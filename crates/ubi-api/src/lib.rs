@@ -450,6 +450,37 @@ pub enum Request {
     /// Find existing Ubisoft Connect installs in Lutris, Wine and Steam prefixes, matched
     /// to owned games (`Vec<setup::FoundInstall>`). Read-only; import one with `Import`.
     ScanInstalls,
+    // ---- Steam copies of Ubisoft games: "use Quiver instead of Ubisoft Connect"
+    /// Ubisoft games installed through Steam, with whether each starts through Quiver
+    /// (`exports::SteamGames`). `steam_user` (id or name) reads that user's launch options
+    /// instead of each game's installer's.
+    SteamGames {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// Make a Steam game start through Quiver: its launch options become
+    /// `<quiver> --source steam steam-run %command%`, keeping the user's own options. Staged
+    /// while Steam runs (it rewrites the file on exit). Returns `exports::SteamPatchResult`.
+    SteamPatch {
+        app_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// Undo [`Request::SteamPatch`] (or a hand-made one): the launch options go back to what
+    /// they were. Staged while Steam runs.
+    SteamUnpatch {
+        app_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// "Not now" on the offer for a newly installed game: it isn't offered again.
+    SteamDismissOffer { app_id: u32 },
+    /// Read (and with `enabled`, change) whether quiverd offers the switch for Ubisoft
+    /// games newly installed in Steam. Returns `{ "enabled": bool }`.
+    SteamOffers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
 }
 
 fn yes() -> bool {
@@ -492,6 +523,12 @@ pub enum Event {
     /// Not sent by quiverd: [`Client`] is connected and subscribed again after
     /// [`Event::Disconnected`]. The daemon may have restarted; reload state.
     Reconnected,
+    /// Ubisoft games installed through Steam, or whether they start through Quiver, changed
+    /// (see `Request::SteamGames`). `offer`: app ids newly installed and offered the switch.
+    SteamGamesChanged {
+        #[serde(default)]
+        offer: Vec<u32>,
+    },
 }
 
 /// Socket path for the current user.

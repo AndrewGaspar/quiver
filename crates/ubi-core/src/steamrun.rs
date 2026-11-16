@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::exports::textvdf;
 
@@ -105,19 +105,40 @@ pub fn resolve_product(
     if let Some(id) = over {
         return Ok((id, ProductSource::Override));
     }
+    detect_product(app_id, installscript, system_reg).with_context(|| {
+        format!("don't know which Ubisoft product Steam app {app_id} is: pass --product <id> (`quiver library` lists ids)")
+    })
+}
+
+/// [`resolve_product`] without an override: the install script, else the prefix's registry
+/// (if it names exactly one product), else the table. `None` when none of them says.
+pub fn detect_product(app_id: u32, installscript: Option<&str>, system_reg: Option<&str>) -> Option<(u32, ProductSource)> {
     if let Some(id) = installscript.and_then(product_from_installscript) {
-        return Ok((id, ProductSource::InstallScript));
+        return Some((id, ProductSource::InstallScript));
     }
     if let Some(text) = system_reg {
         let ids = registry_installs(text);
         if let [id] = ids[..] {
-            return Ok((id, ProductSource::Registry));
+            return Some((id, ProductSource::Registry));
         }
     }
-    if let Some(&(_, id)) = KNOWN.iter().find(|(a, _)| *a == app_id) {
-        return Ok((id, ProductSource::Known));
+    known_product(app_id).map(|id| (id, ProductSource::Known))
+}
+
+/// The table's product id for a Steam app.
+pub fn known_product(app_id: u32) -> Option<u32> {
+    KNOWN.iter().find(|(a, _)| *a == app_id).map(|&(_, id)| id)
+}
+
+impl ProductSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Override => "override",
+            Self::InstallScript => "install_script",
+            Self::Registry => "registry",
+            Self::Known => "known",
+        }
     }
-    bail!("don't know which Ubisoft product Steam app {app_id} is: pass --product <id> (`quiver library` lists ids)")
 }
 
 fn installs_id(key: &str) -> Option<u32> {
