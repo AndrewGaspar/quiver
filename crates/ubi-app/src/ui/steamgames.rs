@@ -185,7 +185,7 @@ impl Quiver {
             div()
                 .id("steam-offer")
                 .absolute()
-                .right(px(16f32.min(self.viewport.0 * 0.02).max(8.) + 8.))
+                .right(px(if self.bp().narrow() { 16. } else { 20. }))
                 .bottom(px(if above { 150. } else { 20. }))
                 .w(px(self.dialog_width(400.)))
                 .flex()
