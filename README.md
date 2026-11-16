@@ -24,14 +24,14 @@ from the Connect install directory, unmodified. They reach Connect through named
 
 | Pipe | Protocol | What the bridge does |
 |---|---|---|
-| `terminal_1_uplay_aux_ipc_pipe_` | `uplayauxdll` | init, then Denuvo activation: forwards the request token to `ubi broker` |
+| `terminal_1_uplay_aux_ipc_pipe_` | `uplayauxdll` | init, then Denuvo activation: forwards the request token to the broker in `quiverd` |
 | `terminal_1_uplay_api_process_ipc_pipe_` | `uplaydll` | `InitProcessReq` handshake |
 | `terminal_1_uplay_ipc_pipe_` | `uplaydll` | `InitReq` (account, ticket, owned IDs, CD keys), then the SDK API |
 
 - **`UPLAY_ARGUMENTS`:** the game must be started with this set to
   `-upc_uplay_id <id> -upc_game_version 1 -upc_exe_path <b64> -upc_working_directory <b64>`.
   Otherwise the aux DLL relaunches it through `UbisoftGameLauncher.exe`.
-- **`ubi broker`:** runs on the host and holds the Ubisoft session. For a Denuvo token it fetches
+- **Broker (in `quiverd`):** runs on the host and holds the Ubisoft session. For a Denuvo token it fetches
   an `ownership_service` ownership token, then calls `denuvo_service.GetGameTokenReq`.
 
 ## Debugging a game against the bridge
