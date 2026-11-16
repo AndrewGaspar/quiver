@@ -4,7 +4,7 @@
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
 use super::{FocusExt, Icon, avatar, badge, glyph, icon, icon_button, kbd};
-use crate::app::{InputMode, Quiver};
+use crate::app::{InputMode, Link, Quiver};
 use crate::assets::DISPLAY_FONT;
 use crate::model::{initials, job_fraction};
 use crate::nav::{Input, Section, Target};
@@ -107,7 +107,11 @@ impl Quiver {
             .child(div().flex_1().text_size(px(13.)).child("Search games, settings, commands"))
             .child(if pad { glyph(th, "≡", false) } else { kbd(th, "Ctrl K") });
 
-        let (dot, label) = if self.demo {
+        let (dot, label) = if self.link == Link::Reconnecting {
+            (th.warn, "Reconnecting to quiverd…".to_string())
+        } else if self.link == Link::Reconnected {
+            (th.ok, "Reconnected to quiverd".to_string())
+        } else if self.demo {
             (th.acc, "Demo data".to_string())
         } else if jobs > 0 {
             (th.ok, format!("quiverd · {jobs} job{}", if jobs == 1 { "" } else { "s" }))

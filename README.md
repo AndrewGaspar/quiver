@@ -71,7 +71,8 @@ from the Connect install directory, unmodified. They reach Connect through named
 
 Front ends hold no state. Every request carries a source label (`gui`, `cli`, or whatever
 `--source`/`QUIVER_SOURCE` says), so the activity log and each game's settings history show who
-changed what.
+changed what. Clients outlive a daemon restart: they reconnect on their own, renew their event
+subscription, and never resend a request the old daemon may already have run.
 
 ## Usage
 

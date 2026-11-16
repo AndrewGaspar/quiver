@@ -99,6 +99,17 @@ pub enum Conn {
     Ready,
 }
 
+/// The link to `quiverd` once connected. The client reconnects on its own when the daemon
+/// restarts; this is only what the top bar says about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Up,
+    /// The daemon went away; the client is retrying with backoff.
+    Reconnecting,
+    /// Back, shown briefly.
+    Reconnected,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideFilter {
     All,
@@ -146,6 +157,8 @@ pub struct Quiver {
     pub body_scroll: ScrollHandle,
     pub toast: Option<SharedString>,
     toast_gen: u64,
+    pub link: Link,
+    link_gen: u64,
     pub side_filter: SideFilter,
     pub lib_filter: crate::ui::library::LibFilter,
     /// What's on screen, as of the last render. Input is resolved against it.
@@ -177,6 +190,8 @@ impl Quiver {
             body_scroll: ScrollHandle::new(),
             toast: None,
             toast_gen: 0,
+            link: Link::Up,
+            link_gen: 0,
             side_filter: SideFilter::All,
             lib_filter: crate::ui::library::LibFilter::All,
             layout: Layout::default(),
@@ -307,8 +322,56 @@ impl Quiver {
             Event::LibraryChanged => self.load_library(false, cx),
             Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
             Event::SessionsChanged { .. } | Event::ModsChanged { .. } => {}
+            Event::Disconnected => {
+                self.link = Link::Reconnecting;
+                self.link_gen += 1;
+            }
+            Event::Reconnected => self.on_reconnected(cx),
         }
         cx.notify();
+    }
+
+    /// The daemon is back (likely restarted): events in between were missed and its jobs
+    /// may be gone, so reload status, jobs and the library.
+    fn on_reconnected(&mut self, cx: &mut Context<Self>) {
+        self.link = Link::Reconnected;
+        self.link_gen += 1;
+        let generation = self.link_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(3200)).await;
+            this.update(cx, |this, cx| {
+                if this.link_gen == generation {
+                    this.link = Link::Up;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        self.call::<Status, _>(Request::Status, cx, |this, r, cx| {
+            let status = match r {
+                Ok(s) => s,
+                Err(e) => return this.show_toast(format!("Could not reload status: {}", err_text(&e)), cx),
+            };
+            // Job ids restart with the daemon; take its list as the whole truth.
+            for g in &mut this.games {
+                g.job = None;
+            }
+            match (status.signed_in.is_some(), &this.conn) {
+                (true, _) => {
+                    this.status = Some(status);
+                    this.conn = Conn::Ready;
+                    this.load_library(false, cx);
+                }
+                // Keep a half-filled sign-in form.
+                (false, Conn::Login(_)) => this.status = Some(status),
+                (false, _) => {
+                    this.status = Some(status);
+                    this.games.clear();
+                    this.show_login(None, cx);
+                }
+            }
+        });
     }
 
     fn apply_job(&mut self, job: Job) {
@@ -1077,7 +1140,8 @@ impl Render for Quiver {
             .text_size(px(13.))
             .line_height(px(18.));
 
-        match &self.conn {
+        let ready = matches!(self.conn, Conn::Ready);
+        let screen = match &self.conn {
             Conn::Connecting => root.child(self.render_splash(&th, None, cx)),
             Conn::Failed(e) => {
                 let e = e.clone();
@@ -1131,7 +1195,15 @@ impl Render for Quiver {
                 .when(self.mode == InputMode::Pad, |d| d.child(self.render_hintbar(&th)))
                 .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t))),
-        }
+        };
+        // The top bar shows the daemon link; other screens get a notice instead.
+        let notice = match self.link {
+            _ if ready => None,
+            Link::Up => None,
+            Link::Reconnecting => Some("Reconnecting to quiverd…"),
+            Link::Reconnected => Some("Reconnected to quiverd"),
+        };
+        screen.when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into())))
     }
 }
 

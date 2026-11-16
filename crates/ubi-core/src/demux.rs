@@ -8,18 +8,23 @@
 //! `ServiceReq` or, more commonly, by opening a *connection*: after
 //! `OpenConnectionReq`, service messages travel inside `Push.data` with the
 //! connection id, each itself length-prefixed.
+//!
+//! Service connections go stale in two ways, neither of which the socket itself reports:
+//! the server may close one (`ConnectionClosedPush` with its id; [`ServiceConnection::is_open`]
+//! turns false), and `ownership_service` only answers the most recently opened (and
+//! initialized) ownership connection on a socket. Older ones stay "open" but every request
+//! on them goes unanswered until it times out ([`ServiceConnection::is_latest`]).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls;
 use ubi_proto::demux;
 
@@ -28,15 +33,34 @@ pub const DEFAULT_HOST: &str = "dmx.upc.ubisoft.com";
 pub const CLIENT_VERSION: u32 = 13416;
 const MAX_FRAME: usize = 64 << 20;
 
-type Stream = TlsStream<TcpStream>;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+type Writer = Box<dyn AsyncWrite + Send + Unpin>;
+
+/// Shared between a [`ServiceConnection`] and the reader's routing table.
+struct ConnState {
+    service: &'static str,
+    /// Unique per opened connection (server connection ids may be reused).
+    serial: u64,
+    /// Set when the server closes the connection or the socket ends.
+    closed: AtomicBool,
+}
+
+struct Route {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    state: Arc<ConnState>,
+}
 
 struct Inner {
-    writer: tokio::sync::Mutex<WriteHalf<Stream>>,
+    writer: tokio::sync::Mutex<Writer>,
     next_request_id: AtomicU32,
     pending: Mutex<HashMap<u32, oneshot::Sender<demux::Rsp>>>,
-    connections: Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>,
+    connections: Mutex<HashMap<u32, Route>>,
+    /// Serial of the most recently opened connection per service.
+    latest: Mutex<HashMap<&'static str, u64>>,
+    next_serial: AtomicU64,
     timeout: Duration,
-    closed: std::sync::atomic::AtomicBool,
+    closed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -64,14 +88,24 @@ impl Demux {
             .connect(name, tcp)
             .await
             .context("demux TLS handshake")?;
-        let (reader, writer) = tokio::io::split(tls);
+        Self::over(tls, client_version, DEFAULT_TIMEOUT).await
+    }
+
+    /// Speak demux over an established stream (TLS in production, a pipe in tests).
+    pub(crate) async fn over<S>(stream: S, client_version: u32, timeout: Duration) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (reader, writer) = tokio::io::split(stream);
         let inner = Arc::new(Inner {
-            writer: tokio::sync::Mutex::new(writer),
+            writer: tokio::sync::Mutex::new(Box::new(writer)),
             next_request_id: AtomicU32::new(0),
             pending: Mutex::default(),
             connections: Mutex::default(),
-            timeout: Duration::from_secs(15),
-            closed: std::sync::atomic::AtomicBool::new(false),
+            latest: Mutex::default(),
+            next_serial: AtomicU64::new(1),
+            timeout,
+            closed: AtomicBool::new(false),
         });
         tokio::spawn(read_loop(reader, Arc::downgrade(&inner)));
         let demux = Self { inner };
@@ -180,10 +214,21 @@ impl Demux {
             bail!("demux refused to open {}", S::NAME);
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        self.inner.connections.lock().unwrap().insert(open.connection_id, tx);
+        let state = Arc::new(ConnState {
+            service: S::NAME,
+            serial: self.inner.next_serial.fetch_add(1, Ordering::Relaxed),
+            closed: AtomicBool::new(false),
+        });
+        let route = Route { tx, state: state.clone() };
+        if let Some(old) = self.inner.connections.lock().unwrap().insert(open.connection_id, route) {
+            // The server reused an id, so the connection that had it is gone.
+            old.state.closed.store(true, Ordering::Relaxed);
+        }
+        self.inner.latest.lock().unwrap().insert(S::NAME, state.serial);
         Ok(ServiceConnection {
             demux: self.clone(),
             id: open.connection_id,
+            state,
             rx,
             next_request_id: 1,
             pushes: VecDeque::new(),
@@ -191,7 +236,7 @@ impl Demux {
     }
 }
 
-async fn read_loop(mut reader: ReadHalf<Stream>, inner: std::sync::Weak<Inner>) {
+async fn read_loop<R: AsyncRead + Unpin>(mut reader: R, inner: std::sync::Weak<Inner>) {
     let result: Result<()> = async {
         loop {
             let len = reader.read_u32().await? as usize;
@@ -213,19 +258,25 @@ async fn read_loop(mut reader: ReadHalf<Stream>, inner: std::sync::Weak<Inner>) 
                 if let Some(data) = push.data {
                     let conns = inner.connections.lock().unwrap();
                     match conns.get(&data.connection_id) {
-                        Some(tx) => {
-                            let _ = tx.send(data.data);
+                        Some(route) => {
+                            let _ = route.tx.send(data.data);
                         }
                         None => tracing::debug!(id = data.connection_id, "data for unknown connection"),
                     }
                 }
                 if let Some(closed) = push.connection_closed {
-                    tracing::warn!(id = closed.connection_id, code = ?closed.error_code, "demux closed connection");
+                    // Dropping the route ends the connection's channel, so a request
+                    // waiting on it fails at once instead of timing out.
+                    let route = inner.connections.lock().unwrap().remove(&closed.connection_id);
+                    let service = route.as_ref().map_or("unknown", |r| r.state.service);
+                    tracing::warn!(id = closed.connection_id, service, code = ?closed.error_code, "demux closed connection");
+                    if let Some(route) = route {
+                        route.state.closed.store(true, Ordering::Relaxed);
+                    }
                     if closed.error_code == Some(demux::connection_closed_push::ConnectionErrorCode::ConnectionMultipleLogin as i32) {
                         tracing::warn!("another Ubisoft login replaced this one");
                         inner.closed.store(true, Ordering::Relaxed);
                     }
-                    inner.connections.lock().unwrap().remove(&closed.connection_id);
                 }
                 if push.client_outdated.is_some() {
                     tracing::warn!("demux says client version {CLIENT_VERSION} is outdated");
@@ -240,7 +291,9 @@ async fn read_loop(mut reader: ReadHalf<Stream>, inner: std::sync::Weak<Inner>) 
     if let Some(inner) = inner.upgrade() {
         inner.closed.store(true, Ordering::Relaxed);
         inner.pending.lock().unwrap().clear();
-        inner.connections.lock().unwrap().clear();
+        for (_, route) in inner.connections.lock().unwrap().drain() {
+            route.state.closed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -322,13 +375,33 @@ impl Service for Playtime {
 pub struct ServiceConnection<S: Service> {
     demux: Demux,
     id: u32,
+    state: Arc<ConnState>,
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
     next_request_id: u32,
     pushes: VecDeque<S::Push>,
 }
 
 impl<S: Service> ServiceConnection<S> {
+    /// The server's id for this connection.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// False once the server closed this connection (or the whole socket).
+    pub fn is_open(&self) -> bool {
+        self.demux.is_alive() && !self.state.closed.load(Ordering::Relaxed)
+    }
+
+    /// Whether this is the most recently opened connection to its service on this socket.
+    /// `ownership_service` only answers that one.
+    pub fn is_latest(&self) -> bool {
+        self.demux.inner.latest.lock().unwrap().get(S::NAME) == Some(&self.state.serial)
+    }
+
     pub async fn request(&mut self, mut req: S::Req) -> Result<S::Rsp> {
+        if !self.is_open() {
+            bail!("{} connection {} was closed by the server", S::NAME, self.id);
+        }
         let id = self.next_request_id;
         self.next_request_id += 1;
         S::set_request_id(&mut req, id);
@@ -369,6 +442,165 @@ impl<S: Service> ServiceConnection<S> {
 
 impl<S: Service> Drop for ServiceConnection<S> {
     fn drop(&mut self) {
-        self.demux.inner.connections.lock().unwrap().remove(&self.id);
+        let mut conns = self.demux.inner.connections.lock().unwrap();
+        // Only our own route: the server may have given the id to a newer connection.
+        if conns.get(&self.id).is_some_and(|r| Arc::ptr_eq(&r.state, &self.state)) {
+            conns.remove(&self.id);
+        }
+    }
+}
+
+/// An in-process demux server for tests: answers `OpenConnectionReq` with fresh ids and
+/// hands service data to a handler; tests can also inject downstream messages.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+
+    /// `handler(service, connection id, service frame body)` returns a reply body, if any.
+    pub type Handler = Box<dyn FnMut(&str, u32, &[u8]) -> Option<Vec<u8>> + Send>;
+
+    pub struct Server {
+        pub demux: Demux,
+        /// Sends a downstream message as the server.
+        pub inject: mpsc::UnboundedSender<demux::Downstream>,
+    }
+
+    pub async fn start(timeout: Duration, mut handler: Handler) -> Server {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (mut r, mut w) = tokio::io::split(server);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<demux::Downstream>();
+        tokio::spawn(async move {
+            while let Some(down) = out_rx.recv().await {
+                let buf = down.encode_to_vec();
+                if w.write_all(&(buf.len() as u32).to_be_bytes()).await.is_err() || w.write_all(&buf).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let inject = out_tx.clone();
+        tokio::spawn(async move {
+            let mut services: HashMap<u32, String> = HashMap::new();
+            let mut next_conn = 1;
+            loop {
+                let Ok(len) = r.read_u32().await else { return };
+                let mut buf = vec![0; len as usize];
+                if r.read_exact(&mut buf).await.is_err() {
+                    return;
+                }
+                let up = demux::Upstream::decode(buf.as_slice()).unwrap();
+                if let Some(open) = up.request.as_ref().and_then(|r| r.open_connection_req.as_ref()) {
+                    let id = next_conn;
+                    next_conn += 1;
+                    services.insert(id, open.service_name.clone());
+                    let rsp = demux::Rsp {
+                        request_id: up.request.as_ref().unwrap().request_id,
+                        open_connection_rsp: Some(demux::OpenConnectionRsp { connection_id: id, success: true }),
+                        ..Default::default()
+                    };
+                    let _ = out_tx.send(demux::Downstream { response: Some(rsp), push: None });
+                }
+                if let Some(data) = up.push.and_then(|p| p.data) {
+                    let service = services.get(&data.connection_id).cloned().unwrap_or_default();
+                    if let Some(body) = handler(&service, data.connection_id, &data.data[4..]) {
+                        let _ = out_tx.send(data_push(data.connection_id, &body));
+                    }
+                }
+            }
+        });
+        let demux = Demux::over(client, CLIENT_VERSION, timeout).await.unwrap();
+        Server { demux, inject }
+    }
+
+    /// A `Push.data` carrying one length-prefixed service frame.
+    pub fn data_push(connection_id: u32, body: &[u8]) -> demux::Downstream {
+        let mut data = (body.len() as u32).to_be_bytes().to_vec();
+        data.extend_from_slice(body);
+        demux::Downstream {
+            response: None,
+            push: Some(demux::Push { data: Some(demux::DataMessage { connection_id, data }), ..Default::default() }),
+        }
+    }
+
+    pub fn closed_push(connection_id: u32) -> demux::Downstream {
+        demux::Downstream {
+            response: None,
+            push: Some(demux::Push {
+                connection_closed: Some(demux::ConnectionClosedPush { connection_id, error_code: None }),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ubi_proto::denuvo_service;
+
+    /// A denuvo service that answers every request with an empty success.
+    fn answer_all() -> fake::Handler {
+        Box::new(|_, _, body| {
+            let req = denuvo_service::Upstream::decode(body).ok()?.request?;
+            let rsp = denuvo_service::Rsp { request_id: req.request_id, ..Default::default() };
+            Some(denuvo_service::Downstream { response: Some(rsp) }.encode_to_vec())
+        })
+    }
+
+    async fn until(cond: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_push_marks_connection_closed() {
+        let server = fake::start(Duration::from_secs(10), answer_all()).await;
+        let mut a = server.demux.open::<Denuvo>().await.unwrap();
+        let mut b = server.demux.open::<Denuvo>().await.unwrap();
+        assert!(a.request(Default::default()).await.is_ok());
+        assert!(a.is_open() && b.is_open());
+
+        server.inject.send(fake::closed_push(a.id())).unwrap();
+        until(|| !a.is_open()).await;
+        assert!(!a.is_open());
+        assert!(b.is_open(), "only the named connection closes");
+        assert!(server.demux.is_alive(), "a service close isn't a socket close");
+
+        // Fails at once rather than after the 10 s timeout.
+        let t = std::time::Instant::now();
+        let err = a.request(Default::default()).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert!(format!("{err:#}").contains("closed"), "{err:#}");
+        assert!(b.request(Default::default()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn closed_push_wakes_a_waiting_request() {
+        // A service that never answers.
+        let server = fake::start(Duration::from_secs(10), Box::new(|_, _, _| None)).await;
+        let mut a = server.demux.open::<Denuvo>().await.unwrap();
+        let (id, inject) = (a.id(), server.inject.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            inject.send(fake::closed_push(id)).unwrap();
+        });
+        let t = std::time::Instant::now();
+        let err = a.request(Default::default()).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(2), "waited {:?}", t.elapsed());
+        assert!(format!("{err:#}").contains("closed"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn newest_connection_per_service_is_latest() {
+        let server = fake::start(Duration::from_secs(10), answer_all()).await;
+        let a = server.demux.open::<Denuvo>().await.unwrap();
+        assert!(a.is_latest());
+        let b = server.demux.open::<Denuvo>().await.unwrap();
+        assert!(!a.is_latest() && b.is_latest());
+        let _c = server.demux.open::<Cloudsave>().await.unwrap();
+        assert!(b.is_latest(), "other services don't count");
     }
 }

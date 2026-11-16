@@ -462,6 +462,12 @@ pub enum Event {
     SessionsChanged { sessions: Vec<ActiveSession> },
     /// A game's mod layers or profiles changed.
     ModsChanged { product_id: u32 },
+    /// Not sent by quiverd: [`Client`] reports that the daemon went away (it is
+    /// reconnecting; events are missed until [`Event::Reconnected`]).
+    Disconnected,
+    /// Not sent by quiverd: [`Client`] is connected and subscribed again after
+    /// [`Event::Disconnected`]. The daemon may have restarted; reload state.
+    Reconnected,
 }
 
 /// Socket path for the current user.

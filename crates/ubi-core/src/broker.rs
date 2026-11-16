@@ -87,7 +87,9 @@ impl Broker {
     }
 
     async fn handle(&self, req: BrokerRequest) -> Result<BrokerResponse> {
-        // One retry on a fresh connection: the demux socket may have gone stale.
+        // Known-stale connections are replaced before use: the ownership session by
+        // `Library` itself (every launch context, install or library refresh replaces it),
+        // the denuvo connection here. One retry on fresh connections covers the rest.
         let account = match &req {
             BrokerRequest::DenuvoGameToken { account_id, .. } | BrokerRequest::PlaySession { account_id, .. } => account_id.clone(),
         };
@@ -103,10 +105,18 @@ impl Broker {
                 guard.insert(user_id.clone(), c);
             }
             let conns = guard.get_mut(&user_id).unwrap();
-            match Self::handle_online(conns, &req).await {
+            let result = async {
+                if !conns.denuvo.is_open() {
+                    tracing::info!(connection = conns.denuvo.id(), "denuvo_service connection was closed; reopening");
+                    conns.denuvo = conns.demux.open::<Denuvo>().await?;
+                }
+                Self::handle_online(conns, &req).await
+            }
+            .await;
+            match result {
                 Ok(rsp) => return Ok(rsp),
                 Err(e) if attempt == 0 => {
-                    tracing::warn!("retrying on a new demux connection after: {e:#}");
+                    tracing::warn!("retrying on new service connections after: {e:#}");
                     guard.remove(&user_id);
                 }
                 Err(e) => return Err(e),

@@ -1,5 +1,7 @@
 //! Owned-product listing via `ownership_service`, plus product configuration parsing.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use ubi_proto::ownership;
@@ -8,6 +10,10 @@ use crate::demux::{Demux, Ownership, ServiceConnection};
 
 /// Ownership protocol version Connect speaks; newer servers accept older versions.
 const OWNERSHIP_PROTO_VERSION: u32 = 7;
+
+/// Re-initialize an ownership session older than this before using it, in case the
+/// server expires idle sessions without saying so.
+const MAX_SESSION_AGE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Product {
@@ -56,37 +62,54 @@ impl Product {
     }
 }
 
+/// An initialized `ownership_service` session and the owned products it reported.
+///
+/// `ownership_service` only answers the most recently initialized ownership connection on
+/// a demux socket, and every `Library::fetch` (library refresh, launch context, install,
+/// launch, the broker) opens one. Requests on an older one go unanswered until they time
+/// out, so every request first re-initializes the session if another has replaced it, the
+/// server closed it, or it is older than [`MAX_SESSION_AGE`].
 pub struct Library {
+    demux: Demux,
     conn: ServiceConnection<Ownership>,
+    opened: Instant,
     pub products: Vec<Product>,
 }
 
 impl Library {
     pub async fn fetch(demux: &Demux) -> Result<Self> {
-        let mut conn = demux.open::<Ownership>().await?;
-        let rsp = conn
-            .request(ownership::Req {
-                initialize_req: Some(ownership::InitializeReq {
-                    get_associations: Some(true),
-                    proto_version: Some(OWNERSHIP_PROTO_VERSION),
-                    use_staging: Some(false),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            })
-            .await?;
-        let init = rsp.initialize_rsp.context("no initialize_rsp")?;
-        if !init.success {
-            bail!("ownership initialize failed");
+        let (conn, products) = initialize(demux).await?;
+        Ok(Self { demux: demux.clone(), conn, opened: Instant::now(), products })
+    }
+
+    /// Why this session can't be used as is, if it can't.
+    pub fn stale_reason(&self) -> Option<&'static str> {
+        if !self.conn.is_open() {
+            Some("closed by the server")
+        } else if !self.conn.is_latest() {
+            Some("replaced by a newer ownership session")
+        } else if self.opened.elapsed() > MAX_SESSION_AGE {
+            Some("idle too long")
+        } else {
+            None
         }
-        let products = init
-            .owned_games
-            .map(|o| o.owned_games)
-            .unwrap_or_default()
-            .into_iter()
-            .map(Product::from_owned)
-            .collect();
-        Ok(Self { conn, products })
+    }
+
+    /// Re-initialize the session (and refresh `products`) if it went stale.
+    pub async fn ensure_fresh(&mut self) -> Result<()> {
+        if let Some(reason) = self.stale_reason() {
+            tracing::info!(connection = self.conn.id(), reason, "reinitializing ownership session");
+            let (conn, products) = initialize(&self.demux).await?;
+            self.conn = conn;
+            self.products = products;
+            self.opened = Instant::now();
+        }
+        Ok(())
+    }
+
+    async fn request(&mut self, req: ownership::Req) -> Result<ownership::Rsp> {
+        self.ensure_fresh().await?;
+        self.conn.request(req).await
     }
 
     pub fn get(&self, product_id: u32) -> Option<&Product> {
@@ -96,7 +119,6 @@ impl Library {
     /// Fetch a product's configuration YAML (needed for products not in the owned list).
     pub async fn product_config(&mut self, product_id: u32) -> Result<String> {
         let rsp = self
-            .conn
             .request(ownership::Req {
                 get_product_config_req: Some(ownership::GetProductConfigReq {
                     product_id,
@@ -117,7 +139,6 @@ impl Library {
     /// Short-lived signed ownership token, the input to `denuvo_service`.
     pub async fn ownership_token(&mut self, product_id: u32) -> Result<String> {
         let rsp = self
-            .conn
             .request(ownership::Req {
                 ownership_token_req: Some(ownership::OwnershipTokenReq { product_id: Some(product_id) }),
                 ..Default::default()
@@ -133,7 +154,6 @@ impl Library {
     /// Per-game ticket handed to the SDK as `InitRsp.upcTicket`.
     pub async fn uplay_pc_ticket(&mut self, uplay_id: u32) -> Result<String> {
         let rsp = self
-            .conn
             .request(ownership::Req {
                 get_uplay_pc_ticket_req: Some(ownership::GetUplayPcTicketReq { uplay_id, platform: None }),
                 ..Default::default()
@@ -145,6 +165,34 @@ impl Library {
         }
         t.uplay_pc_ticket.context("ticket response had no ticket")
     }
+}
+
+/// Open an ownership connection and initialize it (which lists the owned products).
+async fn initialize(demux: &Demux) -> Result<(ServiceConnection<Ownership>, Vec<Product>)> {
+    let mut conn = demux.open::<Ownership>().await?;
+    let rsp = conn
+        .request(ownership::Req {
+            initialize_req: Some(ownership::InitializeReq {
+                get_associations: Some(true),
+                proto_version: Some(OWNERSHIP_PROTO_VERSION),
+                use_staging: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?;
+    let init = rsp.initialize_rsp.context("no initialize_rsp")?;
+    if !init.success {
+        bail!("ownership initialize failed");
+    }
+    let products = init
+        .owned_games
+        .map(|o| o.owned_games)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Product::from_owned)
+        .collect();
+    Ok((conn, products))
 }
 
 pub const ART_BASE_URL: &str = "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_0/assets/";
@@ -214,4 +262,90 @@ pub struct Executable {
     pub working_dir: Option<String>,
     pub arguments: Option<String>,
     pub label: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use prost::Message;
+
+    use super::*;
+    use crate::demux::fake;
+
+    /// Like the real `ownership_service`: only the most recently initialized connection
+    /// gets answers; requests on older ones are silently dropped.
+    fn ownership_server(inits: Arc<Mutex<u32>>) -> fake::Handler {
+        let mut current = None;
+        Box::new(move |service, conn, body| {
+            assert_eq!(service, "ownership_service");
+            let req = ownership::Upstream::decode(body).ok()?.request?;
+            let mut rsp = ownership::Rsp { request_id: req.request_id, ..Default::default() };
+            if req.initialize_req.is_some() {
+                current = Some(conn);
+                *inits.lock().unwrap() += 1;
+                rsp.initialize_rsp = Some(ownership::InitializeRsp { success: true, ..Default::default() });
+            } else if current != Some(conn) {
+                return None;
+            } else if req.ownership_token_req.is_some() {
+                rsp.ownership_token_rsp =
+                    Some(ownership::OwnershipTokenRsp { success: Some(true), token: Some(format!("token-{conn}")), expiration: None });
+            }
+            Some(ownership::Downstream { response: Some(rsp), push: None }.encode_to_vec())
+        })
+    }
+
+    #[tokio::test]
+    async fn superseded_session_reinitializes_before_use() {
+        let inits = Arc::new(Mutex::new(0));
+        let server = fake::start(Duration::from_secs(10), ownership_server(inits.clone())).await;
+        // The broker's long-lived library, then a one-shot one (a launch context).
+        let mut broker = Library::fetch(&server.demux).await.unwrap();
+        assert_eq!(broker.stale_reason(), None);
+        assert!(broker.ownership_token(1).await.unwrap().starts_with("token-"));
+        let mut launch = Library::fetch(&server.demux).await.unwrap();
+        assert!(launch.ownership_token(1).await.is_ok());
+        assert_eq!(broker.stale_reason(), Some("replaced by a newer ownership session"));
+        assert_eq!(*inits.lock().unwrap(), 2);
+
+        // Without the refresh this would wait out the 10 s timeout.
+        let t = Instant::now();
+        let token = broker.ownership_token(1).await.unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "waited {:?}", t.elapsed());
+        assert_eq!(*inits.lock().unwrap(), 3);
+        assert_eq!(broker.stale_reason(), None);
+        // And the other one recovers the same way.
+        assert_ne!(launch.ownership_token(1).await.unwrap(), token);
+        assert_eq!(*inits.lock().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn closed_session_reinitializes_before_use() {
+        let inits = Arc::new(Mutex::new(0));
+        let server = fake::start(Duration::from_secs(10), ownership_server(inits.clone())).await;
+        let mut lib = Library::fetch(&server.demux).await.unwrap();
+        server.inject.send(fake::closed_push(lib.conn.id())).unwrap();
+        for _ in 0..200 {
+            if lib.stale_reason().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(lib.stale_reason(), Some("closed by the server"));
+        let t = Instant::now();
+        assert!(lib.ownership_token(1).await.is_ok());
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert_eq!(*inits.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn fresh_session_is_reused() {
+        let inits = Arc::new(Mutex::new(0));
+        let server = fake::start(Duration::from_secs(10), ownership_server(inits.clone())).await;
+        let mut lib = Library::fetch(&server.demux).await.unwrap();
+        for _ in 0..3 {
+            lib.ownership_token(1).await.unwrap();
+        }
+        assert_eq!(*inits.lock().unwrap(), 1);
+    }
 }
