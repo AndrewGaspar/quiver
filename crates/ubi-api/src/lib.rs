@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod client;
 pub mod exports;
 pub mod mods;
+pub mod info;
 pub use client::Client;
 pub use mods::{ModsRequest, Profile};
 
@@ -359,6 +360,40 @@ pub enum Request {
     SteamApplyStaged,
     /// Mod layers and profiles (see [`mods`]).
     Mods(ModsRequest),
+    /// A game's detail (`info::GameInfo`): product-config facts, add-ons owned or not (with
+    /// store links), install size and languages. `refresh` re-reads ownership from Ubisoft.
+    GameInfo {
+        product_id: u32,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// A game's Ubisoft progression and the account's Ubisoft Connect level and units
+    /// (`info::Progress`), for the game's launch account. Cached for a few minutes.
+    GameProgress {
+        product_id: u32,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// A game's save slots, local and cloud side by side, and its local backups
+    /// (`info::SavesReport`). `cloud: false` lists only what's on this machine.
+    Saves {
+        product_id: u32,
+        #[serde(default = "yes")]
+        cloud: bool,
+    },
+    /// Make a save backup current (`info::RestoreResult`); the saves there now are backed
+    /// up first. `backup` is a backup id, a unique part of one, or `latest`. Agents need a
+    /// human's approval: only a front end that asked the person sets `confirmed`.
+    SavesRestore {
+        product_id: u32,
+        backup: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,6 +499,30 @@ mod tests {
         apply(&mut s, "env.DXVK_HUD=").unwrap();
         assert!(s.env.is_empty());
         assert!(apply(&mut s, "dll.=n").is_err());
+    }
+
+    #[test]
+    fn info_requests_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"game_info","params":{"product_id":3539}}"#).unwrap();
+        assert!(matches!(r, Request::GameInfo { product_id: 3539, refresh: false }));
+        let r: Request = serde_json::from_str(r#"{"method":"game_progress","params":{"product_id":1,"refresh":true}}"#).unwrap();
+        assert!(matches!(r, Request::GameProgress { refresh: true, .. }));
+        // The cloud is checked unless asked not to.
+        let r: Request = serde_json::from_str(r#"{"method":"saves","params":{"product_id":1}}"#).unwrap();
+        assert!(matches!(r, Request::Saves { cloud: true, .. }));
+        let r: Request = serde_json::from_str(r#"{"method":"saves_restore","params":{"product_id":1,"backup":"latest"}}"#).unwrap();
+        assert!(matches!(r, Request::SavesRestore { confirmed: false, .. }));
+        // Results decode from minimal objects (older or newer daemons).
+        let i: info::GameInfo = serde_json::from_str(r#"{"product_id":1,"name":"x","future":1}"#).unwrap();
+        assert!(i.addons.is_empty() && i.install.is_none());
+        let a: info::AddOn = serde_json::from_str(r#"{"product_id":2,"kind":"some_new_kind"}"#).unwrap();
+        assert_eq!(a.kind, info::ProductKind::Unknown);
+        let p: info::Progress = serde_json::from_str(r#"{"product_id":1,"fetched":"2026-11-16T00:00:00Z"}"#).unwrap();
+        assert!(p.stats.is_empty() && p.connect.is_none());
+        let s: info::SavesReport = serde_json::from_str(r#"{"product_id":1,"slots":[{"slot":1,"state":"brand_new"}]}"#).unwrap();
+        assert_eq!(s.slots[0].state, info::SlotState::Unknown);
+        assert_eq!(serde_json::to_value(info::SlotState::CloudNewer).unwrap(), "cloud_newer");
+        assert_eq!(serde_json::to_value(info::ProductKind::SeasonPass).unwrap(), "season_pass");
     }
 
     #[test]

@@ -101,6 +101,10 @@ quiver export steam origins [--user NAME]      # non-Steam shortcut with Ubisoft
 quiver export list                             # exports and whether they're still as written
 quiver steam users                             # Steam users; which one gets shortcuts
 quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
+quiver info origins [--all]                    # publisher, links, size, languages, add-ons (store links for unowned)
+quiver progress origins                        # Ubisoft play time, stats, rewards, achievements, Connect level/units
+quiver saves origins [--local]                 # local vs cloud slots (sizes, times, which is newer), backups
+quiver saves origins restore latest            # backs up the current saves first; agents need your OK
 quiver dev …                                   # low-level tools that bypass the daemon
 
 quiver mods odyssey layer add ReShade ~/mods/reshade   # copy a folder laid out like the install

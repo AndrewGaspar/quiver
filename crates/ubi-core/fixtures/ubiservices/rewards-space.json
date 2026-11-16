@@ -1,0 +1,108 @@
+{
+  "rewards": [
+    {
+      "conditionTree": null,
+      "displayDescription": "Get ready to travel back to Ancient Egypt with our new Assassin's Creed Origins fan kit!",
+      "displayLockedStatusDescription": null,
+      "displayName": "Assassin's Creed Origins fan kit",
+      "displayPurchasedStatusDescription": "Go to https://ubisoftconnect.com to download this Reward and start using it.",
+      "displayUnlockedStatusDescription": null,
+      "downloadUrl": "https://ubiservices.cdn.ubi.com/bfd34091-6af6-4029-873b-ba7e036464fa/reward/ACEREWARD31_downloadable.zip",
+      "imageUrls": {
+        "image": "https://ubiservices.cdn.ubi.com/bfd34091-6af6-4029-873b-ba7e036464fa/connect/ab1a80a4-dce4-4268-b049-24dc729d2c8b_common.jpg"
+      },
+      "legacyRewardId": null,
+      "purchaseLimit": 1,
+      "rarity": {
+        "colorCode": "#A0A0A0",
+        "displayName": "Common",
+        "id": "common"
+      },
+      "rewardId": "f835074f-ba5d-4cd1-b7b0-a76ac5606909",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "tags": [],
+      "ubiPlusCooldownInMonths": 0,
+      "ubiPlusGracePeriodInDays": 0,
+      "units": 0
+    },
+    {
+      "conditionTree": null,
+      "displayDescription": "Unlock Aguilar's Outfit for Bayek.",
+      "displayLockedStatusDescription": null,
+      "displayName": "Aguilar's Outfit",
+      "displayPurchasedStatusDescription": "You can access this Reward within the game.",
+      "displayUnlockedStatusDescription": null,
+      "downloadUrl": null,
+      "imageUrls": {
+        "image": "https://ubiservices.cdn.ubi.com/bfd34091-6af6-4029-873b-ba7e036464fa/reward/ACEREWARD19_legendary.jpg"
+      },
+      "legacyRewardId": "ACEREWARD19",
+      "purchaseLimit": 1,
+      "rarity": {
+        "colorCode": "#ff6d00",
+        "displayName": "Legendary",
+        "id": "legendary"
+      },
+      "rewardId": "27b98c9d-23a5-9d0d-aed2-13e825e09082",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "tags": [],
+      "ubiPlusCooldownInMonths": 0,
+      "ubiPlusGracePeriodInDays": 0,
+      "units": 40
+    },
+    {
+      "conditionTree": null,
+      "displayDescription": "Unlock Corrupted Soul for Bayek. Careful when using it, as it might consume a lesser being.",
+      "displayLockedStatusDescription": null,
+      "displayName": "Corrupted Soul",
+      "displayPurchasedStatusDescription": "You can access this Reward within the game.",
+      "displayUnlockedStatusDescription": null,
+      "downloadUrl": null,
+      "imageUrls": {
+        "image": "https://ubiservices.cdn.ubi.com/bfd34091-6af6-4029-873b-ba7e036464fa/reward/ACEREWARD16_legendary.jpg"
+      },
+      "legacyRewardId": "ACEREWARD16",
+      "purchaseLimit": 1,
+      "rarity": {
+        "colorCode": "#ff6d00",
+        "displayName": "Legendary",
+        "id": "legendary"
+      },
+      "rewardId": "6f6e7013-b82c-b1a5-251a-610812cfc609",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "tags": [],
+      "ubiPlusCooldownInMonths": 0,
+      "ubiPlusGracePeriodInDays": 0,
+      "units": 40
+    },
+    {
+      "conditionTree": null,
+      "displayDescription": "Unlock Altaïr's Outfit for Bayek.",
+      "displayLockedStatusDescription": null,
+      "displayName": "Altaïr's Outfit",
+      "displayPurchasedStatusDescription": "You can access this Reward within the game.",
+      "displayUnlockedStatusDescription": null,
+      "downloadUrl": null,
+      "imageUrls": {
+        "image": "https://ubiservices.cdn.ubi.com/bfd34091-6af6-4029-873b-ba7e036464fa/reward/ACEREWARD17_exotic.jpg"
+      },
+      "legacyRewardId": "ACEREWARD17",
+      "purchaseLimit": 1,
+      "rarity": {
+        "colorCode": "#b78800",
+        "displayName": "Exotic",
+        "id": "exotic"
+      },
+      "rewardId": "66dbc11e-9cd7-df02-bebd-df4a2e413cfd",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "tags": [],
+      "ubiPlusCooldownInMonths": 0,
+      "ubiPlusGracePeriodInDays": 0,
+      "units": 0
+    }
+  ]
+}

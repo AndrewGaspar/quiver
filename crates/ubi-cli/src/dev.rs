@@ -83,6 +83,26 @@ pub enum DevCmd {
     Ping,
     /// Report a play session step to Ubisoft directly: start, update or end.
     Playsession { step: String, product_id: u32 },
+    /// GET a UbiServices REST path with the stored session and print the JSON (read-only;
+    /// `{userId}` and `{profileId}` are replaced with the default account's ids).
+    RestGet {
+        /// e.g. /v1/profiles/{userId}/global/ubiconnect/economy/api/units
+        path: String,
+    },
+    /// Fetch a game's progression over UbiServices REST only (stats, rewards, challenges,
+    /// Connect level/units, achievement set), as the daemon's GameProgress does. No demux.
+    Progress {
+        /// The game's UbiServices space id (`space_id` in `dev library --json`).
+        space_id: String,
+        /// The config's `uplay.achievements` asset, to read achievement definitions.
+        #[arg(long)]
+        achievements: Option<String>,
+        /// Where achievement sets are unpacked.
+        #[arg(long, default_value = "/tmp/quiver-achievements")]
+        cache: PathBuf,
+    },
+    /// Ubisoft Connect's record of a game's cloud save slots (UbiServices REST, no demux).
+    CloudRecord { uplay_id: u32 },
     /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
     Manifest {
         path: PathBuf,
@@ -416,6 +436,27 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
             let info = demux.patch_info().await?;
             println!("demux ok: latest client {} (we send {})", info.latest_version, ubi_core::demux::CLIENT_VERSION);
             println!("patch base url: {}", info.patch_base_url);
+        }
+        DevCmd::RestGet { path } => {
+            let session = store::current(&auth, None).await?;
+            let path = ubi_core::ubiservices::expand(&path, &session);
+            let (status, body) = ubi_core::ubiservices::get_raw(&auth, &session, &path).await?;
+            eprintln!("HTTP {status}");
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+                Err(_) => println!("{body}"),
+            }
+        }
+        DevCmd::Progress { space_id, achievements, cache } => {
+            let session = store::current(&auth, None).await?;
+            let refs = ubi_core::progress::GameRefs { space_id: Some(space_id), achievements_asset: achievements };
+            let p = ubi_core::progress::fetch(&auth, &session, &refs, &cache).await;
+            println!("{}", serde_json::to_string_pretty(&p)?);
+        }
+        DevCmd::CloudRecord { uplay_id } => {
+            let session = store::current(&auth, None).await?;
+            let r = ubi_core::saves::connect_record(&auth, &session, uplay_id).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         DevCmd::Manifest { path, files } => {
             let m = manifest::load_manifest(&path)?;

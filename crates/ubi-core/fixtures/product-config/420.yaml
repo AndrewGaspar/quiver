@@ -1,0 +1,292 @@
+version: 2.0
+root:
+  name: GAMENAME
+  sort_string: "Far Cry 05"
+  background_image: BACKGROUNDIMAGE
+  thumb_image: THUMBIMAGE
+  logo_image: LOGOIMAGE
+  dialog_image: DIALOGIMAGE
+  icon_image: ICONIMAGE
+  background_color: 000000
+  party:
+    party_enabled: yes
+    max_party_size: 9
+  start_game:
+    online:
+      legacy_ticket_enabled: no
+      overlay_product_activation_enabled: yes
+      overlay_required: yes
+      overlay_supported: yes
+      overlay_shop_enabled: yes
+      overlay_shop_url: http://shop.ubi.com/farcry4
+      after_game_report_enabled: yes
+      executables:
+        - path:
+            relative: FarCry4.exe
+          working_directory:
+            register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\420\InstallDir
+            append: bin
+          internal_name: Executable
+          description: EXE_DESCRIPTION_1
+          shortcut_name: EXE_SHORTCUT_NAME_1
+          icon_image: EXE_ICON_IMAGE_1
+        - path:
+            relative: IGE_WPF64.exe
+          working_directory:
+            register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\420\InstallDir
+            append: bin
+          arguments: -uplay_overlay_no_ui
+          internal_name: Executable
+          description: EXE_DESCRIPTION_2
+          shortcut_name: EXE_SHORTCUT_NAME_2
+          icon_image: EXE_ICON_IMAGE_2
+    offline:
+      after_game_report_enabled: yes
+      executables:
+        - path:
+            relative: FarCry4.exe
+          working_directory:
+            register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\420\InstallDir
+            append: bin
+          internal_name: Executable
+          description: EXE_DESCRIPTION_1
+          shortcut_name: EXE_SHORTCUT_NAME_1
+          icon_image: EXE_ICON_IMAGE_1
+        - path:
+            relative: IGE_WPF64.exe
+          working_directory:
+            register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\420\InstallDir
+            append: bin
+          arguments: -uplay_overlay_no_ui
+          internal_name: Executable
+          description: EXE_DESCRIPTION_2
+          shortcut_name: EXE_SHORTCUT_NAME_2
+          icon_image: EXE_ICON_IMAGE_2
+  installer:
+    game_identifier: Far Cry 4
+    publisher: Ubisoft
+    help_url: https://support.ubi.com
+    about_url: https://www.ubisoft.com/en-GB/game/far-cry-4/
+  digital_distribution:
+    version: 14
+  cloud_saves: yes
+  change_language_enabled: yes
+  uplay:
+    game_code: FCC
+    achievements: ef5497fae5293f0e1df27023011c1f87
+    achievements_sync_id: FCC
+  after_game_report_ad: yes
+  homepage_url: HOMEPAGEURL
+  facebook_url: FACEBOOKURL
+  forum_url: https://discord.gg/ubisoftofficial
+  help_url: HELPURL
+  game_streaming_enabled: yes
+  game_invites_enabled: yes
+  show_properties: yes
+  crash_reporting:
+    space_id: aab6ceb2-2ea5-4d27-9719-cc2cb87395b7
+    app_id: 2d10b938-06a4-4f79-89b5-a57706032a5f
+  upn_enabled: yes
+  space_id: aab6ceb2-2ea5-4d27-9719-cc2cb87395b7
+  club:
+    enabled: yes
+  news:
+    thread: FarCry4
+  game_service_status_enabled: yes
+  game_page_modules:
+    friends:
+      size: 1
+    friends_suggestions:
+      enabled: yes
+    news:
+      size: 2
+    streams:
+      size: 1
+  addons:
+    - id: 1163
+      is_visible: no
+      name: RELATED_GAMENAME_1163
+      description: RELATED_DESCRIPTION_1163
+    - id: 1213
+      is_visible: yes
+      name: RELATED_GAMENAME_1213
+      description: RELATED_DESCRIPTION_1213
+      thumb_image: RELATED_THUMBIMAGE_1213
+    - id: 1214
+      is_visible: yes
+      name: RELATED_GAMENAME_1214
+      description: RELATED_DESCRIPTION_1214
+      thumb_image: RELATED_THUMBIMAGE_1214
+    - id: 1215
+      is_visible: yes
+      name: RELATED_GAMENAME_1215
+      description: RELATED_DESCRIPTION_1215
+      thumb_image: RELATED_THUMBIMAGE_1215
+    - id: 1216
+      is_visible: yes
+      name: RELATED_GAMENAME_1216
+      description: RELATED_DESCRIPTION_1216
+      thumb_image: RELATED_THUMBIMAGE_1216
+    - id: 1217
+      is_visible: no
+      name: RELATED_GAMENAME_1217
+      description: RELATED_DESCRIPTION_1217
+    - id: 1218
+      is_visible: no
+      name: RELATED_GAMENAME_1218
+      description: RELATED_DESCRIPTION_1218
+    - id: 1219
+      is_visible: no
+      name: RELATED_GAMENAME_1219
+      description: RELATED_DESCRIPTION_1219
+    - id: 1220
+      is_visible: no
+      name: RELATED_GAMENAME_1220
+      description: RELATED_DESCRIPTION_1220
+    - id: 1221
+      is_visible: no
+      name: RELATED_GAMENAME_1221
+      description: RELATED_DESCRIPTION_1221
+    - id: 1222
+      is_visible: no
+      name: RELATED_GAMENAME_1222
+      description: RELATED_DESCRIPTION_1222
+    - id: 1223
+      is_visible: no
+      name: RELATED_GAMENAME_1223
+      description: RELATED_DESCRIPTION_1223
+    - id: 1585
+      is_visible: yes
+      name: RELATED_GAMENAME_1585
+      description: RELATED_DESCRIPTION_1585
+      thumb_image: RELATED_THUMBIMAGE_1585
+localizations:
+  default:
+    FC4_GAME: Far Cry 4
+    FC4_EDITOR: Map Editor
+    GAMENAME: "Far Cry® 4"
+    THUMBIMAGE: 5216494f61c947708a013e1bc8ed099e.jpg
+    FACEBOOKURL: http://www.facebook.com/farcry
+    FORUMURL: https://discussions.ubisoft.com/category/778/far-cry-series
+    HOMEPAGEURL: https://www.ubisoft.com/en-GB/game/far-cry-4/
+    HELPURL: http://support.ubi.com
+    BACKGROUNDIMAGE: 856bccf231cdf8341d9aec04411d22f5.jpg
+    DIALOGIMAGE: 2687a1be0c2e3ca40bfd5e535818701c.png
+    LOGOIMAGE: 8d53033debba22973766c13db896bb6f.png
+    ICONIMAGE: 912c28f69e6d44a0c9b106038aa98259.ico
+    EXE_DESCRIPTION_1: Far Cry 4
+    EXE_SHORTCUT_NAME_1: Far Cry 4
+    EXE_ICON_IMAGE_1: 912c28f69e6d44a0c9b106038aa98259.ico
+    EXE_DESCRIPTION_2: Map Editor
+    EXE_SHORTCUT_NAME_2: Far Cry 4 Map Editor
+    EXE_ICON_IMAGE_2: 912c28f69e6d44a0c9b106038aa98259.ico
+    RELATED_DESCRIPTION_1163: "Far Cry® 4 - BloodRuby"
+    RELATED_DESCRIPTION_1213: "Escape from the prison and survive the hostile lands of Pagan Min’s Kyrat."
+    DESCRIPTION: Includes exclusive single player missions only available with the Season Pass.
+    RELATED_THUMBIMAGE_1213: d356c08f04da6e6b0b1b54de94c5f012.jpg
+    RELATED_DESCRIPTION_1214: The Hurk Deluxe Pack contains 5 Missions and 5 Weapons.
+    RELATED_THUMBIMAGE_1214: d356c08f04da6e6b0b1b54de94c5f012.jpg
+    RELATED_DESCRIPTION_1215: "Team up as Rakshasa or Golden Path and control a series of neutral locations across Kyrat’s countryside."
+    RELATED_THUMBIMAGE_1215: d356c08f04da6e6b0b1b54de94c5f012.jpg
+    RELATED_DESCRIPTION_1216: "In these new missions featuring single player and co-op action, you will never be alone as the yetis await their prey…"
+    RELATED_THUMBIMAGE_1216: d356c08f04da6e6b0b1b54de94c5f012.jpg
+    RELATED_DESCRIPTION_1217: "Far Cry® 4 - Hurk’s Return"
+    RELATED_DESCRIPTION_1218: "Far Cry® 4 - Yak Farm"
+    RELATED_DESCRIPTION_1219: "Far Cry® 4 - The Syringe"
+    RELATED_DESCRIPTION_1220: "Far Cry® 4 - Driller PKM"
+    RELATED_DESCRIPTION_1221: "Far Cry® 4 - Elephant Gun .700 Nitro"
+    RELATED_DESCRIPTION_1222: "Far Cry® 4 - Sandman 1911 Pistol"
+    RELATED_DESCRIPTION_1223: "Far Cry® 4 - Butcher's Machete"
+    RELATED_DESCRIPTION_1585: "Far Cry® 4 - Season Pass"
+    RELATED_THUMBIMAGE_1585: d356c08f04da6e6b0b1b54de94c5f012.jpg
+    RELATED_GAMENAME_1163: "Far Cry® 4 - BloodRuby"
+    RELATED_GAMENAME_1213: "Far Cry® 4 - Escape from Durgesh Prison"
+    RELATED_GAMENAME_1214: "Far Cry® 4 - The Hurk Deluxe Pack"
+    RELATED_GAMENAME_1215: "Far Cry® 4 - Overrun"
+    RELATED_GAMENAME_1216: "Far Cry® 4 - Valley of the Yetis"
+    RELATED_GAMENAME_1217: "Far Cry® 4 - Hurk’s Return"
+    RELATED_GAMENAME_1218: "Far Cry® 4 - Yak Farm"
+    RELATED_GAMENAME_1219: "Far Cry® 4 - The Syringe"
+    RELATED_GAMENAME_1220: "Far Cry® 4 - Driller PKM"
+    RELATED_GAMENAME_1221: "Far Cry® 4 - Elephant Gun .700 Nitro"
+    RELATED_GAMENAME_1222: "Far Cry® 4 - Sandman 1911 Pistol"
+    RELATED_GAMENAME_1223: "Far Cry® 4 - Butcher's Machete"
+    RELATED_GAMENAME_1585: "Far Cry® 4 - Season Pass"
+  da-DK:
+    DESCRIPTION: "En eksklusiv singleplayer-mission, der kun er tilgængelig med season pass."
+    RELATED_DESCRIPTION_1213: "I skal flygte fra fængslet og overleve i Pagan Mins fjendtligt stemte Kyrat."
+    RELATED_DESCRIPTION_1214: "Hurk Deluxe-pakken indeholder Fem missioner, Fem våben"
+    RELATED_DESCRIPTION_1215: "Spil sammen som enten Rakshasa’en eller Den gyldne sti, og indtag en række neutrale positioner i Kyrat, hvorefter I skal beskytte området mod angribende fjender."
+    RELATED_DESCRIPTION_1216: "I disse nye missioner til både singleplayer og samarbejde er du aldrig alene, for yetierne vil have deres bytte ..."
+    RELATED_DESCRIPTION_1585: "En eksklusiv singleplayer-mission, der kun er tilgængelig med season pass."
+  de-DE:
+    DESCRIPTION: "Setze dein Far Cry®4-Abenteuer mit dem Far Cry®4 Season-Pass fort."
+    RELATED_DESCRIPTION_1213: "Brich aus dem Gefängnis aus und überlebe auf dem feindlichen Terrain von Pagan Mins Kyrat."
+    RELATED_DESCRIPTION_1214: "Das Hurk Deluxe Pack enthält 5 Missionen und 5 Waffen."
+    RELATED_DESCRIPTION_1215: "Schließe dich den Rakshasa oder dem Goldenen Pfad an und übernimm die Herrschaft über eine Reihe neutraler Gebiete in Kyrat."
+    RELATED_DESCRIPTION_1216: In diesen neuen Missionen mit Singleplayer- sowie Koop-Action wirst du nie allein sein, denn die Yetis lauern auf ihre Beute...
+    RELATED_DESCRIPTION_1585: "Setze dein Far Cry®4-Abenteuer mit dem Far Cry®4 Season-Pass fort."
+  es-ES:
+    DESCRIPTION: "Incluye una misión del modo individual solo disponible con el pase de temporada."
+    RELATED_DESCRIPTION_1213: "Escapa de la cárcel y sobrevive al hostil territorio del Kyrat de Pagan Min."
+    RELATED_DESCRIPTION_1214: El Pack Deluxe de Hurk contiene 5 misiones y 5 armas
+    RELATED_DESCRIPTION_1215: "Únete a los Rakshasa o a la Senda Dorada y controla una serie de ubicaciones neutrales repartidas por las zonas rurales de Kyrat."
+    RELATED_DESCRIPTION_1216: "En estas nuevas misiones de acción Individual y Cooperativo, nunca estarás solo pues te esperarán los Yetis..."
+    RELATED_DESCRIPTION_1585: "Incluye una misión del modo individual solo disponible con el pase de temporada."
+  fi-FI:
+    DESCRIPTION: "Sisältö rajoitettu yksinpelitehtävä, saatavissa vain season passilla."
+    RELATED_DESCRIPTION_1213: "Pakene vankilasta ja selviydy Pakana Minin Kyratin vihamielisillä mailla."
+    RELATED_DESCRIPTION_1214: "Hurk Deluxe Pack sisältää 5 tehtävää, 5 asetta."
+    RELATED_DESCRIPTION_1215: "Muodosta Rakshasa- tai Kultaisen polun joukkue ja hallitse neutraalien kohteiden sarjaa Kyratin maaseudulla suojellaksesi niitä vastustajiesi valloitusyrityksiltä."
+    RELATED_DESCRIPTION_1216: "Et ole näissä yksin- ja yhteistyöpelin sisältävissä uusissa tehtävissä koskaan yksin, sillä jetit vaanivat saalistaan..."
+    RELATED_DESCRIPTION_1585: "Sisältö rajoitettu yksinpelitehtävä, saatavissa vain season passilla."
+  fr-FR:
+    DESCRIPTION: 4 nouvelles missions et une mission solo exclusive disponible uniquement avec le season pass
+    RELATED_DESCRIPTION_1213: "Évadez-vous et tâchez de survivre sur les terres hostiles du Kyrat de Pagan Min."
+    RELATED_DESCRIPTION_1214: Le pack Hurk Deluxe contient 5 missions et 5 armes.
+    RELATED_DESCRIPTION_1215: "Battez-vous aux côtés des Rakshasas ou du Sentier d'Or et protégez des zones neutres du Kyrat pour empêcher vos adversaires de les envahir."
+    RELATED_DESCRIPTION_1216: "Dans ces missions également jouables en coop, soyez vigilant car les yétis attendent leur proie dans l'ombre..."
+    RELATED_DESCRIPTION_1585: 4 nouvelles missions et une mission solo exclusive disponible uniquement avec le season pass
+  it-IT:
+    DESCRIPTION: Include 4 missiones y una missione esclusiva per singolo giocatore disponibile solo con il season pass.
+    RELATED_DESCRIPTION_1213: Fuggi dalla prigione e sopravvivi nelle terre ostili del Kyrat di Pagan Min.
+    RELATED_DESCRIPTION_1214: Il pacchetto Hurk Deluxe contiene 5 missioni e 5 armi.
+    RELATED_DESCRIPTION_1215: Schierati con i Rakshasa o con il Sentiero d'oro e lotta per il controllo di varie posizioni neutrali in giro per il Kyrat.
+    RELATED_DESCRIPTION_1216: "In queste nuove missioni d'azione singola o cooperativa, non sarai mai solo, perchè gli Yeti trovano sempre le loro prede..."
+    RELATED_DESCRIPTION_1585: Include 4 missiones y una missione esclusiva per singolo giocatore disponibile solo con il season pass.
+  nb-NO:
+    DESCRIPTION: Inneholder et eksklusivt enkeltspilleroppdrag som bare er tilgjengelig med season pass.
+    RELATED_DESCRIPTION_1213: "Røm fra fengselet, og overlev i det ugjestmilde landskapet i Pagan Mins Kyrat."
+    RELATED_DESCRIPTION_1214: "Hurk Deluxe-pakke inneholder 5 oppdrag, 5 våpen."
+    RELATED_DESCRIPTION_1215: "Spill på lag som Rakshasa eller Den gylne sti, og få kontroll over en rekke nøytrale posisjoner på den kyratiske landsbygda for å beskytte dem mot å bli erobret av motstanderne."
+    RELATED_DESCRIPTION_1216: " I disse nye oppdragene med solo- og samarbeidsaction er du aldri alene mens yetiene venter på byttet sitt …"
+    RELATED_DESCRIPTION_1585: Inneholder et eksklusivt enkeltspilleroppdrag som bare er tilgjengelig med season pass.
+  nl-NL:
+    DESCRIPTION: Inclusief 4 missie, een exclusieve singleplayer-missie, alleen verkrijgbaar met de season pass.
+    RELATED_DESCRIPTION_1213: Ontsnap en overleef de ontberingen van het Kyrat van Pagan Min.
+    RELATED_DESCRIPTION_1214: Het Hurk Deluxe Pack bevat 5 missies en 5 wapens.
+    RELATED_DESCRIPTION_1215: Kies partij voor de Rakshasa of het Gouden Pad en verover neutrale locaties in het landschap van Kyrat.
+    RELATED_DESCRIPTION_1216: "In deze nieuwe missie, speelbaar zowel als singleplayer en coöp ben je nooit alleen wanneer de yetis"
+    RELATED_DESCRIPTION_1585: Inclusief 4 missie, een exclusieve singleplayer-missie, alleen verkrijgbaar met de season pass.
+  pl-PL:
+    DESCRIPTION: "Zawiera ekskluzywną misję dla pojedynczego gracza dostępną jedynie w przepustce sezonowej."
+    RELATED_DESCRIPTION_1213: "Ucieknij z więzienia i przeżyj na niegościnnych ziemiach Kyratu pod panowaniem Pagana Mina."
+    RELATED_DESCRIPTION_1214: "Zawartość Pakietu Hurk Deluxe 5 misji, 5 broni."
+    RELATED_DESCRIPTION_1215: "Graj w drużynie Rakszasów lub członków Złotego Szlaku i przejmuj kolejne neutralne miejsca znajdujące się w Kyracie."
+    RELATED_DESCRIPTION_1216: "W nowych misjach w trybie pojedynczego gracza i kooperacji nigdy nie będziesz sam, gdyż yeti czychają w mroku..."
+    RELATED_DESCRIPTION_1585: "Zawiera ekskluzywną misję dla pojedynczego gracza dostępną jedynie w przepustce sezonowej."
+  ru-RU:
+    DESCRIPTION: "включает задание для одиночной игры, доступное только с season pass."
+    RELATED_DESCRIPTION_1213: "Совершите побег и попробуйте выжить в Кирате Пэйгана Мина."
+    RELATED_DESCRIPTION_1214: "Deluxe-пакет «От Хёрка» содержит 5 заданий, 5 видов оружия."
+    RELATED_DESCRIPTION_1215: "Вступите в ряды ракшасов или Золотого пути и охраняйте нейтральную территорию в различных точках Кирата от посягательств противника."
+    RELATED_DESCRIPTION_1216: "Рядом всегда будут голодные снежные люди."
+    RELATED_DESCRIPTION_1585: "включает задание для одиночной игры, доступное только с season pass."
+  sv-SE:
+    DESCRIPTION: "Innehåller ett exklusivt enspelaruppdrag som endast är tillgängligt med season pass."
+    RELATED_DESCRIPTION_1213: "Fly från fängelset och överlev i Pagan Mins skoningslösa Kyrat."
+    RELATED_DESCRIPTION_1214: "Hurk Deluxe-paketet innehåller 5 uppdrag, 5 vapen."
+    RELATED_DESCRIPTION_1215: "Spela som Rakshasorna eller Gyllene stigen och kontrollera en rad olika platser i Kyrat och skydda dem från motståndarna.."
+    RELATED_DESCRIPTION_1216: "Oavsett om du spelar uppdragen med en eller flera spelare är du aldrig ensam eftersom snömän ständigt jagar byte ..."
+    RELATED_DESCRIPTION_1585: "Innehåller ett exklusivt enspelaruppdrag som endast är tillgängligt med season pass."
+

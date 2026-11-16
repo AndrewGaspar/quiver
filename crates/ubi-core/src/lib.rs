@@ -7,6 +7,7 @@ pub mod cloudsave;
 pub mod demux;
 pub mod download;
 pub mod exports;
+pub mod gameinfo;
 pub mod install;
 pub mod launch;
 pub mod launcher;
@@ -16,9 +17,13 @@ pub mod mods;
 pub mod online;
 pub mod overlay;
 pub mod playsession;
+pub mod progress;
+pub mod saves;
 pub mod savesync;
 pub mod settings;
 pub mod store;
+pub mod ubiservices;
+pub mod zipread;
 
 pub use ubi_proto as proto;
 

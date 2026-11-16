@@ -1,0 +1,26 @@
+{
+  "entities": [
+    {
+      "entityId": "00000000-0000-0000-0000-0000000000e1",
+      "lastModified": "2026-11-16T06:09:31.069Z",
+      "name": "upcCloudSaveUplayId_3539",
+      "obj": {
+        "pc_name": "MY-PC",
+        "slots": [
+          { "filename": "1", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 1, "lastModified": "2026-11-16T06:03:14.084Z", "size": 2541 },
+          { "filename": "2", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 2, "lastModified": "2026-11-16T06:03:14.086Z", "size": 2541 },
+          { "filename": "3", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 3, "lastModified": "2026-11-16T06:03:14.077Z", "size": 107699 },
+          { "filename": "4", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 4, "lastModified": "2026-11-16T06:03:14.081Z", "size": 107699 },
+          { "filename": "5", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 5, "lastModified": "2026-11-16T06:08:22.424Z", "size": 40450 },
+          { "filename": "6", "hash": "f8e39a046ebeec2a251e5fd9d1c0707c", "id": 6, "lastModified": "2026-11-16T06:08:22.433Z", "size": 40450 }
+        ],
+        "timestamp": "1794809034"
+      },
+      "profileId": "00000000-0000-0000-0000-000000000001",
+      "revision": 45,
+      "spaceId": "00000000-0000-0000-0000-0000000000aa",
+      "tags": [],
+      "type": "cloudSave"
+    }
+  ]
+}

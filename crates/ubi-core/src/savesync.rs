@@ -20,7 +20,7 @@ use crate::cloudsave::CloudSaves;
 use crate::library::Library;
 
 /// Highest slot number probed in the cloud when no local file hints at more.
-const DEFAULT_MAX_SLOT: u32 = 16;
+pub(crate) const DEFAULT_MAX_SLOT: u32 = 16;
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -67,7 +67,7 @@ fn pending_uploads(dir: &Path) -> Result<Vec<u32>> {
     Ok(slots)
 }
 
-fn inflate(data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn inflate(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     flate2::read::ZlibDecoder::new(data).read_to_end(&mut out).context("inflate cloud save")?;
     Ok(out)
@@ -108,10 +108,13 @@ pub async fn pull(cloud: &mut CloudSaves, lib: &mut Library, uplay_id: u32, dir:
             continue;
         }
         if let Some(old) = local {
-            let backup = report.backup_dir.get_or_insert_with(|| {
-                backup_root.join(format!("{uplay_id}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")))
-            });
+            let new = report.backup_dir.is_none();
+            let backup = report.backup_dir.get_or_insert_with(|| crate::saves::new_backup_dir(backup_root, uplay_id));
             std::fs::create_dir_all(&*backup)?;
+            if new {
+                let account = crate::saves::account_of_dir(dir);
+                crate::saves::write_meta(backup, "before cloud download", account.as_deref(), Some("sync"))?;
+            }
             std::fs::write(backup.join(format!("{slot}.save")), old)?;
         }
         let tmp = dir.join(format!("{slot}.save.download"));

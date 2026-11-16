@@ -1,0 +1,28 @@
+{
+  "levels": [
+    {
+      "level": 84,
+      "rewards": [
+        {
+          "displayName": "<span> 10 </span> Units",
+          "iconUrl": "https://ubiservices.cdn.ubi.com/45d58365-547f-4b45-ab5b-53ed14cc79ed/Connect/UbiConnect-Units.png",
+          "quantity": 10,
+          "type": "Units"
+        }
+      ],
+      "xp": 41500
+    },
+    {
+      "level": 85,
+      "rewards": [
+        {
+          "displayName": "<span> 20 </span> Units",
+          "iconUrl": "https://ubiservices.cdn.ubi.com/45d58365-547f-4b45-ab5b-53ed14cc79ed/Connect/UbiConnect-Units.png",
+          "quantity": 20,
+          "type": "Units"
+        }
+      ],
+      "xp": 42000
+    }
+  ]
+}
