@@ -799,6 +799,7 @@ fn layer(id: &str, name: &str, days: i64, by: &str, origin: &str, files: u64, by
         origin: Some(home().join(origin)),
         files,
         bytes,
+        deletes: Vec::new(),
     }
 }
 
@@ -886,7 +887,7 @@ impl Mods {
         if r.profile.layers.iter().any(|l| l == "l9q2w7e") && r.profile.layers.iter().any(|l| l == "l3x5v1b") {
             for f in ["water/ocean_normal_01.dds", "water/ocean_normal_02.dds", "water/foam_mask.dds"] {
                 let order: Vec<String> = r.profile.layers.iter().filter(|l| *l == "l9q2w7e" || *l == "l3x5v1b").cloned().collect();
-                conflicts.push(Conflict { path: f.into(), layers: order });
+                conflicts.push(Conflict { path: f.into(), layers: order, deleted_by: Vec::new() });
             }
         }
         ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts }
@@ -927,7 +928,10 @@ impl Detail {
             | ModsRequest::ProfileSet { product_id, .. }
             | ModsRequest::ProfileDelete { product_id, .. }
             | ModsRequest::ProfileHistory { product_id, .. }
-            | ModsRequest::ProfileRestore { product_id, .. } => Some(*product_id),
+            | ModsRequest::ProfileRestore { product_id, .. }
+            | ModsRequest::LayerDeletes { product_id, .. }
+            | ModsRequest::LayerHistory { product_id, .. }
+            | ModsRequest::LayerRestore { product_id, .. } => Some(*product_id),
         };
         if let ModsRequest::Games = req {
             let list: Vec<Value> = st
@@ -951,6 +955,9 @@ impl Detail {
         Ok(match req {
             ModsRequest::Games => unreachable!(),
             ModsRequest::List { .. } => (json!(m.state(id)), None),
+            ModsRequest::LayerDeletes { .. } | ModsRequest::LayerHistory { .. } | ModsRequest::LayerRestore { .. } => {
+                bail!("layer deletions aren't simulated in demo mode")
+            }
             ModsRequest::LayerAdd { name, path, .. } => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
@@ -960,7 +967,7 @@ impl Detail {
                     bail!("{}: use an absolute path", path.display());
                 }
                 let files = 3 + (name.len() as u64 * 7) % 40;
-                let l = Layer { id: random_id('l', n), name, added: now, added_by: src.into(), origin: Some(path), files, bytes: files * 1_350_000 };
+                let l = Layer { id: random_id('l', n), name, added: now, added_by: src.into(), origin: Some(path), files, bytes: files * 1_350_000, deletes: Vec::new() };
                 m.layers.push(l.clone());
                 (json!(l), Some(id))
             }
@@ -1108,7 +1115,7 @@ mod tests {
         assert_eq!(m.profiles.len(), 2);
         assert_eq!(m.deleted.len(), 1);
         assert_eq!(m.profiles[0].conflicts.len(), 3);
-        let l: Layer = call(&demo, Request::Mods(ModsRequest::LayerAdd { product_id: 5059, name: "Mine".into(), path: "/tmp/x".into() }));
+        let l: Layer = call(&demo, Request::Mods(ModsRequest::LayerAdd { product_id: 5059, name: "Mine".into(), path: "/tmp/x".into(), deletes: Vec::new() }));
         let r: ProfileRevision = call(
             &demo,
             Request::Mods(ModsRequest::ProfileCreate { product_id: 5059, name: "Test".into(), layers: vec![l.id.clone()], message: None }),

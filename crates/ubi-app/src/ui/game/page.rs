@@ -988,7 +988,7 @@ impl Quiver {
         let name = if name.is_empty() { path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() } else { name };
         let (ni, pi) = (n.clone(), p.clone());
         self.show_toast(format!("Copying {} into the mod store…", crate::model::tilde(&path)), cx);
-        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id, name, path }), cx, move |this, r, cx| match r {
+        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id, name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
             Ok(l) => {
                 this.show_toast(format!("Added layer {} ({} files)", l.name, l.files), cx);
                 ni.update(cx, |t, cx| t.set_text("", cx));
