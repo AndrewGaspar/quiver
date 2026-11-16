@@ -44,7 +44,7 @@ running (`quiver sessions`).
 
 ```sh
 tools/package.sh                     # prints the package path and the install command
-sudo pacman -U ~/.cache/quiver-pkg/pkg/quiver-git-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U ~/.cache/quiver-pkg/packages/quiver-git-<version>-1-x86_64.pkg.tar.zst
 ```
 
 `packaging/arch/PKGBUILD` is a VCS package (`quiver-git`, provides and conflicts with

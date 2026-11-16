@@ -34,18 +34,18 @@ fi
 commit=$(git -C "$repo" rev-parse HEAD)
 
 dir=${QUIVER_PKG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/quiver-pkg}
-mkdir -p "$dir/pkg"
+mkdir -p "$dir/packages"
 cp "$repo/packaging/arch/PKGBUILD" "$repo/packaging/arch/quiver.install" "$dir/"
 cd "$dir"
 
 export QUIVER_REPO=$repo QUIVER_COMMIT=$commit QUIVER_CARGO_TARGET_DIR=$dir/target
-export PKGDEST=$dir/pkg SRCDEST=$dir BUILDDIR=$dir
+export PKGDEST=$dir/packages SRCDEST=$dir BUILDDIR=$dir
 makepkg -f --noconfirm
 
 pkg=$(makepkg --packagelist | grep -v -- '-debug-' | head -n1)
 [[ -f $pkg ]] || { echo "package.sh: makepkg finished but $pkg isn't there" >&2; exit 1; }
 # Keep the newest three packages (something to roll back to with pacman -U).
-ls -1t "$dir"/pkg/quiver-git-*.pkg.tar.zst 2>/dev/null | tail -n +4 | xargs -r rm -f
+ls -1t "$dir"/packages/quiver-git-*.pkg.tar.zst 2>/dev/null | tail -n +4 | xargs -r rm -f
 
 echo
 echo "Package: $pkg"
