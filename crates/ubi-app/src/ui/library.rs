@@ -3,12 +3,12 @@
 use gpui::{AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, prelude::*, px, relative};
 
 use super::{
-    ArtState, BOLD, FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, TagKind, art_chip, art_fill, badge, button, caption, chip,
+    ArtState, BOLD, FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, TagKind, art_chip, art_fill, button, caption, chip,
     chip_count, cover, display, glyph, icon, progress, soft_shadow, tag,
 };
 use crate::app::{Attention, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{GameRow, clock, day, duration, hours, short_name};
+use crate::model::{GameRow, clock, day, hours, short_name};
 use crate::nav::Target;
 use crate::theme::{Theme, on_art, rgba};
 
@@ -431,25 +431,28 @@ impl Quiver {
         }
         let custom = self.custom_art.get(&id).is_some_and(|c| c.tile.is_some());
 
-        let ring = vec![soft_shadow(rgba(0x000000, 0.35), 6., 18.)];
-        let hover_ring = vec![
-            gpui::BoxShadow {
-                color: th.acc_line,
-                offset: gpui::point(px(0.), px(0.)),
-                blur_radius: px(0.),
-                spread_radius: px(2.),
-            },
-            soft_shadow(rgba(0x000000, 0.6), 18., 40.),
-        ];
         let group = gpui::SharedString::from(format!("tile-{id}"));
+        let deep = vec![soft_shadow(rgba(0x000000, 0.6), 18., 40.)];
+        // Hover: a 2 px accent ring (no lift: GPUI has no transforms) and a deeper shadow.
+        let hover_ring = div()
+            .absolute()
+            .top(px(-2.))
+            .left(px(-2.))
+            .right(px(-2.))
+            .bottom(px(-2.))
+            .rounded(px(12.))
+            .border_2()
+            .border_color(th.acc_line)
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible());
         let mut boxart = div()
             .relative()
             .w(px(w))
             .h(px(h))
             .rounded(px(10.))
             .bg(th.ink3)
-            .shadow(ring)
-            .when(!focused, |d| d.group_hover(group.clone(), move |s| s.shadow(hover_ring.clone())))
+            .shadow(vec![soft_shadow(rgba(0x000000, 0.35), 6., 18.)])
+            .when(!focused, |d| d.group_hover(group.clone(), move |s| s.shadow(deep.clone())).child(hover_ring))
             .child(art_fill(th, &art, &label, 10., false))
             .child(tl)
             .focus_glow(focused, th, 10.);
@@ -564,10 +567,4 @@ pub fn primary_label(g: &GameRow) -> (&'static str, Icon) {
     } else {
         ("Play", Icon::Play)
     }
-}
-
-/// The last-session line used by the hero and the game page.
-pub fn session_line(g: &GameRow) -> Option<String> {
-    let s = g.playtime.as_ref()?.sessions.first()?;
-    Some(format!("{} · {}", day(s.started), duration(s.seconds)))
 }

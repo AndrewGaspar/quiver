@@ -48,8 +48,4 @@ impl Source {
             }
         }
     }
-
-    pub fn is_demo(&self) -> bool {
-        matches!(self, Source::Demo(_))
-    }
 }

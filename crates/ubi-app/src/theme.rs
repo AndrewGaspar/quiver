@@ -13,8 +13,6 @@ use crate::palette::{Color, Palette, Tokens};
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub name: SharedString,
-    /// Where the palette came from: `None` = the built-in "Quiver dark".
-    pub omarchy: Option<SharedString>,
     pub dark: bool,
     pub ink0: Hsla,
     pub ink1: Hsla,
@@ -52,7 +50,6 @@ pub struct Theme {
     pub who_sys: Hsla,
     pub focus: Hsla,
     pub focus_halo: Hsla,
-    pub code_s: Hsla,
     pub scrim: Hsla,
     /// Track behind progress bars: `tx-1` at 12%.
     pub track: Hsla,
@@ -70,11 +67,10 @@ pub fn rgba(hex: u32, a: f32) -> Hsla {
 }
 
 impl Theme {
-    pub fn from_tokens(t: &Tokens, name: impl Into<SharedString>, omarchy: Option<SharedString>) -> Self {
+    pub fn from_tokens(t: &Tokens, name: impl Into<SharedString>) -> Self {
         let h = hsla;
         Self {
             name: name.into(),
-            omarchy,
             dark: t.dark,
             ink0: h(t.ink0),
             ink1: h(t.ink1),
@@ -110,14 +106,13 @@ impl Theme {
             who_sys: h(t.who_sys),
             focus: h(t.focus),
             focus_halo: h(t.focus_halo),
-            code_s: h(t.code_s),
             scrim: h(t.scrim),
             track: h(t.tx1.with_alpha(0.12)),
         }
     }
 
     pub fn builtin() -> Self {
-        Self::from_tokens(&Tokens::builtin(), "Quiver dark", None)
+        Self::from_tokens(&Tokens::builtin(), "Quiver dark")
     }
 }
 
@@ -200,7 +195,7 @@ pub fn load(dir: &Path) -> Theme {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "Omarchy".into());
-            Theme::from_tokens(&Tokens::derive(&p), name.clone(), Some(name.into()))
+            Theme::from_tokens(&Tokens::derive(&p), name)
         }
         Err(e) => {
             tracing::warn!("ignoring {}: {e}", colors.display());

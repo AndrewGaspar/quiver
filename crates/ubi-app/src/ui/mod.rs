@@ -9,7 +9,7 @@ pub mod topbar;
 
 use gpui::{
     AnyElement, BoxShadow, Div, ElementId, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, Pixels, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, StyledImage, Svg, div, img, point, prelude::*, px, svg,
+    Stateful, Styled, StyledImage, Svg, div, img, point, prelude::*, px, svg,
 };
 
 use crate::art::{ArtImage, ArtState};
@@ -18,8 +18,11 @@ use crate::theme::{Theme, on_art};
 
 macro_rules! icons {
     ($($variant:ident => $file:literal),* $(,)?) => {
+        /// The icon catalog (Lucide). Not every icon is in use yet.
+        #[allow(dead_code)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum Icon { $($variant),* }
+        #[allow(dead_code)]
         impl Icon {
             pub const ALL: &'static [Icon] = &[$(Icon::$variant),*];
             pub fn path(self) -> &'static str {
@@ -92,10 +95,6 @@ pub fn icon(i: Icon, size: f32, color: Hsla) -> Svg {
 
 // ---------------------------------------------------------------------------------------------
 // Text
-
-pub fn text(size: f32, color: Hsla) -> Div {
-    div().text_size(px(size)).text_color(color)
-}
 
 /// Archivo SemiExpanded, for page titles and the hero game title only.
 pub fn display(size: f32, weight: FontWeight, color: Hsla) -> Div {
@@ -288,6 +287,7 @@ pub fn art_chip(i: Option<Icon>, label: impl Into<SharedString>) -> Div {
         .child(label.into())
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum TagKind {
     Plain,
@@ -321,6 +321,7 @@ pub fn tag(th: &Theme, kind: TagKind, i: Option<Icon>, label: impl Into<SharedSt
         .when(!label.is_empty(), |d| d.child(label))
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum PillKind {
     Ok,
@@ -440,7 +441,8 @@ pub fn avatar(label: &str, from: Hsla, to: Hsla, ring: Hsla) -> Div {
         .size(px(30.))
         .rounded_full()
         .bg(gpui::linear_gradient(135., gpui::linear_color_stop(from, 0.), gpui::linear_color_stop(to, 1.)))
-        .shadow(vec![BoxShadow { color: ring, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.) }])
+        .border_2()
+        .border_color(ring)
         .text_size(px(12.))
         .font_weight(BOLD)
         .text_color(crate::theme::rgba(0xe8ebff, 1.0))

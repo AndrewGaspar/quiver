@@ -42,6 +42,7 @@ impl Color {
         Some(Self::hex_u32(v))
     }
 
+    #[cfg(test)]
     pub fn hex(&self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
@@ -385,7 +386,8 @@ impl Tokens {
         }
     }
 
-    /// Name -> value for every token, in the mock-up's CSS names. Used by tests and logs.
+    /// Name -> value for every token, in the mock-up's CSS names.
+    #[cfg(test)]
     pub fn entries(&self) -> Vec<(&'static str, Color)> {
         vec![
             ("ink-0", self.ink0),

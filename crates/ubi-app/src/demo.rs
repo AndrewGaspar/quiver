@@ -2,7 +2,7 @@
 //! from fixtures. The library and art come from `design/art/art.json` (the real product
 //! configs for this library); install state, play time, settings history and activity
 //! follow the mock-ups in `design/mockup/src`. One install job progresses live, and Play
-//! starts a short fake session, so event handling can be exercised too.
+//! starts a fake session until Stop, so event handling can be exercised too.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

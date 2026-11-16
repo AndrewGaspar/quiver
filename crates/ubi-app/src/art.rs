@@ -49,12 +49,6 @@ pub struct ArtImage {
     pub height: u32,
 }
 
-impl ArtImage {
-    pub fn aspect(&self) -> f32 {
-        self.width as f32 / self.height.max(1) as f32
-    }
-}
-
 #[derive(Clone, Debug)]
 enum Slot {
     Loading,

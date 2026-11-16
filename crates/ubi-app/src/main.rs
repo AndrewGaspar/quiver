@@ -2,7 +2,16 @@
 //! shows the daemon's state and sends it requests; installs, launches and settings all live
 //! in the daemon, so the CLI and agents see and drive the same thing.
 //!
-//! `QUIVER_DEMO=1` runs on built-in fixture data instead of the daemon (see `demo.rs`).
+//! Environment:
+//! - `QUIVER_DEMO=1`: built-in fixture data instead of the daemon (`demo.rs`); never
+//!   connects to or starts `quiverd`.
+//! - `QUIVER_DEMO_INPUT="pad down a"`: demo mode only, replays inputs once the library is
+//!   on screen (for screenshots without a device).
+//! - `QUIVER_THEME=builtin`: ignore Omarchy and use "Quiver dark".
+//! - `QUIVER_OMARCHY_STATE=DIR`: read the theme from DIR instead of
+//!   `~/.local/state/omarchy/current` (tests, screenshots).
+//! - `XDG_CACHE_HOME`: art cache root (`quiver/art`); `XDG_CONFIG_HOME`: where
+//!   `quiver/custom-art.json` (per-game image files) is read from.
 
 mod app;
 mod art;
