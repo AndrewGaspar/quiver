@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod run;
+
 /// Everything the bridge needs to answer a game's SDK `InitReq` like Connect would.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LaunchContext {
