@@ -363,16 +363,19 @@ impl Daemon {
             }
             ModsRequest::Uninstall { product_id, mod_id, confirmed } => {
                 let store = store(product_id)?;
-                let (layer, applied) = {
+                let (layer, applied, files) = {
                     let (store, q) = (store.clone(), mod_id.clone());
                     blocking(move || {
                         let l = store.layer(&q)?;
                         let applied = store.applied_by(&l.id)?;
-                        Ok((l, applied))
+                        // Every version goes, so any version's files count.
+                        let rec = store.find_mod(&l.id)?;
+                        let files = store.layers()?.iter().any(|v| rec.has(&v.id) && v.has_files());
+                        Ok((l, applied, files))
                     })
                     .await?
                 };
-                if layer.has_files() || !applied.is_empty() {
+                if files || !applied.is_empty() {
                     ask(source, confirmed, "uninstalling a mod with install files or changed config values")?;
                 }
                 self.not_running(product_id, "uninstalling a mod")?;
