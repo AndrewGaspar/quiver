@@ -39,7 +39,7 @@ enum Encoding {
 fn decode(bytes: &[u8]) -> Result<(String, Encoding)> {
     let utf16 = |le: bool| -> Result<(String, Encoding)> {
         let body = &bytes[2..];
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             bail!("odd-length UTF-16 text");
         }
         let units: Vec<u16> =
@@ -789,6 +789,9 @@ pub struct Wanted {
 /// statuses.
 pub fn reconcile(record: &Path, view: &View, wanted: &[Wanted]) -> Result<Vec<PatchStatus>> {
     let mut rec = load(record)?;
+    if rec.keys.is_empty() && wanted.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut statuses: Vec<PatchStatus> = Vec::new();
     // file -> wanted edits, in stack order (a later mod overrides an earlier one).
     let mut files: BTreeMap<String, Vec<Want>> = BTreeMap::new();

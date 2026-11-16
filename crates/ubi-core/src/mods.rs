@@ -1296,8 +1296,19 @@ impl ModStore {
         }
         let launches: Vec<(String, ubi_api::mods::ModLaunch)> = mods.iter().map(|m| (m.id.clone(), m.launch())).collect();
         let empty = GameSettings::default();
-        let (settings, mut setting_conflicts) =
-            ubi_api::mods::resolve_settings(&self.game_settings(), &launches, profile.map_or(&empty, |p| &p.settings));
+        let base = self.game_settings();
+        let over = profile.map_or(&empty, |p| &p.settings);
+        // The same argument from two places is passed twice (arguments can repeat on
+        // purpose, so this is only a note), e.g. a fix's flag still in the game settings.
+        let mut args: Vec<(&str, String)> = base.args.iter().map(|a| (a.as_str(), "the game's settings".to_owned())).collect();
+        args.extend(mods.iter().zip(&launches).flat_map(|(m, (_, l))| l.args.iter().map(|a| (a.as_str(), m.name.clone()))));
+        args.extend(over.args.iter().map(|a| (a.as_str(), "the profile".to_owned())));
+        for (i, (a, from)) in args.iter().enumerate() {
+            if let Some((_, first)) = args[..i].iter().find(|(b, f)| b == a && f != from) {
+                warnings.push(format!("{a} is passed twice: by {first} and by {from}"));
+            }
+        }
+        let (settings, mut setting_conflicts) = ubi_api::mods::resolve_settings(&base, &launches, over);
         setting_conflicts.extend(patch_conflicts(&mods));
         let ids: Vec<String> = mods.iter().map(|m| m.id.clone()).collect();
         let file_conflicts = self.conflicts(&ids);
@@ -2036,6 +2047,12 @@ mod tests {
         store.set_profile("P", &ops(&["args=-p", "env.A=profile"]), "cli", None).unwrap();
         let plan = store.plan(Some("P")).unwrap().api;
         assert_eq!(plan.settings.args, ["-g", "-a", "-b", "-p"]);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        store.set_profile("P", &ops(&["args=-p -a"]), "cli", None).unwrap();
+        let w = store.plan(Some("P")).unwrap().api.warnings;
+        assert_eq!(w, ["-a is passed twice: by a and by the profile"]);
+        store.set_profile("P", &ops(&["args=-p"]), "cli", None).unwrap();
+        let plan = store.plan(Some("P")).unwrap().api;
         assert_eq!(plan.settings.wrappers, ["gamemoderun", "mangohud"]);
         assert_eq!(plan.settings.env["A"], "profile");
         assert_eq!(plan.settings.dll_overrides["d3d11"], "b", "the later mod wins…");

@@ -25,6 +25,8 @@ their asset CDN.</sub>
 - `crates/ubi-cli/`: the `ubi` command
 - `crates/ubi-ipc/`: types shared by the native side and the bridge
 - `crates/ubi-bridge/`: a Windows binary that runs inside the game's prefix in place of Connect
+- `mods/<product id>/<mod id>/quiver-mod.toml`: Quiver's built-in mods (audited recipes,
+  compiled into `ubi-core`)
 - `tools/instance.sh`: per-game reflinked prefixes, run headless in podman
 - `tools/recon/`: SDK harness and the offline recon prefix scripts
 
@@ -120,6 +122,17 @@ quiver play odyssey --profile "Visual overhaul"  # or --profile-id p7f3k2q; vani
 quiver mods odyssey profile history "Visual overhaul"
 quiver mods odyssey profile delete "Visual overhaul"   # restorable; saves are kept
 
+quiver mods "far cry 4" catalog                # built-in mods (audited recipes, with sources)
+quiver mods "far cry 4" install fc4-raw-mouse  # or a package folder with a quiver-mod.toml
+quiver mods "far cry 4" profile set Mouse mods=fc4-skip-intro,fc4-raw-mouse
+quiver mods "far cry 4" profile set Mouse profile_config="drive_c/users/steamuser/Documents/My Games/Far Cry 4"
+quiver mods "far cry 4" profile set Mouse separate_saves=on   # or off, or auto (the default)
+quiver mods "far cry 4" plan Mouse             # settings, saves, mounts, own folders, config patches
+quiver mods "far cry 4" show fc4-raw-mouse     # what it declares, where it's used, what it changed
+quiver mods "far cry 4" set fc4-raw-mouse enabled=off   # also save_compatible=, kind=, name=
+quiver mods "far cry 4" uninstall fc4-raw-mouse   # config values it changed go back
+quiver fixes-on-vanilla on                     # installed fixes also apply to unmodded launches
+
 quiver install origins --dry-run               # sizes, free space, languages; nothing starts
 quiver queue                                   # the download queue: state, progress, speed
 quiver queue move origins top                  # or up / down
@@ -150,9 +163,10 @@ and hard links are replaced by files of their own first, and reflinked imports n
 A **layer** is a folder of files laid out like the install folder; `layer add` copies it into
 `~/.local/share/quiver/mods/<product>/layers/<id>/` (reflinks on btrfs/xfs) and matches file
 names to the install's case. A **profile** stacks layers bottom to top, can override launch
-settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and has its own saves
-(`savegames/<user>/<product>-<profile id>` in the prefix), synced with the cloud only with
-`cloud_saves=on`. Vanilla is implicit and never mounted.
+settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and, when it forks saves (see
+Mods v2 below), has its own (`savegames/<user>/<product>-<profile id>` in the prefix), synced
+with the cloud only with `cloud_saves=on`. Vanilla is implicit and only mounted for fixes
+that change install files.
 
 A layer can also **delete** files and folders (`--delete PATH`, `layer delete-files`,
 `layer keep-files`; paths are relative to the install folder and matched to its case). A
@@ -175,6 +189,85 @@ Profile changes are revisions in `games/<product>/profiles/<id>.jsonl` (`profile
 `profile restore`), and deleting a profile is a revision too. Agents (`--source` other than
 `cli`/`gui`) need a person's confirmation to delete or restore profiles, restore layer
 revisions and remove layers; adding layers and changing their deletions are normal edits.
+
+### Mods v2: packages, stacks, config patches
+
+A **mod** is a folder with a manifest, `quiver-mod.toml` (TOML; `quiver-mod.json` with the
+same fields works too), and optionally `files/` laid out like the install folder:
+
+```toml
+id = "fc4-raw-mouse"            # lowercase letters, digits, '-'
+name = "Raw mouse input"
+version = "1"
+kind = "fix"                    # or "mod" (the default); only fixes can apply to vanilla
+description = "…"
+source = "https://www.pcgamingwiki.com/wiki/Far_Cry_4#Mouse_acceleration"
+audited = "who checked the recipe, when, against what"
+save_compatible = true          # unset counts as false: the profile gets its own saves
+products = [420]                # optional; installing elsewhere is refused
+builds = []                     # known-good install manifest hashes (warns on others)
+requires = []                   # manifest ids that must be in the stack
+conflicts = []                  # manifest ids that must not be
+
+[files]                         # install files: files/ (or dir = "…") adds and replaces,
+delete = ["videos/intro.bk2"]   # delete hides (whiteouts), as for layers
+
+[launch]                        # appended (args, wrappers) or merged (env, dll) in stack order
+args = ["-skipintro"]
+env = { DXVK_HUD = "fps" }
+dll = { d3d11 = "n,b" }
+wrappers = ["gamemoderun"]
+
+[[patch]]                       # INI and XML key edits on files in the prefix
+file = "drive_c/users/steamuser/Documents/My Games/Far Cry 4/*/GamerProfile.xml"
+format = "xml"                  # or "ini" (with section = "…")
+element = "GamerProfile/ProfileSpecificGameProfile"
+set = { MouseAcceleration = "0", Smoothness = "0" }
+delete = []                     # keys (attributes) to remove; every line of a repeated INI key
+```
+
+Installed mods live where layers do (a layer is a file-only mod; v1 layers need no
+migration). **Built-in mods** are in `mods/<product id>/<mod id>/` in this repository, each
+translated from a source such as PCGamingWiki and audited (`source`, `audited`); `quiver mods
+<game> catalog` lists them and `install ID` installs one (again: updates it).
+
+A **profile** is an ordered stack of mods (`mods=a,b`, bottom to top) plus your own
+overrides. Settings resolve as defaults → game settings → each mod → the profile: args and
+wrappers append in that order (a wrapper isn't added twice), env and DLL overrides merge with
+the later one winning, the profile's `proton`/`language` win. Every key set differently by two
+sources (env, DLL, or a config key) is reported in `mods list`, after `profile set` and in the
+launch's job details; a mod's declared `requires`/`conflicts` stop the launch with a reason.
+
+**Saves** fork only when a mod in the stack isn't save-compatible, or the profile says
+`separate_saves=on`; `separate_saves=off` always shares vanilla's (and syncs them with the
+cloud like vanilla does); `auto` (the default) follows the mods. A profile that already has
+its own saves folder (every v1 profile that was played) keeps using it: launches and `quiver
+mods <game> migrate` record `separate_saves=on` for it, and nothing is moved.
+
+**Config patches** are applied at every launch, just before the game starts (the game may
+have rewritten the file), as "ensure key = value". The file's own values from before Quiver
+touched it are recorded in `mods/<product>/patches.json`, and a key no mod in the launch's
+stack wants any more is put back, unless it changed since Quiver set it. A file that doesn't
+exist yet is "pending until first run". INI edits keep comments, order, unknown content, line
+endings and encoding (UTF-8 or UTF-16); XML edits change attribute values in place.
+`undo-patches` puts everything back now; `uninstall` does it for that mod.
+
+**Per-profile prefix folders** (`profile_config=DIR,…`, relative to the prefix): inside the
+launch's namespace each folder is overlaid with the profile's own
+`mods/<product>/profiles/<id>/prefix/<DIR>`, so the profile sees the prefix's files with its
+own changes on top (e.g. its own graphics settings) and vanilla never sees them. Config
+patches to files there edit the profile's copy. `mods <game> plan PROFILE` shows which
+folders are per-profile, the prefix folder the game sees and where the profile's files
+really live. Shared files (outside those folders) are what every launch sees, so a profile's
+patch there is undone by the next launch that doesn't want it.
+
+**Fixes on unmodded games**: `quiver fixes-on-vanilla on` (unset means not decided yet; the
+first-launch prompt asks) applies installed, enabled `fix` mods to vanilla launches too. A
+fix with install files then mounts over the install for vanilla as well, with vanilla's own
+writable layer (`mods/<product>/profiles/vanilla/upper`).
+
+Agents may install mods, edit stacks and change a mod's settings; uninstalling a mod that
+has install files or changed config values, and `undo-patches`, need a person's OK.
 
 Settings keys: `proton`, `language`, `account`, `args`, `wrappers`, `env.NAME`, `dll.NAME`
 (`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its

@@ -337,6 +337,58 @@ fn wine_through_overlay() {
     assert_eq!(read(&install.join("a.txt")), "vanilla");
 }
 
+/// Mods v2: Wine reaching a profile's own prefix folder the way games do, through `C:`
+/// (the prefix's `dosdevices/c:` symlink to `drive_c`), sees the overlay, and its writes
+/// land in the profile's folder. Opt-in like [`wine_through_overlay`].
+#[test]
+#[ignore]
+fn wine_sees_prefix_config_overlay() {
+    let Some(proton) = std::env::var_os("QUIVER_TEST_PROTON").map(std::path::PathBuf::from) else {
+        panic!("set QUIVER_TEST_PROTON to a Proton build directory");
+    };
+    assert!(available());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let prefix = t.join("pfx");
+    std::fs::create_dir_all(t.join("home")).unwrap();
+    let wine = |ns: Option<&Namespace>, args: &[&str]| {
+        let mut cmd = Command::new(proton.join("files/bin/wine"));
+        cmd.args(args)
+            .env("WINEPREFIX", &prefix)
+            .env("HOME", t.join("home"))
+            .env("XDG_DATA_HOME", t.join("home/.local/share"))
+            .env("XDG_CONFIG_HOME", t.join("home/.config"))
+            .env("XDG_CACHE_HOME", t.join("home/.cache"))
+            .env("WINEDEBUG", "-all")
+            .env("WINEDLLOVERRIDES", "winemenubuilder.exe=d;mscoree,mshtml=")
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY");
+        if let Some(ns) = ns {
+            ns.enter(&mut cmd, None).unwrap();
+        }
+        let out = cmd.output().unwrap();
+        let mut kill = Command::new(proton.join("files/bin/wineserver"));
+        kill.arg("-w").env("WINEPREFIX", &prefix);
+        let _ = kill.status();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    // Make the prefix outside any namespace (as Quiver does before a launch).
+    let (ok, out, err) = wine(None, &["cmd", "/c", "echo ready"]);
+    assert!(ok, "{out}\n{err}");
+    let dir = prefix.join("drive_c/quiver-test/MyGame");
+    write(&dir.join("settings.ini"), "Quality=low\r\n");
+    let upper = t.join("profile/prefix/drive_c/quiver-test/MyGame");
+    write(&upper.join("settings.ini"), "Quality=ultra\r\n");
+    let spec = OverlaySpec { target: dir.clone(), lower: vec![], upper: upper.clone(), work: t.join("profile/work") };
+    let ns = Namespace::create(&spec).unwrap();
+    let (ok, out, err) = wine(Some(&ns), &["cmd", "/c", r"type C:\quiver-test\MyGame\settings.ini & echo mine> C:\quiver-test\MyGame\new.txt"]);
+    assert!(ok, "{out}\n{err}");
+    assert!(out.contains("Quality=ultra"), "{out}\n{err}");
+    assert!(read(&upper.join("new.txt")).starts_with("mine"));
+    assert!(!dir.join("new.txt").exists());
+    assert_eq!(read(&dir.join("settings.ini")), "Quality=low\r\n");
+}
+
 /// Like [`wine_through_overlay`], through the `proton` script with the launcher's
 /// environment. Uses `runinprefix`: `run` adds Proton's steam.exe wrapper, which needs
 /// the Steam client library from the real HOME, which this test keeps away from.
