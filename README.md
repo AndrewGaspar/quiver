@@ -31,6 +31,15 @@ from the Connect install directory, unmodified. They reach Connect through named
 - **`ubi broker`:** runs on the host and holds the Ubisoft session. For a Denuvo token it fetches
   an `ownership_service` ownership token, then calls `denuvo_service.GetGameTokenReq`.
 
+## Debugging a game against the bridge
+
+- `tools/recon/sdk-proxy`: a logging stand-in for `uplay_r1_loader64.dll` (`install.sh install|remove`).
+  Diffing its log from a real Connect session against a bridge session is the fastest way to find
+  what the bridge gets wrong. That's how the missing account email (which stops Origins from
+  listing saves) was found.
+- `tools/proto-extract/extract.py <binary>`: dump the protobuf schemas embedded in Ubisoft binaries.
+- `UBI_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
+
 ## Usage
 
 ```sh
@@ -49,7 +58,8 @@ Set `RUST_LOG=ubi_core=debug` to trace demux traffic.
 
 1. Core and CLI: auth, library, manifests (done)
 2. Launch bridge: AC Origins (uplay R1 SDK) reaches the main menu with Denuvo and DLC working (done)
-3. Bridge coverage: answer the remaining SDK requests (achievements, saves, friends, rich presence);
-   newer `upc_r2` games; refresh the ticket on long sessions
+3. Bridge coverage: Origins loads saves and reaches gameplay menus. Still to do: real achievements
+   and Club actions (UbiServices), cloud save sync, newer `upc_r2` games, ticket refresh on long
+   sessions
 4. Installer: download slices from the CDN, verify, one prefix per game
 5. GPUI front end

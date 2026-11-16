@@ -91,6 +91,9 @@ fn respond(req: &u::Req) -> Reply {
     if let Some(user) = &req.user_req {
         return user_req(user);
     }
+    if let Some(c) = &req.club_req {
+        return club(c);
+    }
     if let Some(p) = req.product_req.as_ref().and_then(|p| p.get_product_list_req.as_ref()) {
         let products = product_list();
         let request_id = p.request_id;
@@ -305,6 +308,40 @@ fn achievements(a: &u::AchievementReq) -> Reply {
                 }),
                 ..Default::default()
             })
+        });
+    }
+    Reply::Unhandled
+}
+
+// TODO: Ubisoft Connect rewards/actions live in UbiServices; report none for now.
+fn club(c: &u::ClubReq) -> Reply {
+    let club_rsp = |f: &dyn Fn(&mut u::ClubRsp)| {
+        let mut c = u::ClubRsp::default();
+        f(&mut c);
+        rsp(|x| x.club_rsp = Some(c))
+    };
+    if c.refresh_actions_req.is_some() {
+        return Reply::None;
+    }
+    if let Some(r) = &c.get_actions_req {
+        let request_id = r.request_id;
+        return club_rsp(&|c| c.get_actions_rsp = Some(u::GetActionsRsp { request_id, result: OK, actions: vec![] }));
+    }
+    if let Some(r) = &c.get_rewards_req {
+        let request_id = r.request_id;
+        return club_rsp(&|c| c.get_rewards_rsp = Some(u::GetRewardsRsp { request_id, result: OK, rewards: vec![] }));
+    }
+    if let Some(r) = &c.get_unit_balance_req {
+        let request_id = r.request_id;
+        return club_rsp(&|c| {
+            c.get_unit_balance_rsp = Some(u::GetUnitBalanceRsp { request_id, result: OK, balance: Some(0) })
+        });
+    }
+    if let Some(r) = &c.set_actions_completed_req {
+        log!("    club actions completed (not reported to Ubisoft yet): {:?}", r.action_ids);
+        let request_id = r.request_id;
+        return club_rsp(&|c| {
+            c.set_actions_completed_rsp = Some(u::SetActionsCompletedRsp { request_id, result: OK })
         });
     }
     Reply::Unhandled
