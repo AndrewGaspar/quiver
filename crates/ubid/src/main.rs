@@ -626,8 +626,13 @@ impl Daemon {
                 p.id,
                 plan.api.revision
             ),
-            None if !plan.api.mods.is_empty() => format!(", fixes {}", plan.api.mods.join(",")),
+            None if !plan.api.mods.is_empty() => format!(", fixes {}", mods::mods_line(&plan.api)),
             None => String::new(),
+        };
+        // Which version of each mod, so the activity log says what really ran.
+        let with = match &plan.api.profile {
+            Some(_) if !plan.api.resolved.is_empty() => format!("{with}: {}", mods::mods_line(&plan.api)),
+            _ => with,
         };
         self.log_activity(source, format!("play {}{} (settings r{rev}{with})", game.name, self.as_account(&online)), Some(product_id));
         let this = self.clone();
@@ -640,6 +645,7 @@ impl Daemon {
             let started = started_at.clone();
             let (profile_id, profile_revision) =
                 (plan.api.profile.as_ref().map(|p| p.id.clone()), plan.api.profile.as_ref().map(|_| plan.api.revision));
+            let session_mods = plan.api.resolved.clone();
             let result = run_local(move || async move {
                 launcher::play(&cfg, &online, &g, &plan, &broker, &sessions, |e| match e {
                     LaunchEvent::Detail(lines) => ev_this.update_job(id, |j| j.detail.extend(lines)),
@@ -664,6 +670,7 @@ impl Daemon {
                     settings_revision: rev,
                     profile: profile_id.clone(),
                     profile_revision,
+                    mods: session_mods,
                 };
                 if let Err(e) = settings::record_session(product_id, &session) {
                     tracing::warn!("recording play session: {e:#}");

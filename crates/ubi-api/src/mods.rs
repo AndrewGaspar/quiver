@@ -122,6 +122,215 @@ impl Layer {
     }
 }
 
+// -- Mod versions -------------------------------------------------------------------------
+
+/// A mod: a stable identity (id, name, on or off) with one or more **versions**, one of
+/// them current. Each version is a [`Layer`] of its own (its files folder, which never
+/// changes once added, and its manifest), so `ModsState::layers` lists every version.
+///
+/// A layer from before versions is a mod with one version: the mod's id *is* that layer's
+/// id, and nothing about it is stored until it gets a second version (see
+/// [`ModRecord::implicit`]). From then on the record lives in
+/// `games/<product>/mods/<id>.jsonl`, one whole-state [`ModRevision`] per change.
+///
+/// A profile's stack entry is `MOD` (tracks the mod's current version, so a new version
+/// reaches every such profile at its next launch) or `MOD@VERSION` (pinned; version ids are
+/// stored, labels are resolved when the entry is set). An entry that is a version id on its
+/// own (as written before versions, or by a merge) is pinned to that version.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModRecord {
+    /// Stable: the id of the layer the mod started as.
+    pub id: String,
+    pub name: String,
+    /// The version (a layer id) every profile that tracks the mod runs.
+    pub current: String,
+    /// Oldest first.
+    #[serde(default)]
+    pub versions: Vec<ModVersion>,
+    /// Turned off: skipped wherever it's stacked (whatever the version).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+/// One version of a mod. Its files and manifest are the [`Layer`] with the same id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModVersion {
+    /// The layer id (its folder is `mods/<product>/layers/<id>/`).
+    pub id: String,
+    /// Free text, unique within the mod: `3.8.10`, `v3`.
+    pub label: String,
+    pub added: DateTime<Utc>,
+    pub added_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Hidden from defaults (can't be current); its files are kept and pins to it still work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
+    /// Added without becoming current, for profiles to pin and try first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prerelease: bool,
+}
+
+/// One entry in a mod's history: the whole record from then on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModRevision {
+    pub revision: u32,
+    pub at: DateTime<Utc>,
+    pub source: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// What changed, in words (`added v4 (vk2m9xq)`, `current: v3 -> v4`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+    /// The mod was merged into another one (or removed); its versions belong elsewhere now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+    #[serde(rename = "mod")]
+    pub record: ModRecord,
+}
+
+impl ModRecord {
+    /// The record a layer that was never versioned stands for: one version, current.
+    pub fn implicit(l: &Layer) -> ModRecord {
+        let label = l.manifest.as_ref().and_then(|m| m.version.clone()).filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "v1".into());
+        ModRecord {
+            id: l.id.clone(),
+            name: l.name.clone(),
+            current: l.id.clone(),
+            versions: vec![ModVersion { id: l.id.clone(), label, added: l.added, added_by: l.added_by.clone(), ..Default::default() }],
+            disabled: l.disabled,
+        }
+    }
+
+    /// A version by id or label (labels ignore case).
+    pub fn version(&self, query: &str) -> Option<&ModVersion> {
+        let q = query.trim();
+        self.versions.iter().find(|v| v.id == q).or_else(|| self.versions.iter().find(|v| v.label.eq_ignore_ascii_case(q)))
+    }
+
+    pub fn has(&self, version: &str) -> bool {
+        self.versions.iter().any(|v| v.id == version)
+    }
+
+    pub fn current_version(&self) -> Option<&ModVersion> {
+        self.versions.iter().find(|v| v.id == self.current)
+    }
+
+    /// The version's label, or its id if it isn't one of this mod's.
+    pub fn label_of(&self, version: &str) -> String {
+        self.versions.iter().find(|v| v.id == version).map_or_else(|| version.to_owned(), |v| v.label.clone())
+    }
+
+    /// "DLSS v3", or just "DLSS" while the mod has a single version.
+    pub fn display(&self, version: &str) -> String {
+        if self.versions.len() > 1 { format!("{} {}", self.name, self.label_of(version)) } else { self.name.clone() }
+    }
+
+    /// Versions a person would pick from: not retired, newest first.
+    pub fn live_versions(&self) -> impl Iterator<Item = &ModVersion> {
+        self.versions.iter().rev().filter(|v| !v.retired)
+    }
+}
+
+/// `MOD@VERSION` -> (`MOD`, `Some(VERSION)`); `MOD` -> (`MOD`, `None`).
+pub fn split_entry(entry: &str) -> (&str, Option<&str>) {
+    match entry.split_once('@') {
+        Some((m, v)) => (m.trim(), Some(v.trim()).filter(|v| !v.is_empty())),
+        None => (entry.trim(), None),
+    }
+}
+
+/// A stack entry: `MOD` (tracks current) or `MOD@VERSION` (pinned).
+pub fn stack_entry(mod_id: &str, pinned: Option<&str>) -> String {
+    match pinned {
+        Some(v) => format!("{mod_id}@{v}"),
+        None => mod_id.to_owned(),
+    }
+}
+
+/// A profile's stack entry resolved to the version a launch runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResolvedMod {
+    /// As stored in the profile.
+    #[serde(default)]
+    pub entry: String,
+    #[serde(rename = "mod")]
+    pub mod_id: String,
+    pub name: String,
+    /// The version (layer id) and its label.
+    pub version: String,
+    pub label: String,
+    /// Pinned to this version (else it tracks the mod's current one).
+    #[serde(default)]
+    pub pinned: bool,
+    /// The version is the mod's current one.
+    #[serde(default)]
+    pub current: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
+    /// How many versions the mod has (labels are shown when there's more than one).
+    #[serde(default)]
+    pub versions: usize,
+}
+
+impl ResolvedMod {
+    /// "DLSS v3 (current)", "DLSS v2 (pinned; current is v3)", "Skip intro videos".
+    pub fn describe(&self) -> String {
+        if self.versions <= 1 && !self.pinned {
+            return self.name.clone();
+        }
+        let how = match (self.pinned, self.current) {
+            (false, _) => "current".to_owned(),
+            (true, true) => "pinned, current".to_owned(),
+            (true, false) => "pinned".to_owned(),
+        };
+        format!("{} {} ({how}{})", self.name, self.label, if self.retired { ", retired" } else { "" })
+    }
+}
+
+/// A game's mods: the stored records plus a one-version mod for every layer no record
+/// claims, ordered by their first version's time.
+pub fn mods_of(layers: &[Layer], records: &[ModRecord]) -> Vec<ModRecord> {
+    let mut out: Vec<ModRecord> = records.to_vec();
+    for l in layers {
+        if !records.iter().any(|r| r.has(&l.id)) && !records.iter().any(|r| r.id == l.id) {
+            out.push(ModRecord::implicit(l));
+        }
+    }
+    let first = |r: &ModRecord| r.versions.iter().map(|v| v.added).min();
+    out.sort_by(|a, b| first(a).cmp(&first(b)).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Resolve a stored stack entry against a game's mods ([`mods_of`]). `None`: the mod or the
+/// version is gone.
+pub fn resolve_entry(mods: &[ModRecord], entry: &str) -> Option<ResolvedMod> {
+    let (m, v) = split_entry(entry);
+    let (rec, version, pinned) = match mods.iter().find(|r| r.id == m) {
+        Some(r) => match v {
+            Some(v) => (r, r.version(v)?, true),
+            None => (r, r.current_version()?, false),
+        },
+        // A version id on its own: pinned to it.
+        None if v.is_none() => {
+            let r = mods.iter().find(|r| r.has(m))?;
+            (r, r.versions.iter().find(|x| x.id == m)?, true)
+        }
+        None => return None,
+    };
+    Some(ResolvedMod {
+        entry: entry.to_owned(),
+        mod_id: rec.id.clone(),
+        name: rec.name.clone(),
+        version: version.id.clone(),
+        label: version.label.clone(),
+        pinned,
+        current: version.id == rec.current,
+        retired: version.retired,
+        versions: rec.versions.len(),
+    })
+}
+
 // -- Mods v2 manifest ---------------------------------------------------------------------
 
 /// The manifest file in a mod package's folder. TOML; `quiver-mod.json` (same fields) is
@@ -478,6 +687,9 @@ pub struct ProfileInfo {
     /// Prefix folders the profile has its own copy of, and where their files really live.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_dirs: Vec<ConfigDir>,
+    /// Mod versions: each stack entry and the version it runs now (missing ones left out).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedMod>,
 }
 
 /// A game's layers and profiles.
@@ -507,6 +719,69 @@ pub struct ModsState {
     /// Whose saves vanilla launches use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vanilla_saves: Option<SavesPlan>,
+    /// Mod versions: every mod with its versions (each a layer in `layers`) and the current
+    /// one. Empty from daemons before versions: see [`ModsState::all_mods`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<ModRecord>,
+}
+
+impl ModsState {
+    /// Every mod, one-version mods included (also for a state without `mods`).
+    pub fn all_mods(&self) -> Vec<ModRecord> {
+        mods_of(&self.layers, &self.mods)
+    }
+
+    /// The mod a mod or version id belongs to.
+    pub fn mod_of(&self, id: &str) -> Option<ModRecord> {
+        let all = self.all_mods();
+        let found = all.iter().find(|r| r.id == id).or_else(|| all.iter().find(|r| r.has(id)));
+        found.cloned()
+    }
+
+    pub fn layer(&self, id: &str) -> Option<&Layer> {
+        self.layers.iter().find(|l| l.id == id)
+    }
+
+    /// A mod or version id in words: "DLSS" for a mod, "DLSS v2" for one of its versions
+    /// (just the name while it has one version), the id itself if it's unknown.
+    pub fn display(&self, id: &str) -> String {
+        match self.mod_of(id) {
+            Some(r) if r.id == id => r.name.clone(),
+            Some(r) => r.display(id),
+            None => id.to_owned(),
+        }
+    }
+
+    /// A stack entry resolved to the version it runs now.
+    pub fn resolve(&self, entry: &str) -> Option<ResolvedMod> {
+        resolve_entry(&self.all_mods(), entry)
+    }
+
+    /// The versions a stack runs (enabled mods only, as a launch applies them), each named
+    /// after its mod ("DLSS v3"), for save advice and the like.
+    pub fn stack_layers(&self, entries: &[String]) -> Vec<Layer> {
+        let all = self.all_mods();
+        entries
+            .iter()
+            .filter_map(|e| resolve_entry(&all, e))
+            .filter(|r| all.iter().any(|m| m.id == r.mod_id && !m.disabled))
+            .filter_map(|r| {
+                let mut l = self.layer(&r.version)?.clone();
+                l.name = all.iter().find(|m| m.id == r.mod_id).map_or(l.name, |m| m.display(&r.version));
+                l.disabled = false;
+                Some(l)
+            })
+            .collect()
+    }
+
+    /// Live profiles whose stack has the mod `mod_id`, with how (tracking or pinned).
+    pub fn users_of(&self, mod_id: &str) -> Vec<(&ProfileInfo, ResolvedMod)> {
+        let all = self.all_mods();
+        self.profiles
+            .iter()
+            .filter_map(|p| p.profile.layers.iter().filter_map(|e| resolve_entry(&all, e)).find(|r| r.mod_id == mod_id).map(|r| (p, r)))
+            .collect()
+    }
 }
 
 // -- Mods v2: resolution, saves, config ---------------------------------------------------
@@ -641,6 +916,10 @@ pub struct LaunchPlan {
     pub config_dirs: Vec<ConfigDir>,
     #[serde(default)]
     pub patches: Vec<PatchStatus>,
+    /// Mod versions: each mod applied (bottom to top) and the version it runs, e.g.
+    /// "DLSS v3 (current)". `mods` lists the same versions by layer id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<ResolvedMod>,
 }
 
 /// One overlay mount: `lower` (topmost first) over `target`, writes going to `upper`.
@@ -679,6 +958,12 @@ pub struct ModDetail {
     /// The catalog's manifest, when it differs from the installed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_update: Option<ModManifest>,
+    /// Mod versions: the mod (`layer` is the version shown: its current one unless a
+    /// version was asked for) and how each profile in `used_by` runs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<ModRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub used_as: Vec<String>,
 }
 
 /// One config key Quiver has changed, with the file's own values from before.
@@ -724,6 +1009,44 @@ pub struct MigrationReport {
     pub profile_stores: Vec<(String, String)>,
     #[serde(default)]
     pub stores_created: Vec<String>,
+    /// Built-in mods given the catalog's newer manifest as a new current version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_updates: Vec<String>,
+}
+
+/// A mod after a version change (`VersionAdd`, `VersionUse`, `VersionRetire`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VersionChange {
+    #[serde(rename = "mod")]
+    pub record: ModRecord,
+    /// The version the change was about.
+    pub version: Layer,
+    /// The mod's history revision (0: nothing changed).
+    pub revision: u32,
+    /// Profiles that track the mod's current version (they run it from their next launch).
+    #[serde(default)]
+    pub tracking: Vec<String>,
+    /// Profiles pinned to a version: "Old run (v1)".
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    /// Worth telling the person: a version that isn't save-compatible reaching a profile
+    /// that shares vanilla's or the Default saves, and the like.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// What `ModsRequest::MergeVersions` did (or, with `dry_run`, would do).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VersionMerge {
+    pub dry_run: bool,
+    /// The merged mod.
+    #[serde(rename = "mod")]
+    pub record: ModRecord,
+    /// Profile stacks rewritten: (profile name, entry before, entry after, in words).
+    #[serde(default)]
+    pub profiles: Vec<(String, String, String, String)>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// Settings for a launch: `base` (defaults and the game's settings), then each mod's
@@ -960,6 +1283,81 @@ pub enum ModsRequest {
         #[serde(default)]
         dry_run: bool,
     },
+    // -- Mod versions (appended) ---------------------------------------------------------
+    /// A new version of an installed mod (`VersionChange`): a folder of files (`path`; empty:
+    /// none) or a package folder with a `quiver-mod.toml`, copied into its own folder. A plain
+    /// folder keeps the current version's manifest (launch settings, patches, deletions,
+    /// save compatibility) with `deletes` added; `save_compatible` (`on`, `off`, `unknown`)
+    /// overrides that. It becomes current, so every profile tracking the mod runs it next,
+    /// unless `no_update` or `prerelease`.
+    VersionAdd {
+        product_id: u32,
+        #[serde(rename = "mod")]
+        mod_id: String,
+        #[serde(default)]
+        path: PathBuf,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
+        #[serde(default)]
+        no_update: bool,
+        #[serde(default)]
+        prerelease: bool,
+        #[serde(default)]
+        save_compatible: Option<String>,
+        #[serde(default)]
+        deletes: Vec<String>,
+    },
+    /// Make a version the mod's current one, for every profile that tracks it: a roll back
+    /// or forward (`VersionChange`).
+    VersionUse {
+        product_id: u32,
+        #[serde(rename = "mod")]
+        mod_id: String,
+        version: String,
+        #[serde(default)]
+        message: Option<String>,
+    },
+    /// Retire a version (hidden from defaults, files kept, pins still work) or, with
+    /// `retired: false`, bring it back (`VersionChange`).
+    VersionRetire {
+        product_id: u32,
+        #[serde(rename = "mod")]
+        mod_id: String,
+        version: String,
+        #[serde(default = "yes")]
+        retired: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
+    /// A mod's history (`Vec<ModRevision>`; empty for a mod that never had a second version).
+    ModHistory {
+        product_id: u32,
+        #[serde(rename = "mod")]
+        mod_id: String,
+    },
+    /// Make separate mods versions of one (`VersionMerge`): every version of `from` joins
+    /// `into`, ordered by when each was added; the newest becomes current. Live profiles that
+    /// stacked one of them now stack `into`, tracking current if they ran the newest version,
+    /// else pinned to the version they ran, so no launch changes. `labels` names the versions
+    /// in order (default: `v1`, `v2`… for versions without a label of their own). Recorded as
+    /// revisions (the mod's, each profile's). Agents need `confirmed`.
+    MergeVersions {
+        product_id: u32,
+        into: String,
+        from: Vec<String>,
+        #[serde(default)]
+        labels: Vec<String>,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        confirmed: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -1089,6 +1487,56 @@ mod tests {
         assert!(s.fixes_on_vanilla.is_none() && s.profiles[0].saves.is_none());
         // Unknown manifest fields are refused (typos shouldn't silently do nothing).
         assert!(serde_json::from_str::<ModManifest>(r#"{"id":"a","name":"b","save_compat":true}"#).is_err());
+    }
+
+    #[test]
+    fn versions_resolve_and_read_old_data() {
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let layer = |id: &str, name: &str, when: &str| Layer { id: id.into(), name: name.into(), added: at(when), ..Default::default() };
+        let layers = vec![layer("l1", "DLSS", "2026-01-01T00:00:00Z"), layer("v2", "DLSS", "2026-02-01T00:00:00Z"), layer("l3", "Intro", "2026-01-15T00:00:00Z")];
+        // No records: one mod per layer, current = itself, label v1.
+        let implicit = mods_of(&layers, &[]);
+        assert_eq!(implicit.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["l1", "l3", "v2"]);
+        assert!(implicit.iter().all(|m| m.current == m.id && m.versions.len() == 1 && m.versions[0].label == "v1"));
+        // A record claims its versions.
+        let mut rec = ModRecord::implicit(&layers[0]);
+        rec.versions.push(ModVersion { id: "v2".into(), label: "3.8".into(), added: layers[1].added, ..Default::default() });
+        rec.current = "v2".into();
+        let mods = mods_of(&layers, std::slice::from_ref(&rec));
+        assert_eq!(mods.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["l1", "l3"]);
+        let r = resolve_entry(&mods, "l1").unwrap();
+        assert_eq!((r.version.as_str(), r.pinned, r.current, r.describe()), ("v2", false, true, "DLSS 3.8 (current)".to_owned()));
+        let r = resolve_entry(&mods, "l1@v1").unwrap();
+        assert_eq!((r.version.as_str(), r.pinned, r.describe()), ("l1", true, "DLSS v1 (pinned)".to_owned()));
+        assert_eq!(resolve_entry(&mods, "l1@l1").unwrap().version, "l1", "by id too");
+        // A bare version id (an old revision, or a merged mod's) is pinned to it.
+        let r = resolve_entry(&mods, "v2").unwrap();
+        assert_eq!((r.mod_id.as_str(), r.pinned), ("l1", true));
+        assert_eq!(resolve_entry(&mods, "l3").unwrap().describe(), "Intro");
+        assert!(resolve_entry(&mods, "l1@nope").is_none() && resolve_entry(&mods, "gone").is_none());
+        // A state from before versions (no `mods`) still answers.
+        let s: ModsState = serde_json::from_value(serde_json::json!({ "product_id": 1, "layers": layers, "profiles": [] })).unwrap();
+        assert!(s.mods.is_empty() && s.all_mods().len() == 3);
+        assert_eq!(s.display("v2"), "DLSS");
+        let s = ModsState { mods: vec![rec.clone()], ..s };
+        assert_eq!((s.display("v2"), s.display("l1")), ("DLSS 3.8".to_owned(), "DLSS".to_owned()));
+        assert_eq!(s.stack_layers(&["l1@v1".into(), "l3".into()]).iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["DLSS v1", "Intro"]);
+        // Records and requests on the wire.
+        let rev: ModRevision = serde_json::from_value(serde_json::json!({
+            "revision": 1, "at": "2026-01-01T00:00:00Z", "source": "cli",
+            "mod": { "id": "l1", "name": "DLSS", "current": "l1", "versions": [{ "id": "l1", "label": "v1", "added": "2026-01-01T00:00:00Z", "added_by": "cli" }] }
+        }))
+        .unwrap();
+        assert!(!rev.deleted && !rev.record.disabled && !rev.record.versions[0].retired);
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"version_retire","product_id":1,"mod":"x","version":"v1"}}"#).unwrap();
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::VersionRetire { retired: true, .. })));
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"version_add","product_id":1,"mod":"x"}}"#).unwrap();
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::VersionAdd { no_update: false, ref path, .. }) if path.as_os_str().is_empty()));
+        // A session from before versions reads with no mods.
+        let s: crate::PlaySession = serde_json::from_str(r#"{"started":"2026-01-01T00:00:00Z","ended":"2026-01-01T01:00:00Z","seconds":3600}"#).unwrap();
+        assert!(s.mods.is_empty());
+        assert_eq!(split_entry("a@ b"), ("a", Some("b")));
+        assert_eq!(stack_entry("a", Some("b")), "a@b");
     }
 
     #[test]

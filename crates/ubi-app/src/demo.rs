@@ -107,7 +107,7 @@ fn at(days: i64, h: u32, m: u32) -> DateTime<Utc> {
 
 fn session(days: i64, (h, m): (u32, u32), minutes: u64, rev: u32) -> PlaySession {
     let started = at(days, h, m);
-    PlaySession { started, ended: started + Span::minutes(minutes as i64), seconds: minutes * 60, settings_revision: rev, profile: None, profile_revision: None }
+    PlaySession { started, ended: started + Span::minutes(minutes as i64), seconds: minutes * 60, settings_revision: rev, profile: None, profile_revision: None, mods: Vec::new() }
 }
 
 fn rev(revision: u32, days: i64, source: &str, message: &str, settings: GameSettings) -> Revision {

@@ -496,14 +496,13 @@ impl ModStore {
     /// mod that isn't save-compatible), else Default. Nothing moves; each change is a
     /// revision (the store's and the profile's), so it can be undone.
     pub(crate) fn migrate_saves(&self, dry_run: bool, source: &str, report: &mut ubi_api::mods::MigrationReport) -> Result<()> {
-        let all = self.layers()?;
         let stores = self.save_stores();
         let pid = self.product_id();
         for (p, _) in self.profiles()? {
             if p.saves.is_some() {
                 continue;
             }
-            let mods: Vec<Layer> = p.layers.iter().filter_map(|id| all.iter().find(|l| &l.id == id)).filter(|l| l.enabled()).cloned().collect();
+            let mods: Vec<Layer> = self.stack_layers(&p.layers)?;
             let legacy = self.legacy_saves(&p.id);
             let mut q = p.clone();
             q.separate_saves = None;
@@ -602,11 +601,10 @@ impl ModStore {
         self.save_stores().edit(op, &users, source, message)
     }
 
-    /// The store a profile named `profile` should start with for `layers` (ids).
+    /// The store a profile named `profile` should start with for `layers` (stack entries:
+    /// the versions they run now).
     pub fn saves_advice(&self, layers: &[String]) -> Result<SavesAdvice> {
-        let all = self.layers()?;
-        let mods: Vec<&Layer> = layers.iter().filter_map(|id| all.iter().find(|l| &l.id == id)).filter(|l| l.enabled()).collect();
-        Ok(ubi_api::savestores::saves_advice(mods))
+        Ok(ubi_api::savestores::saves_advice(&self.stack_layers(layers)?))
     }
 
     /// A store id for `query` (`new`: a new store named after `profile_name`).

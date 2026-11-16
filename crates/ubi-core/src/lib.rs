@@ -17,6 +17,7 @@ pub mod library;
 pub mod manifest;
 pub mod modpkg;
 pub mod mods;
+pub mod modversions;
 pub mod online;
 pub mod overlay;
 pub mod playsession;

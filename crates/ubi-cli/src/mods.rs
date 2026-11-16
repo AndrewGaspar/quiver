@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use ubi_api::mods::{
-    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModsState,
-    PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, is_human_source,
+    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision,
+    ModsState, PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, VersionChange, VersionMerge, is_human_source,
 };
 use ubi_api::{Client, ModsRequest, Request, SettingOp};
 
@@ -38,6 +38,31 @@ pub enum ModsAction {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
+    },
+    /// A mod's versions: add one (it becomes current, so every profile that tracks the mod
+    /// runs it next), list them, roll back or forward (`use`), retire old ones.
+    Version {
+        #[command(subcommand)]
+        action: VersionAction,
+    },
+    /// Make separate mods versions of one: `merge-versions DLSS DLSS-v2 DLSS-v3`. Versions
+    /// are ordered by when each was added and the newest becomes current. Profiles that
+    /// stacked one of them stack INTO instead: tracking current if they ran the newest, else
+    /// pinned to what they ran, so no launch changes. Recorded as revisions.
+    MergeVersions {
+        /// The mod that keeps its id and name.
+        into: String,
+        /// Mods that become its versions.
+        #[arg(required = true)]
+        from: Vec<String>,
+        /// Labels for the versions, oldest first (default: v1, v2, … where a version has no
+        /// label of its own).
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Quiver's built-in mods for this game (audited recipes; `install ID` to use one).
     Catalog {
@@ -111,6 +136,10 @@ pub enum LayerAction {
         dir: Option<PathBuf>,
         #[arg(long = "delete", value_name = "PATH")]
         delete: Vec<String>,
+        /// Add it as a new version of this mod instead (NAME is the version's label); the
+        /// same as `version add MOD DIR --label NAME`.
+        #[arg(long, value_name = "MOD")]
+        version_of: Option<String>,
     },
     /// Delete a layer's files (refused while a profile uses it).
     Remove { layer: String },
@@ -140,6 +169,71 @@ pub enum LayerAction {
 }
 
 #[derive(Subcommand)]
+pub enum VersionAction {
+    /// Add a version of MOD from DIR (a folder laid out like the install folder, or a
+    /// package with a quiver-mod.toml). A plain folder keeps the current version's manifest
+    /// (save compatibility, launch settings, config patches, deletions). It becomes current
+    /// unless --no-update or --prerelease; profiles pinned to a version keep theirs.
+    Add {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        dir: Option<PathBuf>,
+        /// Free text, unique within the mod (default: the package's version, else vN).
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Don't make it current.
+        #[arg(long)]
+        no_update: bool,
+        /// A pre-release: not current; pin it to try it (profile set P mods=MOD@LABEL).
+        #[arg(long)]
+        prerelease: bool,
+        /// on, off or unknown (default: as the current version).
+        #[arg(long, value_name = "on|off|unknown")]
+        save_compatible: Option<String>,
+        /// Also hide this install path (relative to the install folder).
+        #[arg(long = "delete", value_name = "PATH")]
+        delete: Vec<String>,
+    },
+    /// A mod's versions, newest first, and which profiles track or pin which.
+    List {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make VERSION (label or id) current: every profile that tracks the mod runs it next.
+    Use {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        version: String,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Hide a version from defaults (it can't be current); its files are kept and profiles
+    /// pinned to it still run it.
+    Retire {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        version: String,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Bring a retired version back.
+    Unretire {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        version: String,
+    },
+    /// The mod's revisions (versions added, current changes, retirements, merges).
+    History {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ProfileAction {
     /// A new profile; `--layers a,b` stacks layer b on top of a. Its save store is Default
     /// when every mod is save-compatible, else a new one, unless `--saves` says.
@@ -153,7 +247,8 @@ pub enum ProfileAction {
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Change a profile: mods=a,b (bottom to top; also layers=)  saves=STORE (default, new,
+    /// Change a profile: mods=a,b (bottom to top; also layers=; MOD tracks its current
+    /// version, MOD@VERSION pins one, e.g. mods=DLSS@v2,aco-skip-intros)  saves=STORE (default, new,
     /// or a store's name or id; cloud sync is per store: quiver saves <game> store cloud)
     /// pinned=on|off  profile_config=DIR,… (prefix folders the profile keeps its own copy
     /// of)  name=…, or a launch-setting override (proton=…, env.NAME=…, dll.NAME=…, args=…,
@@ -297,25 +392,66 @@ pub fn default_label(s: &ModsState) -> String {
     }
 }
 
+/// "current v3 of 3 versions (1 retired)", or "" for a mod with one version.
+fn versions_note(r: &ModRecord) -> String {
+    if r.versions.len() <= 1 {
+        return String::new();
+    }
+    let retired = r.versions.iter().filter(|v| v.retired).count();
+    let pre = r.versions.iter().filter(|v| v.prerelease).count();
+    let mut extra = Vec::new();
+    if retired > 0 {
+        extra.push(format!("{retired} retired"));
+    }
+    if pre > 0 {
+        extra.push(format!("{pre} pre-release"));
+    }
+    format!(
+        "current {} of {} versions{}",
+        r.label_of(&r.current),
+        r.versions.len(),
+        if extra.is_empty() { String::new() } else { format!(" ({})", extra.join(", ")) }
+    )
+}
+
+/// A stack entry in words: "DLSS v3 (current)", "Skip intro videos", "lxyz (missing)".
+fn entry_label(s: &ModsState, e: &str) -> String {
+    s.resolve(e).map_or(format!("{e} (missing)"), |r| r.describe())
+}
+
 fn print_state(name: &str, s: &ModsState) {
-    let layer_name = |id: &String| s.layers.iter().find(|l| &l.id == id).map_or(format!("{id} (missing)"), |l| l.name.clone());
+    let layer_name = |id: &String| if s.mod_of(id).is_some() { s.display(id) } else { format!("{id} (missing)") };
     println!("{name} ({})", s.product_id);
     println!("mods:");
-    if s.layers.is_empty() {
+    let mods = s.all_mods();
+    if mods.is_empty() {
         println!("  (none; quiver mods {} catalog, install ID|DIR, or layer add NAME DIR)", s.product_id);
     }
-    for l in &s.layers {
+    for m in &mods {
+        let Some(l) = s.layer(&m.current) else {
+            println!("  {}  {:<24} current version {} is missing", m.id, m.name, m.current);
+            continue;
+        };
         println!(
             "  {}  {:<24} {:>6} files {:>9}  added {} by {}{}",
-            l.id,
-            l.name,
+            m.id,
+            m.name,
             l.files,
             size(l.bytes),
             l.added.with_timezone(&chrono::Local).format("%Y-%m-%d"),
             l.added_by,
             deletes_note(l).map(|d| format!("; {d}")).unwrap_or_default()
         );
-        println!("           {}{}", mod_flags(l), l.mod_id().map(|m| format!(" [{m}]")).unwrap_or_default());
+        let mut flags = mod_flags(l);
+        if m.disabled && l.enabled() {
+            flags.push_str(", TURNED OFF");
+        }
+        let versions = versions_note(m);
+        println!(
+            "           {flags}{}{}",
+            l.mod_id().map(|x| format!(" [{x}]")).unwrap_or_default(),
+            if versions.is_empty() { String::new() } else { format!("; {versions} (quiver mods {} version list {})", s.product_id, m.id) }
+        );
     }
     println!("profiles (Play uses {}; change it: quiver mods {} default PROFILE|vanilla):", default_label(s), s.product_id);
     let fixes = match s.fixes_on_vanilla {
@@ -336,7 +472,7 @@ fn print_state(name: &str, s: &ModsState) {
     }
     let print_profile = |i: &ProfileInfo| {
         let p = &i.profile;
-        let layers = if p.layers.is_empty() { "no layers".into() } else { p.layers.iter().map(layer_name).collect::<Vec<_>>().join(" < ") };
+        let layers = if p.layers.is_empty() { "no layers".into() } else { p.layers.iter().map(|e| entry_label(s, e)).collect::<Vec<_>>().join(" < ") };
         let store = i.saves.as_ref().and_then(|s| s.store_name.clone()).map_or("saves: not migrated".to_owned(), |n| format!("saves: {n}"));
         let mut flags = vec![format!("r{}", i.revision), store];
         if s.default_profile.as_deref() == Some(p.id.as_str()) {
@@ -427,13 +563,18 @@ fn print_patches(list: &[PatchStatus], name: &dyn Fn(&String) -> String) {
     }
 }
 
-fn print_plan(game: &str, p: &LaunchPlan, mods: &[Layer]) {
-    let name = |id: &String| mods.iter().find(|l| &l.id == id).map_or(id.clone(), |l| format!("{} ({id})", l.name));
+fn print_plan(game: &str, p: &LaunchPlan, state: &ModsState) {
+    let name = |id: &String| if state.mod_of(id).is_some() { format!("{} ({id})", state.display(id)) } else { id.clone() };
     match &p.profile {
         Some(pr) => println!("{game}: profile '{}' ({}) r{}", pr.name, pr.id, p.revision),
         None => println!("{game}: vanilla"),
     }
-    println!("mods (bottom to top): {}", if p.mods.is_empty() { "none".into() } else { p.mods.iter().map(name).collect::<Vec<_>>().join(" < ") });
+    let mods: Vec<String> = if p.resolved.len() == p.mods.len() {
+        p.resolved.iter().map(|r| format!("{} ({})", r.describe(), r.version)).collect()
+    } else {
+        p.mods.iter().map(name).collect()
+    };
+    println!("mods (bottom to top): {}", if mods.is_empty() { "none".into() } else { mods.join(" < ") });
     println!("settings: {}", serde_json::to_string(&p.settings).unwrap_or_default());
     println!("saves: {}", saves_line(&p.saves));
     for m in &p.mounts {
@@ -506,7 +647,11 @@ fn print_detail(d: &ModDetail) {
             println!("  patch {} [{}]: {}", p.file, p.target(), set.into_iter().chain(del).collect::<Vec<_>>().join(" "));
         }
     }
-    println!("  used by {}{}", if d.used_by.is_empty() { "no profile".into() } else { d.used_by.join(", ") }, if d.on_vanilla { "; vanilla (fixes on)" } else { "" });
+    if let Some(r) = d.record.as_ref().filter(|r| r.versions.len() > 1) {
+        println!("  {} (shown: {})", versions_note(r), r.label_of(&l.id));
+    }
+    let used = if d.used_as.is_empty() { d.used_by.clone() } else { d.used_as.clone() };
+    println!("  used by {}{}", if used.is_empty() { "no profile".into() } else { used.join("; ") }, if d.on_vanilla { "; vanilla (fixes on)" } else { "" });
     for k in &d.applied {
         println!(
             "  changed now: {} [{}] {} = {} (the file's own: {}) in {}",
@@ -561,7 +706,40 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
             println!("{}: Play uses {}", g.name, default_label(&state));
         }
-        ModsAction::Layer { action: LayerAction::Add { name, dir, delete } } => {
+        ModsAction::Layer { action: LayerAction::Add { name, dir, delete, version_of: Some(of) } } => {
+            let action = VersionAction::Add {
+                mod_id: of,
+                dir,
+                label: Some(name),
+                notes: None,
+                no_update: false,
+                prerelease: false,
+                save_compatible: None,
+                delete,
+            };
+            return run_version(client, &g, action).await;
+        }
+        ModsAction::Version { action } => return run_version(client, &g, action).await,
+        ModsAction::MergeVersions { into, from, labels, dry_run, json } => {
+            let confirmed = !dry_run && confirm(source, &format!("make {} versions of mod '{into}' of {} (profiles that stack them are rewritten)", from.join(", "), g.name))?;
+            let req = ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed };
+            let r: VersionMerge = client.call(Request::Mods(req)).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            println!("{}: {}", g.name, if dry_run { "would merge (dry run; nothing changed)" } else { "merged" });
+            for n in &r.notes {
+                println!("  {n}");
+            }
+            if r.profiles.is_empty() {
+                println!("  no profile stack changes");
+            }
+            for (p, before, after, said) in &r.profiles {
+                println!("  profile '{p}': {before} -> {after} ({said})");
+            }
+        }
+        ModsAction::Layer { action: LayerAction::Add { name, dir, delete, version_of: None } } => {
             if dir.is_none() && delete.is_empty() {
                 bail!("give a folder to copy, --delete PATH, or both");
             }
@@ -678,11 +856,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             };
             let p = &rev.profile;
             let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
-            let names: Vec<String> = p
-                .layers
-                .iter()
-                .map(|id| state.layers.iter().find(|l| &l.id == id).map_or(id.clone(), |l| l.name.clone()))
-                .collect();
+            let names: Vec<String> = p.layers.iter().map(|e| entry_label(&state, e)).collect();
             let store = p.saves.as_deref().map(|id| {
                 state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced" } else { ", this PC only" }))
             });
@@ -764,7 +938,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
                 let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
-                print_plan(&g.name, &plan, &state.layers);
+                print_plan(&g.name, &plan, &state);
             }
         }
         ModsAction::UndoPatches { mod_id } => {
@@ -789,6 +963,123 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             for n in &r.notes {
                 println!("  {n}");
             }
+        }
+    }
+    Ok(())
+}
+
+fn print_version_change(game: &str, verb: &str, c: &VersionChange) {
+    let r = &c.record;
+    let label = r.label_of(&c.version.id);
+    let current = r.current == c.version.id;
+    println!(
+        "{game}: {verb} {} {label} ({}; {} files, {}){}",
+        r.name,
+        c.version.id,
+        c.version.files,
+        size(c.version.bytes),
+        if c.revision > 0 { format!("; mod revision {}", c.revision) } else { String::new() }
+    );
+    println!("  {}", mod_flags(&c.version));
+    println!("  current version: {}{}", r.label_of(&r.current), if current { String::new() } else { format!(" (not {label})") });
+    if !c.tracking.is_empty() {
+        println!("  tracks current (runs {} next launch): {}", r.label_of(&r.current), c.tracking.join(", "));
+    }
+    if !c.pinned.is_empty() {
+        println!("  pinned: {}", c.pinned.join(", "));
+    }
+    for w in &c.warnings {
+        eprintln!("note: {w}");
+    }
+}
+
+/// `quiver mods <game> version …`.
+async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -> Result<()> {
+    let product_id = g.product_id;
+    let change = |req: ModsRequest| client.call::<VersionChange>(Request::Mods(req));
+    match action {
+        VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete } => {
+            let path = match dir {
+                Some(dir) => {
+                    let path = dir.canonicalize().with_context(|| format!("{} not found", dir.display()))?;
+                    eprintln!("copying {}…", path.display());
+                    path
+                }
+                None => PathBuf::new(),
+            };
+            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete };
+            print_version_change(&g.name, "added", &change(req).await?);
+        }
+        VersionAction::Use { mod_id, version, message } => {
+            print_version_change(&g.name, "now current:", &change(ModsRequest::VersionUse { product_id, mod_id, version, message }).await?);
+        }
+        VersionAction::Retire { mod_id, version, message } => {
+            let req = ModsRequest::VersionRetire { product_id, mod_id, version, retired: true, message };
+            print_version_change(&g.name, "retired", &change(req).await?);
+        }
+        VersionAction::Unretire { mod_id, version } => {
+            let req = ModsRequest::VersionRetire { product_id, mod_id, version, retired: false, message: None };
+            print_version_change(&g.name, "brought back", &change(req).await?);
+        }
+        VersionAction::History { mod_id } => {
+            let revs: Vec<ModRevision> = client.call(Request::Mods(ModsRequest::ModHistory { product_id, mod_id: mod_id.clone() })).await?;
+            if revs.is_empty() {
+                println!("{}: '{mod_id}' has one version and no history yet (it gets one with a second version)", g.name);
+            }
+            for r in revs {
+                println!(
+                    "r{:<3} {}  by {:<8} {}{}  {}",
+                    r.revision,
+                    r.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    r.source,
+                    if r.deleted { "(merged away/removed) " } else { "" },
+                    r.changes.join("; "),
+                    r.message.unwrap_or_default()
+                );
+            }
+        }
+        VersionAction::List { mod_id, json } => {
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { product_id, mod_id })).await?;
+            let r = d.record.clone().or_else(|| state.mod_of(&d.layer.id)).context("the daemon didn't say which mod that is")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            println!("{} ({}): {} version(s), current {}{}", r.name, r.id, r.versions.len(), r.label_of(&r.current), if r.disabled { "; TURNED OFF" } else { "" });
+            let users = state.users_of(&r.id);
+            for v in r.versions.iter().rev() {
+                let l = state.layer(&v.id);
+                let mut marks = Vec::new();
+                if v.id == r.current {
+                    marks.push("current".to_owned());
+                }
+                if v.retired {
+                    marks.push("retired".to_owned());
+                }
+                if v.prerelease {
+                    marks.push("pre-release".to_owned());
+                }
+                let pins: Vec<&str> = users.iter().filter(|(_, x)| x.pinned && x.version == v.id).map(|(p, _)| p.profile.name.as_str()).collect();
+                if !pins.is_empty() {
+                    marks.push(format!("pinned by {}", pins.join(", ")));
+                }
+                println!(
+                    "  {} {:<12} {}  {}  by {:<8} {}{}",
+                    if v.id == r.current { "*" } else { " " },
+                    v.label,
+                    v.id,
+                    v.added.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    v.added_by,
+                    l.map(|l| format!("{} files, {}; {}", l.files, size(l.bytes), mod_flags(l))).unwrap_or_else(|| "(missing)".into()),
+                    if marks.is_empty() { String::new() } else { format!("  [{}]", marks.join(", ")) }
+                );
+                if let Some(n) = &v.notes {
+                    println!("      {n}");
+                }
+            }
+            let tracking: Vec<&str> = users.iter().filter(|(_, x)| !x.pinned).map(|(p, _)| p.profile.name.as_str()).collect();
+            println!("tracks current: {}", if tracking.is_empty() { "no profile".into() } else { tracking.join(", ") });
         }
     }
     Ok(())
