@@ -61,6 +61,35 @@ isn't listed. It needs the new quiverd, so the exact `state`, `platform` and
 - The app reloads the library on `SteamGamesChanged` (install, patch) and when a session
   involves a Steam copy, which shows as Playing while Steam runs it.
 
+### Art (built)
+
+A game bought on Steam has no art in its product config (no `thumb_image`,
+`background_image`, `logo_image`). Every front end now takes art from the first source of
+`ubi_api::art::candidates` that loads:
+
+1. the product config (file names on Ubisoft's asset CDN);
+2. UbiServices' games API, `GET /v1/spaces/global/ubiconnect/games/api?spaceIds=…` (what
+   Connect uses; seen in its HTTP cache): `highBoxArt`/`lowBoxArt` for tiles, `background`
+   for heroes, `gameLogoColor`/`gameLogoFlat` for logos, `gameAvatar` as icon. quiverd asks
+   for the spaces of games whose config leaves a slot empty, 20 per request on the default
+   account's session, and keeps answers (and misses) a day in
+   `$XDG_CACHE_HOME/quiver/spaces.json`; after a failure it waits 5 minutes. It also fills
+   game info's release date, description and extra links. Not yet exercised against
+   Ubisoft (no session in development): `quiver info 66088` shows `art  tile: Ubisoft games
+   API, …` and a `released` row when it works, `quiver library --json` the URLs (`art.space`).
+3. Steam's local library cache (`<Steam>/appcache/librarycache`, read-only;
+   `exports::steamart`), in `SteamGame.art`: current hashed layout
+   (`<appid>/<sha1>/library_capsule.jpg` 300×450, `library_hero.jpg` 1920×620, `logo.png`,
+   `library_header.jpg`, and `<appid>/<sha1>.jpg`, the 32×32 icon), flat per app
+   (`<appid>/library_600x900.jpg`, …) and the old `<appid>_library_600x900.jpg`;
+4. Steam's CDN (`https://shared.steamstatic.com/store_item_assets/steam/apps/<appid>/
+   library_600x900.jpg`, `library_hero.jpg`, `logo.png`), cached by the app like Ubisoft's.
+
+The user's own files (custom art) win over all of them. The per-game setting `art=steam`
+(`quiver set <game> art=steam`, or the game page's "Art: … ▾" menu, offered for games with
+a Steam copy) moves 3 and 4 ahead of 1 and 2. Logos painted into Ubisoft's hero art
+(`BAKED_LOGO`) are only assumed when the hero shown is the config's.
+
 ## 3. Sessions (built)
 
 - `quiver steam-run` sends its Steam app id with `LaunchContext`; quiverd notes it
@@ -140,6 +169,11 @@ launch).
 Saves: a profile with its own saves would point the bridge's `savegame_path` at the
 profile's folder in Steam's prefix (`steam-run` already writes `savegame_path` into the
 context).
+
+Local play history: a session no quiverd launch held (a Steam copy started by
+`steam-run`, a bridge in a container) is recorded in the game's `playtime.jsonl` when its
+last lease ends (`PlaySessions` hands it over as `Finished`), with the current settings
+revision. quiverd's own launches are still recorded by their launch job.
 
 ### Cloud saves (gap)
 

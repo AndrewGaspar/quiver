@@ -623,6 +623,7 @@ mod tests {
             background: Some("fe567514ffeb0e115d6bc50623f3abd5.jpg".into()),
             logo: Some("aa3e99ad561e41b93d2d2a5a6875409c.png".into()),
             icon: Some("48edec3d91f23947b02be534159b74d1.ico".into()),
+            ..Default::default()
         };
         std::fs::create_dir_all(paths.art()).unwrap();
         std::fs::create_dir_all(paths.icons()).unwrap();
@@ -691,6 +692,7 @@ mod tests {
             background: Some("b.JPG".into()),
             logo: Some("c.png".into()),
             icon: None,
+            ..Default::default()
         };
         let names: Vec<String> = grid_files(42, &art).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["42p.jpg", "42.jpg", "42_hero.jpg", "42_logo.png"]);

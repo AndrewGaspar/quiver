@@ -10,6 +10,7 @@ mod info;
 mod savestores;
 mod setup;
 mod steamgames;
+mod spaces;
 mod steamlib;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -682,6 +683,29 @@ impl Daemon {
     }
 }
 
+/// A session no quiverd launch held (a Steam copy started by `quiver steam-run`, a bridge in
+/// a container) into the game's local play history, with the settings revision it ran
+/// under (Steam launches apply the game's settings; see `steamlib::launch_plan`).
+fn record_bridge_session(f: &ubi_core::playsession::Finished) {
+    let rev = settings::current(f.product_id).map(|(_, r)| r).unwrap_or(0);
+    let session = ubi_api::PlaySession {
+        started: f.started,
+        ended: f.ended,
+        seconds: (f.ended - f.started).num_seconds().max(0) as u64,
+        settings_revision: rev,
+        profile: None,
+        profile_revision: None,
+    };
+    let via = match f.steam_app_id {
+        Some(app) => format!("Steam app {app}"),
+        None => f.holders.join(", "),
+    };
+    tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
+    if let Err(e) = settings::record_session(f.product_id, &session) {
+        tracing::warn!("recording play session: {e:#}");
+    }
+}
+
 async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
     let (r, mut w) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
@@ -786,11 +810,20 @@ async fn main() -> Result<()> {
         let events = events.clone();
         let list: Arc<Mutex<Option<Arc<PlaySessions>>>> = Arc::default();
         let l = list.clone();
-        let s = PlaySessions::new(accounts.clone(), cfg.report_playtime, move || {
-            if let Some(s) = &*l.lock().unwrap() {
-                let _ = events.send(Event::SessionsChanged { sessions: s.list() });
-            }
-        });
+        let finished_events = events.clone();
+        let s = PlaySessions::new(
+            accounts.clone(),
+            cfg.report_playtime,
+            move || {
+                if let Some(s) = &*l.lock().unwrap() {
+                    let _ = events.send(Event::SessionsChanged { sessions: s.list() });
+                }
+            },
+            move |f| {
+                record_bridge_session(&f);
+                let _ = finished_events.send(Event::GameStopped { product_id: f.product_id });
+            },
+        );
         *list.lock().unwrap() = Some(s.clone());
         s
     };

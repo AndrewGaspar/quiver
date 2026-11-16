@@ -43,18 +43,32 @@ pub(crate) fn excluded(p: &Product) -> Option<&'static str> {
     }
 }
 
-/// Name and art from a product configuration.
-type Meta = (Option<String>, Art);
+/// Name, art and space id from a product configuration.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Meta {
+    name: Option<String>,
+    art: Art,
+    space_id: Option<String>,
+}
 
 fn config_meta(config: &str) -> Option<Meta> {
     let c = ProductConfig::parse(config).ok()?;
-    let art = Art { thumb: c.art("thumb_image"), background: c.art("background_image"), logo: c.art("logo_image"), icon: c.art("icon_image") };
-    Some((c.name(), art))
+    let art = Art {
+        thumb: c.art("thumb_image"),
+        background: c.art("background_image"),
+        logo: c.art("logo_image"),
+        icon: c.art("icon_image"),
+        ..Default::default()
+    };
+    let space_id = c.root()["space_id"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    Some(Meta { name: c.name(), art, space_id })
 }
 
 /// A library entry for a product from the ownership list.
 pub(crate) fn entry_for(p: &Product, installed: Option<ubi_api::Game>, update_available: bool, user_id: &str) -> LibraryEntry {
-    let art = p.configuration.as_deref().and_then(config_meta).map(|m| m.1).unwrap_or_default();
+    let meta = p.configuration.as_deref().and_then(config_meta).unwrap_or_default();
+    let space_id = p.space_id.clone().filter(|s| !s.is_empty()).or(meta.space_id);
+    let art = meta.art;
     LibraryEntry {
         product_id: p.product_id,
         name: p.name.clone().unwrap_or_else(|| p.product_id.to_string()),
@@ -65,6 +79,7 @@ pub(crate) fn entry_for(p: &Product, installed: Option<ubi_api::Game>, update_av
         owned_by: vec![user_id.to_owned()],
         installable: p.is_installable(),
         steam: None,
+        space_id,
     }
 }
 
@@ -95,7 +110,7 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
         if !seen.insert(id) {
             continue;
         }
-        let (name, art) = unowned.get(&id).cloned().flatten().unwrap_or_default();
+        let Meta { name, art, space_id } = unowned.get(&id).cloned().flatten().unwrap_or_default();
         out.push(LibraryEntry {
             product_id: id,
             name: name.unwrap_or_else(|| g.name.clone()),
@@ -106,6 +121,7 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
             owned_by: Vec::new(),
             installable: false,
             steam: Some(g.clone()),
+            space_id,
         });
     }
     out.sort_by(|a, b| {
@@ -168,6 +184,7 @@ pub(crate) async fn library(daemon: &Arc<Daemon>, refresh: bool) -> Result<Vec<L
     fetch_unowned(daemon, missing).await;
     let unowned = UNOWNED.lock().unwrap().clone();
     let mut out = merge(owned, &steam, &unowned);
+    add_space_art(daemon, &mut out, refresh).await;
     // A Steam copy with a play session is running (Steam started it). Quiver's own
     // installs keep `running` for games quiverd started, which it can stop.
     let playing: HashSet<u32> = daemon.sessions.list().iter().map(|s| s.product_id).collect();
@@ -175,6 +192,27 @@ pub(crate) async fn library(daemon: &Arc<Daemon>, refresh: bool) -> Result<Vec<L
         e.running = playing.contains(&e.product_id);
     }
     Ok(out)
+}
+
+/// Whether the config's art leaves a slot empty (games bought on Steam have none).
+fn needs_space_art(e: &LibraryEntry) -> bool {
+    let a = &e.art;
+    a.thumb.is_none() || a.background.is_none() || a.logo.is_none()
+}
+
+/// Art from UbiServices' games API for entries whose configs leave slots empty (see
+/// `ubi_api::art` for the order front ends try sources in). Cached for a day; fails soft.
+async fn add_space_art(daemon: &Arc<Daemon>, entries: &mut [LibraryEntry], refresh: bool) {
+    let ids: Vec<String> = entries.iter().filter(|e| needs_space_art(e)).filter_map(|e| e.space_id.clone()).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let found = crate::spaces::games(daemon, ids, refresh).await;
+    for e in entries.iter_mut().filter(|e| needs_space_art(e)) {
+        if let Some(g) = e.space_id.as_ref().and_then(|s| found.get(s)) {
+            e.art.space = g.art();
+        }
+    }
 }
 
 /// `Request::Play` for a game only Steam has installed: ask Steam to start it. Returns a
@@ -305,6 +343,7 @@ mod tests {
             owned_by: vec!["me".into()],
             installable,
             steam: None,
+            space_id: None,
         }
     }
 
@@ -322,6 +361,7 @@ mod tests {
             patchable: true,
             offer: false,
             note: None,
+            art: Default::default(),
         }
     }
 
@@ -339,7 +379,10 @@ mod tests {
             steam(2, Some(5000), "Not on any account"),
         ];
         let mut unowned = HashMap::new();
-        unowned.insert(5000, Some((Some("Far Cry Thing".to_owned()), Art { thumb: Some("t.jpg".into()), ..Default::default() })));
+        unowned.insert(
+            5000,
+            Some(Meta { name: Some("Far Cry Thing".to_owned()), art: Art { thumb: Some("t.jpg".into()), ..Default::default() }, space_id: Some("s-1".into()) }),
+        );
         let lib = merge(owned, &steam_games, &unowned);
         let ids: Vec<u32> = lib.iter().map(|e| e.product_id).collect();
         // Installed (Steam or Quiver) first, by name; the uninstalled game without a build is gone.
@@ -352,6 +395,7 @@ mod tests {
         // Not owned by any signed-in account: named from its config, no owners.
         assert_eq!(lib[2].name, "Far Cry Thing");
         assert!(lib[2].owned_by.is_empty() && lib[2].art.thumb.is_some());
+        assert_eq!(lib[2].space_id.as_deref(), Some("s-1"));
 
         // Without Steam, the old library: installable games only.
         let lib = merge(vec![entry(3539, "O", true), entry(66088, "BF", false)], &[], &HashMap::new());

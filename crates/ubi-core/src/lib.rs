@@ -25,6 +25,7 @@ pub mod saves;
 pub mod savestores;
 pub mod savesync;
 pub mod settings;
+pub mod spaces;
 pub mod steamplan;
 pub mod steamrun;
 pub mod store;

@@ -165,6 +165,9 @@ pub struct SteamGame {
     /// Why not patchable, or something to know.
     #[serde(default)]
     pub note: Option<String>,
+    /// Steam's art for it, from Steam's local library cache.
+    #[serde(default, skip_serializing_if = "crate::art::SteamArt::is_empty")]
+    pub art: crate::art::SteamArt,
 }
 
 /// Reply to `Request::SteamGames`.

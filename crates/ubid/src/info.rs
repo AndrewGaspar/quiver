@@ -47,7 +47,7 @@ pub(crate) fn needs_approval(source: &str) -> bool {
 }
 
 /// `$XDG_CACHE_HOME/quiver` (downloaded assets that can be fetched again).
-fn cache_dir() -> std::path::PathBuf {
+pub(crate) fn cache_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"))
@@ -143,7 +143,14 @@ async fn game_info(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> Resu
         .collect();
     let mut info = gameinfo::build(product_id, &name, product, &associated, installed.as_ref());
     info.account = online.user_id().map(str::to_owned);
+    info.space_id = info.space_id.take().or_else(|| entry.as_ref().and_then(|e| e.space_id.clone()));
     info.owned_by = entry.map(|e| e.owned_by).unwrap_or_default();
+    // Release date, description and links the config doesn't have, from the games API.
+    if let Some(space) = info.space_id.clone()
+        && let Some(g) = crate::spaces::game(daemon, &space, refresh).await
+    {
+        gameinfo::apply_space(&mut info, &g);
+    }
     Ok(info)
 }
 
@@ -176,25 +183,35 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
         p.product_id = product_id;
         p.account = Some(session.user_id.clone());
         // Ubisoft's play-time record, the headline number (demux `playtime` service).
-        match remote_playtime(&o, &session.user_id, product_id).await {
-            Ok(Some(s)) if s > 0 => {
+        match tokio::time::timeout(Duration::from_secs(15), remote_playtime(&o, &session.user_id, product_id)).await {
+            Ok(Ok(Some(s))) if s > 0 => {
                 p.playtime_seconds = Some(s);
                 p.playtime_source = Some("playtime_service".into());
             }
-            Ok(_) => {}
-            Err(e) => tracing::info!(product_id, "playtime service: {e:#}"),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::info!(product_id, "playtime service: {e:#}"),
+            Err(_) => tracing::info!(product_id, "playtime service: no answer in 15 s"),
         }
         Ok(p)
     })
     .await?;
     if p.playtime_seconds.is_none()
-        && let Some(n) = p.stats.iter().find(|s| s.id.eq_ignore_ascii_case("TimePlayed")).and_then(|s| s.number)
+        && let Some(s) = playtime_stat(&p.stats)
     {
-        p.playtime_seconds = Some(n as u64);
-        p.playtime_source = Some("stat:TimePlayed".into());
+        p.playtime_seconds = s.number.map(|n| n as u64);
+        p.playtime_source = Some(format!("stat:{}", s.id));
     }
     CACHES.lock().unwrap().progress.insert(key, (Instant::now(), p.clone()));
     Ok(p)
+}
+
+/// A game's own play-time stat: `TimePlayed` (Origins, …) or `Playtime` (Black Flag
+/// Resynced), in seconds.
+fn playtime_stat(stats: &[ubi_api::info::Stat]) -> Option<&ubi_api::info::Stat> {
+    stats
+        .iter()
+        .filter(|s| s.number.is_some_and(|n| n > 0.))
+        .find(|s| ["TimePlayed", "Playtime", "PlayTime"].iter().any(|id| s.id.eq_ignore_ascii_case(id)))
 }
 
 async fn remote_playtime(online: &Online, user_id: &str, product_id: u32) -> Result<Option<u64>> {
