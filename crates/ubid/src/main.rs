@@ -482,7 +482,7 @@ impl Daemon {
             }
             Request::Sessions => json!(self.sessions.list()),
             r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged) => exports::handle(self, source, r).await?,
-            r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. }) => info::handle(self, source, r).await?,
+            r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. } | Request::SavesSync { .. }) => info::handle(self, source, r).await?,
             r @ (Request::Queue
             | Request::QueueMove { .. }
             | Request::QueuePause { .. }

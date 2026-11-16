@@ -16,7 +16,7 @@ use crate::cloudsave::CloudSaves;
 use crate::library::{Library, ProductConfig};
 use crate::{launch, savesync};
 
-pub(crate) const UPC_REL: &str = "drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher";
+pub const UPC_REL: &str = "drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher";
 const UPC_WIN: &str = r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher";
 /// Ubisoft SDK DLLs games load from the Connect directory.
 const SDK_DLLS: &[&str] = &[

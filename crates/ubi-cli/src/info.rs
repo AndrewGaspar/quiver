@@ -15,6 +15,24 @@ pub enum SavesAction {
     /// Make a backup's slots current (the saves there now are backed up first). BACKUP is a
     /// backup id from `quiver saves <game>`, a unique part of one, or `latest`.
     Restore { backup: String },
+    /// Upload saves waiting for the cloud now (e.g. after an upload failed at exit),
+    /// without launching the game.
+    Sync {
+        /// A mod profile's saves (name or id; needs cloud saves on).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+}
+
+pub async fn sync(client: &Client, game: &str, profile: Option<String>) -> Result<()> {
+    let e = resolve(client, game).await?;
+    let slots: Vec<u32> = client.call(Request::SavesSync { product_id: e.product_id, profile }).await?;
+    if slots.is_empty() {
+        println!("{}: nothing waiting to upload", e.name);
+    } else {
+        println!("{}: uploaded slots {slots:?}", e.name);
+    }
+    Ok(())
 }
 
 fn bytes(n: u64) -> String {

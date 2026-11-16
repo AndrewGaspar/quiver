@@ -672,6 +672,7 @@ async fn main() -> Result<()> {
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
         Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,
         Cmd::Saves { game, json, local, action: None } => info::saves(&client, &game, json, local).await?,
+        Cmd::Saves { game, action: Some(info::SavesAction::Sync { profile }), .. } => info::sync(&client, &game, profile).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
             info::restore(&client, &cli.source, &game, backup).await?
         }

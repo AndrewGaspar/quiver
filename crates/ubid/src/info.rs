@@ -294,6 +294,49 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             );
             json!(r)
         }
+        Request::SavesSync { product_id, profile } => {
+            let name = daemon.product_name(product_id);
+            if daemon.running.lock().unwrap().contains(&product_id)
+                || daemon.sessions.list().iter().any(|s| s.product_id == product_id)
+            {
+                bail!("{name} is running; its saves upload when it exits");
+            }
+            let game = Games::load()?.get(product_id).cloned().with_context(|| format!("{name} is not installed"))?;
+            let profile_id = match profile.as_deref() {
+                None => None,
+                Some(q) if q.eq_ignore_ascii_case("vanilla") => None,
+                Some(q) => {
+                    let (p, _) = ubi_core::mods::ModStore::open(product_id).profile(q)?;
+                    if !p.cloud_saves {
+                        bail!("profile '{}' keeps its saves local (cloud_saves is off)", p.name);
+                    }
+                    Some(p.id)
+                }
+            };
+            let online = daemon.account_for(product_id, None).await?;
+            let user = user_id(&online)?;
+            let dir = game
+                .prefix
+                .join(ubi_core::launcher::UPC_REL)
+                .join(ubi_core::launcher::saves_rel(&user, product_id, profile_id.as_deref()));
+            let report = run_local(move || async move {
+                let demux = online.demux().await?;
+                let mut lib = Library::fetch(&demux).await?;
+                let mut cloud = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
+                ubi_core::savesync::push(&mut cloud, &mut lib, product_id, &dir).await
+            })
+            .await?;
+            daemon.log_activity(
+                source,
+                format!(
+                    "uploaded {name} saves{} (slots {:?})",
+                    profile_id.map(|p| format!(" for profile {p}")).unwrap_or_default(),
+                    report.uploaded
+                ),
+                Some(product_id),
+            );
+            json!(report.uploaded)
+        }
         other => bail!("not an info request: {other:?}"),
     })
 }

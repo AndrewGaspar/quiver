@@ -426,6 +426,14 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    /// Upload a game's saves that are waiting for the cloud (slots with `.upload` markers),
+    /// without launching it: e.g. after an upload failed at exit. `profile` picks a mod
+    /// profile's saves (name or id; it must have cloud saves on). Returns the uploaded slots.
+    SavesSync {
+        product_id: u32,
+        #[serde(default)]
+        profile: Option<String>,
+    },
 }
 
 fn yes() -> bool {
