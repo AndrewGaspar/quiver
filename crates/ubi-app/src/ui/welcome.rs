@@ -163,6 +163,8 @@ pub struct Welcome {
     pre_input: Option<Entity<TextInput>>,
     /// Paths changed: quiverd is restarting.
     restarting: bool,
+    /// Width of the step body, as of the last render (rows of cards share it).
+    cw: f32,
 }
 
 impl Quiver {
@@ -599,9 +601,10 @@ impl Quiver {
                         .flex()
                         .flex_col()
                         .flex_1()
+                        .min_w_0()
                         .gap(px(1.))
                         .child(div().font_weight(SEMIBOLD).text_color(th.acc_hi).child("Welcome to Quiver · step 1 of 7"))
-                        .child(div().text_color(th.tx2).child("Then: where games live, existing installs, Steam, controller, fixes, theme")),
+                        .child(div().text_color(th.tx2).child("Next: folders, existing installs, Steam, controller, fixes, theme")),
                 )
                 .child(dots)
                 .into_any_element(),
@@ -626,7 +629,12 @@ impl Quiver {
         let compact = self.wc.mode != Mode::Full;
         let (vw, vh) = self.viewport;
         let pw = if compact { 760f32.min(vw - 48.) } else { 1100f32.min(vw - 48.) };
-        let ph = if compact { (vh - 120.).min(720.) } else { (vh - 72.).min(760.) };
+        self.wc.cw = pw - if compact { 0. } else { 280. } - 64.;
+        let ph = match self.wc.mode {
+            Mode::FixesOnly => (vh - 120.).min(560.),
+            Mode::ImportOnly => (vh - 120.).min(720.),
+            Mode::Full => (vh - 72.).min(760.),
+        };
 
         let content = div()
             .flex()
@@ -653,7 +661,7 @@ impl Quiver {
                     .child(display(24., FontWeight::BOLD, th.tx1).child(step.title()))
                     .child(div().text_color(th.tx2).text_size(px(13.)).line_height(px(19.)).child(step.sub())),
             )
-            .child(div().id("wc-body").flex_1().min_h_0().overflow_y_scroll().px(px(32.)).pb(px(24.)).child(div().flex().flex_col().gap(px(14.)).children(body)))
+            .child(div().id("wc-body").flex_1().min_h_0().overflow_y_scroll().px(px(32.)).pb(px(24.)).child(div().flex().flex_col().gap(px(14.)).w(px(self.wc.cw)).children(body)))
             .child(footer);
 
         let mut panel = div()
@@ -945,7 +953,7 @@ impl Quiver {
                         .child(field)
                         .child(progress(th, used, None, 6., Some(if used > 0.9 { th.bad } else { th.acc })))
                         .child(div().text_size(px(12.)).text_color(th.tx3).child(match (free, total) {
-                            (Some(f), Some(t)) => format!("{} free of {}", gb(f), gb(t)),
+                            (Some(f), Some(t)) => format!("{} free of {}", super::downloads::size(f), super::downloads::size(t)),
                             (Some(f), None) => format!("{} free", gb(f)),
                             _ => "Free space unknown".into(),
                         })),
@@ -1013,10 +1021,11 @@ impl Quiver {
             p.dedup();
             p.len()
         };
+        let third = (self.wc.cw - 24.) / 3.;
         let source_card = |i: Icon, name: &str, detail: String, n: usize| {
             div()
                 .flex()
-                .flex_1()
+                .w(px(third))
                 .items_center()
                 .gap(px(12.))
                 .p(px(12.))
@@ -1040,11 +1049,11 @@ impl Quiver {
             .child(source_card(
                 Icon::Layers,
                 "Lutris",
-                if lutris_names.is_empty() { "game configs that run Ubisoft Connect".into() } else { format!("{} Lutris game{} use it", lutris_names.len(), if lutris_names.len() == 1 { "" } else { "s" }) },
+                if lutris_names.is_empty() { "game configs that run Ubisoft Connect".into() } else { lutris_names.join(", ") },
                 count(InstallSource::Lutris),
             ))
             .child(source_card(Icon::FolderOpen, "Wine prefixes", format!("~/Games · {} prefix{}", prefixes(InstallSource::Wine), if prefixes(InstallSource::Wine) == 1 { "" } else { "es" }), count(InstallSource::Wine)))
-            .child(source_card(Icon::Gamepad, "Steam", "Proton prefixes in compatdata".into(), count(InstallSource::Steam)));
+            .child(source_card(Icon::Gamepad, "Steam", "Proton prefixes".into(), count(InstallSource::Steam)));
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for (i, f) in found.iter().enumerate() {
@@ -1091,17 +1100,19 @@ impl Quiver {
             None => ArtState::Failed,
         };
         let job = self.import_job(&f.path);
-        let mut facts = vec![format!("{} · {} files", gb(f.size_bytes), f.files)];
+        let mut facts = vec![format!("{} · {} files", gb(f.size_bytes), thousands(f.files))];
         if let Some(v) = &f.version {
             facts.push(format!("version {v}"));
         }
         if let Some(l) = &f.language {
             facts.push(l.clone());
         }
-        let source = if f.lutris_games.len() > 1 {
-            format!("{} · also {}", f.source_label, f.lutris_games.iter().filter(|g| !f.source_label.ends_with(g.as_str())).cloned().collect::<Vec<_>>().join(", "))
-        } else {
-            f.source_label.clone()
+        // The Lutris entry that launches this game, if there is one ("Origins (DLSS)").
+        let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect::<String>();
+        let launcher = f.lutris_games.iter().find(|g| norm(g).contains(&norm(&clean_name(&f.name))));
+        let source = match launcher {
+            Some(g) => format!("{} · in Lutris as “{g}”", f.source_label),
+            None => f.source_label.clone(),
         };
         let right: AnyElement = match &job {
             Some(j) if !j.done => div()
@@ -1130,7 +1141,7 @@ impl Quiver {
                 .max_w(px(300.))
                 .child(pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Imported"))
                 .when(!j.detail.is_empty(), |d| {
-                    let shown: Vec<String> = j.detail.iter().take(3).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()).collect();
+                    let shown: Vec<String> = j.detail.iter().take(3).map(|p| { let p = p.trim_end_matches('/'); p.rsplit('/').next().unwrap_or(p).to_owned() }).collect();
                     let more = j.detail.len().saturating_sub(3);
                     d.child(div().text_size(px(11.5)).text_color(th.warn).truncate().child(format!(
                         "Left in place: {}{}",
@@ -1170,7 +1181,7 @@ impl Quiver {
                             .when_some(f.product_id, |d, id| d.child(mono(11., th.tx4).child(id.to_string()))),
                     )
                     .child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(source))
-                    .child(mono(11., th.tx4).truncate().child(tilde(&f.path)))
+                    .child(mono(11., th.tx4).truncate().child(short_path(f)))
                     .child(
                         div()
                             .flex()
@@ -1360,7 +1371,7 @@ impl Quiver {
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .w(px(330.))
+                .w(px((self.wc.cw - 10.) / 2.))
                 .px(px(12.))
                 .py(px(9.))
                 .rounded(px(10.))
@@ -1399,19 +1410,20 @@ impl Quiver {
 
     fn wc_fixes(&mut self, th: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let sel = self.wc.fixes;
+        let third = (self.wc.cw - 20.) / 3.;
         let example = |i: Icon, t: &str, d: &str| {
             div()
                 .flex()
                 .items_start()
                 .gap(px(10.))
-                .flex_1()
+                .w(px(third))
                 .p(px(12.))
                 .rounded(px(10.))
                 .bg(th.ink1)
                 .border_1()
                 .border_color(th.line1)
                 .child(div().pt(px(1.)).child(icon(i, 15., th.acc_hi)))
-                .child(div().flex().flex_col().gap(px(2.)).child(div().font_weight(SEMIBOLD).text_size(px(12.5)).child(t.to_owned())).child(div().text_size(px(12.)).line_height(px(17.)).text_color(th.tx3).child(d.to_owned())))
+                .child(div().flex().flex_col().flex_1().min_w_0().gap(px(2.)).child(div().font_weight(SEMIBOLD).text_size(px(12.5)).child(t.to_owned())).child(div().text_size(px(12.)).line_height(px(17.)).text_color(th.tx3).child(d.to_owned())))
         };
         let option = |c: FixesChoice, title: &str, d: &str, cx: &mut Context<Self>| {
             let on = sel == Some(c);
@@ -1424,7 +1436,7 @@ impl Quiver {
                 .flex()
                 .items_start()
                 .gap(px(12.))
-                .flex_1()
+                .w(px(third))
                 .p(px(14.))
                 .rounded(px(12.))
                 .bg(if on { th.acc_soft } else { th.ink1 })
@@ -1441,7 +1453,7 @@ impl Quiver {
                         .border(px(if on { 5. } else { 1.5 }))
                         .border_color(if on { th.acc } else { th.tx4 }),
                 )
-                .child(div().flex().flex_col().gap(px(3.)).child(div().font_weight(SEMIBOLD).child(title.to_owned())).child(div().text_size(px(12.)).line_height(px(17.)).text_color(th.tx3).child(d.to_owned())))
+                .child(div().flex().flex_col().flex_1().min_w_0().gap(px(3.)).child(div().font_weight(SEMIBOLD).child(title.to_owned())).child(div().text_size(px(12.)).line_height(px(17.)).text_color(th.tx3).child(d.to_owned())))
                 .focus_ring(self.wfocused(WCtl::Fix(c)), th, 12.)
                 .on_click(cx.listener(move |this, _, _, cx| this.welcome_press(WCtl::Fix(c), cx)))
         };
@@ -1524,7 +1536,7 @@ impl Quiver {
                     .child(div().flex_1())
                     .child(div().w(px(160.)).child(progress(th, 0.64, None, 6., None))),
             )
-            .child(div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(th.tx3).child("Source").child(mono(11.5, th.tx2).child(source)));
+            .child(div().flex().items_center().gap(px(8.)).text_size(px(12.)).text_color(th.tx3).child("Source").child(mono(11.5, th.tx2).flex_1().min_w_0().truncate().child(source)));
         let mut v = vec![
             preview.into_any_element(),
             note(
@@ -1622,6 +1634,29 @@ fn import_fraction(status: &str) -> f32 {
     }
 }
 
+/// "3,412".
+pub fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A found install's folder, short: `~/Games/ubisoft-connect › games/Far Cry 5` for the
+/// usual Connect layout.
+fn short_path(f: &FoundInstall) -> String {
+    let connect = f.prefix.join("drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher");
+    match f.path.strip_prefix(&connect) {
+        Ok(rest) => format!("{} › {}", tilde(&f.prefix), rest.display()),
+        Err(_) => tilde(&f.path),
+    }
+}
+
 fn panel(th: &Theme) -> gpui::Div {
     div().flex().flex_col().rounded(px(12.)).bg(th.ink1).border_1().border_color(th.line1).overflow_hidden()
 }
@@ -1670,5 +1705,8 @@ mod tests {
         assert_eq!(Step::ALL.len(), 7);
         assert!((import_fraction("Copying files 51/204…") - 0.25).abs() < 0.01);
         assert_eq!(import_fraction("Reading the manifest…"), 0.05);
+        assert_eq!(thousands(3412), "3,412");
+        assert_eq!(thousands(412), "412");
+        assert_eq!(thousands(1_204_000), "1,204,000");
     }
 }

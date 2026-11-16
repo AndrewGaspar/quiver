@@ -427,6 +427,8 @@ impl Quiver {
             tl = tl.child(tag(th, TagKind::Accent, Some(Icon::Gamepad), "Playing"));
         } else if g.failed().is_some() {
             tl = tl.child(tag(th, TagKind::Warn, Some(Icon::TriangleAlert), "Failed"));
+        } else if g.paused() {
+            tl = tl.child(tag(th, TagKind::Plain, Some(Icon::Pause), "Paused"));
         } else if g.queued() {
             tl = tl.child(tag(th, TagKind::Plain, Some(Icon::Download), "Queued"));
         } else if g.installed() && g.entry.update_available {

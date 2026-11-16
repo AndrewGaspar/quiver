@@ -172,6 +172,8 @@ impl Quiver {
             icon(Icon::Gamepad, 12., th.ok).into_any_element()
         } else if let Some(f) = g.installing() {
             div().text_size(px(11.)).text_color(th.acc_hi).child(format!("{:.0}%", (f * 100.).floor())).into_any_element()
+        } else if g.paused() {
+            div().text_size(px(11.)).text_color(th.tx3).child("Paused").into_any_element()
         } else if g.queued() {
             div().text_size(px(11.)).text_color(th.tx3).child("Queued").into_any_element()
         } else if g.failed().is_some() {

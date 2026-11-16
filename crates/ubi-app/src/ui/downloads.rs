@@ -158,6 +158,11 @@ pub fn eta(seconds: u64) -> String {
     }
 }
 
+/// Sizes up to terabytes: "1.21 TB", "48.7 GB".
+pub fn size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000_000 { format!("{:.2} TB", bytes as f64 / 1e12) } else { gb(bytes) }
+}
+
 /// "84.6 MB/s".
 pub fn rate(bps: u64) -> String {
     let m = bps as f64 / 1e6;
@@ -1086,12 +1091,12 @@ impl Quiver {
 
         let mut c = card(th).relative().overflow_hidden().w_full().h(px(h));
         if let ArtState::Ready(img) = &hero {
-            c = c.child(div().absolute().top_0().left_0().size_full().opacity(0.38).child(cover(img, w, h, (0.6, 0.3))));
+            c = c.child(div().absolute().top_0().left_0().size_full().opacity(0.5).child(cover(img, w, h, (0.6, 0.3))));
         }
         c.child(div().absolute().inset_0().bg(gpui::linear_gradient(
             90.,
             gpui::linear_color_stop(th.ink2, 0.3),
-            gpui::linear_color_stop(th.ink2.opacity(0.55), 1.),
+            gpui::linear_color_stop(th.ink2.opacity(0.3), 1.),
         )))
         .child(body)
         .into_any_element()
@@ -1350,12 +1355,13 @@ impl Quiver {
                         .items_center()
                         .gap(px(8.))
                         .text_size(px(12.))
-                        .child(div().text_color(th.tx3).w(px(58.)).child(label.to_owned()))
-                        .child(mono(11.5, th.tx2).flex_1().min_w_0().truncate().child(tilde(path)))
-                        .child(div().text_color(th.tx2).flex_none().child(free.map(|f| format!("{} free", gb(f))).unwrap_or_else(|| "?".into()))),
+                        .child(div().text_color(th.tx2).font_weight(MEDIUM).child(label.to_owned()))
+                        .child(div().flex_1())
+                        .child(div().text_color(th.tx2).flex_none().child(free.map(|f| format!("{} free", size(f))).unwrap_or_else(|| "?".into()))),
                 )
+                .child(mono(11.5, th.tx3).truncate().child(tilde(path)))
                 .child(progress(th, used, None, 8., Some(color)))
-                .when_some(total, |d, t| d.child(div().text_size(px(11.)).text_color(th.tx4).child(format!("{:.0}% of {} used", used * 100., gb(t)))))
+                .when_some(total, |d, t| d.child(div().text_size(px(11.)).text_color(th.tx4).child(format!("{:.0}% of {} used", used * 100., size(t)))))
         };
         c = c.child(disk("Games", &s.library, s.library_free, s.library_total));
         let same_disk = s.library_total == s.prefixes_total && s.library_free == s.prefixes_free;
@@ -1363,12 +1369,18 @@ impl Quiver {
             c = c.child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
+                    .flex_col()
+                    .gap(px(6.))
                     .text_size(px(12.))
-                    .child(div().text_color(th.tx3).w(px(58.)).child("Prefixes"))
-                    .child(mono(11.5, th.tx2).flex_1().min_w_0().truncate().child(tilde(&s.prefixes)))
-                    .child(div().text_color(th.tx4).flex_none().child("same disk")),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().text_color(th.tx2).font_weight(MEDIUM).child("Prefixes"))
+                            .child(div().flex_1())
+                            .child(div().text_color(th.tx4).child("same disk")),
+                    )
+                    .child(mono(11.5, th.tx3).truncate().child(tilde(&s.prefixes))),
             );
         } else {
             c = c.child(disk("Prefixes", &s.prefixes, s.prefixes_free, s.prefixes_total));
@@ -1804,7 +1816,7 @@ impl Quiver {
         };
 
         let thumb = self.thumb(th, id, 40., 47., cx);
-        let width = 600.;
+        let width = 640.;
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let mut buttons = div().flex().items_center().justify_end().gap(px(8.));
         let cancel_label = if matches!(self.dl.dialog, Some(DlDialog::Verify { .. })) { "Close" } else { "Cancel" };
@@ -1918,7 +1930,7 @@ impl Quiver {
                     .gap(px(10.))
                     .child(stat("Download", gb(p.remaining_download_bytes), resumed.then(|| format!("{} already on disk", gb(p.download_bytes - p.remaining_download_bytes))).or(Some("from Ubisoft's CDN".into()))))
                     .child(stat("On disk", gb(p.install_bytes), Some(format!("{} to write now", gb(p.required_bytes)))))
-                    .child(stat("Free", gb(p.free_bytes), Some(if p.fits { format!("{} left after", gb(after)) } else { "not enough".into() }))),
+                    .child(stat("Free", size(p.free_bytes), Some(if p.fits { format!("{} left after", size(after)) } else { "not enough".into() }))),
             )
             .child(
                 div()
@@ -1937,7 +1949,7 @@ impl Quiver {
                             .child(if p.fits {
                                 format!("Fits, with {} kept free as a margin", gb(p.margin_bytes))
                             } else {
-                                format!("Doesn't fit: needs {} plus a {} margin; {} is free", gb(p.required_bytes), gb(p.margin_bytes), gb(p.free_bytes))
+                                format!("Doesn't fit: needs {} plus a {} margin; {} is free", gb(p.required_bytes), gb(p.margin_bytes), size(p.free_bytes))
                             }),
                     ),
             );
@@ -2178,9 +2190,9 @@ fn verify_report(th: &Theme, r: &VerifyReport, stale: bool) -> AnyElement {
     let headline = if r.repaired_files > 0 {
         format!("Repaired {} files ({} downloaded)", r.repaired_files, gb(r.repaired_bytes))
     } else if ok {
-        format!("All {} files OK · {} read", r.files, gb(r.bytes))
+        format!("All {} files OK · {} read", super::welcome::thousands(r.files), gb(r.bytes))
     } else {
-        format!("{} missing, {} corrupt of {} files", r.missing.len(), r.corrupt.len(), r.files)
+        format!("{} missing, {} corrupt of {} files", r.missing.len(), r.corrupt.len(), super::welcome::thousands(r.files))
     };
     let corrupt: Vec<String> = r.corrupt.iter().take(4).map(|c| format!("{}  ({} bad slice{}, {})", c.path, c.bad_slices, if c.bad_slices == 1 { "" } else { "s" }, gb(c.bad_bytes))).collect();
     let missing: Vec<String> = r.missing.iter().take(4).cloned().collect();
