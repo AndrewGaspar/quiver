@@ -338,6 +338,34 @@ The command palette, `ubi --help` and the MCP tool list all come from one comman
 - **Import that checks against manifests,** so adopted installs are verified, not trusted.
 - **Storage view** and an update window, so big patches do not land mid-session.
 
+## Decisions (from review, 2026-11-16)
+
+- **Name:** pick an original product name with no Ubisoft trademarks (no Ubi/Uplay/Connect, and no
+  Assassin's Creed terms such as Animus, Abstergo or Helix). Working proposal: **Quiver** (the
+  `ubi` CLI becomes `quiver`).
+- **Agent permissions:** as proposed. Agents may change launch options, install and launch
+  freely; restoring saves, uninstalling and deleting need approval; account changes are denied.
+- **Mod overlays:** user namespaces are enabled on this machine and unprivileged overlayfs works
+  (verified). Mount through the syscall so the real uid is kept (Wine checks prefix ownership).
+- **Mod profiles are first-class launch targets:** a profile can be pinned as its own tile in
+  the library and the games list, and gets its own .desktop entry and Steam shortcut.
+- **Modded saves:** separate saves per modded profile, cloud sync off by default, with a toggle
+  to turn it on.
+- **Store:** show add-ons you don't own with a link to the web store.
+- **Steam shortcuts:** offered at install time and available later from the game page, for
+  every game and profile. No separate big-picture mode.
+- **Controller-friendly:** the whole app works with a gamepad (focus model, D-pad/stick moves
+  focus, A/B confirm/back), and must coexist with hyprpad (`~/code/hyprsc`), which owns
+  guide-button combos and keeps Steam Input working.
+- **Custom art:** SteamGridDB and your own images per game.
+- **Icons:** use the game's art (the list-row thumbnails) for desktop entries, not Ubisoft's .ico.
+- **Multiple Ubisoft accounts:** supported now (to confirm).
+- **Theme:** inherit Omarchy's theme: map `~/.local/state/omarchy/current/theme/colors.toml`
+  (accent, background, foreground, selection, mode…) onto the design tokens and watch
+  `theme.generation` to restyle instantly on a theme switch.
+- **Still open:** prefix snapshots on ext4 (proposed: automatic on btrfs/xfs, opt-in elsewhere);
+  Ubisoft vs. local play time (proposed: show Ubisoft's total, keep local sessions as detail).
+
 ## Open questions
 
 1. **Name.** The mock-ups say “ubi” to match the CLI. Keep it, or pick a product name?
