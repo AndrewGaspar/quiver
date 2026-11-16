@@ -146,6 +146,8 @@ quiver mods "far cry 4" set fc4-raw-mouse enabled=off   # also save_compatible=,
 quiver mods "far cry 4" uninstall fc4-raw-mouse   # config values it changed go back
 quiver fixes-on-vanilla on                     # installed fixes also apply to unmodded launches
 
+quiver setup                                   # first-run choices (the app's welcome): folders, importing
+                                               # Lutris/Connect installs, Steam, fixes; --show prints them
 quiver install origins --dry-run               # sizes, free space, languages; nothing starts
 quiver queue                                   # the download queue: state, progress, speed
 quiver queue move origins top                  # or up / down
