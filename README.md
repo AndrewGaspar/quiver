@@ -86,7 +86,8 @@ quiver login                                   # again: adds a second account (f
 quiver account list                            # signed-in accounts; * marks the default
 quiver account default family                  # change the default (by name or user id)
 quiver logout family                           # sign one account out (default: the default)
-quiver-app                                  # the app
+quiver-app                                     # the app; relaunches itself on the same screen when its
+                                               # binary is rebuilt (QUIVER_AUTO_RELAUNCH=0: off)
 quiver library                                 # owned games, install state, owners (2+ accounts)
 quiver install "chronicles china"              # by name or product id; shows progress
 quiver play rabbids                            # runs in its own prefix; syncs cloud saves

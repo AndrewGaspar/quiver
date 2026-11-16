@@ -10,6 +10,8 @@
 //! - `QUIVER_THEME=builtin`: ignore Omarchy and use "Quiver dark".
 //! - `QUIVER_OMARCHY_STATE=DIR`: read the theme from DIR instead of
 //!   `~/.local/state/omarchy/current` (tests, screenshots).
+//! - `QUIVER_AUTO_RELAUNCH=0`: don't relaunch when the binary is replaced by a new build
+//!   (`selfupdate.rs`). `QUIVER_RESUME` is set by a relaunch for the new process.
 //! - `XDG_CACHE_HOME`: art cache root (`quiver/art`); `XDG_CONFIG_HOME`: where
 //!   `quiver/custom-art.json` (per-game image files) is read from.
 
@@ -21,6 +23,7 @@ mod gamepad;
 mod model;
 mod nav;
 mod palette;
+mod selfupdate;
 mod source;
 mod text_input;
 mod theme;
@@ -63,6 +66,7 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,quiver_app=info".into()),
         )
         .init();
+    let resume = selfupdate::take_resume();
     let demo = source::demo_requested();
     if demo {
         tracing::info!("demo mode: fixture data, no daemon");
@@ -72,17 +76,24 @@ fn main() {
         cx.set_global(theme::load(&theme::omarchy_state_dir()));
         text_input::bind_keys(cx);
         app::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx));
+        let bounds = selfupdate::window_bounds(resume.as_ref(), bounds);
         let title = if demo { "Quiver (demo)" } else { "Quiver" };
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
                 titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
                 app_id: Some("quiver".into()),
                 window_min_size: Some(size(px(960.), px(600.))),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| app::Quiver::new(demo, window, cx)),
+            move |window, cx| {
+                cx.new(|cx| {
+                    let mut q = app::Quiver::new(demo, window, cx);
+                    q.start_self_update(resume, window, cx);
+                    q
+                })
+            },
         )
         .expect("open window");
         cx.activate(true);

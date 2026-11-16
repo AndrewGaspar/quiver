@@ -3,7 +3,7 @@
 //! (described by a [`Layout`] the view builds each time) and returns an [`Effect`] for
 //! anything the app itself has to do (play, run a palette command, ...).
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Section {
     Library,
     Downloads,
@@ -26,7 +26,7 @@ impl Section {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Page {
     Library,
     Game(u32),
@@ -52,7 +52,7 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tab {
     Overview,
     LaunchOptions,
@@ -89,7 +89,7 @@ impl Tab {
 }
 
 /// A focus region. Each keeps its own remembered index in [`Nav`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Zone {
     /// Library · Downloads · Activity in the top bar.
     TopBar,
@@ -133,7 +133,7 @@ pub enum Input {
     Play,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Overlay {
     Palette { selected: usize },
     /// The menu for one game.
@@ -194,7 +194,9 @@ pub enum Effect {
     Menu(u32, usize),
 }
 
-#[derive(Clone, Debug)]
+// Serializable so a relaunch can carry it over (`selfupdate.rs`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Nav {
     pub page: Page,
     pub tab: Tab,
