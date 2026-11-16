@@ -388,16 +388,18 @@ impl Quiver {
             out.push(
                 card(th)
                     .flex_row()
+                    .flex_wrap()
                     .items_start()
                     .gap(px(14.))
                     .p(px(16.))
                     .child(avatar(&initials(&a.name), from, to, th.ink2).size(px(40.)).text_size(px(14.)))
                     .child(
+                        // Narrow: the buttons go under the account instead of squeezing it.
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(200.))
                             .gap(px(3.))
                             .child(
                                 div()

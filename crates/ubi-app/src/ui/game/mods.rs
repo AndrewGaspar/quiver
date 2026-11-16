@@ -88,7 +88,7 @@ impl Quiver {
             div()
                 .id(("prof-card", i))
                 .flex_1()
-                .min_w(px(180.))
+                .min_w(px(260.))
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -510,13 +510,13 @@ impl Quiver {
                     .border_color(th.line1)
                     .bg(th.ink1.opacity(0.5))
                     .rounded_b(px(12.))
-                    .child(div().flex().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add layer from folder")).child(div().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add layer from folder")).child(div().min_w_0().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().w(px(200.)).flex_none().children(name))
+                            .child(div().w(px(200.)).flex_shrink().min_w(px(110.)).children(name))
                             .child(div().flex_1().min_w_0().children(path))
                             .child(button("layer-add", th, Kind::Primary, Size::Small, Some(Icon::Plus), "Add layer").on_click(cx.listener(move |this, _, _, cx| this.add_layer(id, cx)))),
                     ),
