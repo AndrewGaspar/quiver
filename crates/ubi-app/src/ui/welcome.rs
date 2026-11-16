@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use gpui::{AnyElement, AppContext, Context, Entity, FontWeight, IntoElement, ParentElement, Styled, Window, div, prelude::*, px};
 use ubi_api::exports::{ExportKind, ExportState, SteamExportResult};
 use ubi_api::setup::{FinishSetup, FixesChoice, FoundInstall, InstallSource, SetupState};
+use ubi_api::mods::{ModPrefs, ModsRequest};
 use ubi_api::{Event, Job, JobKind, Request};
 
 use super::downloads::who;
@@ -324,10 +325,12 @@ impl Quiver {
 
     fn set_fixes(&mut self, c: FixesChoice, cx: &mut Context<Self>) {
         self.wc.fixes = Some(c);
-        self.call::<Option<bool>, _>(Request::FixesOnVanilla { set: Some(c) }, cx, |this, r, cx| match r {
-            Ok(v) => {
+        // Mods v2's app-level preference. "Later" leaves it undecided, so nothing is sent.
+        let Some(v) = c.value() else { return };
+        self.call::<ModPrefs, _>(Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: Some(v) }), cx, |this, r, cx| match r {
+            Ok(p) => {
                 if let Some(s) = &mut this.dl.setup {
-                    s.fixes_on_vanilla = v;
+                    s.fixes_on_vanilla = p.fixes_on_vanilla;
                 }
             }
             Err(e) => this.show_toast(err_text(&e), cx),

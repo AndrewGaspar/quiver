@@ -6,6 +6,7 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 use ubi_api::exports::{ExportKind, ExportStatus, SteamExportResult, SteamUsers};
 use ubi_api::setup::{FinishSetup, FixesChoice, FoundInstall, SetupState};
+use ubi_api::mods::{ModPrefs, ModsRequest};
 use ubi_api::{Client, LibraryEntry, Request, Status};
 
 use crate::{dev, exports, follow, print_json};
@@ -200,15 +201,18 @@ pub async fn run(client: &Client) -> Result<()> {
     println!("  Small, audited tweaks from PCGamingWiki such as skipping intro videos and fixing");
     println!("  mouse input. They never change gameplay or your saves, and you can turn them off");
     println!("  per game. Without them, unmodded games run exactly as shipped.");
-    let current: Option<bool> = client.call(Request::FixesOnVanilla { set: None }).await?;
-    let def = match current {
+    let prefs: ModPrefs = client.call(Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: None })).await?;
+    let def = match prefs.fixes_on_vanilla {
         Some(true) => "y",
         Some(false) => "n",
         None => "l",
     };
     let a = dev::prompt(&format!("  Apply them? [y]es / [n]o / [l]ater (default {def}): "))?;
     let choice: FixesChoice = if a.is_empty() { def.parse().map_err(anyhow::Error::msg)? } else { a.parse().map_err(anyhow::Error::msg)? };
-    let _: Option<bool> = client.call(Request::FixesOnVanilla { set: Some(choice) }).await?;
+    // "Later" leaves it undecided: the app asks again.
+    if let Some(v) = choice.value() {
+        let _: ModPrefs = client.call(Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: Some(v) })).await?;
+    }
 
     step(7, "Theme");
     println!("  Quiver follows your Omarchy theme and restyles live when it changes.");

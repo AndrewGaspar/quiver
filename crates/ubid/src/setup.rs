@@ -1,6 +1,6 @@
 //! First-run setup: the first-run record and storage paths (`Request::Setup`), finding
 //! existing Ubisoft Connect installs (`Request::ScanInstalls`) and the app-level choice
-//! about recommended fixes on unmodded games (`Request::FixesOnVanilla`).
+//! about recommended fixes on unmodded games (read-only here; Mods v2 sets it).
 //!
 //! The scan only reads: Lutris game configs, `~/Games/*` Wine and Proton prefixes and
 //! Steam's `compatdata` prefixes. In each prefix it reads Connect's own install records
@@ -41,20 +41,6 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             let found = tokio::task::spawn_blocking(move || scan(&Roots::for_home(&home), lib.as_deref(), &installed)).await?;
             daemon.log_activity(source, format!("scanned for existing installs: {} found", found.len()), None);
             json!(found)
-        }
-        Request::FixesOnVanilla { set } => {
-            let mut cfg = Config::load()?;
-            if let Some(choice) = set {
-                cfg.fixes_on_vanilla = choice.value();
-                cfg.save()?;
-                let what = match cfg.fixes_on_vanilla {
-                    Some(true) => "on",
-                    Some(false) => "off",
-                    None => "ask later",
-                };
-                daemon.log_activity(source, format!("recommended fixes on unmodded games: {what}"), None);
-            }
-            json!(cfg.fixes_on_vanilla)
         }
         other => bail!("not a setup request: {other:?}"),
     })

@@ -450,16 +450,6 @@ pub enum Request {
     /// Find existing Ubisoft Connect installs in Lutris, Wine and Steam prefixes, matched
     /// to owned games (`Vec<setup::FoundInstall>`). Read-only; import one with `Import`.
     ScanInstalls,
-    /// Read (and with `set`, change) the app-level choice about recommended fixes on
-    /// unmodded games. Returns `Option<bool>` (`None`: not decided).
-    ///
-    /// TODO(mods-v2): a minimal stand-in so first-run setup can ask the question. Mods v2
-    /// owns what the setting does (and may move it under its own settings request); keep
-    /// this request working for older front ends when it does.
-    FixesOnVanilla {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        set: Option<setup::FixesChoice>,
-    },
 }
 
 fn yes() -> bool {
@@ -607,8 +597,6 @@ mod tests {
         assert!(matches!(r, Request::Setup { library: None, prefixes: None, finish: None }));
         let r: Request = serde_json::from_str(r#"{"method":"scan_installs"}"#).unwrap();
         assert!(matches!(r, Request::ScanInstalls));
-        let r: Request = serde_json::from_str(r#"{"method":"fixes_on_vanilla","params":{"set":"later"}}"#).unwrap();
-        assert!(matches!(r, Request::FixesOnVanilla { set: Some(setup::FixesChoice::Later) }));
         let v = serde_json::to_value(Request::Setup { library: None, prefixes: None, finish: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "setup", "params": {} }));
     }

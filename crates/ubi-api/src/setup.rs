@@ -133,7 +133,8 @@ pub struct FoundInstall {
     pub note: Option<String>,
 }
 
-/// `Request::FixesOnVanilla`'s choice.
+/// The three answers front ends offer for `fixes_on_vanilla`; [`FixesChoice::value`] is what
+/// goes into `ModsRequest::Prefs` ('later' leaves it undecided, so nothing is sent).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FixesChoice {

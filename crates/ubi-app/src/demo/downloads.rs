@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use ubi_api::downloads::{
     CorruptFile, DownloadSettings, InstallPreview, LanguageSize, QueueEntry, QueueKind, QueueMove, QueueState, UpdatePreview, VerifyReport,
 };
+use ubi_api::mods::{ModPrefs, ModsRequest};
 use ubi_api::setup::{FirstRun, FoundInstall, InstallSource, MatchedBy, SetupState};
 use ubi_api::{ActivityEntry, Event, Job, JobKind, Request};
 
@@ -577,11 +578,12 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             json!(d.state(st))
         }
         Request::ScanInstalls => json!(d.found(st)),
-        Request::FixesOnVanilla { set } => {
-            if let Some(c) = set {
-                d.fixes = c.value();
+        // Mods v2's app-level preference, kept here so the welcome flow's choice sticks.
+        Request::Mods(ModsRequest::Prefs { fixes_on_vanilla }) => {
+            if fixes_on_vanilla.is_some() {
+                d.fixes = fixes_on_vanilla;
             }
-            json!(d.fixes)
+            json!(ModPrefs { fixes_on_vanilla: d.fixes })
         }
         Request::Import { product_id, path, .. } => {
             let found = d.found(st).into_iter().find(|f| f.path == path && f.importable).ok_or_else(|| anyhow!("{} has no uplay_install.manifest", path.display()))?;
@@ -783,7 +785,8 @@ mod tests {
         assert!(st.paths_locked && st.first_run.is_some());
         let found: Vec<FoundInstall> = serde_json::from_value(demo.handle(Request::ScanInstalls).unwrap()).unwrap();
         assert!(found[0].importable && found.iter().any(|f| f.installed) && found.iter().any(|f| f.product_id.is_none()));
-        let v: Option<bool> = serde_json::from_value(demo.handle(Request::FixesOnVanilla { set: Some(ubi_api::setup::FixesChoice::No) }).unwrap()).unwrap();
+        let p: ModPrefs = serde_json::from_value(demo.handle(Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: Some(false) })).unwrap()).unwrap();
+        let v = p.fixes_on_vanilla;
         assert_eq!(v, Some(false));
     }
 }
