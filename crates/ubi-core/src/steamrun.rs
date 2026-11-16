@@ -338,6 +338,39 @@ pub fn z_path(p: &Path) -> String {
     crate::launcher::win_path(p)
 }
 
+/// Host path -> Windows path the way Wine itself converts it: through the drive (in the
+/// prefix's `dosdevices`) whose root is the deepest ancestor of `p`. Proton maps the Steam
+/// root to `S:`, so a game Steam launches runs as `S:\steamapps\common\…`, not `Z:\home\…`;
+/// games can treat those differently (Black Flag Resynced shows a "game is on a HDD" warning
+/// when started from `Z:`). Falls back to Z:.
+pub fn prefix_win_path(prefix: &Path, p: &Path) -> String {
+    let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    drive_path(&drives(prefix), &p).unwrap_or_else(|| z_path(&p))
+}
+
+/// The prefix's drive letters and their (canonical) host roots.
+fn drives(prefix: &Path) -> Vec<(char, PathBuf)> {
+    let dir = prefix.join("dosdevices");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return vec![] };
+    rd.flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_ascii_lowercase();
+            let mut cs = name.chars();
+            let (letter, colon) = (cs.next()?, cs.next()?);
+            if !letter.is_ascii_alphabetic() || colon != ':' || cs.next().is_some() {
+                return None;
+            }
+            Some((letter.to_ascii_uppercase(), std::fs::canonicalize(e.path()).ok()?))
+        })
+        .collect()
+}
+
+fn drive_path(drives: &[(char, PathBuf)], p: &Path) -> Option<String> {
+    let (letter, root) = drives.iter().filter(|(_, root)| p.starts_with(root)).max_by_key(|(_, root)| root.components().count())?;
+    let rest = p.strip_prefix(root).ok()?;
+    Some(format!("{letter}:\\{}", rest.to_string_lossy().replace('/', "\\")))
+}
+
 /// `WINEDLLOVERRIDES` with Connect's executables disabled, keeping what was there.
 pub fn dll_overrides_without_connect(existing: Option<&str>) -> String {
     let mut parts: Vec<String> = existing.into_iter().flat_map(|e| e.split(';')).filter(|p| !p.is_empty()).map(str::to_owned).collect();
@@ -630,5 +663,28 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert!(found[0].contains("UbisoftConnect.exe -upc_uplay_id"));
         assert!(found[1].contains("upc.exe"));
+    }
+
+    #[test]
+    fn prefix_win_path_uses_the_deepest_drive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let steam = root.join("Steam");
+        let game = steam.join("steamapps/common/Game Name");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("game.exe"), b"").unwrap();
+        let pfx = root.join("pfx");
+        std::fs::create_dir_all(pfx.join("dosdevices")).unwrap();
+        std::fs::create_dir_all(pfx.join("drive_c")).unwrap();
+        std::os::unix::fs::symlink("../drive_c", pfx.join("dosdevices/c:")).unwrap();
+        std::os::unix::fs::symlink(&steam, pfx.join("dosdevices/s:")).unwrap();
+        std::os::unix::fs::symlink("/", pfx.join("dosdevices/z:")).unwrap();
+        std::os::unix::fs::symlink("/dev/ttyS0", pfx.join("dosdevices/com1")).unwrap();
+        assert_eq!(prefix_win_path(&pfx, &game.join("game.exe")), r"S:\steamapps\common\Game Name\game.exe");
+        assert_eq!(prefix_win_path(&pfx, &pfx.join("drive_c/x.txt")), r"C:\x.txt");
+        let other = root.join("elsewhere/f");
+        assert_eq!(prefix_win_path(&pfx, &other), z_path(&other));
+        // No dosdevices: Z:.
+        assert_eq!(prefix_win_path(&root.join("nope"), &game), z_path(&game));
     }
 }

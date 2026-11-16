@@ -176,7 +176,7 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
         );
     }
 
-    let game_win = steamrun::z_path(Path::new(pc.exe(&a.command)));
+    let game_win = steamrun::prefix_win_path(&env.prefix(), Path::new(pc.exe(&a.command)));
     let ctx_path = run_dir.join("context.json");
     let log_path = run_dir.join("bridge.log");
     let bridge_dst = run_dir.join("ubi-bridge.exe");
