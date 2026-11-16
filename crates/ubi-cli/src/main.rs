@@ -143,9 +143,10 @@ enum Cmd {
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
-    /// Keys: proton, language, account, profile, args, wrappers, env.NAME, dll.NAME.
+    /// Keys: proton, language, account, profile, art, args, wrappers, env.NAME, dll.NAME.
     /// `account` (username or user id) picks the account the game launches with; `profile`
-    /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default.
+    /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default; `art`
+    /// (`steam` or `ubisoft`) whose art the app shows first for a game with a Steam copy.
     Set {
         game: String,
         #[arg(required = true)]
