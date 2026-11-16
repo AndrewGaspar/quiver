@@ -71,8 +71,8 @@ pub struct TwoFactorChallenge {
 }
 
 pub struct Auth {
-    http: reqwest::Client,
-    app_id: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) app_id: String,
 }
 
 impl Default for Auth {

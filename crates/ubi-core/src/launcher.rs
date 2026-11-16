@@ -10,6 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
+use crate::playsession::PlaySessionReporter;
 use crate::online::Online;
 use crate::cloudsave::CloudSaves;
 use crate::library::{Library, ProductConfig};
@@ -47,6 +48,13 @@ pub struct Config {
     /// Extra environment for games (e.g. PROTON_ENABLE_NVAPI=1).
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Report play sessions to Ubisoft (the play time shown in Connect and on the web).
+    #[serde(default = "yes")]
+    pub report_playtime: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 pub fn data_dir() -> PathBuf {
@@ -126,6 +134,7 @@ impl Config {
                 ("PROTON_ENABLE_NVAPI".into(), "1".into()),
                 ("DXVK_ENABLE_NVAPI".into(), "1".into()),
             ],
+            report_playtime: true,
         };
         cfg.save()?;
         Ok(cfg)
@@ -624,8 +633,19 @@ pub async fn play(
     let started = wait_for_game_start(&proton, &mut child).await;
     events(LaunchEvent::Running);
     if started {
+        // Report the session to Ubisoft the way Connect does: start, heartbeat, end.
+        let mut report = cfg.report_playtime.then(|| PlaySessionReporter::new(online, game.product_id));
+        if let Some(r) = &mut report {
+            r.start().await;
+        }
         while !game_processes(&proton).is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Some(r) = &mut report {
+                r.tick().await;
+            }
+        }
+        if let Some(r) = &mut report {
+            r.end().await;
         }
     }
     let status = child.try_wait().ok().flatten();

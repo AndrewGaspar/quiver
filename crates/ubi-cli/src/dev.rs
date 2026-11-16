@@ -81,6 +81,8 @@ pub enum DevCmd {
     FetchSdk { dir: PathBuf },
     /// Check demux connectivity (no login needed).
     Ping,
+    /// Report a play session step to Ubisoft directly: start, update or end.
+    Playsession { step: String, product_id: u32 },
     /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
     Manifest {
         path: PathBuf,
@@ -398,6 +400,16 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
                 let e = e?;
                 println!("{:>9}  {}", e.metadata()?.len(), e.file_name().to_string_lossy());
             }
+        }
+        DevCmd::Playsession { step, product_id } => {
+            let online = ubi_core::online::Online::new(auth);
+            match step.as_str() {
+                "start" => ubi_core::playsession::start(&online, product_id).await?,
+                "update" => ubi_core::playsession::heartbeat(&online, product_id).await?,
+                "end" => ubi_core::playsession::end(&online, product_id).await?,
+                other => anyhow::bail!("unknown step {other:?} (start, update, end)"),
+            }
+            println!("playsession {step} {product_id}: ok");
         }
         DevCmd::Ping => {
             let demux = ubi_core::demux::Demux::connect().await?;

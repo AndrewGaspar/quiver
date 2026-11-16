@@ -93,6 +93,8 @@ State lives in `~/.local/share/ubisoft-linux/` (`config.json`, `games.json`,
    sessions
 4. Installer: done (zstd `slices_v3` and legacy zlib `slices` layouts; updates in place)
 5. Cloud saves: done (cloudsave_service V2, pull before / push after each session)
+   Play time: reported to Ubisoft like Connect does (UbiServices playsession start, heartbeat
+   every 330 s, end; `report_playtime` in config.json turns it off)
 6. GPUI front end: library, install/update with progress, play
 7. Next: fetch the SDK DLLs from Ubisoft instead of a local Connect install, real
-   achievements/Club, playtime reporting, LZHAM manifests, `upc_r2` games
+   achievements/Club, LZHAM manifests, `upc_r2` games
