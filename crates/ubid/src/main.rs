@@ -683,10 +683,17 @@ impl Daemon {
     }
 }
 
-/// A session no quiverd launch held (a Steam copy started by `quiver steam-run`, a bridge in
-/// a container) into the game's local play history, with the settings revision it ran
+/// A session no quiverd launch held, started from Steam by `quiver steam-run`, into the
+/// game's local play history, with the settings revision it ran
 /// under (Steam launches apply the game's settings; see `steamlib::launch_plan`).
 fn record_bridge_session(f: &ubi_core::playsession::Finished) {
+    // Only Steam launches through `quiver steam-run` are someone playing. Other bridges
+    // (containers, agents' test instances, often several at once and dozens a day) would
+    // bury the person's own play history, so they stay out of it.
+    let Some(app) = f.steam_app_id else {
+        tracing::debug!(product_id = f.product_id, holders = ?f.holders, "not recording a bridge session that Steam didn't start");
+        return;
+    };
     let rev = settings::current(f.product_id).map(|(_, r)| r).unwrap_or(0);
     let session = ubi_api::PlaySession {
         started: f.started,
@@ -696,10 +703,7 @@ fn record_bridge_session(f: &ubi_core::playsession::Finished) {
         profile: None,
         profile_revision: None,
     };
-    let via = match f.steam_app_id {
-        Some(app) => format!("Steam app {app}"),
-        None => f.holders.join(", "),
-    };
+    let via = format!("Steam app {app}");
     tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
     if let Err(e) = settings::record_session(f.product_id, &session) {
         tracing::warn!("recording play session: {e:#}");
