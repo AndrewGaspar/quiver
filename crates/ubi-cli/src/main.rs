@@ -4,6 +4,7 @@
 
 mod dev;
 mod exports;
+mod info;
 
 use std::io::Write;
 
@@ -149,6 +150,40 @@ enum Cmd {
     Steam {
         #[command(subcommand)]
         action: exports::SteamAction,
+    },
+    /// A game's details: publisher, links, features, install size and languages, add-ons
+    /// (owned or not, with store links for the rest).
+    Info {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        /// Re-read ownership from Ubisoft.
+        #[arg(long)]
+        refresh: bool,
+        /// Also list hidden associated products (internal SKUs, bundles, consumables).
+        #[arg(long)]
+        all: bool,
+    },
+    /// A game's Ubisoft progression (play time, stats, challenges, rewards) and your
+    /// Ubisoft Connect level and units.
+    Progress {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        /// Ask Ubisoft again instead of using the daemon's few-minute cache.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// A game's save slots (local and cloud) and backups; `restore` brings a backup back.
+    Saves {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        /// Only what's on this machine (don't ask the cloud).
+        #[arg(long)]
+        local: bool,
+        #[command(subcommand)]
+        action: Option<info::SavesAction>,
     },
     /// Low-level tools that bypass the daemon.
     Dev {
@@ -558,6 +593,12 @@ async fn main() -> Result<()> {
             while let Some(e) = events.recv().await {
                 println!("{}", serde_json::to_string(&e)?);
             }
+        }
+        Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
+        Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,
+        Cmd::Saves { game, json, local, action: None } => info::saves(&client, &game, json, local).await?,
+        Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
+            info::restore(&client, &cli.source, &game, backup).await?
         }
         Cmd::Daemon { action: DaemonAction::Stop } => {
             let () = client.call(Request::Shutdown).await?;
