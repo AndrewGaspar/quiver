@@ -219,7 +219,7 @@ impl Launcher {
     }
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
-        self.call::<(), _>(Request::Logout, cx, |_, _, _| {});
+        self.call::<(), _>(Request::Logout { account: None }, cx, |_, _, _| {});
     }
 
     fn load_library(&mut self, refresh: bool, cx: &mut Context<Self>) {

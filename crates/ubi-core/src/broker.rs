@@ -35,6 +35,12 @@ impl Broker {
         Arc::new(Self { accounts, conns: Mutex::new(HashMap::new()), sessions })
     }
 
+    /// Drop an account's service connections (after it signs out or signs in again), so
+    /// the broker doesn't keep its old demux login alive.
+    pub async fn forget(&self, user_id: &str) {
+        self.conns.lock().await.remove(user_id);
+    }
+
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;

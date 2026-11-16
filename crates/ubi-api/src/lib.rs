@@ -54,11 +54,16 @@ pub struct GameSettings {
     /// Install/audio language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Launch account (user id); `None`: the default account if it owns the game, else
+    /// the first account that does. Also decides whose cloud saves are used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 impl GameSettings {
-    /// Apply one edit. Keys: `proton`, `language`, `args` (whitespace-separated),
-    /// `wrappers` (comma/space-separated), `env.NAME`, `dll.NAME`.
+    /// Apply one edit. Keys: `proton`, `language`, `account` (a user id; the daemon
+    /// resolves names), `args` (whitespace-separated), `wrappers` (comma/space-separated),
+    /// `env.NAME`, `dll.NAME`.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
         let (key, value) = match op {
             SettingOp::Set { key, value } => (key.as_str(), Some(value.as_str())),
@@ -68,6 +73,7 @@ impl GameSettings {
         match key {
             "proton" => self.proton = opt(value),
             "language" => self.language = opt(value),
+            "account" => self.account = opt(value),
             "args" => self.args = value.map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             "wrappers" => {
                 self.wrappers = value
@@ -80,7 +86,7 @@ impl GameSettings {
                 } else if let Some(n) = k.strip_prefix("dll.") {
                     (&mut self.dll_overrides, n)
                 } else {
-                    return Err(format!("unknown setting '{k}' (proton, language, args, wrappers, env.NAME, dll.NAME)"));
+                    return Err(format!("unknown setting '{k}' (proton, language, account, args, wrappers, env.NAME, dll.NAME)"));
                 };
                 if name.is_empty() {
                     return Err(format!("missing name in '{k}'"));
@@ -135,6 +141,9 @@ pub struct LibraryEntry {
     /// Art file names from the product config (served by Ubisoft's asset CDN).
     #[serde(default)]
     pub art: Art,
+    /// User ids of the signed-in accounts that own it, default account first.
+    #[serde(default)]
+    pub owned_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -144,9 +153,20 @@ pub struct Art {
     pub logo: Option<String>,
 }
 
+/// A signed-in Ubisoft account.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Account {
+    pub user_id: String,
+    /// Ubisoft username.
+    pub name: String,
+    /// The default account (launches games every account owns, unless a game overrides it).
+    pub default: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub version: String,
+    /// The default account's name.
     pub signed_in: Option<String>,
     pub awaiting_2fa: bool,
     pub running: Vec<u32>,
@@ -155,6 +175,9 @@ pub struct Status {
     /// `host:port` of the Denuvo/ticket broker that game bridges connect to.
     #[serde(default)]
     pub broker: String,
+    /// Every signed-in account, in sign-in order.
+    #[serde(default)]
+    pub accounts: Vec<Account>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -235,9 +258,15 @@ pub struct ActivityEntry {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Status,
+    /// Sign in, adding the account (the first one becomes the default).
     Login { email: String, password: String },
     Login2fa { code: String },
-    Logout,
+    /// Sign one account out (`None`: the default). The next account becomes the default.
+    /// `account` is a user id, username or unique user-id prefix.
+    Logout {
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// Owned, installable games with install state.
     Library { refresh: bool },
     Install { product_id: u32, language: Option<String> },
@@ -256,7 +285,14 @@ pub enum Request {
     SettingsRestore { product_id: u32, revision: u32 },
     /// A launch context for running a game's bridge outside this launcher (e.g. in a
     /// container): account, fresh ticket, owned ids, CD keys, broker address.
-    LaunchContext { product_id: u32, savegame_path: Option<String>, install_dir: Option<PathBuf> },
+    /// `account` (user id or name) overrides the game's launch account.
+    LaunchContext {
+        product_id: u32,
+        savegame_path: Option<String>,
+        install_dir: Option<PathBuf>,
+        #[serde(default)]
+        account: Option<String>,
+    },
     /// Installed Proton builds.
     ProtonList,
     /// Play sessions recorded by this launcher.
@@ -268,6 +304,8 @@ pub enum Request {
     Sessions,
     Subscribe,
     Shutdown,
+    /// Make an account (user id, username or unique user-id prefix) the default.
+    AccountDefault { account: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +331,7 @@ pub enum Event {
     GameStarted { product_id: u32 },
     GameStopped { product_id: u32 },
     SettingsChanged { product_id: u32, revision: u32, source: String },
+    /// The signed-in accounts or the default changed; `signed_in` is the default's name.
     SessionChanged { signed_in: Option<String> },
     LibraryChanged,
     /// The set of games being played changed (see `Request::Sessions`).
@@ -307,5 +346,69 @@ pub fn socket_path() -> PathBuf {
             let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
             std::env::temp_dir().join(format!("quiver-{user}")).join("quiverd.sock")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(s: &mut GameSettings, op: &str) -> Result<(), String> {
+        s.apply(&SettingOp::parse(op)?)
+    }
+
+    #[test]
+    fn account_setting() {
+        let mut s = GameSettings::default();
+        apply(&mut s, "account=123-abc").unwrap();
+        assert_eq!(s.account.as_deref(), Some("123-abc"));
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({ "account": "123-abc" }));
+        apply(&mut s, "account=").unwrap();
+        assert_eq!(s.account, None);
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({}));
+        // Older revisions have no account key.
+        let old: GameSettings = serde_json::from_str(r#"{"proton":"GE"}"#).unwrap();
+        assert_eq!(old.account, None);
+    }
+
+    #[test]
+    fn setting_parse() {
+        assert_eq!(SettingOp::parse("a=b=c").unwrap(), SettingOp::Set { key: "a".into(), value: "b=c".into() });
+        assert_eq!(SettingOp::parse("account=").unwrap(), SettingOp::Unset { key: "account".into() });
+        assert!(SettingOp::parse("account").is_err());
+        let mut s = GameSettings::default();
+        assert!(apply(&mut s, "acount=x").unwrap_err().contains("account"));
+        apply(&mut s, "wrappers=gamemoderun, mangohud").unwrap();
+        assert_eq!(s.wrappers, ["gamemoderun", "mangohud"]);
+        apply(&mut s, "env.DXVK_HUD=fps").unwrap();
+        apply(&mut s, "env.DXVK_HUD=").unwrap();
+        assert!(s.env.is_empty());
+        assert!(apply(&mut s, "dll.=n").is_err());
+    }
+
+    #[test]
+    fn wire_compat() {
+        let r: Request = serde_json::from_str(r#"{"method":"logout","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::Logout { account: None }));
+        let r: Request = serde_json::from_str(r#"{"method":"logout","params":{"account":"fam"}}"#).unwrap();
+        assert!(matches!(r, Request::Logout { account: Some(a) } if a == "fam"));
+        let r: Request = serde_json::from_str(r#"{"method":"account_default","params":{"account":"fam"}}"#).unwrap();
+        assert!(matches!(r, Request::AccountDefault { account } if account == "fam"));
+        let r: Request = serde_json::from_str(
+            r#"{"method":"launch_context","params":{"product_id":1,"savegame_path":null,"install_dir":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, Request::LaunchContext { account: None, .. }));
+        // A daemon from before multiple accounts.
+        let s: Status = serde_json::from_str(
+            r#"{"version":"0","signed_in":"me","awaiting_2fa":false,"running":[],"jobs":[],"proton_default":null}"#,
+        )
+        .unwrap();
+        assert!(s.accounts.is_empty());
+        let e: LibraryEntry = serde_json::from_str(
+            r#"{"product_id":1,"name":"x","installed":null,"update_available":false,"running":false}"#,
+        )
+        .unwrap();
+        assert!(e.owned_by.is_empty());
     }
 }

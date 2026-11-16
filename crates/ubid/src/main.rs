@@ -3,7 +3,7 @@
 //! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `ubi-api` for the protocol.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,25 +16,51 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use ubi_api::{
-    ActivityEntry, Art, Envelope, Event, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, Status,
+    Account, ActivityEntry, Art, Envelope, Event, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, SettingOp,
+    Status,
 };
 use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
+use ubi_core::broker::Broker;
 use ubi_core::install::Progress;
 use ubi_core::launcher::{self, Config, Games, LaunchEvent};
-use ubi_core::online::Online;
-use ubi_core::playsession::PlaySessions;
 use ubi_core::library::{Library, ProductConfig};
-use ubi_core::{settings, store};
+use ubi_core::online::{Accounts, Online};
+use ubi_core::playsession::PlaySessions;
+use ubi_core::store::{self, AccountRef};
+use ubi_core::settings;
 
 const ACTIVITY_KEEP: usize = 1000;
 
+/// Which account a game runs (and installs, syncs saves, reports play time) with: its
+/// `account` setting if set; else the default account if it owns the game; else the first
+/// account that does. `owners` is in [`order_owners`] order; empty when unknown, which
+/// leaves the default. `None`: no account at all.
+fn launch_account(setting: Option<&str>, default: Option<&str>, owners: &[String]) -> Option<String> {
+    if let Some(id) = setting {
+        return Some(id.to_owned());
+    }
+    match default {
+        Some(d) if owners.is_empty() || owners.iter().any(|o| o == d) => Some(d.to_owned()),
+        _ => owners.first().cloned().or_else(|| default.map(str::to_owned)),
+    }
+}
+
+/// Order owners like `Status::accounts`: the default first, then sign-in order.
+fn order_owners(owners: &mut [String], accounts: &[AccountRef], default: Option<&str>) {
+    let pos = |id: &String| accounts.iter().position(|a| &a.user_id == id).unwrap_or(usize::MAX);
+    owners.sort_by_key(|id| (Some(id.as_str()) != default, pos(id)));
+}
+
 struct Daemon {
-    /// The single shared Ubisoft login (one demux socket for everything).
-    online: Arc<Online>,
+    /// One Ubisoft login (demux socket) per signed-in account.
+    accounts: Arc<Accounts>,
+    /// For signing in; signed-in sessions refresh through their account's `Online`.
+    auth: Arc<Auth>,
+    /// The Denuvo/play-session broker, to drop an account's connections on sign-out.
+    broker_svc: Arc<Broker>,
     cfg: Arc<Config>,
     broker: String,
     pending_2fa: Mutex<Option<TwoFactorChallenge>>,
-    signed_in: Mutex<Option<String>>,
     jobs: Mutex<BTreeMap<u64, Job>>,
     next_job: AtomicU64,
     running: Mutex<HashSet<u32>>,
@@ -113,19 +139,108 @@ impl Daemon {
             .unwrap_or_else(|| product_id.to_string())
     }
 
+    /// Signed-in accounts for `Status`, and the default's name.
+    fn account_list(&self) -> (Vec<Account>, Option<String>) {
+        match store::accounts_and_default() {
+            Ok((accounts, default)) => {
+                let list: Vec<Account> = accounts
+                    .into_iter()
+                    .map(|a| Account { default: Some(&a.user_id) == default.as_ref(), user_id: a.user_id, name: a.name })
+                    .collect();
+                let name = list.iter().find(|a| a.default).map(|a| a.name.clone());
+                (list, name)
+            }
+            Err(e) => {
+                tracing::warn!("reading signed-in accounts: {e:#}");
+                (Vec::new(), None)
+            }
+        }
+    }
+
+    /// Tell front ends the accounts changed (`signed_in` is the default's name).
+    fn emit_accounts(&self) {
+        let signed_in = self.account_list().1;
+        self.emit(Event::SessionChanged { signed_in });
+    }
+
+    /// The account's name for activity lines, when more than one account is signed in.
+    fn as_account(&self, online: &Online) -> String {
+        match store::accounts() {
+            Ok(list) if list.len() > 1 => list
+                .into_iter()
+                .find(|a| Some(a.user_id.as_str()) == online.user_id())
+                .map(|a| format!(" as {}", a.name))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// The account to use for a game ([`launch_account`]); `explicit` (user id or name)
+    /// overrides the game's setting.
+    async fn account_for(&self, product_id: u32, explicit: Option<&str>) -> Result<Arc<Online>> {
+        let setting = match explicit {
+            Some(q) => Some(store::resolve(q)?.user_id),
+            None => settings::current(product_id)?.0.account,
+        };
+        let (accounts, default) = store::accounts_and_default()?;
+        if let Some(id) = &setting {
+            if !accounts.iter().any(|a| &a.user_id == id) {
+                bail!(
+                    "{}'s launch account ({id}) is not signed in; sign it in, or clear it with `quiver set {product_id} account=`",
+                    self.product_name(product_id)
+                );
+            }
+        }
+        // Ownership only matters when there is a choice to make.
+        let owners = if setting.is_none() && accounts.len() > 1 {
+            match self.library(false).await {
+                Ok(lib) => lib.into_iter().find(|e| e.product_id == product_id).map(|e| e.owned_by).unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!(product_id, "library unavailable to pick an account; using the default: {e:#}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let id = launch_account(setting.as_deref(), default.as_deref(), &owners);
+        self.accounts.get(id.as_deref())
+    }
+
     async fn library(&self, refresh: bool) -> Result<Vec<LibraryEntry>> {
         let mut cache = self.library.lock().await;
         if refresh || cache.is_none() {
-            let online = self.online.clone();
+            // Default account first, so its library supplies names, art and update state.
+            let onlines = self.accounts.all()?;
+            if onlines.is_empty() {
+                bail!("not signed in (run `quiver login`)");
+            }
             let entries = run_local(move || async move {
-                let demux = online.demux().await?;
-                let lib = Library::fetch(&demux).await?;
                 let installed = Games::load()?;
-                let mut out: Vec<LibraryEntry> = lib
-                    .products
-                    .iter()
-                    .filter(|p| p.owned && p.is_installable() && p.product_type == 0 && !p.locked_by_subscription)
-                    .map(|p| {
+                let mut out: Vec<LibraryEntry> = Vec::new();
+                let mut seen: HashMap<u32, usize> = HashMap::new();
+                let mut first_err = None;
+                let mut fetched = 0;
+                for online in &onlines {
+                    let user_id = online.user_id().unwrap_or_default().to_owned();
+                    let lib = match async { Library::fetch(&online.demux().await?).await }.await {
+                        Ok(lib) => lib,
+                        Err(e) => {
+                            tracing::warn!(account = %user_id, "library fetch failed: {e:#}");
+                            first_err.get_or_insert(e);
+                            continue;
+                        }
+                    };
+                    fetched += 1;
+                    for p in lib
+                        .products
+                        .iter()
+                        .filter(|p| p.owned && p.is_installable() && p.product_type == 0 && !p.locked_by_subscription)
+                    {
+                        if let Some(&i) = seen.get(&p.product_id) {
+                            out[i].owned_by.push(user_id.clone());
+                            continue;
+                        }
                         let game = installed.get(p.product_id).cloned();
                         let config = p.configuration.as_deref().and_then(|c| ProductConfig::parse(c).ok());
                         let art = config
@@ -135,16 +250,21 @@ impl Daemon {
                                 logo: c.art("logo_image"),
                             })
                             .unwrap_or_default();
-                        LibraryEntry {
+                        seen.insert(p.product_id, out.len());
+                        out.push(LibraryEntry {
                             product_id: p.product_id,
                             name: p.name.clone().unwrap_or_else(|| p.product_id.to_string()),
                             update_available: game.as_ref().is_some_and(|g| launcher::update_available(g, &lib)),
                             installed: game,
                             running: false,
                             art,
-                        }
-                    })
-                    .collect();
+                            owned_by: vec![user_id.clone()],
+                        });
+                    }
+                }
+                if fetched == 0 {
+                    return Err(first_err.unwrap_or_else(|| anyhow::anyhow!("no library")));
+                }
                 out.sort_by(|a, b| b.installed.is_some().cmp(&a.installed.is_some()).then_with(|| a.name.cmp(&b.name)));
                 Ok(out)
             })
@@ -167,40 +287,59 @@ impl Daemon {
         Ok(match req {
             Request::Status => {
                 let jobs = self.jobs.lock().unwrap().values().cloned().collect();
+                let (accounts, signed_in) = self.account_list();
                 json!(Status {
                     version: env!("CARGO_PKG_VERSION").into(),
-                    signed_in: self.signed_in.lock().unwrap().clone(),
+                    signed_in,
                     awaiting_2fa: self.pending_2fa.lock().unwrap().is_some(),
                     running: self.running.lock().unwrap().iter().copied().collect(),
                     jobs,
                     proton_default: self.cfg.proton.file_name().map(|n| n.to_string_lossy().into_owned()),
                     broker: self.broker.clone(),
+                    accounts,
                 })
             }
             Request::Login { email, password } => {
-                let online = self.online.clone();
-                let outcome = run_local(move || async move { online.auth.login(&email, &password).await }).await?;
-                let r = self.finish_login(source, outcome)?;
-                if matches!(r, LoginResult::SignedIn { .. }) {
-                    self.online.reset().await;
-                }
-                json!(r)
+                let auth = self.auth.clone();
+                let outcome = run_local(move || async move { auth.login(&email, &password).await }).await?;
+                json!(self.finish_login(source, outcome).await?)
             }
             Request::Login2fa { code } => {
                 let challenge = self.pending_2fa.lock().unwrap().clone().context("no sign-in waiting for a 2FA code")?;
-                let online = self.online.clone();
-                let session = run_local(move || async move { online.auth.complete_2fa(&challenge, &code).await }).await?;
-                let r = self.finish_login(source, LoginOutcome::Done(session))?;
-                self.online.reset().await;
-                json!(r)
+                let auth = self.auth.clone();
+                let session = run_local(move || async move { auth.complete_2fa(&challenge, &code).await }).await?;
+                json!(self.finish_login(source, LoginOutcome::Done(session)).await?)
             }
-            Request::Logout => {
-                store::clear()?;
-                self.online.reset().await;
-                *self.signed_in.lock().unwrap() = None;
+            Request::Logout { account } => {
+                let id = match account {
+                    Some(q) => store::resolve(&q)?.user_id,
+                    None => store::default_account()?.context("not signed in")?,
+                };
+                if let Some(s) = self.sessions.list().into_iter().find(|s| s.account == id) {
+                    bail!("{} is running on this account; stop it first", self.product_name(s.product_id));
+                }
+                let removed = store::clear(Some(&id))?;
+                self.accounts.reset(&id).await;
+                self.broker_svc.forget(&id).await;
                 *self.library.lock().await = None;
-                self.log_activity(source, "signed out".into(), None);
-                self.emit(Event::SessionChanged { signed_in: None });
+                let name = removed.map(|a| a.name).unwrap_or(id);
+                self.log_activity(source, format!("signed out {name}"), None);
+                self.emit_accounts();
+                self.emit(Event::LibraryChanged);
+                Value::Null
+            }
+            Request::AccountDefault { account } => {
+                let a = store::resolve(&account)?;
+                store::set_default(&a.user_id)?;
+                if let Some(lib) = self.library.lock().await.as_mut() {
+                    let accounts = store::accounts()?;
+                    for e in lib.iter_mut() {
+                        order_owners(&mut e.owned_by, &accounts, Some(&a.user_id));
+                    }
+                }
+                self.log_activity(source, format!("default account is now {}", a.name), None);
+                self.emit_accounts();
+                self.emit(Event::LibraryChanged);
                 Value::Null
             }
             Request::Library { refresh } => json!(self.library(refresh).await?),
@@ -211,10 +350,17 @@ impl Daemon {
                     .ok()
                     .and_then(|l| l.into_iter().find(|e| e.product_id == product_id).map(|e| e.name))
                     .unwrap_or_else(|| self.product_name(product_id));
-                json!(self.start_install(source, product_id, name, language))
+                let online = self.account_for(product_id, None).await?;
+                json!(self.start_install(source, product_id, name, language, online))
             }
-            Request::Play { product_id } => json!(self.start_play(source, product_id)?),
-            Request::Import { product_id, path, language } => json!(self.start_import(source, product_id, path, language)),
+            Request::Play { product_id } => {
+                let online = self.account_for(product_id, None).await?;
+                json!(self.start_play(source, product_id, online)?)
+            }
+            Request::Import { product_id, path, language } => {
+                let online = self.account_for(product_id, None).await?;
+                json!(self.start_import(source, product_id, path, language, online))
+            }
             Request::Uninstall { product_id, remove_prefix } => {
                 if self.running.lock().unwrap().contains(&product_id) {
                     bail!("stop the game first");
@@ -263,6 +409,16 @@ impl Daemon {
                 json!({ "revision": revision, "settings": s })
             }
             Request::SettingsSet { product_id, ops, message } => {
+                // `account=<name|id|prefix>` is stored as the account's user id.
+                let ops = ops
+                    .into_iter()
+                    .map(|op| match op {
+                        SettingOp::Set { key, value } if key == "account" => {
+                            Ok(SettingOp::Set { key, value: store::resolve(&value)?.user_id })
+                        }
+                        op => Ok(op),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 if let Some(p) = ops.iter().find_map(|op| match op {
                     ubi_api::SettingOp::Set { key, value } if key == "proton" => Some(value.clone()),
                     _ => None,
@@ -281,8 +437,10 @@ impl Daemon {
                 self.emit(Event::SettingsChanged { product_id, revision: rev.revision, source: source.to_owned() });
                 json!(rev)
             }
-            Request::LaunchContext { product_id, savegame_path, install_dir } => {
-                let (online, broker) = (self.online.clone(), self.broker.clone());
+            Request::LaunchContext { product_id, savegame_path, install_dir, account } => {
+                let online = self.account_for(product_id, account.as_deref()).await?;
+                let label = self.as_account(&online);
+                let broker = self.broker.clone();
                 let ctx = run_local(move || async move {
                     let session = online.session().await?;
                     let demux = online.demux().await?;
@@ -296,13 +454,13 @@ impl Daemon {
                     Ok(ctx)
                 })
                 .await?;
-                self.log_activity(source, format!("issued launch context for {product_id}"), Some(product_id));
+                self.log_activity(source, format!("issued launch context for {product_id}{label}"), Some(product_id));
                 json!(ctx)
             }
             Request::ProtonList => json!(launcher::list_protons()),
             Request::Playtime { product_id } => json!(settings::playtime(product_id)?),
             Request::RemotePlaytime { product_id } => {
-                let online = self.online.clone();
+                let online = self.account_for(product_id, None).await?;
                 run_local(move || async move {
                     use ubi_core::proto::playtime as pt;
                     let session = online.session().await?;
@@ -343,30 +501,45 @@ impl Daemon {
         })
     }
 
-    fn finish_login(&self, source: &str, outcome: LoginOutcome) -> Result<LoginResult> {
+    /// A sign-in adds its account (or refreshes it, if already signed in); the first
+    /// account becomes the default.
+    async fn finish_login(&self, source: &str, outcome: LoginOutcome) -> Result<LoginResult> {
         match outcome {
             LoginOutcome::TwoFactor(c) => {
                 *self.pending_2fa.lock().unwrap() = Some(c);
                 Ok(LoginResult::TwoFactorRequired)
             }
             LoginOutcome::Done(session) => {
+                let known = store::accounts()?.iter().any(|a| a.user_id == session.user_id);
                 store::save(&session)?;
                 *self.pending_2fa.lock().unwrap() = None;
-                *self.signed_in.lock().unwrap() = Some(session.name.clone());
-                self.log_activity(source, format!("signed in as {}", session.name), None);
-                self.emit(Event::SessionChanged { signed_in: Some(session.name.clone()) });
+                // Reconnect with the new ticket.
+                self.accounts.reset(&session.user_id).await;
+                self.broker_svc.forget(&session.user_id).await;
+                *self.library.lock().await = None;
+                let what = if known { "signed in again as" } else { "added account" };
+                self.log_activity(source, format!("{what} {}", session.name), None);
+                self.emit_accounts();
+                self.emit(Event::LibraryChanged);
                 Ok(LoginResult::SignedIn { name: session.name })
             }
         }
     }
 
-    fn start_install(self: &Arc<Self>, source: &str, product_id: u32, name: String, language: Option<String>) -> u64 {
+    fn start_install(
+        self: &Arc<Self>,
+        source: &str,
+        product_id: u32,
+        name: String,
+        language: Option<String>,
+        online: Arc<Online>,
+    ) -> u64 {
         let id = self.new_job(JobKind::Install, product_id, name.clone());
         let dest = Games::load()
             .ok()
             .and_then(|g| g.get(product_id).map(|g| g.install_dir.clone()))
             .unwrap_or_else(|| self.cfg.library.join(launcher::slug(&name)));
-        self.log_activity(source, format!("install {name}"), Some(product_id));
+        self.log_activity(source, format!("install {name}{}", self.as_account(&online)), Some(product_id));
         let this = self.clone();
         let progress = Arc::new(Progress::default());
         self.installs.lock().unwrap().insert(id, (progress.clone(), false, dest));
@@ -389,7 +562,7 @@ impl Daemon {
             });
         }
         tokio::spawn(async move {
-            let (cfg, online) = (this.cfg.clone(), this.online.clone());
+            let cfg = this.cfg.clone();
             let lang = language.unwrap_or_else(|| "en-US".into());
             let status_this = this.clone();
             let p = progress.clone();
@@ -427,12 +600,19 @@ impl Daemon {
         id
     }
 
-    fn start_import(self: &Arc<Self>, source: &str, product_id: u32, path: std::path::PathBuf, language: Option<String>) -> u64 {
+    fn start_import(
+        self: &Arc<Self>,
+        source: &str,
+        product_id: u32,
+        path: std::path::PathBuf,
+        language: Option<String>,
+        online: Arc<Online>,
+    ) -> u64 {
         let id = self.new_job(JobKind::Import, product_id, product_id.to_string());
-        self.log_activity(source, format!("import {product_id} from {}", path.display()), Some(product_id));
+        self.log_activity(source, format!("import {product_id} from {}{}", path.display(), self.as_account(&online)), Some(product_id));
         let this = self.clone();
         tokio::spawn(async move {
-            let (cfg, online) = (this.cfg.clone(), this.online.clone());
+            let cfg = this.cfg.clone();
             let lang = language.unwrap_or_else(|| "en-US".into());
             let st = this.clone();
             let result = run_local(move || async move {
@@ -463,17 +643,17 @@ impl Daemon {
         id
     }
 
-    fn start_play(self: &Arc<Self>, source: &str, product_id: u32) -> Result<u64> {
+    fn start_play(self: &Arc<Self>, source: &str, product_id: u32, online: Arc<Online>) -> Result<u64> {
         let game = Games::load()?.get(product_id).cloned().context("not installed")?;
         if !self.running.lock().unwrap().insert(product_id) {
             bail!("{} is already running", game.name);
         }
         let (s, rev) = settings::current(product_id)?;
         let id = self.new_job(JobKind::Play, product_id, game.name.clone());
-        self.log_activity(source, format!("play {} (settings r{rev})", game.name), Some(product_id));
+        self.log_activity(source, format!("play {}{} (settings r{rev})", game.name, self.as_account(&online)), Some(product_id));
         let this = self.clone();
         tokio::spawn(async move {
-            let (cfg, online, broker) = (this.cfg.clone(), this.online.clone(), this.broker.clone());
+            let (cfg, broker) = (this.cfg.clone(), this.broker.clone());
             let sessions = this.sessions.clone();
             let ev_this = this.clone();
             let g = game.clone();
@@ -591,7 +771,7 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
 
     let cfg = Arc::new(Config::load()?);
-    let online = Online::new(Auth::default());
+    let accounts = Accounts::new();
     // A fixed port lets external bridges (containers, Steam prefixes) find the broker.
     let broker_addr = std::env::var("QUIVER_BROKER")
         .or_else(|_| std::env::var("UBID_BROKER"))
@@ -609,7 +789,7 @@ async fn main() -> Result<()> {
         let events = events.clone();
         let list: Arc<Mutex<Option<Arc<PlaySessions>>>> = Arc::default();
         let l = list.clone();
-        let s = PlaySessions::new(online.clone(), cfg.report_playtime, move || {
+        let s = PlaySessions::new(accounts.clone(), cfg.report_playtime, move || {
             if let Some(s) = &*l.lock().unwrap() {
                 let _ = events.send(Event::SessionsChanged { sessions: s.list() });
             }
@@ -617,15 +797,21 @@ async fn main() -> Result<()> {
         *list.lock().unwrap() = Some(s.clone());
         s
     };
-    tokio::spawn(ubi_core::broker::Broker::new(online.clone(), Some(sessions.clone())).serve(broker_listener));
+    let broker_svc = Broker::new(accounts.clone(), Some(sessions.clone()));
+    tokio::spawn(broker_svc.clone().serve(broker_listener));
 
-    let signed_in = match online.session().await {
-        Ok(s) => Some(s.name),
-        Err(e) => {
-            tracing::info!("not signed in: {e:#}");
-            None
+    // Also moves a pre-multi-account keyring entry to its per-account one.
+    match store::accounts_and_default() {
+        Ok((list, _)) if list.is_empty() => tracing::info!("not signed in"),
+        Ok((list, default)) => {
+            let names: Vec<String> = list
+                .iter()
+                .map(|a| if Some(&a.user_id) == default.as_ref() { format!("{} (default)", a.name) } else { a.name.clone() })
+                .collect();
+            tracing::info!("signed in: {}", names.join(", "));
         }
-    };
+        Err(e) => tracing::warn!("reading signed-in accounts: {e:#}"),
+    }
     let activity: VecDeque<ActivityEntry> = std::fs::read_to_string(launcher::data_dir().join("activity.jsonl"))
         .unwrap_or_default()
         .lines()
@@ -637,11 +823,12 @@ async fn main() -> Result<()> {
         .rev()
         .collect();
     let daemon = Arc::new(Daemon {
-        online,
+        accounts,
+        auth: Arc::new(Auth::default()),
+        broker_svc,
         cfg,
         broker,
         pending_2fa: Mutex::new(None),
-        signed_in: Mutex::new(signed_in),
         jobs: Mutex::new(BTreeMap::new()),
         next_job: AtomicU64::new(1),
         running: Mutex::new(HashSet::new()),
@@ -655,6 +842,49 @@ async fn main() -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         tokio::spawn(serve_conn(daemon.clone(), stream));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn launch_account_rule() {
+        let pick = |setting, default, owners: &[&str]| launch_account(setting, default, &ids(owners));
+        // The game's setting wins, even over a default that owns it.
+        assert_eq!(pick(Some("fam"), Some("me"), &["me", "fam"]).as_deref(), Some("fam"));
+        assert_eq!(pick(Some("fam"), Some("me"), &[]).as_deref(), Some("fam"));
+        // The default, when it owns the game.
+        assert_eq!(pick(None, Some("me"), &["me", "fam"]).as_deref(), Some("me"));
+        assert_eq!(pick(None, Some("me"), &["fam", "me"]).as_deref(), Some("me"));
+        // Otherwise the first owner.
+        assert_eq!(pick(None, Some("me"), &["fam", "third"]).as_deref(), Some("fam"));
+        // Ownership unknown: the default.
+        assert_eq!(pick(None, Some("me"), &[]).as_deref(), Some("me"));
+        // No default (nobody signed in): only an owner or a setting can name one.
+        assert_eq!(pick(None, None, &[]), None);
+        assert_eq!(pick(None, None, &["fam"]).as_deref(), Some("fam"));
+    }
+
+    #[test]
+    fn owners_default_first_then_sign_in_order() {
+        let accounts: Vec<AccountRef> = ["a", "b", "c"]
+            .iter()
+            .map(|id| AccountRef { user_id: id.to_string(), name: id.to_uppercase() })
+            .collect();
+        let mut owners = ids(&["a", "b", "c"]);
+        order_owners(&mut owners, &accounts, Some("c"));
+        assert_eq!(owners, ["c", "a", "b"]);
+        order_owners(&mut owners, &accounts, Some("b"));
+        assert_eq!(owners, ["b", "a", "c"]);
+        let mut owners = ids(&["c", "x", "a"]);
+        order_owners(&mut owners, &accounts, None);
+        assert_eq!(owners, ["a", "c", "x"]);
     }
 }
 
