@@ -325,6 +325,11 @@ pub struct PlaySession {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_revision: Option<u32>,
+    /// Mod versions: the mods the launch ran, bottom to top, each with the version it
+    /// resolved to ("DLSS v3 (current)"), so the session can be reproduced even after the
+    /// mod's current version moves on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<mods::ResolvedMod>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

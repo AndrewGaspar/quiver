@@ -1,7 +1,8 @@
 # Mods v2: one model for files, settings and config (design notes)
 
-Status: agreed direction (2026-11-16); backend built on `feat/mods-v2` (core, daemon, API,
-CLI). The app's UI is still to come. See "As built" at the end and README "Mods v2".
+Status: agreed direction (2026-11-16); built (core, daemon, API, CLI, app). Mods are
+versioned (decision 7–12, "Mod versions (as built)"). See "As built" at the end and README
+"Mods v2" and "Mod versions".
 
 ## Problem
 
@@ -75,6 +76,33 @@ steer by whether its mods can break saves.
 6. **Moving between stores** is a plain setting; combining two stores is an explicit
    **merge** (per slot, newer mtime wins, the target is backed up first, refused while the game
    runs). Retiring a store keeps its files.
+
+## Decision (user, 2026-11-16, later still): mods are versioned
+
+User request: "mods can just install new versions and have all existing profiles pick up
+those updates automatically", without the "DLSS / DLSS-v2 / DLSS-v3" pile of separate mods,
+"but track the versions as separate objects, so the user can override and use an older
+version".
+
+7. **A mod is a stable identity** (id, name, on/off) with **one or more versions**. Each
+   version is its own object: its files folder (never rewritten once added) and manifest
+   (deletions, launch settings, config patches, save compatibility, known builds), a free-text
+   label unique within the mod (`3.8.10`, `v3`), added-at/by, notes, and flags *retired*
+   (kept, hidden from defaults, can't be current) and *pre-release* (added, not current).
+8. **Profiles reference mods, not versions, by default.** A stack entry `MOD` tracks the
+   mod's *current* version; `MOD@VERSION` pins one. Adding a version makes it current (unless
+   `--no-update` or a pre-release), so every tracking profile runs it at its next launch.
+   `version use` rolls the current version back or forward for everyone; pinning is per
+   profile.
+9. **Save compatibility is per version.** A version that may change saves reaching a profile
+   that shares vanilla's store or Default warns (when added, in `mods list` and `plan`),
+   through the save stores' steering. Saves never move on their own.
+10. **Reproducible play history:** launches and sessions record the version each mod resolved
+    to ("DLSS v3 (current)").
+11. **Built-ins are versioned the same way:** a newer catalog manifest becomes a new current
+    version.
+12. **Consolidating separate mods is explicit** (`merge-versions INTO FROM…`); nothing is
+    merged by guessing from names.
 
 ## Distribution
 
@@ -165,6 +193,64 @@ steer by whether its mods can break saves.
   is kept, so restoring the profile brings it back. `ModsState::default_profile` reports it.
   CLI: `quiver mods <game> default PROFILE|vanilla`; app: the profile chip next to Play.
 
+### Mod versions (as built, 2026-11-16)
+
+- **Types** (`ubi_api::mods`): `ModRecord` (id, name, current, versions, disabled),
+  `ModVersion` (id, label, added, added_by, notes, retired, prerelease), `ModRevision`
+  (whole-record history entries; `deleted` for a mod merged away or removed),
+  `ResolvedMod` (an entry resolved: mod, version, label, pinned, current; `describe()`),
+  `mods_of`/`resolve_entry`/`split_entry`/`stack_entry`; `ModsState.mods` (every mod, one-version
+  ones included), `ProfileInfo.resolved`, `LaunchPlan.resolved`, `ModDetail.record/used_as`,
+  `PlaySession.mods`, `MigrationReport.builtin_updates`; replies `VersionChange`,
+  `VersionMerge`. Requests (appended): `VersionAdd`, `VersionUse`, `VersionRetire`,
+  `ModHistory`, `MergeVersions`. Core: `ubi_core::modversions`.
+- **Storage:** a version *is* a layer: `mods/<product>/layers/<version id>/` (files),
+  `<version id>.json` (its `Layer`: metadata and manifest), `games/<product>/layers/<version
+  id>.jsonl` (deletions history). A mod's record is `games/<product>/mods/<mod id>.jsonl`, one
+  whole record per revision, the last current. New version ids start with `v`.
+- **Ids and old data:** a layer that was never versioned is a one-version mod whose id is the
+  layer's id (`ModRecord::implicit`; label: the manifest's `version`, else `v1`), so v1/v2
+  stores, profile entries and histories read unchanged and nothing is written until a mod
+  gets a second version, a label or a merge; then revision 1 records the mod as it was and
+  revision 2 the change. The mod id is the first layer's id forever, so it stays valid
+  wherever it was used. A profile entry that is a bare *version* id (old revisions, or one
+  that named `DLSS-v2` before a merge) resolves pinned to that version: restoring an old
+  profile revision runs exactly what it ran.
+- **Adding a version** (`add_version`): a package folder brings its own manifest and files;
+  a plain folder keeps the current version's manifest (save compatibility, kind, launch
+  settings, patches, requires/conflicts, without `version`, `builds`, `audited`) and its
+  deletions, plus `--delete`; `--save-compatible` overrides. Labels: given, else the
+  package's `version`, else `vN`. Installing a package whose manifest id is installed adds a
+  version (the same manifest again is refused).
+- **Resolution:** the stack resolves each entry to a version (a turned-off mod is skipped as
+  before; a pin to a retired version runs with a note); the version's layer, named after its
+  mod ("DLSS v3"), is what mounts, conflicts, save advice and warnings see. Config patches are
+  recorded under the **mod's** id, so switching versions reconciles like any change of what
+  the mod wants: keys the new version sets get its values (the file's own value stays
+  recorded), keys it no longer sets go back, keys it adds are recorded fresh. `undo-patches
+  MOD` and `applied_by` cover the mod's id and its versions' ids (records from before).
+- **Mod-level vs version-level settings:** `name`, `enabled` are the mod's (in its record once
+  versioned); `save_compatible`, `kind` are a version's manifest (current, or `MOD@VERSION`);
+  `label`, `notes` are a version's entry in the record.
+- **Retire:** not the current version; pins keep running it (with a note); `unretire`
+  brings it back; `version use` refuses a retired version.
+- **Merge** (`merge_versions`): every version of each FROM mod joins INTO (it keeps its id and
+  name), ordered by added time; labels: `--labels` in order, else a version keeps a label it
+  had (versioned mod, or a manifest `version`) and the rest are `vN` by position; the newest
+  live version becomes current. Each live profile entry that resolved to one of these mods is
+  rewritten to INTO, tracking current if it ran the newest version and pinned to what it ran
+  otherwise, so no launch changes; a profile stacking two of them is refused. Revisions: the
+  mod's (revision 1 as it was, then the merge), a `deleted` revision for a versioned FROM, a
+  note in each moved version's layer history, a profile revision per rewritten stack. Agents
+  need confirmation; `--dry-run` shows everything first.
+- **Built-ins:** `install ID` with a newer catalog manifest adds it as a new current version
+  (or makes the version that has it current again). The daemon does the same at launch
+  (`migrate`, and for vanilla launches) unless someone made an older version current by hand.
+- **Uninstall** removes every version (refused while any version is stacked).
+- **App:** the Mods tab stacks mods (version chips: track current or pin), the mod store shows
+  each mod's current version and its history (Make current, Retire / Bring back, who pins
+  what).
+
 ### Known limits
 
 - A profile without its own copy of a folder shares that folder's files with every other
@@ -174,3 +260,8 @@ steer by whether its mods can break saves.
   any patch vanilla had applied then; undoing in the copy restores the prefix's pre-Quiver
   value (recorded in the prefix's entry).
 - `profile_config` folders are comma-separated, so a folder name with a comma can't be given.
+- A single version can't be deleted (retire keeps its files); uninstalling removes them all.
+- `layer delete-files` still edits a version's deletions in place (recorded in its history);
+  a new version is the way to change what a mod ships.
+- Mod revisions can be listed (`version history`) but not restored as a whole; `version use`,
+  `unretire` and profile restores undo the usual changes.

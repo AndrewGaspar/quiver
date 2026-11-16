@@ -10,7 +10,13 @@
 //! <data>/mods/<product>/patches.json              config keys Quiver changed and their own values
 //! <data>/games/<product>/profiles/<id>.jsonl      the profile's history; the last line is current
 //! <data>/games/<product>/layers/<mod-id>.jsonl    the history of the mod's deletions and metadata
+//! <data>/games/<product>/mods/<mod-id>.jsonl      a versioned mod's history (crate::modversions)
 //! ```
+//!
+//! **Mod versions** ([`crate::modversions`]): a mod has one or more versions, each a layer
+//! of its own (folder, metadata, deletions history). A layer that was never versioned is a
+//! mod with one version whose id is the mod's. A profile's stack entry `MOD` tracks the
+//! mod's current version, `MOD@VERSION` (or a bare version id) is pinned.
 //!
 //! **Mods v2.** An installed mod is a layer with a manifest (launch settings, config
 //! patches, metadata); a layer from before Mods v2 is a file-only mod and needs no
@@ -41,10 +47,12 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-pub use ubi_api::mods::{Conflict, Layer, LayerChange, LayerRevision, ModsState, Profile, ProfileInfo, ProfileRevision, VANILLA};
+pub use ubi_api::mods::{
+    Conflict, Layer, LayerChange, LayerRevision, ModRecord, ModsState, Profile, ProfileInfo, ProfileRevision, ResolvedMod, VANILLA,
+};
 use ubi_api::mods::{
     AppliedKey, CatalogEntry, ConfigDir, LaunchPlan, MigrationReport, ModDetail, ModKind, ModManifest, Mount, PatchState,
-    PatchStatus, PatchedFile, SavesPlan, SettingConflict, ValueFrom,
+    PatchStatus, PatchedFile, SavesPlan, SettingConflict, ValueFrom, mods_of, resolve_entry, split_entry, stack_entry,
 };
 use ubi_api::{Game, GameSettings, SettingOp};
 
@@ -121,7 +129,7 @@ pub(crate) fn new_id(prefix: char) -> Result<String> {
     Ok(id)
 }
 
-fn same_name(a: &str, b: &str) -> bool {
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
@@ -418,19 +426,23 @@ pub fn match_case(layer: &Path, install: &Path) -> Result<usize> {
 }
 
 /// The mods a launch applies (bottom to top) and what was found about them.
-struct Stack {
-    mods: Vec<Layer>,
-    problems: Vec<String>,
-    warnings: Vec<String>,
+pub(crate) struct Stack {
+    /// The versions applied, each named after its mod ("DLSS v3").
+    pub(crate) mods: Vec<Layer>,
+    /// The same, as stack entries resolved (`mods[i]` is version `resolved[i]`).
+    pub(crate) resolved: Vec<ResolvedMod>,
+    pub(crate) problems: Vec<String>,
+    pub(crate) warnings: Vec<String>,
     setting_conflicts: Vec<SettingConflict>,
     settings: GameSettings,
     file_conflicts: Vec<Conflict>,
 }
 
-/// Config keys that mods in a stack set differently (or one sets and another deletes).
-fn patch_conflicts(mods: &[Layer]) -> Vec<SettingConflict> {
+/// Config keys that mods in a stack set differently (or one sets and another deletes), by
+/// mod id.
+fn patch_conflicts(mods: &[Layer], resolved: &[ResolvedMod]) -> Vec<SettingConflict> {
     let mut seen: BTreeMap<String, (String, Vec<ValueFrom>)> = BTreeMap::new();
-    for m in mods {
+    for (m, r) in mods.iter().zip(resolved) {
         for p in m.patches() {
             let ops = p.set.iter().map(|(k, v)| (k, Some(v.clone()))).chain(p.delete.iter().map(|k| (k, None)));
             for (k, value) in ops {
@@ -440,7 +452,7 @@ fn patch_conflicts(mods: &[Layer]) -> Vec<SettingConflict> {
                     }
                     ubi_api::mods::PatchFormat::Xml => (format!("{} {}@{k}", p.file, p.element), format!("xml|{}|{}|{k}", p.file, p.element)),
                 };
-                seen.entry(norm).or_insert_with(|| (label, Vec::new())).1.push(ValueFrom { from: m.id.clone(), value });
+                seen.entry(norm).or_insert_with(|| (label, Vec::new())).1.push(ValueFrom { from: r.mod_id.clone(), value });
             }
         }
     }
@@ -448,6 +460,14 @@ fn patch_conflicts(mods: &[Layer]) -> Vec<SettingConflict> {
         .filter(|(_, by)| by.iter().any(|b| b.value != by[0].value))
         .map(|(key, by)| SettingConflict { key, by })
         .collect()
+}
+
+/// A version as a stack shows it: named after its mod ("DLSS v3"), on or off with it.
+pub(crate) fn named(l: &Layer, rec: &ModRecord) -> Layer {
+    let mut l = l.clone();
+    l.name = rec.display(&l.id);
+    l.disabled = rec.disabled;
+    l
 }
 
 /// A short stable name for a path (FNV-1a), for overlayfs work folders.
@@ -509,7 +529,7 @@ impl ModStore {
         self.data.join("mods").join(self.product_id.to_string())
     }
 
-    fn layers_dir(&self) -> PathBuf {
+    pub(crate) fn layers_dir(&self) -> PathBuf {
         self.mods_dir().join("layers")
     }
 
@@ -517,7 +537,7 @@ impl ModStore {
         self.layers_dir().join(id)
     }
 
-    fn layer_meta(&self, id: &str) -> PathBuf {
+    pub(crate) fn layer_meta(&self, id: &str) -> PathBuf {
         self.layers_dir().join(format!("{id}.json"))
     }
 
@@ -534,11 +554,11 @@ impl ModStore {
         self.histories_dir().join(format!("{id}.jsonl"))
     }
 
-    fn layer_history_path(&self, id: &str) -> PathBuf {
+    pub(crate) fn layer_history_path(&self, id: &str) -> PathBuf {
         self.data.join("games").join(self.product_id.to_string()).join("layers").join(format!("{id}.jsonl"))
     }
 
-    fn write_layer_meta(&self, layer: &Layer) -> Result<()> {
+    pub(crate) fn write_layer_meta(&self, layer: &Layer) -> Result<()> {
         let path = self.layer_meta(&layer.id);
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(layer)?)?;
@@ -563,24 +583,86 @@ impl ModStore {
         Ok(out)
     }
 
-    /// A layer by id or name.
+    /// A layer (a mod's version) by id, or a mod by id, name or manifest id (its current
+    /// version), or `MOD@VERSION` (a version by id or label).
     pub fn layer(&self, query: &str) -> Result<Layer> {
         let layers = self.layers()?;
-        if let Some(l) = layers.iter().find(|l| l.id == query) {
+        if let Some(l) = layers.iter().find(|l| l.id == query.trim()) {
             return Ok(l.clone());
         }
-        let mut found: Vec<&Layer> = layers.iter().filter(|l| l.mod_id().is_some_and(|m| same_name(m, query))).collect();
-        if found.is_empty() {
-            found = layers.iter().filter(|l| same_name(&l.name, query)).collect();
-        }
-        match found.as_slice() {
-            [l] => Ok((*l).clone()),
-            [] => bail!(
-                "no layer '{query}' (layers: {})",
-                if layers.is_empty() { "none".into() } else { layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ") }
-            ),
-            _ => bail!("'{query}' names more than one layer; use its id"),
-        }
+        let mods = mods_of(&layers, &self.records()?);
+        let (rec, pinned) = self.find_ref(&mods, &layers, query)?;
+        let id = pinned.unwrap_or(rec.current);
+        layers.into_iter().find(|l| l.id == id).with_context(|| format!("version {id} of '{}' has lost its record", rec.name))
+    }
+
+    /// What `query` names: a mod and, if it names one version (`MOD@VERSION`, a version id,
+    /// or the name a version had as a mod of its own), that version's id. Mods match by id,
+    /// then name, then manifest id.
+    pub(crate) fn find_ref(&self, mods: &[ModRecord], layers: &[Layer], query: &str) -> Result<(ModRecord, Option<String>)> {
+        let (q, v) = split_entry(query);
+        let pick = |found: Vec<&ModRecord>| -> Result<Option<ModRecord>> {
+            match found.as_slice() {
+                [] => Ok(None),
+                [r] => Ok(Some((*r).clone())),
+                _ => bail!("'{q}' names more than one mod; use its id"),
+            }
+        };
+        let layer_of = |id: &str| layers.iter().find(|l| l.id == id);
+        let mut by_version = None;
+        let rec = if let Some(r) = mods.iter().find(|r| r.id == q) {
+            r.clone()
+        } else if let Some(r) = mods.iter().find(|r| r.has(q)) {
+            by_version = Some(q.to_owned());
+            r.clone()
+        } else if let Some(r) = pick(mods.iter().filter(|r| same_name(&r.name, q)).collect())? {
+            r
+        } else if let Some(r) = pick(
+            mods.iter().filter(|r| r.versions.iter().any(|x| layer_of(&x.id).and_then(|l| l.mod_id()).is_some_and(|m| same_name(m, q)))).collect(),
+        )? {
+            r
+        } else {
+            // A version's own name from before it was merged ("DLSS-v2").
+            let hits: Vec<(&ModRecord, &str)> = mods
+                .iter()
+                .flat_map(|r| r.versions.iter().filter(|x| layer_of(&x.id).is_some_and(|l| same_name(&l.name, q))).map(move |x| (r, x.id.as_str())))
+                .collect();
+            match hits.as_slice() {
+                [(r, vid)] => {
+                    by_version = Some((*vid).to_owned());
+                    (*r).clone()
+                }
+                [] => bail!(
+                    "no mod '{q}' (mods: {})",
+                    if mods.is_empty() { "none".into() } else { mods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ") }
+                ),
+                _ => bail!("'{q}' names more than one mod; use its id"),
+            }
+        };
+        let pinned = match v {
+            None => by_version,
+            Some(v) if v.eq_ignore_ascii_case("current") => None,
+            Some(v) => {
+                if by_version.is_some() {
+                    bail!("{query}: '{q}' is already a version; name the mod and the version (MOD@VERSION)");
+                }
+                let labels: Vec<&str> = rec.versions.iter().map(|x| x.label.as_str()).collect();
+                Some(rec.version(v).with_context(|| format!("'{}' has no version '{v}' (versions: {})", rec.name, labels.join(", ")))?.id.clone())
+            }
+        };
+        Ok((rec, pinned))
+    }
+
+    /// A mod by id, name or manifest id (or one of its versions' ids).
+    pub fn find_mod(&self, query: &str) -> Result<ModRecord> {
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        Ok(self.find_ref(&mods, &layers, split_entry(query).0)?.0)
+    }
+
+    /// Every mod (one-version mods included), ordered by when each was first added.
+    pub fn mods(&self) -> Result<Vec<ModRecord>> {
+        Ok(mods_of(&self.layers()?, &self.records()?))
     }
 
     /// Copy `src` into the store as a new layer (reflinks where the filesystem supports
@@ -623,13 +705,15 @@ impl ModStore {
         install: Option<&Path>,
         source: &str,
     ) -> Result<LayerChange> {
-        self.add_mod(name, src, deletes, install, source, None, false)
+        self.add_mod(name, src, deletes, install, source, None, false, None)
     }
 
     /// [`Self::add_layer_with`] with a manifest (Mods v2): a mod with a manifest may have no
     /// files at all (only launch settings or config patches).
+    /// `version_of`: the new layer is a version of that mod (named after it, id `v…`), not a
+    /// mod of its own.
     #[allow(clippy::too_many_arguments)]
-    fn add_mod(
+    pub(crate) fn add_mod(
         &self,
         name: &str,
         src: Option<&Path>,
@@ -638,13 +722,14 @@ impl ModStore {
         source: &str,
         manifest: Option<ModManifest>,
         builtin: bool,
+        version_of: Option<&str>,
     ) -> Result<LayerChange> {
         let name = name.trim();
         if name.is_empty() {
             bail!("a layer needs a name");
         }
-        if self.layers()?.iter().any(|l| same_name(&l.name, name)) {
-            bail!("there is already a layer named '{name}'");
+        if version_of.is_none() && self.mods()?.iter().any(|m| same_name(&m.name, name)) {
+            bail!("there is already a mod named '{name}' (a new version of it: quiver mods <game> version add '{name}' DIR)");
         }
         let src = match src {
             Some(src) => {
@@ -663,8 +748,13 @@ impl ModStore {
         if src.is_none() && deletes.is_empty() && manifest.is_none() {
             bail!("a layer needs a folder of files, files to delete, or both");
         }
+        let prefix = match (version_of, &manifest) {
+            (Some(_), _) => 'v',
+            (None, Some(_)) => 'm',
+            (None, None) => 'l',
+        };
         let id = loop {
-            let id = new_id(if manifest.is_some() { 'm' } else { 'l' })?;
+            let id = new_id(prefix)?;
             if !self.layer_dir(&id).exists() {
                 break id;
             }
@@ -832,36 +922,58 @@ impl ModStore {
         self.set_deletions(layer, target.deletes, source, Some(format!("restore revision {revision}")), Vec::new())
     }
 
-    /// Delete a layer and its files. Refused while a profile uses it.
+    /// Delete a mod and every version's files. Refused while a profile uses it.
     pub fn remove_layer(&self, query: &str) -> Result<Layer> {
-        let layer = self.layer(query)?;
-        let users: Vec<String> =
-            self.profiles()?.into_iter().filter(|(p, _)| p.layers.contains(&layer.id)).map(|(p, _)| p.name).collect();
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let (rec, _) = self.find_ref(&mods, &layers, split_entry(query).0)?;
+        let users: Vec<String> = self.users_of(&mods, &rec.id)?.into_iter().map(|(p, _)| p.name).collect();
         if !users.is_empty() {
-            bail!("layer '{}' is used by {}; take it out of those profiles first", layer.name, users.join(", "));
+            bail!("mod '{}' is used by {}; take it out of those profiles first", rec.name, users.join(", "));
         }
-        std::fs::remove_file(self.layer_meta(&layer.id))?;
-        let dir = self.layer_dir(&layer.id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        let _ = std::fs::remove_file(self.layer_history_path(&layer.id));
-        Ok(layer)
-    }
-
-    /// Layer queries (ids or names) to ids, keeping order.
-    fn resolve_layers(&self, queries: &[String]) -> Result<Vec<String>> {
-        let mut ids: Vec<String> = Vec::new();
-        for q in queries {
-            let id = self.layer(q)?.id;
-            if ids.contains(&id) {
-                bail!("layer '{q}' is listed twice");
+        let mut shown = layers.iter().find(|l| l.id == rec.current).cloned().unwrap_or_default();
+        shown.name = rec.name.clone();
+        for v in &rec.versions {
+            let _ = std::fs::remove_file(self.layer_meta(&v.id));
+            let dir = self.layer_dir(&v.id);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
             }
-            ids.push(id);
+            let _ = std::fs::remove_file(self.layer_history_path(&v.id));
         }
-        Ok(ids)
+        if self.versioned(&rec.id) {
+            self.append_mod_revision(&rec, true, "store", Some("removed (with every version's files)".into()), Vec::new())?;
+        }
+        Ok(shown)
     }
 
+    /// Live profiles whose stack has the mod `mod_id` (any version), and how.
+    pub(crate) fn users_of(&self, mods: &[ModRecord], mod_id: &str) -> Result<Vec<(Profile, ResolvedMod)>> {
+        Ok(self
+            .profiles()?
+            .into_iter()
+            .filter_map(|(p, _)| {
+                let r = p.layers.iter().filter_map(|e| resolve_entry(mods, e)).find(|r| r.mod_id == mod_id)?;
+                Some((p, r))
+            })
+            .collect())
+    }
+
+    /// Stack entries as given (mod ids or names, `MOD@VERSION`, version ids) to stored ones,
+    /// keeping order: `MOD` to track the current version, `MOD@VERSION-ID` to pin one.
+    fn resolve_layers(&self, queries: &[String]) -> Result<Vec<String>> {
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let mut out: Vec<(String, String)> = Vec::new();
+        for q in queries {
+            let (rec, pinned) = self.find_ref(&mods, &layers, q)?;
+            if out.iter().any(|(m, _)| *m == rec.id) {
+                bail!("mod '{}' is listed twice ({q})", rec.name);
+            }
+            out.push((rec.id.clone(), stack_entry(&rec.id, pinned.as_deref())));
+        }
+        Ok(out.into_iter().map(|(_, e)| e).collect())
+    }
     /// Files that more than one of `layers` (bottom to top) provides, or that a layer
     /// provides and a higher one deletes (the path or a folder above it), compared without
     /// case like the game does.
@@ -900,7 +1012,7 @@ impl ModStore {
 
     // -- Mods v2: packages ---------------------------------------------------------------
 
-    fn install_dir(&self) -> Option<&Path> {
+    pub(crate) fn install_dir(&self) -> Option<&Path> {
         self.game.as_ref().map(|g| g.install_dir.as_path())
     }
 
@@ -908,24 +1020,35 @@ impl ModStore {
         self.game.as_ref().map(|g| g.prefix.as_path())
     }
 
-    /// The catalog's mods for this game, with whether each is installed.
+    /// The catalog's mods for this game, with whether each is installed (and whether the
+    /// installed mod's current version has a different manifest).
     pub fn catalog(&self) -> Result<Vec<CatalogEntry>> {
-        let installed = self.layers()?;
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
         Ok(crate::modpkg::catalog(self.product_id)?
             .into_iter()
             .map(|manifest| {
-                let have = installed.iter().find(|l| l.builtin && l.mod_id() == Some(manifest.id.as_str()));
+                let have = self.builtin_mod(&mods, &layers, &manifest.id);
                 CatalogEntry {
-                    installed: have.map(|l| l.id.clone()),
-                    update: have.is_some_and(|l| l.manifest.as_ref() != Some(&manifest)),
+                    installed: have.map(|r| r.id.clone()),
+                    update: have.is_some_and(|r| layers.iter().find(|l| l.id == r.current).and_then(|l| l.manifest.as_ref()) != Some(&manifest)),
                     manifest,
                 }
             })
             .collect())
     }
 
-    /// Install a mod package (see [`Package`]). A built-in mod that's already installed is
-    /// updated to the catalog's manifest (its deletions too, as a revision).
+    /// The installed mod a built-in manifest id belongs to.
+    pub(crate) fn builtin_mod<'a>(&self, mods: &'a [ModRecord], layers: &[Layer], id: &str) -> Option<&'a ModRecord> {
+        mods.iter().find(|r| {
+            r.versions.iter().any(|v| layers.iter().any(|l| l.id == v.id && l.builtin && l.mod_id().is_some_and(|m| m.eq_ignore_ascii_case(id))))
+        })
+    }
+
+    /// Install a mod package (see [`Package`]). A built-in mod that's already installed gets
+    /// the catalog's manifest as a new current version (or, if one of its versions has it,
+    /// that one becomes current). A package whose manifest id is already installed becomes a
+    /// new version of that mod.
     pub fn install(&self, pkg: &Package, source: &str) -> Result<LayerChange> {
         let install = self.install_dir();
         let (manifest, files, builtin, name) = match pkg {
@@ -937,7 +1060,7 @@ impl ModStore {
                     None => {
                         // A plain folder of files: a file-only mod, as layers always were.
                         let name = name.clone().unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-                        return self.add_mod(&name, Some(&path), &[], install, source, None, false);
+                        return self.add_mod(&name, Some(&path), &[], install, source, None, false, None);
                     }
                 }
             }
@@ -945,27 +1068,42 @@ impl ModStore {
         if !manifest.products.is_empty() && !manifest.products.contains(&self.product_id) {
             bail!("{} is for product {:?}, not {}", manifest.id, manifest.products, self.product_id);
         }
-        if let Some(old) = self.layers()?.into_iter().find(|l| l.mod_id() == Some(manifest.id.as_str())) {
-            if !(builtin && old.builtin) {
-                bail!("{} is already installed (as {}); uninstall it first", manifest.id, old.id);
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let installed = mods.iter().find(|r| {
+            r.versions.iter().any(|v| layers.iter().any(|l| l.id == v.id && l.mod_id().is_some_and(|m| m.eq_ignore_ascii_case(&manifest.id))))
+        });
+        if let Some(rec) = installed {
+            let was_builtin = self.builtin_mod(&mods, &layers, &manifest.id).is_some();
+            if builtin != was_builtin {
+                bail!("{} is already installed (as {}) from {}; uninstall it first", manifest.id, rec.id, if was_builtin { "the catalog" } else { "a folder" });
             }
-            if old.manifest.as_ref() == Some(&manifest) {
-                let revision = self.layer_history(&old.id)?.last().map_or(0, |r| r.revision);
-                return Ok(LayerChange { layer: old, revision, warnings: vec!["already installed and up to date".into()] });
+            if builtin {
+                return self.update_builtin(rec, &layers, manifest, source);
             }
-            let (deletes, mut warnings) = self.resolve_deletions(&manifest.files.delete, install)?;
-            let (list, notes) = plan_deletions(&[], &deletes, &[])?;
-            warnings.extend(notes);
-            let from = old.manifest.as_ref().and_then(|m| m.version.clone()).unwrap_or_else(|| "?".into());
-            let to = manifest.version.clone().unwrap_or_else(|| "?".into());
-            let new = Layer { name: old.name.clone(), deletes: list, manifest: Some(manifest), ..old.clone() };
-            return self.commit(old, new, vec![format!("manifest {from} -> {to}")], source, Some("updated from the catalog".into()), warnings);
+            let Package::Dir { path, .. } = pkg else { unreachable!() };
+            let same = layers.iter().filter(|l| rec.has(&l.id)).find(|l| l.manifest.as_ref() == Some(&manifest));
+            if let Some(l) = same {
+                bail!(
+                    "{} is already installed (as {}, version {}) with this manifest; to add the folder as a new version anyway: quiver mods <game> version add {} DIR",
+                    manifest.id,
+                    rec.id,
+                    rec.label_of(&l.id),
+                    rec.id
+                );
+            }
+            let opts = crate::modversions::NewVersion { path: Some(path.clone()), ..Default::default() };
+            let vc = self.add_version(&rec.id, &opts, source)?;
+            let revision = self.layer_history(&vc.version.id)?.last().map_or(0, |r| r.revision);
+            let mut warnings = vec![format!("{} was installed already: this is its new version {}", rec.name, vc.record.label_of(&vc.version.id))];
+            warnings.extend(vc.warnings);
+            return Ok(LayerChange { layer: vc.version, revision, warnings });
         }
         let name = name.unwrap_or_else(|| manifest.name.clone());
-        let taken = self.layers()?.iter().any(|l| same_name(&l.name, &name));
+        let taken = mods.iter().any(|m| same_name(&m.name, &name));
         let name = if taken { format!("{name} ({})", manifest.id) } else { name };
         let deletes = manifest.files.delete.clone();
-        self.add_mod(&name, files.as_deref(), &deletes, install, source, Some(manifest), builtin)
+        self.add_mod(&name, files.as_deref(), &deletes, install, source, Some(manifest), builtin, None)
     }
 
     /// The real file behind a recorded config key.
@@ -976,38 +1114,62 @@ impl ModStore {
         }
     }
 
+    /// The ids config patches may be recorded under for a mod: its own (launches record
+    /// the mod's id) and its versions' (what was recorded before they were versions).
+    fn patch_ids(rec: &ModRecord) -> Vec<String> {
+        let mut ids = vec![rec.id.clone()];
+        ids.extend(rec.versions.iter().map(|v| v.id.clone()).filter(|v| *v != rec.id));
+        ids
+    }
+
     /// Put back the files' own values for config keys Quiver changed: for one mod (by id or
-    /// name), or all.
+    /// name, any version), or all.
     pub fn undo_patches(&self, query: Option<&str>) -> Result<Vec<PatchStatus>> {
-        let id = query.map(|q| self.layer(q).map(|l| l.id)).transpose()?;
-        confpatch::undo(&self.record_path(), id.as_deref(), |scope, rel| self.physical(scope, rel))
-    }
-
-    /// Config keys a mod has changed right now.
-    pub fn applied_by(&self, id: &str) -> Result<Vec<AppliedKey>> {
-        Ok(confpatch::applied(&self.record_path())?.into_iter().filter(|k| k.mods.iter().any(|m| m == id)).collect())
-    }
-
-    /// Remove an installed mod: refused while a profile stacks it; the config values it
-    /// changed go back to the files' own first.
-    pub fn uninstall(&self, query: &str) -> Result<(Layer, Vec<PatchStatus>)> {
-        let layer = self.layer(query)?;
-        let users: Vec<String> =
-            self.profiles()?.into_iter().filter(|(p, _)| p.layers.contains(&layer.id)).map(|(p, _)| p.name).collect();
-        if !users.is_empty() {
-            bail!("mod '{}' is used by {}; take it out of those profiles first", layer.name, users.join(", "));
+        let physical = |scope: &str, rel: &str| self.physical(scope, rel);
+        let Some(q) = query else { return confpatch::undo(&self.record_path(), None, physical) };
+        let rec = self.find_mod(q)?;
+        let mut out = Vec::new();
+        for id in Self::patch_ids(&rec) {
+            out.extend(confpatch::undo(&self.record_path(), Some(&id), physical)?);
         }
-        let undone = self.undo_patches(Some(&layer.id))?;
-        Ok((self.remove_layer(&layer.id)?, undone))
+        Ok(out)
     }
 
-    /// Change an installed mod: `enabled=on|off`, `save_compatible=on|off|unknown`,
-    /// `kind=fix|mod`, `name=…`. A layer from before Mods v2 gets a manifest of its own for
-    /// these. Recorded as a revision in the mod's history.
+    /// Config keys a mod (by id or name, any version) has changed right now.
+    pub fn applied_by(&self, query: &str) -> Result<Vec<AppliedKey>> {
+        let ids = Self::patch_ids(&self.find_mod(query)?);
+        Ok(confpatch::applied(&self.record_path())?.into_iter().filter(|k| k.mods.iter().any(|m| ids.contains(m))).collect())
+    }
+
+    /// Remove an installed mod (every version): refused while a profile stacks it; the
+    /// config values it changed go back to the files' own first.
+    pub fn uninstall(&self, query: &str) -> Result<(Layer, Vec<PatchStatus>)> {
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let (rec, _) = self.find_ref(&mods, &layers, split_entry(query).0)?;
+        let users: Vec<String> = self.users_of(&mods, &rec.id)?.into_iter().map(|(p, _)| p.name).collect();
+        if !users.is_empty() {
+            bail!("mod '{}' is used by {}; take it out of those profiles first", rec.name, users.join(", "));
+        }
+        let undone = self.undo_patches(Some(&rec.id))?;
+        Ok((self.remove_layer(&rec.id)?, undone))
+    }
+
+    /// Change an installed mod. The mod: `enabled=on|off`, `name=…`. A version (the current
+    /// one, or `MOD@VERSION`): `save_compatible=on|off|unknown`, `kind=fix|mod` (its
+    /// manifest; a layer from before Mods v2 gets one of its own), `label=…`, `notes=…`.
+    /// Recorded in the version's history (and the mod's, for a versioned mod).
     pub fn set_mod(&self, query: &str, ops: &[SettingOp], source: &str, message: Option<String>) -> Result<LayerChange> {
-        let old = self.layer(query)?;
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let (rec, pinned) = self.find_ref(&mods, &layers, query)?;
+        let vid = pinned.unwrap_or_else(|| rec.current.clone());
+        let old = layers.iter().find(|l| l.id == vid).cloned().with_context(|| format!("version {vid} of '{}' has lost its record", rec.name))?;
+        // Labels and notes live in the mod's record, so they make it a versioned mod.
+        let explicit = self.versioned(&rec.id) || ops.iter().any(|o| matches!(o, SettingOp::Set { key, .. } | SettingOp::Unset { key } if key == "label" || key == "notes"));
         let mut new = old.clone();
-        let mut changes = Vec::new();
+        let mut new_rec = rec.clone();
+        let (mut changes, mut rec_changes) = (Vec::new(), Vec::new());
         for op in ops {
             let (key, value) = match op {
                 SettingOp::Set { key, value } => (key.as_str(), Some(value.trim())),
@@ -1023,8 +1185,21 @@ impl ModStore {
                 let (id, name) = (l.id.clone(), l.name.clone());
                 l.manifest.get_or_insert_with(|| ModManifest { id, name, ..Default::default() })
             }
+            let said = match value {
+                Some(v) => format!("{key}={v}"),
+                None => format!("{key}="),
+            };
+            let mut on_record = false;
             match key {
-                "enabled" => new.disabled = bool_of(value)? == Some(false),
+                "enabled" => {
+                    let off = bool_of(value)? == Some(false);
+                    if explicit {
+                        new_rec.disabled = off;
+                        on_record = true;
+                    } else {
+                        new.disabled = off;
+                    }
+                }
                 "save_compatible" => manifest(&mut new).save_compatible = bool_of(value)?,
                 "kind" => {
                     manifest(&mut new).kind = match value {
@@ -1035,54 +1210,99 @@ impl ModStore {
                 }
                 "name" => {
                     let name = value.filter(|v| !v.is_empty()).context("a mod needs a name")?;
-                    if self.layers()?.iter().any(|l| l.id != old.id && same_name(&l.name, name)) {
+                    if mods.iter().any(|m| m.id != rec.id && same_name(&m.name, name)) {
                         bail!("there is already a mod named '{name}'");
                     }
-                    new.name = name.to_owned();
+                    if explicit {
+                        new_rec.name = name.to_owned();
+                        on_record = true;
+                    } else {
+                        new.name = name.to_owned();
+                    }
                 }
-                k => bail!("unknown mod setting '{k}' (enabled, save_compatible, kind, name)"),
+                "label" => {
+                    let label = value.filter(|v| !v.is_empty()).context("a version needs a label")?;
+                    if new_rec.versions.iter().any(|v| v.id != vid && v.label.eq_ignore_ascii_case(label)) {
+                        bail!("'{}' already has a version labelled '{label}'", rec.name);
+                    }
+                    new_rec.versions.iter_mut().filter(|v| v.id == vid).for_each(|v| v.label = label.to_owned());
+                    on_record = true;
+                }
+                "notes" => {
+                    let notes = value.filter(|v| !v.is_empty()).map(str::to_owned);
+                    new_rec.versions.iter_mut().filter(|v| v.id == vid).for_each(|v| v.notes = notes.clone());
+                    on_record = true;
+                }
+                k => bail!("unknown mod setting '{k}' (enabled, name; for a version: save_compatible, kind, label, notes)"),
             }
-            changes.push(match value {
-                Some(v) => format!("{key}={v}"),
-                None => format!("{key}="),
-            });
+            if on_record {
+                rec_changes.push(if key == "enabled" || key == "name" { said } else { format!("{}: {said}", rec.label_of(&vid)) });
+            } else {
+                changes.push(said);
+            }
         }
         if let Some(m) = &new.manifest {
             crate::modpkg::validate(m)?;
         }
-        self.commit(old, new, changes, source, message, Vec::new())
+        if new_rec != rec {
+            self.write_record(&rec, new_rec.clone(), source, message.clone(), rec_changes)?;
+        }
+        let mut change = self.commit(old, new, changes, source, message, Vec::new())?;
+        if explicit {
+            change.layer.name = new_rec.display(&vid);
+            change.layer.disabled = new_rec.disabled;
+        }
+        Ok(change)
     }
 
-    /// An installed mod in detail.
+    /// An installed mod in detail: its current version, or the one asked for
+    /// (`MOD@VERSION`, a version id).
     pub fn detail(&self, query: &str) -> Result<ModDetail> {
-        let layer = self.layer(query)?;
-        let used_by = self.profiles()?.into_iter().filter(|(p, _)| p.layers.contains(&layer.id)).map(|(p, _)| p.name).collect();
-        let catalog_update = if layer.builtin {
-            crate::modpkg::catalog(self.product_id)?
-                .into_iter()
-                .find(|m| Some(m.id.as_str()) == layer.mod_id())
-                .filter(|m| Some(m) != layer.manifest.as_ref())
-        } else {
-            None
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        let (rec, pinned) = self.find_ref(&mods, &layers, query)?;
+        let vid = pinned.unwrap_or_else(|| rec.current.clone());
+        let mut layer = layers.iter().find(|l| l.id == vid).cloned().with_context(|| format!("version {vid} of '{}' has lost its record", rec.name))?;
+        let users = self.users_of(&mods, &rec.id)?;
+        let current = layers.iter().find(|l| l.id == rec.current);
+        let catalog_update = match current.filter(|l| l.builtin).and_then(|l| l.mod_id()) {
+            Some(id) => crate::modpkg::catalog(self.product_id)?.into_iter().find(|m| m.id == id).filter(|m| Some(m) != current.and_then(|l| l.manifest.as_ref())),
+            None => None,
         };
+        layer.name = rec.display(&vid);
+        layer.disabled = rec.disabled;
         Ok(ModDetail {
-            on_vanilla: self.vanilla_fixes()?.iter().any(|l| l.id == layer.id),
-            applied: self.applied_by(&layer.id)?,
-            used_by,
+            on_vanilla: self.vanilla_stack(&mods, &layers).iter().any(|(_, r)| r.mod_id == rec.id),
+            applied: self.applied_by(&rec.id)?,
+            used_by: users.iter().map(|(p, _)| p.name.clone()).collect(),
+            used_as: users.iter().map(|(p, r)| format!("{}: {}", p.name, r.describe())).collect(),
             catalog_update,
             layer,
+            record: Some(rec),
         })
     }
 
-    /// Enabled `fix` mods that apply to vanilla (none unless `fixes_on_vanilla` is on), in
-    /// the order they were installed.
+    /// Enabled `fix` mods (their current versions) that apply to vanilla (none unless
+    /// `fixes_on_vanilla` is on), in the order they were installed.
     pub fn vanilla_fixes(&self) -> Result<Vec<Layer>> {
-        if self.fixes_on_vanilla != Some(true) {
-            return Ok(Vec::new());
-        }
-        Ok(self.layers()?.into_iter().filter(|l| l.enabled() && l.kind() == ModKind::Fix && l.save_compatible()).collect())
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        Ok(self.vanilla_stack(&mods, &layers).into_iter().map(|(l, _)| l).collect())
     }
 
+    fn vanilla_stack(&self, mods: &[ModRecord], layers: &[Layer]) -> Vec<(Layer, ResolvedMod)> {
+        if self.fixes_on_vanilla != Some(true) {
+            return Vec::new();
+        }
+        mods.iter()
+            .filter(|r| !r.disabled)
+            .filter_map(|r| {
+                let res = resolve_entry(mods, &r.id)?;
+                let l = layers.iter().find(|l| l.id == res.version)?;
+                (l.kind() == ModKind::Fix && l.save_compatible()).then(|| (named(l, r), res))
+            })
+            .collect()
+    }
     // -- profiles -------------------------------------------------------------------------
 
     pub fn history(&self, id: &str) -> Result<Vec<ProfileRevision>> {
@@ -1280,16 +1500,27 @@ impl ModStore {
     }
 
     fn info(&self, r: ProfileRevision) -> ProfileInfo {
-        let missing_layers = r.profile.layers.iter().filter(|id| !self.layer_meta(id).exists()).cloned().collect();
+        let (layers, mods) = match self.layers().and_then(|l| Ok((mods_of(&l, &self.records()?), l))) {
+            Ok((m, l)) => (l, m),
+            Err(_) => (Vec::new(), Vec::new()),
+        };
+        let resolved: Vec<ResolvedMod> = r.profile.layers.iter().filter_map(|e| resolve_entry(&mods, e)).collect();
+        let missing_layers = r
+            .profile
+            .layers
+            .iter()
+            .filter(|e| resolve_entry(&mods, e).is_none_or(|x| !layers.iter().any(|l| l.id == x.version)))
+            .cloned()
+            .collect();
         let (conflicts, setting_conflicts, problems, warnings, saves) = match self.stack(Some(&r.profile)) {
             Ok(st) => {
                 let saves = self.saves_plan(Some(&r.profile), &st.mods);
                 (st.file_conflicts, st.setting_conflicts, st.problems, st.warnings, Some(saves))
             }
-            Err(e) => (self.conflicts(&r.profile.layers), Vec::new(), vec![format!("{e:#}")], Vec::new(), None),
+            Err(e) => (Vec::new(), Vec::new(), vec![format!("{e:#}")], Vec::new(), None),
         };
         let config_dirs = self.config_dirs(&r.profile);
-        ProfileInfo { profile: r.profile, revision: r.revision, missing_layers, conflicts, setting_conflicts, problems, warnings, saves, config_dirs }
+        ProfileInfo { profile: r.profile, revision: r.revision, missing_layers, conflicts, setting_conflicts, problems, warnings, saves, config_dirs, resolved }
     }
 
     pub fn state(&self) -> Result<ModsState> {
@@ -1305,6 +1536,7 @@ impl ModStore {
             default_profile: None,
             save_stores: self.save_stores().current()?.stores,
             vanilla_saves: Some(self.saves_plan(None, &[])),
+            mods: self.mods()?,
         })
     }
 
@@ -1316,32 +1548,71 @@ impl ModStore {
         crate::manifest::manifest_hash(&raw).ok()
     }
 
-    /// The mods a launch of `profile` (`None`: vanilla) applies and what's wrong with them.
-    fn stack(&self, profile: Option<&Profile>) -> Result<Stack> {
-        let all = self.layers()?;
-        let (mut mods, mut problems, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
-        match profile {
-            None => mods = self.vanilla_fixes()?,
-            Some(p) => {
-                for id in &p.layers {
-                    match all.iter().find(|l| &l.id == id) {
-                        None => problems.push(format!("mod {id} is no longer installed; take it out of the profile")),
-                        Some(l) if !l.enabled() => warnings.push(format!("{} is turned off, so it's skipped", l.name)),
-                        Some(l) => mods.push(l.clone()),
+    /// The versions a stack of entries runs (enabled mods only, as a launch applies them),
+    /// each named after its mod. Entries that don't resolve are left out.
+    pub(crate) fn stack_layers(&self, entries: &[String]) -> Result<Vec<Layer>> {
+        let p = Profile { layers: entries.to_vec(), ..Default::default() };
+        let layers = self.layers()?;
+        let mods = mods_of(&layers, &self.records()?);
+        Ok(Self::resolve_stack(&mods, &layers, &p).0)
+    }
+
+    /// A profile's entries resolved to versions (skipping turned-off mods), with what's
+    /// wrong (problems, warnings).
+    fn resolve_stack(mods: &[ModRecord], layers: &[Layer], p: &Profile) -> (Vec<Layer>, Vec<ResolvedMod>, Vec<String>, Vec<String>) {
+        let (mut out, mut resolved, mut problems, mut warnings) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for e in &p.layers {
+            let Some(r) = resolve_entry(mods, e) else {
+                problems.push(match split_entry(e) {
+                    (m, Some(v)) if mods.iter().any(|r| r.id == m) => {
+                        format!("{} has no version {v} any more; pick one (profile set PROFILE mods=…)", mods.iter().find(|r| r.id == m).unwrap().name)
                     }
+                    _ => format!("mod {e} is no longer installed; take it out of the profile"),
+                });
+                continue;
+            };
+            let rec = mods.iter().find(|x| x.id == r.mod_id).expect("resolved from these mods");
+            if rec.disabled {
+                warnings.push(format!("{} is turned off, so it's skipped", rec.name));
+                continue;
+            }
+            match layers.iter().find(|l| l.id == r.version) {
+                None => problems.push(format!("{} {} ({}) is missing from the mod store", rec.name, r.label, r.version)),
+                Some(l) => {
+                    if r.pinned && r.retired {
+                        warnings.push(format!("{} is pinned to {}, which is retired", rec.name, r.label));
+                    }
+                    out.push(named(l, rec));
+                    resolved.push(r);
                 }
             }
         }
-        for m in &mods {
+        (out, resolved, problems, warnings)
+    }
+
+    /// The mods a launch of `profile` (`None`: vanilla) applies and what's wrong with them.
+    pub(crate) fn stack(&self, profile: Option<&Profile>) -> Result<Stack> {
+        let layers = self.layers()?;
+        let all = mods_of(&layers, &self.records()?);
+        let (mods, resolved, mut problems, mut warnings) = match profile {
+            None => {
+                let (m, r) = self.vanilla_stack(&all, &layers).into_iter().unzip();
+                (m, r, Vec::new(), Vec::new())
+            }
+            Some(p) => Self::resolve_stack(&all, &layers, p),
+        };
+        // A mod answers to its store ids, manifest id and name (its mod's too).
+        let is = |j: usize, q: &str| mods[j].is(q) || resolved[j].mod_id == q || same_name(&resolved[j].name, q);
+        for (i, m) in mods.iter().enumerate() {
             let Some(man) = &m.manifest else { continue };
             for r in &man.requires {
-                if !mods.iter().any(|o| o.id != m.id && o.is(r)) {
+                if !(0..mods.len()).any(|j| j != i && is(j, r)) {
                     problems.push(format!("{} needs {r}, which isn't in the stack (or is turned off)", m.name));
                 }
             }
             for c in &man.conflicts {
-                if let Some(o) = mods.iter().find(|o| o.id != m.id && o.is(c)) {
-                    problems.push(format!("{} and {} don't work together ({} says so)", m.name, o.name, m.name));
+                if let Some(j) = (0..mods.len()).find(|&j| j != i && is(j, c)) {
+                    problems.push(format!("{} and {} don't work together ({} says so)", m.name, mods[j].name, m.name));
                 }
             }
         }
@@ -1357,7 +1628,7 @@ impl ModStore {
                 }
             }
         }
-        let launches: Vec<(String, ubi_api::mods::ModLaunch)> = mods.iter().map(|m| (m.id.clone(), m.launch())).collect();
+        let launches: Vec<(String, ubi_api::mods::ModLaunch)> = mods.iter().zip(&resolved).map(|(m, r)| (r.mod_id.clone(), m.launch())).collect();
         let empty = GameSettings::default();
         let base = self.game_settings();
         let over = profile.map_or(&empty, |p| &p.settings);
@@ -1372,15 +1643,14 @@ impl ModStore {
             }
         }
         let (settings, mut setting_conflicts) = ubi_api::mods::resolve_settings(&base, &launches, over);
-        setting_conflicts.extend(patch_conflicts(&mods));
+        setting_conflicts.extend(patch_conflicts(&mods, &resolved));
         let ids: Vec<String> = mods.iter().map(|m| m.id.clone()).collect();
         let file_conflicts = self.conflicts(&ids);
         if let Some(p) = profile {
             self.store_notes(p, &mods, &mut problems, &mut warnings);
         }
-        Ok(Stack { mods, problems, warnings, setting_conflicts, settings, file_conflicts })
+        Ok(Stack { mods, resolved, problems, warnings, setting_conflicts, settings, file_conflicts })
     }
-
     /// The saves folder a profile made before Mods v2 (relative to the prefix), if any.
     pub(crate) fn legacy_saves(&self, id: &str) -> Option<String> {
         let saves = self.prefix()?.join(crate::launcher::UPC_REL).join("savegames");
@@ -1499,8 +1769,14 @@ impl ModStore {
                 .filter(|p| !p.profile_config.is_empty())
                 .map(|p| (p.id.clone(), self.profile_prefix(&p.id), p.profile_config.clone())),
         };
-        let patches: Vec<Wanted> =
-            st.mods.iter().flat_map(|m| m.patches().iter().map(|p| Wanted { mod_id: m.id.clone(), patch: p.clone() })).collect();
+        // Recorded under the mod's id, so switching versions reconciles like any change of
+        // what the mod wants.
+        let patches: Vec<Wanted> = st
+            .mods
+            .iter()
+            .zip(&st.resolved)
+            .flat_map(|(m, r)| m.patches().iter().map(|p| Wanted { mod_id: r.mod_id.clone(), patch: p.clone() }))
+            .collect();
         // What the patches would touch (they're applied at launch).
         let preview = patches
             .iter()
@@ -1534,6 +1810,7 @@ impl ModStore {
             mounts: overlays.iter().map(|o| Mount { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone() }).collect(),
             config_dirs,
             patches: preview,
+            resolved: st.resolved,
         };
         let saves_folder = saves.folder.trim_start_matches("savegames/<user>/").to_owned();
         Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder })
@@ -1549,6 +1826,8 @@ impl ModStore {
             report.notes.push("no game prefix given; profiles' saves folders weren't checked".into());
         }
         self.migrate_saves(dry_run, source, &mut report)?;
+        report.builtin_updates = self.update_builtins(dry_run, source)?;
+        report.notes.extend(report.builtin_updates.iter().map(|u| format!("built-in mod updated: {u}")));
         Ok(report)
     }
 
@@ -1556,11 +1835,15 @@ impl ModStore {
     pub fn launch(&self, query: Option<&str>, install_dir: &Path) -> Result<Option<ProfileLaunch>> {
         let Some(query) = query.filter(|q| !same_name(q, VANILLA)) else { return Ok(None) };
         let (profile, revision) = self.profile(query)?;
+        let st = self.stack(Some(&profile))?;
+        if let Some(e) = profile.layers.iter().find(|e| !st.resolved.iter().any(|r| &r.entry == *e)) {
+            bail!("profile '{}' uses layer {e}, which was removed; update its layers", profile.name);
+        }
         let mut lower = Vec::new();
-        for id in profile.layers.iter().rev() {
-            let dir = self.layer_dir(id);
-            if !self.layer_meta(id).exists() || !dir.is_dir() {
-                bail!("profile '{}' uses layer {id}, which was removed; update its layers", profile.name);
+        for m in st.mods.iter().rev() {
+            let dir = self.layer_dir(&m.id);
+            if !dir.is_dir() {
+                bail!("profile '{}' uses layer {}, which was removed; update its layers", profile.name, m.id);
             }
             lower.push(dir);
         }
@@ -2280,7 +2563,8 @@ mod tests {
         assert_eq!(c.warnings.len(), 1, "warning_disclaimer.bk2 isn't in this install: {:?}", c.warnings);
         assert!(l.id.starts_with('m'));
         assert_eq!(store.catalog().unwrap()[0].installed.as_deref(), Some(l.id.as_str()));
-        // Again: up to date. With an older manifest recorded: updated, as a revision.
+        // Again: up to date. With an older manifest recorded: the catalog's becomes a new
+        // version, current; the old one's folder and history stay as they were.
         assert!(store.install(&Package::Builtin("aco-skip-intros".into()), "cli").unwrap().warnings[0].contains("up to date"));
         let mut old = l.clone();
         old.manifest.as_mut().unwrap().version = Some("0".into());
@@ -2289,7 +2573,15 @@ mod tests {
         assert!(store.catalog().unwrap()[0].update);
         let u = store.install(&Package::Builtin("aco-skip-intros".into()), "cli").unwrap();
         assert_eq!(u.layer.manifest, l.manifest);
-        assert_eq!(store.layer_history(&l.id).unwrap().last().unwrap().changes, ["manifest 0 -> 1"]);
+        assert!(u.layer.id.starts_with('v') && u.layer.builtin && u.layer.deletes.len() == 4);
+        let (rec, hist) = store.mod_history_of(&l.id).unwrap();
+        assert_eq!((rec.id.as_str(), rec.current.as_str(), rec.versions.len()), (l.id.as_str(), u.layer.id.as_str(), 2));
+        assert_eq!(rec.versions.iter().map(|v| v.label.as_str()).collect::<Vec<_>>(), ["0", "1"]);
+        assert!(hist.last().unwrap().changes.contains(&"current: 0 -> 1".to_owned()), "{:?}", hist.last().unwrap().changes);
+        assert_eq!(store.layer_history(&l.id).unwrap().len(), 1, "the old version is untouched");
+        assert!(!store.catalog().unwrap()[0].update);
+        assert_eq!(store.catalog().unwrap()[0].installed.as_deref(), Some(l.id.as_str()), "the mod keeps its id");
+        let l = u.layer.clone();
         // Wrong game: refused.
         assert!(store.install(&Package::Builtin("fc4-skip-intro".into()), "cli").unwrap_err().to_string().contains("no built-in mod"));
 
@@ -2315,7 +2607,8 @@ mod tests {
         store.delete_profile(&p.profile.id, "cli").unwrap();
         let (gone, undone) = store.uninstall("aco-skip-intros").unwrap();
         assert_eq!((gone.id, undone.len()), (l.id.clone(), 0));
-        assert!(store.layers().unwrap().is_empty());
+        assert!(store.layers().unwrap().is_empty(), "every version goes");
+        assert!(store.mods().unwrap().is_empty());
     }
 
     #[test]

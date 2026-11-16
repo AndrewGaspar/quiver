@@ -1,0 +1,15 @@
+{
+  "id": "lplaao3",
+  "name": "DLSS-v3",
+  "added": "2026-11-16T17:11:53.248513284Z",
+  "added_by": "aco-dlss",
+  "origin": "/home/USER/mods/dlss-layer-v3",
+  "files": 4,
+  "bytes": 77959278,
+  "manifest": {
+    "id": "lplaao3",
+    "name": "DLSS-v3",
+    "kind": "mod",
+    "save_compatible": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "lbi2b9z",
+  "name": "DLSS-v2",
+  "added": "2026-11-16T09:42:15.675867265Z",
+  "added_by": "aco-dlss",
+  "origin": "/home/USER/mods/dlss-layer-v2",
+  "files": 3,
+  "bytes": 68496137,
+  "manifest": {
+    "id": "lbi2b9z",
+    "name": "DLSS-v2",
+    "kind": "mod",
+    "save_compatible": true
+  }
+}

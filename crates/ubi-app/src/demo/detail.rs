@@ -23,7 +23,10 @@ use ubi_api::info::{
     Achievement, Achievements, AddOn, CloudRecord, CloudSlot, ConnectProfile, Features, GameInfo, InstallInfo, Link,
     ProductKind, Progress, RecordSlot, RestoreResult, Reward, SaveBackup, SaveSlot, SavesReport, SlotFile, SlotState, Stat,
 };
-use ubi_api::mods::{Conflict, Layer, ModManifest, ModsRequest, ModsState, ProfileInfo, ProfileRevision, SavesPlan, VANILLA};
+use ubi_api::mods::{
+    Conflict, Layer, ModManifest, ModRecord, ModVersion, ModsRequest, ModsState, ProfileInfo, ProfileRevision, SavesPlan, VANILLA,
+    VersionChange, mods_of, resolve_entry, split_entry, stack_entry,
+};
 use ubi_api::savestores::{DEFAULT_STORE, NEW_STORE, SaveStore, SaveStoreInfo, SaveStoreOp, SaveStoresReport, SaveStoresRevision, StoreUser};
 use ubi_api::{Event, GameSettings, LibraryEntry, Profile, Request, Revision, SettingOp};
 
@@ -74,6 +77,8 @@ struct Mods {
     stores: Vec<SaveStore>,
     /// The store vanilla uses (`None`: Default).
     vanilla_store: Option<String>,
+    /// Versioned mods (the others are one-version mods, one per layer).
+    records: Vec<ModRecord>,
 }
 
 static DETAILS: LazyLock<Mutex<HashMap<usize, Detail>>> = LazyLock::new(Mutex::default);
@@ -331,7 +336,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 let profile_revision = profile.as_ref().map(|_| 1);
                 pt.sessions.insert(
                     0,
-                    ubi_api::PlaySession { started: ended - Span::seconds(seconds as i64), ended, seconds, settings_revision: rev, profile, profile_revision },
+                    ubi_api::PlaySession { started: ended - Span::seconds(seconds as i64), ended, seconds, settings_revision: rev, profile, profile_revision, mods: Vec::new() },
                 );
                 pt.total_seconds += seconds;
                 pt.last_played = Some(ended);
@@ -1170,15 +1175,37 @@ fn odyssey_mods() -> Mods {
     Mods { layers, history: vec![h1, h2, h3], ..Default::default() }
 }
 
-/// Origins: a DLSS profile sharing Default with vanilla, and a hardcore run (a gameplay
-/// mod) with a store of its own.
+/// Origins: a DLSS mod with three versions (a DLSS profile tracking the current one and
+/// sharing Default with vanilla, a benchmark profile pinned to an older one), and a hardcore
+/// run (a gameplay mod) with a store of its own.
 fn origins_mods() -> Mods {
     let layers = vec![
         with_saves(layer("lr2s8hd", "ReShade 6.3 + Desert Sun", 20, "gui", "Downloads/reshade-origins", 39, 81_000_000), true),
         with_saves(layer("lb5k1yq", "Skip intro videos", 20, "cli", "mods/origins/skip-intro", 4, 1_536), true),
-        with_saves(layer("ld7s3vq", "DLSS 3.7 + DLSSTweaks", 6, "gui", "Downloads/dlss-origins", 5, 52_000_000), true),
+        with_saves(layer("ld7s3vq", "DLSS + DLSSTweaks", 18, "gui", "Downloads/dlss-origins", 3, 48_000_000), true),
         with_saves(layer("lh4c9wz", "Nightmare difficulty rebalance", 4, "gui", "Downloads/aco-nightmare", 12, 3_200_000), false),
+        with_saves(layer("vq4n2c8", "DLSS + DLSSTweaks", 9, "aco-dlss", "Downloads/dlss-origins-3.7", 4, 52_000_000), true),
+        with_saves(layer("vt8w1hz", "DLSS + DLSSTweaks", 2, "aco-dlss", "Downloads/dlss-origins-3.8", 4, 77_900_000), true),
     ];
+    let version = |l: &Layer, label: &str, notes: Option<&str>| ModVersion {
+        id: l.id.clone(),
+        label: label.into(),
+        added: l.added,
+        added_by: l.added_by.clone(),
+        notes: notes.map(str::to_owned),
+        ..Default::default()
+    };
+    let dlss_record = ModRecord {
+        id: "ld7s3vq".into(),
+        name: "DLSS + DLSSTweaks".into(),
+        current: "vt8w1hz".into(),
+        versions: vec![
+            version(&layers[2], "3.5.10", Some("First build: DLSS 3.5 through DLSSTweaks")),
+            version(&layers[4], "3.7.10", Some("DLSS 3.7, preset E")),
+            version(&layers[5], "3.8.10", Some("DLSS 3.8 with frame generation DLLs")),
+        ],
+        disabled: false,
+    };
     let mut p = Profile { id: "pz6c4uf".into(), name: "ReShade".into(), layers: vec!["lb5k1yq".into(), "lr2s8hd".into()], saves: Some(DEFAULT_STORE.into()), ..Default::default() };
     p.settings.dll_overrides.insert("dxgi".into(), "n,b".into());
     let mut dlss = Profile {
@@ -1189,6 +1216,14 @@ fn origins_mods() -> Mods {
         ..Default::default()
     };
     dlss.settings.dll_overrides.insert("d3d11".into(), "n,b".into());
+    let mut bench = Profile {
+        id: "pb3x7tm".into(),
+        name: "Benchmark (DLSS 3.7)".into(),
+        layers: vec!["ld7s3vq@vq4n2c8".into()],
+        saves: Some(DEFAULT_STORE.into()),
+        ..Default::default()
+    };
+    bench.settings.dll_overrides.insert("d3d11".into(), "n,b".into());
     let hard = Profile { id: "pn2h8re".into(), name: "Nightmare".into(), layers: vec!["lh4c9wz".into()], saves: Some("s5kq2mt".into()), ..Default::default() };
     let stores = vec![
         default_store(3539),
@@ -1207,10 +1242,12 @@ fn origins_mods() -> Mods {
         history: vec![
             vec![rev(1, 20, "gui", Some("ReShade with the Desert Sun preset"), p)],
             vec![rev(1, 6, "gui", Some("DLSS through DLSSTweaks, sharing vanilla's saves"), dlss)],
+            vec![rev(1, 3, "gui", Some("Frame times against DLSS 3.7, kept on that build"), bench)],
             vec![rev(1, 4, "gui", Some("Nightmare difficulty: its own saves"), hard)],
         ],
         stores,
         vanilla_store: None,
+        records: vec![dlss_record],
     }
 }
 
@@ -1255,16 +1292,66 @@ impl Mods {
         }
     }
 
+    fn all_mods(&self) -> Vec<ModRecord> {
+        mods_of(&self.layers, &self.records)
+    }
+
+    /// A stack entry as given (a mod's id or name, `MOD@VERSION`) to the stored entry.
     fn resolve_layer(&self, q: &str) -> Result<String> {
-        self.layers
+        let (m, v) = split_entry(q);
+        let all = self.all_mods();
+        let rec = all
             .iter()
-            .find(|l| l.id == q || l.name.eq_ignore_ascii_case(q))
-            .map(|l| l.id.clone())
-            .ok_or_else(|| anyhow!("no layer '{q}'"))
+            .find(|r| r.id == m || r.name.eq_ignore_ascii_case(m))
+            .or_else(|| all.iter().find(|r| r.has(m)))
+            .ok_or_else(|| anyhow!("no mod '{m}'"))?;
+        let pinned = match v {
+            Some(v) => Some(rec.version(v).ok_or_else(|| anyhow!("'{}' has no version '{v}'", rec.name))?.id.clone()),
+            None if rec.id != m && rec.has(m) => Some(m.to_owned()),
+            None => None,
+        };
+        Ok(stack_entry(&rec.id, pinned.as_deref()))
+    }
+
+    /// The versions a stack runs (named after their mods), as the daemon resolves them.
+    fn stack_layers(&self, entries: &[String]) -> Vec<Layer> {
+        ModsState { layers: self.layers.clone(), mods: self.records.clone(), ..Default::default() }.stack_layers(entries)
+    }
+
+    /// A version change on a mod (demo: make current, retire, bring back).
+    fn version_op(&mut self, mod_q: &str, version: &str, op: &str) -> Result<VersionChange> {
+        let mut rec = self.all_mods().into_iter().find(|r| r.id == mod_q || r.name.eq_ignore_ascii_case(mod_q)).ok_or_else(|| anyhow!("no mod '{mod_q}'"))?;
+        let v = rec.version(version).ok_or_else(|| anyhow!("'{}' has no version '{version}'", rec.name))?.clone();
+        match op {
+            "use" if v.retired => bail!("{} {} is retired; bring it back first", rec.name, v.label),
+            "use" => rec.current = v.id.clone(),
+            "retire" if v.id == rec.current => bail!("{} {} is the current version; make another one current first", rec.name, v.label),
+            _ => {}
+        }
+        for x in rec.versions.iter_mut().filter(|x| x.id == v.id) {
+            match op {
+                "retire" => x.retired = true,
+                "unretire" => x.retired = false,
+                _ => x.prerelease = false,
+            }
+        }
+        self.records.retain(|r| r.id != rec.id);
+        self.records.push(rec.clone());
+        let all = self.all_mods();
+        let (mut tracking, mut pinned) = (Vec::new(), Vec::new());
+        for r in self.live() {
+            if let Some(x) = r.profile.layers.iter().filter_map(|e| resolve_entry(&all, e)).find(|x| x.mod_id == rec.id) {
+                if x.pinned { pinned.push(format!("{} ({})", r.profile.name, x.label)) } else { tracking.push(r.profile.name.clone()) }
+            }
+        }
+        let version = self.layers.iter().find(|l| l.id == v.id).cloned().unwrap_or_default();
+        Ok(VersionChange { record: rec, version, revision: 1, tracking, pinned, warnings: Vec::new() })
     }
 
     fn info(&self, id: u32, r: &ProfileRevision) -> ProfileInfo {
-        let missing = r.profile.layers.iter().filter(|l| !self.layers.iter().any(|x| &x.id == *l)).cloned().collect();
+        let all = self.all_mods();
+        let missing = r.profile.layers.iter().filter(|e| resolve_entry(&all, e).is_none()).cloned().collect();
+        let resolved = r.profile.layers.iter().filter_map(|e| resolve_entry(&all, e)).collect();
         // Demo conflicts: the texture pack and the water mod both ship ocean normals.
         let mut conflicts = vec![];
         if r.profile.layers.iter().any(|l| l == "l9q2w7e") && r.profile.layers.iter().any(|l| l == "l3x5v1b") {
@@ -1274,11 +1361,11 @@ impl Mods {
             }
         }
         let saves = self.saves_plan(id, r.profile.saves.as_deref());
-        let mods: Vec<&Layer> = r.profile.layers.iter().filter_map(|l| self.layers.iter().find(|x| &x.id == l)).collect();
+        let mods = self.stack_layers(&r.profile.layers);
         let stores = self.all_stores(id);
         let store = stores.iter().find(|s| Some(&s.id) == r.profile.saves.as_ref());
-        let warnings = store.and_then(|s| ubi_api::savestores::shared_store_warning(mods, s, self.vanilla() == s.id)).into_iter().collect();
-        ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts, warnings, saves: Some(saves), ..Default::default() }
+        let warnings = store.and_then(|s| ubi_api::savestores::shared_store_warning(&mods, s, self.vanilla() == s.id)).into_iter().collect();
+        ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts, warnings, saves: Some(saves), resolved, ..Default::default() }
     }
 
     fn state(&self, id: u32) -> ModsState {
@@ -1290,6 +1377,7 @@ impl Mods {
             deleted: deleted.into_iter().map(|r| self.info(id, r)).collect(),
             save_stores: self.all_stores(id),
             vanilla_saves: Some(self.saves_plan(id, Some(&self.vanilla()))),
+            mods: self.all_mods(),
             ..Default::default()
         }
     }
@@ -1468,7 +1556,12 @@ impl Detail {
             | ModsRequest::ModSet { product_id, .. }
             | ModsRequest::Plan { product_id, .. }
             | ModsRequest::PatchesUndo { product_id, .. }
-            | ModsRequest::Migrate { product_id, .. } => Some(*product_id),
+            | ModsRequest::Migrate { product_id, .. }
+            | ModsRequest::VersionAdd { product_id, .. }
+            | ModsRequest::VersionUse { product_id, .. }
+            | ModsRequest::VersionRetire { product_id, .. }
+            | ModsRequest::ModHistory { product_id, .. }
+            | ModsRequest::MergeVersions { product_id, .. } => Some(*product_id),
             ModsRequest::Prefs { .. } => None,
         };
         if let ModsRequest::Prefs { .. } = req {
@@ -1512,6 +1605,12 @@ impl Detail {
             | ModsRequest::Plan { .. }
             | ModsRequest::PatchesUndo { .. }
             | ModsRequest::Migrate { .. } => bail!("Mods v2 requests aren't simulated in demo mode yet"),
+            ModsRequest::VersionAdd { .. } | ModsRequest::MergeVersions { .. } => bail!("adding and merging mod versions isn't simulated in demo mode"),
+            ModsRequest::ModHistory { .. } => (json!(Vec::<ubi_api::mods::ModRevision>::new()), None),
+            ModsRequest::VersionUse { mod_id, version, .. } => (json!(m.version_op(&mod_id, &version, "use")?), Some(id)),
+            ModsRequest::VersionRetire { mod_id, version, retired, .. } => {
+                (json!(m.version_op(&mod_id, &version, if retired { "retire" } else { "unretire" })?), Some(id))
+            }
             ModsRequest::LayerAdd { name, path, .. } => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
@@ -1529,12 +1628,16 @@ impl Detail {
                 if !confirmed {
                     bail!("removing a mod layer needs your approval");
                 }
-                let lid = m.resolve_layer(&layer)?;
-                if let Some(p) = m.live().find(|r| r.profile.layers.contains(&lid)) {
-                    bail!("profile '{}' uses this layer; take it out of the profile first", p.profile.name);
+                let lid = split_entry(&m.resolve_layer(&layer)?).0.to_owned();
+                if let Some(p) = m.live().find(|r| r.profile.layers.iter().any(|e| split_entry(e).0 == lid)) {
+                    bail!("profile '{}' uses this mod; take it out of the profile first", p.profile.name);
                 }
-                let i = m.layers.iter().position(|l| l.id == lid).unwrap();
-                (json!(m.layers.remove(i)), Some(id))
+                let rec = m.all_mods().into_iter().find(|r| r.id == lid).unwrap();
+                let mut gone = m.layers.iter().find(|l| l.id == rec.current).cloned().unwrap_or_default();
+                gone.name = rec.name.clone();
+                m.layers.retain(|l| !rec.has(&l.id));
+                m.records.retain(|r| r.id != rec.id);
+                (json!(gone), Some(id))
             }
             ModsRequest::ProfileCreate { name, layers, message, saves, .. } => {
                 let name = name.trim().to_owned();
@@ -1549,7 +1652,7 @@ impl Detail {
                 }
                 let layers = layers.iter().map(|l| m.resolve_layer(l)).collect::<Result<Vec<_>>>()?;
                 // The daemon's steering: Default when every mod is save-compatible.
-                let advice = ubi_api::savestores::saves_advice(layers.iter().filter_map(|l| m.layers.iter().find(|x| &x.id == l)));
+                let advice = ubi_api::savestores::saves_advice(&m.stack_layers(&layers));
                 let wanted = saves.unwrap_or_else(|| if advice.share_default { DEFAULT_STORE.into() } else { NEW_STORE.into() });
                 let store = m.resolve_store(id, &wanted, &name, n)?;
                 let p = Profile { id: random_id('p', n), name, layers, saves: Some(store), ..Default::default() };
@@ -1562,7 +1665,7 @@ impl Detail {
                 let mut p = m.history[i].last().unwrap().profile.clone();
                 for op in &ops {
                     let op = match op {
-                        SettingOp::Set { key, value } if key == "layers" => SettingOp::Set {
+                        SettingOp::Set { key, value } if key == "layers" || key == "mods" => SettingOp::Set {
                             key: key.clone(),
                             value: ubi_api::mods::split_list(value).iter().map(|l| m.resolve_layer(l)).collect::<Result<Vec<_>>>()?.join(","),
                         },

@@ -18,6 +18,7 @@ use ubi_api::mods::{GameProfiles, LaunchPlan, ModPrefs, ModsRequest, PatchState,
 use ubi_api::{Event, SettingOp};
 use ubi_core::launcher::{self, Config, Games};
 use ubi_core::mods::{ModStore, Package, Plan};
+use ubi_core::modversions::{NewVersion, parse_save_compatible};
 use ubi_core::settings;
 
 use crate::Daemon;
@@ -96,6 +97,12 @@ pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: 
             Ok(r) => r.notes.iter().for_each(|n| tracing::info!("mods v2 migration: {n}")),
             Err(e) => tracing::warn!("mods v2 migration: {e:#}"),
         }
+    } else {
+        // Vanilla with fixes runs built-ins too: give them the catalog's newer versions.
+        match store.update_builtins(false, source) {
+            Ok(u) => u.iter().for_each(|n| tracing::info!("built-in mod updated: {n}")),
+            Err(e) => tracing::warn!("updating built-in mods: {e:#}"),
+        }
     }
     let mut plan = store.plan(profile.as_deref())?;
     plan.api.warnings.extend(warning.clone());
@@ -115,7 +122,9 @@ pub(crate) fn resolve_default(product_id: u32, value: &str) -> Result<String> {
 /// What a launch plan says worth keeping with the launch job.
 pub(crate) fn plan_lines(p: &LaunchPlan) -> Vec<String> {
     let mut out = Vec::new();
-    if !p.mods.is_empty() {
+    if !p.resolved.is_empty() {
+        out.push(format!("mods: {}", mods_line(p)));
+    } else if !p.mods.is_empty() {
         out.push(format!("mods: {}", p.mods.join(" < ")));
     }
     out.push(format!("saves: {} ({})", p.saves.folder, p.saves.reason));
@@ -136,6 +145,12 @@ pub(crate) fn plan_lines(p: &LaunchPlan) -> Vec<String> {
         out.push(format!("own folder: {} -> {}", d.dir, d.upper.display()));
     }
     out
+}
+
+/// The mods a launch runs, bottom to top, with their versions: "DLSS v3 (current) < Skip
+/// intro videos".
+pub(crate) fn mods_line(p: &LaunchPlan) -> String {
+    p.resolved.iter().map(|r| r.describe()).collect::<Vec<_>>().join(" < ")
 }
 
 /// Notes for a person after a stack edit: what will conflict or fail at launch.
@@ -348,16 +363,19 @@ impl Daemon {
             }
             ModsRequest::Uninstall { product_id, mod_id, confirmed } => {
                 let store = store(product_id)?;
-                let (layer, applied) = {
+                let (layer, applied, files) = {
                     let (store, q) = (store.clone(), mod_id.clone());
                     blocking(move || {
                         let l = store.layer(&q)?;
                         let applied = store.applied_by(&l.id)?;
-                        Ok((l, applied))
+                        // Every version goes, so any version's files count.
+                        let rec = store.find_mod(&l.id)?;
+                        let files = store.layers()?.iter().any(|v| rec.has(&v.id) && v.has_files());
+                        Ok((l, applied, files))
                     })
                     .await?
                 };
-                if layer.has_files() || !applied.is_empty() {
+                if files || !applied.is_empty() {
                     ask(source, confirmed, "uninstalling a mod with install files or changed config values")?;
                 }
                 self.not_running(product_id, "uninstalling a mod")?;
@@ -436,10 +454,101 @@ impl Daemon {
                 }
                 json!(prefs)
             }
+            // -- Mod versions --------------------------------------------------------------
+            ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes } => {
+                // A new version is a normal edit for agents too (it's how a mod is updated);
+                // the old versions stay, and rolling back is one request.
+                let store = store(product_id)?;
+                let save_compatible = save_compatible.as_deref().map(parse_save_compatible).transpose()?;
+                let path = (!path.as_os_str().is_empty()).then_some(path);
+                let opts = NewVersion { path, label, notes, no_update, prerelease, save_compatible, deletes };
+                let c = blocking(move || store.add_version(&mod_id, &opts, &src)).await?;
+                let label = c.record.label_of(&c.version.id);
+                let current = c.record.current == c.version.id;
+                self.mods_changed(
+                    source,
+                    product_id,
+                    format!(
+                        "added version {label} ({}) of mod '{}' to {}{}",
+                        c.version.id,
+                        c.record.name,
+                        self.product_name(product_id),
+                        match (current, c.tracking.is_empty()) {
+                            (true, true) => "; current".to_owned(),
+                            (true, false) => format!("; current, so {} run it next", c.tracking.join(", ")),
+                            (false, _) => "; not current".to_owned(),
+                        }
+                    ),
+                );
+                json!(c)
+            }
+            ModsRequest::VersionUse { product_id, mod_id, version, message } => {
+                let store = store(product_id)?;
+                let c = blocking(move || store.use_version(&mod_id, &version, &src, message)).await?;
+                if c.revision > 0 {
+                    self.mods_changed(
+                        source,
+                        product_id,
+                        format!(
+                            "mod '{}' of {}: current version {} (r{}){}",
+                            c.record.name,
+                            self.product_name(product_id),
+                            c.record.label_of(&c.record.current),
+                            c.revision,
+                            if c.tracking.is_empty() { String::new() } else { format!("; {} run it next", c.tracking.join(", ")) }
+                        ),
+                    );
+                }
+                json!(c)
+            }
+            ModsRequest::VersionRetire { product_id, mod_id, version, retired, message } => {
+                let store = store(product_id)?;
+                let c = blocking(move || store.retire_version(&mod_id, &version, retired, &src, message)).await?;
+                self.mods_changed(
+                    source,
+                    product_id,
+                    format!(
+                        "mod '{}' of {}: {} version {} (r{})",
+                        c.record.name,
+                        self.product_name(product_id),
+                        if retired { "retired" } else { "brought back" },
+                        c.record.label_of(&c.version.id),
+                        c.revision
+                    ),
+                );
+                json!(c)
+            }
+            ModsRequest::ModHistory { product_id, mod_id } => {
+                let (_, history) = blocking(move || ModStore::open(product_id).mod_history_of(&mod_id)).await?;
+                json!(history)
+            }
+            ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed } => {
+                // It rewrites profiles (keeping what each runs), so agents ask first.
+                if !dry_run {
+                    ask(source, confirmed, "merging mods into versions of one mod")?;
+                    self.not_running(product_id, "merging mods")?;
+                }
+                let store = store(product_id)?;
+                let r = blocking(move || store.merge_versions(&into, &from, &labels, dry_run, &src)).await?;
+                if !dry_run {
+                    self.mods_changed(
+                        source,
+                        product_id,
+                        format!(
+                            "merged mods of {} into '{}' ({} versions){}",
+                            self.product_name(product_id),
+                            r.record.name,
+                            r.record.versions.len(),
+                            if r.profiles.is_empty() { String::new() } else { format!("; {} profile stack(s) rewritten", r.profiles.len()) }
+                        ),
+                    );
+                }
+                json!(r)
+            }
             ModsRequest::Migrate { product_id, dry_run } => {
                 let store = store(product_id)?;
                 let report = blocking(move || store.migrate(dry_run, &src)).await?;
-                if !dry_run && !report.profile_stores.is_empty() {
+                if !dry_run && (!report.profile_stores.is_empty() || !report.builtin_updates.is_empty()) {
                     self.mods_changed(
                         source,
                         product_id,

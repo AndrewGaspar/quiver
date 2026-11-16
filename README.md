@@ -292,10 +292,11 @@ delete = []                     # keys (attributes) to remove; every line of a r
 Installed mods live where layers do (a layer is a file-only mod; v1 layers need no
 migration). **Built-in mods** are in `mods/<product id>/<mod id>/` in this repository, each
 translated from a source such as PCGamingWiki and audited (`source`, `audited`); `quiver mods
-<game> catalog` lists them and `install ID` installs one (again: updates it).
+<game> catalog` lists them and `install ID` installs one. A newer built-in manifest becomes a
+new version of the installed mod (see "Mod versions").
 
-A **profile** is an ordered stack of mods (`mods=a,b`, bottom to top) plus your own
-overrides. Settings resolve as defaults → game settings → each mod → the profile: args and
+A **profile** is an ordered stack of mods (`mods=a,b`, bottom to top; `MOD` runs the mod's
+current version, `MOD@VERSION` pins one) plus your own overrides. Settings resolve as defaults → game settings → each mod → the profile: args and
 wrappers append in that order (a wrapper isn't added twice), env and DLL overrides merge with
 the later one winning, the profile's `proton`/`language` win. Every key set differently by two
 sources (env, DLL, or a config key) is reported in `mods list`, after `profile set` and in the
@@ -334,6 +335,76 @@ it, and the Mods tab marks it ("Make default"); the Play button's arrow menu pla
 once without changing it. `quiver play <game> --vanilla` (or `--profile vanilla`) forces
 vanilla. If the default profile is deleted, launches run vanilla and say so (activity log,
 the launch job); restoring the profile makes it the default again.
+
+### Mod versions
+
+A mod is a stable identity (id, name, on or off) with one or more **versions**. Each version
+is its own object: its own folder of files (never rewritten once added) and manifest
+(deletions, launch settings, config patches, save compatibility), a label (`3.8.10`, `v3`;
+unique within the mod), when and by whom it was added, notes, and whether it is retired or a
+pre-release. One version is **current**.
+
+A profile stacks mods, not versions: `mods=DLSS,aco-skip-intros` runs DLSS's current
+version, so **adding a version updates every profile that tracks the mod** at its next
+launch. `mods=DLSS@v2,aco-skip-intros` pins a profile to a version (by label or id), and
+`version use` rolls the current version back (or forward) for everyone that tracks it.
+
+```
+quiver mods origins version add DLSS ~/mods/dlss-3.8.10 --label 3.8.10 --notes "DLSS 3.8.10 DLLs"
+quiver mods origins version list DLSS               # versions, current, who pins which
+quiver mods origins version use DLSS v3             # current again for every tracking profile
+quiver mods origins version retire DLSS v1          # hidden from defaults; files kept; pins still run it
+quiver mods origins profile set DLSS mods=DLSS@v2,aco-skip-intros   # pin one profile
+quiver mods origins version history DLSS            # every change, as revisions
+```
+
+`version add` takes a plain folder laid out like the install folder (it keeps the current
+version's manifest: save compatibility, launch settings, config patches and deletions;
+`--save-compatible on|off|unknown` and `--delete PATH` change that), or a package folder with
+its own `quiver-mod.toml`. It becomes current unless `--no-update` or `--prerelease` (pin it
+to try it first). `layer add NAME DIR --version-of MOD` does the same. Installing a package
+whose manifest id is already installed adds a version too.
+
+**Save compatibility is per version.** If the new current version may change saves and a
+profile tracking the mod shares vanilla's saves or Default, `version add`/`use` say so, as do
+`mods list` and `plan` ("DLSS v4 (not save-compatible) could change saves, and this profile
+uses the Default saves …"). Saves never move on their own: point the profile at a store of its
+own (`saves=new`) or pin it to the old version.
+
+`mods list` shows each mod's current version and how many it has, and each profile's stack
+with the versions it resolves to ("DLSS v3 (current)", "DLSS v2 (pinned)"); `plan` shows the
+same, and the launch's job, the activity log and the play session record it, so play history
+says which build ran. Config patches follow the version: switching puts back keys the new
+version no longer sets and applies its values (the file's own values stay recorded).
+
+**Consolidating separate mods** (one mod per build, from before versions) is explicit:
+
+```
+quiver mods origins merge-versions DLSS DLSS-v2 DLSS-v3 --dry-run   # shows labels, current, profile rewrites
+quiver mods origins merge-versions DLSS DLSS-v2 DLSS-v3
+```
+
+The versions are ordered by when each was added (`--labels a,b,c` names them, oldest first;
+default `v1`, `v2`, …) and the newest becomes current. INTO keeps its id and name. Profiles
+that stacked one of them now stack INTO, tracking current if they ran the newest version and
+pinned to the version they ran otherwise, so no launch changes. Everything is a revision (the
+mod's, each profile's, a note in each moved version's history). Agents need a person's OK.
+
+Storage: a version is a layer (`mods/<product>/layers/<version id>/` and `.json`); a mod's
+record is `games/<product>/mods/<mod id>.jsonl`. A mod that was never versioned has no record
+and its id is its layer's id, so older data reads unchanged; an old profile revision that
+named a version directly runs that version, pinned.
+
+**Shipping a new build of a mod** (e.g. an agent that builds DLSS for Origins) is one command:
+
+```
+quiver --source aco-dlss mods origins version add DLSS <dir> --label 3.8.10 --notes "what changed"
+```
+
+It copies the folder, keeps the mod's save compatibility and settings, makes it current, and
+answers which profiles now run it (and warns if one shares vanilla's saves with a version
+that may change them). No `layer add`, `set … save_compatible=on` or `profile set … mods=…`
+any more; `version use DLSS <previous>` rolls back.
 
 ### Save stores
 
@@ -381,8 +452,9 @@ and of the profile, so it shows in their histories and can be undone; nothing mo
 Agents may list, create, rename and retire stores and point profiles at them; moving the
 cloud flag, restoring a stores revision and merging need a person's OK.
 
-Agents may install mods, edit stacks and change a mod's settings; uninstalling a mod that
-has install files or changed config values, and `undo-patches`, need a person's OK.
+Agents may install mods, edit stacks, change a mod's settings and add, use and retire
+versions; uninstalling a mod that has install files or changed config values,
+`undo-patches` and `merge-versions`, need a person's OK.
 
 Settings keys: `proton`, `language`, `account`, `profile`, `args`, `wrappers`, `env.NAME`,
 `dll.NAME` (`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its

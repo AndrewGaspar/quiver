@@ -1,17 +1,18 @@
-//! Mods: profiles (Vanilla plus named stacks of layers), the selected profile's layer
-//! stack, its switches and history, deleted profiles, and the layer store with "add a
-//! layer from a folder".
+//! Mods: profiles (Vanilla plus named stacks of mods), the selected profile's mod stack
+//! (each mod tracking its current version or pinned to one), its switches and history,
+//! deleted profiles, and the mod store with each mod's versions ("Make current", "Retire")
+//! and "add a mod from a folder".
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
-use ubi_api::SettingOp;
-use ubi_api::mods::{Layer, ModsState, ProfileInfo, ProfileRevision, VANILLA};
+use ubi_api::mods::{ModRecord, ModsRequest, ModsState, ProfileInfo, ProfileRevision, ResolvedMod, VANILLA, VersionChange};
+use ubi_api::{Request, SettingOp};
 
 use super::page::{Dialog, Load, checkbox, danger, human_size, kv, load_note, note, small, toggle};
 use crate::app::Quiver;
 use crate::model::{GameRow, actor_label, ago, day, gb, tilde};
 use crate::nav::Target;
 use crate::theme::Theme;
-use crate::ui::{FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, badge, button, caption, card, card_header, icon, icon_button, mono, pill};
+use crate::ui::{FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, badge, button, caption, card, card_header, chip, icon, icon_button, mono, pill};
 
 /// Stable colors for layers (by position in the store).
 fn layer_color(th: &Theme, i: usize) -> gpui::Hsla {
@@ -154,9 +155,11 @@ impl Quiver {
         for (i, p) in m.profiles.iter().enumerate() {
             let pr = &p.profile;
             let n = pr.layers.len();
+            let pins = p.resolved.iter().filter(|r| r.pinned).count();
             let sub = format!(
-                "{n} layer{}{}",
+                "{n} mod{}{}{}",
                 if n == 1 { "" } else { "s" },
+                if pins == 0 { String::new() } else { format!(" · {pins} pinned") },
                 if p.conflicts.is_empty() { String::new() } else { format!(" · {} conflicts", p.conflicts.len()) }
             );
             let saves = store_label(p.saves.as_ref());
@@ -265,9 +268,9 @@ impl Quiver {
             .gap(px(8.))
             .child(div().flex().items_center().child(caption("Vanilla · nothing mounted", th.tx3)))
             .child(note(th, if m.layers.is_empty() {
-                "Vanilla runs the base install directly. Add a layer from a folder below, then create a profile that stacks it on top."
+                "Vanilla runs the base install directly. Add a mod from a folder below, then create a profile that stacks it on top."
             } else {
-                "Vanilla runs the base install directly with the game's own saves. Pick a profile above to see its layers."
+                "Vanilla runs the base install directly with the game's own saves. Pick a profile above to see its mods."
             }).px(px(0.)).py(px(4.)))
             .children(self.base_rows(th, g))
     }
@@ -276,42 +279,49 @@ impl Quiver {
         let id = g.id();
         let prof = p.profile.clone();
         let pid = prof.id.clone();
-        // Profile layers top first, then the store's other layers (off).
-        let mut order: Vec<(Layer, Option<usize>)> = prof
+        let all = m.all_mods();
+        // The profile's mods top first (with their entry's position), then the store's
+        // other mods (off).
+        let mut order: Vec<(ModRecord, Option<usize>, Option<ResolvedMod>)> = prof
             .layers
             .iter()
             .enumerate()
             .rev()
-            .filter_map(|(pos, lid)| m.layers.iter().find(|l| &l.id == lid).map(|l| (l.clone(), Some(pos))))
+            .filter_map(|(pos, e)| {
+                let r = m.resolve(e)?;
+                let rec = all.iter().find(|x| x.id == r.mod_id)?.clone();
+                Some((rec, Some(pos), Some(r)))
+            })
             .collect();
-        for l in &m.layers {
-            if !prof.layers.contains(&l.id) {
-                order.push((l.clone(), None));
+        for rec in &all {
+            if !order.iter().any(|o| o.0.id == rec.id) {
+                order.push((rec.clone(), None, None));
             }
         }
         let n_on = prof.layers.len();
         let rows: Vec<AnyElement> = order
             .into_iter()
             .enumerate()
-            .map(|(i, (l, pos))| {
+            .map(|(i, (rec, pos, res))| {
                 let on = pos.is_some();
-                let color = layer_color(th, m.layers.iter().position(|x| x.id == l.id).unwrap_or(0));
-                let over: Vec<&ubi_api::mods::Conflict> = p.conflicts.iter().filter(|c| c.layers.last() == Some(&l.id)).collect();
-                let under: Vec<&ubi_api::mods::Conflict> = p.conflicts.iter().filter(|c| c.layers.contains(&l.id) && c.layers.last() != Some(&l.id)).collect();
-                let name_of = |lid: &str| m.layers.iter().find(|x| x.id == lid).map(|x| x.name.clone()).unwrap_or_else(|| lid.to_owned());
+                // The version this row runs (or would run, tracking current).
+                let vid = res.as_ref().map_or(rec.current.clone(), |r| r.version.clone());
+                let l = m.layer(&vid).cloned().unwrap_or_default();
+                let color = layer_color(th, all.iter().position(|x| x.id == rec.id).unwrap_or(0));
+                let over: Vec<&ubi_api::mods::Conflict> = p.conflicts.iter().filter(|c| c.layers.last() == Some(&vid)).collect();
+                let under: Vec<&ubi_api::mods::Conflict> = p.conflicts.iter().filter(|c| c.layers.contains(&vid) && c.layers.last() != Some(&vid)).collect();
                 let warn = if !over.is_empty() {
-                    let others: Vec<String> = over[0].layers.iter().filter(|x| **x != l.id).map(|x| name_of(x)).collect();
+                    let others: Vec<String> = over[0].layers.iter().filter(|x| **x != vid).map(|x| m.display(x)).collect();
                     Some(format!("Overrides {} file{} from {}", over.len(), if over.len() == 1 { "" } else { "s" }, others.join(", ")))
                 } else if !under.is_empty() {
-                    Some(format!("{} file{} overridden by a higher layer", under.len(), if under.len() == 1 { "" } else { "s" }))
+                    Some(format!("{} file{} overridden by a higher mod", under.len(), if under.len() == 1 { "" } else { "s" }))
                 } else {
                     None
                 };
-                let lid = l.id.clone();
+                let mid = rec.id.clone();
                 let toggle_pid = pid.clone();
                 let layers_now = prof.layers.clone();
                 let move_btn = |dir: i32, this: &mut Self, cx: &mut Context<Self>| {
-                    let lid = l.id.clone();
                     let pid = pid.clone();
                     let layers_now = prof.layers.clone();
                     let can = match pos {
@@ -320,28 +330,35 @@ impl Quiver {
                         None => false,
                     };
                     let _ = this;
-                    icon_button(SharedString::from(format!("mv-{dir}-{}", l.id)), th, if dir > 0 { Icon::ChevronUp } else { Icon::ChevronDown }, false)
+                    icon_button(SharedString::from(format!("mv-{dir}-{}", rec.id)), th, if dir > 0 { Icon::ChevronUp } else { Icon::ChevronDown }, false)
                         .size(px(24.))
                         .when(!can, |d| d.opacity(0.3))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !can {
-                                return;
-                            }
+                            let Some(i) = pos.filter(|_| can) else { return };
                             let mut v = layers_now.clone();
-                            if let Some(i) = v.iter().position(|x| *x == lid) {
-                                let j = if dir > 0 { i + 1 } else { i - 1 };
-                                v.swap(i, j);
-                                this.profile_set(id, &pid, vec![SettingOp::Set { key: "layers".into(), value: v.join(",") }], cx);
-                            }
+                            let j = if dir > 0 { i + 1 } else { i - 1 };
+                            v.swap(i, j);
+                            this.profile_set(id, &pid, vec![SettingOp::Set { key: "mods".into(), value: v.join(",") }], cx);
                         }))
                 };
                 let up = move_btn(1, self, cx);
                 let down = move_btn(-1, self, cx);
+                let versions = match (&res, pos) {
+                    (Some(r), Some(at)) if rec.versions.len() > 1 => Some(self.version_chips(th, id, &pid, &prof.layers, at, &rec, r, cx)),
+                    _ => None,
+                };
+                let version_note = match &res {
+                    Some(r) if rec.versions.len() > 1 || r.pinned => {
+                        if r.pinned { format!("{} · pinned", r.label) } else { format!("{} · tracks current", r.label) }
+                    }
+                    None if rec.versions.len() > 1 => format!("{} · current of {}", rec.label_of(&rec.current), rec.versions.len()),
+                    _ => String::new(),
+                };
                 div()
                     .id(("stack", i))
                     .flex()
-                    .items_center()
-                    .gap(px(12.))
+                    .flex_col()
+                    .gap(px(8.))
                     .px(px(14.))
                     .py(px(11.))
                     .rounded(px(10.))
@@ -351,44 +368,59 @@ impl Quiver {
                     .when(!on, |d| d.opacity(0.62))
                     .child(
                         div()
-                            .id(("stack-toggle", i))
-                            .cursor_pointer()
-                            .child(checkbox(th, on))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let mut v = layers_now.clone();
-                                if let Some(i) = v.iter().position(|x| *x == lid) {
-                                    v.remove(i);
-                                } else {
-                                    v.push(lid.clone()); // on top
-                                }
-                                this.profile_set(id, &toggle_pid, vec![SettingOp::Set { key: "layers".into(), value: v.join(",") }], cx);
-                            })),
-                    )
-                    .child(div().w(px(4.)).h(px(30.)).rounded(px(2.)).flex_none().bg(color))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(div().font_weight(SEMIBOLD).truncate().child(l.name.clone()))
+                            .items_center()
+                            .gap(px(12.))
                             .child(
                                 div()
+                                    .id(("stack-toggle", i))
+                                    .cursor_pointer()
+                                    .child(checkbox(th, on))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let mut v = layers_now.clone();
+                                        match pos {
+                                            Some(i) => {
+                                                v.remove(i);
+                                            }
+                                            None => v.push(mid.clone()), // on top, tracking current
+                                        }
+                                        this.profile_set(id, &toggle_pid, vec![SettingOp::Set { key: "mods".into(), value: v.join(",") }], cx);
+                                    })),
+                            )
+                            .child(div().w(px(4.)).h(px(30.)).rounded(px(2.)).flex_none().bg(color))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .text_size(px(11.5))
-                                    .text_color(th.tx3)
-                                    .child(format!("{} files · {}", l.files, human_size(l.bytes)))
-                                    .when_some(warn, |d, w| d.child(div().flex().items_center().gap(px(4.)).text_color(th.warn).child(icon(Icon::TriangleAlert, 11., th.warn)).child(w))),
-                            ),
+                                    .flex_col()
+                                    .gap(px(3.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(div().font_weight(SEMIBOLD).truncate().child(rec.name.clone()))
+                                            .when(!version_note.is_empty(), |d| d.child(mono(11., th.tx3).flex_none().child(version_note))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(10.))
+                                            .text_size(px(11.5))
+                                            .text_color(th.tx3)
+                                            .child(format!("{} files · {}", l.files, human_size(l.bytes)))
+                                            .when_some(warn, |d, w| d.child(div().flex().items_center().gap(px(4.)).text_color(th.warn).child(icon(Icon::TriangleAlert, 11., th.warn)).child(w))),
+                                    ),
+                            )
+                            .when(on, |d| d.child(up).child(down))
+                            .child(mono(11., th.tx3).w(px(22.)).child(match pos {
+                                Some(p) => format!("#{}", p + 1),
+                                None => "off".into(),
+                            })),
                     )
-                    .when(on, |d| d.child(up).child(down))
-                    .child(mono(11., th.tx3).w(px(22.)).child(match pos {
-                        Some(p) => format!("#{}", p + 1),
-                        None => "off".into(),
-                    }))
+                    .children(versions)
                     .into_any_element()
             })
             .collect();
@@ -403,10 +435,10 @@ impl Quiver {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(caption("Layer stack · top wins", th.tx3))
+                    .child(caption("Mod stack · top wins", th.tx3))
                     .child(badge(th, format!("{n_on} on"), true))
                     .child(div().flex_1())
-                    .child(div().text_size(px(11.5)).text_color(th.tx3).child("Tick a layer to add it on top; arrows reorder")),
+                    .child(div().text_size(px(11.5)).text_color(th.tx3).child("Tick a mod to add it on top; arrows reorder")),
             )
             .when(!missing.is_empty(), |d| {
                 d.child(
@@ -421,10 +453,10 @@ impl Quiver {
                         .text_color(th.warn)
                         .text_size(px(12.))
                         .child(icon(Icon::TriangleAlert, 14., th.warn))
-                        .child(div().flex_1().min_w_0().child(format!("Uses {} layer(s) that were removed ({}); launching it fails until you update its layers.", missing.len(), missing.join(", ")))),
+                        .child(div().flex_1().min_w_0().child(format!("Uses {} mod(s) or version(s) that were removed ({}); launching it fails until you update its mods.", missing.len(), missing.join(", ")))),
                 )
             })
-            .when(rows.is_empty(), |d| d.child(note(th, "No layers in the store yet. Add one from a folder below.").px(px(0.))))
+            .when(rows.is_empty(), |d| d.child(note(th, "No mods in the store yet. Add one from a folder below.").px(px(0.))))
             .children(rows)
             .children(self.base_rows(th, g))
             .child(
@@ -447,24 +479,93 @@ impl Quiver {
             )
     }
 
+    /// A stacked mod's version picker: track the current version, or pin one (live versions
+    /// newest first, plus a retired one the entry is pinned to).
+    #[allow(clippy::too_many_arguments)]
+    fn version_chips(
+        &mut self,
+        th: &Theme,
+        id: u32,
+        pid: &str,
+        entries: &[String],
+        at: usize,
+        rec: &ModRecord,
+        r: &ResolvedMod,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut items: Vec<(String, String, Option<Icon>, bool)> =
+            vec![(rec.id.clone(), format!("Track current · {}", rec.label_of(&rec.current)), Some(Icon::RefreshCw), !r.pinned)];
+        for v in rec.versions.iter().rev().filter(|v| !v.retired || (r.pinned && r.version == v.id)) {
+            let label = if v.retired { format!("{} (retired)", v.label) } else if v.prerelease { format!("{} (pre-release)", v.label) } else { v.label.clone() };
+            items.push((ubi_api::mods::stack_entry(&rec.id, Some(&v.id)), label, Some(Icon::Pin), r.pinned && r.version == v.id));
+        }
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .pl(px(46.))
+            .children(items.into_iter().enumerate().map(|(j, (entry, label, ic, on))| {
+                let v = entries.to_vec();
+                let pid = pid.to_owned();
+                chip(th, ic, label, on)
+                    .id(SharedString::from(format!("ver-{}-{j}", rec.id)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if on {
+                            return;
+                        }
+                        let mut v = v.clone();
+                        v[at] = entry.clone();
+                        this.profile_set(id, &pid, vec![SettingOp::Set { key: "mods".into(), value: v.join(",") }], cx);
+                    }))
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+
+    /// Make a version current, or retire one (or bring it back), then reload.
+    fn version_op(&mut self, id: u32, req: ModsRequest, cx: &mut Context<Self>) {
+        self.call::<VersionChange, _>(Request::Mods(req), cx, move |this, r, cx| match r {
+            Ok(c) => {
+                let label = c.record.label_of(&c.version.id);
+                let msg = if c.record.current == c.version.id {
+                    match c.tracking.len() {
+                        0 => format!("{} {label} is current", c.record.name),
+                        n => format!("{} {label} is current: {n} profile{} run it next", c.record.name, if n == 1 { "" } else { "s" }),
+                    }
+                } else if c.record.versions.iter().any(|v| v.id == c.version.id && v.retired) {
+                    format!("Retired {} {label}", c.record.name)
+                } else {
+                    format!("{} {label} is back", c.record.name)
+                };
+                this.show_toast(c.warnings.first().cloned().unwrap_or(msg), cx);
+                this.load_mods(id, cx);
+            }
+            Err(e) => this.show_toast(crate::err_text(&e), cx),
+        });
+    }
+
     fn render_layer_store(&mut self, th: &Theme, g: &GameRow, m: &ModsState, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
-        let used: Vec<String> = m.profiles.iter().flat_map(|p| p.profile.layers.clone()).collect();
-        let rows: Vec<AnyElement> = m
-            .layers
+        let all = m.all_mods();
+        let open = self.gp.mod_open.clone();
+        let rows: Vec<AnyElement> = all
             .iter()
             .enumerate()
-            .map(|(i, l)| {
-                let in_use = used.contains(&l.id);
-                let layer = l.clone();
-                div()
+            .map(|(i, rec)| {
+                let users = m.users_of(&rec.id);
+                let in_use = !users.is_empty();
+                let l = m.layer(&rec.current).cloned().unwrap_or_default();
+                let mut shown = l.clone();
+                shown.name = rec.name.clone();
+                let multi = rec.versions.len() > 1;
+                let is_open = open.as_deref() == Some(rec.id.as_str());
+                let mid = rec.id.clone();
+                let head = div()
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .px(px(16.))
-                    .py(px(9.))
-                    .border_t_1()
-                    .border_color(th.line1)
                     .child(div().w(px(4.)).h(px(26.)).rounded(px(2.)).flex_none().bg(layer_color(th, i)))
                     .child(
                         div()
@@ -473,9 +574,18 @@ impl Quiver {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(MEDIUM).truncate().child(l.name.clone())).child(mono(11., th.tx3).child(l.id.clone())))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(div().font_weight(MEDIUM).truncate().child(rec.name.clone()))
+                                    .child(mono(11., th.tx3).child(rec.id.clone()))
+                                    .when(multi, |d| d.child(badge(th, rec.label_of(&rec.current), true))),
+                            )
                             .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(format!(
-                                "{} files · {} · {} · added {} by {}",
+                                "{}{} files · {} · {} · added {} by {}",
+                                if multi { format!("{} versions · ", rec.versions.len()) } else { String::new() },
                                 l.files,
                                 human_size(l.bytes),
                                 l.origin.as_ref().map(|o| tilde(o)).unwrap_or_else(|| "?".into()),
@@ -483,15 +593,34 @@ impl Quiver {
                                 actor_label(&l.added_by)
                             ))),
                     )
+                    .when(multi, |d| {
+                        d.child(small(("mod-versions", i), th, Some(if is_open { Icon::ChevronUp } else { Icon::History }), "Versions").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.gp.mod_open = if this.gp.mod_open.as_deref() == Some(mid.as_str()) { None } else { Some(mid.clone()) };
+                                cx.notify();
+                            },
+                        )))
+                    })
                     .when(in_use, |d| d.child(pill(th, PillKind::Muted, None, "In use")))
                     .when(!in_use, |d| {
                         d.child(
                             icon_button(("layer-rm", i), th, Icon::Trash, false).size(px(26.)).on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_dialog(Dialog::RemoveLayer { game: id, layer: layer.clone() });
+                                this.open_dialog(Dialog::RemoveLayer { game: id, layer: shown.clone() });
                                 cx.notify();
                             })),
                         )
-                    })
+                    });
+                let versions = (is_open && multi).then(|| self.render_versions(th, id, m, rec, cx));
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .px(px(16.))
+                    .py(px(9.))
+                    .border_t_1()
+                    .border_color(th.line1)
+                    .child(head)
+                    .children(versions)
                     .into_any_element()
             })
             .collect();
@@ -499,8 +628,8 @@ impl Quiver {
         let path = self.gp.layer_path.clone();
         card(th)
             .child(
-                card_header(th, "Layer store")
-                    .child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{} layer{} · copied into Quiver, reflinked where possible", m.layers.len(), if m.layers.len() == 1 { "" } else { "s" })))
+                card_header(th, "Mod store")
+                    .child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{} mod{} · copied into Quiver, reflinked where possible", all.len(), if all.len() == 1 { "" } else { "s" })))
                     .child(div().flex_1()),
             )
             .children(rows)
@@ -515,7 +644,7 @@ impl Quiver {
                     .border_color(th.line1)
                     .bg(th.ink1.opacity(0.5))
                     .rounded_b(px(12.))
-                    .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add layer from folder")).child(div().min_w_0().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add mod from folder")).child(div().min_w_0().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
                     .child(
                         div()
                             .flex()
@@ -523,11 +652,98 @@ impl Quiver {
                             .gap(px(8.))
                             .child(div().w(px(200.)).flex_shrink().min_w(px(110.)).children(name))
                             .child(div().flex_1().min_w_0().children(path))
-                            .child(button("layer-add", th, Kind::Primary, Size::Small, Some(Icon::Plus), "Add layer").on_click(cx.listener(move |this, _, _, cx| this.add_layer(id, cx)))),
-                    ),
+                            .child(button("layer-add", th, Kind::Primary, Size::Small, Some(Icon::Plus), "Add mod").on_click(cx.listener(move |this, _, _, cx| this.add_layer(id, cx)))),
+                    )
+                    .child(div().text_size(px(11.)).text_color(th.tx3).child(format!("A new build of a mod is a version of it: quiver mods {id} version add MOD DIR"))),
             )
     }
 
+    /// A mod's versions, newest first: which is current, who pins which, and the buttons to
+    /// make one current (for every profile that tracks the mod) or retire it.
+    fn render_versions(&mut self, th: &Theme, id: u32, m: &ModsState, rec: &ModRecord, cx: &mut Context<Self>) -> AnyElement {
+        let users = m.users_of(&rec.id);
+        let tracking: Vec<String> = users.iter().filter(|(_, r)| !r.pinned).map(|(p, _)| p.profile.name.clone()).collect();
+        let rows: Vec<AnyElement> = rec
+            .versions
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(j, v)| {
+                let is_cur = v.id == rec.current;
+                let pins: Vec<String> = users.iter().filter(|(_, r)| r.pinned && r.version == v.id).map(|(p, _)| p.profile.name.clone()).collect();
+                let l = m.layer(&v.id);
+                let key = |what: &str| SharedString::from(format!("ver-{what}-{}-{j}", rec.id));
+                let (mid, vid) = (rec.id.clone(), v.id.clone());
+                let (mid2, vid2) = (rec.id.clone(), v.id.clone());
+                let mut sub = format!("{} · added {} by {}", v.id, day(v.added), actor_label(&v.added_by));
+                if let Some(l) = l {
+                    sub.push_str(&format!(" · {} files · {}", l.files, human_size(l.bytes)));
+                    if l.manifest.as_ref().and_then(|x| x.save_compatible) != Some(true) {
+                        sub.push_str(" · may change saves");
+                    }
+                }
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .bg(if is_cur { th.acc_soft } else { th.ink1 })
+                    .when(v.retired, |d| d.opacity(0.6))
+                    .child(icon(if is_cur { Icon::CircleCheck } else { Icon::CircleDot }, 13., if is_cur { th.acc } else { th.tx3 }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(div().font_weight(SEMIBOLD).child(v.label.clone()))
+                                    .when(v.retired, |d| d.child(pill(th, PillKind::Muted, None, "Retired")))
+                                    .when(v.prerelease, |d| d.child(pill(th, PillKind::Warn, None, "Pre-release")))
+                                    .when(!pins.is_empty(), |d| d.child(pill(th, PillKind::Muted, Some(Icon::Pin), format!("Pinned by {}", pins.join(", "))))),
+                            )
+                            .child(mono(11., th.tx3).truncate().child(sub))
+                            .when_some(v.notes.clone(), |d, n| d.child(div().text_size(px(11.5)).text_color(th.tx2).truncate().child(n))),
+                    )
+                    .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
+                    .when(!is_cur && !v.retired, |d| {
+                        d.child(small(key("use"), th, Some(Icon::CircleCheck), "Make current").on_click(cx.listener(move |this, _, _, cx| {
+                            this.version_op(id, ModsRequest::VersionUse { product_id: id, mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
+                        })))
+                    })
+                    .when(!is_cur, |d| {
+                        let retired = v.retired;
+                        d.child(
+                            small(key("retire"), th, Some(if retired { Icon::ArchiveRestore } else { Icon::Minus }), if retired { "Bring back" } else { "Retire" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let req = ModsRequest::VersionRetire { product_id: id, mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
+                                    this.version_op(id, req, cx);
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .pl(px(16.))
+            .child(div().text_size(px(11.5)).text_color(th.tx3).child(if tracking.is_empty() {
+                "No profile tracks the current version. Making a version current updates every profile that does.".to_owned()
+            } else {
+                format!("Tracking the current version: {}. Making another version current updates them; pinned profiles keep theirs.", tracking.join(", "))
+            }))
+            .children(rows)
+            .into_any_element()
+    }
     fn render_profile_card(&mut self, th: &Theme, g: &GameRow, m: &ModsState, p: &ProfileInfo, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let prof = p.profile.clone();
@@ -735,12 +951,17 @@ fn describe_change(prev: Option<&ubi_api::Profile>, r: &ProfileRevision) -> Stri
         parts.push(format!("renamed to {}", n.name));
     }
     if p.layers != n.layers {
-        let added = n.layers.iter().filter(|l| !p.layers.contains(l)).count();
-        let removed = p.layers.iter().filter(|l| !n.layers.contains(l)).count();
+        // Entries of the same mod (`MOD`, `MOD@VERSION`) are a version change, not a swap.
+        let mod_of = |e: &String| ubi_api::mods::split_entry(e).0.to_owned();
+        let (pm, nm): (Vec<String>, Vec<String>) = (p.layers.iter().map(mod_of).collect(), n.layers.iter().map(mod_of).collect());
+        let added = nm.iter().filter(|l| !pm.contains(l)).count();
+        let removed = pm.iter().filter(|l| !nm.contains(l)).count();
+        let versions = n.layers.iter().filter(|e| !p.layers.contains(e) && pm.contains(&mod_of(e))).count();
         parts.push(match (added, removed) {
-            (0, 0) => "layers reordered".into(),
-            (a, 0) => format!("{a} layer{} added", if a == 1 { "" } else { "s" }),
-            (0, r) => format!("{r} layer{} removed", if r == 1 { "" } else { "s" }),
+            (0, 0) if versions > 0 => format!("{versions} mod version{} changed", if versions == 1 { "" } else { "s" }),
+            (0, 0) => "mods reordered".into(),
+            (a, 0) => format!("{a} mod{} added", if a == 1 { "" } else { "s" }),
+            (0, r) => format!("{r} mod{} removed", if r == 1 { "" } else { "s" }),
             (a, r) => format!("{a} added, {r} removed"),
         });
     }

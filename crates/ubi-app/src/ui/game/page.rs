@@ -171,6 +171,8 @@ pub struct GamePage {
     pub prof_sel: Option<String>,
     pub prof_hist: Load<(String, Vec<ProfileRevision>)>,
     pub layer_name: Option<Entity<TextInput>>,
+    /// Mods tab: the mod whose versions are shown (its id).
+    pub mod_open: Option<String>,
     pub layer_path: Option<Entity<TextInput>>,
     pub log_file: usize,
     pub log: Load<LogText>,
@@ -356,7 +358,7 @@ pub fn profile_summary(i: &ubi_api::mods::ProfileInfo) -> String {
         None => "saves not migrated".into(),
     };
     format!(
-        "{} layer{} · {}{}",
+        "{} mod{} · {}{}",
         p.layers.len(),
         if p.layers.len() == 1 { "" } else { "s" },
         saves,
@@ -1155,7 +1157,7 @@ impl Quiver {
 
     pub fn ensure_mods_inputs(&mut self, cx: &mut Context<Self>) {
         if self.gp.layer_name.is_none() {
-            self.gp.layer_name = Some(self.text_input("Layer name, e.g. ReShade", "", false, cx));
+            self.gp.layer_name = Some(self.text_input("Mod name, e.g. ReShade", "", false, cx));
             self.gp.layer_path = Some(self.text_input("/home/you/mods/reshade (laid out like the install folder)", "", true, cx));
         }
     }
@@ -1217,7 +1219,7 @@ impl Quiver {
             .gp
             .mods
             .ready()
-            .map(|m| m.layers.iter().map(|l| (l.id.clone(), l.name.clone(), false)).collect())
+            .map(|m| m.all_mods().iter().map(|r| (r.id.clone(), r.name.clone(), false)).collect())
             .unwrap_or_default();
         let name = self.text_input("Profile name, e.g. Visual overhaul", "", false, cx);
         self.open_dialog(Dialog::NewProfile { game: id, name, layers, saves: None });
