@@ -1,0 +1,13 @@
+[package]
+name = "ubi-proto"
+description = "Generated Ubisoft Connect protobuf types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
