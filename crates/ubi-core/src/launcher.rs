@@ -115,7 +115,11 @@ impl Config {
             library: games.join("ubi-library"),
             prefixes: games.join("ubi-prefixes"),
             proton: find_proton().context("no Proton found in ~/.local/share/Steam/compatibilitytools.d")?,
-            sdk_source: games.join("ubisoft-connect").join(UPC_REL),
+            sdk_source: {
+                // Prefer an existing Connect install; otherwise ensure_sdk() fetches the DLLs.
+                let lutris = games.join("ubisoft-connect").join(UPC_REL);
+                if lutris.join("uplay_r164.dll").is_file() { lutris } else { data_dir().join("sdk") }
+            },
             bridge_exe: default_bridge_exe(),
             save_backups: data_dir().join("save-backups"),
             env: vec![
@@ -447,6 +451,29 @@ impl Proton<'_> {
     }
 }
 
+const CONNECT_INSTALLER: &str = "https://static3.cdn.ubi.com/orbit/launcher_installer/UbisoftConnectInstaller.exe";
+
+/// Make sure `cfg.sdk_source` holds Ubisoft's SDK DLLs, extracting them from the public
+/// Ubisoft Connect installer (an NSIS archive, read with `7z`) if needed. Nothing is
+/// installed or run; only the DLLs games load are kept.
+pub async fn ensure_sdk(cfg: &Config) -> Result<()> {
+    if cfg.sdk_source.join("uplay_r164.dll").is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&cfg.sdk_source)?;
+    let installer = cfg.sdk_source.join("UbisoftConnectInstaller.exe");
+    let bytes = reqwest::get(CONNECT_INSTALLER).await?.error_for_status()?.bytes().await?;
+    std::fs::write(&installer, &bytes)?;
+    let mut cmd = Command::new("7z");
+    cmd.args(["e", "-y", "-bso0", "-bsp0"]).arg(format!("-o{}", cfg.sdk_source.display())).arg(&installer).args(SDK_DLLS);
+    let status = cmd.status().await.context("running 7z (install p7zip)")?;
+    let _ = std::fs::remove_file(&installer);
+    if !status.success() || !cfg.sdk_source.join("uplay_r164.dll").is_file() {
+        bail!("could not extract the SDK DLLs from the Ubisoft Connect installer");
+    }
+    Ok(())
+}
+
 /// Create the game's prefix if needed: a fresh Proton prefix plus Ubisoft's SDK DLLs in a
 /// Connect-shaped directory and the registry key the SDK loader uses to find them.
 pub async fn ensure_prefix(cfg: &Config, game: &Game) -> Result<()> {
@@ -460,6 +487,7 @@ pub async fn ensure_prefix(cfg: &Config, game: &Game) -> Result<()> {
         // Proton initializes <compat>/pfx; pointing it at the root keeps a plain Wine layout.
         std::os::unix::fs::symlink(".", &pfx_link)?;
     }
+    ensure_sdk(cfg).await?;
     let proton = Proton { cfg, prefix: &game.prefix, build: cfg.proton.clone() };
     let log = game.prefix.join("ubi-setup.log");
     proton.run_to_end(&["wineboot", "-u"], &log).await?;

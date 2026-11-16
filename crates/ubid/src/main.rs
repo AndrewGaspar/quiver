@@ -166,6 +166,7 @@ impl Daemon {
                     running: self.running.lock().unwrap().iter().copied().collect(),
                     jobs,
                     proton_default: self.cfg.proton.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    broker: self.broker.clone(),
                 })
             }
             Request::Login { email, password } => {
@@ -233,6 +234,23 @@ impl Daemon {
                 self.log_activity(source, format!("restored settings r{revision} as r{} for {}", rev.revision, self.product_name(product_id)), Some(product_id));
                 self.emit(Event::SettingsChanged { product_id, revision: rev.revision, source: source.to_owned() });
                 json!(rev)
+            }
+            Request::LaunchContext { product_id, savegame_path, install_dir } => {
+                let (auth, broker) = (self.auth.clone(), self.broker.clone());
+                let ctx = run_local(move || async move {
+                    let (session, demux) = ubi_core::connect(&auth).await?;
+                    let mut lib = Library::fetch(&demux).await?;
+                    let mut ctx = ubi_core::launch::build(&auth, &session, &mut lib, product_id).await?;
+                    ctx.savegame_path = savegame_path;
+                    ctx.broker = Some(broker);
+                    if let Some(dir) = install_dir {
+                        ctx.chunks = ubi_core::launch::installed_chunks(&dir).unwrap_or_default();
+                    }
+                    Ok(ctx)
+                })
+                .await?;
+                self.log_activity(source, format!("issued launch context for {product_id}"), Some(product_id));
+                json!(ctx)
             }
             Request::ProtonList => json!(launcher::list_protons()),
             Request::Playtime { product_id } => json!(settings::playtime(product_id)?),
@@ -488,7 +506,15 @@ async fn main() -> Result<()> {
 
     let cfg = Arc::new(Config::load()?);
     let auth = Arc::new(Auth::default());
-    let broker_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    // A fixed port lets external bridges (containers, Steam prefixes) find the broker.
+    let broker_addr = std::env::var("UBID_BROKER").unwrap_or_else(|_| "127.0.0.1:47810".into());
+    let broker_listener = match tokio::net::TcpListener::bind(&broker_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("broker port {broker_addr} unavailable ({e}); using an ephemeral port");
+            tokio::net::TcpListener::bind("127.0.0.1:0").await?
+        }
+    };
     let broker = broker_listener.local_addr()?.to_string();
     tokio::spawn(ubi_core::broker::Broker::new(Auth::default()).serve(broker_listener));
 

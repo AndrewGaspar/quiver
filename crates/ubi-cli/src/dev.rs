@@ -77,6 +77,8 @@ pub enum DevCmd {
     CdnProbe { product_id: u32, paths: Vec<String> },
     /// Download raw cloud save blobs (<slot>.savegame, zlib) as a backup.
     CloudPull { uplay_id: u32, dir: PathBuf, #[arg(long, default_value_t = 10)] max_slot: u32 },
+    /// Fetch Ubisoft's SDK DLLs from the public Connect installer into a directory.
+    FetchSdk { dir: PathBuf },
     /// Check demux connectivity (no login needed).
     Ping,
     /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
@@ -386,6 +388,15 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
                 } else {
                     println!("slot {slot}: HTTP {status}");
                 }
+            }
+        }
+        DevCmd::FetchSdk { dir } => {
+            let mut cfg = ubi_core::launcher::Config::load()?;
+            cfg.sdk_source = dir.clone();
+            ubi_core::launcher::ensure_sdk(&cfg).await?;
+            for e in std::fs::read_dir(&dir)? {
+                let e = e?;
+                println!("{:>9}  {}", e.metadata()?.len(), e.file_name().to_string_lossy());
             }
         }
         DevCmd::Ping => {

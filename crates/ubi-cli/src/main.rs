@@ -85,6 +85,19 @@ enum Cmd {
     History { game: String },
     /// Make an earlier settings revision current again (0 = defaults).
     Restore { game: String, revision: u32 },
+    /// Write a launch context for running a game's ubi-bridge yourself (containers, other
+    /// prefixes). Uses the daemon's login, so no extra Ubisoft session is created.
+    Context {
+        game: String,
+        #[arg(short, long)]
+        out: std::path::PathBuf,
+        /// Windows path for SDK savegames, e.g. C:\...\savegames\<user>\<id>
+        #[arg(long)]
+        savegame_path: Option<String>,
+        /// Host path of the game's install dir (for installed-chunk info).
+        #[arg(long)]
+        install_dir: Option<std::path::PathBuf>,
+    },
     /// Installed Proton builds.
     Protons,
     /// Play sessions recorded by this launcher.
@@ -208,6 +221,7 @@ async fn main() -> Result<()> {
                 None => println!("not signed in (ubi login)"),
             }
             println!("default Proton: {}", s.proton_default.as_deref().unwrap_or("?"));
+            println!("broker: {}", s.broker);
             if !s.running.is_empty() {
                 println!("running: {:?}", s.running);
             }
@@ -331,6 +345,17 @@ async fn main() -> Result<()> {
                     s.settings_revision
                 );
             }
+        }
+        Cmd::Context { game, out, savegame_path, install_dir } => {
+            let e = resolve(&client, &game).await?;
+            let ctx: serde_json::Value =
+                client.call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir }).await?;
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&out)?;
+                f.write_all(serde_json::to_string_pretty(&ctx)?.as_bytes())?;
+            }
+            eprintln!("wrote {} (broker {}, ticket valid for a few hours)", out.display(), ctx["broker"]);
         }
         Cmd::Protons => {
             let list: Vec<String> = client.call(Request::ProtonList).await?;

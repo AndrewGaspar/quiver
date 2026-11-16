@@ -152,6 +152,9 @@ pub struct Status {
     pub running: Vec<u32>,
     pub jobs: Vec<Job>,
     pub proton_default: Option<String>,
+    /// `host:port` of the Denuvo/ticket broker that game bridges connect to.
+    #[serde(default)]
+    pub broker: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,6 +235,9 @@ pub enum Request {
     SettingsSet { product_id: u32, ops: Vec<SettingOp>, message: Option<String> },
     SettingsHistory { product_id: u32 },
     SettingsRestore { product_id: u32, revision: u32 },
+    /// A launch context for running a game's bridge outside this launcher (e.g. in a
+    /// container): account, fresh ticket, owned ids, CD keys, broker address.
+    LaunchContext { product_id: u32, savegame_path: Option<String>, install_dir: Option<PathBuf> },
     /// Installed Proton builds.
     ProtonList,
     /// Play sessions recorded by this launcher.
