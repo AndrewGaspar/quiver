@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod exports;
 pub use client::Client;
 
 // ---------------------------------------------------------------------------------------
@@ -151,6 +152,9 @@ pub struct Art {
     pub thumb: Option<String>,
     pub background: Option<String>,
     pub logo: Option<String>,
+    /// `icon_image` (an .ico), used for .desktop entries and Steam shortcuts.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// A signed-in Ubisoft account.
@@ -306,6 +310,18 @@ pub enum Request {
     Shutdown,
     /// Make an account (user id, username or unique user-id prefix) the default.
     AccountDefault { account: String },
+    /// Exports Quiver wrote, with whether each is still as written (`Vec<ExportStatus>`).
+    ExportList,
+    /// Write (or with `remove`, delete) a game's .desktop entry.
+    ExportDesktop { product_id: u32, remove: bool },
+    /// Add (or remove) a game's Steam shortcut. Staged if Steam is running. `steam_user`
+    /// (id or name) is required when there are several Steam users and none was chosen
+    /// before; a given user is remembered.
+    ExportSteam { product_id: u32, remove: bool, steam_user: Option<String> },
+    /// Steam's users on this machine (`exports::SteamUsers`).
+    SteamUsers,
+    /// Write staged shortcut changes now (fails while Steam is running). Never restarts Steam.
+    SteamApplyStaged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

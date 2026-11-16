@@ -29,3 +29,8 @@ sha1.workspace = true
 hex.workspace = true
 futures.workspace = true
 ubi-api.workspace = true
+crc32fast.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
