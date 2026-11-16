@@ -8,6 +8,7 @@ pub mod demux;
 pub mod download;
 pub mod install;
 pub mod launch;
+pub mod launcher;
 pub mod library;
 pub mod manifest;
 pub mod savesync;

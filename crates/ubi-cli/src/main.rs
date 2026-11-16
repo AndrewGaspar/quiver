@@ -60,6 +60,10 @@ enum Cmd {
         #[command(subcommand)]
         action: SavesAction,
     },
+    /// List games installed by this launcher.
+    Games,
+    /// Launch an installed game (blocks until it exits; syncs cloud saves around it).
+    Play { product_id: u32 },
     /// Compare installed games (dirs containing uplay_install.manifest) with the latest builds.
     Status {
         /// Game install directories, as `product_id=path`.
@@ -101,6 +105,16 @@ enum SavesAction {
     },
     /// Local -> cloud for slots the game marked with <slot>.save.upload.
     Push { uplay_id: u32, dir: PathBuf },
+}
+
+async fn register_game(lib: &mut Library, product_id: u32, dest: &std::path::Path, language: &str) -> Result<()> {
+    use ubi_core::launcher;
+    let cfg = launcher::Config::load()?;
+    let game = launcher::register(&cfg, lib, product_id, &dest.canonicalize()?, language).await?;
+    eprintln!("registered {} (runs {} in prefix {})", game.name, game.exe, game.prefix.display());
+    let mut games = launcher::Games::load()?;
+    games.upsert(game);
+    games.save()
 }
 
 fn prompt(label: &str) -> Result<String> {
@@ -249,6 +263,25 @@ async fn main() -> Result<()> {
                 println!("previous local copies backed up to {}", b.display());
             }
         }
+        Cmd::Games => {
+            for g in ubi_core::launcher::Games::load()?.games {
+                println!("{:>6}  {:<40} {}", g.product_id, g.name, g.install_dir.display());
+            }
+        }
+        Cmd::Play { product_id } => {
+            use ubi_core::launcher::{self, LaunchEvent};
+            let cfg = launcher::Config::load()?;
+            let game = launcher::Games::load()?.get(product_id).cloned().context("not installed (see `ubi games`)")?;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let broker_addr = listener.local_addr()?.to_string();
+            tokio::spawn(ubi_core::broker::Broker::new(Auth::default()).serve(listener));
+            launcher::play(&cfg, &auth, &game, &broker_addr, |e| match e {
+                LaunchEvent::Status(s) => eprintln!("{s}"),
+                LaunchEvent::Running => eprintln!("{} is running", game.name),
+                LaunchEvent::Exited(code) => eprintln!("game exited ({code:?})"),
+            })
+            .await?;
+        }
         Cmd::Status { installs } => {
             let (_, demux) = ubi_core::connect(&auth).await?;
             let lib = Library::fetch(&demux).await?;
@@ -287,6 +320,9 @@ async fn main() -> Result<()> {
                     let done: std::collections::HashSet<&str> = done.lines().collect();
                     if dry_run || plan.files.iter().all(|f| done.contains(f.path.as_str())) {
                         println!("already installed and up to date");
+                        if !dry_run {
+                            register_game(&mut lib, product_id, &dest, &language).await?;
+                        }
                         return Ok(());
                     }
                     println!("resuming incomplete install");
@@ -332,6 +368,7 @@ async fn main() -> Result<()> {
             reporter.abort();
             result?;
             std::fs::write(&installed, &raw)?;
+            register_game(&mut lib, product_id, &dest, &language).await?;
             println!("{} {} files in {}", if updating { "updated" } else { "installed" }, plan.files.len(), dest.display());
         }
         Cmd::CloudPull { uplay_id, dir, max_slot } => {
