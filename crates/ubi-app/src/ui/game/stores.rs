@@ -5,7 +5,7 @@
 use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 use ubi_api::Request;
 use ubi_api::SettingOp;
-use ubi_api::mods::{Layer, ModsState, ProfileInfo};
+use ubi_api::mods::{ModsState, ProfileInfo};
 use ubi_api::savestores::{DEFAULT_STORE, NEW_STORE, SaveStore, SaveStoresReport, SavesAdvice, saves_advice};
 
 use super::page::{Dialog, Load, load_note};
@@ -14,10 +14,10 @@ use crate::model::{GameRow, ago};
 use crate::theme::Theme;
 use crate::ui::{Icon, PillKind, SEMIBOLD, card, card_header, caption, chip, icon, mono, pill};
 
-/// The advice for a stack of layer ids (enabled mods only, as a launch applies them).
+/// The advice for a stack (entries: mods tracking their current version, or pinned ones;
+/// enabled mods only, as a launch applies them).
 pub fn advice_for(m: &ModsState, layers: &[String]) -> SavesAdvice {
-    let mods: Vec<&Layer> = layers.iter().filter_map(|id| m.layers.iter().find(|l| &l.id == id)).filter(|l| l.enabled()).collect();
-    saves_advice(mods)
+    saves_advice(&m.stack_layers(layers))
 }
 
 fn live(m: &ModsState) -> Vec<SaveStore> {
