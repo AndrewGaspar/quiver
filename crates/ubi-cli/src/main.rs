@@ -7,6 +7,7 @@ mod downloads;
 mod exports;
 mod mods;
 mod info;
+mod savestores;
 mod setup;
 mod steamrun;
 
@@ -777,6 +778,11 @@ async fn main() -> Result<()> {
         Cmd::Saves { game, action: Some(info::SavesAction::Sync { profile }), .. } => info::sync(&client, &game, profile).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
             info::restore(&client, &cli.source, &game, backup).await?
+        }
+        Cmd::Saves { game, action: Some(info::SavesAction::Stores { json }), json: j, .. } => savestores::stores(&client, &game, json || j).await?,
+        Cmd::Saves { game, action: Some(info::SavesAction::Store { action }), .. } => savestores::store(&client, &cli.source, &game, action).await?,
+        Cmd::Saves { game, action: Some(info::SavesAction::Merge { from, into }), .. } => {
+            savestores::merge(&client, &cli.source, &game, from, into).await?
         }
         Cmd::Daemon { action: DaemonAction::Stop } => {
             let () = client.call(Request::Shutdown).await?;

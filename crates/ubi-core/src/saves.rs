@@ -266,17 +266,27 @@ pub fn new_backup_dir(root: &Path, product_id: u32) -> PathBuf {
 
 fn read_backup(path: &Path, id: String) -> SaveBackup {
     let meta: Meta = std::fs::read(path.join(META)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let created = meta.created.or_else(|| {
-        // `<id>-YYYYmmdd-HHMMSS`, local time.
-        let stamp = id.split_once('-')?.1.get(..15)?;
-        let naive = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S").ok()?;
-        naive.and_local_timezone(chrono::Local).single().map(|d| d.with_timezone(&Utc))
+    // `<id>-YYYYmmdd-HHMMSS[-n]`, local time; anything else after `<id>-` is a name someone
+    // gave the folder (dated by the folder's modification time).
+    let stamped = id.split_once('-').and_then(|(_, rest)| {
+        let naive = chrono::NaiveDateTime::parse_from_str(rest.get(..15)?, "%Y%m%d-%H%M%S").ok()?;
+        let tail = &rest[15..];
+        (tail.is_empty() || tail.strip_prefix('-').is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
+            .then(|| naive.and_local_timezone(chrono::Local).single().map(|d| d.with_timezone(&Utc)))
+            .flatten()
     });
+    let name = match stamped {
+        Some(_) => None,
+        None => id.split_once('-').map(|(_, n)| n.to_owned()),
+    };
+    let mtime = || std::fs::metadata(path).ok().as_ref().and_then(modified);
+    let created = meta.created.or(stamped).or_else(mtime);
     let slots = local_slots(path).map(|m| m.into_iter().map(|(s, (f, _))| (s, f.size)).collect()).unwrap_or_default();
-    SaveBackup { id, path: path.to_path_buf(), created, slots, reason: meta.reason, account: meta.account }
+    SaveBackup { id, path: path.to_path_buf(), created, slots, reason: meta.reason, account: meta.account, name }
 }
 
-/// A product's backups, newest first.
+/// A product's backups, newest first: Quiver's own (`<id>-<date>`) and folders named by
+/// hand (`<id>-<name>`).
 pub fn list_backups(root: &Path, product_id: u32) -> Vec<SaveBackup> {
     let prefix = format!("{product_id}-");
     let mut out: Vec<SaveBackup> = std::fs::read_dir(root)
@@ -286,7 +296,7 @@ pub fn list_backups(root: &Path, product_id: u32) -> Vec<SaveBackup> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| {
             let id = e.file_name().to_str()?.to_owned();
-            id.strip_prefix(&prefix)?.starts_with(|c: char| c.is_ascii_digit()).then(|| read_backup(&e.path(), id))
+            (!id.strip_prefix(&prefix)?.is_empty()).then(|| read_backup(&e.path(), id))
         })
         .collect();
     out.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| b.id.cmp(&a.id)));
@@ -488,6 +498,29 @@ mod tests {
         assert!(restore(&root, 3539, "nope", &dir, None).is_err());
         let other = tmp.path().join("prefix/savegames/user-2/3539");
         assert!(restore(&root, 3539, &prev.id, &other, None).unwrap_err().to_string().contains("another account"));
+    }
+
+    #[test]
+    fn named_backups_are_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("save-backups");
+        // As found in the wild: a folder copied by hand, named after what it holds.
+        let named = root.join("3539-ptkzxpv-fresh-playthrough-20261116-011432");
+        write(&named, "1.save", b"fresh");
+        write(&named, "1.save.upload", b"");
+        write(&root.join("3539-20261101-120000-2"), "1.save", b"dated");
+        let t: DateTime<Utc> = "2026-11-16T08:14:32Z".parse().unwrap();
+        std::fs::File::open(&named).unwrap().set_modified(t.into()).unwrap();
+        let list = list_backups(&root, 3539);
+        assert_eq!(list.len(), 2);
+        let n = list.iter().find(|b| b.id.contains("fresh")).unwrap();
+        assert_eq!(n.name.as_deref(), Some("ptkzxpv-fresh-playthrough-20261116-011432"));
+        assert_eq!(n.created, Some(t), "dated by the folder's mtime");
+        assert_eq!(n.slots, [(1, 5)]);
+        let d = list.iter().find(|b| b.id.ends_with("-2")).unwrap();
+        assert!(d.name.is_none() && d.created.is_some());
+        assert_eq!(find_backup(&root, 3539, "fresh-playthrough").unwrap().id, n.id);
+        assert!(list_backups(&root, 353).is_empty());
     }
 
     #[test]

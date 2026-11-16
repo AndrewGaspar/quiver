@@ -11,9 +11,9 @@
 //! [`resolve_settings`] for how they combine and [`SettingConflict`] for what is reported.
 //!
 //! A **layer** is a directory of files that is overlaid on a game's install folder. A
-//! **profile** is a named stack of layers (bottom to top) with its own saves, optional
-//! launch-setting overrides and a cloud-save switch. Vanilla is implicit: no layers, the
-//! game's own saves, never mounted. Running a profile never changes the install folder:
+//! **profile** is a named stack of layers (bottom to top) with optional launch-setting
+//! overrides and a save store (see [`crate::savestores`]). Vanilla is implicit: no layers,
+//! never mounted. Running a profile never changes the install folder:
 //! the layers and a per-profile writable directory are mounted over it with overlayfs,
 //! visible only to that launch's processes.
 //!
@@ -342,16 +342,18 @@ pub struct Profile {
     /// Launch-setting overrides applied on top of the game's settings.
     #[serde(default, skip_serializing_if = "is_default")]
     pub settings: GameSettings,
-    /// Sync this profile's own saves with the cloud (off by default, so a broken mod can't
-    /// overwrite cloud saves).
+    /// Before save stores: sync this profile's own saves with the cloud. Ignored once
+    /// `saves` is set (cloud sync is per store now, see [`crate::savestores`]); kept so
+    /// older revisions read as they were.
     #[serde(default)]
     pub cloud_saves: bool,
     /// Shown as its own tile and exported like a game.
     #[serde(default)]
     pub pinned: bool,
-    /// Mods v2: `Some(true)` gives the profile its own saves
-    /// (`savegames/<user>/<product>-<id>`), `Some(false)` shares vanilla's, `None` (auto)
-    /// forks only if a mod in the stack isn't save-compatible.
+    /// Mods v2 before save stores: `Some(true)` gave the profile its own saves
+    /// (`savegames/<user>/<product>-<id>`), `Some(false)` shared vanilla's, `None` (auto)
+    /// forked only if a mod in the stack wasn't save-compatible. Ignored once `saves` is
+    /// set; migration turns it into a store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separate_saves: Option<bool>,
     /// Prefix folders (relative to the prefix) this profile has its own copy of: overlaid
@@ -359,6 +361,11 @@ pub struct Profile {
     /// under `Documents/My Games`, so the profile keeps its own graphics settings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_config: Vec<String>,
+    /// The save store the profile uses (a [`crate::savestores::SaveStore`] id), chosen
+    /// independently of its mods. `None`: from before save stores, not migrated yet (the
+    /// old `separate_saves` rule applies until then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saves: Option<String>,
 }
 
 fn is_default(s: &GameSettings) -> bool {
@@ -375,10 +382,11 @@ fn parse_bool(key: &str, v: Option<&str>) -> Result<bool, String> {
 
 impl Profile {
     /// Apply one edit. Keys: `name`, `mods` (or `layers`: comma-separated mod ids, bottom
-    /// to top; the daemon resolves names), `cloud_saves=on|off`, `pinned=on|off`,
-    /// `separate_saves=on|off|auto`, `profile_config=DIR,…` (prefix-relative; the daemon
-    /// normalizes them); any other key is a launch-setting override (`proton`,
-    /// `env.NAME`, `dll.NAME`, `args`, `wrappers`, `language`). `account` is per game.
+    /// to top; the daemon resolves names), `pinned=on|off`, `saves=STORE` (a save store's
+    /// id; the daemon resolves names, `default` and `new`), `profile_config=DIR,…`
+    /// (prefix-relative; the daemon normalizes them); any other key is a launch-setting
+    /// override (`proton`, `env.NAME`, `dll.NAME`, `args`, `wrappers`, `language`).
+    /// `account` is per game; `cloud_saves` and `separate_saves` are replaced by stores.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
         let (key, value) = match op {
             SettingOp::Set { key, value } => (key.as_str(), Some(value.as_str())),
@@ -393,19 +401,22 @@ impl Profile {
                 self.name = name.to_owned();
             }
             "layers" | "mods" => self.layers = split_list(value.unwrap_or_default()),
-            "cloud_saves" => self.cloud_saves = parse_bool(key, value)?,
             "pinned" => self.pinned = parse_bool(key, value)?,
+            "saves" => match value.map(str::trim).filter(|v| !v.is_empty()) {
+                Some(v) => self.saves = Some(v.to_owned()),
+                None => return Err("saves: name a save store (default, new, or a store's name or id)".into()),
+            },
+            "cloud_saves" => {
+                return Err("cloud sync is set per save store now: `quiver saves <game> store cloud STORE` (one store per game syncs)".into());
+            }
             "separate_saves" => {
-                self.separate_saves = match value.map(str::to_ascii_lowercase).as_deref() {
-                    None | Some("auto") => None,
-                    v => Some(parse_bool(key, v)?),
-                }
+                return Err("separate_saves is replaced by save stores: saves=default shares the Default store, saves=new gives the profile its own".into());
             }
             "profile_config" => self.profile_config = split_list(value.unwrap_or_default()),
             "account" => return Err("the launch account is set per game (`quiver set <game> account=…`)".into()),
             "profile" => return Err("the default profile is set per game (`quiver mods <game> default PROFILE`)".into()),
             _ => self.settings.apply(op).map_err(|e| {
-                format!("{e}; profiles also take name, mods, cloud_saves, pinned, separate_saves, profile_config")
+                format!("{e}; profiles also take name, mods, saves, pinned, profile_config")
             })?,
         }
         Ok(())
@@ -490,6 +501,12 @@ pub struct ModsState {
     /// with a warning), so check it against `profiles`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
+    /// The game's save stores (retired ones included; see [`crate::savestores`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub save_stores: Vec<crate::savestores::SaveStore>,
+    /// Whose saves vanilla launches use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vanilla_saves: Option<SavesPlan>,
 }
 
 // -- Mods v2: resolution, saves, config ---------------------------------------------------
@@ -515,7 +532,7 @@ pub struct SettingConflict {
 /// Which saves a launch uses.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SavesPlan {
-    /// The profile's own saves (`savegames/<user>/<product>-<profile id>`), not vanilla's.
+    /// Not the Default store's folder (`savegames/<user>/<product>`).
     pub separate: bool,
     /// Why, in words.
     pub reason: String,
@@ -523,6 +540,15 @@ pub struct SavesPlan {
     pub folder: String,
     /// Whether the launch syncs these saves with the cloud.
     pub cloud: bool,
+    /// The save store's id and name (`None`: a profile from before save stores, not
+    /// migrated yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_name: Option<String>,
+    /// Said when the store doesn't sync with the cloud: which one does, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_note: Option<String>,
 }
 
 /// A prefix folder a profile has its own copy of.
@@ -692,6 +718,12 @@ pub struct MigrationReport {
     /// their own: (profile id, folder relative to the prefix).
     pub kept_separate_saves: Vec<(String, String)>,
     pub notes: Vec<String>,
+    /// Save stores: profiles given a store (profile id, store id), and stores created for
+    /// profiles' own folders (ids).
+    #[serde(default)]
+    pub profile_stores: Vec<(String, String)>,
+    #[serde(default)]
+    pub stores_created: Vec<String>,
 }
 
 /// Settings for a launch: `base` (defaults and the game's settings), then each mod's
@@ -791,6 +823,8 @@ pub enum ModsRequest {
         #[serde(default)]
         confirmed: bool,
     },
+    /// A new profile. `saves`: a save store (id, name, `default` or `new`); `None` follows
+    /// the advice (Default if every mod is save-compatible, else a new store).
     ProfileCreate {
         product_id: u32,
         name: String,
@@ -798,6 +832,8 @@ pub enum ModsRequest {
         layers: Vec<String>,
         #[serde(default)]
         message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saves: Option<String>,
     },
     /// Edit a profile (see [`Profile::apply`] for the keys); records a revision.
     ProfileSet {
@@ -915,9 +951,10 @@ pub enum ModsRequest {
         #[serde(default)]
         fixes_on_vanilla: Option<bool>,
     },
-    /// Make Mods v1 data explicit for Mods v2 (`MigrationReport`): profiles that already
-    /// have their own saves folder get `separate_saves=on`, so they keep using it. Layers
-    /// need nothing. Idempotent. Launches do this for their profile on their own.
+    /// Make older data explicit (`MigrationReport`): every profile gets a save store. One
+    /// with its own saves folder (or `separate_saves=on`, or a stack that would have forked
+    /// its saves) gets a store pointing at that folder, so nothing moves; the others use
+    /// Default. Layers need nothing. Idempotent. Launches do this on their own.
     Migrate {
         product_id: u32,
         #[serde(default)]
@@ -938,11 +975,8 @@ mod tests {
         let mut p = Profile { id: "p1".into(), name: "x".into(), ..Default::default() };
         set(&mut p, "layers=la, lb,").unwrap();
         assert_eq!(p.layers, ["la", "lb"]);
-        set(&mut p, "cloud_saves=on").unwrap();
-        assert!(p.cloud_saves);
-        set(&mut p, "cloud_saves=").unwrap();
-        assert!(!p.cloud_saves);
-        assert!(set(&mut p, "cloud_saves=maybe").is_err());
+        // Cloud sync is per save store now.
+        assert!(set(&mut p, "cloud_saves=on").unwrap_err().contains("store cloud"));
         set(&mut p, "pinned=true").unwrap();
         assert!(p.pinned);
         set(&mut p, "env.DXVK_HUD=fps").unwrap();
@@ -950,7 +984,7 @@ mod tests {
         assert_eq!(p.settings.env["DXVK_HUD"], "fps");
         assert!(set(&mut p, "account=me").is_err());
         assert!(set(&mut p, "name=").is_err());
-        assert!(set(&mut p, "bogus=1").unwrap_err().contains("cloud_saves"));
+        assert!(set(&mut p, "bogus=1").unwrap_err().contains("saves"));
         set(&mut p, "name= Visual overhaul ").unwrap();
         assert_eq!(p.name, "Visual overhaul");
         set(&mut p, "layers=").unwrap();
@@ -1013,24 +1047,21 @@ mod tests {
         let mut p = Profile { id: "p1".into(), name: "x".into(), ..Default::default() };
         set(&mut p, "mods=a,b").unwrap();
         assert_eq!(p.layers, ["a", "b"]);
-        assert_eq!(p.separate_saves, None);
-        set(&mut p, "separate_saves=on").unwrap();
-        assert_eq!(p.separate_saves, Some(true));
-        set(&mut p, "separate_saves=off").unwrap();
-        assert_eq!(p.separate_saves, Some(false));
-        set(&mut p, "separate_saves=auto").unwrap();
-        assert_eq!(p.separate_saves, None);
-        set(&mut p, "separate_saves=off").unwrap();
-        set(&mut p, "separate_saves=").unwrap();
-        assert_eq!(p.separate_saves, None);
-        assert!(set(&mut p, "separate_saves=maybe").is_err());
+        assert_eq!((p.separate_saves, p.saves.as_deref()), (None, None));
+        // Save stores replace separate_saves.
+        assert!(set(&mut p, "separate_saves=on").unwrap_err().contains("saves=new"));
+        set(&mut p, "saves=s123").unwrap();
+        assert_eq!(p.saves.as_deref(), Some("s123"));
+        assert!(set(&mut p, "saves=").is_err());
+        assert_eq!(p.saves.as_deref(), Some("s123"));
         set(&mut p, "profile_config=drive_c/a, drive_c/b").unwrap();
         assert_eq!(p.profile_config, ["drive_c/a", "drive_c/b"]);
         // A v1 revision reads as auto saves and no per-profile folders; defaults stay out.
         let old: Profile = serde_json::from_str(r#"{"id":"p","name":"n","layers":["l1"],"cloud_saves":true,"pinned":false}"#).unwrap();
         assert_eq!((old.separate_saves, old.profile_config.len()), (None, 0));
         let v = serde_json::to_value(&old).unwrap();
-        assert!(v.get("separate_saves").is_none() && v.get("profile_config").is_none());
+        assert!(v.get("separate_saves").is_none() && v.get("profile_config").is_none() && v.get("saves").is_none());
+        assert!(old.saves.is_none(), "not migrated yet");
     }
 
     #[test]

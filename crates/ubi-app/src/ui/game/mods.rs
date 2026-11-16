@@ -64,7 +64,7 @@ impl Quiver {
             .flex_none()
             .gap(px(16.))
             .child(match &selected {
-                Some(p) => self.render_profile_card(th, g, p, cx).into_any_element(),
+                Some(p) => self.render_profile_card(th, g, &m, p, cx).into_any_element(),
                 None => self.render_vanilla_card(th, g, cx).into_any_element(),
             })
             .when(selected.is_some(), |d| d.child(self.render_profile_history(th, g, cx)))
@@ -82,7 +82,7 @@ impl Quiver {
         let id = g.id();
         let playing = self.default_profile(id);
         let mut cards: Vec<AnyElement> = Vec::new();
-        let entry = |i: usize, key: Option<String>, name: String, sub: String, saves: (Icon, &str), ic: Icon, pinned: bool, this: &mut Self, cx: &mut Context<Self>| {
+        let entry = |i: usize, key: Option<String>, name: String, sub: String, saves: (Icon, String), ic: Icon, pinned: bool, this: &mut Self, cx: &mut Context<Self>| {
             let on = key.as_deref().unwrap_or(VANILLA) == sel;
             let focused = this.focused(Target::Body(i));
             let is_play = key == playing;
@@ -139,7 +139,7 @@ impl Quiver {
                         .items_end()
                         .gap(px(4.))
                         .when(pinned, |d| d.child(icon(Icon::Pin, 12., th.tx3)))
-                        .child(div().flex().items_center().gap(px(4.)).text_size(px(11.)).text_color(th.tx3).child(icon(saves.0, 11., th.tx3)).child(saves.1.to_string())),
+                        .child(div().flex().items_center().gap(px(4.)).text_size(px(11.)).text_color(th.tx3).child(icon(saves.0, 11., th.tx3)).child(saves.1)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_profile(id, k.clone(), cx);
@@ -147,7 +147,12 @@ impl Quiver {
                 }))
                 .into_any_element()
         };
-        cards.push(entry(0, None, "Vanilla".into(), "Base game only, never mounted".into(), (Icon::Cloud, "Cloud saves"), Icon::ShieldCheck, false, self, cx));
+        // Which save store each uses (cloud icon: the store that syncs).
+        let store_label = |s: Option<&ubi_api::mods::SavesPlan>| match s {
+            Some(s) => (if s.cloud { Icon::Cloud } else { Icon::HardDrive }, s.store_name.clone().unwrap_or_else(|| "Own saves".into())),
+            None => (Icon::Cloud, "Default".to_owned()),
+        };
+        cards.push(entry(0, None, "Vanilla".into(), "Base game only, never mounted".into(), store_label(m.vanilla_saves.as_ref()), Icon::ShieldCheck, false, self, cx));
         for (i, p) in m.profiles.iter().enumerate() {
             let pr = &p.profile;
             let n = pr.layers.len();
@@ -156,7 +161,7 @@ impl Quiver {
                 if n == 1 { "" } else { "s" },
                 if p.conflicts.is_empty() { String::new() } else { format!(" · {} conflicts", p.conflicts.len()) }
             );
-            let saves = if pr.cloud_saves { (Icon::Cloud, "Own saves, synced") } else { (Icon::HardDrive, "Own saves") };
+            let saves = store_label(p.saves.as_ref());
             cards.push(entry(i + 1, Some(pr.id.clone()), pr.name.clone(), sub, saves, Icon::Layers, pr.pinned, self, cx));
         }
         let new_i = m.profiles.len() + 1;
@@ -523,7 +528,7 @@ impl Quiver {
             )
     }
 
-    fn render_profile_card(&mut self, th: &Theme, g: &GameRow, p: &ProfileInfo, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_profile_card(&mut self, th: &Theme, g: &GameRow, m: &ModsState, p: &ProfileInfo, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let prof = p.profile.clone();
         let pid = prof.id.clone();
@@ -557,7 +562,7 @@ impl Quiver {
                 }))
                 .into_any_element()
         };
-        let cloud = switch("cloud_saves", prof.cloud_saves, self, cx);
+        let stores = self.render_store_picker(th, g, m, p, cx);
         let pinned = switch("pinned", prof.pinned, self, cx);
         let del_prof = prof.clone();
         let play_i = self.gp.profiles().iter().position(|x| x.id == prof.id).map(|i| i + 1).unwrap_or(0);
@@ -575,8 +580,7 @@ impl Quiver {
                     .child(div().flex_1())
                     .child(badge(th, format!("r{}", p.revision), false)),
             )
-            .child(row("Saves", Some("Kept apart from Vanilla's"), pill(th, PillKind::Muted, Some(Icon::HardDrive), "Own saves").into_any_element()))
-            .child(row("Sync these saves to the cloud", Some("Off by default, so a broken mod can't overwrite your cloud saves"), cloud))
+            .child(stores)
             .child(row("Pin to library", Some("Its own tile and list row"), pinned))
             .child(row(
                 "Launch overrides",
@@ -613,12 +617,19 @@ impl Quiver {
         let id = g.id();
         let cloud = self.gp.info.ready().map(|i| i.features.cloud_saves).unwrap_or(true);
         let is_default = self.default_profile(id).is_none();
+        let store = self.gp.mods.ready().and_then(|m| m.vanilla_saves.clone());
+        let saves = match (&store, cloud) {
+            (_, false) => "The game's own (no cloud saves)".to_owned(),
+            (Some(s), _) if s.cloud => format!("{} store, synced with the cloud", s.store_name.as_deref().unwrap_or("Default")),
+            (Some(s), _) => format!("{} store, on this PC only", s.store_name.as_deref().unwrap_or("Default")),
+            (None, _) => "The game's own, synced with the cloud".to_owned(),
+        };
         card(th)
             .p(px(16.))
             .gap(px(10.))
             .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).text_size(px(14.)).child("Vanilla")))
             .child(kv(th, "Runs", div().child("The base install, unmounted")))
-            .child(kv(th, "Saves", div().child(if cloud { "The game's own, synced with the cloud" } else { "The game's own (no cloud saves)" })))
+            .child(kv(th, "Saves", div().child(saves)))
             .child(kv(th, "Settings", div().child("This game's launch options")))
             .child(self.cli_line("van-cli", th, format!("quiver play {id} --vanilla"), cx))
             .child(
@@ -733,8 +744,8 @@ fn describe_change(prev: Option<&ubi_api::Profile>, r: &ProfileRevision) -> Stri
             (a, r) => format!("{a} added, {r} removed"),
         });
     }
-    if p.cloud_saves != n.cloud_saves {
-        parts.push(format!("cloud saves {}", if n.cloud_saves { "on" } else { "off" }));
+    if p.saves != n.saves {
+        parts.push("save store changed".into());
     }
     if p.pinned != n.pinned {
         parts.push(if n.pinned { "pinned".into() } else { "unpinned".into() });

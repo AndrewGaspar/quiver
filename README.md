@@ -227,10 +227,9 @@ and hard links are replaced by files of their own first, and reflinked imports n
 A **layer** is a folder of files laid out like the install folder; `layer add` copies it into
 `~/.local/share/quiver/mods/<product>/layers/<id>/` (reflinks on btrfs/xfs) and matches file
 names to the install's case. A **profile** stacks layers bottom to top, can override launch
-settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and, when it forks saves (see
-Mods v2 below), has its own (`savegames/<user>/<product>-<profile id>` in the prefix), synced
-with the cloud only with `cloud_saves=on`. Vanilla is implicit and only mounted for fixes
-that change install files.
+settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and points at a **save store**
+(see "Save stores" below), chosen independently of its mods. Vanilla is implicit and only
+mounted for fixes that change install files.
 
 A layer can also **delete** files and folders (`--delete PATH`, `layer delete-files`,
 `layer keep-files`; paths are relative to the install folder and matched to its case). A
@@ -302,11 +301,7 @@ the later one winning, the profile's `proton`/`language` win. Every key set diff
 sources (env, DLL, or a config key) is reported in `mods list`, after `profile set` and in the
 launch's job details; a mod's declared `requires`/`conflicts` stop the launch with a reason.
 
-**Saves** fork only when a mod in the stack isn't save-compatible, or the profile says
-`separate_saves=on`; `separate_saves=off` always shares vanilla's (and syncs them with the
-cloud like vanilla does); `auto` (the default) follows the mods. A profile that already has
-its own saves folder (every v1 profile that was played) keeps using it: launches and `quiver
-mods <game> migrate` record `separate_saves=on` for it, and nothing is moved.
+**Saves** live in save stores, which profiles pick independently of their mods (see below).
 
 **Config patches** are applied at every launch, just before the game starts (the game may
 have rewritten the file), as "ensure key = value". The file's own values from before Quiver
@@ -339,6 +334,52 @@ it, and the Mods tab marks it ("Make default"); the Play button's arrow menu pla
 once without changing it. `quiver play <game> --vanilla` (or `--profile vanilla`) forces
 vanilla. If the default profile is deleted, launches run vanilla and say so (activity log,
 the launch job); restoring the profile makes it the default again.
+
+### Save stores
+
+A **save store** is a named set of save slots for a game. Every game has **Default**, the
+folder Ubisoft Connect itself uses (`savegames/<user>/<product>` in the prefix); `quiver saves
+<game> store create NAME` adds another (`savegames/<user>/<product>-<id>`). Vanilla and every
+profile point at one store, several can share one, and the store is a plain profile setting:
+`quiver mods <game> profile set PROFILE saves=STORE` (`default`, `new`, or a store's name or
+id). A new profile starts on Default when every mod in its stack is save-compatible, and on a
+new store named after it otherwise, saying why ("Skip intros (unknown save compatibility)
+could change saves"); `profile create --saves STORE` overrides that. Changing a profile's mods
+later only warns when the stack could change saves while it shares vanilla's store or Default.
+
+Ubisoft's cloud keeps one set of slots per game and account, so **one store per game syncs
+with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
+launches with any other store keep their saves on this PC and say so. `quiver saves <game>`
+shows the cloud store's slots against the cloud, and `restore` brings a backup back into it.
+Its backup list includes folders named by hand (`save-backups/<product>-<name>`), dated by the
+folder's modification time.
+
+```
+quiver saves origins stores                      # stores, who uses each, cloud, slots, last change
+quiver saves origins store create|rename|retire|unretire|cloud|vanilla|history|restore …
+quiver saves origins merge DLSS into default     # per slot, the newer file wins
+quiver mods origins profile set DLSS saves=default
+```
+
+**Merging** goes slot by slot: a slot only the source has is copied, and where both have one
+the newer file (by modification time) wins. Everything in the target is backed up first (the
+usual save backups, `quiver saves <game> restore ID` undoes it), the source is left as it was,
+slots taken into the cloud store are marked for upload (so the next sync sends them instead of
+downloading the cloud's copy over them), and the game must not be running. **Retiring** a store
+(refused while vanilla or a profile uses it, or it's the cloud store) hides it and keeps its
+files; `unretire` brings it back. Store changes are revisions in `games/<product>/saves.jsonl`
+(`store history`, `store restore N`); a store's folder never changes, so files never move.
+
+Profiles from before save stores are given one by `quiver mods <game> migrate` (and by
+launching them): a profile with its own saves folder (`separate_saves=on`, or a v1 profile
+that was played) gets a store that *is* that folder, named after the profile and not synced
+(Default keeps the cloud); the others point at Default (a folder one of them left behind, with
+`separate_saves=off`, becomes a retired store, so it can still be merged). Each step is a revision of the stores
+and of the profile, so it shows in their histories and can be undone; nothing moves.
+`cloud_saves` and `separate_saves` are no longer profile settings.
+
+Agents may list, create, rename and retire stores and point profiles at them; moving the
+cloud flag, restoring a stores revision and merging need a person's OK.
 
 Agents may install mods, edit stacks and change a mod's settings; uninstalling a mod that
 has install files or changed config values, and `undo-patches`, need a person's OK.

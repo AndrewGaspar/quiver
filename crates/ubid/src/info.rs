@@ -220,11 +220,15 @@ async fn saves_report(daemon: &Arc<Daemon>, product_id: u32, cloud: bool) -> Res
         Some(_) => None,
         None => daemon.library(false).await.ok().and_then(|l| l.into_iter().find(|e| e.product_id == product_id)).and_then(|e| e.steam),
     };
+    // An installed game: the save store that syncs with the cloud (Default unless moved).
+    let primary = game.as_ref().map(|_| ubi_core::savestores::SaveStores::new(&ubi_core::launcher::data_dir(), product_id).primary());
     let dir = game
         .as_ref()
-        .map(|g| saves::save_dir(g, &account))
+        .zip(primary.as_ref())
+        .map(|(g, s)| ubi_core::savestores::store_dir(&g.prefix, &account, &s.folder))
         .or_else(|| steam.as_ref().and_then(|g| crate::steamlib::steam_save_dir(g, &account, product_id)));
-    let mut report = SavesReport { product_id, account: Some(account.clone()), dir: dir.clone(), ..Default::default() };
+    let mut report =
+        SavesReport { product_id, account: Some(account.clone()), dir: dir.clone(), store: primary.map(|s| s.name), ..Default::default() };
     let max_local = dir.as_deref().and_then(|d| saves::local_slots(d).ok()).and_then(|m| m.keys().max().copied()).unwrap_or(0);
     let mut cloud_items = None;
     if cloud {
@@ -292,7 +296,8 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             }
             let game = Games::load()?.get(product_id).cloned().with_context(|| format!("{name} is not installed"))?;
             let online = daemon.account_for(product_id, None).await?;
-            let dir = saves::save_dir(&game, &user_id(&online)?);
+            let primary = ubi_core::savestores::SaveStores::new(&ubi_core::launcher::data_dir(), product_id).primary();
+            let dir = ubi_core::savestores::store_dir(&game.prefix, &user_id(&online)?, &primary.folder);
             let r = saves::restore(&daemon.cfg.save_backups, product_id, &backup, &dir, Some(source))?;
             let what = r.previous.as_ref().map(|p| format!("; previous saves kept as {}", p.id)).unwrap_or_default();
             daemon.log_activity(
@@ -310,25 +315,16 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 bail!("{name} is running; its saves upload when it exits");
             }
             let game = Games::load()?.get(product_id).cloned().with_context(|| format!("{name} is not installed"))?;
-            let profile_id = match profile.as_deref() {
-                None => None,
-                Some(q) if q.eq_ignore_ascii_case("vanilla") => None,
-                Some(q) => {
-                    // Mods v2: a profile may share vanilla's saves (then those are synced).
-                    let plan = ubi_core::mods::ModStore::open(product_id).with_game(&game, None).plan(Some(q))?;
-                    let p = plan.api.profile.as_ref().context("profile")?;
-                    if !plan.api.saves.cloud {
-                        bail!("profile '{}' keeps its saves local (cloud_saves is off)", p.name);
-                    }
-                    plan.saves_profile.clone()
-                }
-            };
+            // The save store the profile (or vanilla) uses; only the cloud store syncs.
+            let q = profile.as_deref().filter(|q| !q.eq_ignore_ascii_case("vanilla"));
+            let plan = ubi_core::mods::ModStore::open(product_id).with_game(&game, None).plan(q)?;
+            if !plan.api.saves.cloud {
+                bail!("{}", plan.api.saves.cloud_note.clone().unwrap_or_else(|| "these saves aren't synced with the cloud".into()));
+            }
+            let profile_id = plan.api.profile.as_ref().map(|p| p.id.clone());
             let online = daemon.account_for(product_id, None).await?;
             let user = user_id(&online)?;
-            let dir = game
-                .prefix
-                .join(ubi_core::launcher::UPC_REL)
-                .join(ubi_core::launcher::saves_rel(&user, product_id, profile_id.as_deref()));
+            let dir = game.prefix.join(ubi_core::launcher::UPC_REL).join(format!("savegames/{user}/{}", plan.saves_folder));
             let report = run_local(move || async move {
                 let demux = online.demux().await?;
                 let mut lib = Library::fetch(&demux).await?;

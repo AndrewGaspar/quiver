@@ -89,8 +89,9 @@ pub enum ModsAction {
         #[arg(value_name = "MOD")]
         mod_id: Option<String>,
     },
-    /// Make Mods v1 data explicit: profiles that have their own saves folder get
-    /// separate_saves=on. Launches do this on their own; `--dry-run` shows what it would do.
+    /// Give every profile a save store: one with its own saves folder (or separate_saves=on)
+    /// gets a store that is that folder, nothing moves; the others use Default. Launches do
+    /// this on their own; `--dry-run` shows what it would do.
     Migrate {
         #[arg(long)]
         dry_run: bool,
@@ -140,18 +141,23 @@ pub enum LayerAction {
 
 #[derive(Subcommand)]
 pub enum ProfileAction {
-    /// A new profile; `--layers a,b` stacks layer b on top of a.
+    /// A new profile; `--layers a,b` stacks layer b on top of a. Its save store is Default
+    /// when every mod is save-compatible, else a new one, unless `--saves` says.
     Create {
         name: String,
         #[arg(long, value_delimiter = ',')]
         layers: Vec<String>,
+        /// Save store: default, new, or a store's name or id (quiver saves <game> stores).
+        #[arg(long)]
+        saves: Option<String>,
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Change a profile: mods=a,b (bottom to top; also layers=)  cloud_saves=on|off
-    /// pinned=on|off  separate_saves=on|off|auto  profile_config=DIR,… (prefix folders the
-    /// profile keeps its own copy of)  name=…, or a launch-setting override (proton=…,
-    /// env.NAME=…, dll.NAME=…, args=…, wrappers=…).
+    /// Change a profile: mods=a,b (bottom to top; also layers=)  saves=STORE (default, new,
+    /// or a store's name or id; cloud sync is per store: quiver saves <game> store cloud)
+    /// pinned=on|off  profile_config=DIR,… (prefix folders the profile keeps its own copy
+    /// of)  name=…, or a launch-setting override (proton=…, env.NAME=…, dll.NAME=…, args=…,
+    /// wrappers=…).
     Set {
         profile: String,
         #[arg(required = true)]
@@ -171,7 +177,7 @@ pub enum ProfileAction {
 }
 
 /// An installed game by product id or unique name match.
-async fn resolve_installed(client: &Client, game: &str) -> Result<GameProfiles> {
+pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<GameProfiles> {
     let games: Vec<GameProfiles> = client.call(Request::Mods(ModsRequest::Games)).await?;
     if let Ok(id) = game.parse::<u32>() {
         return games.into_iter().find(|g| g.product_id == id).with_context(|| format!("product {id} is not installed"));
@@ -325,10 +331,14 @@ fn print_state(name: &str, s: &ModsState) {
         "Vanilla",
         if live_default.is_none() { "  [default]" } else { "" }
     );
+    if let Some(v) = &s.vanilla_saves {
+        println!("           saves: {}", saves_line(v));
+    }
     let print_profile = |i: &ProfileInfo| {
         let p = &i.profile;
         let layers = if p.layers.is_empty() { "no layers".into() } else { p.layers.iter().map(layer_name).collect::<Vec<_>>().join(" < ") };
-        let mut flags = vec![format!("r{}", i.revision), format!("cloud saves {}", if p.cloud_saves { "on" } else { "off" })];
+        let store = i.saves.as_ref().and_then(|s| s.store_name.clone()).map_or("saves: not migrated".to_owned(), |n| format!("saves: {n}"));
+        let mut flags = vec![format!("r{}", i.revision), store];
         if s.default_profile.as_deref() == Some(p.id.as_str()) {
             flags.insert(0, "default".into());
         }
@@ -341,7 +351,7 @@ fn print_state(name: &str, s: &ModsState) {
             println!("           overrides: {overrides}");
         }
         if let Some(saves) = &i.saves {
-            println!("           saves: {} ({})", saves.folder, saves.reason);
+            println!("           saves: {}", saves_line(saves));
         }
         for d in &i.config_dirs {
             println!("           own folder: {} (files live in {})", d.dir, d.upper.display());
@@ -370,6 +380,15 @@ fn print_state(name: &str, s: &ModsState) {
         println!("deleted (quiver mods {} profile restore ID REVISION):", s.product_id);
         s.deleted.iter().for_each(print_profile);
     }
+}
+
+/// "DLSS store, savegames/<user>/3539-ptkzxpv (why); note" for a saves plan.
+fn saves_line(s: &ubi_api::mods::SavesPlan) -> String {
+    let mut out = format!("{} ({})", s.folder, s.reason);
+    if let Some(n) = &s.cloud_note {
+        out.push_str(&format!("; note: {n}"));
+    }
+    out
 }
 
 fn conflict_line(c: &SettingConflict, name: &dyn Fn(&String) -> String) -> String {
@@ -416,7 +435,7 @@ fn print_plan(game: &str, p: &LaunchPlan, mods: &[Layer]) {
     }
     println!("mods (bottom to top): {}", if p.mods.is_empty() { "none".into() } else { p.mods.iter().map(name).collect::<Vec<_>>().join(" < ") });
     println!("settings: {}", serde_json::to_string(&p.settings).unwrap_or_default());
-    println!("saves: {} ({})", p.saves.folder, p.saves.reason);
+    println!("saves: {}", saves_line(&p.saves));
     for m in &p.mounts {
         let lower: Vec<String> = m.lower.iter().map(|l| l.display().to_string()).collect();
         println!("mount: {} <- [{}] writes to {}", m.target.display(), lower.join(", "), m.upper.display());
@@ -511,8 +530,11 @@ fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
             eprintln!("note: {n}");
         }
     }
+    if let Some(a) = v.get("saves_advice").and_then(|s| serde_json::from_value::<ubi_api::savestores::SavesAdvice>(s.clone()).ok()) {
+        eprintln!("saves advice: {}", a.reason);
+    }
     if let Some(s) = v.get("saves").and_then(|s| serde_json::from_value::<ubi_api::mods::SavesPlan>(s.clone()).ok()) {
-        eprintln!("saves: {} ({})", s.folder, s.reason);
+        eprintln!("saves: {}", saves_line(&s));
     }
     Ok(serde_json::from_value(v)?)
 }
@@ -604,8 +626,8 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
         ModsAction::Profile { action } => {
             let rev: ProfileRevision = match action {
-                ProfileAction::Create { name, layers, message } => {
-                    profile_reply(call(ModsRequest::ProfileCreate { product_id, name, layers, message }).await?)?
+                ProfileAction::Create { name, layers, saves, message } => {
+                    profile_reply(call(ModsRequest::ProfileCreate { product_id, name, layers, message, saves }).await?)?
                 }
                 ProfileAction::Set { profile, changes, message } => {
                     let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
@@ -661,19 +683,17 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 .iter()
                 .map(|id| state.layers.iter().find(|l| &l.id == id).map_or(id.clone(), |l| l.name.clone()))
                 .collect();
+            let store = p.saves.as_deref().map(|id| {
+                state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced" } else { ", this PC only" }))
+            });
             println!(
-                "{}: profile {} '{}' revision {} (mods: {}; cloud saves {}{}{}{})",
+                "{}: profile {} '{}' revision {} (mods: {}; saves: {}{}{})",
                 g.name,
                 p.id,
                 p.name,
                 rev.revision,
                 if names.is_empty() { "none".into() } else { names.join(" < ") },
-                if p.cloud_saves { "on" } else { "off" },
-                match p.separate_saves {
-                    Some(true) => "; separate saves",
-                    Some(false) => "; shares vanilla's saves",
-                    None => "",
-                },
+                store.unwrap_or_else(|| "not migrated yet".into()),
                 if p.profile_config.is_empty() { String::new() } else { format!("; own folders: {}", p.profile_config.join(", ")) },
                 if p.pinned { "; pinned" } else { "" }
             );
@@ -763,8 +783,8 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { product_id, dry_run })).await?;
             println!("{}: {}", g.name, if dry_run { "would migrate (dry run)" } else { "migrated" });
             println!("  file-only mods (no change needed): {}", if r.file_only_mods.is_empty() { "none".into() } else { r.file_only_mods.join(", ") });
-            if r.kept_separate_saves.is_empty() {
-                println!("  no profile needed separate_saves set");
+            if r.notes.is_empty() {
+                println!("  every profile already has a save store");
             }
             for n in &r.notes {
                 println!("  {n}");

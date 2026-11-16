@@ -655,10 +655,10 @@ async fn wait_for_bridge(log: &Path, bridge: &mut Child) -> Result<()> {
     bail!("ubi-bridge did not start; see {}", log.display())
 }
 
-/// Where a profile's SDK saves live, relative to the Connect directory in the prefix.
-/// Vanilla uses Connect's own `savegames/<user>/<product>`; a profile with separate saves
-/// (see [`crate::mods::ModStore::saves_plan`]) gets a sibling folder of its own, so its
-/// saves never mix with vanilla's. A profile that shares vanilla's saves passes `None`.
+/// Where a profile's SDK saves lived before save stores, relative to the Connect directory
+/// in the prefix: Connect's own `savegames/<user>/<product>`, or a sibling folder of the
+/// profile's own. Launches now use their save store's folder (`Plan::saves_folder`, see
+/// [`crate::savestores`]); a store made from such a folder keeps it.
 pub fn saves_rel(user_id: &str, product_id: u32, profile: Option<&str>) -> String {
     match profile {
         None => format!("savegames/{user_id}/{product_id}"),
@@ -700,7 +700,7 @@ pub async fn play(
     let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
     let mut ctx = launch::build(&online.auth, &session, &mut lib, game.product_id).await?;
-    let saves_rel = saves_rel(&session.user_id, game.product_id, plan.saves_profile.as_deref());
+    let saves_rel = format!("savegames/{}/{}", session.user_id, plan.saves_folder);
     let cloud_sync = plan.api.saves.cloud;
     let saves_dir = game.prefix.join(UPC_REL).join(&saves_rel);
     ctx.savegame_path = Some(format!(r"{UPC_WIN}\{}", saves_rel.replace('/', "\\")));

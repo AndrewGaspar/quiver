@@ -359,6 +359,10 @@ pub struct SavesReport {
     pub connect_record: Option<CloudRecord>,
     #[serde(default)]
     pub backups: Vec<SaveBackup>,
+    /// The save store these slots are (the one that syncs with the cloud, else Default;
+    /// see [`crate::savestores`]), by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -455,6 +459,10 @@ pub struct SaveBackup {
     /// User id the saves belong to, when recorded (older backups don't say).
     #[serde(default)]
     pub account: Option<String>,
+    /// For a backup folder named by hand (`<product>-<name>`, not `<product>-<date>`): the
+    /// name. Its `created` is the folder's modification time unless it records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

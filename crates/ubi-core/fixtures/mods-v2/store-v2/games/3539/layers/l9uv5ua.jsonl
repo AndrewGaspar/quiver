@@ -1,0 +1,2 @@
+{"revision":1,"at":"2026-11-16T07:53:01.307215657Z","source":"aco-dlss","message":"added","deletes":[]}
+{"revision":2,"at":"2026-11-16T09:55:05.896922295Z","source":"agent","message":"rendering-only mod (DLSS upscaler); doesn't change saves","deletes":[],"changes":["save_compatible=on"]}

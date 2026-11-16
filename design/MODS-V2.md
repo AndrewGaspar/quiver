@@ -34,6 +34,7 @@ bring its flags and its file changes together.
 **Saves fork per mod, not per profile:** saves fork only when a mod in the stack is not
 save-compatible (gameplay or save-format changes). Fixes such as intro skips and mouse
 settings don't fork saves. The profile shows which way it goes, and the user can override it.
+*Superseded by decision 4 below: saves are orthogonal to profiles.*
 
 ## Decisions (user, 2026-11-16)
 
@@ -53,6 +54,27 @@ settings don't fork saves. The profile shows which way it goes, and the user can
 3. **Third-party recipes:** sources like PCGamingWiki, ProtonDB and community lists are
    **audited when translated into Quiver's built-in mods**. Users install built-in mods, not
    raw third-party recipes.
+
+## Decision (user, 2026-11-16, later): saves are orthogonal to profiles
+
+User feedback: the Vanilla and DLSS profiles of AC Origins had different saves folders and
+only "met" through the cloud; they should just share the same Default saves. Which saves a
+profile uses and which mods it runs are separate questions, though creating a profile should
+steer by whether its mods can break saves.
+
+4. **Save stores** are a first-class, per-game concept. Every game has **Default** (Connect's
+   own `savegames/<user>/<product>`) and any number of named extra stores. A profile points
+   at a store by id; vanilla points at one too (normally Default); several may share one. The
+   choice is explicit and recorded, not an auto rule: a new profile starts on Default when
+   every mod is save-compatible, else on a new store, and the reason is shown. Changing mods
+   later only warns while a save-incompatible stack shares vanilla's store or Default.
+5. **One cloud store per game.** Ubisoft keeps one set of cloud slots per game and account,
+   so at most one store syncs (a store-level flag, Default by default). Launches with any
+   other store keep saves local and say which store syncs. The per-profile `cloud_saves`
+   switch is gone.
+6. **Moving between stores** is a plain setting; combining two stores is an explicit
+   **merge** (per slot, newer mtime wins, the target is backed up first, refused while the game
+   runs). Retiring a store keeps its files.
 
 ## Distribution
 
@@ -79,15 +101,51 @@ settings don't fork saves. The profile shows which way it goes, and the user can
   with unknown save compatibility (counted as not compatible). `quiver mods <game> set MOD
   save_compatible=on kind=fix` gives one a manifest of its own, recorded in its history.
 - **Profiles:** `Profile::layers` is the mod stack and `Profile::settings` the person's
-  overrides, so v1 histories read unchanged. New fields: `separate_saves` (`None` = auto)
-  and `profile_config` (prefix folders the profile has its own copy of).
-- **Saves migration:** a profile that already has a `savegames/<user>/<product>-<id>` folder
-  keeps it. The rule checks for the folder even before migration, and `ModStore::migrate`
-  (run by every profile launch, and by `quiver mods <game> migrate`) records
-  `separate_saves=on` as a revision, so the choice is visible and reversible. Nothing is moved;
-  only an explicit `separate_saves=off` makes such a profile share vanilla's saves.
-- **Shared saves sync with the cloud** like vanilla's (a profile's `cloud_saves` only
-  matters for its own saves).
+  overrides, so v1 histories read unchanged. New fields: `profile_config` (prefix folders the
+  profile has its own copy of) and `saves` (its save store, see below); `separate_saves` and
+  `cloud_saves` are read from old revisions but no longer settable.
+- **Saves migration (first pass):** a profile that already had a
+  `savegames/<user>/<product>-<id>` folder got `separate_saves=on` recorded. Replaced by save
+  stores (below), which migrate that setting again.
+
+### Save stores (as built, 2026-11-16)
+
+- **Types:** `ubi_api::savestores` (`SaveStore`, `SaveStoresRevision`, `SaveStoreOp`,
+  `SaveStoresReport`, `MergeReport`, `saves_advice`, `shared_store_warning`); core in
+  `ubi_core::savestores`. Requests (appended): `SaveStores`, `SaveStoreEdit`,
+  `SaveStoreHistory`, `SavesMerge`; `ModsRequest::ProfileCreate` takes an optional `saves`.
+- **Storage:** `games/<product>/saves.jsonl`, whole-state revisions (stores with id, name,
+  folder, created, created_by, cloud, retired, note; plus vanilla's store). No file means
+  revision 0: Default only, cloud, used by vanilla. Each store's `folder` is fixed when it's
+  made (`<product>` for Default, `<product>-<store id>` for new stores, `<product>-<profile id>`
+  for a migrated profile folder), so files never move. Who uses a store is read from the
+  profiles' own `saves` field, never stored twice.
+- **Cloud rule:** at most one live store has `cloud`; moving the flag clears the old one in the
+  same revision, and the cloud store can't be retired. `SavesPlan` carries the store and a
+  `cloud_note` when the store isn't the cloud one; the launch job and `mods list`/`plan` show it.
+  `Saves`/`SavesRestore` work on the cloud store (else Default).
+- **Migration:** `ModStore::migrate` (each profile launch, `quiver mods <game> migrate`) gives
+  every live profile without `saves` one. Profiles the old rule gave their own folder
+  (`separate_saves=on`, an existing folder, or an auto stack with a save-incompatible mod) get a
+  store adopting that folder (named after the profile, not synced; an existing store with that
+  folder is reused, and unretired if needed); the rest get Default (an unused folder left by `separate_saves=off` becomes a retired
+  store, so it can be merged). Each is a stores revision
+  plus a profile revision clearing `separate_saves`/`cloud_saves`, so restoring the earlier
+  profile revision undoes it (and the next migration finds the same store). Until migrated, a
+  profile's plan follows the old rule. A profile that had `cloud_saves=on` with its own folder
+  gets a note: its saves and vanilla's took turns in the one cloud set; merge, then point it at
+  Default.
+- **Merge:** `merge_dirs` per account folder that has the source: union of slots; source-only
+  copied; both: equal bytes kept, source strictly newer mtime replaces (mtime kept on copy),
+  else the target's is kept. The target is backed up with the save-backup machinery (reason
+  "before merging save store A into B") before anything is replaced; slots taken into the cloud
+  store get `.upload` markers. The daemon refuses while the game runs (its launches or any play
+  session) and asks agents for confirmation.
+- **Named backups:** `quiver saves` and the Saves tab also list backup folders named by hand
+  (`save-backups/<product>-<name>`, e.g. `3539-ptkzxpv-fresh-playthrough-…`), dated by the
+  folder's mtime, restorable like the others.
+- **Not done:** Steam launches (`steam-run`) still use Default whatever vanilla's store is;
+  restoring a backup into a store other than the cloud one needs a merge from a store instead.
 - **Config patches:** applied by the daemon before the namespace is mounted (never under a
   live overlay), to the file the launch will see: the prefix's, or the profile's copy in
   `profiles/<id>/prefix/<dir>` (copied up first, as overlayfs would). Record:

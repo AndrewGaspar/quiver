@@ -17,6 +17,7 @@ pub mod downloads;
 pub mod exports;
 pub mod mods;
 pub mod info;
+pub mod savestores;
 pub mod setup;
 pub mod steamlib;
 pub use client::Client;
@@ -543,6 +544,35 @@ pub enum Request {
     /// The launch settings `quiver steam-run` applies to a Steam copy
     /// (`SteamLaunchPlan`): the game's environment, DLL overrides, arguments and wrappers.
     SteamLaunchPlan { product_id: u32 },
+    // ---- Save stores (see [`savestores`]); appended
+    /// A game's save stores, who uses each, slot counts (`savestores::SaveStoresReport`).
+    /// Reads only the prefix; no Ubisoft request.
+    SaveStores { product_id: u32 },
+    /// Create, rename, retire or restore stores, move the cloud flag, or pick vanilla's
+    /// store. Records a revision; returns `savestores::SaveStoresRevision`. Agents need
+    /// `confirmed` to move the cloud flag or restore a revision (which saves sync changes).
+    SaveStoreEdit {
+        product_id: u32,
+        op: savestores::SaveStoreOp,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    /// The save stores' revisions (`Vec<savestores::SaveStoresRevision>`).
+    SaveStoreHistory { product_id: u32 },
+    /// Merge one store's slots into another (`into` `None`: Default), slot by slot, the
+    /// newer file (by modification time) winning. The target's saves are backed up before
+    /// any is replaced; the source is left as it was. Refused while the game runs. Agents
+    /// need `confirmed`. Returns `savestores::MergeReport`.
+    SavesMerge {
+        product_id: u32,
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default)]
+        confirmed: bool,
+    },
 }
 
 fn yes() -> bool {

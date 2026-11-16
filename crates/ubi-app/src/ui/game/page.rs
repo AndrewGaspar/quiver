@@ -110,7 +110,8 @@ pub enum Dialog {
     DeleteProfile { game: u32, profile: Profile },
     RestoreProfile { game: u32, id: String, name: String, revision: u32 },
     RemoveLayer { game: u32, layer: Layer },
-    NewProfile { game: u32, name: Entity<TextInput>, layers: Vec<(String, String, bool)> },
+    /// `saves`: the store picked (`None`: follow the advice for the ticked layers).
+    NewProfile { game: u32, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String> },
     SteamRestart { waiting: Vec<String> },
     SteamUser { game: u32, users: Vec<SteamUser> },
 }
@@ -156,6 +157,8 @@ pub struct GamePage {
     /// (the daemon's `profile` setting) instead of playing once.
     pub default_menu: bool,
     pub busy: bool,
+    /// The game's save stores (Saves tab).
+    pub stores: Load<ubi_api::savestores::SaveStoresReport>,
 }
 
 impl GamePage {
@@ -274,13 +277,18 @@ pub fn ops_between(base: &GameSettings, staged: &GameSettings) -> Vec<SettingOp>
     out
 }
 
-/// A profile in a menu line: "2 layers · own saves, synced · pinned".
-pub fn profile_summary(p: &Profile) -> String {
+/// A profile in a menu line: "2 layers · Default saves, synced · pinned".
+pub fn profile_summary(i: &ubi_api::mods::ProfileInfo) -> String {
+    let p = &i.profile;
+    let saves = match &i.saves {
+        Some(s) => format!("{} saves, {}", s.store_name.as_deref().unwrap_or("own"), if s.cloud { "synced" } else { "this PC only" }),
+        None => "saves not migrated".into(),
+    };
     format!(
         "{} layer{} · {}{}",
         p.layers.len(),
         if p.layers.len() == 1 { "" } else { "s" },
-        if p.cloud_saves { "own saves, synced" } else { "own saves, local only" },
+        saves,
         if p.pinned { " · pinned" } else { "" }
     )
 }
@@ -443,6 +451,10 @@ impl Quiver {
             };
             if let Some(sel) = this.gp.prof_sel.clone().filter(|s| s != VANILLA) {
                 this.load_profile_history(id, &sel, cx);
+            }
+            // Store users and flags change with profiles.
+            if !this.gp.stores.is_idle() {
+                this.load_stores(id, cx);
             }
         });
     }
@@ -635,7 +647,7 @@ impl Quiver {
         if let Some(m) = self.gp.mods.ready().filter(|_| self.gp.id == id) {
             for (i, p) in m.profiles.iter().enumerate() {
                 let p = &p.profile;
-                v.push(entry(i + 1, Some(p.id.as_str()), &p.name, profile_summary(p)));
+                v.push(entry(i + 1, Some(p.id.as_str()), &p.name, profile_summary(&m.profiles[i])));
             }
             if let Some(d) = deleted.and_then(|d| m.deleted.iter().find(|x| x.profile.id == d)) {
                 v[0].detail = Some(format!("Default for Play · the default, {}, was deleted", d.profile.name).into());
@@ -670,7 +682,7 @@ impl Quiver {
                 v.push(Command {
                     icon: Icon::Layers,
                     label: format!("Play {}", p.name).into(),
-                    detail: Some(format!("{}{}", profile_summary(p), is_default(current.as_deref() == Some(p.id.as_str()))).into()),
+                    detail: Some(format!("{}{}", profile_summary(&m.profiles[i]), is_default(current.as_deref() == Some(p.id.as_str()))).into()),
                     cli: Some(format!("quiver play {id} --profile {}", sh_quote(&p.name)).into()),
                     action: Cmd::PlayWith(id, i + 1),
                     future: false,
@@ -1061,7 +1073,7 @@ impl Quiver {
             .map(|m| m.layers.iter().map(|l| (l.id.clone(), l.name.clone(), false)).collect())
             .unwrap_or_default();
         let name = self.text_input("Profile name, e.g. Visual overhaul", "", false, cx);
-        self.open_dialog(Dialog::NewProfile { game: id, name, layers });
+        self.open_dialog(Dialog::NewProfile { game: id, name, layers, saves: None });
     }
 
     // -----------------------------------------------------------------------------------
@@ -1173,17 +1185,17 @@ impl Quiver {
                     },
                 );
             }
-            Dialog::NewProfile { game, name, layers } => {
+            Dialog::NewProfile { game, name, layers, saves } => {
                 let n = name.read(cx).text().trim().to_owned();
                 if n.is_empty() {
                     self.show_toast("A profile needs a name", cx);
-                    self.gp.dialog = Some(Dialog::NewProfile { game, name, layers });
+                    self.gp.dialog = Some(Dialog::NewProfile { game, name, layers, saves });
                     self.gp.dialog_btn = 1;
                     return;
                 }
                 let chosen: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileCreate { product_id: game, name: n, layers: chosen, message: None }),
+                    Request::Mods(ModsRequest::ProfileCreate { product_id: game, name: n, layers: chosen, message: None, saves }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1746,7 +1758,7 @@ impl Quiver {
                     ))
                     .into_any_element()],
             ),
-            Dialog::NewProfile { name, layers, .. } => {
+            Dialog::NewProfile { name, layers, saves, .. } => {
                 let rows: Vec<AnyElement> = layers
                     .iter()
                     .enumerate()
@@ -1788,11 +1800,7 @@ impl Quiver {
                             .when(rows.is_empty(), |d| d.child(div().text_color(th.tx3).text_size(px(12.)).child("No layers yet: add one from a folder first, or create an empty profile.")))
                             .children(rows)
                             .into_any_element(),
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(th.tx3)
-                            .child("A new profile has its own saves, not synced to the cloud until you turn that on.")
-                            .into_any_element(),
+                        super::stores::new_profile_saves(th, self.gp.mods.ready(), layers, saves.as_deref(), cx),
                     ],
                 )
             }

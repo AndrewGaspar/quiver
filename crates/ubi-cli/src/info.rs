@@ -18,9 +18,29 @@ pub enum SavesAction {
     /// Upload saves waiting for the cloud now (e.g. after an upload failed at exit),
     /// without launching the game.
     Sync {
-        /// A mod profile's saves (name or id; needs cloud saves on).
+        /// A mod profile's saves (name or id; its save store must be the cloud store).
         #[arg(long)]
         profile: Option<String>,
+    },
+    /// Save stores: who uses each, which one syncs with the cloud, slots and last change.
+    Stores {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create, rename, retire (files kept) or bring back a save store, pick the cloud
+    /// store or vanilla's, or restore an earlier revision.
+    Store {
+        #[command(subcommand)]
+        action: crate::savestores::StoreAction,
+    },
+    /// Merge one store's slots into another (default: into Default): per slot the newer
+    /// file wins; the target's saves are backed up first; FROM is left as it was.
+    /// `quiver saves <game> merge FROM [into] [TO]`.
+    Merge {
+        from: String,
+        /// `into TO`, or just `TO`.
+        #[arg(num_args = 0..=2)]
+        into: Vec<String>,
     },
 }
 
@@ -206,7 +226,7 @@ pub async fn progress(client: &Client, game: &str, json: bool, refresh: bool) ->
 fn print_backups(list: &[SaveBackup]) {
     for b in list {
         let slots: Vec<String> = b.slots.iter().map(|(s, n)| format!("{s} ({})", bytes(*n))).collect();
-        println!("  {:<26} {}  slots {}  {}", b.id, when(b.created), slots.join(", "), b.reason.as_deref().unwrap_or(""));
+        println!("  {:<26} {}  slots {}  {}", b.id, when(b.created), slots.join(", "), b.reason.clone().or_else(|| b.name.as_ref().map(|_| "named backup (dated by its folder)".into())).unwrap_or_default());
     }
 }
 

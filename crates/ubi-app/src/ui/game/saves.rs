@@ -100,6 +100,9 @@ impl Quiver {
             }
         };
         let mut col = div().flex().flex_col().gap(px(18.)).child(top).child(slots);
+        if g.installed() {
+            col = col.child(self.render_stores_card(th, g, cx));
+        }
         match &progress {
             Some(p) => {
                 col = col.child(div().flex().gap(px(16.)).items_start().child(self.stats_card(th, p).flex_1()).child(self.rewards_card(th, p).flex_1()));
@@ -251,7 +254,11 @@ impl Quiver {
         };
         let dir = s.dir.clone().map(|d| d.to_string_lossy().into_owned());
         let account = s.account.clone().map(|a| self.account_name(&a));
-        let header = card_header(th, "Save slots")
+        let title = match &s.store {
+            Some(n) => format!("Save slots · {n}"),
+            None => "Save slots".to_owned(),
+        };
+        let header = card_header(th, title)
             .child(source)
             .when_some(account, |d, a| d.child(div().text_size(px(12.)).text_color(th.tx3).child(format!("saves of {a}"))))
             .child(div().flex_1())
@@ -404,7 +411,7 @@ impl Quiver {
                             .child(div().font_weight(MEDIUM).text_size(px(12.5)).child(when(b.created)))
                             .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(format!(
                                 "{} · {} slot{}",
-                                b.reason.clone().unwrap_or_else(|| "backup".into()),
+                                b.reason.clone().or_else(|| b.name.clone().map(|n| format!("named backup {n}"))).unwrap_or_else(|| "backup".into()),
                                 b.slots.len(),
                                 if b.slots.len() == 1 { "" } else { "s" }
                             ))),
