@@ -266,7 +266,7 @@ fn prefixes(r: &Roots) -> Vec<Prefix> {
         dirs.sort();
         for d in dirs {
             for p in [d.clone(), d.join("pfx")] {
-                let label = format!("Wine prefix · {}", tilde(&r.home, &d));
+                let label = format!("Wine · {}", tilde(&r.home, &d));
                 add(&mut out, Prefix { path: p, source: InstallSource::Wine, label, lutris_games: Vec::new() });
             }
         }

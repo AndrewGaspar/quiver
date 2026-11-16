@@ -389,7 +389,7 @@ impl Dl {
                 games.join("ubi-recon/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Assassin's Creed Syndicate"),
                 &games.join("ubi-recon"),
                 InstallSource::Wine,
-                "Wine prefix · ~/Games/ubi-recon",
+                "Wine · ~/Games/ubi-recon",
                 None,
                 None,
                 0.06,
