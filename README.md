@@ -84,6 +84,11 @@ quiver restore origins 2                       # make revision 2 current again (
 quiver --source agent set origins wrappers=gamemoderun,mangohud
 quiver activity                                # recent actions across GUI/CLI/agents
 quiver watch                                   # live daemon events (JSON)
+quiver export desktop origins [--remove]       # ~/.local/share/applications/quiver-<id>.desktop
+quiver export steam origins [--user NAME]      # non-Steam shortcut with Ubisoft art (staged while Steam runs)
+quiver export list                             # exports and whether they're still as written
+quiver steam users                             # Steam users; which one gets shortcuts
+quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
 quiver dev …                                   # low-level tools that bypass the daemon
 ```
 

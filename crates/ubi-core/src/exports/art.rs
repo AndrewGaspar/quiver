@@ -111,6 +111,17 @@ pub(crate) mod tests {
         assert_eq!(img.to_rgba8().get_pixel(0, 0).0, [0, 0, 255, 255]);
     }
 
+    /// Convert a real `icon_image` (downloaded by hand from the CDN):
+    /// `QUIVER_ICO_CHECK=<file.ico> cargo test -p ubi-core real_icon -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_icon() {
+        let path = std::env::var("QUIVER_ICO_CHECK").expect("set QUIVER_ICO_CHECK");
+        let png = to_png(&std::fs::read(&path).unwrap()).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        eprintln!("{path}: {}x{}", img.width(), img.height());
+    }
+
     #[test]
     fn names() {
         assert!(check_name("48edec3d91f23947b02be534159b74d1.ico").is_ok());
