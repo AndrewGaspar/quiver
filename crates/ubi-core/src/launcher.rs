@@ -450,6 +450,11 @@ impl Proton<'_> {
             .env("__GL_SHADER_DISK_CACHE", "1")
             .env("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1")
             .env("MESA_SHADER_CACHE_MAX_SIZE", "10G");
+        // Steam Input: don't let Wine read the physical controllers Steam already mirrors
+        // as its virtual pad (doubled inputs). Config and game env still override.
+        for (k, v) in steam_input_env() {
+            cmd.env(k, v);
+        }
         for (k, v) in &self.cfg.env {
             cmd.env(k, v);
         }
@@ -799,4 +804,67 @@ async fn wait_for_game_start(proton: &Proton<'_>, child: &mut Child) -> bool {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
+}
+
+/// Steam's virtual gamepad (the pad Steam Input exposes while it's running).
+const STEAM_VIRTUAL_PAD: (u16, u16) = (0x28de, 0x11ff);
+
+/// When Steam Input is mirroring Valve controllers as its virtual pad, hide the physical
+/// controllers from Wine (both its hidraw and SDL paths), as Steam does for its own games.
+/// Without the virtual pad (Steam not running) nothing is hidden, so the controller still
+/// works directly.
+pub fn steam_input_env() -> Vec<(&'static str, String)> {
+    let devices = input_devices(std::path::Path::new("/sys/class/input"));
+    steam_input_env_for(&devices)
+}
+
+fn steam_input_env_for(devices: &[(u16, u16)]) -> Vec<(&'static str, String)> {
+    if !devices.contains(&STEAM_VIRTUAL_PAD) {
+        return Vec::new();
+    }
+    let mut physical: Vec<(u16, u16)> =
+        devices.iter().copied().filter(|&(v, p)| v == 0x28de && (v, p) != STEAM_VIRTUAL_PAD).collect();
+    physical.sort();
+    physical.dedup();
+    if physical.is_empty() {
+        return Vec::new();
+    }
+    let list = |upper: bool| {
+        physical
+            .iter()
+            .map(|(v, p)| if upper { format!("0x{v:04X}/0x{p:04X}") } else { format!("0x{v:04x}/0x{p:04x}") })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    vec![
+        ("PROTON_DISABLE_HIDRAW", list(true)),
+        ("SDL_GAMECONTROLLER_IGNORE_DEVICES", list(false)),
+        ("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1".into()),
+    ]
+}
+
+/// (vendor, product) of every input device under `dir` (`/sys/class/input/input*/id`).
+fn input_devices(dir: &std::path::Path) -> Vec<(u16, u16)> {
+    let hex = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|s| u16::from_str_radix(s.trim(), 16).ok());
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((hex(e.path().join("id/vendor"))?, hex(e.path().join("id/product"))?)))
+        .collect()
+}
+
+#[cfg(test)]
+mod steam_input_tests {
+    use super::*;
+
+    #[test]
+    fn hides_physical_valve_pads_only_when_steam_mirrors_them() {
+        let none = steam_input_env_for(&[(0x28de, 0x1302), (0x093a, 0x0274)]);
+        assert!(none.is_empty(), "no virtual pad: leave the controller visible");
+        let env = steam_input_env_for(&[(0x28de, 0x1302), (0x28de, 0x11ff), (0x28de, 0x1303), (0x28de, 0x1302)]);
+        assert_eq!(env[0], ("PROTON_DISABLE_HIDRAW", "0x28DE/0x1302,0x28DE/0x1303".to_string()));
+        assert_eq!(env[1], ("SDL_GAMECONTROLLER_IGNORE_DEVICES", "0x28de/0x1302,0x28de/0x1303".to_string()));
+        assert!(steam_input_env_for(&[(0x28de, 0x11ff)]).is_empty(), "virtual pad alone: nothing to hide");
+    }
 }
