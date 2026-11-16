@@ -65,12 +65,12 @@ async fn product(client: &Client, game: &str) -> Result<(u32, String)> {
     }
 }
 
-fn restart_hint() -> &'static str {
+pub(crate) fn restart_hint() -> &'static str {
     "Steam is running, so it will show this after it restarts. Run `quiver steam restart` to restart it now (it asks first), or it applies the next time Steam is closed."
 }
 
 /// Without `--user`, with several Steam users and none chosen yet: ask in a terminal.
-async fn pick_user(client: &Client, user: Option<String>) -> Result<Option<String>> {
+pub(crate) async fn pick_user(client: &Client, user: Option<String>) -> Result<Option<String>> {
     if user.is_some() {
         return Ok(user);
     }

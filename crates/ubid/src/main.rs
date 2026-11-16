@@ -7,6 +7,7 @@ mod downloads;
 mod exports;
 mod mods;
 mod info;
+mod setup;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -494,6 +495,7 @@ impl Daemon {
             | Request::Verify { .. }
             | Request::VerifyResult { .. }
             | Request::DownloadSettings { .. }) => downloads::handle(self, source, r).await?,
+            r @ (Request::Setup { .. } | Request::ScanInstalls | Request::FixesOnVanilla { .. }) => setup::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {
