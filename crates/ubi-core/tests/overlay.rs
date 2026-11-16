@@ -185,6 +185,86 @@ fn deletions_in_user_namespace() {
     assert_eq!(run(&ns, None, &format!("cat '{i}/Videos/Intro.bik'")), "mine\n");
 }
 
+/// Mods v2: a profile with its own copy of a prefix folder (the game's settings under
+/// `Documents/My Games`). Inside the launch's namespace the folder is overlaid: the game
+/// sees the prefix's files with the profile's changes on top, a config patch applied before
+/// the mount shows in there, and what the game writes lands in the profile's folder. The
+/// host's prefix (what vanilla sees) is untouched. The install overlay is mounted alongside.
+#[test]
+fn prefix_config_in_user_namespace() {
+    use ubi_core::mods::{ModStore, Package};
+    if !available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let prefix = t.join("pfx");
+    let install = t.join("Games/My Game");
+    write(&install.join("game.exe"), "exe");
+    let dir = "drive_c/users/steamuser/Documents/My Games/My Game";
+    let ini = prefix.join(dir).join("Settings.ini");
+    write(&ini, "; the game's own\r\n[Graphics]\r\nQuality=low\r\nVSync=1\r\n");
+    write(&prefix.join("drive_c/users/steamuser/Documents/other.txt"), "shared");
+    let game = ubi_api::Game {
+        product_id: 77,
+        name: "My Game".into(),
+        install_dir: install.clone(),
+        prefix: prefix.clone(),
+        exe: "game.exe".into(),
+        args: None,
+        language: None,
+    };
+    let store = ModStore::new(&t.join("data"), 77).with_game(&game, None);
+    let pkg = t.join("pkg");
+    write(
+        &pkg.join("quiver-mod.toml"),
+        &format!(
+            "id = \"ultra\"\nname = \"Ultra\"\nsave_compatible = true\n[[patch]]\nfile = \"{dir}/Settings.ini\"\nsection = \"Graphics\"\nset = {{ Quality = \"ultra\" }}\n"
+        ),
+    );
+    write(&pkg.join("files/extra.txt"), "from the mod");
+    store.install(&Package::Dir { path: pkg, name: None }, "cli").unwrap();
+    store.create_profile("Pretty", &["ultra".into()], "cli", None).unwrap();
+    // A folder the game hasn't made yet works too (created empty before mounting).
+    let later = "drive_c/users/steamuser/AppData/Local/My Game";
+    store
+        .set_profile("Pretty", &[ubi_api::SettingOp::Set { key: "profile_config".into(), value: format!("{dir},{later}") }], "cli", None)
+        .unwrap();
+
+    let plan = store.plan(Some("Pretty")).unwrap();
+    assert_eq!(plan.overlays.len(), 3);
+    let st = plan.apply_patches().unwrap();
+    assert_eq!(st[0].state, ubi_api::mods::PatchState::Applied, "{st:?}");
+    for o in &plan.overlays {
+        std::fs::create_dir_all(&o.target).unwrap();
+    }
+    let ns = Namespace::create_many(&plan.overlays).unwrap();
+    let own = store.profile_prefix(&plan.api.profile.as_ref().unwrap().id);
+
+    let d = prefix.join(dir);
+    let seen = run(&ns, Some(&d), "cat Settings.ini");
+    assert_eq!(seen, "; the game's own\r\n[Graphics]\r\nQuality=ultra\r\nVSync=1\r\n", "the patch, as the game sees the file");
+    // The game writes its settings and new files: they land in the profile's folders.
+    run(&ns, Some(&d), "printf 'x' >> Settings.ini && echo new > Profile.dat");
+    run(&ns, None, &format!("echo cache > '{}/{later}/cache.bin'", prefix.display()));
+    assert!(std::fs::read_to_string(own.join(dir).join("Settings.ini")).unwrap().ends_with("VSync=1\r\nx"));
+    assert_eq!(read(&own.join(dir).join("Profile.dat")), "new\n");
+    assert_eq!(read(&own.join(later).join("cache.bin")), "cache\n");
+    // The prefix itself (vanilla's view) is as it was, apart from the empty folder made
+    // for the mount.
+    assert_eq!(read(&ini), "; the game's own\r\n[Graphics]\r\nQuality=low\r\nVSync=1\r\n");
+    assert!(!prefix.join(dir).join("Profile.dat").exists());
+    assert!(std::fs::read_dir(prefix.join(later)).unwrap().next().is_none());
+    // Outside the profile's folders the prefix is shared, and the install overlay works.
+    assert_eq!(run(&ns, None, &format!("cat '{}/drive_c/users/steamuser/Documents/other.txt'", prefix.display())), "shared");
+    assert_eq!(run(&ns, None, &format!("cat '{}/extra.txt'", install.display())), "from the mod");
+    drop(ns);
+    // The next launch's view (and the plan) shows the profile's own files.
+    let info = store.state().unwrap().profiles.remove(0);
+    assert_eq!(info.config_dirs[0].files, ["Profile.dat", "Settings.ini"]);
+    assert_eq!(info.config_dirs[1].files, ["cache.bin"]);
+}
+
 #[test]
 fn bad_layer_is_reported() {
     if !available() {

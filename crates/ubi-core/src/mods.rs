@@ -1839,4 +1839,341 @@ mod tests {
         assert!(store.launch(Some("P"), &install).unwrap_err().to_string().contains(&b.id));
         assert_eq!(store.state().unwrap().profiles[0].missing_layers, [b.id.clone()]);
     }
+
+    // -- Mods v2 ----------------------------------------------------------------------------
+
+    const STORE_V1: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mods-v2/store-v1");
+    const USER: &str = "USER-ID";
+
+    fn game(t: &Path, product_id: u32) -> Game {
+        Game {
+            product_id,
+            name: "Game".into(),
+            install_dir: t.join("install"),
+            prefix: t.join("pfx"),
+            exe: "game.exe".into(),
+            args: None,
+            language: None,
+        }
+    }
+
+    fn saves_dir(g: &Game, name: &str) -> PathBuf {
+        g.prefix.join(crate::launcher::UPC_REL).join("savegames").join(USER).join(name)
+    }
+
+    /// A copy of the live v1 store for Origins (the DLSS layer and profile, the "Skip
+    /// intros" deletions layer and their histories, with personal paths replaced), plus an
+    /// install and a prefix with vanilla's and the DLSS profile's saves folders.
+    fn v1_store(t: &Path) -> (ModStore, Game) {
+        let data = t.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let out = std::process::Command::new("cp").arg("-a").arg(format!("{STORE_V1}/.")).arg(&data).output().unwrap();
+        assert!(out.status.success());
+        let layers = data.join("mods/3539/layers");
+        folder(&layers.join("l9uv5ua"), &[("d3d11.dll", "x"), ("nvngx_dlss.dll", "y"), ("aco_dlss.ini", "z")]);
+        let skip: Layer = serde_json::from_str(&std::fs::read_to_string(layers.join("lzrticn.json")).unwrap()).unwrap();
+        std::fs::create_dir_all(layers.join("lzrticn")).unwrap();
+        sync_deletions(&layers.join("lzrticn"), &[], &skip.deletes).unwrap();
+        let g = game(t, 3539);
+        folder(&g.install_dir, &[("ACOrigins.exe", "e"), ("videos/UbisoftLogo.bk2", "v"), ("videos/en/Epilepsy.bk2", "v")]);
+        folder(&saves_dir(&g, "3539"), &[("1.save", "vanilla")]);
+        folder(&saves_dir(&g, "3539-ptkzxpv"), &[("1.save", "dlss")]);
+        (ModStore::new(&data, 3539).with_game(&g, None), g)
+    }
+
+    #[test]
+    fn v1_store_reads_as_v2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, g) = v1_store(tmp.path());
+        // Layers are file-only mods: same ids, no manifest, unknown save compatibility.
+        let mods = store.layers().unwrap();
+        assert_eq!(mods.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["l9uv5ua", "lzrticn"]);
+        assert!(mods.iter().all(|l| l.manifest.is_none() && l.enabled() && !l.save_compatible()));
+        assert_eq!(mods[1].deletes.len(), 4);
+        // Old histories read as they are.
+        assert_eq!(store.layer_history("lzrticn").unwrap().len(), 1);
+        let (p, hist) = store.history_of("DLSS").unwrap();
+        assert_eq!(hist.len(), 4);
+        assert_eq!(p.layers, ["l9uv5ua", "lzrticn"]);
+        assert_eq!((p.separate_saves, p.profile_config.len()), (None, 0));
+        // The profile's overrides stay its overrides; its layers are its mod stack.
+        let plan = store.plan(Some("dlss")).unwrap();
+        assert_eq!(plan.api.mods, ["l9uv5ua", "lzrticn"]);
+        assert_eq!(plan.api.settings.dll_overrides["d3d11"], "n,b");
+        assert!(plan.api.problems.is_empty(), "{:?}", plan.api.problems);
+        // Its saves stay where they are, synced as before (cloud_saves=on).
+        assert_eq!(plan.saves_profile.as_deref(), Some("ptkzxpv"));
+        assert!(plan.api.saves.separate && plan.api.saves.cloud);
+        assert_eq!(plan.overlays.len(), 1);
+        assert_eq!(plan.overlays[0].lower, [store.layer_dir("lzrticn"), store.layer_dir("l9uv5ua")], "topmost first");
+        assert_eq!(plan.overlays[0].upper, store.profile_dir("ptkzxpv").join("upper"), "the same writable layer as v1");
+        // Vanilla: nothing mounted, its own saves.
+        let v = store.plan(None).unwrap();
+        assert!(v.overlays.is_empty() && v.api.mods.is_empty() && v.saves_profile.is_none());
+        assert!(g.install_dir.join("videos/UbisoftLogo.bk2").is_file());
+    }
+
+    #[test]
+    fn migration_keeps_existing_save_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, g) = v1_store(tmp.path());
+        // Mark both mods save-compatible, as the DLSS and intro-skip mods are: the rule
+        // alone would now share vanilla's saves, but the profile's own folder wins.
+        store.set_mod("DLSS", &ops(&["save_compatible=on"]), "cli", None).unwrap();
+        let c = store.set_mod("lzrticn", &ops(&["save_compatible=on", "kind=fix"]), "cli", None).unwrap();
+        assert_eq!(store.layer_history("lzrticn").unwrap().last().unwrap().changes, ["save_compatible=on", "kind=fix"]);
+        assert_eq!(c.layer.manifest.as_ref().unwrap().id, "lzrticn");
+        let info = store.state().unwrap().profiles.remove(0);
+        let saves = info.saves.unwrap();
+        assert!(saves.separate && saves.reason.contains("before Mods v2"), "{saves:?}");
+
+        let dry = store.migrate(true, "cli").unwrap();
+        assert_eq!(dry.kept_separate_saves.len(), 1);
+        assert!(dry.kept_separate_saves[0].1.ends_with(&format!("savegames/{USER}/3539-ptkzxpv")));
+        assert_eq!(store.history("ptkzxpv").unwrap().len(), 4, "a dry run changes nothing");
+        assert!(dry.file_only_mods.is_empty(), "both have a manifest of their own now");
+
+        let r = store.migrate(false, "cli").unwrap();
+        assert_eq!(r.kept_separate_saves.len(), 1);
+        let hist = store.history("ptkzxpv").unwrap();
+        assert_eq!(hist.len(), 5);
+        assert_eq!(hist[4].profile.separate_saves, Some(true));
+        assert!(hist[4].message.as_deref().unwrap().contains("own saves folder"));
+        // Idempotent.
+        assert!(store.migrate(false, "cli").unwrap().kept_separate_saves.is_empty());
+        assert_eq!(store.history("ptkzxpv").unwrap().len(), 5);
+        let plan = store.plan(Some("DLSS")).unwrap();
+        assert_eq!(plan.saves_profile.as_deref(), Some("ptkzxpv"));
+        assert!(plan.api.saves.reason.contains("separate_saves is on"));
+        // Nothing moved.
+        assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539-ptkzxpv").join("1.save")).unwrap(), "dlss");
+        assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539").join("1.save")).unwrap(), "vanilla");
+        // Only the person's explicit choice shares vanilla's saves.
+        store.set_profile("DLSS", &ops(&["separate_saves=off"]), "cli", None).unwrap();
+        let plan = store.plan(Some("DLSS")).unwrap();
+        assert!(plan.saves_profile.is_none() && plan.api.saves.cloud);
+        assert!(saves_dir(&g, "3539-ptkzxpv").join("1.save").is_file(), "the old folder stays");
+        // `auto` with the old folder still there: still separate (never silently shared).
+        store.set_profile("DLSS", &ops(&["separate_saves=auto"]), "cli", None).unwrap();
+        assert_eq!(store.plan(Some("DLSS")).unwrap().saves_profile.as_deref(), Some("ptkzxpv"));
+    }
+
+    #[test]
+    fn save_fork_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let g = game(t, 7);
+        folder(&g.install_dir, &[("game.exe", "e")]);
+        std::fs::create_dir_all(&g.prefix).unwrap();
+        let store = ModStore::new(&t.join("data"), 7).with_game(&g, None);
+        let pkg = |name: &str, save: Option<bool>| {
+            let dir = t.join("pkgs").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let save = save.map(|s| format!("save_compatible = {s}\n")).unwrap_or_default();
+            std::fs::write(dir.join("quiver-mod.toml"), format!("id = \"{name}\"\nname = \"{name}\"\n{save}[launch]\nargs = [\"-{name}\"]\n")).unwrap();
+            store.install(&Package::Dir { path: dir, name: None }, "cli").unwrap().layer
+        };
+        let safe = pkg("safe", Some(true));
+        let gameplay = pkg("gameplay", Some(false));
+        let unknown = pkg("unknown", None);
+        assert!(safe.files == 0 && store.layer_dir(&safe.id).is_dir());
+        let mk = |name: &str, mods: &[&Layer]| {
+            store.create_profile(name, &mods.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), "cli", None).unwrap();
+            store.plan(Some(name)).unwrap()
+        };
+        let p = mk("Empty", &[]);
+        assert!(!p.api.saves.separate, "no mods: vanilla's saves");
+        let p = mk("Safe", &[&safe]);
+        assert!(!p.api.saves.separate && p.api.saves.cloud && p.saves_profile.is_none());
+        assert_eq!(p.api.settings.args, ["-safe"]);
+        let p = mk("Gameplay", &[&safe, &gameplay]);
+        assert!(p.api.saves.separate && p.api.saves.reason.contains("gameplay"), "{:?}", p.api.saves);
+        assert!(!p.api.saves.cloud, "own saves stay local unless cloud_saves=on");
+        assert_eq!(p.api.saves.folder, format!("savegames/<user>/7-{}", p.api.profile.as_ref().unwrap().id));
+        let p = mk("Unknown", &[&unknown]);
+        assert!(p.api.saves.separate, "unknown counts as not save-compatible");
+        // The person's override wins both ways.
+        store.set_profile("Gameplay", &ops(&["separate_saves=off"]), "cli", None).unwrap();
+        assert!(!store.plan(Some("Gameplay")).unwrap().api.saves.separate);
+        store.set_profile("Safe", &ops(&["separate_saves=on", "cloud_saves=on"]), "cli", None).unwrap();
+        let p = store.plan(Some("Safe")).unwrap();
+        assert!(p.api.saves.separate && p.api.saves.cloud);
+        // A turned-off mod is skipped (and says so) and doesn't fork.
+        store.set_mod("gameplay", &ops(&["enabled=off"]), "cli", None).unwrap();
+        store.set_profile("Gameplay", &ops(&["separate_saves=auto"]), "cli", None).unwrap();
+        let p = store.plan(Some("Gameplay")).unwrap();
+        assert_eq!(p.api.mods, [safe.id.clone()]);
+        assert!(!p.api.saves.separate);
+        assert!(p.api.warnings[0].contains("turned off"));
+    }
+
+    #[test]
+    fn stacks_resolve_and_report_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let g = game(t, 8);
+        folder(&g.install_dir, &[("game.exe", "e")]);
+        std::fs::create_dir_all(&g.prefix).unwrap();
+        std::fs::create_dir_all(t.join("data/games/8")).unwrap();
+        std::fs::write(
+            t.join("data/games/8/history.jsonl"),
+            r#"{"revision":1,"at":"2026-11-16T00:00:00Z","source":"cli","settings":{"args":["-g"],"env":{"A":"game"}}}"#,
+        )
+        .unwrap();
+        let store = ModStore::new(&t.join("data"), 8).with_game(&g, None);
+        let pkg = |id: &str, body: &str| {
+            let dir = t.join("pkgs").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("quiver-mod.toml"), format!("id = \"{id}\"\nname = \"{id}\"\nsave_compatible = true\n{body}")).unwrap();
+            store.install(&Package::Dir { path: dir, name: None }, "cli").unwrap().layer.id
+        };
+        let a = pkg("a", "[launch]\nargs = [\"-a\"]\nenv = { A = \"a\" }\ndll = { d3d11 = \"n,b\" }\nwrappers = [\"gamemoderun\"]\n[[patch]]\nfile = \"drive_c/x.ini\"\nsection = \"S\"\nset = { K = \"1\" }\n");
+        let b = pkg("b", "requires = [\"c\"]\nconflicts = [\"a\"]\n[launch]\nargs = [\"-b\"]\ndll = { d3d11 = \"b\" }\nwrappers = [\"gamemoderun\", \"mangohud\"]\n[[patch]]\nfile = \"drive_c/x.ini\"\nsection = \"s\"\ndelete = [\"k\"]\n");
+        // Already installed: refused, not duplicated.
+        assert!(store.install(&Package::Dir { path: t.join("pkgs/a"), name: None }, "cli").unwrap_err().to_string().contains("already installed"));
+        let r = store.create_profile("P", &[a.clone(), "b".into()], "cli", None).unwrap();
+        assert_eq!(r.profile.layers, [a.clone(), b.clone()], "mods by manifest id too");
+        store.set_profile("P", &ops(&["args=-p", "env.A=profile"]), "cli", None).unwrap();
+        let plan = store.plan(Some("P")).unwrap().api;
+        assert_eq!(plan.settings.args, ["-g", "-a", "-b", "-p"]);
+        assert_eq!(plan.settings.wrappers, ["gamemoderun", "mangohud"]);
+        assert_eq!(plan.settings.env["A"], "profile");
+        assert_eq!(plan.settings.dll_overrides["d3d11"], "b", "the later mod wins…");
+        let keys: Vec<&str> = plan.setting_conflicts.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"dll.d3d11") && keys.contains(&"env.A"), "…and it's reported: {keys:?}");
+        assert!(keys.iter().any(|k| k.contains("drive_c/x.ini") && k.ends_with('K')), "config keys too (any case): {keys:?}");
+        // Declared requirements and conflicts block the launch.
+        assert_eq!(plan.problems.len(), 2, "{:?}", plan.problems);
+        assert!(plan.problems.iter().any(|p| p.contains("needs c")));
+        assert!(plan.problems.iter().any(|p| p.contains("don't work together")));
+        // The same report shows when editing the stack.
+        let info = store.state().unwrap().profiles.remove(0);
+        assert_eq!((info.problems.len(), info.setting_conflicts.len()), (2, plan.setting_conflicts.len()));
+        // A missing mod is a problem too.
+        std::fs::remove_file(store.layer_meta(&b)).unwrap();
+        assert!(store.plan(Some("P")).unwrap().api.problems[0].contains("no longer installed"));
+    }
+
+    #[test]
+    fn builtins_install_update_and_uninstall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let g = game(t, 3539);
+        folder(&g.install_dir, &[("videos/UbisoftLogo.bk2", "v"), ("videos/en/Epilepsy.bk2", "v"), ("videos/en/pc_WarningSaving.bk2", "v")]);
+        std::fs::create_dir_all(&g.prefix).unwrap();
+        let store = ModStore::new(&t.join("data"), 3539).with_game(&g, Some(true));
+        assert!(store.catalog().unwrap().iter().all(|e| e.installed.is_none()));
+        let c = store.install(&Package::Builtin("aco-skip-intros".into()), "cli").unwrap();
+        let l = c.layer.clone();
+        assert!(l.builtin && l.kind() == ModKind::Fix && l.save_compatible());
+        assert_eq!(l.deletes.len(), 4);
+        assert_eq!(c.warnings.len(), 1, "warning_disclaimer.bk2 isn't in this install: {:?}", c.warnings);
+        assert!(l.id.starts_with('m'));
+        assert_eq!(store.catalog().unwrap()[0].installed.as_deref(), Some(l.id.as_str()));
+        // Again: up to date. With an older manifest recorded: updated, as a revision.
+        assert!(store.install(&Package::Builtin("aco-skip-intros".into()), "cli").unwrap().warnings[0].contains("up to date"));
+        let mut old = l.clone();
+        old.manifest.as_mut().unwrap().version = Some("0".into());
+        old.manifest.as_mut().unwrap().files.delete.pop();
+        store.write_layer_meta(&old).unwrap();
+        assert!(store.catalog().unwrap()[0].update);
+        let u = store.install(&Package::Builtin("aco-skip-intros".into()), "cli").unwrap();
+        assert_eq!(u.layer.manifest, l.manifest);
+        assert_eq!(store.layer_history(&l.id).unwrap().last().unwrap().changes, ["manifest 0 -> 1"]);
+        // Wrong game: refused.
+        assert!(store.install(&Package::Builtin("fc4-skip-intro".into()), "cli").unwrap_err().to_string().contains("no built-in mod"));
+
+        // Fixes on vanilla: mounted over the install with vanilla's own writable layer.
+        let v = store.plan(None).unwrap();
+        assert_eq!(v.api.mods, [l.id.clone()]);
+        assert_eq!(v.overlays[0].upper, store.profile_dir(VANILLA).join("upper"));
+        assert!(v.saves_profile.is_none());
+        assert_eq!(store.state().unwrap().vanilla_fixes, [l.id.clone()]);
+        assert!(store.detail(&l.id).unwrap().on_vanilla);
+        // Not decided, off, or the fix turned off: vanilla is the game as installed.
+        for s in [None, Some(false)] {
+            let st = ModStore::new(&t.join("data"), 3539).with_game(&g, s);
+            assert!(st.plan(None).unwrap().overlays.is_empty());
+        }
+        store.set_mod(&l.id, &ops(&["enabled=off"]), "cli", None).unwrap();
+        assert!(store.plan(None).unwrap().api.mods.is_empty());
+        // A fix must stay save-compatible.
+        assert!(store.set_mod(&l.id, &ops(&["save_compatible=off"]), "cli", None).is_err());
+
+        let p = store.create_profile("P", &["aco-skip-intros".into()], "cli", None).unwrap();
+        assert!(store.uninstall("aco-skip-intros").unwrap_err().to_string().contains("used by P"));
+        store.delete_profile(&p.profile.id, "cli").unwrap();
+        let (gone, undone) = store.uninstall("aco-skip-intros").unwrap();
+        assert_eq!((gone.id, undone.len()), (l.id.clone(), 0));
+        assert!(store.layers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_config_and_patches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let g = game(t, 1651);
+        folder(&g.install_dir, &[("game.exe", "e")]);
+        let cfg = "drive_c/users/steamuser/Documents/My Games/UnrealEngine3/ACCGame/ACCGame/Config";
+        let engine = format!("{cfg}/PCConsole-ACCEngine.ini");
+        let system = format!("{cfg}/PCConsole-ACCSystemSettings.ini");
+        let fixture = |n: &str| std::fs::read_to_string(format!("{}/fixtures/mods-v2/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        folder(&g.prefix, &[(&engine, &fixture("PCConsole-ACCEngine.ini")), (&system, &fixture("PCConsole-ACCSystemSettings.ini"))]);
+        let store = ModStore::new(&t.join("data"), 1651).with_game(&g, Some(true));
+        let skip = store.install(&Package::Builtin("acc-china-skip-intro".into()), "cli").unwrap().layer;
+        let af = store.install(&Package::Builtin("acc-china-anisotropy-16".into()), "cli").unwrap().layer;
+        assert_eq!(af.kind(), ModKind::Mod);
+
+        // Folder checks: relative to the prefix (absolute inside it is fine), not the
+        // prefix's machinery, no overlaps.
+        let dir = "drive_c/users/steamuser/Documents/My Games/UnrealEngine3";
+        assert_eq!(store.check_config_dirs(&[format!("{}/{dir}/", g.prefix.display())]).unwrap(), [dir]);
+        for bad in ["drive_c", "/etc", "../x", "drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/savegames", "drive_c/windows/system32"] {
+            assert!(store.check_config_dirs(&[bad.into()]).is_err(), "{bad}");
+        }
+        assert!(store.check_config_dirs(&[dir.into(), cfg.into()]).unwrap_err().to_string().contains("overlap"));
+
+        // Vanilla, with fixes on: the intro skip edits the prefix's own file.
+        let v = store.plan(None).unwrap();
+        assert_eq!(v.api.mods, [skip.id.clone()]);
+        assert!(v.overlays.is_empty(), "a config-only fix needs no mount");
+        assert_eq!(v.api.patches[0].files[0].scope, "prefix");
+        let st = v.apply_patches().unwrap();
+        assert_eq!(st[0].state, PatchState::Applied);
+        assert!(!std::fs::read_to_string(g.prefix.join(&engine)).unwrap().contains("StartupMovies="));
+        assert_eq!(store.applied_by(&skip.id).unwrap().len(), 1);
+
+        // A profile with its own copy of the game's settings folder, and the quality mod.
+        store.create_profile("Pretty", &[af.id.clone()], "cli", None).unwrap();
+        let r = store.set_profile("Pretty", &ops(&[&format!("profile_config={dir}")]), "cli", None).unwrap();
+        assert_eq!(r.profile.profile_config, [dir]);
+        let p = store.plan(Some("Pretty")).unwrap();
+        let own = store.profile_prefix(&r.profile.id).join(dir);
+        assert_eq!(p.api.config_dirs[0].upper, own);
+        assert_eq!(p.overlays.len(), 2, "the install and the settings folder");
+        assert_eq!((p.overlays[1].target.clone(), p.overlays[1].upper.clone()), (g.prefix.join(dir), own.clone()));
+        assert!(p.overlays[1].lower.is_empty());
+        assert_eq!(p.api.patches[0].files[0].scope, format!("profile:{}", r.profile.id));
+        // The profile's copy of the system settings gets 16x AF (copied up from the
+        // prefix's file first); the prefix's files don't change.
+        let st = p.apply_patches().unwrap();
+        assert_eq!(st[0].state, PatchState::Applied, "{st:#?}");
+        assert!(std::fs::read_to_string(own.join("ACCGame/ACCGame/Config/PCConsole-ACCSystemSettings.ini")).unwrap().contains("MaxAnisotropy=16"));
+        assert!(std::fs::read_to_string(g.prefix.join(&system)).unwrap().contains("MaxAnisotropy=4"));
+        // Inspectable: which files are the profile's own, where they live.
+        let info = store.state().unwrap().profiles.remove(0);
+        assert_eq!(info.config_dirs[0].files, ["ACCGame/ACCGame/Config/PCConsole-ACCSystemSettings.ini"]);
+        // The quality mod leaves the stack: the profile's copy gets its own value back.
+        store.set_profile("Pretty", &ops(&["mods="]), "cli", None).unwrap();
+        let st = store.plan(Some("Pretty")).unwrap().apply_patches().unwrap();
+        assert!(st.iter().any(|s| s.state == PatchState::Undone));
+        assert_eq!(
+            std::fs::read_to_string(own.join("ACCGame/ACCGame/Config/PCConsole-ACCSystemSettings.ini")).unwrap(),
+            fixture("PCConsole-ACCSystemSettings.ini")
+        );
+        // Undo all (as for the explicit request): vanilla's file is whole again.
+        let undone = store.undo_patches(None).unwrap();
+        assert_eq!(undone.len(), 1);
+        assert_eq!(std::fs::read_to_string(g.prefix.join(&engine)).unwrap(), fixture("PCConsole-ACCEngine.ini"));
+    }
 }
