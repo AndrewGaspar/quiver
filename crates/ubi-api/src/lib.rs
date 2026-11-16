@@ -246,6 +246,8 @@ pub enum Request {
     ProtonList,
     /// Play sessions recorded by this launcher.
     Playtime { product_id: u32 },
+    /// Ubisoft's own play-time record for a game (read-only).
+    RemotePlaytime { product_id: u32 },
     Activity { limit: usize },
     Subscribe,
     Shutdown,

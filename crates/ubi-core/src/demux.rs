@@ -296,6 +296,29 @@ service!(Denuvo, "denuvo_service", denuvo_service);
 service!(Cloudsave, "cloudsave_service", cloudsave_service);
 service!(Download, "download_service", download_service);
 
+/// `playtime_service` (package `mg.playtime`): proto2 with an optional request id.
+pub struct Playtime;
+impl Service for Playtime {
+    const NAME: &'static str = "playtime_service";
+    type Up = ubi_proto::playtime::Upstream;
+    type Down = ubi_proto::playtime::Downstream;
+    type Req = ubi_proto::playtime::Req;
+    type Rsp = ubi_proto::playtime::Rsp;
+    type Push = ();
+    fn wrap(req: Self::Req) -> Self::Up {
+        ubi_proto::playtime::Upstream { request: Some(req) }
+    }
+    fn set_request_id(req: &mut Self::Req, id: u32) {
+        req.request_id = Some(id);
+    }
+    fn response_id(rsp: &Self::Rsp) -> u32 {
+        rsp.request_id.unwrap_or_default()
+    }
+    fn split(down: Self::Down) -> (Option<Self::Rsp>, Option<Self::Push>) {
+        (down.response, None)
+    }
+}
+
 pub struct ServiceConnection<S: Service> {
     demux: Demux,
     id: u32,

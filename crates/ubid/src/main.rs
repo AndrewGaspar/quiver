@@ -298,6 +298,27 @@ impl Daemon {
             }
             Request::ProtonList => json!(launcher::list_protons()),
             Request::Playtime { product_id } => json!(settings::playtime(product_id)?),
+            Request::RemotePlaytime { product_id } => {
+                let online = self.online.clone();
+                run_local(move || async move {
+                    use ubi_core::proto::playtime as pt;
+                    let session = online.session().await?;
+                    let demux = online.demux().await?;
+                    let mut conn = demux.open::<ubi_core::demux::Playtime>().await?;
+                    let rsp = conn
+                        .request(pt::Req {
+                            get_playtime_req: Some(pt::GetPlaytimeReq {
+                                account_id: Some(session.user_id.clone()),
+                                product_id: Some(product_id),
+                            }),
+                            ..Default::default()
+                        })
+                        .await?;
+                    let r = rsp.get_playtime_rsp.context("no get_playtime_rsp")?;
+                    Ok(json!({ "result": r.result, "seconds": r.seconds, "last_played": r.last_played }))
+                })
+                .await?
+            }
             Request::Activity { limit } => {
                 let a = self.activity.lock().unwrap();
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())

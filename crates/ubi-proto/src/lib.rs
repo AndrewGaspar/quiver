@@ -9,6 +9,7 @@ macro_rules! include_proto {
 }
 
 pub mod mg {
+    pub mod playtime { include_proto!("mg.playtime"); }
     pub mod protocol {
         pub mod demux { include_proto!("mg.protocol.demux"); }
         pub mod ownership { include_proto!("mg.protocol.ownership"); }
@@ -26,4 +27,5 @@ pub mod mg {
     }
 }
 
+pub use mg::playtime;
 pub use mg::protocol::*;

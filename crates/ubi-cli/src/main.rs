@@ -371,6 +371,10 @@ async fn main() -> Result<()> {
         Cmd::Playtime { game } => {
             let e = resolve(&client, &game).await?;
             let p: ubi_api::Playtime = client.call(Request::Playtime { product_id: e.product_id }).await?;
+            match client.call::<serde_json::Value>(Request::RemotePlaytime { product_id: e.product_id }).await {
+                Ok(r) => println!("Ubisoft says: {} (raw: {r})", r["seconds"].as_u64().map(|s| format!("{}h{:02}m", s / 3600, s % 3600 / 60)).unwrap_or("?".into())),
+                Err(err) => println!("Ubisoft play time unavailable: {err:#}"),
+            }
             println!("{}: {}h{:02}m over {} session(s)", e.name, p.total_seconds / 3600, p.total_seconds % 3600 / 60, p.sessions.len());
             for s in p.sessions.iter().rev().take(10) {
                 println!(
