@@ -96,6 +96,36 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
     Ok(plan)
 }
 
+/// Prepare `dest` for installing `new` over an existing install of `old`: files whose slices
+/// are unchanged are recorded as done, files no longer in the game are deleted, and the
+/// rest will be (re)downloaded. Returns (kept, removed) counts.
+pub fn prepare_update(old: &Plan, new: &Plan, dest: &Path) -> Result<(usize, usize)> {
+    use std::collections::HashMap;
+    let old_files: HashMap<&str, &PlannedFile> = old.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let new_paths: HashSet<&str> = new.files.iter().map(|f| f.path.as_str()).collect();
+    let unchanged = |f: &PlannedFile| {
+        old_files.get(f.path.as_str()).is_some_and(|o| {
+            o.size == f.size
+                && o.slices.len() == f.slices.len()
+                && o.slices.iter().zip(&f.slices).all(|(a, b)| a.sha1 == b.sha1 && a.offset == b.offset)
+        }) && dest.join(&f.path).metadata().is_ok_and(|m| m.len() == f.size)
+    };
+    std::fs::create_dir_all(state_dir(dest))?;
+    let mut done = std::fs::File::create(state_dir(dest).join("done"))?;
+    let mut kept = 0;
+    for f in new.files.iter().filter(|f| unchanged(f)) {
+        writeln!(done, "{}", f.path)?;
+        kept += 1;
+    }
+    let mut removed = 0;
+    for f in old.files.iter().filter(|f| !new_paths.contains(f.path.as_str())) {
+        if std::fs::remove_file(dest.join(&f.path)).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok((kept, removed))
+}
+
 #[derive(Default)]
 pub struct Progress {
     pub downloaded: AtomicU64,

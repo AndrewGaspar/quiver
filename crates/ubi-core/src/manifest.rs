@@ -40,6 +40,17 @@ pub fn read_signed(data: &[u8]) -> Result<SignedBlob> {
     Ok(SignedBlob { version, signature, payload })
 }
 
+/// The manifest's identity as used by ownership (`OwnedGame.latest_manifest`): upper-case
+/// hex SHA-1 of the compressed payload.
+pub fn manifest_hash(data: &[u8]) -> Result<String> {
+    use sha1::{Digest, Sha1};
+    ensure!(data.len() >= 12, "manifest too short");
+    let u32_at = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap()) as usize;
+    let body = 12 + u32_at(4);
+    let compressed = data.get(body..body + u32_at(8)).context("manifest truncated")?;
+    Ok(hex::encode_upper(Sha1::digest(compressed)))
+}
+
 pub fn parse_manifest(data: &[u8]) -> Result<download::Manifest> {
     let blob = read_signed(data)?;
     download::Manifest::decode(blob.payload.as_slice()).context("decode download.Manifest")

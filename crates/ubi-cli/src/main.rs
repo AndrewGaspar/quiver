@@ -60,6 +60,11 @@ enum Cmd {
         #[command(subcommand)]
         action: SavesAction,
     },
+    /// Compare installed games (dirs containing uplay_install.manifest) with the latest builds.
+    Status {
+        /// Game install directories, as `product_id=path`.
+        installs: Vec<String>,
+    },
     /// Download and install a game (resumable).
     Install {
         product_id: u32,
@@ -244,6 +249,19 @@ async fn main() -> Result<()> {
                 println!("previous local copies backed up to {}", b.display());
             }
         }
+        Cmd::Status { installs } => {
+            let (_, demux) = ubi_core::connect(&auth).await?;
+            let lib = Library::fetch(&demux).await?;
+            for spec in installs {
+                let (id, path) = spec.split_once('=').context("expected product_id=path")?;
+                let id: u32 = id.parse()?;
+                let installed = manifest::manifest_hash(&std::fs::read(PathBuf::from(path).join("uplay_install.manifest"))?)?;
+                let product = lib.get(id).context("not in library")?;
+                let latest = product.latest_manifest.clone().unwrap_or_default();
+                let state = if latest.eq_ignore_ascii_case(&installed) { "up to date" } else { "UPDATE AVAILABLE" };
+                println!("{:<40} {state}  (installed {}, latest {})", product.name.as_deref().unwrap_or("?"), &installed[..8], &latest[..latest.len().min(8)]);
+            }
+        }
         Cmd::Install { product_id, dest, language, dry_run } => {
             use std::sync::atomic::Ordering::Relaxed;
             let (_, demux) = ubi_core::connect(&auth).await?;
@@ -261,6 +279,28 @@ async fn main() -> Result<()> {
                 plan.download_bytes as f64 / 1e9,
                 plan.chunks
             );
+            let installed = dest.join("uplay_install.manifest");
+            let mut updating = false;
+            if let Ok(old_raw) = std::fs::read(&installed) {
+                if manifest::manifest_hash(&old_raw)?.eq_ignore_ascii_case(&hash) {
+                    let done = std::fs::read_to_string(dest.join(".ubi-install/done")).unwrap_or_default();
+                    let done: std::collections::HashSet<&str> = done.lines().collect();
+                    if dry_run || plan.files.iter().all(|f| done.contains(f.path.as_str())) {
+                        println!("already installed and up to date");
+                        return Ok(());
+                    }
+                    println!("resuming incomplete install");
+                } else {
+                    updating = true;
+                    let old_plan = ubi_core::install::plan(&manifest::parse_manifest(&old_raw)?, &language)?;
+                    if dry_run {
+                        println!("update from {}", manifest::manifest_hash(&old_raw)?);
+                        return Ok(());
+                    }
+                    let (kept, removed) = ubi_core::install::prepare_update(&old_plan, &plan, &dest)?;
+                    println!("updating: {kept} files unchanged, {removed} removed");
+                }
+            }
             if dry_run {
                 return Ok(());
             }
@@ -291,8 +331,8 @@ async fn main() -> Result<()> {
             let result = ubi_core::install::install(&mut dl, &plan, &dest, compressed, &progress).await;
             reporter.abort();
             result?;
-            std::fs::write(dest.join("uplay_install.manifest"), &raw)?;
-            println!("installed {} files into {}", plan.files.len(), dest.display());
+            std::fs::write(&installed, &raw)?;
+            println!("{} {} files in {}", if updating { "updated" } else { "installed" }, plan.files.len(), dest.display());
         }
         Cmd::CloudPull { uplay_id, dir, max_slot } => {
             let (_, demux) = ubi_core::connect(&auth).await?;
