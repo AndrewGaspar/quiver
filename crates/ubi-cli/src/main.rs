@@ -113,16 +113,18 @@ enum Cmd {
         #[arg(long)]
         prefix: bool,
     },
-    /// Launch a game (follows it until it exits unless --detach).
+    /// Launch a game (follows it until it exits unless --detach). Without --profile it runs
+    /// the game's default profile (`quiver mods <game> default`; vanilla unless set).
     Play {
         game: String,
-        /// Mod profile (name or id); default: vanilla.
+        /// Mod profile (name or id), or `vanilla`; default: the game's default profile.
         #[arg(long, conflicts_with = "vanilla")]
         profile: Option<String>,
-        /// Mod profile by its stable id (what .desktop entries and Steam shortcuts use).
+        /// Mod profile by its stable id (what profile .desktop entries and Steam shortcuts use).
         #[arg(long, conflicts_with_all = ["profile", "vanilla"])]
         profile_id: Option<String>,
-        /// The game as installed, without mods (the default).
+        /// The game as installed, without mods, whatever the default profile is (same as
+        /// `--profile vanilla`).
         #[arg(long)]
         vanilla: bool,
         #[arg(long)]
@@ -140,8 +142,9 @@ enum Cmd {
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
-    /// Keys: proton, language, account, args, wrappers, env.NAME, dll.NAME.
-    /// `account` (username or user id) picks the account the game launches with.
+    /// Keys: proton, language, account, profile, args, wrappers, env.NAME, dll.NAME.
+    /// `account` (username or user id) picks the account the game launches with; `profile`
+    /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default.
     Set {
         game: String,
         #[arg(required = true)]
@@ -583,19 +586,29 @@ async fn main() -> Result<()> {
             let () = client.call(Request::Uninstall { product_id: e.product_id, remove_prefix: prefix }).await?;
             println!("uninstalled {}", e.name);
         }
-        Cmd::Play { game, profile, profile_id, vanilla: _, detach } => {
+        Cmd::Play { game, profile, profile_id, vanilla, detach } => {
             let e = resolve(&client, &game).await?;
             let events = client.subscribe().await?;
-            let profile = profile.or(profile_id);
+            // `None`: the daemon runs the game's default profile; `vanilla` forces vanilla.
+            let profile = profile.or(profile_id).or(vanilla.then(|| ubi_api::mods::VANILLA.to_owned()));
+            let default = match &profile {
+                None => client
+                    .call::<ubi_api::mods::ModsState>(Request::Mods(ubi_api::ModsRequest::List { product_id: e.product_id }))
+                    .await
+                    .ok()
+                    .map(|s| mods::default_label(&s)),
+                Some(_) => None,
+            };
             let id: u64 = client.call(Request::Play { product_id: e.product_id, profile: profile.clone() }).await?;
             if let Some(g) = e.steam.as_ref().filter(|_| e.steam_only()) {
                 let how = if g.state.uses_quiver() { "it starts through Quiver" } else { "it starts through Ubisoft Connect; `quiver steam patch` switches it" };
                 eprintln!("asked Steam to start {} (steam://rungameid/{}; {how})", e.name, g.app_id);
                 return Ok(());
             }
-            match profile {
-                Some(p) => eprintln!("launching {} with profile {p} (job {id})", e.name),
-                None => eprintln!("launching {} (job {id})", e.name),
+            match (profile, default) {
+                (Some(p), _) => eprintln!("launching {} with profile {p} (job {id})", e.name),
+                (None, Some(d)) => eprintln!("launching {} with its default, {d} (job {id})", e.name),
+                (None, None) => eprintln!("launching {} (job {id})", e.name),
             }
             if !detach {
                 follow(&client, events, id).await?;
@@ -628,6 +641,11 @@ async fn main() -> Result<()> {
                     Some(a) => println!("  (launches as {})", a.name),
                     None => println!("  (launch account {id} is not signed in)"),
                 }
+            }
+            if v["settings"]["profile"].is_string()
+                && let Ok(s) = client.call::<ubi_api::mods::ModsState>(Request::Mods(ubi_api::ModsRequest::List { product_id: e.product_id })).await
+            {
+                println!("  (Play uses {})", mods::default_label(&s));
             }
         }
         Cmd::Set { game, changes, message } => {

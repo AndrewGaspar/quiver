@@ -2,7 +2,7 @@
 //! exports, the launch-options form, dialogs and dropdowns. Rendering lives next to this
 //! file, one module per tab.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -152,17 +152,17 @@ pub struct GamePage {
     pub dropdown_sel: usize,
     /// The game menu shows play options (X / the Play arrow) instead of the game menu (Y).
     pub play_menu: bool,
-    /// Profile id each game plays with by default (absent: vanilla), chosen from the menu.
-    pub play_with: HashMap<u32, String>,
+    /// With `play_menu`: the profile chip's menu, which picks the game's default profile
+    /// (the daemon's `profile` setting) instead of playing once.
+    pub default_menu: bool,
     pub busy: bool,
 }
 
 impl GamePage {
     fn reset(&mut self, id: u32) {
-        let play_with = std::mem::take(&mut self.play_with);
         let protons = std::mem::take(&mut self.protons);
         let exports = std::mem::take(&mut self.exports);
-        *self = GamePage { id, play_with, protons, exports, ..Default::default() };
+        *self = GamePage { id, protons, exports, ..Default::default() };
     }
 
     pub fn exports_for(&self, id: u32) -> Vec<ExportStatus> {
@@ -179,15 +179,6 @@ impl GamePage {
     /// Live profiles of the page's game (empty until loaded).
     pub fn profiles(&self) -> Vec<Profile> {
         self.mods.ready().map(|m| m.profiles.iter().map(|p| p.profile.clone()).collect()).unwrap_or_default()
-    }
-
-    /// The profile Play uses for `id`: the one chosen from the menu, if it still exists.
-    pub fn play_profile(&self, id: u32) -> Option<String> {
-        let p = self.play_with.get(&id)?;
-        if self.id == id && self.mods.ready().is_some() && !self.profiles().iter().any(|x| &x.id == p) {
-            return None;
-        }
-        Some(p.clone())
     }
 }
 
@@ -217,6 +208,9 @@ pub fn flatten(s: &GameSettings) -> BTreeMap<String, String> {
     }
     if let Some(l) = &s.language {
         m.insert("language".into(), l.clone());
+    }
+    if let Some(p) = &s.profile {
+        m.insert("profile".into(), p.clone());
     }
     if !s.wrappers.is_empty() {
         m.insert("wrappers".into(), s.wrappers.join(","));
@@ -278,6 +272,17 @@ pub fn ops_between(base: &GameSettings, staged: &GameSettings) -> Vec<SettingOp>
         }
     }
     out
+}
+
+/// A profile in a menu line: "2 layers · own saves, synced · pinned".
+pub fn profile_summary(p: &Profile) -> String {
+    format!(
+        "{} layer{} · {}{}",
+        p.layers.len(),
+        if p.layers.len() == 1 { "" } else { "s" },
+        if p.cloud_saves { "own saves, synced" } else { "own saves, local only" },
+        if p.pinned { " · pinned" } else { "" }
+    )
 }
 
 /// A size in the unit that reads best: "2 KB", "81 MB", "12.8 GB".
@@ -555,44 +560,107 @@ impl Quiver {
         }
     }
 
-    /// Play with profile entry `i` of the play menu (0: vanilla) and remember the choice.
+    /// The game's `profile` setting as saved (a profile id; `None`: vanilla). It may name a
+    /// deleted profile; [`Self::default_profile`] is what Play really runs.
+    pub fn default_profile_setting(&self, id: u32) -> Option<String> {
+        self.game(id)?.settings.as_ref()?.profile.clone()
+    }
+
+    /// The profile Play runs for `id` when none is named (the daemon resolves the same
+    /// way): the game's default, unless it's no longer a live profile.
+    pub fn default_profile(&self, id: u32) -> Option<String> {
+        let p = self.default_profile_setting(id)?;
+        if self.gp.id == id && self.gp.mods.ready().is_some() && !self.gp.profiles().iter().any(|x| x.id == p) {
+            return None;
+        }
+        Some(p)
+    }
+
+    /// Play once with profile entry `i` of the play menu (0: vanilla); the default stays.
     pub fn play_with(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
         let profiles = self.gp.profiles();
         let chosen = if i == 0 { None } else { profiles.get(i - 1).cloned() };
-        match &chosen {
-            Some(p) => {
-                self.gp.play_with.insert(id, p.id.clone());
-            }
-            None => {
-                self.gp.play_with.remove(&id);
-            }
-        }
         let label = chosen.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Vanilla".into());
         let name = self.game(id).map(|g| g.entry.name.clone()).unwrap_or_default();
-        let running = self.game(id).is_some_and(|g| g.running());
-        if running {
-            self.show_toast(format!("{name} is running; it will use {label} next time"), cx);
+        if self.game(id).is_some_and(|g| g.running()) {
+            self.show_toast(format!("{name} is already running"), cx);
             return;
         }
-        let profile = chosen.map(|p| p.id);
+        // Named explicitly, so the daemon doesn't apply the default (`vanilla` forces it).
+        let profile = Some(chosen.map(|p| p.id).unwrap_or_else(|| VANILLA.into()));
         self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
             Ok(_) => this.show_toast(format!("Starting {name} · {label}…"), cx),
             Err(e) => this.show_toast(err_text(&e), cx),
         });
     }
 
-    /// The play menu (X, or the Play button's arrow): Vanilla and every profile.
+    /// Make profile entry `i` (0: vanilla) the game's default: the `profile` setting, a
+    /// revision in its settings history, which Play, `quiver play` and shortcuts follow.
+    pub fn set_default_profile(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
+        let profiles = self.gp.profiles();
+        let chosen = if i == 0 { None } else { profiles.get(i - 1).cloned() };
+        let label = chosen.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Vanilla".into());
+        let value = chosen.as_ref().map(|p| p.id.clone());
+        if self.default_profile_setting(id) == value {
+            self.show_toast(format!("Play already uses {label}"), cx);
+            return;
+        }
+        let ops = vec![SettingOp::Set { key: "profile".into(), value: value.unwrap_or_else(|| VANILLA.into()) }];
+        let message = Some(format!("Default for Play: {label}"));
+        self.call::<Revision, _>(Request::SettingsSet { product_id: id, ops, message }, cx, move |this, r, cx| match r {
+            Ok(rev) => {
+                this.show_toast(format!("Play now uses {label} (launch options r{})", rev.revision), cx);
+                this.load_details(id, cx);
+            }
+            Err(e) => this.show_toast(err_text(&e), cx),
+        });
+    }
+
+    /// The profile chip's menu: pick the game's default profile.
+    fn default_menu_commands(&self, id: u32) -> Vec<Command> {
+        let current = self.default_profile(id);
+        let entry = |i: usize, key: Option<&str>, name: &str, what: String| {
+            let on = current.as_deref() == key;
+            Command {
+                icon: if on { Icon::CircleCheck } else if key.is_some() { Icon::Layers } else { Icon::ShieldCheck },
+                label: name.to_owned().into(),
+                detail: Some(if on { format!("Default for Play · {what}") } else { what }.into()),
+                cli: Some(format!("quiver mods {id} default {}", key.map(|_| sh_quote(name)).unwrap_or_else(|| VANILLA.into())).into()),
+                action: Cmd::DefaultProfile(id, i),
+                future: false,
+            }
+        };
+        let mut v = vec![entry(0, None, "Vanilla", "The base install, the game's own saves".into())];
+        let deleted = self.default_profile_setting(id).filter(|_| current.is_none());
+        if let Some(m) = self.gp.mods.ready().filter(|_| self.gp.id == id) {
+            for (i, p) in m.profiles.iter().enumerate() {
+                let p = &p.profile;
+                v.push(entry(i + 1, Some(p.id.as_str()), &p.name, profile_summary(p)));
+            }
+            if let Some(d) = deleted.and_then(|d| m.deleted.iter().find(|x| x.profile.id == d)) {
+                v[0].detail = Some(format!("Default for Play · the default, {}, was deleted", d.profile.name).into());
+            }
+        }
+        v
+    }
+
+    /// The play menu (X, or the Play button's arrow): play once with Vanilla or a profile.
+    /// From the profile chip it's the default-profile menu instead.
     pub fn play_menu_commands(&self, id: u32) -> Option<Vec<Command>> {
         if !self.gp.play_menu {
             return None;
         }
-        let current = self.gp.play_profile(id);
+        if self.gp.default_menu {
+            return Some(self.default_menu_commands(id));
+        }
+        let current = self.default_profile(id);
         let mods = self.gp.mods.ready().filter(|_| self.gp.id == id);
+        let is_default = |on: bool| if on { " · default" } else { "" };
         let mut v = vec![Command {
-            icon: if current.is_none() { Icon::CircleCheck } else { Icon::Play },
+            icon: Icon::Play,
             label: "Play Vanilla".into(),
-            detail: Some("The base install, the game's own saves".into()),
-            cli: Some(format!("quiver play {id}").into()),
+            detail: Some(format!("The base install, the game's own saves{}", is_default(current.is_none())).into()),
+            cli: Some(format!("quiver play {id} --vanilla").into()),
             action: Cmd::PlayWith(id, 0),
             future: false,
         }];
@@ -600,20 +668,21 @@ impl Quiver {
             for (i, p) in m.profiles.iter().enumerate() {
                 let p = &p.profile;
                 v.push(Command {
-                    icon: if current.as_deref() == Some(p.id.as_str()) { Icon::CircleCheck } else { Icon::Layers },
+                    icon: Icon::Layers,
                     label: format!("Play {}", p.name).into(),
-                    detail: Some(
-                        format!(
-                            "{} layer{} · {}{}",
-                            p.layers.len(),
-                            if p.layers.len() == 1 { "" } else { "s" },
-                            if p.cloud_saves { "own saves, synced" } else { "own saves, local only" },
-                            if p.pinned { " · pinned" } else { "" }
-                        )
-                        .into(),
-                    ),
+                    detail: Some(format!("{}{}", profile_summary(p), is_default(current.as_deref() == Some(p.id.as_str()))).into()),
                     cli: Some(format!("quiver play {id} --profile {}", sh_quote(&p.name)).into()),
                     action: Cmd::PlayWith(id, i + 1),
+                    future: false,
+                });
+            }
+            if !m.profiles.is_empty() {
+                v.push(Command {
+                    icon: Icon::CircleCheck,
+                    label: "Change the default…".into(),
+                    detail: Some("What Play, shortcuts and `quiver play` use".into()),
+                    cli: Some(format!("quiver mods {id} default PROFILE").into()),
+                    action: Cmd::DefaultMenu(id),
                     future: false,
                 });
             }
@@ -1065,9 +1134,10 @@ impl Quiver {
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
-                            this.show_toast(format!("Deleted {name}; restore it from Deleted profiles (r{})", rev.revision - 1), cx);
+                            let was_default = this.default_profile_setting(game).as_deref() == Some(rev.profile.id.as_str());
+                            let then = if was_default { "; Play uses Vanilla until it's back" } else { "" };
+                            this.show_toast(format!("Deleted {name}; restore it from Deleted profiles (r{}){then}", rev.revision - 1), cx);
                             this.gp.prof_sel = None;
-                            this.gp.play_with.retain(|_, p| *p != rev.profile.id);
                             this.load_mods(game, cx);
                         }
                         Err(e) => this.show_toast(err_text(&e), cx),
@@ -1168,8 +1238,8 @@ impl Quiver {
         // X opens play options, Y the game menu (both open the same overlay).
         if self.nav.overlay.is_none() {
             match input {
-                Input::PlayOptions => self.gp.play_menu = true,
-                Input::Menu => self.gp.play_menu = false,
+                Input::PlayOptions => (self.gp.play_menu, self.gp.default_menu) = (true, false),
+                Input::Menu => (self.gp.play_menu, self.gp.default_menu) = (false, false),
                 _ => {}
             }
         }

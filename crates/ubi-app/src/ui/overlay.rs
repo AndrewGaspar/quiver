@@ -21,7 +21,8 @@ impl Quiver {
                 ("palette", ctx, self.palette_commands(), selected)
             }
             Overlay::Menu { game, selected } => {
-                let ctx = self.game(game).map(|g| g.entry.name.clone());
+                let default_menu = self.gp.play_menu && self.gp.default_menu;
+                let ctx = self.game(game).map(|g| if default_menu { format!("{} · Default for Play", g.entry.name) } else { g.entry.name.clone() });
                 ("menu", ctx, self.menu_commands(game), selected)
             }
         };

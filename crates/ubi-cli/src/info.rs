@@ -91,6 +91,10 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         if !inst.languages.is_empty() {
             row("languages", &inst.languages.join(", "));
         }
+        let mods = Request::Mods(ubi_api::ModsRequest::List { product_id: e.product_id });
+        if let Ok(s) = client.call::<ubi_api::mods::ModsState>(mods).await {
+            row("plays", &crate::mods::default_label(&s));
+        }
     } else {
         row("installed", "no");
     }

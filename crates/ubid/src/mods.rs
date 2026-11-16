@@ -18,6 +18,7 @@ use ubi_api::mods::{GameProfiles, LaunchPlan, ModPrefs, ModsRequest, PatchState,
 use ubi_api::{Event, SettingOp};
 use ubi_core::launcher::{self, Config, Games};
 use ubi_core::mods::{ModStore, Package, Plan};
+use ubi_core::settings;
 
 use crate::Daemon;
 
@@ -62,18 +63,49 @@ fn store(product_id: u32) -> Result<ModStore> {
     Ok(store_for(&installed(product_id)?))
 }
 
-/// The launch plan for `profile` (`None`: vanilla). A profile from before Mods v2 that has
-/// its own saves folder first gets `separate_saves=on` recorded (see `ModStore::migrate`).
-pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: &str) -> Result<Plan> {
+/// The profile a launch of the store's game runs: `requested` (a name or id; `vanilla`:
+/// unmodded), else the game's default (its `profile` setting). The second value is a
+/// warning when the default can't be used (deleted): the launch runs vanilla instead.
+fn launch_profile(store: &ModStore, product_id: u32, requested: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+    let default = match requested {
+        Some(_) => None,
+        None => settings::current(product_id)?.0.profile,
+    };
+    let (profile, warning) = store.launch_profile(requested, default.as_deref());
+    if let Some(w) = &warning {
+        tracing::warn!(product_id, "{w}");
+    }
+    Ok((profile, warning))
+}
+
+/// The launch plan for `profile` (`None`: the game's default profile, see
+/// [`launch_profile`]; `vanilla`: unmodded). A profile from before Mods v2 that has its own
+/// saves folder first gets `separate_saves=on` recorded (see `ModStore::migrate`). Also
+/// returns the warning when a deleted default profile made it vanilla (it's in the plan's
+/// warnings too).
+pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: &str) -> Result<(Plan, Option<String>)> {
     let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let store = store_for(game);
+    let (profile, warning) = launch_profile(&store, game.product_id, profile)?;
     if profile.is_some() {
         match store.migrate(false, source) {
             Ok(r) => r.notes.iter().for_each(|n| tracing::info!("mods v2 migration: {n}")),
             Err(e) => tracing::warn!("mods v2 migration: {e:#}"),
         }
     }
-    store.plan(profile)
+    let mut plan = store.plan(profile.as_deref())?;
+    plan.api.warnings.extend(warning.clone());
+    Ok((plan, warning))
+}
+
+/// The game's default profile as a profile id: `value` is a name or id (`vanilla` or empty:
+/// none, returned as is).
+pub(crate) fn resolve_default(product_id: u32, value: &str) -> Result<String> {
+    let v = value.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case(ubi_api::mods::VANILLA) {
+        return Ok(v.to_owned());
+    }
+    Ok(ModStore::open(product_id).profile(v)?.0.id)
 }
 
 /// What a launch plan says worth keeping with the launch job.
@@ -136,7 +168,10 @@ impl Daemon {
             }
             ModsRequest::List { product_id } => {
                 let store = store(product_id)?;
-                json!(blocking(move || store.state()).await?)
+                let default_profile = settings::current(product_id)?.0.profile;
+                let mut state = blocking(move || store.state()).await?;
+                state.default_profile = default_profile;
+                json!(state)
             }
             ModsRequest::LayerAdd { product_id, name, path, deletes } => {
                 let game = installed(product_id)?;
@@ -207,18 +242,23 @@ impl Daemon {
                 ask(source, confirmed, "deleting a mod profile")?;
                 installed(product_id)?;
                 let rev = blocking(move || ModStore::open(product_id).delete_profile(&profile, &src)).await?;
+                // The game's default stays pointed at it (restoring brings it back), but
+                // until then Play runs vanilla: say so.
+                let was_default = settings::current(product_id)?.0.profile.as_deref() == Some(rev.profile.id.as_str());
+                let note = if was_default { "; it was the default profile, so Play runs vanilla until it's restored or another default is picked" } else { "" };
                 self.mods_changed(
                     source,
                     product_id,
                     format!(
-                        "deleted mod profile '{}' ({}) of {} (restore: r{})",
+                        "deleted mod profile '{}' ({}) of {} (restore: r{}){note}",
                         rev.profile.name,
                         rev.profile.id,
                         self.product_name(product_id),
                         rev.revision - 1
                     ),
                 );
-                json!(rev)
+                let notes = if was_default { vec![note.trim_start_matches("; ").to_owned()] } else { Vec::new() };
+                with_notes(json!(rev), (notes, None))
             }
             ModsRequest::ProfileHistory { product_id, profile } => {
                 let (_, history) = blocking(move || ModStore::open(product_id).history_of(&profile)).await?;
@@ -341,7 +381,15 @@ impl Daemon {
             }
             ModsRequest::Plan { product_id, profile } => {
                 let game = installed(product_id)?;
-                json!(blocking(move || store_for(&game).plan(profile.as_deref()).map(|p| p.api)).await?)
+                // No profile: what Play would run, i.e. the game's default.
+                json!(blocking(move || {
+                    let store = store_for(&game);
+                    let (profile, warning) = launch_profile(&store, product_id, profile.as_deref())?;
+                    let mut plan = store.plan(profile.as_deref())?.api;
+                    plan.warnings.extend(warning);
+                    Ok(plan)
+                })
+                .await?)
             }
             ModsRequest::PatchesUndo { product_id, mod_id, confirmed } => {
                 ask(source, confirmed, "undoing config patches")?;

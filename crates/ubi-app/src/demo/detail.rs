@@ -124,7 +124,15 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 {
                     bail!("no Proton build '{value}' (installed: {})", PROTONS.join(", "));
                 }
-                s.apply(op).map_err(|e| anyhow!(e))?;
+                // The default profile is stored as its id, like the daemon does.
+                let op = match op {
+                    SettingOp::Set { key, value } if key == "profile" && !value.trim().is_empty() => {
+                        let id = launch_profile(d, st, product_id, Some(value))?;
+                        SettingOp::Set { key: key.clone(), value: id.unwrap_or_default() }
+                    }
+                    op => op.clone(),
+                };
+                s.apply(&op).map_err(|e| anyhow!(e))?;
             }
             let rev = push_revision(st, product_id, s, "gui", message);
             events.push(Event::SettingsChanged { product_id, revision: rev.revision, source: "gui".into() });
@@ -284,15 +292,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             json!({ "applied": d.apply_staged() })
         }
         Request::Play { product_id, profile } => {
-            let mut id = None;
-            if let Some(p) = profile.as_deref().filter(|p| *p != VANILLA) {
-                let mods = d.mods.get(&product_id);
-                let found = mods.and_then(|m| m.live().find(|r| r.profile.id == p || r.profile.name.eq_ignore_ascii_case(p)));
-                match found {
-                    Some(r) => id = Some(r.profile.id.clone()),
-                    None => bail!("no mod profile '{p}' for {}", name(st, product_id)),
-                }
-            }
+            let id = launch_profile(d, st, product_id, profile.as_deref())?;
             if !st.sessions.iter().any(|s| s.product_id == product_id) {
                 d.running.insert(product_id, (id, Utc::now()));
             }
@@ -1076,10 +1076,35 @@ fn origins_mods() -> Mods {
     let layers = vec![
         layer("lr2s8hd", "ReShade 6.3 + Desert Sun", 20, "gui", "Downloads/reshade-origins", 39, 81_000_000),
         layer("lb5k1yq", "Skip intro videos", 20, "cli", "mods/origins/skip-intro", 4, 1_536),
+        layer("ld7s3vq", "DLSS 3.7 + DLSSTweaks", 6, "gui", "Downloads/dlss-origins", 5, 52_000_000),
     ];
     let mut p = Profile { id: "pz6c4uf".into(), name: "ReShade".into(), layers: vec!["lb5k1yq".into(), "lr2s8hd".into()], ..Default::default() };
     p.settings.dll_overrides.insert("dxgi".into(), "n,b".into());
-    Mods { layers, history: vec![vec![rev(1, 20, "gui", Some("ReShade with the Desert Sun preset"), p)]] }
+    let mut dlss =
+        Profile { id: ORIGINS_DEFAULT.into(), name: "DLSS".into(), layers: vec!["lb5k1yq".into(), "ld7s3vq".into()], cloud_saves: true, ..Default::default() };
+    dlss.settings.dll_overrides.insert("d3d11".into(), "n,b".into());
+    Mods {
+        layers,
+        history: vec![
+            vec![rev(1, 20, "gui", Some("ReShade with the Desert Sun preset"), p)],
+            vec![rev(1, 6, "gui", Some("DLSS through DLSSTweaks"), dlss)],
+        ],
+    }
+}
+
+/// Origins' DLSS profile, the game's default profile in demo mode (demo.rs).
+pub(super) const ORIGINS_DEFAULT: &str = "pd1s5xk";
+
+/// The profile a demo launch runs (the daemon's rule): the one named (`vanilla`: none),
+/// else the game's default if it's still a live profile.
+fn launch_profile(d: &Detail, st: &State, product_id: u32, requested: Option<&str>) -> Result<Option<String>> {
+    let mods = d.mods.get(&product_id);
+    let live = |q: &str| mods.and_then(|m| m.live().find(|r| r.profile.id == q || r.profile.name.eq_ignore_ascii_case(q))).map(|r| r.profile.id.clone());
+    Ok(match requested {
+        Some(p) if p.eq_ignore_ascii_case(VANILLA) => None,
+        Some(p) => Some(live(p).ok_or_else(|| anyhow!("no mod profile '{p}' for {}", name(st, product_id)))?),
+        None => st.settings.get(&product_id).and_then(|s| s.profile.as_deref()).and_then(live),
+    })
 }
 
 impl Mods {
@@ -1199,7 +1224,11 @@ impl Detail {
         let now = Utc::now();
         Ok(match req {
             ModsRequest::Games => unreachable!(),
-            ModsRequest::List { .. } => (json!(m.state(id)), None),
+            ModsRequest::List { .. } => {
+                let mut s = m.state(id);
+                s.default_profile = st.settings.get(&id).and_then(|s| s.profile.clone());
+                (json!(s), None)
+            }
             ModsRequest::LayerDeletes { .. } | ModsRequest::LayerHistory { .. } | ModsRequest::LayerRestore { .. } => {
                 bail!("layer deletions aren't simulated in demo mode")
             }
@@ -1320,19 +1349,48 @@ mod tests {
     async fn settings_edit_and_restore() {
         let (demo, _events) = Demo::start();
         let v: Value = call(&demo, Request::SettingsGet { product_id: 3539 });
-        assert_eq!(v["revision"], 14);
+        assert_eq!(v["revision"], 15);
         assert_eq!(v["settings"]["proton"], "GE-Proton10-25");
         let ops = vec![SettingOp::parse("env.DXVK_HUD=fps").unwrap(), SettingOp::parse("proton=").unwrap()];
         let r: Revision = call(&demo, Request::SettingsSet { product_id: 3539, ops, message: Some("HUD".into()) });
-        assert_eq!(r.revision, 15);
+        assert_eq!(r.revision, 16);
         assert_eq!(r.settings.env["DXVK_HUD"], "fps");
         assert_eq!(r.settings.proton, None);
         assert!(demo.handle(Request::SettingsSet { product_id: 3539, ops: vec![SettingOp::parse("proton=nope").unwrap()], message: None }).is_err());
         let r: Revision = call(&demo, Request::SettingsRestore { product_id: 3539, revision: 13 });
-        assert_eq!(r.revision, 16);
+        assert_eq!(r.revision, 17);
         assert_eq!(r.settings.proton.as_deref(), Some("GE-Proton10-25"));
         let h: Vec<Revision> = call(&demo, Request::SettingsHistory { product_id: 3539 });
-        assert_eq!(h[0].revision, 16);
+        assert_eq!(h[0].revision, 17);
+    }
+
+    #[tokio::test]
+    async fn default_profile() {
+        let (demo, _events) = Demo::start();
+        // Origins plays its DLSS profile by default.
+        let m: ModsState = call(&demo, Request::Mods(ModsRequest::List { product_id: 3539 }));
+        assert_eq!(m.default_profile.as_deref(), Some(ORIGINS_DEFAULT));
+        assert!(m.profiles.iter().any(|p| p.profile.id == ORIGINS_DEFAULT && p.profile.name == "DLSS"));
+        let session_profile = |demo: &Demo| {
+            let pt: ubi_api::Playtime = call(demo, Request::Playtime { product_id: 3539 });
+            pt.sessions[0].profile.clone()
+        };
+        // No profile named: the default. `vanilla`: forced vanilla.
+        for (asked, ran) in [(None, Some(ORIGINS_DEFAULT)), (Some(VANILLA), None), (Some("reshade"), Some("pz6c4uf"))] {
+            demo.handle(Request::Play { product_id: 3539, profile: asked.map(str::to_owned) }).unwrap();
+            demo.handle(Request::Stop { product_id: 3539 }).unwrap();
+            assert_eq!(session_profile(&demo).as_deref(), ran, "{asked:?}");
+        }
+        // Set by name, stored as the id; unknown names are refused; `vanilla` clears it.
+        let set = |v: &str| Request::SettingsSet { product_id: 3539, ops: vec![SettingOp::parse(&format!("profile={v}")).unwrap()], message: None };
+        let r: Revision = call(&demo, set("ReShade"));
+        assert_eq!(r.settings.profile.as_deref(), Some("pz6c4uf"));
+        assert!(demo.handle(set("nope")).is_err());
+        let r: Revision = call(&demo, set("vanilla"));
+        assert_eq!(r.settings.profile, None);
+        demo.handle(Request::Play { product_id: 3539, profile: None }).unwrap();
+        demo.handle(Request::Stop { product_id: 3539 }).unwrap();
+        assert_eq!(session_profile(&demo), None);
     }
 
     #[tokio::test]

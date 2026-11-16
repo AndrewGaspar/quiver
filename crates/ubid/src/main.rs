@@ -404,12 +404,16 @@ impl Daemon {
                 json!({ "revision": revision, "settings": s })
             }
             Request::SettingsSet { product_id, ops, message } => {
-                // `account=<name|id|prefix>` is stored as the account's user id.
+                // `account=<name|id|prefix>` is stored as the account's user id, and
+                // `profile=<name|id>` (the default profile) as the profile's id.
                 let ops = ops
                     .into_iter()
                     .map(|op| match op {
                         SettingOp::Set { key, value } if key == "account" => {
                             Ok(SettingOp::Set { key, value: store::resolve(&value)?.user_id })
+                        }
+                        SettingOp::Set { key, value } if key == "profile" => {
+                            Ok(SettingOp::Set { key, value: mods::resolve_default(product_id, &value)? })
                         }
                         op => Ok(op),
                     })
@@ -592,7 +596,12 @@ impl Daemon {
         let game = Games::load()?.get(product_id).cloned().context("not installed")?;
         // The launch plan (Mods v2): the profile's mod stack (or vanilla, with fixes if
         // that's on), settings resolved through it, mounts, saves and config patches.
-        let plan = mods::launch_plan(&game, profile.as_deref(), source)?;
+        // No profile named: the game's default profile (vanilla if it was deleted, with a
+        // warning in the activity log and the job).
+        let (plan, fallback) = mods::launch_plan(&game, profile.as_deref(), source)?;
+        if let Some(w) = fallback {
+            self.log_activity(source, format!("{}: {w}", game.name), Some(product_id));
+        }
         if !plan.api.problems.is_empty() {
             bail!("can't launch {}: {}", game.name, plan.api.problems.join("; "));
         }
@@ -606,7 +615,13 @@ impl Daemon {
             self.update_job(id, |j| j.detail = detail);
         }
         let with = match &plan.api.profile {
-            Some(p) => format!(", profile '{}' ({}) r{}", p.name, p.id, plan.api.revision),
+            Some(p) => format!(
+                ", {}profile '{}' ({}) r{}",
+                if profile.is_none() { "default " } else { "" },
+                p.name,
+                p.id,
+                plan.api.revision
+            ),
             None if !plan.api.mods.is_empty() => format!(", fixes {}", plan.api.mods.join(",")),
             None => String::new(),
         };

@@ -122,12 +122,8 @@ impl Quiver {
             .when(g.installed(), |d| d.child(self.render_locations(th, g, cx)))
             .when_some(self.render_links(th, g, cx), |d, l| d.child(l))
             .child({
-                let cmd = match (g.installed(), self.gp.play_profile(id)) {
-                    (false, _) if g.steam_only() => format!("quiver play {id}"),
-                    (false, _) => format!("quiver install {id}"),
-                    (true, None) => format!("quiver play {id}"),
-                    (true, Some(p)) => format!("quiver play {id} --profile-id {p}"),
-                };
+                // `quiver play` runs the game's default profile, like Play (Steam copies start through Steam).
+                let cmd = if g.installed() || g.steam_only() { format!("quiver play {id}") } else { format!("quiver install {id}") };
                 self.cli_line("ov-cli", th, cmd, cx)
             });
         div().flex().gap(px(20.)).child(left).child(right).into_any_element()

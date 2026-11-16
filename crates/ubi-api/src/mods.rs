@@ -403,6 +403,7 @@ impl Profile {
             }
             "profile_config" => self.profile_config = split_list(value.unwrap_or_default()),
             "account" => return Err("the launch account is set per game (`quiver set <game> account=…`)".into()),
+            "profile" => return Err("the default profile is set per game (`quiver mods <game> default PROFILE`)".into()),
             _ => self.settings.apply(op).map_err(|e| {
                 format!("{e}; profiles also take name, mods, cloud_saves, pinned, separate_saves, profile_config")
             })?,
@@ -484,6 +485,11 @@ pub struct ModsState {
     /// `fixes_on_vanilla` is on).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vanilla_fixes: Vec<String>,
+    /// The game's default profile: its `profile` setting, the id Play uses when no profile
+    /// is named. `None`: vanilla. It can name a deleted profile (launches then run vanilla,
+    /// with a warning), so check it against `profiles`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
 }
 
 // -- Mods v2: resolution, saves, config ---------------------------------------------------
@@ -693,8 +699,9 @@ pub struct MigrationReport {
 /// appended in that order (a wrapper already present isn't added twice); env and DLL
 /// overrides merge, the later source winning; the profile's `proton` and `language` win.
 /// Every env or DLL key that sources set to different values comes back as a conflict.
+/// The game's default `profile` isn't a launch setting, so it's left out.
 pub fn resolve_settings(base: &GameSettings, mods: &[(String, ModLaunch)], over: &GameSettings) -> (GameSettings, Vec<SettingConflict>) {
-    let mut out = base.clone();
+    let mut out = GameSettings { profile: None, ..base.clone() };
     let mut seen: BTreeMap<String, Vec<ValueFrom>> = BTreeMap::new();
     let mut note = |key: String, from: &str, value: &str| {
         seen.entry(key).or_default().push(ValueFrom { from: from.to_owned(), value: Some(value.to_owned()) });
@@ -957,8 +964,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(r, crate::Request::Mods(ModsRequest::ProfileDelete { confirmed: false, .. })));
+        // Older clients send no profile (the game's default applies); `vanilla` forces vanilla.
         let r: crate::Request = serde_json::from_str(r#"{"method":"play","params":{"product_id":5}}"#).unwrap();
         assert!(matches!(r, crate::Request::Play { profile: None, .. }));
+        let r: crate::Request = serde_json::from_str(r#"{"method":"play","params":{"product_id":5,"profile":"vanilla"}}"#).unwrap();
+        assert!(matches!(r, crate::Request::Play { profile: Some(ref p), .. } if p == VANILLA));
+        // The default profile is per game, not a profile override.
+        let mut p = Profile::default();
+        assert!(p.apply(&SettingOp::Set { key: "profile".into(), value: "x".into() }).is_err());
         // Defaults stay out of stored revisions.
         let p = Profile { id: "p".into(), name: "n".into(), ..Default::default() };
         let v = serde_json::to_value(&p).unwrap();

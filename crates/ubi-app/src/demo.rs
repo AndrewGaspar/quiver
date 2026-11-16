@@ -131,6 +131,9 @@ fn origins_history() -> (GameSettings, Vec<Revision>) {
     s.env.insert("ENABLE_HDR_WSI".into(), "1".into());
     s.args = vec!["-W".into(), "3440".into(), "-H".into(), "1440".into()];
     out.push(rev(14, 1, "gui", "Turn on gamescope with HDR", s.clone()));
+    // Play runs the DLSS profile (demo/detail.rs) unless told otherwise.
+    s.profile = Some(detail::ORIGINS_DEFAULT.into());
+    out.push(rev(15, 0, "cli", "Default for Play: DLSS", s.clone()));
     out.reverse(); // newest first, like the daemon
     (s, out)
 }
@@ -437,7 +440,7 @@ mod tests {
         assert!(pt.sessions[0].started > pt.sessions[1].started, "newest first");
         let hist: Vec<Revision> =
             serde_json::from_value(demo.handle(Request::SettingsHistory { product_id: 3539 }).unwrap()).unwrap();
-        assert_eq!(hist[0].revision, 14);
+        assert_eq!(hist[0].revision, 15);
         assert!(demo.handle(Request::Login { email: "a".into(), password: "b".into() }).is_err());
         // The install job advances on its own.
         let e = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();

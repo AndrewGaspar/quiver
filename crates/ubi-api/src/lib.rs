@@ -65,12 +65,19 @@ pub struct GameSettings {
     /// the first account that does. Also decides whose cloud saves are used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The mod profile Play uses by default (a profile id; the daemon resolves names);
+    /// `None`: vanilla. A launch that names no profile uses it ([`Request::Play`]), so the
+    /// app's Play button, `quiver play`, .desktop entries and Steam shortcuts follow it; one
+    /// that doesn't exist any more (deleted) launches vanilla, with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl GameSettings {
     /// Apply one edit. Keys: `proton`, `language`, `account` (a user id; the daemon
-    /// resolves names), `args` (whitespace-separated), `wrappers` (comma/space-separated),
-    /// `env.NAME`, `dll.NAME`.
+    /// resolves names), `profile` (the default mod profile's id; `vanilla` or empty: none;
+    /// the daemon resolves names), `args` (whitespace-separated), `wrappers`
+    /// (comma/space-separated), `env.NAME`, `dll.NAME`.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
         let (key, value) = match op {
             SettingOp::Set { key, value } => (key.as_str(), Some(value.as_str())),
@@ -81,6 +88,7 @@ impl GameSettings {
             "proton" => self.proton = opt(value),
             "language" => self.language = opt(value),
             "account" => self.account = opt(value),
+            "profile" => self.profile = opt(value).filter(|v| !v.trim().eq_ignore_ascii_case(mods::VANILLA)),
             "args" => self.args = value.map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             "wrappers" => {
                 self.wrappers = value
@@ -93,7 +101,7 @@ impl GameSettings {
                 } else if let Some(n) = k.strip_prefix("dll.") {
                     (&mut self.dll_overrides, n)
                 } else {
-                    return Err(format!("unknown setting '{k}' (proton, language, account, args, wrappers, env.NAME, dll.NAME)"));
+                    return Err(format!("unknown setting '{k}' (proton, language, account, profile, args, wrappers, env.NAME, dll.NAME)"));
                 };
                 if name.is_empty() {
                     return Err(format!("missing name in '{k}'"));
@@ -109,7 +117,7 @@ impl GameSettings {
 
     /// These settings with `over` (a mod profile's overrides) on top: values `over` sets
     /// win, `args` are appended, `env` and `dll` entries are merged, and non-empty
-    /// `wrappers` replace the game's.
+    /// `wrappers` replace the game's. `profile` (per game) is kept from `self`.
     pub fn merged(&self, over: &GameSettings) -> GameSettings {
         let mut out = self.clone();
         if over.proton.is_some() {
@@ -334,7 +342,9 @@ pub enum Request {
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
     Import { product_id: u32, path: PathBuf, language: Option<String> },
     Uninstall { product_id: u32, remove_prefix: bool },
-    /// Launch a game; `profile` (mod profile name or id; `None` or `vanilla`: unmodded).
+    /// Launch a game. `profile`: a mod profile's name or id, or `vanilla` for the unmodded
+    /// game; `None` (what older clients send): the game's default profile (its `profile`
+    /// setting; vanilla when unset, or with a warning when that profile was deleted).
     Play {
         product_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -614,6 +624,25 @@ mod tests {
         // Older revisions have no account key.
         let old: GameSettings = serde_json::from_str(r#"{"proton":"GE"}"#).unwrap();
         assert_eq!(old.account, None);
+    }
+
+    #[test]
+    fn profile_setting() {
+        let mut s = GameSettings::default();
+        apply(&mut s, "profile=ptkzxpv").unwrap();
+        assert_eq!(s.profile.as_deref(), Some("ptkzxpv"));
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({ "profile": "ptkzxpv" }));
+        // Vanilla (any case) and empty both mean "no default profile".
+        apply(&mut s, "profile=Vanilla").unwrap();
+        assert_eq!(s.profile, None);
+        apply(&mut s, "profile=p1").unwrap();
+        apply(&mut s, "profile=").unwrap();
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({}));
+        // The default is per game: a profile's overrides never change it.
+        let mut game = GameSettings::default();
+        apply(&mut game, "profile=p1").unwrap();
+        let over = GameSettings { profile: Some("p2".into()), ..Default::default() };
+        assert_eq!(game.merged(&over).profile.as_deref(), Some("p1"));
     }
 
     #[test]

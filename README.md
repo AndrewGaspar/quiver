@@ -330,11 +330,21 @@ first-launch prompt asks) applies installed, enabled `fix` mods to vanilla launc
 fix with install files then mounts over the install for vanilla as well, with vanilla's own
 writable layer (`mods/<product>/profiles/vanilla/upper`).
 
+**Default profile**: `quiver mods <game> default PROFILE` (or `vanilla`; without a value it
+shows the current one) picks the profile Play runs when none is named: the app's Play button,
+`quiver play <game>`, the game's .desktop entry and Steam shortcut. It is the game setting
+`profile` (stored as the profile's id, so renames keep it), so every change is a settings
+revision (`quiver history`, `quiver restore`). In the app, the profile chip next to Play sets
+it, and the Mods tab marks it ("Make default"); the Play button's arrow menu plays a profile
+once without changing it. `quiver play <game> --vanilla` (or `--profile vanilla`) forces
+vanilla. If the default profile is deleted, launches run vanilla and say so (activity log,
+the launch job); restoring the profile makes it the default again.
+
 Agents may install mods, edit stacks and change a mod's settings; uninstalling a mod that
 has install files or changed config values, and `undo-patches`, need a person's OK.
 
-Settings keys: `proton`, `language`, `account`, `args`, `wrappers`, `env.NAME`, `dll.NAME`
-(`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its
+Settings keys: `proton`, `language`, `account`, `profile`, `args`, `wrappers`, `env.NAME`,
+`dll.NAME` (`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its
 `account` if set, else the default account if it owns the game, else the first account that does.
 State lives in `~/.local/share/quiver/` (`config.json`, `games.json`, `accounts.json`,
 `games/<id>/history.jsonl`, `activity.jsonl`, save backups, `quiverd.log`); a pre-Quiver
