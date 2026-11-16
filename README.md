@@ -103,7 +103,8 @@ quiver account list                            # signed-in accounts; * marks the
 quiver account default family                  # change the default (by name or user id)
 quiver logout family                           # sign one account out (default: the default)
 quiver-app                                     # the app; relaunches itself on the same screen when its
-                                               # binary is rebuilt (QUIVER_AUTO_RELAUNCH=0: off)
+                                               # binary is rebuilt; under Hyprland, on the same workspace
+                                               # and spot, without taking focus (QUIVER_AUTO_RELAUNCH=0: off)
 quiver library                                 # owned games, install state, owners (2+ accounts); Steam copies too
 quiver ownership 66088                         # Ubisoft's raw ownership record: why a game is (not) listed
 quiver install "chronicles china"              # by name or product id; shows progress

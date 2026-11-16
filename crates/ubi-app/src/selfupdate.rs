@@ -11,8 +11,10 @@
 //!   overlay, a focused text field, a sign-in in progress; see [`Quiver::relaunch_blocker`]),
 //!   then shows a toast with a [`COUNTDOWN`] and "Relaunch now" / "Later".
 //! - **Hand over.** The old app writes a [`Resume`] state file and spawns the new binary with
-//!   the same args and env plus `QUIVER_RESUME=<file>`. The new app restores the state and,
-//!   once it has drawn its first frame, deletes the file. The old app sees the file gone and
+//!   the same args and env plus `QUIVER_RESUME=<file>`. Under Hyprland it first has Hyprland
+//!   make an exec rule that opens the new window where the old one is (same workspace,
+//!   floating/tiled, position, fullscreen; no focus change unless it had focus; see [`hypr`]).
+//!   The new app restores the state and, once it has drawn its first frame, deletes the file. The old app sees the file gone and
 //!   quits. If the new process exits or isn't ready within [`READY_TIMEOUT`], the old app
 //!   kills it, keeps running and says so (with the new process's log).
 //!
@@ -38,6 +40,9 @@ use crate::app::{Conn, InputMode, Quiver, SideFilter};
 use crate::nav::{Nav, Page, Tab};
 use crate::theme::{Theme, rgba};
 use crate::ui::{Icon, Kind, MEDIUM, button, icon, soft_shadow};
+
+mod hypr;
+pub use hypr::forget_tokens as forget_hyprland_tokens;
 
 pub const ENV_RESUME: &str = "QUIVER_RESUME";
 pub const ENV_AUTO: &str = "QUIVER_AUTO_RELAUNCH";
@@ -385,6 +390,8 @@ pub struct Resume {
     pub scroll: ScrollState,
     pub window: Option<WindowState>,
     pub theme: Option<String>,
+    /// Where Hyprland had the window (Hyprland sessions only).
+    pub hyprland: Option<hypr::Placement>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -477,6 +484,9 @@ pub fn take_resume() -> Option<(PathBuf, Resume)> {
             Resume::default()
         });
     tracing::info!("resumed from pid {} ({})", state.from_pid, path.display());
+    if let Some(p) = &state.hyprland {
+        tracing::info!("resume: the previous window was on {}", p.describe());
+    }
     Some((path, state))
 }
 
@@ -540,8 +550,20 @@ fn spawn_successor(exe: &Path, state: &Resume) -> Result<(Child, PathBuf), Strin
         .stderr(stderr)
         // Its own process group: it outlives us and a terminal's hangup isn't ours to pass on.
         .process_group(0);
-    for k in ENV_DROP {
+    for k in ENV_DROP.iter().chain(hypr::ENV_DROP) {
         cmd.env_remove(k);
+    }
+    if let Some(p) = &state.hyprland {
+        // Last, so a slow Hyprland eats into the rule's minute as little as possible.
+        match hypr::register(p, &dir) {
+            Ok(token) => {
+                tracing::info!("relaunch: the new window opens on {}", p.describe());
+                cmd.env(hypr::TOKEN_ENV, token);
+            }
+            Err(e) => {
+                tracing::warn!("relaunch: Hyprland can't place the new window ({e}); it opens where new windows do")
+            }
+        }
     }
     match cmd.spawn() {
         Ok(child) => Ok((child, path)),
@@ -745,6 +767,7 @@ impl Quiver {
             },
             window: Some(WindowState::of(window.window_bounds())),
             theme: Some(crate::theme::theme(cx).name.to_string()),
+            hyprland: hypr::capture(std::process::id()),
         }
     }
 
@@ -761,6 +784,7 @@ impl Quiver {
             }
         };
         tracing::info!("relaunch: started {} (pid {}), waiting for it", exe.display(), child.id());
+        let placed = state.hyprland.is_some();
         cx.spawn_in(window, async move |this, cx| {
             let started = Instant::now();
             let failure = loop {
@@ -789,6 +813,12 @@ impl Quiver {
             };
             let _ = this.update(cx, |this, cx| match failure {
                 None => {
+                    if placed {
+                        match hypr::capture(child.id()) {
+                            Some(p) => tracing::info!("relaunch: the new window is on {}", p.describe()),
+                            None => tracing::info!("relaunch: Hyprland doesn't list the new window yet"),
+                        }
+                    }
                     tracing::info!("relaunch: handed over to pid {}; exiting", child.id());
                     cx.quit();
                 }
