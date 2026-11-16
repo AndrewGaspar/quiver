@@ -110,7 +110,31 @@ quiver mods odyssey list                       # layers, profiles, file conflict
 quiver play odyssey --profile "Visual overhaul"  # or --profile-id p7f3k2q; vanilla by default
 quiver mods odyssey profile history "Visual overhaul"
 quiver mods odyssey profile delete "Visual overhaul"   # restorable; saves are kept
+
+quiver install origins --dry-run               # sizes, free space, languages; nothing starts
+quiver queue                                   # the download queue: state, progress, speed
+quiver queue move origins top                  # or up / down
+quiver pause origins                           # stops at a slice boundary; keeps its place
+quiver resume origins                          # also retries a failed item
+quiver queue remove origins                    # files stay; installing again resumes
+quiver queue settings --max-active 1 --limit 20M --auto-update off
+quiver update origins --preview                # files changed/added/removed, bytes to fetch
+quiver verify origins [--repair]               # hash files against the manifest; repair fetches only bad slices
 ```
+
+## Downloads
+
+Installs, updates and repairs go through one queue in `quiverd` (`<data>/queue.json`), one at
+a time unless `--max-active` says otherwise. A download refuses to start if what it will write
+plus a margin (1 GiB or 5%) doesn't fit on the library's filesystem. Progress is kept per file
+(`.ubi-install/done`) and per slice (`.ubi-install/slices`), so pausing, a crash or a daemon
+restart loses at most the slices in flight; a restarted daemon resumes what was running and
+leaves paused items paused. Each slice is tried up to six times (1 s doubling to 30 s, with
+jitter) on connection errors, timeouts, cut-off bodies, 5xx and 429, and its signed URL is
+renewed when the CDN refuses it. Updates reuse every slice whose bytes are already in place.
+Verify hashes each slice of each file the manifest lists (other files, such as mods or extra
+DLLs, are never read or written) and repair re-downloads only the slices that failed; symlinks
+and hard links are replaced by files of their own first, and reflinked imports need nothing.
 
 ## Mods
 
