@@ -310,7 +310,17 @@ pub fn find_patch(opts: &str) -> Option<(usize, usize)> {
     Some((w[start].0, end))
 }
 
-/// The launch options with Quiver's part added (unchanged if it's there already).
+/// Whether Quiver can add its part to these options: `%command%` must be a word of its own
+/// (inside a quoted `bash -c "… %command%"` there's no safe place to put it).
+pub fn check_patchable(current: &str) -> Result<()> {
+    if current.contains(COMMAND) && !words(current).iter().any(|w| w.2 == COMMAND) && find_patch(current).is_none() {
+        bail!("its launch options use %command% inside quotes, so Quiver can't add itself safely; add `quiver --source steam steam-run` before %command% by hand");
+    }
+    Ok(())
+}
+
+/// The launch options with Quiver's part added (unchanged if it's there already). Check
+/// [`check_patchable`] first.
 pub fn patched(current: &str, cmd: &str) -> String {
     if find_patch(current).is_some() {
         return current.to_owned();
@@ -480,6 +490,9 @@ pub struct Change {
     pub staged: bool,
     /// Already so: nothing written or staged.
     pub unchanged: bool,
+    /// A change for this game was waiting for Steam and is dropped (e.g. undo before Steam
+    /// restarted).
+    pub dropped_staged: bool,
 }
 
 /// Apply one op to `file` (Steam closed; caller holds the lock). Returns the new options.
@@ -493,7 +506,10 @@ fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp)
     };
     let current = launch_options_in(&text, app_id);
     let new = match op {
-        StagedOp::Patch { command } => patched(&current, command),
+        StagedOp::Patch { command } => {
+            check_patchable(&current)?;
+            patched(&current, command)
+        }
         StagedOp::Unpatch => unpatched(&current, st.record(user, app_id)),
     };
     if new != current {
@@ -521,10 +537,15 @@ fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op:
     let file = localconfig(steam, user);
     let current = launch_options(steam, user, app_id);
     let wanted = match &op {
-        StagedOp::Patch { command } => patched(&current, command),
+        StagedOp::Patch { command } => {
+            check_patchable(&current)?;
+            patched(&current, command)
+        }
         StagedOp::Unpatch => unpatched(&current, st.record(user, app_id)),
     };
+    let before = st.staged.len();
     st.staged.retain(|s| !(s.user == user && s.app_id == app_id));
+    let dropped_staged = st.staged.len() != before;
     st.offers.remove(&app_id);
     if wanted == current {
         // Already so (an earlier staged change for it is dropped above).
@@ -532,18 +553,18 @@ fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op:
             st.patches.retain(|r| !(r.user == user && r.app_id == app_id));
         }
         save(paths, &st)?;
-        return Ok(Change { launch_options: current, staged: false, unchanged: true });
+        return Ok(Change { launch_options: current, staged: false, unchanged: true, dropped_staged });
     }
     if running {
         st.staged.push(StagedPatch { file, user: user.to_owned(), app_id, name: name.to_owned(), op });
         save(paths, &st)?;
-        return Ok(Change { launch_options: wanted, staged: true, unchanged: false });
+        return Ok(Change { launch_options: wanted, staged: true, unchanged: false, dropped_staged });
     }
     // Steam is closed: write this, and anything staged before.
     let new = write_op(&mut st, &file, user, app_id, &op)?;
     apply_list(&mut st)?;
     save(paths, &st)?;
-    Ok(Change { launch_options: new, staged: false, unchanged: false })
+    Ok(Change { launch_options: new, staged: false, unchanged: false, dropped_staged })
 }
 
 /// Make the game start through Quiver for `user`: `cmd` ([`command`]) goes in front of
@@ -690,6 +711,9 @@ mod tests {
         assert_eq!(patched("quiver steam-run %command%", Q), "quiver steam-run %command%");
         let other = "PROTON_LOG=1 '/opt/my quiver/quiver' --source x steam-run --product 5 %command%";
         assert_eq!(patched(other, Q), other);
+        // %command% inside a quoted wrapper: refused rather than guessed.
+        assert!(check_patchable(r#"bash -c "exec %command% -x""#).is_err());
+        assert!(check_patchable("FOO=1 %command%").is_ok() && check_patchable("-skipvideos").is_ok());
         // Not Quiver: a word merely containing "quiver", or quiver without steam-run.
         assert!(find_patch("/x/quiver-app %command%").is_none());
         assert!(find_patch("quiver play 5 %command%").is_none());
@@ -883,7 +907,8 @@ mod tests {
         assert_eq!(st.patch_state("1001", 552520, &launch_options(&steam, "1001", 552520)), PatchState::Waiting);
         assert_eq!(staged_descriptions(&paths), ["start through Quiver: \"Far Cry 5\" (Steam app 552520) for Steam user 1001"]);
         // Undo while still staged: the staged patch is just dropped.
-        assert!(unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", true).unwrap().unchanged);
+        let c = unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", true).unwrap();
+        assert!(c.unchanged && c.dropped_staged);
         assert!(load(&paths).staged.is_empty());
         patch(&paths, &steam, "1001", 552520, "Far Cry 5", Q, true).unwrap();
         // The shortcut code's apply writes these too (restart, or "write them now").

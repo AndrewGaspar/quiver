@@ -201,4 +201,7 @@ pub struct SteamPatchResult {
     /// Nothing needed changing (already so).
     #[serde(default)]
     pub unchanged: bool,
+    /// A change for this game that was waiting for Steam was dropped instead.
+    #[serde(default)]
+    pub dropped_staged: bool,
 }

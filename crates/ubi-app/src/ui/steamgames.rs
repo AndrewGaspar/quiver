@@ -86,6 +86,7 @@ impl Quiver {
         self.call::<SteamPatchResult, _>(req, cx, move |this, r, cx| {
             this.ui.sg.busy.remove(&app_id);
             match r {
+                Ok(r) if r.unchanged && r.dropped_staged => this.show_toast(format!("{}: the change waiting for Steam is dropped", r.name), cx),
                 Ok(r) if r.unchanged => {}
                 Ok(r) if r.staged => this.show_toast(
                     if undo {

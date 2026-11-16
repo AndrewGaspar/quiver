@@ -174,12 +174,15 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                         launch_options: c.launch_options,
                         staged: c.staged,
                         unchanged: c.unchanged,
+                        dropped_staged: c.dropped_staged,
                     },
                     product.map(|p| p.0),
                 ))
             })
             .await?;
-            if !r.unchanged {
+            if r.dropped_staged && r.unchanged {
+                daemon.log_activity(source, format!("Steam: dropped the change waiting for Steam for {}", r.name), product_id);
+            } else if !r.unchanged {
                 daemon.log_activity(
                     source,
                     format!(

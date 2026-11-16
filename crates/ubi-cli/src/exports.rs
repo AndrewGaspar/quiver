@@ -136,6 +136,7 @@ async fn patch(client: &Client, game: &str, user: Option<String>, undo: bool) ->
         staged |= r.staged;
         let what = if undo { "starts through Ubisoft Connect" } else { "starts through Quiver" };
         match (r.unchanged, r.staged) {
+            (true, _) if r.dropped_staged => println!("{} {what}; the change that was waiting for Steam is dropped", r.name),
             (true, _) => println!("{} already {what}", r.name),
             (false, false) => println!("{} now {what}", r.name),
             (false, true) => println!("{} {what} once Steam restarts", r.name),

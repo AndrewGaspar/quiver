@@ -168,7 +168,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 g.launch_options = shown.clone();
             }
             events.push(Event::SteamGamesChanged { offer: vec![] });
-            json!(SteamPatchResult { app_id, name: g.name.clone(), steam_user: "84211337".into(), launch_options: shown, staged, unchanged })
+            let dropped_staged = matches!((before, g.state), (PatchState::WaitingUndo, PatchState::On) | (PatchState::Waiting, PatchState::Off));
+            json!(SteamPatchResult { app_id, name: g.name.clone(), steam_user: "84211337".into(), launch_options: shown, staged, unchanged, dropped_staged })
         }
         Request::SteamDismissOffer { app_id } => {
             if let Some(g) = d.steam_games.iter_mut().find(|g| g.app_id == app_id) {
