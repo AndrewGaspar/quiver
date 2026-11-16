@@ -255,7 +255,7 @@ impl Quiver {
             }
         }
         if self.nav.page == Page::Settings && self.nav.settings == SettingsSection::Steam && n % 6 == 0 {
-            self.load_exports(cx);
+            self.load_global_exports(cx);
         }
     }
 
@@ -275,7 +275,7 @@ impl Quiver {
         if matches!(self.conn, Conn::Ready) {
             self.load_sessions(cx);
             self.load_protons(cx);
-            self.load_exports(cx);
+            self.load_global_exports(cx);
             self.reload_activity(cx);
         }
     }
@@ -316,7 +316,7 @@ impl Quiver {
         // Anything that changes state may have logged an Activity entry.
         self.reload_activity(cx);
         if matches!(e, Event::LibraryChanged) {
-            self.load_exports(cx);
+            self.load_global_exports(cx);
         }
     }
 
@@ -469,7 +469,7 @@ impl Quiver {
                         }
                         Err(e) => this.show_toast(err_text(&e), cx),
                     }
-                    this.load_exports(cx);
+                    this.load_global_exports(cx);
                 });
             }
             GlobalCmd::RescanProtons => {
@@ -506,7 +506,7 @@ impl Quiver {
                         Ok(_) => this.show_toast(format!("Added {name} to Steam"), cx),
                         Err(e) => this.show_toast(err_text(&e), cx),
                     }
-                    this.load_exports(cx);
+                    this.load_global_exports(cx);
                 });
             }
             GlobalCmd::ExportDesktop(id) => {
@@ -517,7 +517,7 @@ impl Quiver {
                         Ok(_) => this.show_toast(format!("Added {name} to the app launcher"), cx),
                         Err(e) => this.show_toast(err_text(&e), cx),
                     }
-                    this.load_exports(cx);
+                    this.load_global_exports(cx);
                 });
             }
         }
@@ -552,7 +552,7 @@ impl Quiver {
                         Ok(_) => this.show_toast("Removed", cx),
                         Err(e) => this.show_toast(err_text(&e), cx),
                     }
-                    this.load_exports(cx);
+                    this.load_global_exports(cx);
                 });
             }
         }
@@ -589,7 +589,7 @@ impl Quiver {
         });
     }
 
-    pub fn load_exports(&mut self, cx: &mut Context<Self>) {
+    pub fn load_global_exports(&mut self, cx: &mut Context<Self>) {
         self.call::<Vec<ExportStatus>, _>(Request::ExportList, cx, |this, r, _| {
             this.ui.exports = Some(r.map_err(|e| err_text(&e)));
         });
@@ -626,14 +626,6 @@ impl Quiver {
 
     pub fn game_name(&self, id: u32) -> String {
         self.game(id).map(|g| short_name(&g.entry.name)).unwrap_or_else(|| format!("Game {id}"))
-    }
-
-    pub fn account_name(&self, user_id: &str) -> String {
-        self.status
-            .as_ref()
-            .and_then(|s| s.accounts.iter().find(|a| a.user_id == user_id))
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| if user_id.is_empty() { "your account".into() } else { user_id.chars().take(8).collect() })
     }
 
     // -----------------------------------------------------------------------------------------

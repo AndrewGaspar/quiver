@@ -1,7 +1,7 @@
 //! Demo answers for the global screens (a child module of `demo`, so it shares its state):
-//! two Ubisoft accounts with sign-in, sign-out and default switching, who owns what, Steam
-//! users and shortcuts (one staged while "Steam is running"), more Activity with agents,
-//! and optionally a game being played through a container bridge.
+//! two Ubisoft accounts with sign-in, sign-out and default switching, who owns what, more
+//! Activity with agents, and optionally a game being played through a container bridge.
+//! Exports and Steam users come from `demo/detail.rs`, shared with the game page.
 //!
 //! `QUIVER_DEMO_GLOBAL` flags (comma-separated) for screenshots:
 //! - `signed-out`: no account yet (the sign-in screen; any email, any password except
@@ -10,13 +10,11 @@
 //! - `unreachable`: every request fails as if quiverd weren't running;
 //! - `playing`: AC Origins is running in a container, reported to Ubisoft;
 //! - `one-account`: only the default account;
-//! - `steam-closed`: Steam isn't running, so staged shortcuts can be written.
 //!
 //! The app side reads more flags (`settings=…`, `palette=…`, …; see `ui/global.rs`).
 
 use std::sync::Mutex;
 
-use ubi_api::exports::{ExportKind, ExportRecord, ExportState, ExportStatus, SteamExportResult, SteamUser, SteamUsers};
 use ubi_api::{Account, LoginResult};
 
 use super::*;
@@ -26,13 +24,12 @@ const FAMILY: &str = "f3a1c9e2-77b0-4d1f-a5e3-0c9b8e7d6a51";
 const SHARED: [u32; 3] = [3539, 5059, 3600];
 /// Owned only by the second account.
 const FAMILY_ONLY: [u32; 2] = [5408, 5277];
-const STEAM_USER: &str = "1180254417";
+/// The Steam user in `demo/detail.rs`.
+const STEAM_USER: &str = "84211337";
 
 struct Global {
     accounts: Vec<Account>,
     pending_2fa: Option<String>,
-    exports: Vec<ExportStatus>,
-    steam: SteamUsers,
     seeded: bool,
 }
 
@@ -42,8 +39,8 @@ fn flag(name: &str) -> bool {
     crate::ui::global::demo_flag(name).is_some()
 }
 
-fn steam_appid(key: &str) -> u32 {
-    // crc32 isn't a dependency here; any stable 32-bit value with the top bit does.
+fn id_hash(key: &str) -> u32 {
+    // A stable stand-in for a user id (FNV-1a).
     let mut h: u32 = 2166136261;
     for b in key.bytes() {
         h = (h ^ b as u32).wrapping_mul(16777619);
@@ -51,41 +48,7 @@ fn steam_appid(key: &str) -> u32 {
     h | 0x8000_0000
 }
 
-fn export(kind: ExportKind, id: u32, name: &str, mins_ago: i64, state: ExportState) -> ExportStatus {
-    let key = format!("quiver:{id}");
-    let home = home();
-    let (path, appid, user) = match kind {
-        ExportKind::Desktop => (home.join(format!(".local/share/applications/quiver-{id}.desktop")), None, None),
-        ExportKind::Steam => (
-            home.join(format!(".local/share/Steam/userdata/{STEAM_USER}/config/shortcuts.vdf")),
-            Some(steam_appid(&key)),
-            Some(STEAM_USER.to_owned()),
-        ),
-    };
-    ExportStatus {
-        record: ExportRecord {
-            key,
-            kind,
-            product_id: id,
-            profile_id: None,
-            name: name.to_owned(),
-            path,
-            appid,
-            steam_user: user,
-            written_at: Utc::now() - Span::minutes(mins_ago),
-            hash: format!("{:016x}", steam_appid(name) as u64 * 2654435761),
-            staged: state == ExportState::WaitingForSteam,
-        },
-        state,
-    }
-}
-
-fn staged_line(change: &str, name: &str, id: u32) -> String {
-    format!("{change} \"{name}\" (quiver:{id}) for Steam user {STEAM_USER}")
-}
-
-fn init(st: &State) -> Global {
-    let name = |id: u32| st.entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
+fn init() -> Global {
     let mut accounts = vec![Account { user_id: "demo".into(), name: "demo".into(), default: true }];
     if !flag("one-account") {
         accounts.push(Account { user_id: FAMILY.into(), name: "family".into(), default: false });
@@ -93,37 +56,7 @@ fn init(st: &State) -> Global {
     if flag("signed-out") || flag("2fa") {
         accounts.clear();
     }
-    let steam_running = !flag("steam-closed");
-    let exports = vec![
-        export(ExportKind::Steam, 5059, &name(5059), 25, if steam_running { ExportState::WaitingForSteam } else { ExportState::WaitingForSteam }),
-        export(ExportKind::Desktop, 3539, &name(3539), 40, ExportState::Ok),
-        export(ExportKind::Steam, 3539, &name(3539), 60 * 24 * 12, ExportState::Ok),
-        export(ExportKind::Desktop, 13504, &name(13504), 60 * 24 * 30, ExportState::Missing),
-        export(ExportKind::Desktop, 1803, &name(1803), 60 * 24 * 61, ExportState::Changed),
-    ];
-    let steam = SteamUsers {
-        root: Some(home().join(".local/share/Steam")),
-        users: vec![
-            SteamUser {
-                id: STEAM_USER.into(),
-                steam_id64: 76561197960265728 + 1180254417,
-                persona_name: Some("Player One".into()),
-                account_name: Some("playerone".into()),
-                most_recent: true,
-            },
-            SteamUser {
-                id: "40921733".into(),
-                steam_id64: 76561197960265728 + 40921733,
-                persona_name: Some("Couch".into()),
-                account_name: Some("couch_steam".into()),
-                most_recent: false,
-            },
-        ],
-        selected: Some(STEAM_USER.into()),
-        running: steam_running,
-        staged: vec![staged_line("add/update", &name(5059), 5059)],
-    };
-    Global { accounts, pending_2fa: flag("2fa").then(|| "player.one@example.com".to_owned()), exports, steam, seeded: false }
+    Global { accounts, pending_2fa: flag("2fa").then(|| "player.one@example.com".to_owned()), seeded: false }
 }
 
 /// More history than `demo.rs` has: agents (including one running a game in a container),
@@ -186,7 +119,7 @@ fn log(st: &mut State, action: String, id: Option<u32>) {
 /// Answer `req` if it's one of the global screens' requests; `None` lets `demo.rs` answer.
 pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Option<Value>> {
     let mut guard = GLOBAL.lock().unwrap();
-    let g = guard.get_or_insert_with(|| init(st));
+    let g = guard.get_or_insert_with(init);
     if !g.seeded {
         g.seeded = true;
         seed_activity(st);
@@ -252,7 +185,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             }
             g.pending_2fa = None;
             let name: String = email.split('@').next().unwrap_or("player").chars().filter(|c| c.is_alphanumeric()).collect();
-            let user_id = if name == "family" { FAMILY.to_owned() } else { format!("{:08x}-demo-4c3e-9f10-{:012x}", steam_appid(&name), name.len()) };
+            let user_id = if name == "family" { FAMILY.to_owned() } else { format!("{:08x}-demo-4c3e-9f10-{:012x}", id_hash(&name), name.len()) };
             let known = g.accounts.iter().any(|a| a.user_id == user_id);
             if !known {
                 let first = g.accounts.is_empty();
@@ -299,68 +232,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             demo.emit(Event::LibraryChanged);
             Value::Null
         }
-        Request::ExportList => json!(g.exports),
-        Request::SteamUsers => json!(g.steam),
-        Request::SteamApplyStaged => {
-            if g.steam.running {
-                bail!("Steam is running; it would overwrite shortcuts.vdf when it exits. Close Steam or run `quiver steam restart`.");
-            }
-            let n = g.steam.staged.len();
-            g.steam.staged.clear();
-            for x in &mut g.exports {
-                if x.state == ExportState::WaitingForSteam {
-                    x.state = ExportState::Ok;
-                    x.record.staged = false;
-                }
-            }
-            if n > 0 {
-                log(st, format!("wrote {n} staged Steam shortcut change(s)"), None);
-            }
-            json!({ "applied": n })
-        }
-        Request::ExportDesktop { product_id, remove } => {
-            let name = name_of(st, *product_id)?;
-            let path = home().join(format!(".local/share/applications/quiver-{product_id}.desktop"));
-            g.exports.retain(|x| !(x.record.kind == ExportKind::Desktop && x.record.product_id == *product_id));
-            if *remove {
-                log(st, format!("removed .desktop entry for {name}"), Some(*product_id));
-                json!({ "removed": true, "path": path })
-            } else {
-                let x = export(ExportKind::Desktop, *product_id, &name, 0, ExportState::Ok);
-                g.exports.insert(0, x.clone());
-                log(st, format!("wrote .desktop entry for {name}"), Some(*product_id));
-                json!(x.record)
-            }
-        }
-        Request::ExportSteam { product_id, remove, .. } => {
-            let name = name_of(st, *product_id)?;
-            let running = g.steam.running;
-            g.exports.retain(|x| !(x.record.kind == ExportKind::Steam && x.record.product_id == *product_id));
-            g.steam.staged.retain(|s| !s.contains(&format!("(quiver:{product_id})")));
-            if running {
-                g.steam.staged.push(staged_line(if *remove { "remove" } else { "add/update" }, &name, *product_id));
-            }
-            if !*remove {
-                let state = if running { ExportState::WaitingForSteam } else { ExportState::Ok };
-                g.exports.insert(0, export(ExportKind::Steam, *product_id, &name, 0, state));
-            }
-            log(
-                st,
-                format!(
-                    "{} Steam shortcut for {name} (user {STEAM_USER}){}",
-                    if *remove { "removed" } else { "wrote" },
-                    if running { "; staged until Steam restarts" } else { "" }
-                ),
-                Some(*product_id),
-            );
-            json!(SteamExportResult {
-                key: format!("quiver:{product_id}"),
-                appid: steam_appid(&format!("quiver:{product_id}")),
-                steam_user: STEAM_USER.into(),
-                staged: running,
-                applied_staged: 0,
-            })
-        }
         _ => return Ok(None),
     }))
 }
@@ -370,7 +241,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn accounts_and_exports() {
+    async fn accounts() {
         let (demo, _events) = Demo::start();
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert!(status.accounts.len() >= 2, "two accounts to start with");
@@ -392,11 +263,5 @@ mod tests {
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert!(status.accounts.iter().all(|a| a.name != "tester"));
         assert_eq!(status.signed_in.as_deref(), Some("demo"));
-        // Exports and Steam: one shortcut staged while Steam runs.
-        let x: Vec<ExportStatus> = serde_json::from_value(demo.handle(Request::ExportList).unwrap()).unwrap();
-        assert!(x.iter().any(|x| x.state == ExportState::WaitingForSteam));
-        let s: SteamUsers = serde_json::from_value(demo.handle(Request::SteamUsers).unwrap()).unwrap();
-        assert!(s.running && !s.staged.is_empty());
-        assert!(demo.handle(Request::SteamApplyStaged).is_err(), "not while Steam runs");
     }
 }
