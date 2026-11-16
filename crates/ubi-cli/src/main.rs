@@ -3,6 +3,7 @@
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
 mod dev;
+mod downloads;
 mod exports;
 mod mods;
 
@@ -50,13 +51,50 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Install or update a game (follows progress unless --detach).
+    /// Install or update a game (queued; follows progress unless --detach).
     Install {
         game: String,
         #[arg(long)]
         language: Option<String>,
         #[arg(long)]
         detach: bool,
+        /// Only show the download and install sizes, free space and languages.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The download queue (`quiver queue` lists it), or move, remove, settings.
+    Queue {
+        #[command(subcommand)]
+        action: Option<downloads::QueueAction>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause a game's download (resumable; it keeps its place in the queue).
+    Pause { game: String },
+    /// Resume a paused download, or retry a failed one.
+    Resume { game: String },
+    /// Update an installed game (queued), or with --preview show what would change.
+    Update {
+        game: String,
+        #[arg(long)]
+        preview: bool,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a game's files against its manifest; --repair re-downloads only what is
+    /// missing or corrupt. Files the game doesn't ship (mods, extra DLLs) are left alone.
+    Verify {
+        game: String,
+        #[arg(long)]
+        repair: bool,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Adopt an existing install (e.g. from Lutris): copies only the game's own files
     /// (reflinks on btrfs/xfs) and lists anything else it found, such as mods.
@@ -267,7 +305,7 @@ pub(crate) async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry>
 
 /// Print job events for `job_id` until it finishes. Ctrl-C cancels the job (once; a
 /// second Ctrl-C leaves it running in the daemon and exits).
-async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id: u64) -> Result<()> {
+pub(crate) async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id: u64) -> Result<()> {
     let mut last_status = String::new();
     let mut cancelled = false;
     loop {
@@ -289,6 +327,10 @@ async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceive
         if job.id != job_id {
             continue;
         }
+        if job.status == "Paused" && !job.done {
+            eprintln!("\npaused (quiver resume <game> to continue)");
+            return Ok(());
+        }
         if job.total > 0 && !job.done {
             eprint!(
                 "\r{:5.1}%  {:.2}/{:.2} GB  {}   ",
@@ -307,7 +349,9 @@ async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceive
                 bail!(err);
             }
             if !job.detail.is_empty() {
-                eprintln!("{} other file(s) were not copied:", job.detail.len());
+                if job.kind == ubi_api::JobKind::Import {
+                    eprintln!("{} other file(s) were not copied:", job.detail.len());
+                }
                 for d in &job.detail {
                     eprintln!("  {d}");
                 }
@@ -421,7 +465,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Install { game, language, detach } => {
+        Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,
+        Cmd::Queue { action, json } => downloads::queue(&client, action, json).await?,
+        Cmd::Pause { game } => downloads::pause(&client, &game).await?,
+        Cmd::Resume { game } => downloads::resume(&client, &game).await?,
+        Cmd::Update { game, preview, detach, json } => downloads::update(&client, &game, preview, detach, json).await?,
+        Cmd::Verify { game, repair, detach, json } => downloads::verify(&client, &game, repair, detach, json).await?,
+        Cmd::Install { game, language, detach, .. } => {
             let e = resolve(&client, &game).await?;
             let events = client.subscribe().await?;
             let id: u64 = client.call(Request::Install { product_id: e.product_id, language }).await?;
