@@ -154,7 +154,7 @@ impl Launcher {
                 self.show_login(None, cx);
             }
             Event::LibraryChanged => self.load_library(false, cx),
-            Event::SettingsChanged { .. } | Event::SessionsChanged { .. } => {}
+            Event::SettingsChanged { .. } | Event::SessionsChanged { .. } | Event::ModsChanged { .. } => {}
         }
         cx.notify();
     }
@@ -254,7 +254,7 @@ impl Launcher {
     }
 
     fn play(&mut self, product_id: u32, cx: &mut Context<Self>) {
-        self.call::<u64, _>(Request::Play { product_id }, cx, |this, r, _| {
+        self.call::<u64, _>(Request::Play { product_id, profile: None }, cx, |this, r, _| {
             if let Err(e) = r {
                 this.error = Some(err_text(&e));
             }

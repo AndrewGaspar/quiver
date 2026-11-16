@@ -13,6 +13,7 @@ pub mod launcher;
 pub mod library;
 pub mod manifest;
 pub mod online;
+pub mod overlay;
 pub mod playsession;
 pub mod savesync;
 pub mod settings;

@@ -6254,6 +6254,7 @@ dependencies = [
  "hex",
  "image",
  "keyring",
+ "libc",
  "md5",
  "prost",
  "reqwest",
