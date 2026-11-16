@@ -8,7 +8,7 @@ use ubi_api::exports::{ExportKind, ExportState};
 
 use super::page::{kv, load_note, note};
 use crate::app::Quiver;
-use crate::model::{GameRow, clock, day, duration, gb, hours, tilde};
+use crate::model::{GameRow, clock, day, duration, gb, hours};
 use crate::nav::{Tab, Target};
 use crate::theme::Theme;
 use crate::ui::{BOLD, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, button, caption, card, card_header, chip, icon, icon_button, mono, pill, progress};
@@ -35,6 +35,20 @@ pub fn weekly_bars(th: &Theme, sessions: &[PlaySession], height: f32) -> gpui::D
     let vals = weekly_hours(sessions, WEEKS, now);
     let max = vals.iter().cloned().fold(1f32, f32::max).ceil();
     let first = now - Span::weeks(WEEKS as i64 - 1);
+    if vals.iter().all(|v| *v == 0.) {
+        return div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(height + 18.))
+            .rounded(px(8.))
+            .border_1()
+            .border_dashed()
+            .border_color(th.line2)
+            .text_size(px(12.))
+            .text_color(th.tx3)
+            .child(format!("No sessions on this PC since {}", first.format("%b %-d")));
+    }
     div()
         .flex()
         .flex_col()
@@ -484,7 +498,7 @@ impl Quiver {
                     .gap(px(10.))
                     .text_size(px(12.))
                     .child(div().w(px(52.)).flex_none().text_color(th.tx3).child(label.split(' ').next().unwrap_or(label).to_owned()))
-                    .child(mono(12., th.tx2).flex_1().min_w_0().truncate().child(tilde(&path)))
+                    .child(mono(12., th.tx2).flex_1().min_w_0().truncate().child(self.short_path(&path)))
                     .child(
                         icon_button(("ov-open", i), th, Icon::FolderOpen, false)
                             .size(px(26.))

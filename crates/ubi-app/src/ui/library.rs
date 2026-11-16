@@ -6,6 +6,7 @@ use super::{
     ArtState, BOLD, FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, TagKind, art_chip, art_fill, button, caption, chip,
     chip_count, cover, display, glyph, icon, progress, soft_shadow, tag,
 };
+use super::hero::{TitleBox, title_slot};
 use crate::app::{Attention, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
 use crate::model::{GameRow, clock, day, hours, short_name};
@@ -217,6 +218,8 @@ impl Quiver {
         };
         let id = g.id();
         let art = self.art_for(&g, ArtSlot::Hero, Variant::Original, cx);
+        // The logo (or the name until it loads); nothing when the art has it painted in.
+        let title = self.hero_title(&g, cx);
         let mut hero = div().id("hero").relative().h(px(HERO_HEIGHT)).w_full().overflow_hidden().bg(th.ink0);
         hero = match &art {
             ArtState::Ready(img) => hero.child(cover(img, w, HERO_HEIGHT, (0.5, 0.35))),
@@ -296,7 +299,7 @@ impl Quiver {
             .flex_col()
             .gap(px(14.))
             .child(caption("Continue playing", accent_on_art))
-            .child(display(40., FontWeight::EXTRA_BOLD, on_art::tx1()).line_height(px(41.)).child(g.entry.name.clone()))
+            .children(title_slot(&title, &g.entry.name, TitleBox { max_w: 380., max_h: 96., max_scale: 1.4, text: 40., text_w: 540. }))
             .when(!sub.is_empty(), |d| d.child(div().text_size(px(13.5)).text_color(on_art::tx2()).child(sub)))
             .child(
                 div()

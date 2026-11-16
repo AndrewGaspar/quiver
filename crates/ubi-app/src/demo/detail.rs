@@ -53,6 +53,8 @@ struct Detail {
     exports: Vec<ExportStatus>,
     steam_running: bool,
     next: u32,
+    /// Games started from the demo: the profile they run and when they started.
+    running: HashMap<u32, (Option<String>, DateTime<Utc>)>,
 }
 
 #[derive(Default)]
@@ -180,13 +182,37 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }
             json!({ "applied": d.apply_staged() })
         }
-        Request::Play { product_id, profile: Some(p) } if p != VANILLA => {
-            let mods = d.mods.get(&product_id);
-            let found = mods.is_some_and(|m| m.live().any(|r| r.profile.id == p || r.profile.name.eq_ignore_ascii_case(&p)));
-            if !found {
-                bail!("no mod profile '{p}' for {}", name(st, product_id));
+        Request::Play { product_id, profile } => {
+            let mut id = None;
+            if let Some(p) = profile.as_deref().filter(|p| *p != VANILLA) {
+                let mods = d.mods.get(&product_id);
+                let found = mods.and_then(|m| m.live().find(|r| r.profile.id == p || r.profile.name.eq_ignore_ascii_case(p)));
+                match found {
+                    Some(r) => id = Some(r.profile.id.clone()),
+                    None => bail!("no mod profile '{p}' for {}", name(st, product_id)),
+                }
             }
-            return Ok(Err(Request::Play { product_id, profile: Some(p) }));
+            if !st.sessions.iter().any(|s| s.product_id == product_id) {
+                d.running.insert(product_id, (id, Utc::now()));
+            }
+            return Ok(Err(Request::Play { product_id, profile }));
+        }
+        Request::Stop { product_id } => {
+            // Record the session like the daemon does (at least 25 minutes, so it shows).
+            if let Some((profile, started)) = d.running.remove(&product_id) {
+                let ended = Utc::now();
+                let seconds = ((ended - started).num_seconds().max(0) as u64).max(25 * 60);
+                let rev = st.history.get(&product_id).and_then(|h| h.iter().map(|r| r.revision).max()).unwrap_or(0);
+                let pt = st.playtime.entry(product_id).or_default();
+                let profile_revision = profile.as_ref().map(|_| 1);
+                pt.sessions.insert(
+                    0,
+                    ubi_api::PlaySession { started: ended - Span::seconds(seconds as i64), ended, seconds, settings_revision: rev, profile, profile_revision },
+                );
+                pt.total_seconds += seconds;
+                pt.last_played = Some(ended);
+            }
+            return Ok(Err(Request::Stop { product_id }));
         }
         other => return Ok(Err(other)),
     };
@@ -216,7 +242,7 @@ pub fn log_text(product_id: u32, file: &str) -> Option<String> {
         _ => "game.exe",
     };
     let t0 = at(1, 19, 33);
-    let ts = |s: i64| (t0 + Span::seconds(s)).format("%H:%M:%S%.3f").to_string();
+    let ts = |s: i64| (t0 + Span::seconds(s)).with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string();
     let lines: Vec<String> = match file {
         "bridge.log" => vec![
             format!("{} INFO ubi-bridge 0.1.0 starting (product {product_id})", ts(0)),
@@ -566,7 +592,7 @@ fn progress(st: &State, id: u32) -> Result<Progress> {
 
 impl Detail {
     fn new(entries: &[LibraryEntry]) -> Self {
-        let mut d = Detail { mods: BTreeMap::new(), backups: BTreeMap::new(), slots: BTreeMap::new(), exports: vec![], steam_running: true, next: 1 };
+        let mut d = Detail { mods: BTreeMap::new(), backups: BTreeMap::new(), slots: BTreeMap::new(), exports: vec![], steam_running: true, next: 1, running: HashMap::new() };
         let name = |id: u32| entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
         // Exports: Origins is in Steam and the app launcher; Odyssey waits for a Steam restart.
         d.exports.push(ExportStatus { record: record(ExportKind::Steam, 3539, &name(3539), steam_vdf(), at(12, 21, 4), false), state: ExportState::Ok });

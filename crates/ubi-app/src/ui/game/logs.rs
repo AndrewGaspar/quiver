@@ -47,7 +47,7 @@ impl Quiver {
                     cx.notify();
                 }))
         }));
-        let (meta, lines, path): (String, Option<std::sync::Arc<Vec<SharedString>>>, Option<String>) = match &self.gp.log {
+        let (meta, lines): (String, Option<std::sync::Arc<Vec<SharedString>>>) = match &self.gp.log {
             Load::Ready(t) => (
                 format!(
                     "{} · {} lines · {}{}",
@@ -57,10 +57,9 @@ impl Quiver {
                     t.modified.map(|m| format!(" · written {}", ago(m))).unwrap_or_default()
                 ),
                 Some(t.lines.clone()),
-                Some(t.path.to_string_lossy().into_owned()),
             ),
-            Load::Failed(e) => (e.clone(), None, None),
-            _ => ("Reading…".into(), None, None),
+            Load::Failed(e) => (e.clone(), None),
+            _ => ("Reading…".into(), None),
         };
         let height = (self.viewport.1 - 52. - 112. - 40. - 48. - 92.).max(260.);
         let view: AnyElement = match lines {
@@ -151,7 +150,6 @@ impl Quiver {
                             .text_color(th.tx3)
                             .child(mono(11.5, th.tx3).flex_1().min_w_0().truncate().child(meta))
                             .when(truncated, |d| d.child(div().text_color(th.warn).child("showing the last 512 KB")))
-                            .when_some(path, |d, _| d.child("written by the last launch")),
                     )
                     .child(div().bg(th.ink0).font_family(crate::assets::MONO_FONT).text_size(px(11.5)).child(view)),
             )

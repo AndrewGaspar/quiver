@@ -136,7 +136,7 @@ impl Quiver {
                 })
                 .collect();
             gpui::deferred(
-                gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                gpui::anchored().offset(gpui::point(px(0.), px(30.))).snap_to_window_with_margin(px(8.)).child(
                     div()
                         .id(("dd-list", dd as usize))
                         .occlude()

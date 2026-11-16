@@ -2,6 +2,7 @@
 //! themselves (PROPOSAL.md, "Design system for GPUI").
 
 pub mod game;
+pub mod hero;
 pub mod library;
 pub mod overlay;
 pub mod pages;

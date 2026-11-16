@@ -5,7 +5,7 @@ use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude
 
 use super::page::{kv, note, small};
 use crate::app::Quiver;
-use crate::model::{GameRow, gb, tilde};
+use crate::model::{GameRow, gb};
 use crate::nav::Target;
 use crate::theme::Theme;
 use crate::ui::{FocusExt, Icon, MEDIUM, SEMIBOLD, card, card_header, icon, icon_button, mono};
@@ -51,7 +51,7 @@ impl Quiver {
                             .flex_col()
                             .gap(px(2.))
                             .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).child(label)).child(div().text_size(px(11.5)).text_color(th.tx3).child(what)))
-                            .child(mono(12., th.tx2).truncate().child(tilde(&path))),
+                            .child(mono(12., th.tx2).truncate().child(self.short_path(&path))),
                     )
                     .child(
                         icon_button(("files-copy", i), th, Icon::Copy, true)

@@ -10,7 +10,7 @@ mod overview;
 mod page;
 mod saves;
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, img, prelude::*, px, relative};
+use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
 pub use page::{ExportAction, GamePage, settings_from_reply};
 
@@ -24,12 +24,11 @@ use crate::art::{ArtSlot, Variant};
 use crate::model::{GameRow, day, gb, hours, short_name};
 use crate::nav::{Tab, Target};
 use crate::theme::{Theme, on_art, rgba};
+use super::hero::{HeroTitle, TitleBox, title_element};
 
 pub const SIDE_WIDTH: f32 = 288.;
 pub const HERO: f32 = 312.;
 
-/// Heroes that already have the logo painted in, so Quiver doesn't draw it again.
-const BAKED_LOGO: &[u32] = &[3539, 3600];
 
 impl Quiver {
     pub fn render_game(&mut self, th: &Theme, id: u32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -300,19 +299,10 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn hero_logo(&mut self, g: &GameRow, cx: &mut Context<Self>) -> Option<ArtState> {
-        let id = g.id();
-        if BAKED_LOGO.contains(&id) && !self.custom_art.contains_key(&id) {
-            None
-        } else {
-            Some(self.art_for(g, ArtSlot::Logo, Variant::Trimmed, cx))
-        }
-    }
-
     fn render_hero(&mut self, th: &Theme, g: &GameRow, pane_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let hero = self.art_for(g, ArtSlot::Hero, Variant::Original, cx);
-        let logo = self.hero_logo(g, cx);
+        let title = self.hero_title(g, cx);
         let mut hero_el = div().relative().h(px(HERO)).flex_none().overflow_hidden();
         hero_el = match &hero {
             ArtState::Ready(a) => hero_el.child(cover(a, pane_w, HERO, (0.5, 0.3))),
@@ -327,25 +317,10 @@ impl Quiver {
             .child(div().absolute().left_0().right_0().bottom_0().h(relative(if th.dark { 0.65 } else { 0.3 })).bg(
                 gpui::linear_gradient(180., gpui::linear_color_stop(th.ink1.opacity(0.), 0.), gpui::linear_color_stop(th.ink1, 1.)),
             ));
-        match logo {
-            Some(ArtState::Ready(l)) => {
-                // Fit inside 300×120, anchored top-left.
-                let s = (300. / l.width as f32).min(120. / l.height as f32).min(1.5);
-                hero_el = hero_el.child(
-                    img(l.path.clone()).absolute().left(px(28.)).top(px(28.)).w(px(l.width as f32 * s)).h(px(l.height as f32 * s)),
-                );
-            }
-            Some(_) => {
-                hero_el = hero_el.child(
-                    super::display(30., FontWeight::EXTRA_BOLD, on_art::tx1())
-                        .absolute()
-                        .left(px(28.))
-                        .top(px(32.))
-                        .max_w(px(520.))
-                        .child(g.entry.name.clone()),
-                );
-            }
-            None => {}
+        // The logo fits inside 300×120, anchored top-left.
+        let tb = TitleBox { max_w: 300., max_h: 120., max_scale: 1.5, text: 30., text_w: 520. };
+        if let Some(t) = title_element(&title, &g.entry.name, tb) {
+            hero_el = hero_el.child(div().absolute().left(px(28.)).top(px(28.)).child(t));
         }
         let custom = self.custom_art.get(&id).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
         hero_el.child(
@@ -379,11 +354,12 @@ impl Quiver {
     fn render_slim_hero(&mut self, th: &Theme, g: &GameRow, pane_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         const SLIM: f32 = 112.;
         let hero = self.art_for(g, ArtSlot::Hero, Variant::Original, cx);
-        let logo = self.hero_logo(g, cx);
+        let title = self.hero_title(g, cx);
+        let baked = title == HeroTitle::Baked;
         let mut el = div().relative().h(px(SLIM)).flex_none().overflow_hidden();
         el = match &hero {
             // Skip logos painted into the art.
-            ArtState::Ready(a) => el.child(cover(a, pane_w, SLIM, (0.5, if BAKED_LOGO.contains(&g.id()) { 0.92 } else { 0.32 }))),
+            ArtState::Ready(a) => el.child(cover(a, pane_w, SLIM, (0.5, if baked { 0.92 } else { 0.32 }))),
             other => el.child(super::art_placeholder(th, other, "", px(0.))),
         };
         el = el
@@ -397,13 +373,10 @@ impl Quiver {
                 gpui::linear_color_stop(th.ink1.opacity(0.), 0.),
                 gpui::linear_color_stop(th.ink1.opacity(0.85), 1.),
             )));
-        let title: AnyElement = match logo {
-            Some(ArtState::Ready(l)) => {
-                let s = (230. / l.width as f32).min(60. / l.height as f32).min(1.2);
-                img(l.path.clone()).flex_none().w(px(l.width as f32 * s)).h(px(l.height as f32 * s)).into_any_element()
-            }
-            _ => super::display(24., FontWeight::EXTRA_BOLD, on_art::tx1()).max_w(px(420.)).truncate().child(g.entry.name.clone()).into_any_element(),
-        };
+        // The crop above hides a painted-in logo, so baked art gets the name here.
+        let title = if baked { HeroTitle::Text } else { title };
+        let tb = TitleBox { max_w: 230., max_h: 60., max_scale: 1.2, text: 24., text_w: 420. };
+        let title: AnyElement = title_element(&title, &g.entry.name, tb).unwrap_or_else(|| div().into_any_element());
         el.child(
             div()
                 .absolute()

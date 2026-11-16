@@ -1346,6 +1346,20 @@ impl Quiver {
         ]
     }
 
+    /// A location for display: `~` for home, and the save folder's long prefix path cut
+    /// to `…/savegames/<user>/<product>`.
+    pub fn short_path(&self, p: &Path) -> String {
+        let s = crate::model::tilde(p);
+        match s.find("/savegames/") {
+            Some(i) => {
+                let head = &s[..i];
+                let root = head.find("/drive_c").map(|j| &head[..j]).unwrap_or(head);
+                format!("{root}/…{}", &s[i..])
+            }
+            None => s,
+        }
+    }
+
     pub fn account_name(&self, user_id: &str) -> String {
         self.status
             .as_ref()
