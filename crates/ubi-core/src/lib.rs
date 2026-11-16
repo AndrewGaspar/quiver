@@ -5,6 +5,8 @@ pub mod auth;
 pub mod broker;
 pub mod cloudsave;
 pub mod demux;
+pub mod download;
+pub mod install;
 pub mod launch;
 pub mod library;
 pub mod manifest;

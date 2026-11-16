@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ubi_core::auth::{Auth, LoginOutcome};
 use ubi_core::library::{Library, ProductConfig};
@@ -59,6 +59,16 @@ enum Cmd {
     Saves {
         #[command(subcommand)]
         action: SavesAction,
+    },
+    /// Download and install a game (resumable).
+    Install {
+        product_id: u32,
+        dest: PathBuf,
+        #[arg(long, default_value = "en-US")]
+        language: String,
+        /// Only print what would be installed.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Download raw cloud save blobs (<slot>.savegame, zlib) as a backup.
     CloudPull { uplay_id: u32, dir: PathBuf, #[arg(long, default_value_t = 10)] max_slot: u32 },
@@ -234,6 +244,56 @@ async fn main() -> Result<()> {
                 println!("previous local copies backed up to {}", b.display());
             }
         }
+        Cmd::Install { product_id, dest, language, dry_run } => {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (_, demux) = ubi_core::connect(&auth).await?;
+            let mut lib = Library::fetch(&demux).await?;
+            let product = lib.get(product_id).context("not in your library")?.clone();
+            let hash = product.latest_manifest.clone().context("product has no PC build")?;
+            let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
+            let (manifest, raw) = dl.manifest(&hash).await?;
+            let plan = ubi_core::install::plan(&manifest, &language)?;
+            println!(
+                "{}: {} files, {:.2} GB on disk, {:.2} GB to download (chunks {:?})",
+                product.name.as_deref().unwrap_or("?"),
+                plan.files.len(),
+                plan.install_bytes as f64 / 1e9,
+                plan.download_bytes as f64 / 1e9,
+                plan.chunks
+            );
+            if dry_run {
+                return Ok(());
+            }
+            let progress = std::sync::Arc::new(ubi_core::install::Progress::default());
+            let reporter = {
+                let p = progress.clone();
+                let total = plan.download_bytes;
+                let files = plan.files.len();
+                tokio::spawn(async move {
+                    let start = std::time::Instant::now();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let d = p.downloaded.load(Relaxed);
+                        let rate = d as f64 / start.elapsed().as_secs_f64() / 1e6;
+                        eprintln!(
+                            "{:5.1}%  {:.2}/{:.2} GB  {:.1} MB/s  files {}/{}",
+                            100.0 * d as f64 / total.max(1) as f64,
+                            d as f64 / 1e9,
+                            total as f64 / 1e9,
+                            rate,
+                            p.files_done.load(Relaxed),
+                            files
+                        );
+                    }
+                })
+            };
+            let compressed = manifest.is_compressed.unwrap_or(false);
+            let result = ubi_core::install::install(&mut dl, &plan, &dest, compressed, &progress).await;
+            reporter.abort();
+            result?;
+            std::fs::write(dest.join("uplay_install.manifest"), &raw)?;
+            println!("installed {} files into {}", plan.files.len(), dest.display());
+        }
         Cmd::CloudPull { uplay_id, dir, max_slot } => {
             let (_, demux) = ubi_core::connect(&auth).await?;
             let mut lib = Library::fetch(&demux).await?;
@@ -262,6 +322,15 @@ async fn main() -> Result<()> {
             let m = manifest::load_manifest(&path)?;
             let s = manifest::summarize(&m);
             println!("{}", serde_json::to_string_pretty(&s)?);
+            println!("compression: {:?}, slicer: {:?}", m.compression_method, m.slicer_config);
+            for c in &m.chunks {
+                let (n, bytes) = c.files.iter().filter(|f| !f.is_dir).fold((0, 0u64), |(n, b), f| (n + 1, b + f.size));
+                println!(
+                    "chunk {:>3} type {} lang {:<6} tags {:<24} uplay {:?} files {:>4} {:>8.2} GB",
+                    c.id, c.r#type, c.language.as_deref().unwrap_or("-"), c.tags.as_deref().unwrap_or("-"),
+                    c.uplay_id, n, bytes as f64 / 1e9
+                );
+            }
             if files {
                 for chunk in &m.chunks {
                     for f in chunk.files.iter().filter(|f| !f.is_dir) {

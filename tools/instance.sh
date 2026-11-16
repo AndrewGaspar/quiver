@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # instance.sh — run a Ubisoft game against ubi-bridge (no Connect) in a headless container.
 #
+#   instance.sh new <name>                   fresh Proton prefix with only Ubisoft's SDK DLLs (no
+#                                            Connect); games are run from the library directory
 #   instance.sh create <name> [src-prefix]   reflink-clone a prefix; strip Connect's login data
 #                                            and disable Connect's executables
 #   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, ubi-bridge,
@@ -31,6 +33,10 @@ PROTON=${UBI_PROTON:-$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-1
 IMAGE=${UBI_IMAGE:-localhost/aco-headless:latest}
 RES=${UBI_RES:-1920x1080}
 BROKER=${UBI_BROKER:-127.0.0.1:47810}
+LIBRARY=${UBI_LIBRARY:-$HOME/Games/ubi-library}
+# SDK DLLs games load from the "Connect" install dir; copied from an existing Connect install.
+SDK_DLLS=(uplay_r1.dll uplay_r164.dll uplay_r2.dll uplay_r264.dll uplay_aux_r1.dll uplay_aux_r164.dll
+          ubiorbitapi_r2.dll ubiorbitapi_r264.dll)
 UPC_REL="drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher"
 CONNECT_APPDATA="drive_c/users/steamuser/AppData/Local/Ubisoft Game Launcher"
 CONNECT_EXES=(upc.exe UbisoftConnect.exe UbisoftGameLauncher.exe UbisoftGameLauncher64.exe UplayService.exe UplayWebCore.exe UbisoftExtension.exe)
@@ -38,6 +44,36 @@ CONNECT_EXES=(upc.exe UbisoftConnect.exe UbisoftGameLauncher.exe UbisoftGameLaun
 die() { echo "instance: $*" >&2; exit 1; }
 ctr() { echo "ubi-$1"; }
 dir() { echo "$INST_ROOT/$1"; }
+
+# Run a command with Proton inside the runtime image against an instance's prefix.
+proton_exec() {
+  local name=$1; shift
+  local pfx; pfx=$(cat "$(dir "$name")/src")
+  podman run --rm --userns=keep-id --user 1000:1000 --security-opt label=disable \
+    -v "$pfx:$pfx" -v "$PROTON:$PROTON:ro" \
+    -e HOME=/home/steamuser -e WINEPREFIX="$pfx" -e STEAM_COMPAT_DATA_PATH="$pfx" \
+    -e STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steam -e WINEDEBUG=-all -e UBI_PROTON="$PROTON" \
+    "$IMAGE" bash -c 'mkdir -p /tmp/steam; python3 "$UBI_PROTON/proton" run "$@"; rc=$?
+      "$UBI_PROTON/files/bin/wineserver" -w; exit $rc' _ "$@"
+}
+
+cmd_new() {
+  local name=$1 dst; dst=$(dir "$name")
+  [[ -e $dst ]] && die "$name exists"
+  local sdk_src=${UBI_SDK_SRC:-$HOME/Games/ubisoft-connect/$UPC_REL}
+  mkdir -p "$dst/out" "$dst/prefix"
+  ln -s . "$dst/prefix/pfx"   # Proton initializes the prefix root itself (same layout as Lutris)
+  echo "$dst/prefix" > "$dst/src"
+  proton_exec "$name" wineboot -u >"$dst/out/wineboot.log" 2>&1
+  mkdir -p "$dst/prefix/$UPC_REL"
+  local f
+  for f in "${SDK_DLLS[@]}"; do
+    [[ -f $sdk_src/$f ]] && cp "$sdk_src/$f" "$dst/prefix/$UPC_REL/"
+  done
+  cp "$sdk_src/version.txt" "$dst/prefix/$UPC_REL/" 2>/dev/null || true
+  proton_exec "$name" reg add 'HKLM\Software\Wow6432Node\Ubisoft\Launcher' /v InstallDir /d 'C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\' /f >>"$dst/out/wineboot.log" 2>&1
+  echo "created $dst (fresh prefix, SDK DLLs only)"
+}
 
 cmd_create() {
   local name=$1 src=${2:-$DEFAULT_SRC} dst; dst=$(dir "$name")
@@ -72,7 +108,10 @@ cmd_run() {
   local user_id
   # Host path of the game's directory, from the Windows exe path (C:\... inside the prefix).
   local win_dir=${exe%\\*} host_dir
-  host_dir="$dst/prefix/drive_c/$(printf %s "${win_dir#[Cc]:\\}" | tr '\\' /)"
+  case $win_dir in
+    [Zz]:\\*) host_dir="/$(printf %s "${win_dir#?:\\}" | tr '\\' /)";;
+    *) host_dir="$dst/prefix/drive_c/$(printf %s "${win_dir#[Cc]:\\}" | tr '\\' /)";;
+  esac
   [[ -f $host_dir/uplay_install.manifest ]] || die "no uplay_install.manifest in $host_dir"
   ( umask 077; "$ROOT/target/debug/ubi" launch-context "$id" --broker "$BROKER" --install-dir "$host_dir" -o "$dst/out/context.json" )
   user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
@@ -86,6 +125,8 @@ p, path = sys.argv[1], sys.argv[2]
 c = json.load(open(p)); c["savegame_path"] = path
 json.dump(c, open(p, "w"), indent=1)
 EOF
+  local libmount=()
+  [[ -d $LIBRARY ]] && libmount=(-v "$LIBRARY:$LIBRARY")
   local lib32=() f
   for f in /usr/lib32/libGLX_nvidia.so* /usr/lib32/libnvidia-*.so* /usr/lib32/libEGL_nvidia.so* /usr/lib32/libcuda.so*; do
     lib32+=(-v "$f:$f:ro")
@@ -98,6 +139,7 @@ EOF
     -v "$PROTON:$PROTON:ro" \
     -v /usr/lib/nvidia/wine:/usr/lib/nvidia/wine:ro \
     -v "$dst/out:/out" \
+    "${libmount[@]}" \
     "${lib32[@]}" \
     -v /etc/machine-id:/etc/machine-id:ro \
     -e HOME=/home/steamuser -e USER=steamuser \
@@ -162,7 +204,7 @@ cmd_stop() {
 
 cmd=${1:-}; shift || true
 case $cmd in
-  create|run|shot|keys|logs|stop|wait) "cmd_$cmd" "$@";;
+  new|create|run|shot|keys|logs|stop|wait) "cmd_$cmd" "$@";;
   trace-grep) cmd_trace_grep "$@";;
   *) sed -n '2,13p' "$0"; exit 2;;
 esac
