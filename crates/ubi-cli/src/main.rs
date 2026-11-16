@@ -442,9 +442,9 @@ async fn main() -> Result<()> {
     if let Cmd::Dev { cmd } = cli.cmd {
         return dev::run_dev(cmd).await;
     }
-    // Restarting Steam happens here, never in the daemon, and only after confirmation.
+    // Restarting Steam only after confirmation; quiverd does it when it's reachable.
     if let Cmd::Steam { action: exports::SteamAction::Restart { yes } } = cli.cmd {
-        return exports::steam_restart(yes, &cli.source);
+        return exports::steam_restart(yes, &cli.source).await;
     }
     // Connects (and execs Steam's command) on its own; --dry-run needs no daemon.
     if let Cmd::SteamRun(args) = cli.cmd {

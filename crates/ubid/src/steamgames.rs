@@ -3,8 +3,9 @@
 //! and noticing new installs to offer the switch.
 //!
 //! Like shortcuts, launch options can only be written while Steam is closed, so changes made
-//! while it runs are staged. The daemon never restarts Steam: front ends do, after the user
-//! confirms. The watcher writes staged changes once Steam has been seen closed twice in a row.
+//! while it runs are staged. The daemon never restarts Steam on its own: front ends ask the
+//! user, then send a confirmed `SteamRestart` (see `exports`). The watcher writes staged
+//! changes once Steam has been seen closed twice in a row.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use ubi_api::exports::{
-    ExportRecord, ExportState, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUsers,
+    ExportRecord, ExportState, ExportStatus, PatchState, RestartReport, SteamExportResult, SteamGame, SteamGames, SteamPatchResult,
+    SteamUsers,
 };
 use ubi_api::{Client, Request};
 use ubi_core::exports::{Paths, steam};
@@ -45,7 +46,7 @@ pub enum SteamAction {
         #[arg(long)]
         json: bool,
     },
-    /// Restart Steam so it shows staged shortcuts. Always asks first.
+    /// Restart Steam so it shows staged shortcuts and launch options. Always asks first.
     Restart {
         /// Confirm without the prompt (for your own scripts when there's no terminal).
         /// Agents must ask you instead of passing this.
@@ -331,19 +332,60 @@ pub async fn steam(client: &Client, action: SteamAction) -> Result<()> {
                 println!("Off: Quiver doesn't offer anything for new Steam installs (quiver steam patch still works)");
             }
         }
-        SteamAction::Restart { .. } => unreachable!("handled before connecting to the daemon"),
+        SteamAction::Restart { .. } => unreachable!("handled on its own (it may not need the daemon)"),
     }
     Ok(())
 }
 
-/// `quiver steam restart`: runs here in the CLI (never in the daemon), and only after the
-/// user confirms in the terminal, or passes `--yes` themselves.
-pub fn steam_restart(yes: bool, source: &str) -> Result<()> {
+/// The daemon, unless it's unreachable (then the CLI does it itself).
+async fn daemon_for_restart(source: &str) -> Option<Client> {
+    match Client::connect(source).await {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("quiverd isn't reachable ({e:#}); doing it from here");
+            None
+        }
+    }
+}
+
+/// A daemon too old for a request (it never ran it), as opposed to one that refused it.
+fn unknown_request(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("unknown variant")
+}
+
+/// What's left staged after writing: an error naming it, rather than "done".
+fn fail_if_left(left: &[String]) -> Result<()> {
+    if !left.is_empty() {
+        bail!("{} change(s) couldn't be written and still wait for Steam: {}", left.len(), left.join("; "));
+    }
+    Ok(())
+}
+
+/// `quiver steam restart`: only after the user confirms in the terminal, or passes `--yes`
+/// themselves. quiverd does the restart (it knows what's staged, whatever this binary's
+/// version); without a reachable daemon the CLI does it itself.
+pub async fn steam_restart(yes: bool, source: &str) -> Result<()> {
     let paths = Paths::from_env();
     let Some(st) = steam::Steam::find(&paths.home) else { bail!("Steam not found") };
-    let pending = steam::staged_descriptions(&paths);
+    let client = daemon_for_restart(source).await;
+    let pending = match &client {
+        Some(c) => c.call::<SteamUsers>(Request::SteamUsers).await.map(|u| u.staged).unwrap_or_else(|_| steam::staged_descriptions(&paths)),
+        None => steam::staged_descriptions(&paths),
+    };
     if !steam::is_running() {
-        let n = steam::apply_staged(&paths, false)?;
+        let n = match &client {
+            Some(c) => {
+                let v: serde_json::Value = c.call(Request::SteamApplyStaged).await?;
+                let left = c.call::<SteamUsers>(Request::SteamUsers).await?.staged;
+                fail_if_left(&left)?;
+                v["applied"].as_u64().unwrap_or(0) as usize
+            }
+            None => {
+                let n = steam::apply_staged(&paths, false)?;
+                fail_if_left(&steam::staged_descriptions(&paths))?;
+                n
+            }
+        };
         println!("Steam isn't running; wrote {n} staged change(s). Steam shows them when it next starts.");
         return Ok(());
     }
@@ -372,7 +414,36 @@ pub fn steam_restart(yes: bool, source: &str) -> Result<()> {
         }
     }
     eprintln!("Closing Steam…");
-    let r = steam::restart_steam(&paths, &st, Duration::from_secs(90))?;
+    // The person confirmed just now (the prompt, or their own --yes).
+    let by_daemon = match &client {
+        Some(c) => match c.call::<RestartReport>(Request::SteamRestart { confirmed: true }).await {
+            Ok(r) => Some(r),
+            Err(e) if unknown_request(&e) => {
+                eprintln!("quiverd is too old to restart Steam; doing it from here (restart quiverd after updating Quiver)");
+                None
+            }
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+    let r = match by_daemon {
+        Some(r) => r,
+        None => tokio::task::spawn_blocking(move || steam::restart_steam(&paths, &st, Duration::from_secs(90))).await??,
+    };
     println!("Steam restarted; wrote {} staged change(s).", r.applied);
     Ok(())
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn old_daemons_and_leftovers() {
+        assert!(unknown_request(&anyhow::anyhow!("bad request: unknown variant `steam_restart`, expected one of `status`")));
+        assert!(!unknown_request(&anyhow::anyhow!("restarting Steam needs the person's confirmation every time")));
+        assert!(fail_if_left(&[]).is_ok());
+        let e = fail_if_left(&["start through Quiver: \"Far Cry 5\"".into()]).unwrap_err().to_string();
+        assert!(e.starts_with("1 change(s) couldn't be written") && e.contains("Far Cry 5"), "{e}");
+    }
 }

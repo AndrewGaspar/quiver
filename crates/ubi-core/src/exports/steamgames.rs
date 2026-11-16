@@ -917,6 +917,24 @@ mod tests {
         assert!(!localconfig(&steam, "2002").exists());
     }
 
+    /// What a Steam restart writes: a change that can't be written stays staged, and that
+    /// is a failure (not "Steam restarted").
+    #[test]
+    fn restart_apply_fails_when_something_stays_staged() {
+        let (_tmp, paths, steam) = fixture();
+        patch(&paths, &steam, "1001", 552520, "Far Cry 5", Q, true).unwrap();
+        assert_eq!(super::super::steam::apply_all_or_fail(&paths).unwrap(), 1);
+        assert_eq!(launch_options(&steam, "1001", 552520), format!("PROTON_LOG=1 {Q} %command% -skipintro"));
+        // Nothing staged: fine, nothing written.
+        assert_eq!(super::super::steam::apply_all_or_fail(&paths).unwrap(), 0);
+        // Its file is gone by the time Steam is closed: the change stays, and it's an error.
+        unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", true).unwrap();
+        std::fs::remove_file(localconfig(&steam, "1001")).unwrap();
+        let e = super::super::steam::apply_all_or_fail(&paths).unwrap_err().to_string();
+        assert!(e.contains("1 change(s) couldn't be written") && e.contains("Far Cry 5"), "{e}");
+        assert_eq!(load(&paths).staged.len(), 1);
+    }
+
     #[test]
     fn staged_while_steam_runs() {
         let (_tmp, paths, steam) = fixture();

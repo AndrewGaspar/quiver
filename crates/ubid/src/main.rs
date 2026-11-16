@@ -483,7 +483,7 @@ impl Daemon {
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
             }
             Request::Sessions => json!(self.sessions.list()),
-            r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged) => exports::handle(self, source, r).await?,
+            r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged | Request::SteamRestart { .. }) => exports::handle(self, source, r).await?,
             r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. } | Request::SavesSync { .. }) => info::handle(self, source, r).await?,
             r @ (Request::Queue
             | Request::QueueMove { .. }

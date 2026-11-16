@@ -15,7 +15,8 @@ use chrono::{DateTime, Duration as Span, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use ubi_api::exports::{
-    ExportKind, ExportRecord, ExportState, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUser,
+    ExportKind, ExportRecord, ExportState, ExportStatus, PatchState, RestartReport, SteamExportResult, SteamGame, SteamGames, SteamPatchResult,
+    SteamUser,
     SteamUsers,
 };
 use ubi_api::info::{
@@ -241,6 +242,13 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 applied_staged: 0,
             })
         }
+        Request::SteamRestart { confirmed } => {
+            if !confirmed {
+                bail!("restarting Steam needs the person's confirmation every time");
+            }
+            let was_running = d.steam_running;
+            json!(RestartReport { was_running, applied: d.apply_staged(), started: was_running })
+        }
         Request::SteamApplyStaged => {
             if d.steam_running {
                 bail!("Steam is running; staged shortcuts are written when it closes");
@@ -286,16 +294,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         demo.emit(e);
     }
     Ok(Ok(out))
-}
-
-impl Demo {
-    /// What `quiver steam restart` does once the person confirmed it: Steam closes, the
-    /// staged shortcuts are written, Steam starts again. Demo only.
-    pub fn restart_steam(&self) -> usize {
-        let key = self as *const Demo as usize;
-        let mut all = DETAILS.lock().unwrap();
-        all.get_mut(&key).map(|d| d.apply_staged()).unwrap_or(0)
-    }
 }
 
 /// The text of a per-launch log in `<prefix>/ubi-run/` for the demo's games.
@@ -1328,8 +1326,11 @@ mod tests {
         let r: SteamExportResult = call(&demo, Request::ExportSteam { product_id: 1651, remove: false, steam_user: None });
         assert!(r.staged);
         assert!(demo.handle(Request::SteamApplyStaged).is_err(), "Steam is running");
+        // Only once the person confirmed.
+        assert!(demo.handle(Request::SteamRestart { confirmed: false }).is_err());
         // Two shortcuts and Watch Dogs: Legion's launch options.
-        assert_eq!(demo.restart_steam(), 3);
+        let r: RestartReport = call(&demo, Request::SteamRestart { confirmed: true });
+        assert_eq!((r.was_running, r.applied), (true, 3));
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
         assert!(list.iter().all(|e| e.state != ExportState::WaitingForSteam));
         let _: ExportRecord = call(&demo, Request::ExportDesktop { product_id: 1651, remove: false });
@@ -1358,7 +1359,7 @@ mod tests {
         assert!(demo.handle(Request::SteamPatch { app_id: 916440, steam_user: None }).is_err());
         let u: SteamUsers = call(&demo, Request::SteamUsers);
         assert!(u.staged.iter().any(|s| s.contains("Watch Dogs: Legion")));
-        demo.restart_steam();
+        let _: RestartReport = call(&demo, Request::SteamRestart { confirmed: true });
         let s: SteamGames = call(&demo, Request::SteamGames { steam_user: None });
         assert_eq!(state(&s, 2239550), PatchState::On);
         let v: Value = call(&demo, Request::SteamOffers { enabled: Some(false) });

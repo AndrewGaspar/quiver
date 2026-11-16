@@ -189,6 +189,16 @@ fn yes() -> bool {
     true
 }
 
+/// Reply to `Request::SteamRestart` (and what `quiver steam restart` does locally).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RestartReport {
+    /// Steam was running, so it was closed and started again.
+    pub was_running: bool,
+    /// Staged changes written.
+    pub applied: usize,
+    pub started: bool,
+}
+
 /// Reply to `Request::SteamPatch` / `Request::SteamUnpatch`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SteamPatchResult {

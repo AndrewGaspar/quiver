@@ -482,6 +482,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
     },
+    /// Close Steam cleanly, write every staged change (shortcuts and launch options) and
+    /// start Steam again; with Steam closed, only writes them. Takes up to ~90 s. Returns
+    /// `exports::RestartReport`; fails if anything is still staged afterwards.
+    ///
+    /// **Only send this after the person confirmed it, every time** (a dialog they answered
+    /// just now, or a terminal prompt). Refused unless `confirmed` is true, and from sources
+    /// other than "gui" and "cli"; quiverd never restarts Steam on its own.
+    SteamRestart {
+        #[serde(default)]
+        confirmed: bool,
+    },
 }
 
 fn yes() -> bool {
@@ -647,6 +658,10 @@ mod tests {
         assert!(matches!(r, Request::SteamPatch { app_id: 3751950, steam_user: None }));
         let v = serde_json::to_value(Request::SteamOffers { enabled: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "steam_offers", "params": {} }));
+        let v = serde_json::to_value(Request::SteamRestart { confirmed: true }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_restart", "params": { "confirmed": true } }));
+        let r: Request = serde_json::from_str(r#"{"method":"steam_restart","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::SteamRestart { confirmed: false }), "unconfirmed unless it says so");
         let e: Event = serde_json::from_str(r#"{"type":"steam_games_changed"}"#).unwrap();
         assert!(matches!(e, Event::SteamGamesChanged { offer } if offer.is_empty()));
         // Minimal and newer replies decode.
