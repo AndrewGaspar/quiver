@@ -123,7 +123,14 @@ pub async fn progress(client: &Client, game: &str, json: bool, refresh: bool) ->
     let who = account_name(client, p.account.as_deref()).await;
     println!("{} — {who} (fetched {})", e.name, when(Some(p.fetched)));
     match p.playtime_seconds {
-        Some(s) => println!("  play time      {} (Ubisoft)", hours(s)),
+        Some(s) => {
+            let src = match p.playtime_source.as_deref() {
+                Some("playtime_service") => "Ubisoft",
+                Some(_) => "the game's TimePlayed stat",
+                None => "?",
+            };
+            println!("  play time      {} ({src})", hours(s))
+        }
         None => println!("  play time      not available"),
     }
     if let Some(c) = &p.connect {

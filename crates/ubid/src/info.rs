@@ -177,14 +177,21 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
         p.account = Some(session.user_id.clone());
         // Ubisoft's play-time record, the headline number (demux `playtime` service).
         match remote_playtime(&o, &session.user_id, product_id).await {
-            Ok(s) => p.playtime_seconds = s,
-            Err(e) => p.errors.push(format!("play time: {e:#}")),
+            Ok(Some(s)) if s > 0 => {
+                p.playtime_seconds = Some(s);
+                p.playtime_source = Some("playtime_service".into());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::info!(product_id, "playtime service: {e:#}"),
         }
         Ok(p)
     })
     .await?;
-    if p.playtime_seconds.is_none() {
-        p.playtime_seconds = p.stats.iter().find(|s| s.id.eq_ignore_ascii_case("TimePlayed")).and_then(|s| s.number).map(|n| n as u64);
+    if p.playtime_seconds.is_none()
+        && let Some(n) = p.stats.iter().find(|s| s.id.eq_ignore_ascii_case("TimePlayed")).and_then(|s| s.number)
+    {
+        p.playtime_seconds = Some(n as u64);
+        p.playtime_source = Some("stat:TimePlayed".into());
     }
     CACHES.lock().unwrap().progress.insert(key, (Instant::now(), p.clone()));
     Ok(p)

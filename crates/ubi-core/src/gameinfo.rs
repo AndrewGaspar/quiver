@@ -288,6 +288,70 @@ mod tests {
         assert_eq!(store_search_url("Assassin's Creed® Origins - The Curse of the Pharaohs"), "https://store.ubisoft.com/search?q=Assassin%27s+Creed+Origins+-+The+Curse+of+the+Pharaohs");
     }
 
+    fn product(id: u32, config: Option<String>, associations: Vec<u32>) -> Product {
+        Product {
+            product_id: id,
+            name: None,
+            product_type: 0,
+            state: 3,
+            owned: true,
+            download_id: None,
+            latest_manifest: None,
+            associations,
+            space_id: Some("space-from-ownership".into()),
+            app_id: None,
+            locked_by_subscription: false,
+            configuration: config,
+            raw: Default::default(),
+        }
+    }
+
+    #[test]
+    fn build_from_ownership() {
+        let cfg = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/product-config/5183.yaml")).unwrap();
+        let p = product(5183, Some(cfg), vec![13347]);
+        let assoc = [Associated { product_id: 13347, product_type: Some(0), owned: true, config: None }];
+        let tmp = tempfile::tempdir().unwrap();
+        let game = Game {
+            product_id: 5183,
+            name: "AC3".into(),
+            install_dir: tmp.path().into(),
+            prefix: tmp.path().into(),
+            exe: "ACIII.exe".into(),
+            args: None,
+            language: Some("en-US".into()),
+        };
+        let info = build(5183, "Assassin's Creed® III - Remastered", Some(&p), &assoc, Some(&game));
+        // Ownership's space id wins over the config's.
+        assert_eq!(info.space_id.as_deref(), Some("space-from-ownership"));
+        assert_eq!(info.addons.len(), 1);
+        assert_eq!(info.addons[0].kind, ProductKind::Game);
+        assert!(!info.addons[0].visible);
+        // No manifest in the install dir: the record's facts only.
+        let inst = info.install.unwrap();
+        assert_eq!((inst.language.as_deref(), inst.size_bytes, inst.manifest), (Some("en-US"), 0, None));
+        assert_eq!(info.unavailable, ["developer", "release_date", "description", "genres"]);
+    }
+
+    /// Reads a real installed manifest (no network): `cargo test -- --ignored real_install`.
+    #[test]
+    #[ignore]
+    fn real_install() {
+        let dir = Path::new(&std::env::var("HOME").unwrap()).join("Games/ubi-library/assassins-creed-origins");
+        let game = Game {
+            product_id: 3539,
+            name: "Origins".into(),
+            install_dir: dir.clone(),
+            prefix: dir,
+            exe: String::new(),
+            args: None,
+            language: Some("en-US".into()),
+        };
+        let i = install_info(&game);
+        eprintln!("{i:?}");
+        assert!(i.size_bytes > 10 << 30 && !i.languages.is_empty() && i.manifest.is_some());
+    }
+
     #[test]
     fn every_fixture_parses() {
         for name in ["3539.yaml", "420.yaml", "2688.yaml", "5183.yaml"] {

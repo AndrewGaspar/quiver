@@ -194,6 +194,10 @@ pub struct Progress {
     /// Ubisoft's play-time record (seconds), when available: the headline number.
     #[serde(default)]
     pub playtime_seconds: Option<u64>,
+    /// `playtime_service` (Ubisoft's play-session record, as Connect shows it) or
+    /// `stat:TimePlayed` (the game's own stat).
+    #[serde(default)]
+    pub playtime_source: Option<String>,
     /// Player stats (`statsCard`).
     #[serde(default)]
     pub stats: Vec<Stat>,

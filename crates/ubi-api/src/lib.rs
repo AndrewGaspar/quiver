@@ -438,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn info_requests_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"game_info","params":{"product_id":3539}}"#).unwrap();
+        assert!(matches!(r, Request::GameInfo { product_id: 3539, refresh: false }));
+        let r: Request = serde_json::from_str(r#"{"method":"game_progress","params":{"product_id":1,"refresh":true}}"#).unwrap();
+        assert!(matches!(r, Request::GameProgress { refresh: true, .. }));
+        // The cloud is checked unless asked not to.
+        let r: Request = serde_json::from_str(r#"{"method":"saves","params":{"product_id":1}}"#).unwrap();
+        assert!(matches!(r, Request::Saves { cloud: true, .. }));
+        let r: Request = serde_json::from_str(r#"{"method":"saves_restore","params":{"product_id":1,"backup":"latest"}}"#).unwrap();
+        assert!(matches!(r, Request::SavesRestore { confirmed: false, .. }));
+        // Results decode from minimal objects (older or newer daemons).
+        let i: info::GameInfo = serde_json::from_str(r#"{"product_id":1,"name":"x","future":1}"#).unwrap();
+        assert!(i.addons.is_empty() && i.install.is_none());
+        let a: info::AddOn = serde_json::from_str(r#"{"product_id":2,"kind":"some_new_kind"}"#).unwrap();
+        assert_eq!(a.kind, info::ProductKind::Unknown);
+        let p: info::Progress = serde_json::from_str(r#"{"product_id":1,"fetched":"2026-11-16T00:00:00Z"}"#).unwrap();
+        assert!(p.stats.is_empty() && p.connect.is_none());
+        let s: info::SavesReport = serde_json::from_str(r#"{"product_id":1,"slots":[{"slot":1,"state":"brand_new"}]}"#).unwrap();
+        assert_eq!(s.slots[0].state, info::SlotState::Unknown);
+        assert_eq!(serde_json::to_value(info::SlotState::CloudNewer).unwrap(), "cloud_newer");
+        assert_eq!(serde_json::to_value(info::ProductKind::SeasonPass).unwrap(), "season_pass");
+    }
+
+    #[test]
     fn wire_compat() {
         let r: Request = serde_json::from_str(r#"{"method":"logout","params":{}}"#).unwrap();
         assert!(matches!(r, Request::Logout { account: None }));
