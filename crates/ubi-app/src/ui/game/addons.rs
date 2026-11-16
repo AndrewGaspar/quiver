@@ -60,6 +60,7 @@ impl Quiver {
             .bg(th.ink1)
             .border_1()
             .border_color(th.line2);
+        let compact = !self.pane_bp().two_columns();
         let rows: Vec<AnyElement> = shown
             .iter()
             .enumerate()
@@ -98,17 +99,23 @@ impl Quiver {
                             .flex_col()
                             .gap(px(1.))
                             .child(div().font_weight(MEDIUM).text_color(if a.owned { th.tx1 } else { th.tx2 }).truncate().child(name))
-                            .child(div().text_size(px(11.5)).text_color(th.tx3).child(format!("{} · product {}", kind_label(a.kind), a.product_id))),
+                            .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(format!("{} · product {}", kind_label(a.kind), a.product_id))),
                     )
-                    .child(if a.owned {
-                        pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Owned").into_any_element()
-                    } else {
-                        pill(th, PillKind::Muted, None, "Not owned").into_any_element()
+                    .child(match (a.owned, compact) {
+                        (true, false) => pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Owned").into_any_element(),
+                        (false, false) => pill(th, PillKind::Muted, None, "Not owned").into_any_element(),
+                        // The art is dimmed for add-ons you don't own; the check says owned.
+                        (true, true) => icon(Icon::CircleCheck, 14., th.ok).into_any_element(),
+                        (false, true) => div().into_any_element(),
                     })
-                    .child(div().w(px(196.)).flex().justify_end().when_some(url, |d, url| {
+                    .child(div().when(!compact, |d| d.w(px(196.))).when(compact, |d| d.w(px(28.))).flex_none().flex().justify_end().when_some(url, |d, url| {
+                        let store = if compact {
+                            small(("addon-store", i), th, Some(Icon::ExternalLink), "").tooltip(crate::ui::responsive::tip(th, "View in Ubisoft Store"))
+                        } else {
+                            small(("addon-store", i), th, None, "View in Ubisoft Store").child(icon(Icon::ExternalLink, 12., th.tx2))
+                        };
                         d.child(
-                            small(("addon-store", i), th, None, "View in Ubisoft Store")
-                                .child(icon(Icon::ExternalLink, 12., th.tx2))
+                            store
                                 .focus_ring(focused, th, 6.)
                                 .on_click(cx.listener(move |this, _, _, cx| this.open_external(&url, cx))),
                         )
@@ -140,12 +147,12 @@ impl Quiver {
                     .text_size(px(11.5))
                     .text_color(th.tx3)
                     .child(icon(Icon::Info, 12., th.tx3))
-                    .child(format!(
+                    .child(div().flex_1().min_w_0().child(format!(
                         "Ownership of {}. \"View in Ubisoft Store\" opens a store search for the add-on's name in your browser; there's no store inside Quiver.",
                         if owners.is_empty() { "the launch account".to_string() } else { owners.join(", ") }
-                    )),
+                    ))),
             )
-            .child(self.cli_line("addons-cli", th, format!("quiver info {id} --all"), cx).w(px(360.)))
+            .child(self.cli_line("addons-cli", th, format!("quiver info {id} --all"), cx).max_w(px(360.)))
             .into_any_element()
     }
 }

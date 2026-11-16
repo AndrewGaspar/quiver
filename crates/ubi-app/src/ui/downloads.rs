@@ -206,6 +206,8 @@ pub fn who(th: &Theme, source: &str) -> Div {
 
 /// A card cut into rows: `first` rounds the top, `last` the bottom; rows are separated by
 /// a hairline.
+const DL_SIDE_W: f32 = 340.;
+
 fn seg(th: &Theme, first: bool, last: bool) -> Div {
     div()
         .flex()
@@ -678,12 +680,25 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // The page
 
+    /// Width of the queue column.
+    fn dl_main_w(&self) -> f32 {
+        if self.bp().two_columns() { (self.viewport.0 - 2. * self.gutter() - DL_SIDE_W - 24.).max(420.) } else { self.viewport.0 - 2. * self.gutter() }
+    }
+
+    /// The queue column is too narrow for one-line rows: they wrap, and drop the grip and
+    /// who-added column.
+    fn dl_tight(&self) -> bool {
+        self.dl_main_w() < 700.
+    }
+
     pub fn render_downloads(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let rows = self.dl_rows();
         let (active, waiting, failed) = self.dl_split();
         let recent = self.recent_jobs();
-        let side_w = 340.;
-        let main_w = (self.viewport.0 - 2. * Self::GUTTER - side_w - 24.).max(420.);
+        // Storage and rules sit beside the queue from Medium up, under it below.
+        let two = self.bp().two_columns();
+        let main_w = self.dl_main_w();
+        let tight = self.dl_tight();
         let row_ix = |r: Row| rows.iter().position(|(x, _)| *x == r).unwrap_or(usize::MAX);
         let mut children: Vec<AnyElement> = Vec::new();
         let mut row_child: Vec<Option<usize>> = vec![None; rows.len()];
@@ -705,6 +720,7 @@ impl Quiver {
         let head_btns = rows.get(hi).map(|r| r.1.clone()).unwrap_or_default();
         let mut head = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(12.))
             .pt(px(28.))
@@ -777,14 +793,16 @@ impl Quiver {
         if !waiting.is_empty() {
             children.push(
                 seg(th, true, false)
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(10.))
+                    .gap_x(px(10.))
+                    .gap_y(px(4.))
                     .px(px(16.))
                     .py(px(12.))
                     .child(div().text_size(px(13.5)).font_weight(SEMIBOLD).child("Up next"))
                     .child(div().text_color(th.tx3).text_size(px(12.)).child(format!("{} in order", waiting.len())))
                     .child(div().flex_1())
-                    .child(div().text_color(th.tx3).text_size(px(12.)).child(if self.mode == InputMode::Pad {
+                    .child(div().when(tight, |d| d.w_full()).text_color(th.tx3).text_size(px(12.)).child(if self.mode == InputMode::Pad {
                         "LT / RT move the focused item"
                     } else {
                         "Reorder with the arrows; one runs at a time unless the rules say more"
@@ -806,13 +824,15 @@ impl Quiver {
         if !failed.is_empty() {
             children.push(
                 seg(th, true, false)
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(10.))
+                    .gap_x(px(10.))
+                    .gap_y(px(4.))
                     .px(px(16.))
                     .py(px(12.))
                     .child(icon(Icon::TriangleAlert, 15., th.bad))
                     .child(div().text_size(px(13.5)).font_weight(SEMIBOLD).child("Needs attention"))
-                    .child(div().text_color(th.tx3).text_size(px(12.)).child("Failed items keep their place; Retry continues from what is on disk"))
+                    .child(div().when(tight, |d| d.w_full()).text_color(th.tx3).text_size(px(12.)).child("Failed items keep their place; Retry continues from what is on disk"))
                     .into_any_element(),
             );
             for (i, e) in failed.iter().enumerate() {
@@ -857,9 +877,25 @@ impl Quiver {
         }
         self.dl.row_child = row_child;
 
+        if !two {
+            // One column: the side cards after the queue, in the same scroll.
+            let g = self.gutter();
+            return div().flex().flex_1().min_h_0().child(
+                div()
+                    .id("dl-main")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
+                    .px(px(g))
+                    .pb(px(40.))
+                    .children(children)
+                    .child(div().flex().flex_col().gap(px(20.)).pt(px(28.)).child(self.render_storage(th)).child(self.render_rules(th, &rows, cx))),
+            );
+        }
         let side = div()
             .id("dl-side")
-            .w(px(side_w))
+            .w(px(DL_SIDE_W))
             .flex_none()
             .flex()
             .flex_col()
@@ -867,7 +903,7 @@ impl Quiver {
             .overflow_y_scroll()
             .pt(px(76.))
             .pb(px(40.))
-            .pr(px(Self::GUTTER))
+            .pr(px(self.gutter()))
             .child(self.render_storage(th))
             .child(self.render_rules(th, &rows, cx));
 
@@ -883,7 +919,7 @@ impl Quiver {
                     .min_w_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.body_scroll)
-                    .pl(px(Self::GUTTER))
+                    .pl(px(self.gutter()))
                     .pb(px(40.))
                     .children(children),
             )
@@ -904,6 +940,9 @@ impl Quiver {
         let retrying = status.starts_with("Retrying");
         let verifying = e.state == QueueState::Verifying;
         let h = if e.kind == QueueKind::Install { 352. } else { 300. };
+        // Tight: title and buttons on one line, the numbers under them, and the card grows
+        // to fit (the art is cropped to a generous height).
+        let tight = w < 700.;
         let name = g.as_ref().map(|g| clean_name(&g.entry.name)).unwrap_or_else(|| clean_name(&e.name));
 
         // Art: the hero, dimmed, under a scrim that fades to the card.
@@ -918,7 +957,11 @@ impl Quiver {
             },
             None => HeroTitle::Text,
         };
-        let title_el = title_element(&title, &name, TitleBox { max_w: 210., max_h: 62., max_scale: 1.0, text: 22., text_w: 260. })
+        let title_el = title_element(&title, &name, if tight {
+            TitleBox { max_w: 150., max_h: 48., max_scale: 1.0, text: 17., text_w: 150. }
+        } else {
+            TitleBox { max_w: 210., max_h: 62., max_scale: 1.0, text: 22., text_w: 260. }
+        })
             .unwrap_or_else(|| div().into_any_element());
 
         let (pill_kind, label) = match (e.kind, verifying) {
@@ -929,7 +972,7 @@ impl Quiver {
         };
         let speed = if verifying { 0 } else { e.speed };
         let left = total.saturating_sub(done);
-        let mut nums = div().flex().items_center().gap(px(18.)).text_size(px(13.)).text_color(on_art::tx1());
+        let mut nums = div().flex().flex_wrap().items_center().gap_x(px(18.)).gap_y(px(2.)).text_size(px(13.)).text_color(on_art::tx1());
         let num = |b: String, s: &str| {
             div().flex().items_baseline().gap(px(5.)).child(div().font_weight(BOLD).child(b)).child(div().text_color(on_art::tx2()).child(s.to_owned()))
         };
@@ -990,7 +1033,7 @@ impl Quiver {
                 ]
             }
         };
-        let phase_row = div().flex().items_center().gap(px(6.)).text_size(px(11.5)).children(steps.iter().enumerate().flat_map(|(i, (s, st))| {
+        let phase_row = div().flex().flex_wrap().items_center().gap(px(6.)).text_size(px(11.5)).children(steps.iter().enumerate().flat_map(|(i, (s, st))| {
             let (c, ic) = match st {
                 0 => (th.ok, Icon::CircleCheck),
                 1 => (th.acc_hi, Icon::LoaderCircle),
@@ -1012,35 +1055,53 @@ impl Quiver {
             .gap(px(14.))
             .px(px(22.))
             .py(px(20.))
-            .child(
-                div()
+            .child({
+                let info = div()
                     .flex()
-                    .items_center()
-                    .gap(px(16.))
-                    .child(div().w(px(210.)).h(px(62.)).flex().items_center().child(title_el))
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(6.))
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.))
                                     .child(pill(th, pill_kind, None, label))
                                     .child(who(th, &e.source))
-                                    .when(retrying, |d| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), status.clone())))
-                                    .when_some(e.job_id, |d, j| d.child(mono(11., on_art::tx2()).child(format!("job {j}")))),
-                            )
-                            .child(nums),
+                            .when(retrying, |d| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), status.clone())))
+                            .when_some(e.job_id, |d, j| d.child(mono(11., on_art::tx2()).child(format!("job {j}")))),
                     )
-                    .child(pause)
-                    .child(remove)
-                    .child(open),
-            )
+                    .child(nums);
+                if tight {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(div().flex_1().min_w_0().h(px(48.)).flex().items_center().overflow_hidden().child(title_el))
+                                .child(pause)
+                                .child(remove)
+                                .child(open),
+                        )
+                        .child(info)
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(16.))
+                        .child(div().w(px(210.)).h(px(62.)).flex().items_center().child(title_el))
+                        .child(info)
+                        .child(pause)
+                        .child(remove)
+                        .child(open)
+                }
+            })
             .child(progress(th, f, None, 8., None))
             .child(phase_row)
             .child(chart);
@@ -1066,8 +1127,10 @@ impl Quiver {
             body = body.child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(16.))
+                    .gap_x(px(16.))
+                    .gap_y(px(4.))
                     .px(px(12.))
                     .py(px(10.))
                     .rounded(px(10.))
@@ -1078,8 +1141,8 @@ impl Quiver {
                     .child(caption("When it finishes", th.tx3))
                     .child(check("dl-f-steam", after.steam, "Add to Steam", self.btn_focused(fr, 0, fb), Btn::FinishSteam(id), cx))
                     .child(check("dl-f-desk", after.desktop, "Create .desktop entry", self.btn_focused(fr, 1, fb), Btn::FinishDesktop(id), cx))
-                    .child(div().flex_1())
-                    .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(if after.steam && steam_running {
+                    .when(!tight, |d| d.child(div().flex_1()))
+                    .child(div().text_size(px(11.5)).text_color(th.tx3).min_w_0().when(!tight, |d| d.truncate()).child(if after.steam && steam_running {
                         "Steam is running: the shortcut shows after it restarts, and Quiver asks first"
                     } else if after.steam || after.desktop {
                         "Quiver does this when the install finishes, while the app is open"
@@ -1089,9 +1152,11 @@ impl Quiver {
             );
         }
 
-        let mut c = card(th).relative().overflow_hidden().w_full().h(px(h));
+        let mut c = card(th).relative().overflow_hidden().w_full();
+        c = if tight { c.min_h(px(h)) } else { c.h(px(h)) };
+        let art_h = if tight { h + 240. } else { h };
         if let ArtState::Ready(img) = &hero {
-            c = c.child(div().absolute().top_0().left_0().size_full().opacity(0.5).child(cover(img, w, h, (0.6, 0.3))));
+            c = c.child(div().absolute().top_0().left_0().size_full().overflow_hidden().opacity(0.5).child(cover(img, w, art_h, (0.6, 0.3))));
         }
         c.child(div().absolute().inset_0().bg(gpui::linear_gradient(
             90.,
@@ -1187,6 +1252,7 @@ impl Quiver {
             pill(th, PillKind::Muted, None, format!("Queued · #{}", e.position))
         };
         let thumb = self.thumb(th, id, 34., 40., cx);
+        let tight = self.dl_tight();
         let first_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| x.product_id).next() == Some(id);
         let last_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| x.product_id).last() == Some(id);
         let up = ibtn(("q-up", id as usize), th, Icon::ChevronUp, None, self.btn_focused(r, 0, n))
@@ -1201,12 +1267,14 @@ impl Quiver {
         let remove = ibtn(("q-x", id as usize), th, Icon::X, None, self.btn_focused(r, 3, n)).on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx)));
         seg(th, false, last)
             .id(("q-row", id as usize))
+            .when(tight, |d| d.flex_wrap())
             .items_center()
-            .gap(px(14.))
+            .gap_x(px(if tight { 10. } else { 14. }))
+            .gap_y(px(8.))
             .px(px(16.))
             .py(px(10.))
             .when(row_focus, |d| d.bg(th.ink3))
-            .child(icon(Icon::GripVertical, 15., th.tx4))
+            .when(!tight, |d| d.child(icon(Icon::GripVertical, 15., th.tx4)))
             .child(mono(12., th.tx3).w(px(16.)).child(e.position.to_string()))
             .child(thumb)
             .child(
@@ -1214,14 +1282,16 @@ impl Quiver {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(if tight { 140. } else { 0. }))
                     .gap(px(2.))
                     .child(div().font_weight(SEMIBOLD).truncate().child(self.game_name(id)))
                     .child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(what.join(" · "))),
             )
             .child(state)
-            .child(div().flex().flex_col().items_end().gap(px(3.)).w(px(150.)).child(who(th, &e.source)).child(div().text_size(px(11.)).text_color(th.tx4).child(format!("added {}", ago(e.added)))))
-            .child(div().flex().gap(px(6.)).child(up).child(down).child(toggle).child(remove))
+            .when(!tight, |d| {
+                d.child(div().flex().flex_col().items_end().gap(px(3.)).w(px(150.)).child(who(th, &e.source)).child(div().text_size(px(11.)).text_color(th.tx4).child(format!("added {}", ago(e.added)))))
+            })
+            .child(div().flex().gap(px(6.)).when(tight, |d| d.ml_auto()).child(up).child(down).child(toggle).child(remove))
             .into_any_element()
     }
 
@@ -1231,9 +1301,12 @@ impl Quiver {
         let thumb = self.thumb(th, id, 34., 40., cx);
         let err = e.error.clone().unwrap_or_else(|| "Failed".into());
         let progress_txt = (e.total_bytes > 0).then(|| format!(" · stopped at {} of {}", gb(e.done_bytes), gb(e.total_bytes)));
+        let tight = self.dl_tight();
         seg(th, false, last)
+            .when(tight, |d| d.flex_wrap())
             .items_center()
-            .gap(px(14.))
+            .gap_x(px(14.))
+            .gap_y(px(8.))
             .px(px(16.))
             .py(px(10.))
             .when(self.focused(Target::Body(r)), |d| d.bg(th.ink3))
@@ -1246,19 +1319,22 @@ impl Quiver {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
+                    .when(tight, |d| d.min_w(px(160.)))
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(8.))
+                            .gap_x(px(8.))
                             .child(div().font_weight(SEMIBOLD).child(self.game_name(id)))
                             .child(div().text_color(th.tx3).text_size(px(12.)).child(format!("{} failed{}", kind_word(e.kind), progress_txt.unwrap_or_default()))),
                     )
                     .child(div().text_size(px(12.)).text_color(th.bad).truncate().child(err)),
             )
-            .child(who(th, &e.source))
+            .when(!tight, |d| d.child(who(th, &e.source)))
             .child(
                 button(("f-retry", id as usize), th, Kind::Secondary, Size::Small, Some(Icon::RotateCcw), "Retry")
+                    .when(tight, |d| d.ml_auto())
                     .focus_ring(self.btn_focused(r, 0, n), th, 6.)
                     .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Retry(id), cx))),
             )
@@ -1312,12 +1388,12 @@ impl Quiver {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(div().font_weight(MEDIUM).child(self.game_name(id)))
-                            .child(div().text_color(th.tx3).truncate().child(format!("· {}", j.status))),
+                            .child(div().flex_none().font_weight(MEDIUM).child(self.game_name(id)))
+                            .child(div().min_w_0().text_color(th.tx3).truncate().child(format!("· {}", j.status))),
                     )
                     .when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(if bad { th.bad } else { th.tx3 }).truncate().child(detail))),
             )
-            .child(div().text_size(px(11.5)).text_color(th.tx3).child(what))
+            .when(!self.dl_tight(), |d| d.child(div().text_size(px(11.5)).text_color(th.tx3).child(what)))
             .when(j.total > 0, |d| d.child(mono(11.5, th.tx3).child(gb(j.downloaded.max(j.total.min(j.downloaded))))))
             .child(
                 ibtn(("r-open", j.id as usize), th, Icon::ChevronRight, None, self.btn_focused(r, 0, n))
@@ -1821,7 +1897,7 @@ impl Quiver {
         };
 
         let thumb = self.thumb(th, id, 40., 47., cx);
-        let width = 640.;
+        let width = self.dialog_width(640.);
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let mut buttons = div().flex().items_center().justify_end().gap(px(8.));
         let cancel_label = if matches!(self.dl.dialog, Some(DlDialog::Verify { .. })) { "Close" } else { "Cancel" };
@@ -1892,13 +1968,15 @@ impl Quiver {
                     )
                     .children(body)
                     .child(
+                        // Narrow: the command gets its own line above the buttons.
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .pt(px(4.))
-                            .when_some(cli, |d, c| d.child(command_line(th, c).flex_1().min_w_0()))
-                            .child(buttons),
+                            .when_some(cli, |d, c| d.child(command_line(th, c).flex_1().min_w(px(200.))))
+                            .child(buttons.ml_auto()),
                     ),
             )
             .into_any_element()

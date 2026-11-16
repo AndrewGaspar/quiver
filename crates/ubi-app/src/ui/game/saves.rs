@@ -79,23 +79,24 @@ impl Quiver {
             self.load_saves(id, true, cx);
         }
         let progress = self.gp.progress.ready().filter(|_| self.gp.id == id).cloned();
+        // Three cards in a row from Large; wrapping (each at least 260 px) below.
+        let row = self.pane_bp() >= crate::ui::responsive::Bp::Large;
         let top = div()
             .flex()
+            .when(!row, |d| d.flex_wrap())
             .gap(px(16.))
-            .child(self.saves_playtime(th, g).flex_1())
-            .child(self.connect_card(th, progress.as_ref()).w(px(300.)).flex_none())
-            .child(self.ach_summary(th, progress.as_ref()).w(px(300.)).flex_none());
+            .child(self.saves_playtime(th, g).flex_1().min_w(px(260.)))
+            .child(self.connect_card(th, progress.as_ref()).when(row, |d| d.w(px(300.)).flex_none()).when(!row, |d| d.flex_1().min_w(px(260.))))
+            .child(self.ach_summary(th, progress.as_ref()).when(row, |d| d.w(px(300.)).flex_none()).when(!row, |d| d.flex_1().min_w(px(260.))));
         let slots: AnyElement = if !local {
             card(th).child(card_header(th, "Save slots")).child(note(th, "Install the game to see its saves on this PC; cloud slots sync on the first launch.")).into_any_element()
         } else {
             match self.gp.saves.ready().cloned() {
-                Some(s) => div()
-                    .flex()
-                    .gap(px(16.))
-                    .items_start()
-                    .child(self.slots_card(th, g, &s, cx))
-                    .child(self.backups_card(th, g, &s, cx))
-                    .into_any_element(),
+                Some(s) => {
+                    let slots = div().flex().flex_col().child(self.slots_card(th, g, &s, cx));
+                    let backups = div().flex().flex_col().child(self.backups_card(th, g, &s, cx));
+                    crate::ui::responsive::columns(self.pane_bp(), 16., 330., slots, backups).into_any_element()
+                }
                 None => card(th).child(card_header(th, "Save slots")).children(load_note(th, &self.gp.saves, "saves")).into_any_element(),
             }
         };
@@ -105,7 +106,15 @@ impl Quiver {
         }
         match &progress {
             Some(p) => {
-                col = col.child(div().flex().gap(px(16.)).items_start().child(self.stats_card(th, p).flex_1()).child(self.rewards_card(th, p).flex_1()));
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(16.))
+                        .items_start()
+                        .child(self.stats_card(th, p).flex_1().min_w(px(280.)))
+                        .child(self.rewards_card(th, p).flex_1().min_w(px(280.))),
+                );
                 if let Some(a) = &p.achievements {
                     col = col.child(self.ach_grid(th, a));
                 }
@@ -275,6 +284,8 @@ impl Quiver {
                 if w > 0. { d.w(px(w)).flex_none() } else { d.flex_1() }
             }))
         };
+        // Narrow: the status goes under the two dates.
+        let narrow = self.pane_bp().narrow();
         let rows: Vec<AnyElement> = s
             .slots
             .iter()
@@ -282,6 +293,7 @@ impl Quiver {
                 let warn = matches!(sl.state, SlotState::LocalNewer | SlotState::Differs) || sl.pending_upload;
                 div()
                     .flex()
+                    .when(narrow, |d| d.flex_wrap().gap_y(px(6.)))
                     .items_center()
                     .gap(px(12.))
                     .px(px(16.))
@@ -315,7 +327,7 @@ impl Quiver {
                                 None => String::new(),
                             })),
                     )
-                    .child(div().w(px(160.)).flex_none().flex().flex_col().items_start().gap(px(2.)).child(slot_state(th, sl)).when(sl.pending_upload, |d| {
+                    .child(div().w(px(160.)).flex_none().when(narrow, |d| d.ml(px(40.))).flex().flex_col().items_start().gap(px(2.)).child(slot_state(th, sl)).when(sl.pending_upload, |d| {
                         d.child(div().text_size(px(11.)).text_color(th.tx3).child("uploads after next session"))
                     }).when(sl.state == SlotState::CloudNewer, |d| d.child(div().text_size(px(11.)).text_color(th.tx3).child("downloads at the next launch"))))
                     .into_any_element()
@@ -340,7 +352,7 @@ impl Quiver {
                     .child(format!("Couldn't read the cloud: {e}")),
             );
         }
-        c = c.child(th_row(vec![("Slot", 40.), ("This PC", 0.), ("Cloud", 0.), ("Status", 160.)]));
+        c = c.child(th_row(if narrow { vec![("Slot", 40.), ("This PC", 0.), ("Cloud", 0.)] } else { vec![("Slot", 40.), ("This PC", 0.), ("Cloud", 0.), ("Status", 160.)] }));
         if rows.is_empty() {
             c = c.child(note(th, "No saves yet. The game writes them here; with cloud saves on they're uploaded after each session."));
         }
@@ -428,8 +440,6 @@ impl Quiver {
             })
             .collect();
         card(th)
-            .w(px(330.))
-            .flex_none()
             .child(card_header(th, "Backups").child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{} kept · {}", s.backups.len(), kb(total)))))
             .when(rows.is_empty(), |d| d.child(note(th, "None yet. Quiver backs the save folder up before a cloud download or a restore replaces anything.")))
             .child(div().flex().flex_col().p(px(8.)).children(rows))

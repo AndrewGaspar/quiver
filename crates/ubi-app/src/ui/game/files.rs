@@ -21,6 +21,7 @@ impl Quiver {
             self.load_saves(id, false, cx);
         }
         let locs = self.file_locations(id);
+        let narrow = self.pane_bp().narrow();
         let rows: Vec<AnyElement> = locs
             .into_iter()
             .enumerate()
@@ -36,8 +37,10 @@ impl Quiver {
                 };
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(14.))
+                    .gap_x(px(14.))
+                    .gap_y(px(8.))
                     .px(px(16.))
                     .py(px(12.))
                     .when(i > 0, |d| d.border_t_1().border_color(th.line1))
@@ -46,11 +49,18 @@ impl Quiver {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(180.))
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).child(label)).child(div().text_size(px(11.5)).text_color(th.tx3).child(what)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .when(narrow, |d| d.flex_col())
+                                    .when(!narrow, |d| d.items_center().gap(px(8.)))
+                                    .child(div().font_weight(SEMIBOLD).child(label))
+                                    .child(div().text_size(px(11.5)).text_color(th.tx3).child(what)),
+                            )
                             .child(mono(12., th.tx2).truncate().child(self.short_path(&path))),
                     )
                     .child(
@@ -86,16 +96,13 @@ impl Quiver {
                 .child(kv(th, "Executable", mono(12., th.tx1).truncate().child(gm.exe.clone())))
                 .child(kv(th, "Arguments", mono(12., th.tx2).truncate().child(gm.args.clone().unwrap_or_else(|| "—".into()))));
         }
-        div()
-            .flex()
-            .gap(px(20.))
-            .items_start()
-            .child(
-                div()
+        crate::ui::responsive::columns(
+            self.pane_bp(),
+            20.,
+            380.,
+            div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_w_0()
                     .gap(px(14.))
                     .child(card(th).child(card_header(th, "Locations").child(div().text_size(px(12.)).text_color(th.tx3).child("each game has its own compatibility folder; nothing is shared"))).children(rows))
                     .child(
@@ -106,19 +113,15 @@ impl Quiver {
                             .text_size(px(11.5))
                             .text_color(th.tx3)
                             .child(icon(Icon::Info, 12., th.tx3))
-                            .child("Mod profiles never write to the install folder: their files and what the game writes go to the profile's own layer."),
+                            .child(div().flex_1().min_w_0().child("Mod profiles never write to the install folder: their files and what the game writes go to the profile's own layer.")),
                     ),
-            )
-            .child(
-                div()
+            div()
                     .flex()
                     .flex_col()
-                    .w(px(380.))
-                    .flex_none()
                     .gap(px(14.))
                     .child(card(th).child(card_header(th, "Install").child(div().flex_1()).child(div().font_weight(MEDIUM).text_size(px(12.)).text_color(th.tx3).child(inst.as_ref().map(|i| gb(i.size_bytes)).unwrap_or_default()))).child(facts))
                     .child(self.cli_line("files-cli", th, format!("quiver info {id}"), cx)),
-            )
-            .into_any_element()
+        )
+        .into_any_element()
     }
 }

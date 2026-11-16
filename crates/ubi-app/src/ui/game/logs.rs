@@ -21,7 +21,7 @@ impl Quiver {
             self.load_log(id, cx);
         }
         let sel = self.gp.log_file.min(LOG_FILES.len() - 1);
-        let tabs = div().flex().gap(px(6.)).children(LOG_FILES.iter().enumerate().map(|(i, (file, label))| {
+        let tabs = div().flex().flex_wrap().gap(px(6.)).children(LOG_FILES.iter().enumerate().map(|(i, (file, label))| {
             let on = i == sel;
             let focused = self.focused(Target::Body(i));
             div()
@@ -121,6 +121,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .child(tabs)

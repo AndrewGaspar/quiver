@@ -60,8 +60,6 @@ impl Quiver {
         let right = div()
             .flex()
             .flex_col()
-            .w(px(380.))
-            .flex_none()
             .gap(px(16.))
             .child(match &selected {
                 Some(p) => self.render_profile_card(th, g, &m, p, cx).into_any_element(),
@@ -74,7 +72,7 @@ impl Quiver {
             .flex_col()
             .gap(px(18.))
             .child(self.render_profile_cards(th, g, &m, &sel, cx))
-            .child(div().flex().gap(px(20.)).items_start().child(left).child(right))
+            .child(crate::ui::responsive::columns(self.pane_bp(), 20., 380., left, right))
             .into_any_element()
     }
 
@@ -90,7 +88,7 @@ impl Quiver {
             div()
                 .id(("prof-card", i))
                 .flex_1()
-                .min_w(px(180.))
+                .min_w(px(260.))
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -170,6 +168,7 @@ impl Quiver {
             div()
                 .id("prof-new")
                 .w(px(130.))
+                .min_h(px(60.))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -191,7 +190,7 @@ impl Quiver {
                 }))
                 .into_any_element(),
         );
-        div().flex().gap(px(12.)).children(cards)
+        div().flex().flex_wrap().gap(px(12.)).children(cards)
     }
 
     fn base_rows(&self, th: &Theme, g: &GameRow) -> Vec<AnyElement> {
@@ -401,6 +400,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .child(caption("Layer stack · top wins", th.tx3))
@@ -421,7 +421,7 @@ impl Quiver {
                         .text_color(th.warn)
                         .text_size(px(12.))
                         .child(icon(Icon::TriangleAlert, 14., th.warn))
-                        .child(format!("Uses {} layer(s) that were removed ({}); launching it fails until you update its layers.", missing.len(), missing.join(", "))),
+                        .child(div().flex_1().min_w_0().child(format!("Uses {} layer(s) that were removed ({}); launching it fails until you update its layers.", missing.len(), missing.join(", ")))),
                 )
             })
             .when(rows.is_empty(), |d| d.child(note(th, "No layers in the store yet. Add one from a folder below.").px(px(0.))))
@@ -430,6 +430,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .px(px(14.))
@@ -441,8 +442,7 @@ impl Quiver {
                     .border_color(th.line1)
                     .text_size(px(12.))
                     .child(icon(Icon::Pencil, 14., th.tx2))
-                    .child(div().text_color(th.tx2).child("Files the game writes go to this profile's own writable layer"))
-                    .child(div().flex_1())
+                    .child(div().flex_1().min_w(px(180.)).text_color(th.tx2).child("Files the game writes go to this profile's own writable layer"))
                     .child(mono(11., th.tx3).child(format!("profiles/{}/upper", p.profile.id))),
             )
     }
@@ -515,13 +515,13 @@ impl Quiver {
                     .border_color(th.line1)
                     .bg(th.ink1.opacity(0.5))
                     .rounded_b(px(12.))
-                    .child(div().flex().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add layer from folder")).child(div().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(icon(Icon::FolderPlus, 14., th.tx2)).child(div().font_weight(SEMIBOLD).child("Add layer from folder")).child(div().min_w_0().text_size(px(11.5)).text_color(th.tx3).child("laid out like the install folder; names are matched to the install's case")))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().w(px(200.)).flex_none().children(name))
+                            .child(div().w(px(200.)).flex_shrink().min_w(px(110.)).children(name))
                             .child(div().flex_1().min_w_0().children(path))
                             .child(button("layer-add", th, Kind::Primary, Size::Small, Some(Icon::Plus), "Add layer").on_click(cx.listener(move |this, _, _, cx| this.add_layer(id, cx)))),
                     ),

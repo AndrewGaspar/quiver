@@ -351,7 +351,7 @@ impl Quiver {
     pub fn render_palette(&mut self, th: &Theme, selected: usize, cx: &mut Context<Self>) -> AnyElement {
         let pad = self.mode == InputMode::Pad;
         let entries = self.palette_entries();
-        let width = 720.;
+        let width = self.dialog_width(720.);
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let context = self.nav.focused_game(&self.layout).and_then(|id| self.game(id)).map(|g| short_name(&g.entry.name));
         let query_empty = self.ui.palette_query.trim().is_empty();
@@ -407,8 +407,10 @@ impl Quiver {
         let hint = |k: AnyElement, label: &str| div().flex().items_center().gap(px(6.)).child(k).child(label.to_owned());
         let footer = div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(16.))
+            .gap_x(px(16.))
+            .gap_y(px(6.))
             .px(px(16.))
             .py(px(10.))
             .border_t_1()

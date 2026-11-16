@@ -54,7 +54,8 @@ impl Quiver {
             .child(self.render_kv_section(th, true, is_changed("dll"), cx))
             .child(self.render_resolved(th, g, &staged, &ops, cx));
 
-        let row = div().flex().gap(px(20.)).items_start().child(form).child(self.render_history(th, g, cx));
+        let history = self.render_history(th, g, cx);
+        let row = crate::ui::responsive::columns(self.pane_bp(), 20., 380., form, history);
         if g.steam_only() {
             let note = "A Steam copy: Steam picks Proton and the language. Environment, DLL overrides, arguments and wrappers \
                         apply when Steam starts it through Quiver (quiver steam-run reads them at every launch).";
@@ -234,7 +235,7 @@ impl Quiver {
                 .when(!last, |d| d.child(icon(Icon::ChevronRight, 12., th.tx3)))
         }));
         let input = self.gp.launch.as_ref().map(|f| f.wrappers.clone());
-        let toggles = div().flex().gap(px(6.)).children(COMMON_WRAPPERS.iter().map(|(cmd, label)| {
+        let toggles = div().flex().flex_wrap().gap(px(6.)).children(COMMON_WRAPPERS.iter().map(|(cmd, label)| {
             let on = staged.wrappers.iter().any(|w| w == cmd);
             let cmd = cmd.to_string();
             div()
@@ -283,9 +284,12 @@ impl Quiver {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(div().w(px(220.)).flex_none().child(row.key.clone()))
+            .map(|d| {
+                let key = div().child(row.key.clone());
+                d.child(if self.pane_bp().two_columns() { key.w(px(220.)).flex_none() } else { key.flex_1().min_w(px(90.)) })
+            })
             .child(div().text_color(th.tx3).child("="))
-            .child(div().flex_1().min_w_0().child(row.value.clone()))
+            .child(div().flex_1().min_w(px(90.)).child(row.value.clone()))
             .child(
                 icon_button(SharedString::from(format!("kv-rm-{dll}-{i}")), th, Icon::X, false)
                     .size(px(28.))
@@ -367,6 +371,7 @@ impl Quiver {
                 changed,
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .when(!own.is_empty(), |d| {
@@ -389,7 +394,7 @@ impl Quiver {
                                 .child(own),
                         )
                     })
-                    .child(div().flex_1().min_w_0().children(args)),
+                    .child(div().flex_1().min_w(px(160.)).children(args)),
             ))
     }
 
@@ -426,6 +431,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .child(div().font_weight(SEMIBOLD).child("Resolved launch"))
@@ -466,13 +472,16 @@ impl Quiver {
         let next = g.current_revision().unwrap_or(0) + 1;
         let msg = self.gp.launch.as_ref().map(|f| f.message.clone())?;
         let busy = self.gp.busy;
+        let pb = self.pane_bp();
+        let inset = pb.pad().min(24.);
         Some(
             div()
                 .absolute()
-                .left(px(24.))
-                .right(px(424.))
+                .left(px(inset))
+                .right(px(if pb.two_columns() { 424. } else { inset }))
                 .bottom(px(16.))
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(10.))
                 .pl(px(16.))
@@ -485,7 +494,7 @@ impl Quiver {
                 .shadow(vec![soft_shadow(crate::theme::rgba(0x000000, 0.55), 14., 40.)])
                 .child(div().size(px(7.)).rounded_full().bg(th.warn))
                 .child(div().flex_none().font_weight(SEMIBOLD).child(format!("{} unsaved change{}", ops.len(), if ops.len() == 1 { "" } else { "s" })))
-                .child(mono(11.5, th.tx3).max_w(px(180.)).truncate().child(keys.join(", ")))
+                .child(mono(11.5, th.tx3).min_w_0().max_w(px(180.)).truncate().child(keys.join(", ")))
                 .child(div().flex_1().min_w(px(160.)).child(msg))
                 .child(
                     button("launch-discard", th, Kind::Ghost, Size::Small, None, "Discard").on_click(cx.listener(|this, _, _, cx| {
@@ -501,7 +510,7 @@ impl Quiver {
         )
     }
 
-    fn render_history(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_history(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> gpui::Div {
         let id = g.id();
         let mut history: Vec<Revision> = g.history.clone().unwrap_or_default();
         history.sort_by(|a, b| b.revision.cmp(&a.revision));
@@ -657,8 +666,6 @@ impl Quiver {
             })
             .collect();
         card(th)
-            .w(px(380.))
-            .flex_none()
             .child(
                 card_header(th, "History")
                     .child(badge(th, format!("{} revision{}", history.len(), if history.len() == 1 { "" } else { "s" }), false))

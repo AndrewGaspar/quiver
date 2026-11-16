@@ -88,7 +88,7 @@ fn main() {
                 window_bounds: Some(bounds),
                 titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
                 app_id: Some("quiver".into()),
-                window_min_size: Some(size(px(960.), px(600.))),
+                window_min_size: Some(size(px(360.), px(400.))),
                 ..Default::default()
             },
             move |window, cx| {

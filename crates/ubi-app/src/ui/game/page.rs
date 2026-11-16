@@ -159,6 +159,8 @@ pub struct GamePage {
     pub busy: bool,
     /// The game's save stores (Saves tab).
     pub stores: Load<ubi_api::savestores::SaveStoresReport>,
+    /// Narrow windows: the game list is open over the page.
+    pub side_open: bool,
 }
 
 impl GamePage {
@@ -1517,8 +1519,10 @@ pub fn field_box(th: &Theme, text: impl Into<SharedString>, muted: bool) -> gpui
 pub fn form_row(th: &Theme, label: &str, help: Option<&str>, changed: bool, control: impl IntoElement) -> gpui::Div {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(16.))
+        .gap_x(px(16.))
+        .gap_y(px(8.))
         .py(px(9.))
         .border_t_1()
         .border_color(th.line1)
@@ -1541,7 +1545,7 @@ pub fn form_row(th: &Theme, label: &str, help: Option<&str>, changed: bool, cont
                 )
                 .when_some(help, |d, h| d.child(div().text_size(px(11.5)).text_color(th.tx3).line_height(px(15.)).child(h.to_owned()))),
         )
-        .child(div().flex_1().min_w_0().child(control))
+        .child(div().flex_1().min_w(px(220.)).child(control))
 }
 
 /// A titled card section ("Runtime · Wine/Proton build").
@@ -1549,8 +1553,10 @@ pub fn section(th: &Theme, title: &str, sub: impl Into<SharedString>, right: Opt
     crate::ui::card(th).px(px(16.)).pb(px(8.)).child(
         div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(8.))
+            .gap_x(px(8.))
+            .gap_y(px(4.))
             .pt(px(12.))
             .pb(px(10.))
             .child(div().font_weight(SEMIBOLD).text_size(px(13.5)).child(title.to_owned()))
@@ -1564,11 +1570,13 @@ pub fn section(th: &Theme, title: &str, sub: impl Into<SharedString>, right: Opt
 pub fn kv(th: &Theme, k: &str, v: impl IntoElement) -> gpui::Div {
     div()
         .flex()
+        .flex_wrap()
         .items_start()
-        .gap(px(12.))
+        .gap_x(px(12.))
+        .gap_y(px(2.))
         .text_size(px(12.5))
         .child(div().w(px(112.)).flex_none().text_color(th.tx3).child(k.to_owned()))
-        .child(div().flex_1().min_w_0().child(v))
+        .child(div().flex_1().min_w(px(160.)).child(v))
 }
 
 /// A small secondary button.
@@ -1842,7 +1850,7 @@ impl Quiver {
         let (w, h) = self.viewport;
         let panel = div()
             .id("dialog")
-            .w(px(460.))
+            .w(px(self.dialog_width(460.)))
             .flex()
             .flex_col()
             .gap(px(14.))
@@ -1882,7 +1890,7 @@ impl Quiver {
                             .children(body),
                     ),
             )
-            .child(div().flex().justify_end().gap(px(8.)).children(btns));
+            .child(div().flex().flex_wrap().justify_end().gap(px(8.)).children(btns));
         Some(
             gpui::deferred(
                 gpui::anchored().position(gpui::point(px(0.), px(0.))).child(
