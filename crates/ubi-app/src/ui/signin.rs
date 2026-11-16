@@ -41,7 +41,7 @@ impl Quiver {
                         .child(mono(12., th.tx2).flex_1().min_w_0().truncate().child(v))
                 };
                 super::card(th)
-                    .w(px(520.))
+                    .w(px(self.dialog_width(520.)))
                     .p(px(24.))
                     .gap(px(16.))
                     .shadow(vec![super::soft_shadow(rgba(0x000000, 0.5), 24., 70.)])
@@ -317,11 +317,14 @@ impl Quiver {
             );
         }
 
+        let card_w = self.dialog_width(480.);
+        // Narrow windows: less padding, so the fields keep their width.
+        let card_px = if card_w < 480. { 18. } else { 30. };
         let card = div()
-            .w(px(480.))
+            .w(px(card_w))
             .flex()
             .flex_col()
-            .px(px(30.))
+            .px(px(card_px))
             .py(px(28.))
             .rounded(px(14.))
             .bg(th.ink2.opacity(0.96))
@@ -353,7 +356,7 @@ impl Quiver {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .w(px(480.))
+                        .w(px(card_w))
                         .px(px(14.))
                         .py(px(10.))
                         .rounded(px(10.))
@@ -363,7 +366,7 @@ impl Quiver {
                         .text_size(px(12.5))
                         .text_color(th.acc_hi)
                         .child(icon(Icon::Users, 14., th.acc_hi))
-                        .child(format!("Signed in: {}. Adding another account; the first stays the default.", accounts.join(", "))),
+                        .child(div().flex_1().min_w_0().child(format!("Signed in: {}. Adding another account; the first stays the default.", accounts.join(", ")))),
                 )
             })
             .when(!adding && !accounts.is_empty() && self.status.as_ref().is_some_and(|s| s.signed_in.is_none()), |d| {
@@ -372,7 +375,7 @@ impl Quiver {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .w(px(480.))
+                        .w(px(card_w))
                         .px(px(14.))
                         .py(px(10.))
                         .rounded(px(10.))
@@ -380,12 +383,14 @@ impl Quiver {
                         .text_size(px(12.5))
                         .text_color(th.warn)
                         .child(icon(Icon::ClockAlert, 14., th.warn))
-                        .child("The Ubisoft session ended. Sign in again to continue."),
+                        .child(div().flex_1().min_w_0().child("The Ubisoft session ended. Sign in again to continue.")),
                 )
             })
             .child(card)
             .child(
                 div()
+                    .max_w(px(card_w))
+                    .text_center()
                     .text_size(px(11.5))
                     .text_color(th.tx3)
                     .child("Quiver is a third-party launcher for your Ubisoft library. Not affiliated with or endorsed by Ubisoft."),
@@ -393,6 +398,9 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .max_w(px(card_w))
                     .items_center()
                     .gap(px(10.))
                     .child(command_line(th, "quiver login").w(px(230.)))

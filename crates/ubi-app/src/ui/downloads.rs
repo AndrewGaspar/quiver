@@ -1897,7 +1897,7 @@ impl Quiver {
         };
 
         let thumb = self.thumb(th, id, 40., 47., cx);
-        let width = 640.;
+        let width = self.dialog_width(640.);
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let mut buttons = div().flex().items_center().justify_end().gap(px(8.));
         let cancel_label = if matches!(self.dl.dialog, Some(DlDialog::Verify { .. })) { "Close" } else { "Cancel" };
@@ -1968,13 +1968,15 @@ impl Quiver {
                     )
                     .children(body)
                     .child(
+                        // Narrow: the command gets its own line above the buttons.
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .pt(px(4.))
-                            .when_some(cli, |d, c| d.child(command_line(th, c).flex_1().min_w_0()))
-                            .child(buttons),
+                            .when_some(cli, |d, c| d.child(command_line(th, c).flex_1().min_w(px(200.))))
+                            .child(buttons.ml_auto()),
                     ),
             )
             .into_any_element()

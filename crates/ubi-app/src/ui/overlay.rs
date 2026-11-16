@@ -28,7 +28,7 @@ impl Quiver {
         };
         let palette = title == "palette";
         let pad = self.mode == InputMode::Pad;
-        let width = if palette { 720. } else { 400. };
+        let width = self.dialog_width(if palette { 720. } else { 400. });
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let items: Vec<AnyElement> = commands
             .iter()
@@ -253,9 +253,10 @@ impl Quiver {
 }
 
 pub fn toast(th: &Theme, text: SharedString) -> impl IntoElement + use<> {
-    div().absolute().left_0().right_0().bottom(px(64.)).flex().justify_center().child(
+    div().absolute().left_0().right_0().bottom(px(64.)).flex().justify_center().px(px(16.)).child(
         div()
             .flex()
+            .min_w_0()
             .items_center()
             .gap(px(8.))
             .px(px(14.))
@@ -267,6 +268,6 @@ pub fn toast(th: &Theme, text: SharedString) -> impl IntoElement + use<> {
             .shadow(vec![soft_shadow(rgba(0x000000, 0.5), 14., 40.)])
             .text_size(px(12.5))
             .child(icon(Icon::Info, 14., th.acc_hi))
-            .child(text),
+            .child(div().min_w_0().child(text)),
     )
 }

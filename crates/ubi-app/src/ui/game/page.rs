@@ -1842,7 +1842,7 @@ impl Quiver {
         let (w, h) = self.viewport;
         let panel = div()
             .id("dialog")
-            .w(px(460.))
+            .w(px(self.dialog_width(460.)))
             .flex()
             .flex_col()
             .gap(px(14.))
@@ -1882,7 +1882,7 @@ impl Quiver {
                             .children(body),
                     ),
             )
-            .child(div().flex().justify_end().gap(px(8.)).children(btns));
+            .child(div().flex().flex_wrap().justify_end().gap(px(8.)).children(btns));
         Some(
             gpui::deferred(
                 gpui::anchored().position(gpui::point(px(0.), px(0.))).child(

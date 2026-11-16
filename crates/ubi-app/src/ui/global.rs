@@ -786,7 +786,7 @@ impl Quiver {
     fn render_confirm(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(c) = self.ui.confirm.clone() else { return div().into_any_element() };
         let keys = self.mode != InputMode::Pointer;
-        let width = 460.;
+        let width = self.dialog_width(460.);
         let left = ((self.viewport.0 - width) / 2.).max(16.);
         let cancel = button("confirm-cancel", th, Kind::Secondary, Size::Medium, None, "Cancel")
             .focus_ring(keys && c.selected == 0, th, 8.)
@@ -983,8 +983,9 @@ impl Quiver {
                     .id("now-playing")
                     .absolute()
                     .top(px(58.))
-                    .right(px(588.))
-                    .w(px(420.))
+                    // Under the pill on wide windows; at the right edge once it moves.
+                    .right(px(if self.bp() == super::responsive::Bp::Wide { 588. } else { 16. }))
+                    .w(px(self.dialog_width(420.)))
                     .flex()
                     .flex_col()
                     .rounded(px(14.))

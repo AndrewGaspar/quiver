@@ -651,7 +651,7 @@ impl Quiver {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .w(px(480.))
+                .w(px(self.dialog_width(480.)))
                 .px(px(14.))
                 .py(px(10.))
                 .rounded(px(10.))
