@@ -85,6 +85,28 @@ fn find_bridge() -> Result<PathBuf> {
     })
 }
 
+/// Start quiverd through systemd if it isn't running. Started by the client instead, it
+/// would be a descendant of Steam's reaper, and Steam would show the game running (and
+/// kill quiverd on Stop) for as long as the daemon lives.
+fn ensure_daemon_outside_steam(log: &mut Log) {
+    let up = || std::os::unix::net::UnixStream::connect(ubi_api::socket_path()).is_ok();
+    if up() {
+        return;
+    }
+    let started = std::process::Command::new("systemctl")
+        .args(["--user", "start", "quiverd"])
+        .status()
+        .is_ok_and(|s| s.success());
+    for _ in 0..if started { 50 } else { 0 } {
+        if up() {
+            log.line("started quiverd (systemd user unit)");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    log.line("quiverd isn't running and the systemd unit didn't start it; starting it here (Steam will count it as part of the game until it exits)");
+}
+
 /// `--sdk-dir`: point InstallDir at `dir`, with no Wine process running in the prefix.
 fn redirect_sdk(env: &SteamEnv, dir: &Path, log: &mut Log) -> Result<()> {
     if !dir.join("uplay_r164.dll").is_file() && !dir.join("uplay_r264.dll").is_file() {
@@ -179,6 +201,7 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     // The bridge goes next to the context, under the home folder: Steam's runtime container
     // sees the home folder but not the host's /usr (where a package installs the bridge).
     std::fs::copy(find_bridge()?, &bridge_dst).context("copy ubi-bridge.exe")?;
+    ensure_daemon_outside_steam(&mut log);
     let client = Client::connect(source).await?;
     let mut ctx: serde_json::Value = client
         .call(Request::LaunchContext { product_id, savegame_path: None, install_dir: None, account: a.account })
