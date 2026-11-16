@@ -14,8 +14,8 @@ const OK: i32 = OperationResult::Ok as i32;
 const UNAVAILABLE: i32 = OperationResult::Unavailable as i32;
 
 pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
-    // Play-session lease, opened at the game's SDK init and dropped with this connection.
-    let mut lease = None;
+    // Play-session lease keeper, started at the game's SDK init, stopped with this connection.
+    let mut lease: Option<tokio::task::JoinHandle<()>> = None;
     let result: Result<()> = async {
         loop {
             let body = read_frame(&mut pipe).await?;
@@ -28,13 +28,7 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
             };
             log!("[conn {n}] <- {}", describe(&req));
             if req.init_req.is_some() && lease.is_none() {
-                match super::play_session_lease().await {
-                    Ok(s) => {
-                        log!("[conn {n}]    play session lease open");
-                        lease = Some(s);
-                    }
-                    Err(e) => log!("[conn {n}]    play session lease failed: {e:#}"),
-                }
+                lease = Some(tokio::spawn(keep_lease(n)));
             }
             match respond(&req) {
                 Reply::Rsp(rsp) => {
@@ -47,8 +41,29 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
         }
     }
     .await;
-    drop(lease);
+    if let Some(l) = lease {
+        l.abort();
+    }
     log!("[conn {n}] closed: {result:?}");
+}
+
+/// Hold a play-session lease with the broker for as long as this task runs, reopening it
+/// whenever the broker goes away (e.g. quiverd restarting) so the session stays reported.
+async fn keep_lease(n: u32) {
+    use tokio::io::AsyncReadExt;
+    loop {
+        match super::play_session_lease().await {
+            Ok(mut s) => {
+                log!("[conn {n}]    play session lease open");
+                let mut buf = [0u8; 64];
+                // The broker never writes after its reply; a read returns only on close.
+                while matches!(s.read(&mut buf).await, Ok(k) if k > 0) {}
+                log!("[conn {n}]    play session lease lost; reconnecting");
+            }
+            Err(e) => log!("[conn {n}]    play session lease failed: {e:#}; retrying"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
 }
 
 enum Reply {
