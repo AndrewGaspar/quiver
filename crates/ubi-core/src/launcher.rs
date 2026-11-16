@@ -55,6 +55,9 @@ pub struct Config {
     /// first export when the machine has several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_user: Option<String>,
+    /// Queue, bandwidth and auto-update settings.
+    #[serde(default)]
+    pub downloads: ubi_api::downloads::DownloadSettings,
 }
 
 fn yes() -> bool {
@@ -178,6 +181,7 @@ impl Config {
             ],
             report_playtime: true,
             steam_user: None,
+            downloads: Default::default(),
         };
         cfg.save()?;
         Ok(cfg)
@@ -278,49 +282,9 @@ pub async fn register(cfg: &Config, lib: &mut Library, product_id: u32, install_
     })
 }
 
-/// Install (or update) a product into `<library>/<slug>` and register it.
-pub async fn install_game(
-    cfg: &Config,
-    online: &Online,
-    product_id: u32,
-    language: &str,
-    progress: &crate::install::Progress,
-    status: impl Fn(String),
-) -> Result<Game> {
-    use crate::{download::Downloader, install, manifest};
-    status("Fetching manifest…".into());
-    let demux = online.demux().await?;
-    let mut lib = Library::fetch(&demux).await?;
-    let product = lib.get(product_id).context("not in your library")?.clone();
-    let hash = product.latest_manifest.clone().context("product has no PC build")?;
-    let name = product.name.clone().unwrap_or_else(|| product_id.to_string());
-    let dest = Games::load()?
-        .get(product_id)
-        .map(|g| g.install_dir.clone())
-        .unwrap_or_else(|| cfg.library.join(slug(&name)));
-    let mut dl = Downloader::open(&demux, &mut lib, product_id).await?;
-    let (new_manifest, raw) = dl.manifest(&hash).await?;
-    let plan = install::plan(&new_manifest, language)?;
-    progress.total.store(plan.download_bytes, std::sync::atomic::Ordering::Relaxed);
-    let installed_path = dest.join("uplay_install.manifest");
-    if let Ok(old_raw) = std::fs::read(&installed_path) {
-        if !manifest::manifest_hash(&old_raw)?.eq_ignore_ascii_case(&hash) {
-            let old_plan = install::plan(&manifest::parse_manifest(&old_raw)?, language)?;
-            let (kept, removed) = install::prepare_update(&old_plan, &plan, &dest)?;
-            status(format!("Updating ({kept} files unchanged, {removed} removed)…"));
-        }
-    }
-    status(format!("Downloading {:.1} GB…", plan.download_bytes as f64 / 1e9));
-    std::fs::create_dir_all(&dest)?;
-    install::install(&mut dl, &plan, &dest, new_manifest.is_compressed.unwrap_or(false), progress).await?;
-    std::fs::write(&installed_path, &raw)?;
-    let game = register(cfg, &mut lib, product_id, &dest.canonicalize()?, language).await?;
-    let mut games = Games::load()?;
-    games.upsert(game.clone());
-    games.save()?;
-    status("Installed".into());
-    Ok(game)
-}
+/// Install (or update) a product into `<library>/<slug>` and register it (see
+/// [`crate::builds`]: resumes, updates in place, checks free space first).
+pub use crate::builds::install_game;
 
 /// Result of importing an existing install.
 #[derive(Debug, Clone, Serialize, Deserialize)]

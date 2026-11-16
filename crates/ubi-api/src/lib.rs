@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod downloads;
 pub mod exports;
 pub mod mods;
 pub mod info;
@@ -216,6 +217,8 @@ pub enum JobKind {
     Install,
     Import,
     Play,
+    /// Hashing a game's files against its manifest (repairs run as `Install` jobs).
+    Verify,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +363,39 @@ pub enum Request {
     SteamApplyStaged,
     /// Mod layers and profiles (see [`mods`]).
     Mods(ModsRequest),
+    /// The download queue in order (`Vec<downloads::QueueEntry>`).
+    Queue,
+    /// Move a game's queue item up, down or to the top.
+    QueueMove { product_id: u32, to: downloads::QueueMove },
+    /// Pause a game's download (it stops at a slice boundary and resumes where it was).
+    QueuePause { product_id: u32 },
+    /// Resume a paused item, or retry a failed one.
+    QueueResume { product_id: u32 },
+    /// Take a game out of the queue, stopping it if it is running. Downloaded files stay,
+    /// so installing again resumes.
+    QueueRemove { product_id: u32 },
+    /// Sizes, free space and languages for installing (or updating) a game, without
+    /// starting it (`downloads::InstallPreview`).
+    InstallPreview { product_id: u32, language: Option<String> },
+    /// What updating an installed game would change (`downloads::UpdatePreview`).
+    UpdatePreview { product_id: u32 },
+    /// Queue an update for an installed game. Returns the job id.
+    Update { product_id: u32 },
+    /// Hash a game's installed files against its manifest. With `repair`, queue
+    /// re-downloading only what is missing or corrupt. Returns the job id.
+    Verify { product_id: u32, repair: bool },
+    /// The last verify report for a game (`Option<downloads::VerifyReport>`).
+    VerifyResult { product_id: u32 },
+    /// Read download settings, changing the ones given (`bandwidth_limit: 0` = unlimited).
+    /// Returns `downloads::DownloadSettings`.
+    DownloadSettings {
+        #[serde(default)]
+        max_active: Option<usize>,
+        #[serde(default)]
+        bandwidth_limit: Option<u64>,
+        #[serde(default)]
+        auto_update: Option<bool>,
+    },
     /// A game's detail (`info::GameInfo`): product-config facts, add-ons owned or not (with
     /// store links), install size and languages. `refresh` re-reads ownership from Ubisoft.
     GameInfo {

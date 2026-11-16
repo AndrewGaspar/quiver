@@ -3,6 +3,7 @@
 //! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `ubi-api` for the protocol.
 
+mod downloads;
 mod exports;
 mod mods;
 mod info;
@@ -25,7 +26,6 @@ use ubi_api::{
 };
 use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
 use ubi_core::broker::Broker;
-use ubi_core::install::Progress;
 use ubi_core::launcher::{self, Config, Games, LaunchEvent};
 use ubi_core::library::{Library, ProductConfig};
 use ubi_core::online::{Accounts, Online};
@@ -68,9 +68,8 @@ struct Daemon {
     jobs: Mutex<BTreeMap<u64, Job>>,
     next_job: AtomicU64,
     running: Mutex<HashSet<u32>>,
-    /// Running installs: progress handle (to cancel), whether to discard on cancel, and the
-    /// install folder.
-    installs: Mutex<BTreeMap<u64, (Arc<Progress>, bool, std::path::PathBuf)>>,
+    /// The install queue (installs, updates, repairs) and verify jobs.
+    downloads: Arc<downloads::Downloads>,
     library: tokio::sync::Mutex<Option<Vec<LibraryEntry>>>,
     /// Accounts whose library the cached one is missing (fetch failed).
     library_failed: Mutex<Vec<String>>,
@@ -355,16 +354,7 @@ impl Daemon {
                 Value::Null
             }
             Request::Library { refresh } => json!(self.library(refresh).await?),
-            Request::Install { product_id, language } => {
-                let name = self
-                    .library(false)
-                    .await
-                    .ok()
-                    .and_then(|l| l.into_iter().find(|e| e.product_id == product_id).map(|e| e.name))
-                    .unwrap_or_else(|| self.product_name(product_id));
-                let online = self.account_for(product_id, None).await?;
-                json!(self.start_install(source, product_id, name, language, online))
-            }
+            Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
             Request::Play { product_id, profile } => {
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_play(source, product_id, profile, online)?)
@@ -377,6 +367,7 @@ impl Daemon {
                 if self.running.lock().unwrap().contains(&product_id) {
                     bail!("stop the game first");
                 }
+                self.downloads.ensure_idle(product_id)?;
                 let game = launcher::uninstall(product_id, remove_prefix)?;
                 *self.library.lock().await = None;
                 self.log_activity(
@@ -393,14 +384,7 @@ impl Daemon {
                     bail!("job {job_id} already finished");
                 }
                 match job.kind {
-                    JobKind::Install => {
-                        let mut installs = self.installs.lock().unwrap();
-                        let entry = installs.get_mut(&job_id).context("install not cancellable yet")?;
-                        entry.0.cancel.store(true, Ordering::Relaxed);
-                        entry.1 = discard;
-                        drop(installs);
-                        self.update_job(job_id, |j| j.status = "Cancelling…".into());
-                    }
+                    JobKind::Install | JobKind::Verify => downloads::cancel(self, source, &job, discard)?,
                     JobKind::Play => {
                         let game = Games::load()?.get(job.product_id).cloned().context("not installed")?;
                         launcher::stop(&self.cfg, &game).await?;
@@ -499,6 +483,17 @@ impl Daemon {
             Request::Sessions => json!(self.sessions.list()),
             r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged) => exports::handle(self, source, r).await?,
             r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. }) => info::handle(self, source, r).await?,
+            r @ (Request::Queue
+            | Request::QueueMove { .. }
+            | Request::QueuePause { .. }
+            | Request::QueueResume { .. }
+            | Request::QueueRemove { .. }
+            | Request::InstallPreview { .. }
+            | Request::UpdatePreview { .. }
+            | Request::Update { .. }
+            | Request::Verify { .. }
+            | Request::VerifyResult { .. }
+            | Request::DownloadSettings { .. }) => downloads::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {
@@ -539,80 +534,6 @@ impl Daemon {
                 Ok(LoginResult::SignedIn { name: session.name })
             }
         }
-    }
-
-    fn start_install(
-        self: &Arc<Self>,
-        source: &str,
-        product_id: u32,
-        name: String,
-        language: Option<String>,
-        online: Arc<Online>,
-    ) -> u64 {
-        let id = self.new_job(JobKind::Install, product_id, name.clone());
-        let dest = Games::load()
-            .ok()
-            .and_then(|g| g.get(product_id).map(|g| g.install_dir.clone()))
-            .unwrap_or_else(|| self.cfg.library.join(launcher::slug(&name)));
-        self.log_activity(source, format!("install {name}{}", self.as_account(&online)), Some(product_id));
-        let this = self.clone();
-        let progress = Arc::new(Progress::default());
-        self.installs.lock().unwrap().insert(id, (progress.clone(), false, dest));
-        // Progress ticker.
-        {
-            let this = this.clone();
-            let progress = progress.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let done = this.jobs.lock().unwrap().get(&id).is_none_or(|j| j.done);
-                    if done {
-                        break;
-                    }
-                    this.update_job(id, |j| {
-                        j.downloaded = progress.downloaded.load(Ordering::Relaxed);
-                        j.total = progress.total.load(Ordering::Relaxed);
-                    });
-                }
-            });
-        }
-        tokio::spawn(async move {
-            let cfg = this.cfg.clone();
-            let lang = language.unwrap_or_else(|| "en-US".into());
-            let status_this = this.clone();
-            let p = progress.clone();
-            let result = run_local(move || async move {
-                launcher::install_game(&cfg, &online, product_id, &lang, &p, |s| status_this.update_job(id, |j| j.status = s))
-                    .await
-            })
-            .await;
-            let (discard, dest) = this.installs.lock().unwrap().remove(&id).map(|(_, d, p)| (d, Some(p))).unwrap_or_default();
-            let cancelled = result.as_ref().err().is_some_and(ubi_core::install::is_cancelled);
-            let mut discarded = false;
-            if let (true, true, Some(dir)) = (cancelled, discard, dest) {
-                // Only when never registered: then the folder holds just this partial install.
-                if Games::load().map(|g| g.get(product_id).is_none()).unwrap_or(false) {
-                    discarded = std::fs::remove_dir_all(&dir).is_ok();
-                }
-            }
-            *this.library.lock().await = None;
-            this.update_job(id, |j| {
-                j.done = true;
-                j.downloaded = progress.downloaded.load(Ordering::Relaxed);
-                match &result {
-                    Ok(_) => j.status = "Installed".into(),
-                    Err(_) if cancelled => {
-                        j.status = if discarded { "Cancelled (files removed)".into() } else { "Cancelled (install again to resume)".into() }
-                    }
-                    Err(e) => {
-                        j.status = "Failed".into();
-                        j.error = Some(format!("{e:#}"));
-                    }
-                }
-            });
-            this.emit(Event::LibraryChanged);
-        });
-        id
     }
 
     fn start_import(
@@ -849,6 +770,7 @@ async fn main() -> Result<()> {
         .take(ACTIVITY_KEEP)
         .rev()
         .collect();
+    let queue = downloads::load(&cfg);
     let daemon = Arc::new(Daemon {
         accounts,
         auth: Arc::new(Auth::default()),
@@ -859,13 +781,14 @@ async fn main() -> Result<()> {
         jobs: Mutex::new(BTreeMap::new()),
         next_job: AtomicU64::new(1),
         running: Mutex::new(HashSet::new()),
-        installs: Mutex::new(BTreeMap::new()),
+        downloads: queue,
         library: tokio::sync::Mutex::new(None),
         library_failed: Mutex::new(Vec::new()),
         activity: Mutex::new(activity),
         events,
         sessions,
     });
+    downloads::start(&daemon);
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;

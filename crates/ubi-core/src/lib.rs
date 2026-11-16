@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod broker;
+pub mod builds;
 pub mod cloudsave;
 pub mod demux;
 pub mod download;
@@ -24,6 +25,7 @@ pub mod settings;
 pub mod store;
 pub mod ubiservices;
 pub mod zipread;
+pub mod verify;
 
 pub use ubi_proto as proto;
 

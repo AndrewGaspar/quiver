@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use ubi_proto::{download, download_service as ds};
 
 use crate::demux::{Demux, Download, ServiceConnection};
+use crate::install::SliceError;
 use crate::library::Library;
 
 const BASE32: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
@@ -32,8 +33,13 @@ pub fn slice_path(sha1: &[u8]) -> String {
     format!("slices_v3/{c}/{hash}")
 }
 
+/// CDN connect timeout, and how long a response may go without sending a byte.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct Downloader {
-    conn: ServiceConnection<Download>,
+    /// Locked so slices can ask for fresh URLs while others download.
+    conn: tokio::sync::Mutex<ServiceConnection<Download>>,
     pub product_id: u32,
     pub http: reqwest::Client,
 }
@@ -54,14 +60,18 @@ impl Downloader {
         let http = reqwest::Client::builder()
             .user_agent("Massgate")
             .pool_max_idle_per_host(32)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(STALL_TIMEOUT)
             .build()?;
-        Ok(Self { conn, product_id, http })
+        Ok(Self { conn: tokio::sync::Mutex::new(conn), product_id, http })
     }
 
     /// Signed URLs (one or more mirrors each) for relative CDN paths.
-    pub async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+    pub async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
         let rsp = self
             .conn
+            .lock()
+            .await
             .request(ds::Req {
                 url_req: Some(ds::UrlReq {
                     url_requests: vec![ds::url_req::Request {
@@ -85,14 +95,39 @@ impl Downloader {
 
     /// GET the first working mirror.
     pub async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>> {
-        let mut last = None;
+        self.fetch(mirrors).await.map_err(SliceError::into_inner)
+    }
+
+    /// GET the first working mirror, saying whether a failure is worth retrying.
+    pub async fn fetch(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
+        let mut worst: Option<SliceError> = None;
         for url in mirrors {
-            match self.http.get(url).send().await.and_then(|r| r.error_for_status()) {
-                Ok(r) => return Ok(r.bytes().await?.to_vec()),
-                Err(e) => last = Some(e),
-            }
+            let e = match self.http.get(url).send().await {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) => return Ok(b.to_vec()),
+                    Err(e) => classify(e),
+                },
+                Ok(r) => {
+                    let status = r.status();
+                    let e = anyhow::anyhow!("HTTP {status}");
+                    match status.as_u16() {
+                        // Signed URLs expire (or were refused): ask for fresh ones.
+                        400 | 401 | 403 | 404 | 410 => SliceError::Refresh(e),
+                        408 | 425 | 429 | 500..=599 => SliceError::Retry(e),
+                        _ => SliceError::Fatal(e),
+                    }
+                }
+                Err(e) => classify(e),
+            };
+            // Keep the most actionable error: a refresh beats a retry beats a fatal one.
+            worst = Some(match (worst, e) {
+                (Some(SliceError::Refresh(a)), _) => SliceError::Refresh(a),
+                (_, e @ SliceError::Refresh(_)) => e,
+                (Some(SliceError::Retry(a)), SliceError::Fatal(_)) => SliceError::Retry(a),
+                (_, e) => e,
+            });
         }
-        Err(last.map(anyhow::Error::from).unwrap_or_else(|| anyhow::anyhow!("no mirrors")))
+        Err(worst.unwrap_or_else(|| SliceError::Refresh(anyhow::anyhow!("no mirrors"))))
     }
 
     /// Download and parse a manifest; returns the raw file too (to store as
@@ -102,5 +137,24 @@ impl Downloader {
         let urls = self.urls(&[path]).await?;
         let raw = self.get(&urls[0]).await?;
         Ok((crate::manifest::parse_manifest(&raw)?, raw))
+    }
+}
+
+/// Connection trouble, timeouts and cut-off bodies are worth retrying.
+fn classify(e: reqwest::Error) -> SliceError {
+    if e.is_timeout() || e.is_connect() || e.is_body() || e.is_request() || e.is_decode() {
+        SliceError::Retry(e.into())
+    } else {
+        SliceError::Fatal(e.into())
+    }
+}
+
+impl crate::install::SliceSource for Downloader {
+    async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+        Downloader::urls(self, paths).await
+    }
+
+    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
+        self.fetch(mirrors).await
     }
 }

@@ -19,7 +19,7 @@ impl Quiver {
         let overall = self
             .status
             .as_ref()
-            .and_then(|s| s.jobs.iter().find(|j| !j.done && j.kind == ubi_api::JobKind::Install && j.status != "Queued"))
+            .and_then(|s| s.jobs.iter().find(|j| !j.done && j.kind == ubi_api::JobKind::Install && !j.status.starts_with("Queued")))
             .map(job_fraction);
 
         let nav = div().flex().h_full().gap(px(2.)).children(Section::ALL.iter().map(|&s| {
