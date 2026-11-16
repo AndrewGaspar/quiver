@@ -657,11 +657,14 @@ pub async fn play(
         None
     };
 
-    let proton = Proton { cfg, prefix: &game.prefix, build };
     // A wineserver left over from an earlier session would serve this one with its own
-    // view of the install folder (it opens files for its clients), so start clean.
-    let _ = proton.wineserver().arg("-k").status().await;
-    let _ = proton.wineserver().arg("-w").status().await;
+    // view of the install folder (it opens files for its clients), so start clean, using
+    // the build that started it (wineservers only talk to their own version).
+    let previous = Proton { cfg, prefix: &game.prefix, build: session_build(game).unwrap_or_else(|| build.clone()) };
+    let _ = previous.wineserver().arg("-k").status().await;
+    let _ = previous.wineserver().arg("-w").status().await;
+    record_session_build(game, &build)?;
+    let proton = Proton { cfg, prefix: &game.prefix, build };
     let ns = match profile {
         Some(p) => {
             events(LaunchEvent::Status(format!("Mounting mods ({})…", p.profile.name)));
@@ -750,12 +753,35 @@ pub async fn play(
     Ok(())
 }
 
-/// Ask a running game to stop by shutting its prefix down.
+/// Where the Proton build of the game's latest session is recorded.
+fn session_build_path(game: &Game) -> PathBuf {
+    game.prefix.join("ubi-run").join("proton-build")
+}
+
+fn record_session_build(game: &Game, build: &Path) -> Result<()> {
+    let path = session_build_path(game);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(path, build.as_os_str().as_encoded_bytes())?;
+    Ok(())
+}
+
+/// The Proton build that started the game's latest session (a mod profile may override
+/// the game's), if it is still installed.
+fn session_build(game: &Game) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(session_build_path(game)).ok()?;
+    let build = PathBuf::from(text.trim());
+    build.join("files/bin/wineserver").is_file().then_some(build)
+}
+
+/// Ask a running game to stop by shutting its prefix down, with the wineserver of the
+/// Proton build that launched it.
 pub async fn stop(cfg: &Config, game: &Game) -> Result<()> {
-    let settings = crate::settings::current(game.product_id)?.0;
-    let build = match &settings.proton {
-        Some(name) => resolve_proton(name)?,
-        None => cfg.proton.clone(),
+    let build = match session_build(game) {
+        Some(b) => b,
+        None => match &crate::settings::current(game.product_id)?.0.proton {
+            Some(name) => resolve_proton(name)?,
+            None => cfg.proton.clone(),
+        },
     };
     let proton = Proton { cfg, prefix: &game.prefix, build };
     proton.wineserver().arg("-k").status().await?;
