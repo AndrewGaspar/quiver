@@ -1,0 +1,55 @@
+# ubisoft-linux
+
+A native Linux client for a Ubisoft library: login, library, install and one Proton prefix per game, without running `UbisoftConnect.exe`. For personal use.
+
+## Layout
+
+- `proto/`: Ubisoft Connect protobuf definitions, vendored (see `proto/README.md`)
+- `crates/ubi-proto/`: generated protobuf types
+- `crates/ubi-core/`: UbiServices auth, the demux client, ownership/library and manifest parsing
+- `crates/ubi-cli/`: the `ubi` command
+- `crates/ubi-ipc/`: types shared by the native side and the bridge
+- `crates/ubi-bridge/`: a Windows binary that runs inside the game's prefix in place of Connect
+- `tools/instance.sh`: per-game reflinked prefixes, run headless in podman
+- `tools/recon/`: SDK harness and the offline recon prefix scripts
+
+## How a game runs without Connect
+
+The game's `uplay_r1_loader64.dll` loads Ubisoft's own `uplay_r164.dll` and `uplay_aux_r164.dll`
+from the Connect install directory, unmodified. They reach Connect through named pipes
+(4-byte big-endian length + protobuf), and `ubi-bridge` owns those pipes:
+
+| Pipe | Protocol | What the bridge does |
+|---|---|---|
+| `terminal_1_uplay_aux_ipc_pipe_` | `uplayauxdll` | init, then Denuvo activation: forwards the request token to `ubi broker` |
+| `terminal_1_uplay_api_process_ipc_pipe_` | `uplaydll` | `InitProcessReq` handshake |
+| `terminal_1_uplay_ipc_pipe_` | `uplaydll` | `InitReq` (account, ticket, owned IDs, CD keys), then the SDK API |
+
+- **`UPLAY_ARGUMENTS`:** the game must be started with this set to
+  `-upc_uplay_id <id> -upc_game_version 1 -upc_exe_path <b64> -upc_working_directory <b64>`.
+  Otherwise the aux DLL relaunches it through `UbisoftGameLauncher.exe`.
+- **`ubi broker`:** runs on the host and holds the Ubisoft session. For a Denuvo token it fetches
+  an `ownership_service` ownership token, then calls `denuvo_service.GetGameTokenReq`.
+
+## Usage
+
+```sh
+cargo build
+./target/debug/ubi ping                 # demux connectivity, no login
+./target/debug/ubi login                # email, password, 2FA; session stored in the keyring
+./target/debug/ubi whoami
+./target/debug/ubi library [--all] [--json]
+./target/debug/ubi config <product-id>  # product configuration YAML
+./target/debug/ubi manifest <path/to/uplay_install.manifest> [--files]
+```
+
+Set `RUST_LOG=ubi_core=debug` to trace demux traffic.
+
+## Roadmap
+
+1. Core and CLI: auth, library, manifests (done)
+2. Launch bridge: AC Origins (uplay R1 SDK) reaches the main menu with Denuvo and DLC working (done)
+3. Bridge coverage: answer the remaining SDK requests (achievements, saves, friends, rich presence);
+   newer `upc_r2` games; refresh the ticket on long sessions
+4. Installer: download slices from the CDN, verify, one prefix per game
+5. GPUI front end
