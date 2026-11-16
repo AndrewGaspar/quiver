@@ -90,6 +90,9 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
+                // gpui 0.2's Wayland backend ignores `titlebar.title` at creation (only the
+                // app id reaches the compositor), so set it once the window exists.
+                window.set_window_title(title);
                 cx.new(|cx| {
                     let mut q = app::Quiver::new(demo, window, cx);
                     q.start_self_update(resume, window, cx);
