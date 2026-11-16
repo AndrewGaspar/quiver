@@ -36,7 +36,10 @@ loads them.
 2. **Bridge binary**: copy `~/code/ubisoft-linux/target/x86_64-pc-windows-gnu/release/ubi-bridge.exe`
    to `<prefix>/drive_c/ubi/ubi-bridge.exe`.
 3. **Container networking**: run the container with `--network host` so the bridge reaches
-   `127.0.0.1:47810`.
+   `127.0.0.1:47810`. Host networking shares the abstract X11 socket namespace: never run an X
+   server on `:0` (or any low display) in such a container, or desktop X clients connect to it
+   instead of the real Xwayland. Use a high display like `:97`, or occupy `/tmp/.X0-lock`…
+   `/tmp/.X9-lock` first so the server picks `:10`+.
 4. **Start the bridge first** (inside the container, same prefix/wineserver as the game):
    ```sh
    UBI_BRIDGE_LOG='Z:\out\bridge.log' python3 "$PROTON/proton" run 'C:\ubi\ubi-bridge.exe' 'Z:\out\context.json' &

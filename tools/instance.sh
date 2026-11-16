@@ -33,6 +33,10 @@ PROTON=${UBI_PROTON:-$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-1
 IMAGE=${UBI_IMAGE:-localhost/aco-headless:latest}
 RES=${UBI_RES:-1920x1080}
 BROKER=${UBI_BROKER:-127.0.0.1:47810}
+# Containers share the host network (to reach the broker), and with it the abstract X11
+# socket namespace: an Xvfb on :0 there would capture the desktop's X clients (Xwayland only
+# listens on the path socket). Use a display number the desktop won't have.
+XDISPLAY=${UBI_XDISPLAY:-:97}
 LIBRARY=${UBI_LIBRARY:-$HOME/Games/ubi-library}
 # SDK DLLs games load from the "Connect" install dir; copied from an existing Connect install.
 SDK_DLLS=(uplay_r1.dll uplay_r164.dll uplay_r2.dll uplay_r264.dll uplay_aux_r1.dll uplay_aux_r164.dll
@@ -143,7 +147,7 @@ EOF
     "${lib32[@]}" \
     -v /etc/machine-id:/etc/machine-id:ro \
     -e HOME=/home/steamuser -e USER=steamuser \
-    -e DISPLAY=:0 -e XDG_RUNTIME_DIR=/tmp/xdg \
+    -e DISPLAY="$XDISPLAY" -e XDG_RUNTIME_DIR=/tmp/xdg \
     -e WINEPREFIX="$src" -e STEAM_COMPAT_DATA_PATH="$src" \
     -e STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steam \
     -e STEAM_COMPAT_APP_ID=0 -e SteamAppId=0 -e SteamGameId=0 \
@@ -156,7 +160,7 @@ EOF
     -e UBI_PROTON="$PROTON" -e UBI_RES="$RES" -e UBI_EXE="$exe" \
     "$IMAGE" bash -c '
       mkdir -p /tmp/xdg /tmp/steam; chmod 700 /tmp/xdg
-      Xvfb :0 -screen 0 ${UBI_RES}x24 -nolisten tcp >/out/xvfb.log 2>&1 &
+      Xvfb "$DISPLAY" -screen 0 ${UBI_RES}x24 -nolisten tcp >/out/xvfb.log 2>&1 &
       for i in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
       echo "boot $(date -Is)" >> /out/run.log
       python3 "$UBI_PROTON/proton" run "C:\\ubi\\ubi-bridge.exe" "Z:\\out\\context.json" >/out/bridge.log 2>&1 &
