@@ -1,7 +1,9 @@
 //! Builds the [`LaunchContext`] that `ubi-bridge` serves to a game's SDK.
 
 use anyhow::{Context, Result};
-pub use ubi_ipc::{CdKey, LaunchContext};
+use std::path::Path;
+
+pub use ubi_ipc::{CdKey, Chunk, LaunchContext};
 
 use crate::auth::Session;
 use crate::library::Library;
@@ -39,5 +41,16 @@ pub async fn build(session: &Session, lib: &mut Library, uplay_id: u32) -> Resul
         ubiservices_app_id: product.app_id.clone(),
         language: Some("en-US".into()),
         broker: None,
+        chunks: Vec::new(),
     })
+}
+
+/// Chunks listed in an installed game's `uplay_install.manifest`.
+pub fn installed_chunks(install_dir: &Path) -> Result<Vec<Chunk>> {
+    let manifest = crate::manifest::load_manifest(&install_dir.join("uplay_install.manifest"))?;
+    Ok(manifest
+        .chunks
+        .iter()
+        .map(|c| Chunk { id: c.id, tags: c.tags.clone().filter(|t| !t.is_empty()) })
+        .collect())
 }

@@ -21,6 +21,16 @@ pub struct LaunchContext {
     /// `host:port` of the native broker for live requests (Denuvo tokens).
     #[serde(default)]
     pub broker: Option<String>,
+    /// Installed chunks from the game's `uplay_install.manifest` (for `UPLAY_INSTALLER_*`).
+    #[serde(default)]
+    pub chunks: Vec<Chunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Chunk {
+    pub id: u32,
+    #[serde(default)]
+    pub tags: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

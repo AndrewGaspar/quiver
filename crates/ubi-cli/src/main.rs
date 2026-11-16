@@ -44,6 +44,9 @@ enum Cmd {
         /// Broker address the bridge should use for live requests.
         #[arg(long)]
         broker: Option<String>,
+        /// Host path of the game's install directory (to report installed chunks).
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
         #[arg(short, long)]
         out: PathBuf,
     },
@@ -164,12 +167,15 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::LaunchContext { uplay_id, savegame_path, broker, out } => {
+        Cmd::LaunchContext { uplay_id, savegame_path, broker, install_dir, out } => {
             let (session, demux) = ubi_core::connect(&auth).await?;
             let mut lib = Library::fetch(&demux).await?;
             let mut ctx = ubi_core::launch::build(&session, &mut lib, uplay_id).await?;
             ctx.savegame_path = savegame_path;
             ctx.broker = broker;
+            if let Some(dir) = install_dir {
+                ctx.chunks = ubi_core::launch::installed_chunks(&dir)?;
+            }
             std::fs::write(&out, serde_json::to_vec_pretty(&ctx)?)?;
             eprintln!(
                 "wrote {} (owned ids: {:?}, {} cd key(s), ticket {} chars)",

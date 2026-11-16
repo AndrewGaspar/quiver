@@ -5,7 +5,8 @@
 #                                            and disable Connect's executables
 #   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, ubi-bridge,
 #                                            then the game (<exe> is a Windows path). Extra game
-#                                            environment: UBI_GAME_ENV="K=V K2=V2"
+#                                            environment: UBI_GAME_ENV="K=V K2=V2". Filtered Wine
+#                                            trace of the game: UBI_TRACE=+file UBI_TRACE_GREP=regex
 #   instance.sh shot <name> [file]           screenshot the container's display
 #   instance.sh keys <name> <xdotool args>   send input
 #   instance.sh logs <name>                  tail bridge and game logs
@@ -63,7 +64,11 @@ cmd_run() {
     echo "started broker on $BROKER (log: $INST_ROOT/broker.log)"
   fi
   local user_id
-  ( umask 077; "$ROOT/target/debug/ubi" launch-context "$id" --broker "$BROKER" -o "$dst/out/context.json" )
+  # Host path of the game's directory, from the Windows exe path (C:\... inside the prefix).
+  local win_dir=${exe%\\*} host_dir
+  host_dir="$dst/prefix/drive_c/$(printf %s "${win_dir#[Cc]:\\}" | tr '\\' /)"
+  [[ -f $host_dir/uplay_install.manifest ]] || die "no uplay_install.manifest in $host_dir"
+  ( umask 077; "$ROOT/target/debug/ubi" launch-context "$id" --broker "$BROKER" --install-dir "$host_dir" -o "$dst/out/context.json" )
   user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
   # Same layout Connect uses: savegames\<user id>\<uplay id>
   python3 -I - "$dst/out/context.json" "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\savegames\\$user_id\\$id" <<'EOF'
@@ -96,6 +101,7 @@ EOF
     -e PROTON_LOG=1 -e PROTON_LOG_DIR=/out \
     -e UBI_BRIDGE_LOG='Z:\out\bridge-ipc.log' \
     -e UBI_GAME_ENV="${UBI_GAME_ENV:-}" -e UBI_UPLAY_ID="$id" \
+    -e UBI_TRACE="${UBI_TRACE:-}" -e UBI_TRACE_GREP="${UBI_TRACE_GREP:-}" \
     -e UBI_PROTON="$PROTON" -e UBI_RES="$RES" -e UBI_EXE="$exe" \
     "$IMAGE" bash -c '
       mkdir -p /tmp/xdg /tmp/steam; chmod 700 /tmp/xdg
@@ -111,7 +117,17 @@ EOF
       export UPLAY_ARGUMENTS="-upc_uplay_id $UBI_UPLAY_ID -upc_game_version 1 -upc_exe_path $(b64 "$UBI_EXE") -upc_working_directory $(b64 "${UBI_EXE%\\*}")"
       echo "UPLAY_ARGUMENTS=$UPLAY_ARGUMENTS" >> /out/run.log
       echo "game env: $UBI_GAME_ENV" >> /out/run.log
-      env $UBI_GAME_ENV python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
+      if [ -n "$UBI_TRACE" ]; then
+        # Filtered Wine trace of the game only; unfiltered traces reach gigabytes in seconds.
+        # Proton forces WINEDEBUG=-all unless PROTON_LOG is set, and then writes the trace to
+        # $PROTON_LOG_DIR/steam-0.log, so make that a FIFO and filter it on the way out.
+        mkdir -p /tmp/gamelog && mkfifo /tmp/gamelog/steam-0.log
+        ( while :; do cat /tmp/gamelog/steam-0.log; done | grep -a --line-buffered -E "${UBI_TRACE_GREP:-.}" >>/out/trace.log ) &
+        env $UBI_GAME_ENV PROTON_LOG=1 PROTON_LOG_DIR=/tmp/gamelog WINEDEBUG="$UBI_TRACE" \
+          python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
+      else
+        env $UBI_GAME_ENV python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
+      fi
       echo "game exited $(date -Is) status $?" >> /out/run.log' >/dev/null
   echo "started $(ctr "$name"); logs in $dst/out"
 }
