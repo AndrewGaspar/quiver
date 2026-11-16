@@ -3,6 +3,6 @@ Type=Application
 Name=Quiver
 Comment=Third-party launcher for your Ubisoft library (not affiliated with Ubisoft)
 Exec=quiver-app
-Icon=applications-games
+Icon=quiver
 Categories=Game;
 StartupWMClass=quiver

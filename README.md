@@ -74,7 +74,20 @@ Front ends hold no state. Every request carries a source label (`gui`, `cli`, or
 changed what. Clients outlive a daemon restart: they reconnect on their own, renew their event
 subscription, and never resend a request the old daemon may already have run.
 
+## Install
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+tools/install-user.sh                          # build and install into ~/.local (no root); again to upgrade
+tools/package.sh                               # or: an Arch package (quiver-git) for /usr
+```
+
+See [packaging/arch/README.md](packaging/arch/README.md) for what goes where, upgrades and
+switching from a build directory.
+
 ## Usage
+
+To run straight from a build directory instead:
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
