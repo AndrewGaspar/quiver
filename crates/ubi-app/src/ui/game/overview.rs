@@ -486,12 +486,13 @@ impl Quiver {
         if let Some(sc) = self.steam_copy(id) {
             let app_id = sc.app_id;
             let action = crate::ui::steamgames::control(&sc);
-            let (col, label) = if sc.state.uses_quiver() { (th.ok, "Starts through Quiver") } else { (th.tx2, "Starts through Ubisoft Connect") };
+            let (col, label) = if sc.state.uses_quiver() { (th.ok, "Starts through Quiver") } else { (th.tx2, "Opens Connect first") };
             kvs = kvs.child(kv(
                 th,
                 "Steam copy",
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(6.))
                     .child(div().text_color(col).child(label))

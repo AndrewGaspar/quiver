@@ -951,7 +951,7 @@ mod tests {
             // An edit of every app's options round-trips without touching anything else.
             let out = set_launch_options_in(&text, 3751950, &patched(&launch_options_in(&text, 3751950), Q)).unwrap();
             let back = set_launch_options_in(&out, 3751950, &launch_options_in(&text, 3751950)).unwrap();
-            let had = text.contains("\"3751950\"\n\t\t\t\t\t{") && launch_options_in(&text, 3751950) != "" ;
+            let had = text.contains("\"3751950\"\n\t\t\t\t\t{") && !launch_options_in(&text, 3751950).is_empty();
             eprintln!("user {}: localconfig {} bytes, round trip exact: {}", u.id, text.len(), back == text || !had);
         }
     }

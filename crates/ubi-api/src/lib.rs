@@ -639,6 +639,23 @@ mod tests {
     }
 
     #[test]
+    fn steam_games_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"steam_games","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::SteamGames { steam_user: None }));
+        let r: Request = serde_json::from_str(r#"{"method":"steam_patch","params":{"app_id":3751950}}"#).unwrap();
+        assert!(matches!(r, Request::SteamPatch { app_id: 3751950, steam_user: None }));
+        let v = serde_json::to_value(Request::SteamOffers { enabled: None }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_offers", "params": {} }));
+        let e: Event = serde_json::from_str(r#"{"type":"steam_games_changed"}"#).unwrap();
+        assert!(matches!(e, Event::SteamGamesChanged { offer } if offer.is_empty()));
+        // Minimal and newer replies decode.
+        let g: exports::SteamGames = serde_json::from_str(r#"{"games":[{"app_id":1,"name":"x","install_dir":"/g","state":"later_state"}]}"#).unwrap();
+        assert!(g.offers && g.root.is_none());
+        assert_eq!(g.games[0].state, exports::PatchState::Other);
+        assert!(!g.games[0].patchable && !g.games[0].state.uses_quiver());
+    }
+
+    #[test]
     fn wire_compat() {
         let r: Request = serde_json::from_str(r#"{"method":"logout","params":{}}"#).unwrap();
         assert!(matches!(r, Request::Logout { account: None }));

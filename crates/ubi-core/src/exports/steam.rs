@@ -3,7 +3,9 @@
 //! Steam reads shortcuts.vdf when it starts and writes it back when it exits, so a change
 //! written while Steam runs would be lost. While Steam runs, changes go to a staging file
 //! (`<data>/steam-staged.json`) and are written the next time Quiver touches Steam's files
-//! with Steam closed, or on request ([`apply_staged`]). Restarting Steam
+//! with Steam closed, on request ([`apply_staged`]), or by quiverd once it has seen Steam
+//! closed for a while. Launch-option changes ([`super::steamgames`]) are staged the same way
+//! and written together with these. Restarting Steam
 //! ([`restart_steam`]) is only for front ends to call after the user explicitly confirms.
 //!
 //! Grid art isn't rewritten by Steam, so it's written straight away.

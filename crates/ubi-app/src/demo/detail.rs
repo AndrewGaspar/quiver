@@ -1320,11 +1320,40 @@ mod tests {
         let r: SteamExportResult = call(&demo, Request::ExportSteam { product_id: 1651, remove: false, steam_user: None });
         assert!(r.staged);
         assert!(demo.handle(Request::SteamApplyStaged).is_err(), "Steam is running");
-        assert_eq!(demo.restart_steam(), 2);
+        // Two shortcuts and Watch Dogs: Legion's launch options.
+        assert_eq!(demo.restart_steam(), 3);
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
         assert!(list.iter().all(|e| e.state != ExportState::WaitingForSteam));
         let _: ExportRecord = call(&demo, Request::ExportDesktop { product_id: 1651, remove: false });
         let v: Value = call(&demo, Request::ExportDesktop { product_id: 1651, remove: true });
         assert_eq!(v["removed"], true);
+    }
+
+    #[tokio::test]
+    async fn steam_games_switch_and_wait_for_steam() {
+        let (demo, _events) = Demo::start();
+        let s: SteamGames = call(&demo, Request::SteamGames { steam_user: None });
+        assert!(s.running && s.offers);
+        let state = |s: &SteamGames, id: u32| s.games.iter().find(|g| g.app_id == id).unwrap().state;
+        assert_eq!(state(&s, 3751950), PatchState::On);
+        assert_eq!(state(&s, 2239550), PatchState::Waiting);
+        // Far Cry 4: its own option is kept as a game argument.
+        let r: SteamPatchResult = call(&demo, Request::SteamPatch { app_id: 298110, steam_user: None });
+        assert!(r.staged && !r.unchanged);
+        assert!(r.launch_options.ends_with("steam-run %command% -skipintro"), "{}", r.launch_options);
+        // Undo before Steam restarted: nothing waits any more.
+        let r: SteamPatchResult = call(&demo, Request::SteamUnpatch { app_id: 298110, steam_user: None });
+        assert!(r.unchanged);
+        let s: SteamGames = call(&demo, Request::SteamGames { steam_user: None });
+        assert_eq!(state(&s, 298110), PatchState::Off);
+        // Anno 1800's product isn't known.
+        assert!(demo.handle(Request::SteamPatch { app_id: 916440, steam_user: None }).is_err());
+        let u: SteamUsers = call(&demo, Request::SteamUsers);
+        assert!(u.staged.iter().any(|s| s.contains("Watch Dogs: Legion")));
+        demo.restart_steam();
+        let s: SteamGames = call(&demo, Request::SteamGames { steam_user: None });
+        assert_eq!(state(&s, 2239550), PatchState::On);
+        let v: Value = call(&demo, Request::SteamOffers { enabled: Some(false) });
+        assert_eq!(v["enabled"], false);
     }
 }

@@ -40,9 +40,9 @@ settings don't fork saves. The profile shows which way it goes, and the user can
 1. **Fixes on vanilla:** behind an app-level setting, with a prompt on first launch. This is
    part of a broader **first-launch UX** design, which still needs doing:
    - sign-in;
-   - library and prefix locations;
-   - importing existing installs (Lutris/Connect);
-   - Steam shortcuts;
+   - where games are installed (the per-game prefixes folder under "Advanced");
+   - importing Ubisoft Connect downloads (Lutris, Wine, Connect inside a Steam game);
+   - Steam: Ubisoft games bought on Steam start through Quiver (launch options), and shortcuts;
    - controller and hyprpad;
    - "apply recommended fixes to unmodded games?";
    - the theme.

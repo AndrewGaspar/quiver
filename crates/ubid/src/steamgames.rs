@@ -247,9 +247,12 @@ fn fingerprint() -> Option<Vec<(PathBuf, Option<SystemTime>)>> {
     Some(out)
 }
 
+/// A new offer: app id, name, product.
+type Offer = (u32, String, Option<u32>);
+
 /// Note the installed Ubisoft games; returns them and the new offers (app id, name,
 /// product). Only games Quiver can switch are offered.
-fn rescan(lib: Option<Vec<LibraryEntry>>) -> Result<(Vec<u32>, Vec<(u32, String, Option<u32>)>)> {
+fn rescan(lib: Option<Vec<LibraryEntry>>) -> Result<(Vec<u32>, Vec<Offer>)> {
     let paths = Paths::from_env();
     let Some(steam) = Steam::find(&paths.home) else { return Ok((vec![], vec![])) };
     let users = steam.users().unwrap_or_default();

@@ -119,6 +119,10 @@ quiver export list                             # exports and whether they're sti
 quiver steam users                             # Steam users; which one gets shortcuts
 quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
 quiver steam-run %command%                     # as a Steam game's launch options: Steam copies of Ubisoft games use Quiver, not Connect
+quiver steam games                             # Ubisoft games installed through Steam; which start through Quiver
+quiver steam patch "black flag"                # set its launch options to use Quiver (keeps yours); or an app id, or `all`
+quiver steam unpatch "black flag"              # put its launch options back the way they were
+quiver steam offers off                        # don't offer the switch when a Ubisoft game is installed through Steam
 quiver info origins [--all]                    # publisher, links, size, languages, add-ons (store links for unowned)
 quiver progress origins                        # Ubisoft play time, stats, rewards, achievements, Connect level/units
 quiver saves origins [--local]                 # local vs cloud slots (sizes, times, which is newer), backups
@@ -147,8 +151,8 @@ quiver mods "far cry 4" set fc4-raw-mouse enabled=off   # also save_compatible=,
 quiver mods "far cry 4" uninstall fc4-raw-mouse   # config values it changed go back
 quiver fixes-on-vanilla on                     # installed fixes also apply to unmodded launches
 
-quiver setup                                   # first-run choices (the app's welcome): folders, importing
-                                               # Lutris/Connect installs, Steam, fixes; --show prints them
+quiver setup                                   # first-run choices (the app's welcome): install folder, importing
+                                               # Connect downloads, Steam games and shortcuts, fixes; --show prints them
 quiver install origins --dry-run               # sizes, free space, languages; nothing starts
 quiver queue                                   # the download queue: state, progress, speed
 quiver queue move origins top                  # or up / down
@@ -159,6 +163,32 @@ quiver queue settings --max-active 1 --limit 20M --auto-update off
 quiver update origins --preview                # files changed/added/removed, bytes to fetch
 quiver verify origins [--repair]               # hash files against the manifest; repair fetches only bad slices
 ```
+
+## Ubisoft games bought on Steam
+
+A Steam copy of a Ubisoft game normally opens Ubisoft Connect first. With its Steam launch options
+set to `<abs path>/quiver --source steam steam-run %command%`, Steam's own Proton runs Quiver's
+bridge instead: no Connect window, no second sign-in, and play time is reported through `quiverd`.
+Nothing in the game's prefix changes, and clearing the launch option undoes it.
+
+`quiver steam patch` (and the app: the welcome's Steam step, Settings › Steam and shortcuts, the
+game page) writes that launch option for you, in the Steam user's
+`userdata/<id>/config/localconfig.vdf` (`UserLocalConfigStore/Software/Valve/Steam/apps/<appid>/LaunchOptions`).
+Your own options are kept: `FOO=1 %command% -bar` becomes `FOO=1 /…/quiver --source steam steam-run
+%command% -bar`, and options without `%command%` are kept as game arguments after it.
+`quiver steam unpatch` restores exactly what was there (or, if you edited it since, takes only
+Quiver's part out). The path is absolute because Steam's `PATH` usually lacks `~/.local/bin`.
+
+Ubisoft games are found in every Steam library (`libraryfolders.vdf`, `appmanifest_*.acf`): by
+the install script registering `Ubisoft\Launcher\Installs\<id>` (which also gives the product
+id), by Connect's SDK loaders or installer in the game folder, or by a small table; the product id
+otherwise comes from the prefix's registry or a same-named game in your library. Steam rewrites
+`localconfig.vdf` when it exits, so while Steam runs the change is staged: it's written when Steam
+closes (quiverd checks every 30 s), on `quiver steam apply`, or by `quiver steam restart`, which
+always asks first. `quiverd` also notices Ubisoft games newly installed through Steam and offers the
+switch once (an Activity entry, and a card in the app); "Not now" isn't asked again, and
+`quiver steam offers off` stops the offers. Steam from Flatpak isn't supported (its sandbox can't run
+`quiver`).
 
 ## Downloads
 
