@@ -1,1 +1,6 @@
 /target
+# Downloaded Ubisoft artwork and dumped account data (regenerate with design/tools/*)
+/design/art/raw/
+/design/art/web/
+/design/data/
+/design/mockup/ubi-launcher.html

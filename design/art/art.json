@@ -1,0 +1,390 @@
+[
+ {
+  "background_image": "fe567514ffeb0e115d6bc50623f3abd5.jpg",
+  "thumb_image": "79b8e5e2468fb3f434b622ee5c5063fb.jpg",
+  "logo_image": "aa3e99ad561e41b93d2d2a5a6875409c.png",
+  "icon_image": "48edec3d91f23947b02be534159b74d1.ico",
+  "name": "Assassin's Creed® Chronicles China",
+  "sort_string": "Assassin's Creed 12",
+  "product_id": 1651,
+  "lib_name": "Assassin's Creed® Chronicles China",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACCGame-Win32-Shipping.exe"
+  ]
+ },
+ {
+  "background_image": "e8db3e40fee368ca00bff5024e0251ac.jpg",
+  "thumb_image": "50922c7ffc97b2be2ccdf04342242e6d.jpg",
+  "logo_image": "a2c5269822b35d77991907ae85e0b71a.png",
+  "splash_image": "941fa1c7fdbc7ef6afe28ca47ae3e176.jpg",
+  "icon_image": "b2e6a3fb1654ed11016bc6c5068cbddc.ico",
+  "name": "Assassin's Creed® III - Remastered",
+  "sort_string": "Assassin's Creed 05.3",
+  "product_id": 5183,
+  "lib_name": "Assassin's Creed® III - Remastered",
+  "dlc_count": 1,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACIII.exe",
+   "ACLiberation.exe"
+  ]
+ },
+ {
+  "background_image": "9559114dbbffbb37e2283c61c8e2bd03.jpg",
+  "thumb_image": "d8101d9638c7cf3717773074aa030418.jpg",
+  "logo_image": "6a79e2157a3c2998df56f475f2f79449.png",
+  "splash_image": "053cb1339099bda06eef8ee99dbc8f43.png",
+  "icon_image": "beabeab9b63e93e11f03f4e9231733d4.ico",
+  "name": "Assassin's Creed® Mirage",
+  "product_id": 6100,
+  "lib_name": "Assassin's Creed® Mirage",
+  "dlc_count": 32,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACMirage.exe",
+   "ACMirage_plus.exe"
+  ]
+ },
+ {
+  "background_image": "df0c2d8dafeef298d25d308e2d671322.jpg",
+  "thumb_image": "dc483860ed7e46a710bba16bb51671ab.jpg",
+  "logo_image": "fa3b2098a82f5fce7bb439079726440a.png",
+  "splash_image": "3f8b4ab3bf3e6a25da701603325a3152.jpg",
+  "icon_image": "8a7b25947147117ff25674487a23a84d.ico",
+  "name": "Assassin's Creed® Odyssey",
+  "sort_string": "Assassin's Creed 17",
+  "product_id": 5059,
+  "lib_name": "Assassin's Creed® Odyssey",
+  "dlc_count": 66,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACOdyssey.exe",
+   "ACOdyssey_plus.exe"
+  ]
+ },
+ {
+  "background_image": "2d21948937872f3a4e488d1a58b765db.jpg",
+  "thumb_image": "1be065304226cdb56a5818dd9808c3e0.jpg",
+  "logo_image": "173bca0f8923c59a731b6f43a9810970.png",
+  "splash_image": "4b6c0b2a9ad5dc22b720f7c349e54951.jpg",
+  "icon_image": "3095113d1c9698957e4fb4e2ce087e0d.ico",
+  "name": "Assassin's Creed® Origins",
+  "sort_string": "Assassin's Creed 16",
+  "product_id": 3539,
+  "lib_name": "Assassin's Creed® Origins",
+  "dlc_count": 43,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACOrigins.exe",
+   "ACOrigins_plus.exe"
+  ]
+ },
+ {
+  "background_image": "cb94c927869ea6e04f68c38ce0462121.jpg",
+  "thumb_image": "c698e01ad67770b33af230f93d8f5753.jpg",
+  "logo_image": "e922d4d28ae9b303f770621c5e604ca7.png",
+  "icon_image": "2cc31c01f09cd8f98ce44c69f60a575b.ico",
+  "name": "Assassin's Creed® Syndicate",
+  "sort_string": "Assassin's Creed 15",
+  "product_id": 1875,
+  "lib_name": "Assassin's Creed® Syndicate",
+  "dlc_count": 66,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACS.exe"
+  ]
+ },
+ {
+  "background_image": "d4cb571aee87654441fb46624a99b3c5.jpg",
+  "thumb_image": "b72d55757d36943ae5f1a0ac01d8e295.jpg",
+  "logo_image": "59bbabde8aff65589071ef743a051206.png",
+  "icon_image": "61fdd16f06ae08158d0a6d476f1c6bd5.ico",
+  "name": "Assassin's Creed® Unity",
+  "sort_string": "Assassin's Creed 10",
+  "product_id": 720,
+  "lib_name": "Assassin's Creed® Unity",
+  "dlc_count": 63,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACU.exe"
+  ]
+ },
+ {
+  "background_image": "5a569d6034781cc6aad64f9fd09933ab.jpg",
+  "thumb_image": "27c97b4d76c0a26e88030a857a518677.jpg",
+  "logo_image": "18a0b36f540ec7a577e2d6c7c6c4caf3.png",
+  "splash_image": "fdba4739d70f871abe392b1fdc4bd9e3.jpg",
+  "icon_image": "436885f573ff3b6c934cdd33bca9be22.ico",
+  "name": "Assassin's Creed® Valhalla",
+  "sort_string": "Assassin's Creed 18",
+  "product_id": 13504,
+  "lib_name": "Assassin's Creed® Valhalla",
+  "dlc_count": 46,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACValhalla.exe",
+   "ACValhalla_plus.exe"
+  ]
+ },
+ {
+  "background_image": "ac060891fa9862102170c3bdac811e21.jpg",
+  "thumb_image": "a8ee4a8f69cb0f91eaa13a7017728454.png",
+  "logo_image": "7567333e7a423be432ab0ddecf4123f2.png",
+  "icon_image": "0ebf34f61a01a7a2a8ae1df5a6368558.ico",
+  "name": "Assassin’s Creed® Chronicles India",
+  "sort_string": "Assassin's Creed 13",
+  "product_id": 1847,
+  "lib_name": "Assassin’s Creed® Chronicles India",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACCGame-Win32-Shipping.exe"
+  ]
+ },
+ {
+  "background_image": "d4c5bb0f3cd230eabfafcd91803a2bc4.jpg",
+  "thumb_image": "239ea35ca6be64d0e10120b818f567d4.jpg",
+  "logo_image": "c807aee7461592d5504a1cab624165da.png",
+  "splash_image": "beac15c9c803f8b11fe51f671cacd5f3.png",
+  "icon_image": "ef399b53ac336806eba9582c6f93c0b0.ico",
+  "name": "Assassin’s Creed® Chronicles Russia",
+  "sort_string": "Assassin's Creed 14",
+  "product_id": 1848,
+  "lib_name": "Assassin’s Creed® Chronicles Russia",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ACCGame-Win32-Shipping.exe"
+  ]
+ },
+ {
+  "background_image": "4821a726fcec8a293464f107824b5f6c.jpg",
+  "thumb_image": "eee09b42f111d9f6c614e3e458aca853.jpg",
+  "logo_image": "c174c3ff05466c8b1dfa3572d9d6cba7.png",
+  "splash_image": "a3dfe39d3171004d53b23be51c661a4d.jpg",
+  "icon_image": "8a0af04f1e55a3e613a7afb1667ef031.ico",
+  "name": "Discovery Tour by Assassin's Creed: Ancient Egypt",
+  "product_id": 5100,
+  "lib_name": "Discovery Tour by Assassin's Creed: Ancient Egypt",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": false,
+  "exes": [
+   "DiscoveryTourAncientEgypt.exe",
+   "DiscoveryTourAncientEgypt_plus.exe"
+  ]
+ },
+ {
+  "background_image": "3ebb77cd769366985a8d500eee3ba8f3.jpg",
+  "thumb_image": "6952e059380a8228f0a0be59feae4381.jpg",
+  "logo_image": "646dc35e4a04cd6a3cc5374abaacb03e.png",
+  "splash_image": "2fcdbeed927416075bf37bf4a72b3fbe.jpg",
+  "icon_image": "8a7b25947147117ff25674487a23a84d.ico",
+  "name": "Discovery Tour: Ancient Greece by Ubisoft",
+  "product_id": 5404,
+  "lib_name": "Discovery Tour: Ancient Greece by Ubisoft",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": false,
+  "exes": [
+   "ACOdyssey.exe"
+  ]
+ },
+ {
+  "background_image": "856bccf231cdf8341d9aec04411d22f5.jpg",
+  "thumb_image": "5216494f61c947708a013e1bc8ed099e.jpg",
+  "logo_image": "8d53033debba22973766c13db896bb6f.png",
+  "icon_image": "912c28f69e6d44a0c9b106038aa98259.ico",
+  "name": "Far Cry® 4",
+  "sort_string": "Far Cry 05",
+  "product_id": 420,
+  "lib_name": "Far Cry® 4",
+  "dlc_count": 38,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "FarCry4.exe",
+   "IGE_WPF64.exe"
+  ]
+ },
+ {
+  "background_image": "e046cee4cbf28c014292582e9c3e9103.jpg",
+  "thumb_image": "decf139ab84921a3bf69f3e813dc3604.jpg",
+  "logo_image": "e96bb3464f0934a469078ade5f1d0e0a.png",
+  "icon_image": "af75079256f3274d9235552a0b616e50.ico",
+  "name": "Far Cry® 5",
+  "sort_string": "Far Cry 07",
+  "product_id": 1803,
+  "lib_name": "Far Cry® 5",
+  "dlc_count": 49,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "bin/ArcadeEditor64.exe",
+   "bin\\FarCry5.exe",
+   "bin_plus/ArcadeEditor64.exe",
+   "bin_plus\\FarCry5.exe"
+  ]
+ },
+ {
+  "background_image": "22e9f2d0fc157278673840ad2e89c803.jpg",
+  "thumb_image": "f1166b68eea8d132ad067434064c939a.jpg",
+  "logo_image": "4198c5f80b1e285656bc57c05fecca11.png",
+  "splash_image": "aee5f1bd5b1a5ffa8587c553622d7f62.jpg",
+  "icon_image": "da9ad3354ed18e9c2788f786db672d7b.ico",
+  "name": "Immortals Fenyx Rising™",
+  "sort_string": "Immortals Fenyx Rising",
+  "product_id": 5405,
+  "lib_name": "Immortals Fenyx Rising™",
+  "dlc_count": 41,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "ImmortalsFenyxRising.exe",
+   "ImmortalsFenyxRising_plus.exe"
+  ]
+ },
+ {
+  "background_image": "5d04eba230d70e75c9baf66928627a23.jpg",
+  "thumb_image": "9dbc9b7ad1f038b193ae7a9665d7cb9c.jpg",
+  "logo_image": "f62a6f0647c9f9b6e73b65bc2238f3aa.png",
+  "icon_image": "7d7e05d6ccaa5728a6bdd4eaace6a894.ico",
+  "name": "Prince of Persia",
+  "sort_string": "Prince of Persia 4",
+  "product_id": 277,
+  "lib_name": "Prince of Persia",
+  "dlc_count": 0,
+  "cloud_saves": false,
+  "achievements": false,
+  "exes": []
+ },
+ {
+  "background_image": "be7e9b2cf3ef8e908bcdb26c9927a94c.jpg",
+  "thumb_image": "62906578c6ca5c73a2b9538f65ee5d37.png",
+  "logo_image": "8e66c04a6aa66b5e98968ea8d59c4ba0.png",
+  "splash_image": "a1b7aaff7c854d810ffa9d774fa335fd.jpg",
+  "icon_image": "ef546301c29bcc02695bd8be93b0e18a.ico",
+  "name": "Rabbids Coding!",
+  "product_id": 5408,
+  "lib_name": "Rabbids Coding!",
+  "dlc_count": 0,
+  "cloud_saves": true,
+  "achievements": false,
+  "exes": []
+ },
+ {
+  "background_image": "c1de6640e699382a69ff568854149941.jpg",
+  "thumb_image": "228c89d9826b06618c26280dbbae867e.jpg",
+  "logo_image": "d1aa7361cd6fbf70984d35c780b7e99b.png",
+  "splash_image": "7bbf03e90aa1b881293ea56910a8ded9.png",
+  "icon_image": "de34131384392b685102397359589dcd.ico",
+  "name": "Starlink: Battle for Atlas",
+  "product_id": 5277,
+  "lib_name": "Starlink: Battle for Atlas",
+  "dlc_count": 14,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "Starlink.exe",
+   "Starlink_Plus.exe"
+  ]
+ },
+ {
+  "background_image": "2af5c1da24f7503406879e5750633db5.jpg",
+  "thumb_image": "abef2ebfc2695686ee4d7f7c0c8a7254.jpg",
+  "logo_image": "fb22743d09e81aa77163aa0ecc45561d.png",
+  "splash_image": "ca538b1a04b05386ade91d3bb042a7a6.jpg",
+  "icon_image": "cce4d99b9ada86ae74b2cee5f64b6722.ico",
+  "name": "The Settlers 3 - History Edition",
+  "sort_string": "The Settlers 3 - History Edition",
+  "product_id": 11784,
+  "lib_name": "The Settlers 3 - History Edition",
+  "dlc_count": 0,
+  "cloud_saves": false,
+  "achievements": false,
+  "exes": [
+   ".\\S3EDITOR\\S3Editor.exe",
+   ".\\S3EDITOR\\S3Editor_en.exe",
+   ".\\config\\Settlers3Config.exe",
+   "Siedler3R.exe"
+  ]
+ },
+ {
+  "background_image": "6b7da0564c173293938428c11930afa0.jpg",
+  "thumb_image": "29af1426c8ea0ed58abcc96195c45ef7.jpg",
+  "logo_image": "3ef7644fa8876ca454a90e2b936d32f9.png",
+  "splash_image": "562969058e8378ddbb54d0ab009e74d5.jpg",
+  "icon_image": "8231e71808581ef4d3499fe96ecdf921.ico",
+  "name": "Trackmania",
+  "product_id": 5595,
+  "lib_name": "Trackmania",
+  "dlc_count": 8,
+  "cloud_saves": false,
+  "achievements": false,
+  "exes": [
+   "Trackmania.exe"
+  ]
+ },
+ {
+  "background_image": "5c65f6f3ffc93dbd700af41e3f25744f.png",
+  "thumb_image": "7d95922e7462997e40b5ed3a0a99f2dd.png",
+  "logo_image": "5bdd6776af384a62ce924747a1cf46cf.png",
+  "splash_image": "abaa5deea0b590c8e6370479e07cff54.jpg",
+  "icon_image": "49d3a2dd75d8d7b4c69584b4b66c038f.ico",
+  "name": "Trials Rising",
+  "product_id": 3600,
+  "lib_name": "Trials Rising",
+  "dlc_count": 46,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "Launch_Trials_Rising.exe"
+  ]
+ },
+ {
+  "background_image": "160159cf6a4487f5605078896c68e294.jpg",
+  "thumb_image": "0f946fb03f8bdf913969d1c22df1625e.jpg",
+  "logo_image": "8ed50864d177441829e82c7afb003f39.png",
+  "splash_image": "cb9e4b7fd09fc1f80654acefc10d8e31.jpg",
+  "icon_image": "1dfa256ba4370c1212f01a1251268216.ico",
+  "name": "WATCH_DOGS® 2",
+  "product_id": 2688,
+  "lib_name": "WATCH_DOGS® 2",
+  "dlc_count": 48,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "'\\bin\\WatchDogs2.exe",
+   "'\\bin_plus\\WatchDogs2.exe"
+  ]
+ },
+ {
+  "background_image": "c446fa52674cddecb4263ac63dff90b5.jpg",
+  "thumb_image": "ebb6c36e07ce6d0a30ca86faddc1c26f.jpg",
+  "logo_image": "63137b4b83f052122428bced1e407ac7.png",
+  "splash_image": "f22244595046240c8b65a08ccd6d5f14.jpg",
+  "icon_image": "3e71665ae92b94b9e9d7adac07d831a5.ico",
+  "name": "Watch Dogs: Legion",
+  "sort_string": "watch_dogs03",
+  "product_id": 3353,
+  "lib_name": "Watch Dogs: Legion",
+  "dlc_count": 43,
+  "cloud_saves": true,
+  "achievements": true,
+  "exes": [
+   "bin\\WatchDogsLegion.exe"
+  ]
+ }
+]
