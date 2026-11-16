@@ -1,7 +1,7 @@
 # Mod options: a pluggable configuration mechanism (design notes)
 
 Status: proposal (2026-11-16), nothing built. Companion to [MODS-V2.md](MODS-V2.md) (the mod
-model this extends) and `OVERLAY.md` (the in-game overlay, designed separately; it consumes
+model this extends) and `SIGHT.md` (the in-game overlay, designed separately; it consumes
 the contract in [Contract with the in-game overlay](#contract-with-the-in-game-overlay)).
 
 **Naming.** In this codebase *overlay* already means two things: overlayfs mounts
@@ -57,7 +57,7 @@ session) have no way to say "this key is a 1–5 slider and applies live".
 
 ## Non-goals
 
-- Rendering, input capture or injection for the in-game overlay (OVERLAY.md).
+- Rendering, input capture or injection for the in-game overlay (SIGHT.md).
 - Memory poking or patching game code to change values. Mods do that; Quiver configures mods.
 - Arbitrary code plugins in the daemon (see [Pluggability](#2-pluggability)).
 - Nexus-style "mod configuration as a downloadable recipe" marketplace. Schemas travel with
@@ -865,7 +865,7 @@ to one form (W3C `KeyboardEvent.code` names plus modifiers: `F9`, `Shift+Home`) 
 |---|---|
 | mod options (`key` type) | DLSS: F9 (Frame Generation), F10 (DLSS/TAA) |
 | known tools (runtime surfaces) | ReShade: Home (`KeyOverlay=36,0,0,0`); MangoHud: Shift_R+F12 (HUD), Shift_L+F4 (reload); Steam: Shift+Tab (overlay), F12 (screenshot) |
-| the in-game overlay | its own open/close binding (OVERLAY.md) |
+| the in-game overlay | its own open/close binding (SIGHT.md) |
 | the game | catalog entry per product, where known (`[keys]` in the game surface) |
 | desktop | Hyprland binds with no modifier other than Super never reach the game; listed as "taken by the desktop" if they overlap |
 
@@ -912,7 +912,7 @@ Generation" in a help strip. Mods without the SDK keep their own keys (steer 14)
 
 ## Contract with the in-game overlay
 
-This section is the interface OVERLAY.md can rely on. Everything here is daemon-side, so it
+This section is the interface SIGHT.md can rely on. Everything here is daemon-side, so it
 holds whether the in-game overlay runs as a Linux Vulkan layer (talking to quiverd's Unix
 socket directly) or as a Windows DLL in the game (talking through the bridge's pipe, which
 relays the same JSON requests).
@@ -982,7 +982,7 @@ value it didn't validate. The overlay doesn't need to know about files, formats,
 folders, the SDK or the bridge.
 
 **C10. Not provided.** Rendering, input, focus, text entry, screenshots; FPS/frametime
-metrics (MangoHud-like data is OVERLAY.md's, though a mod's readouts are delivered here).
+metrics (MangoHud-like data is SIGHT.md's, though a mod's readouts are delivered here).
 
 ## Prior art
 

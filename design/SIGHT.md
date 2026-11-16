@@ -776,6 +776,21 @@ Sight consumes MOD-CONFIG; it doesn't define schemas or storage. What Sight need
 If MOD-CONFIG can't provide M4's acknowledgement or M6's events, Sight degrades to "sent" states
 and refresh-on-open.
 
+**Reconciled with MOD-CONFIG (2026-11-16).** MOD-CONFIG calls the feature *Options* and its
+"Contract with the in-game overlay" (C1–C10) covers these: M1 → C1 + C2 (`ActiveSession`
+gains `session`, `profile`, `options_revision`, `pids`; `OptionsList` returns renderable
+`SurfaceState`), M2 → C2 + C8 (`overlay = false` hides settings Sight can't edit), M3 → `apply`
+/ `at` on `OptionDef` (live, at a game event, restart, next launch), M4 → C3 per-op outcomes,
+M5 → C4 (in-game edits saved to the profile, coalesced per burst; `live: Only` and
+`OptionsRevertSession` for try/revert), M6 + M8 → C5 events (`OptionsLive`, `OptionsReadout`),
+M7 → C7 `OptionsKeys` (Sight registers its chord as a runtime surface), M9 → C6
+`OptionsInvoke`, M10 → C9. One gap: MOD-CONFIG has `danger` (shown read-only in game unless
+enabled) but no separate *save-affecting* flag; save compatibility stays a property of the mod
+version (MODS-V2), so Sight should warn from that rather than per option. Sight is a separate
+process, not inside the game, so it finds its session from `Request::Sessions` (focused game's
+pids/window) rather than from `QUIVER_SESSION` in its own environment; only the Sight layer
+reads the env.
+
 ---
 
 ## 11. Risks and spikes
