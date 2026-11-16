@@ -182,7 +182,7 @@ impl Quiver {
             .gap(px(7.))
             .text_size(px(12.))
             .text_color(th.tx3)
-            .child(div().size(px(7.)).rounded_full().bg(if self.ui.link_up() { th.ok } else { th.warn }))
+            .child(div().size(px(7.)).rounded_full().bg(if self.daemon_up() { th.ok } else { th.warn }))
             .child(match checked {
                 Some(s) if s < 2 => "Live · just checked".to_owned(),
                 Some(s) => format!("Live · checked {s} s ago"),

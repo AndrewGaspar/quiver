@@ -3,12 +3,11 @@
 //! palette and sign-in fields, live refreshes, and the demo-mode setup for these screens.
 //!
 //! `app.rs` calls in through a handful of hooks (`start_global`, `global_event`,
-//! `global_status`, `global_input`, `on_link_lost`, ...), so the screens in `settings.rs`,
+//! `global_status`, `global_input`, ...), so the screens in `settings.rs`,
 //! `palette.rs`, `activity.rs` and `signin.rs` stay out of the shared files.
 
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use gpui::{
     AnyElement, App, Context, Entity, EntityId, Focusable, IntoElement, KeyBinding, ParentElement, SharedString, Stateful,
     Styled, Window, actions, div, prelude::*, px,
@@ -21,10 +20,9 @@ use crate::app::{Conn, InputMode, NAV_CONTEXT, Quiver};
 use crate::art::{ArtSlot, Variant};
 use crate::model::{Actor, actor, clean_name, clock, short_name};
 use crate::nav::{Input, Overlay, Page, Section, SettingsSection};
-use crate::source::Source;
 use crate::text_input::TextInput;
 use crate::theme::{Theme, rgba};
-use crate::{err_text, on_tokio};
+use crate::err_text;
 
 actions!(
     quiver_global,
@@ -143,14 +141,6 @@ pub enum GlobalCmd {
     ExportDesktop(u32),
 }
 
-/// The connection to `quiverd` once the app is up.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Link {
-    Up,
-    /// The connection dropped; the app keeps showing what it had and retries.
-    Reconnecting { attempt: u32, since: Instant, error: Option<String> },
-}
-
 #[derive(Clone, Debug)]
 pub enum ConfirmAction {
     SignOut { user_id: String, name: String },
@@ -175,7 +165,8 @@ pub struct GlobalUi {
     pub protons: Option<Result<Vec<String>, String>>,
     pub exports: Option<Result<Vec<ExportStatus>, String>>,
     pub steam: Option<Result<SteamUsers, String>>,
-    pub link: Option<Link>,
+    /// When the daemon connection dropped (`Event::Disconnected`), for the banner.
+    pub down_since: Option<Instant>,
     pub confirm: Option<Confirm>,
     pub now_playing_open: bool,
     pub palette_input: Option<Entity<TextInput>>,
@@ -193,10 +184,6 @@ pub struct GlobalUi {
 }
 
 impl GlobalUi {
-    pub fn link_up(&self) -> bool {
-        !matches!(self.link, Some(Link::Reconnecting { .. }))
-    }
-
     pub fn source_filter(&self) -> SourceFilter {
         self.activity_source.unwrap_or(SourceFilter::All)
     }
@@ -257,7 +244,7 @@ impl Quiver {
         if !matches!(self.conn, Conn::Ready) {
             return;
         }
-        if !self.ui.sessions.is_empty() || matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
+        if !self.ui.sessions.is_empty() || self.ui.down_since.is_some() {
             cx.notify(); // clocks
         }
         if self.nav.page == Page::Activity {
@@ -312,6 +299,17 @@ impl Quiver {
                 }
             }
             Event::GameStarted { .. } | Event::GameStopped { .. } => self.load_sessions(cx),
+            Event::Disconnected => {
+                self.ui.down_since = Some(Instant::now());
+                self.ui.confirm = None;
+                return;
+            }
+            // `app.rs` reloads status and the library; the global screens reload their own.
+            Event::Reconnected => {
+                self.ui.down_since = None;
+                self.load_sessions(cx);
+                self.load_protons(cx);
+            }
             Event::Job(j) if !j.done => return,
             _ => {}
         }
@@ -320,114 +318,6 @@ impl Quiver {
         if matches!(e, Event::LibraryChanged) {
             self.load_exports(cx);
         }
-    }
-
-    /// The event stream ended: the daemon went away (or restarted). Keep the screen as it
-    /// is, say so, and reconnect with backoff. If the client gets its own reconnect (and an
-    /// `Event::Reconnected`), call [`Self::on_link_up`] from that event instead.
-    pub fn on_link_lost(&mut self, cx: &mut Context<Self>) {
-        if self.demo || matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
-            return;
-        }
-        if matches!(self.conn, Conn::Connecting | Conn::Failed(_)) {
-            return;
-        }
-        tracing::warn!("lost the connection to quiverd; reconnecting");
-        self.ui.link = Some(Link::Reconnecting { attempt: 0, since: Instant::now(), error: None });
-        self.source = None;
-        self.ui.confirm = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let mut delay = Duration::from_millis(500);
-            loop {
-                cx.background_executor().timer(delay).await;
-                let go = this
-                    .update(cx, |this, cx| match &mut this.ui.link {
-                        Some(Link::Reconnecting { attempt, .. }) => {
-                            *attempt += 1;
-                            cx.notify();
-                            true
-                        }
-                        _ => false,
-                    })
-                    .unwrap_or(false);
-                if !go {
-                    return;
-                }
-                let rx = on_tokio(async move { open_source(false).await });
-                match rx.await {
-                    Ok(Ok((source, status, events))) => {
-                        let _ = this.update(cx, |this, cx| this.adopt_source(source, status, events, cx));
-                        return;
-                    }
-                    Ok(Err(e)) => {
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(Link::Reconnecting { error, .. }) = &mut this.ui.link {
-                                *error = Some(err_text(&e));
-                            }
-                            cx.notify();
-                        });
-                    }
-                    Err(_) => return,
-                }
-                delay = (delay * 2).min(Duration::from_secs(10));
-            }
-        })
-        .detach();
-    }
-
-    /// "Retry now" in the reconnecting banner: skip the rest of the backoff.
-    pub fn reconnect_now(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
-            return;
-        }
-        let rx = on_tokio(async move { open_source(false).await });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok((source, status, events))) = rx.await {
-                let _ = this.update(cx, |this, cx| this.adopt_source(source, status, events, cx));
-            }
-        })
-        .detach();
-    }
-
-    /// A new connection after a drop: take it over, refresh everything, pump its events.
-    fn adopt_source(
-        &mut self,
-        source: Source,
-        status: Status,
-        mut events: futures::channel::mpsc::UnboundedReceiver<Event>,
-        cx: &mut Context<Self>,
-    ) {
-        if !matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
-            return; // another attempt won
-        }
-        self.source = Some(source);
-        self.on_link_up(cx);
-        self.on_status(status, cx);
-        cx.spawn(async move |this, cx| {
-            while let Some(e) = events.next().await {
-                if this.update(cx, |this, cx| this.on_event(e, cx)).is_err() {
-                    return;
-                }
-            }
-            let _ = this.update(cx, |this, cx| this.on_link_lost(cx));
-        })
-        .detach();
-    }
-
-    /// The daemon is reachable again (also the hook for a client-side reconnect event).
-    pub fn on_link_up(&mut self, cx: &mut Context<Self>) {
-        let was_down = matches!(self.ui.link, Some(Link::Reconnecting { .. }));
-        self.ui.link = Some(Link::Up);
-        if was_down {
-            self.show_toast("Reconnected to quiverd", cx);
-            if matches!(self.conn, Conn::Ready) {
-                self.refresh_status(cx);
-                self.load_library(false, cx);
-                self.global_status(cx);
-            }
-        }
-        cx.notify();
     }
 
     /// Input while one of the global overlays is up, or on the global pages, before
@@ -1125,10 +1015,17 @@ impl Quiver {
         )
     }
 
-    /// Under the top bar while the daemon is gone.
-    pub fn render_link_banner(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Link::Reconnecting { attempt, since, error }) = self.ui.link.clone() else { return None };
-        let secs = since.elapsed().as_secs();
+    /// Whether the daemon connection is up (the client reconnects on its own).
+    pub fn daemon_up(&self) -> bool {
+        self.link != crate::app::Link::Reconnecting
+    }
+
+    /// Under the top bar while the daemon is gone; the client retries on its own.
+    pub fn render_link_banner(&mut self, th: &Theme, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.daemon_up() {
+            return None;
+        }
+        let secs = self.ui.down_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         Some(
             div()
                 .flex()
@@ -1144,16 +1041,11 @@ impl Quiver {
                 .child(icon(Icon::RefreshCw, 14., th.warn))
                 .child(div().font_weight(SEMIBOLD).text_color(th.warn).child("Reconnecting to quiverd…"))
                 .child(div().text_color(th.tx2).truncate().child(format!(
-                    "Lost the connection {} ago · attempt {attempt}{}",
+                    "The connection dropped {} ago; Quiver retries on its own and reloads when it's back",
                     if secs < 60 { format!("{secs} s") } else { format!("{} min", secs / 60) },
-                    error.map(|e| format!(" · {e}")).unwrap_or_default()
                 )))
                 .child(div().flex_1())
                 .child(div().text_color(th.tx3).child("Showing what Quiver knew; actions wait for the daemon"))
-                .child(
-                    button("reconnect", th, Kind::Secondary, Size::Small, Some(Icon::RefreshCw), "Retry now")
-                        .on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))),
-                )
                 .into_any_element(),
         )
     }
@@ -1215,11 +1107,8 @@ impl Quiver {
                         "confirm-signout" => this.run_global(GlobalCmd::SignOut(1), cx),
                         "now-playing" => this.ui.now_playing_open = true,
                         "reconnecting" => {
-                            this.ui.link = Some(Link::Reconnecting {
-                                attempt: 3,
-                                since: Instant::now() - Duration::from_secs(14),
-                                error: Some("connection refused (os error 111)".into()),
-                            })
+                            this.link = crate::app::Link::Reconnecting;
+                            this.ui.down_since = Some(Instant::now() - Duration::from_secs(14));
                         }
                         "signin-error" => {
                             if let Conn::Login(form) = &mut this.conn {
@@ -1250,23 +1139,6 @@ impl Quiver {
             self.show_toast(format!("Copied: {cli}"), cx);
         }
     }
-}
-
-/// Connect (or, in demo mode, start the fixtures) and forward events into a channel GPUI
-/// tasks can await. The same thing `app.rs` does at startup.
-pub async fn open_source(
-    demo: bool,
-) -> anyhow::Result<(Source, Status, futures::channel::mpsc::UnboundedReceiver<Event>)> {
-    let (source, status, mut events) = Source::connect(demo).await?;
-    let (tx, rx) = futures::channel::mpsc::unbounded();
-    tokio::spawn(async move {
-        while let Some(e) = events.recv().await {
-            if tx.unbounded_send(e).is_err() {
-                break;
-            }
-        }
-    });
-    Ok((source, status, rx))
 }
 
 

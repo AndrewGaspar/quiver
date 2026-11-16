@@ -428,8 +428,7 @@ impl Quiver {
                 d.child(div().absolute().top(px(26.)).right(px(24.)).flex().items_center().gap(px(6.)).child(super::kbd(th, "Esc")).child(
                     div().text_size(px(12.)).text_color(th.tx3).child("Cancel"),
                 ))
-            })
-            .when_some(self.render_link_banner(th, cx), |d, b| d.child(div().absolute().top_0().left_0().right_0().child(b)));
+            });
         div().size_full().child(root)
     }
 

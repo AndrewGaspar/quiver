@@ -37,7 +37,7 @@ pub enum Page {
 }
 
 /// The sections of the Settings page, in the order of its side list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SettingsSection {
     Accounts,
     Library,

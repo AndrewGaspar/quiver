@@ -266,10 +266,9 @@ impl Quiver {
             let Some(mut events) = events else { return };
             while let Some(e) = events.next().await {
                 if this.update(cx, |this, cx| this.on_event(e, cx)).is_err() {
-                    return;
+                    break;
                 }
             }
-            let _ = this.update(cx, |this, cx| this.on_link_lost(cx));
         })
         .detach();
     }
@@ -280,7 +279,7 @@ impl Quiver {
         cx.notify();
     }
 
-    pub(crate) fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
+    fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
         let signed_in = status.signed_in.is_some();
         self.status = Some(status);
         if signed_in {
@@ -311,7 +310,7 @@ impl Quiver {
         .detach();
     }
 
-    pub(crate) fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
+    fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
         self.global_event(&e, cx);
         match e {
             Event::Job(job) => self.apply_job(job),

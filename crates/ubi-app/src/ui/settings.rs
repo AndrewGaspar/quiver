@@ -1224,7 +1224,7 @@ impl Quiver {
         let socket_short = socket.replace(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "\u{0}".into()), "$XDG_RUNTIME_DIR");
         let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_default();
         let broker = self.status.as_ref().map(|s| s.broker.clone()).filter(|b| !b.is_empty());
-        let up = self.ui.link_up() && self.source.is_some();
+        let up = self.daemon_up() && self.source.is_some();
         let (dot, state) = if self.demo {
             (th.acc, "Demo data · no daemon".to_owned())
         } else if up {

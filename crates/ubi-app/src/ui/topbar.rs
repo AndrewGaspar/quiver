@@ -114,8 +114,6 @@ impl Quiver {
             (th.ok, "Reconnected to quiverd".to_string())
         } else if self.demo {
             (th.acc, "Demo data".to_string())
-        } else if !self.ui.link_up() {
-            (th.warn, "Reconnecting…".to_string())
         } else if jobs > 0 {
             (th.ok, format!("quiverd · {jobs} job{}", if jobs == 1 { "" } else { "s" }))
         } else {
