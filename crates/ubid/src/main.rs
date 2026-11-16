@@ -709,6 +709,8 @@ fn record_bridge_session(f: &ubi_core::playsession::Finished) {
         settings_revision: rev,
         profile: None,
         profile_revision: None,
+        // Steam launches don't apply mod profiles (yet).
+        mods: Vec::new(),
     };
     let via = format!("Steam app {app}");
     tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
