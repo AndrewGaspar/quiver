@@ -3,7 +3,19 @@
 A third-party launcher for your Ubisoft library on Linux. Not affiliated with or endorsed by
 Ubisoft.
 
-A native Linux client for a Ubisoft library: login, library, install and one Proton prefix per game, without running `UbisoftConnect.exe`. For personal use.
+A native Linux client for a Ubisoft library: sign-in, library, installs and updates, one Proton
+prefix per game, cloud saves, play time, mod overlays and Steam/desktop shortcuts, all without
+running `UbisoftConnect.exe`. A daemon (`quiverd`) owns everything; the desktop app, the
+`quiver` CLI and scripts or agents all drive it the same way.
+
+![Library](docs/screenshots/library.png)
+
+| Game page (controller) | Launch options with history | Light theme (follows Omarchy) |
+|---|---|---|
+| ![Game page](docs/screenshots/game-controller.png) | ![Launch options](docs/screenshots/launch-options.png) | ![Light theme](docs/screenshots/light-theme.png) |
+
+<sub>Screenshots use the app's demo data (`QUIVER_DEMO=1`); box art is Ubisoft's, shown from
+their asset CDN.</sub>
 
 ## Layout
 
@@ -152,5 +164,7 @@ needs your own Ubisoft account and only runs games you own.
   from the client's embedded descriptors with `tools/proto-extract` (see `proto/README.md`).
 - `crates/ubi-app/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
   Copyright Zed Industries).
+- `crates/ubi-app/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
+  with their license files.
 - `third_party/xattr-0.2.3`: the `xattr` crate (MIT/Apache-2.0) with a one-line patch GPUI
   needs; its license files are included.
