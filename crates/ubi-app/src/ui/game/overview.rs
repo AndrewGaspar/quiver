@@ -123,6 +123,7 @@ impl Quiver {
             .when_some(self.render_links(th, g, cx), |d, l| d.child(l))
             .child({
                 let cmd = match (g.installed(), self.gp.play_profile(id)) {
+                    (false, _) if g.steam_only() => format!("quiver play {id}"),
                     (false, _) => format!("quiver install {id}"),
                     (true, None) => format!("quiver play {id}"),
                     (true, Some(p)) => format!("quiver play {id} --profile-id {p}"),
@@ -417,6 +418,30 @@ impl Quiver {
                     if langs > 1 { format!(" · {langs} available") } else { String::new() }
                 )),
             ));
+        } else if let Some(s) = g.steam().filter(|_| g.steam_only()) {
+            let dir = s.install_dir.to_string_lossy().into_owned();
+            let short = self.short_path(&s.install_dir);
+            kvs = kvs
+                .child(kv(th, "Installed", txt(format!("Through Steam (app {})", s.app_id))))
+                .child(kv(
+                    th,
+                    "Folder",
+                    div()
+                        .id("ov-steam-dir")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .child(mono(12., th.tx1).truncate().child(short))
+                        .child(icon(Icon::FolderOpen, 12., th.tx3))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_external(&dir, cx))),
+                ))
+                .child(div().text_color(th.tx3).text_size(px(12.)).child(if g.entry.installable {
+                    "Steam updates, verifies and uninstalls this copy. Quiver can also install its own."
+                } else {
+                    "Bought on Steam: Steam installs, updates, verifies and uninstalls it."
+                }));
         } else {
             kvs = kvs.child(div().text_color(th.tx3).child("Not installed. Install puts it in its own compatibility folder; nothing is shared with other games."));
         }

@@ -231,7 +231,7 @@ impl Demo {
                     detail: vec![],
                 };
                 st.jobs.push(job.clone());
-                st.sessions.push(ActiveSession { product_id, account: "demo".into(), started: Utc::now(), holders: vec!["launcher".into()], reported: true });
+                st.sessions.push(ActiveSession { product_id, account: "demo".into(), started: Utc::now(), holders: vec!["launcher".into()], reported: true, steam_app_id: None });
                 if let Some(e) = st.entries.iter_mut().find(|e| e.product_id == product_id) {
                     e.running = true;
                 }
@@ -313,6 +313,8 @@ pub fn library() -> Vec<LibraryEntry> {
                 running: false,
                 art: Art { thumb: r.thumb_image, background: r.background_image, logo: r.logo_image, icon: None },
                 owned_by: vec!["demo".into()],
+                installable: true,
+                steam: None,
             };
             (order, entry)
         })

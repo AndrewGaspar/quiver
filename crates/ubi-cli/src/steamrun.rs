@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use ubi_api::{Client, Request};
 use ubi_core::launcher;
+use ubi_api::steamlib::SteamLaunchPlan;
+use ubi_core::steamplan;
 use ubi_core::steamrun::{self, ProtonCommand, SteamEnv};
 use ubi_ipc::run::BridgeArgs;
 
@@ -33,6 +35,9 @@ pub struct SteamRunArgs {
     /// Don't disable Connect's executables for this launch (WINEDLLOVERRIDES).
     #[arg(long)]
     no_guard: bool,
+    /// Don't apply the game's Quiver launch settings (env, DLL overrides, args, wrappers).
+    #[arg(long)]
+    no_settings: bool,
     /// Point the prefix's Ubisoft InstallDir at this folder of SDK DLLs (a backup of
     /// system.reg is kept as system.reg.quiver-bak). Only needed if Connect's own DLLs
     /// are missing from the prefix.
@@ -180,14 +185,15 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     let ctx_path = run_dir.join("context.json");
     let log_path = run_dir.join("bridge.log");
     let bridge_dst = run_dir.join("ubi-bridge.exe");
-    let bridge_args = BridgeArgs::run_command(
-        &steamrun::z_path(&ctx_path),
-        Some(&steamrun::z_path(&log_path)),
-        &game_win,
-        pc.game_args(&a.command),
-    );
-    let argv = pc.rewrite(&a.command, &bridge_dst.to_string_lossy(), &bridge_args);
-    let overrides = (!a.no_guard).then(|| steamrun::dll_overrides_without_connect(std::env::var("WINEDLLOVERRIDES").ok().as_deref()));
+    // The game's arguments, then the plan's (Quiver's `args` setting for the game).
+    let command_for = |extra_args: &[String]| {
+        let mut game_args = pc.game_args(&a.command).to_vec();
+        game_args.extend(extra_args.iter().cloned());
+        let bridge_args = BridgeArgs::run_command(&steamrun::z_path(&ctx_path), Some(&steamrun::z_path(&log_path)), &game_win, &game_args);
+        pc.rewrite(&a.command, &bridge_dst.to_string_lossy(), &bridge_args)
+    };
+    let mut argv = command_for(&[]);
+    let mut overrides = (!a.no_guard).then(|| steamrun::dll_overrides_without_connect(std::env::var("WINEDLLOVERRIDES").ok().as_deref()));
 
     if a.dry_run {
         println!("product: {product_id} ({how:?})");
@@ -204,7 +210,13 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     ensure_daemon_outside_steam(&mut log);
     let client = Client::connect(source).await?;
     let mut ctx: serde_json::Value = client
-        .call(Request::LaunchContext { product_id, savegame_path: None, install_dir: None, account: a.account })
+        .call(Request::LaunchContext {
+            product_id,
+            savegame_path: None,
+            install_dir: None,
+            account: a.account,
+            steam_app_id: Some(env.app_id),
+        })
         .await
         .with_context(|| format!("launch context for product {product_id} from quiverd"))?;
     let account = ctx["account_id"].as_str().context("launch context has no account")?.to_owned();
@@ -215,10 +227,30 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
         f.write_all(&serde_json::to_vec(&ctx)?)?;
     }
     log.line(format!("saves: {}", ctx["savegame_path"].as_str().unwrap_or_default()));
+
+    // The game's launch settings (env, DLL overrides, args, wrappers); an older quiverd
+    // doesn't have them, and the launch goes on without.
+    let mut plan_env = Vec::new();
+    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { product_id }).await {
+        Ok(plan) if !a.no_settings => {
+            for l in steamplan::describe(&plan) {
+                log.line(format!("settings r{}: {l}", plan.revision));
+            }
+            argv = steamplan::wrap(&plan, command_for(&plan.args));
+            if !plan.dll_overrides.is_empty() {
+                let base = overrides.clone().or_else(|| std::env::var("WINEDLLOVERRIDES").ok()).unwrap_or_default();
+                overrides = Some(steamplan::merge_dll_overrides(&base, &plan.dll_overrides));
+            }
+            plan_env = steamplan::env(&plan);
+        }
+        Ok(_) => log.line("--no-settings: the game's Quiver launch settings are not applied"),
+        Err(e) => log.line(format!("no launch settings from quiverd ({e:#}); starting without them")),
+    }
     log.line(format!("exec: {}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" ")));
 
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    cmd.envs(plan_env);
     if let Some(o) = overrides {
         log.line(format!("WINEDLLOVERRIDES={o}"));
         cmd.env("WINEDLLOVERRIDES", o);

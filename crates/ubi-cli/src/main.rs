@@ -179,6 +179,17 @@ enum Cmd {
         #[arg(short, default_value_t = 30)]
         n: usize,
     },
+    /// What Ubisoft's ownership service says about a product (or every product), raw: why
+    /// a game is or isn't in the library. Read-only; uses quiverd's session.
+    Ownership {
+        /// Product id (default: every product on the account).
+        product: Option<u32>,
+        /// Account (username or user id); default: the game's launch account.
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Games being played right now (from any launcher, including bridges in containers).
     Sessions {
         #[arg(long)]
@@ -517,16 +528,23 @@ async fn main() -> Result<()> {
                 println!("{:>6}  {:<10} {:<width$}  name", "id", "state", "owned by");
             }
             for e in &lib {
-                let state = match (&e.installed, e.update_available, e.running) {
-                    (_, _, true) => "running",
-                    (Some(_), true, _) => "update",
-                    (Some(_), false, _) => "installed",
-                    (None, _, _) => "",
+                let state = match (&e.installed, e.update_available, e.running, &e.steam) {
+                    (_, _, true, _) => "running",
+                    (Some(_), true, _, _) => "update",
+                    (Some(_), false, _, _) => "installed",
+                    (None, _, _, Some(_)) => "steam",
+                    (None, _, _, None) => "",
+                };
+                let note = match &e.steam {
+                    Some(g) if e.owned_by.is_empty() => format!("  (Steam app {}; not on a signed-in Ubisoft account)", g.app_id),
+                    Some(g) if !e.installable => format!("  (owned on Steam, app {})", g.app_id),
+                    Some(g) if e.installed.is_none() => format!("  (Steam app {})", g.app_id),
+                    _ => String::new(),
                 };
                 if accounts.len() > 1 {
-                    println!("{:>6}  {:<10} {:<width$}  {}", e.product_id, state, owners(e), e.name);
+                    println!("{:>6}  {:<10} {:<width$}  {}{note}", e.product_id, state, owners(e), e.name);
                 } else {
-                    println!("{:>6}  {:<10} {}", e.product_id, state, e.name);
+                    println!("{:>6}  {:<10} {}{note}", e.product_id, state, e.name);
                 }
             }
         }
@@ -570,6 +588,11 @@ async fn main() -> Result<()> {
             let events = client.subscribe().await?;
             let profile = profile.or(profile_id);
             let id: u64 = client.call(Request::Play { product_id: e.product_id, profile: profile.clone() }).await?;
+            if let Some(g) = e.steam.as_ref().filter(|_| e.steam_only()) {
+                let how = if g.state.uses_quiver() { "it starts through Quiver" } else { "it starts through Ubisoft Connect; `quiver steam patch` switches it" };
+                eprintln!("asked Steam to start {} (steam://rungameid/{}; {how})", e.name, g.app_id);
+                return Ok(());
+            }
             match profile {
                 Some(p) => eprintln!("launching {} with profile {p} (job {id})", e.name),
                 None => eprintln!("launching {} (job {id})", e.name),
@@ -655,7 +678,7 @@ async fn main() -> Result<()> {
         Cmd::Context { game, out, savegame_path, install_dir, account } => {
             let e = resolve(&client, &game).await?;
             let ctx: serde_json::Value = client
-                .call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir, account })
+                .call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir, account, steam_app_id: None })
                 .await?;
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -676,6 +699,27 @@ async fn main() -> Result<()> {
                 println!("{}  {:<8} {}", a.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"), a.source, a.action);
             }
         }
+        Cmd::Ownership { product, account, json } => {
+            let list: Vec<ubi_api::steamlib::OwnedProduct> = client.call(Request::Ownership { product_id: product, account }).await?;
+            if json {
+                return print_json(&list);
+            }
+            for p in &list {
+                println!(
+                    "{:>6}  type {:<2} state {} owned {:<5} pc build {:<5} {}  {}",
+                    p.product_id,
+                    p.product_type,
+                    p.state,
+                    p.owned,
+                    p.has_pc_build,
+                    if p.listed { "listed".to_owned() } else { format!("not listed: {}", p.not_listed_because.as_deref().unwrap_or("?")) },
+                    p.name.as_deref().unwrap_or("")
+                );
+            }
+            if list.is_empty() {
+                println!("not in this account's ownership list");
+            }
+        }
         Cmd::Sessions { json } => {
             let list: Vec<ubi_api::ActiveSession> = client.call(Request::Sessions).await?;
             if json {
@@ -683,13 +727,19 @@ async fn main() -> Result<()> {
             } else if list.is_empty() {
                 println!("nothing running");
             } else {
+                let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await.unwrap_or_default();
                 for s in list {
                     let mins = (chrono::Utc::now() - s.started).num_minutes();
+                    let name = lib.iter().find(|e| e.product_id == s.product_id).map(|e| e.name.clone()).unwrap_or_default();
+                    let via = match s.steam_app_id {
+                        Some(app) => format!("Steam app {app}"),
+                        None => s.holders.join("+"),
+                    };
                     println!(
-                        "{:<6} {:>4} min  via {:<16} {}",
+                        "{:<6} {:>4} min  via {:<16} {:<20} {name}",
                         s.product_id,
                         mins,
-                        s.holders.join("+"),
+                        via,
                         if s.reported { "reported to Ubisoft" } else { "not reported" }
                     );
                 }

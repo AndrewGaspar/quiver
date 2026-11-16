@@ -1471,6 +1471,11 @@ impl Quiver {
         if self.game(id).is_some_and(|g| g.installed()) {
             return self.open_update_dialog(id, cx);
         }
+        // Steam installs (and updates) its own copies; there's no Ubisoft build to get.
+        if let Some(g) = self.game(id).filter(|g| g.steam_only() && !g.entry.installable) {
+            let name = crate::model::clean_name(&g.entry.name);
+            return self.show_toast(format!("{name} is installed through Steam, which updates it"), cx);
+        }
         let steam = self.dl.setup.as_ref().and_then(|s| s.first_run.as_ref()).is_none_or(|f| f.steam_on_install);
         let steam_there = matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some());
         self.nav.close_overlay();

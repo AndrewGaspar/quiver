@@ -9,6 +9,7 @@ mod mods;
 mod info;
 mod setup;
 mod steamgames;
+mod steamlib;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -23,13 +24,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use ubi_api::{
-    Account, ActivityEntry, Art, Envelope, Event, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, SettingOp,
+    Account, ActivityEntry, Envelope, Event, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, SettingOp,
     Status,
 };
 use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
 use ubi_core::broker::Broker;
 use ubi_core::launcher::{self, Config, Games, LaunchEvent};
-use ubi_core::library::{Library, ProductConfig};
+use ubi_core::library::Library;
 use ubi_core::online::{Accounts, Online};
 use ubi_core::playsession::PlaySessions;
 use ubi_core::store::{self, AccountRef};
@@ -200,7 +201,7 @@ impl Daemon {
         }
         // Ownership only matters when there is a choice to make.
         let owners = if setting.is_none() && accounts.len() > 1 {
-            match self.library(false).await {
+            match self.owned_library(false).await {
                 // If the default's library couldn't be fetched, its ownership is unknown:
                 // keep the default rather than silently switching save histories.
                 Ok(_) if default.as_ref().is_some_and(|d| self.library_failed.lock().unwrap().contains(d)) => Vec::new(),
@@ -217,7 +218,15 @@ impl Daemon {
         self.accounts.get(id.as_deref())
     }
 
-    async fn library(&self, refresh: bool) -> Result<Vec<LibraryEntry>> {
+    /// The library as front ends see it: [`Self::owned_library`]'s installable games plus
+    /// Steam installs (see `steamlib`).
+    async fn library(self: &Arc<Self>, refresh: bool) -> Result<Vec<LibraryEntry>> {
+        steamlib::library(self, refresh).await
+    }
+
+    /// Every owned game on the signed-in accounts (cached), including those Ubisoft has no
+    /// PC build of (`installable: false`: copies bought on Steam).
+    async fn owned_library(&self, refresh: bool) -> Result<Vec<LibraryEntry>> {
         let mut cache = self.library.lock().await;
         if refresh || cache.is_none() {
             // Default account first, so its library supplies names, art and update state.
@@ -242,35 +251,18 @@ impl Daemon {
                             continue;
                         }
                     };
-                    for p in lib
-                        .products
-                        .iter()
-                        .filter(|p| p.owned && p.is_installable() && p.product_type == 0 && !p.locked_by_subscription)
-                    {
+                    for p in lib.products.iter().filter(|p| steamlib::excluded(p).is_none()) {
                         if let Some(&i) = seen.get(&p.product_id) {
-                            out[i].owned_by.push(user_id.clone());
+                            let e: &mut LibraryEntry = &mut out[i];
+                            e.owned_by.push(user_id.clone());
+                            // Another account may own the downloadable edition.
+                            e.installable |= p.is_installable();
                             continue;
                         }
                         let game = installed.get(p.product_id).cloned();
-                        let config = p.configuration.as_deref().and_then(|c| ProductConfig::parse(c).ok());
-                        let art = config
-                            .map(|c| Art {
-                                thumb: c.art("thumb_image"),
-                                background: c.art("background_image"),
-                                logo: c.art("logo_image"),
-                                icon: c.art("icon_image"),
-                            })
-                            .unwrap_or_default();
+                        let update = game.as_ref().is_some_and(|g| launcher::update_available(g, &lib));
                         seen.insert(p.product_id, out.len());
-                        out.push(LibraryEntry {
-                            product_id: p.product_id,
-                            name: p.name.clone().unwrap_or_else(|| p.product_id.to_string()),
-                            update_available: game.as_ref().is_some_and(|g| launcher::update_available(g, &lib)),
-                            installed: game,
-                            running: false,
-                            art,
-                            owned_by: vec![user_id.clone()],
-                        });
+                        out.push(steamlib::entry_for(p, game, update, &user_id));
                     }
                 }
                 if failed.len() == onlines.len() {
@@ -358,6 +350,11 @@ impl Daemon {
             Request::Library { refresh } => json!(self.library(refresh).await?),
             Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
             Request::Play { product_id, profile } => {
+                if Games::load()?.get(product_id).is_none()
+                    && let Some(e) = self.library(false).await?.into_iter().find(|e| e.product_id == product_id && e.steam_only())
+                {
+                    return Ok(json!(steamlib::play(self, source, &e).await?));
+                }
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_play(source, product_id, profile, online)?)
             }
@@ -435,8 +432,11 @@ impl Daemon {
                 self.emit(Event::SettingsChanged { product_id, revision: rev.revision, source: source.to_owned() });
                 json!(rev)
             }
-            Request::LaunchContext { product_id, savegame_path, install_dir, account } => {
+            Request::LaunchContext { product_id, savegame_path, install_dir, account, steam_app_id } => {
                 let online = self.account_for(product_id, account.as_deref()).await?;
+                if let Some(app_id) = steam_app_id {
+                    self.sessions.from_steam(product_id, app_id);
+                }
                 let label = self.as_account(&online);
                 let broker = self.broker.clone();
                 let ctx = run_local(move || async move {
@@ -502,6 +502,7 @@ impl Daemon {
             | Request::SteamUnpatch { .. }
             | Request::SteamDismissOffer { .. }
             | Request::SteamOffers { .. }) => steamgames::handle(self, source, r).await?,
+            r @ (Request::Ownership { .. } | Request::SteamLaunchPlan { .. }) => steamlib::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {

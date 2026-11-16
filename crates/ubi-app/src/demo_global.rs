@@ -130,7 +130,12 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                 started: Utc::now() - Span::seconds(72 * 60 + 8),
                 holders: vec!["bridge".into()],
                 reported: true,
+                steam_app_id: None,
             });
+        }
+        // Black Flag Resynced, started from Steam through Quiver.
+        if flag("playing-steam") {
+            st.sessions.push(super::detail::steam_session(66088, 3751950, Utc::now() - Span::seconds(23 * 60 + 41)));
         }
     }
     if flag("unreachable") {

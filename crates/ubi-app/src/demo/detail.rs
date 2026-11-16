@@ -78,8 +78,36 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
     let key = demo as *const Demo as usize;
     let mut all = DETAILS.lock().unwrap();
     let d = all.entry(key).or_insert_with(|| Detail::new(&st.entries));
+    sync_steam(st, &d.steam_games);
     let mut events = Vec::new();
     let out = match req {
+        // A game only Steam installed: Steam starts it, and (switched to Quiver) its bridge
+        // reports a session from Steam.
+        Request::Play { product_id, .. } if entry(st, product_id).is_ok_and(|e| e.steam_only()) => {
+            let e = entry(st, product_id)?.clone();
+            let g = e.steam.clone().unwrap_or_else(|| unreachable!());
+            let id = st.next_job;
+            st.next_job += 1;
+            let job = ubi_api::Job {
+                id,
+                kind: ubi_api::JobKind::Play,
+                product_id,
+                name: e.name.clone(),
+                status: "Asked Steam to start it".into(),
+                downloaded: 0,
+                total: 0,
+                done: true,
+                error: None,
+                detail: vec![format!("steam://rungameid/{}", g.app_id)],
+            };
+            st.jobs.push(job.clone());
+            events.push(Event::Job(job));
+            if g.state.uses_quiver() && !st.sessions.iter().any(|s| s.product_id == product_id) {
+                st.sessions.push(steam_session(product_id, g.app_id, Utc::now()));
+                events.push(Event::SessionsChanged { sessions: st.sessions.clone() });
+            }
+            json!(id)
+        }
         Request::SettingsGet { product_id } => {
             // The daemon's shape: the settings and their revision.
             let settings = st.settings.get(&product_id).cloned().unwrap_or_default();
@@ -393,6 +421,60 @@ fn push_revision(st: &mut State, product_id: u32, settings: GameSettings, source
 
 // ---------------------------------------------------------------------------------------
 // Game info and progression
+
+/// Products the demo account owns as Steam copies (no Ubisoft PC build).
+const OWNED_ON_STEAM: &[u32] = &[1875, 66088];
+
+/// A play session started from Steam through `quiver steam-run`.
+pub(super) fn steam_session(product_id: u32, app_id: u32, started: DateTime<Utc>) -> ubi_api::ActiveSession {
+    ubi_api::ActiveSession {
+        product_id,
+        account: "demo".into(),
+        started,
+        holders: vec!["steam".into()],
+        reported: true,
+        steam_app_id: Some(app_id),
+    }
+}
+
+/// The library's Steam installs, as quiverd joins them: each Steam game on its product's
+/// entry, and an entry for Steam copies the library didn't have (Black Flag Resynced).
+fn sync_steam(st: &mut State, games: &[SteamGame]) {
+    for e in st.entries.iter_mut() {
+        e.steam = None;
+    }
+    for g in games {
+        let Some(id) = g.product_id else { continue };
+        match st.entries.iter_mut().find(|e| e.product_id == id) {
+            Some(e) => e.steam = Some(g.clone()),
+            None => {
+                let at = st.entries.iter().take_while(|e| e.installed.is_some()).count();
+                st.entries.insert(
+                    at,
+                    LibraryEntry {
+                        product_id: id,
+                        name: g.name.clone(),
+                        installed: None,
+                        update_available: false,
+                        running: false,
+                        art: Default::default(),
+                        owned_by: vec!["demo".into()],
+                        installable: false,
+                        steam: Some(g.clone()),
+                    },
+                );
+            }
+        }
+    }
+    for e in st.entries.iter_mut().filter(|e| OWNED_ON_STEAM.contains(&e.product_id)) {
+        e.installable = false;
+    }
+    // As quiverd does: a Steam copy with a session is running (Steam started it).
+    let playing: Vec<u32> = st.sessions.iter().map(|s| s.product_id).collect();
+    for e in st.entries.iter_mut().filter(|e| e.steam_only()) {
+        e.running = playing.contains(&e.product_id);
+    }
+}
 
 fn entry(st: &State, id: u32) -> Result<&LibraryEntry> {
     st.entries.iter().find(|e| e.product_id == id).ok_or_else(|| anyhow!("unknown product {id}"))
@@ -738,7 +820,9 @@ impl Detail {
     }
 
     fn saves(&mut self, st: &State, id: u32, cloud: bool) -> Result<SavesReport> {
-        installed(st, id)?;
+        if !entry(st, id)?.steam_only() {
+            installed(st, id)?;
+        }
         let slots = self.slots.entry(id).or_insert_with(|| Self::initial_slots(st, id)).clone();
         let backups = self.backups.entry(id).or_insert_with(|| Self::initial_backups(st, id)).clone();
         let cloud_on = facts(id).is_some_and(|f| f.cloud_saves);
@@ -1364,5 +1448,28 @@ mod tests {
         assert_eq!(state(&s, 2239550), PatchState::On);
         let v: Value = call(&demo, Request::SteamOffers { enabled: Some(false) });
         assert_eq!(v["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn steam_copies_in_the_library() {
+        let (demo, _events) = Demo::start();
+        let lib: Vec<LibraryEntry> = call(&demo, Request::Library { refresh: false });
+        let e = |id: u32| lib.iter().find(|e| e.product_id == id).unwrap().clone();
+        // Black Flag Resynced: only Steam has it, and it's owned on Steam.
+        let bf = e(66088);
+        assert!(bf.steam_only() && !bf.installable && bf.steam.as_ref().unwrap().app_id == 3751950);
+        // Syndicate is owned on Steam too; Far Cry 4 has a Ubisoft build as well.
+        assert!(e(1875).steam_only() && !e(1875).installable);
+        assert!(e(420).steam_only() && e(420).installable);
+        assert!(e(3539).steam.is_none());
+        // Play asks Steam; a game switched to Quiver then reports a session from Steam.
+        let _: u64 = call(&demo, Request::Play { product_id: 66088, profile: None });
+        let sessions: Vec<ubi_api::ActiveSession> = call(&demo, Request::Sessions);
+        let s = sessions.iter().find(|s| s.product_id == 66088).unwrap();
+        assert_eq!((s.holders.as_slice(), s.steam_app_id), (&["steam".to_owned()][..], Some(3751950)));
+        // Syndicate still opens Connect: no Quiver session.
+        let _: u64 = call(&demo, Request::Play { product_id: 1875, profile: None });
+        let sessions: Vec<ubi_api::ActiveSession> = call(&demo, Request::Sessions);
+        assert!(sessions.iter().all(|s| s.product_id != 1875));
     }
 }

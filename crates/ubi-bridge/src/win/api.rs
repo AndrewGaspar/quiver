@@ -14,8 +14,9 @@ const OK: i32 = OperationResult::Ok as i32;
 const UNAVAILABLE: i32 = OperationResult::Unavailable as i32;
 
 pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
-    // Play-session lease keeper, started at the game's SDK init, stopped with this connection.
-    let mut lease: Option<tokio::task::JoinHandle<()>> = None;
+    // This connection's share of the play-session lease, taken at the game's SDK init and
+    // released when the connection closes.
+    let mut lease: Option<LeaseShare> = None;
     let result: Result<()> = async {
         loop {
             let body = read_frame(&mut pipe).await?;
@@ -28,7 +29,7 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
             };
             log!("[conn {n}] <- {}", describe(&req));
             if req.init_req.is_some() && lease.is_none() {
-                lease = Some(tokio::spawn(keep_lease(n)));
+                lease = Some(LeaseShare::take(n));
             }
             match respond(&req) {
                 Reply::Rsp(rsp) => {
@@ -46,10 +47,64 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
         }
     }
     .await;
-    if let Some(l) = lease {
-        l.abort();
-    }
+    drop(lease);
     log!("[conn {n}] closed: {result:?}");
+}
+
+/// How long the lease outlives the last SDK connection, so a game that reconnects (a
+/// loading screen, a second DLL generation starting up) keeps one session.
+const LEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One play-session lease for the whole process, shared by the game's SDK connections:
+/// a game keeps several open at once (Black Flag Resynced: three, from two SDK API
+/// versions), and each used to hold a lease of its own.
+#[derive(Default)]
+struct SharedLease {
+    shares: usize,
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// Bumped on every take, so a grace timer knows if someone came back.
+    generation: u64,
+}
+
+static LEASE: std::sync::Mutex<SharedLease> = std::sync::Mutex::new(SharedLease { shares: 0, task: None, generation: 0 });
+
+struct LeaseShare;
+
+impl LeaseShare {
+    fn take(n: u32) -> Self {
+        let mut l = LEASE.lock().unwrap();
+        l.shares += 1;
+        l.generation += 1;
+        if l.task.is_none() {
+            l.task = Some(tokio::spawn(keep_lease(n)));
+        } else {
+            log!("[conn {n}]    sharing the play session lease ({} connections)", l.shares);
+        }
+        LeaseShare
+    }
+}
+
+impl Drop for LeaseShare {
+    fn drop(&mut self) {
+        let generation = {
+            let mut l = LEASE.lock().unwrap();
+            l.shares = l.shares.saturating_sub(1);
+            if l.shares > 0 {
+                return;
+            }
+            l.generation
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(LEASE_GRACE).await;
+            let mut l = LEASE.lock().unwrap();
+            if l.shares == 0 && l.generation == generation
+                && let Some(t) = l.task.take()
+            {
+                t.abort();
+                log!("play session lease released (no SDK connections left)");
+            }
+        });
+    }
 }
 
 /// Hold a play-session lease with the broker for as long as this task runs, reopening it

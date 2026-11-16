@@ -87,7 +87,7 @@ impl Quiver {
             .into_iter()
             .filter(|g| match self.lib_filter {
                 LibFilter::All => true,
-                LibFilter::Installed => g.installed(),
+                LibFilter::Installed => g.on_disk(),
                 LibFilter::Updates => g.installed() && g.entry.update_available,
             })
             .collect()
@@ -136,7 +136,7 @@ impl Quiver {
 
     fn render_lib_header(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let total = self.games.len();
-        let installed = self.games.iter().filter(|g| g.installed()).count();
+        let installed = self.games.iter().filter(|g| g.on_disk()).count();
         let updates = self.games.iter().filter(|g| g.installed() && g.entry.update_available).count();
         let filter_chip = |f: LibFilter, label: &'static str, n: usize, i: Option<Icon>, cx: &mut Context<Self>| {
             let on = self.lib_filter == f;
@@ -417,7 +417,7 @@ impl Quiver {
     fn render_tile(&mut self, th: &Theme, id: u32, w: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.game(id).cloned() else { return div().into_any_element() };
         let h = (w * TILE_RATIO).round();
-        let dim = !g.installed() && g.install_job().is_none();
+        let dim = !g.on_disk() && g.install_job().is_none();
         let art = self.art_for(&g, ArtSlot::Tile, if dim { Variant::TileDimmed } else { Variant::Tile }, cx);
         let focused = self.focused(Target::Tile(id));
         let label = short_name(&g.entry.name);
@@ -559,12 +559,17 @@ impl Quiver {
 
 /// The primary action's label and icon for a game.
 pub fn primary_label(g: &GameRow) -> (&'static str, Icon) {
-    if g.running() {
+    if g.running() && g.steam_only() {
+        // Started from Steam: quit it there (or in the game).
+        ("Playing", Icon::Gamepad)
+    } else if g.running() {
         ("Stop", Icon::Square)
     } else if g.installing().is_some() {
         ("Installing", Icon::Download)
     } else if g.queued() {
         ("Queued", Icon::Download)
+    } else if g.steam_only() {
+        ("Play", Icon::Play)
     } else if !g.installed() {
         ("Install", Icon::Download)
     } else if g.entry.update_available {

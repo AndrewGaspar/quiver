@@ -76,7 +76,15 @@ type Key = (String, u32);
 enum Cmd {
     Begin { account: Option<String>, product_id: u32, holder: String, lease: u64 },
     End { lease: u64 },
+    /// The next bridge sessions for `product_id` are a Steam launch of `app_id`.
+    FromSteam { product_id: u32, app_id: u32 },
 }
+
+/// How long a [`PlaySessions::from_steam`] note waits for the game's bridge to report in.
+const STEAM_HINT_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// A bridge holder for a game `quiver steam-run` started shows as this.
+pub const STEAM_HOLDER: &str = "steam";
 
 struct Active {
     online: Arc<Online>,
@@ -85,6 +93,19 @@ struct Active {
     holders: Vec<(u64, String)>,
     reported: bool,
     last_beat: Instant,
+    steam_app_id: Option<u32>,
+}
+
+/// Holder names, each once, in the order they joined (a game's SDK opens several
+/// connections, each holding its own lease).
+fn unique_holders(holders: &[(u64, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, h) in holders {
+        if !out.contains(h) {
+            out.push(h.clone());
+        }
+    }
+    out
 }
 
 /// The daemon's play-session tracker.
@@ -124,6 +145,12 @@ impl PlaySessions {
         Lease { tx: self.tx.clone(), id }
     }
 
+    /// `quiver steam-run` is starting `product_id` from Steam app `app_id`: bridge leases
+    /// for it in the next few minutes (and while that session lasts) show as `steam`.
+    pub fn from_steam(&self, product_id: u32, app_id: u32) {
+        let _ = self.tx.send(Cmd::FromSteam { product_id, app_id });
+    }
+
     pub fn list(&self) -> Vec<ActiveSession> {
         self.snapshot.lock().unwrap().clone()
     }
@@ -137,13 +164,18 @@ async fn run(
     on_change: impl Fn(),
 ) {
     let mut active: HashMap<Key, Active> = HashMap::new();
+    let mut steam_hints: HashMap<u32, (u32, Instant)> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         let mut changed = false;
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 None => return,
-                Some(Cmd::Begin { account, product_id, holder, lease }) => {
+                Some(Cmd::FromSteam { product_id, app_id }) => {
+                    steam_hints.retain(|_, (_, at)| at.elapsed() < STEAM_HINT_TTL);
+                    steam_hints.insert(product_id, (app_id, Instant::now()));
+                }
+                Some(Cmd::Begin { account, product_id, mut holder, lease }) => {
                     let online = match accounts.get(account.as_deref()) {
                         Ok(o) => o,
                         Err(e) => { tracing::warn!(product_id, "play session for unknown account: {e:#}"); continue }
@@ -154,15 +186,21 @@ async fn run(
                     };
                     changed = true;
                     let key = (user_id, product_id);
+                    let hint = steam_hints.get(&product_id).filter(|(_, at)| at.elapsed() < STEAM_HINT_TTL).map(|h| h.0);
+                    let steam_app_id = active.get(&key).and_then(|a| a.steam_app_id).or(hint);
+                    if holder == "bridge" && steam_app_id.is_some() {
+                        holder = STEAM_HOLDER.to_owned();
+                    }
                     if let Some(a) = active.get_mut(&key) {
                         a.holders.push((lease, holder));
+                        a.steam_app_id = steam_app_id;
                     } else {
                         tracing::info!(product_id, %holder, "game started");
                         let reported = report && match start(&online, product_id).await {
                             Ok(()) => { tracing::info!(product_id, "play session started"); true }
                             Err(e) => { tracing::warn!(product_id, "play session start failed: {e:#}"); false }
                         };
-                        active.insert(key, Active { online, started: Utc::now(), holders: vec![(lease, holder)], reported, last_beat: Instant::now() });
+                        active.insert(key, Active { online, started: Utc::now(), holders: vec![(lease, holder)], reported, last_beat: Instant::now(), steam_app_id });
                     }
                 }
                 Some(Cmd::End { lease }) => {
@@ -173,6 +211,9 @@ async fn run(
                     if a.holders.is_empty() {
                         let product_id = key.1;
                         let a = active.remove(&key).unwrap();
+                        if a.steam_app_id.is_some() {
+                            steam_hints.remove(&product_id);
+                        }
                         tracing::info!(product_id, minutes = (Utc::now() - a.started).num_minutes(), "game stopped");
                         if report {
                             match end(&a.online, product_id).await {
@@ -212,13 +253,27 @@ async fn run(
                     product_id: *product_id,
                     account: user_id.clone(),
                     started: a.started,
-                    holders: a.holders.iter().map(|h| h.1.clone()).collect(),
+                    holders: unique_holders(&a.holders),
                     reported: a.reported,
+                    steam_app_id: a.steam_app_id,
                 })
                 .collect();
             list.sort_by_key(|s| s.started);
             *snapshot.lock().unwrap() = list;
             on_change();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn holders_once_each() {
+        let h = |v: &[(u64, &str)]| v.iter().map(|(i, s)| (*i, s.to_string())).collect::<Vec<_>>();
+        assert_eq!(unique_holders(&h(&[(1, "bridge"), (2, "bridge"), (3, "bridge")])), ["bridge"]);
+        assert_eq!(unique_holders(&h(&[(1, "launcher"), (2, "bridge"), (3, "launcher")])), ["launcher", "bridge"]);
+        assert!(unique_holders(&[]).is_empty());
     }
 }

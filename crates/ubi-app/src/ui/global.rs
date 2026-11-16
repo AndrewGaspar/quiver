@@ -872,6 +872,16 @@ impl Quiver {
     }
 
     fn render_now_playing(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        /// How a session was started, from who holds it.
+        fn launched_how(launcher: bool, steam: bool, bridge: bool) -> &'static str {
+            match (launcher, steam, bridge) {
+                (true, _, true) => "Started by Quiver · bridge connected",
+                (true, _, false) => "Started by Quiver",
+                (false, true, _) => "From Steam, through Quiver",
+                (false, false, true) => "Through a Quiver bridge (container or another launcher)",
+                _ => "Tracked by quiverd",
+            }
+        }
         let sessions = self.ui.sessions.clone();
         let now = chrono::Utc::now();
         let mut cards: Vec<AnyElement> = Vec::new();
@@ -884,12 +894,8 @@ impl Quiver {
             let name = g.as_ref().map(|g| clean_name(&g.entry.name)).unwrap_or_else(|| format!("Game {}", s.product_id));
             let launcher = s.holders.iter().any(|h| h == "launcher");
             let bridge = s.holders.iter().any(|h| h == "bridge");
-            let how = match (launcher, bridge) {
-                (true, true) => "Started by Quiver · bridge connected",
-                (true, false) => "Started by Quiver",
-                (false, true) => "Through a Quiver bridge (container or another launcher)",
-                _ => "Tracked by quiverd",
-            };
+            let steam = s.steam_app_id.is_some() || s.holders.iter().any(|h| h == "steam");
+            let how = launched_how(launcher, steam, bridge);
             let id = s.product_id;
             let row = |label: &str, value: AnyElement| {
                 div()

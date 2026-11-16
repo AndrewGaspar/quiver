@@ -73,7 +73,9 @@ fn slot_state(th: &Theme, s: &SaveSlot) -> AnyElement {
 impl Quiver {
     pub(super) fn render_saves(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        if g.installed() && self.gp.id == id && (self.gp.saves.is_idle() || (!self.gp.saves_cloud && self.gp.saves.ready().is_some())) {
+        // A Steam copy's saves are in Steam's compatibility folder; quiverd reads them there.
+        let local = g.installed() || g.steam_only();
+        if local && self.gp.id == id && (self.gp.saves.is_idle() || (!self.gp.saves_cloud && self.gp.saves.ready().is_some())) {
             self.load_saves(id, true, cx);
         }
         let progress = self.gp.progress.ready().filter(|_| self.gp.id == id).cloned();
@@ -83,7 +85,7 @@ impl Quiver {
             .child(self.saves_playtime(th, g).flex_1())
             .child(self.connect_card(th, progress.as_ref()).w(px(300.)).flex_none())
             .child(self.ach_summary(th, progress.as_ref()).w(px(300.)).flex_none());
-        let slots: AnyElement = if !g.installed() {
+        let slots: AnyElement = if !local {
             card(th).child(card_header(th, "Save slots")).child(note(th, "Install the game to see its saves on this PC; cloud slots sync on the first launch.")).into_any_element()
         } else {
             match self.gp.saves.ready().cloned() {

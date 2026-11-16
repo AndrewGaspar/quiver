@@ -349,10 +349,18 @@ impl Quiver {
                 self.games.clear();
                 self.show_login(None, cx);
             }
-            Event::LibraryChanged => self.load_library(false, cx),
+            // Steam games change Steam copies in the library (installed, switched to Quiver).
+            Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
             Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
             Event::ModsChanged { product_id } => self.load_page(product_id, cx),
-            Event::SessionsChanged { .. } | Event::SteamGamesChanged { .. } => {}
+            // A Steam copy shows as running while Steam plays it (quiverd's library says so).
+            Event::SessionsChanged { sessions } => {
+                let steam_now = sessions.iter().any(|s| self.game(s.product_id).is_some_and(|g| g.steam_only()));
+                let steam_before = self.games.iter().any(|g| g.steam_only() && g.entry.running);
+                if steam_now || steam_before {
+                    self.load_library(false, cx);
+                }
+            }
             Event::Disconnected => {
                 self.link = Link::Reconnecting;
                 self.link_gen += 1;
@@ -484,7 +492,8 @@ impl Quiver {
     }
 
     fn load_settings(&mut self, id: u32, cx: &mut Context<Self>) {
-        if !self.game(id).is_some_and(|g| g.installed()) {
+        // A Steam copy's settings apply when Steam starts it through Quiver.
+        if !self.game(id).is_some_and(|g| g.installed() || g.steam_only()) {
             return;
         }
         // The daemon replies `{revision, settings}`.
@@ -577,7 +586,7 @@ impl Quiver {
     pub fn ordered(&self) -> Vec<&GameRow> {
         let mut v: Vec<&GameRow> = self.games.iter().collect();
         v.sort_by(|a, b| {
-            let group = |g: &GameRow| if g.installed() || g.install_job().is_some() { 0 } else { 1 };
+            let group = |g: &GameRow| if g.on_disk() || g.install_job().is_some() { 0 } else { 1 };
             group(a)
                 .cmp(&group(b))
                 .then_with(|| b.last_played().cmp(&a.last_played()))
@@ -591,7 +600,7 @@ impl Quiver {
     pub fn side_games(&self) -> Vec<&GameRow> {
         self.ordered()
             .into_iter()
-            .filter(|g| self.side_filter == SideFilter::All || g.installed() || g.install_job().is_some())
+            .filter(|g| self.side_filter == SideFilter::All || g.on_disk() || g.install_job().is_some())
             .collect()
     }
 
@@ -663,6 +672,8 @@ impl Quiver {
     fn primary_command(&self, g: &GameRow) -> Command {
         let (icon, label, cli) = if g.running() {
             (crate::ui::Icon::Square, "Stop", format!("quiver stop {}", g.id()))
+        } else if g.steam_only() {
+            (crate::ui::Icon::Play, "Play", format!("quiver play {}", g.id()))
         } else if !g.installed() {
             (crate::ui::Icon::Download, "Install", format!("quiver install {}", g.id()))
         } else if g.entry.update_available {
@@ -694,6 +705,40 @@ impl Quiver {
             action: Cmd::Open(id),
             future: false,
         });
+        // A Steam copy: Steam installs it, so no shortcuts or install actions; the switch
+        // between Quiver and Ubisoft Connect instead.
+        if let Some(s) = g.steam().filter(|_| g.steam_only()) {
+            let s = self.steam_copy(id).unwrap_or_else(|| s.clone());
+            let app_id = s.app_id;
+            match crate::ui::steamgames::control(&s) {
+                Some(true) => v.push(Command {
+                    icon: crate::ui::Icon::Gamepad,
+                    label: "Start it from Steam through Quiver".into(),
+                    detail: Some("Instead of Ubisoft Connect; undo any time".into()),
+                    cli: Some(format!("quiver steam patch {app_id}").into()),
+                    action: Cmd::Global(crate::ui::global::GlobalCmd::SteamPatch(app_id)),
+                    future: false,
+                }),
+                Some(false) => v.push(Command {
+                    icon: crate::ui::Icon::Undo,
+                    label: "Start it from Steam through Ubisoft Connect again".into(),
+                    detail: None,
+                    cli: Some(format!("quiver steam unpatch {app_id}").into()),
+                    action: Cmd::Global(crate::ui::global::GlobalCmd::SteamUnpatch(app_id)),
+                    future: false,
+                }),
+                None => {}
+            }
+            v.push(Command {
+                icon: crate::ui::Icon::SlidersHorizontal,
+                label: "Launch options…".into(),
+                detail: Some("Applied when Steam starts it through Quiver".into()),
+                cli: Some(format!("quiver history {id}").into()),
+                action: Cmd::Tab(id, Tab::LaunchOptions),
+                future: false,
+            });
+            return v;
+        }
         v.push(Command {
             icon: crate::ui::Icon::SlidersHorizontal,
             label: "Launch options…".into(),
@@ -754,7 +799,9 @@ impl Quiver {
     pub fn primary(&mut self, id: u32, cx: &mut Context<Self>) {
         let Some(g) = self.game(id) else { return };
         let name = g.entry.name.clone();
-        if g.running() {
+        if g.running() && g.steam_only() {
+            self.show_toast(format!("{name} is running from Steam; quit it from the game or Steam"), cx);
+        } else if g.running() {
             self.call::<(), _>(Request::Stop { product_id: id }, cx, |this, r, cx| {
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
@@ -764,6 +811,17 @@ impl Quiver {
             self.show_toast(format!("{name} is installing ({:.0}%)", (f * 100.).floor()), cx);
         } else if g.queued() {
             self.show_toast(format!("{name} is queued"), cx);
+        } else if g.steam_only() {
+            // Steam starts it (through Quiver, once it's switched).
+            if self.ui.sessions.iter().any(|s| s.product_id == id) {
+                return self.show_toast(format!("{name} is running; quit it from the game"), cx);
+            }
+            let via_quiver = g.steam().is_some_and(|s| s.state.uses_quiver());
+            self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
+                Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
+                Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
+                Err(e) => this.show_toast(err_text(&e), cx),
+            });
         } else if !g.installed() {
             self.open_install_dialog(id, cx);
         } else if g.entry.update_available {
@@ -903,7 +961,7 @@ impl Quiver {
     pub fn side_child_index(&self, id: u32) -> Option<usize> {
         let games = self.side_games();
         let pos = games.iter().position(|g| g.id() == id)?;
-        let first_rest = games.iter().position(|g| !(g.installed() || g.install_job().is_some()));
+        let first_rest = games.iter().position(|g| !(g.on_disk() || g.install_job().is_some()));
         Some(match first_rest {
             Some(r) if pos >= r => pos + 2,
             _ => pos + 1,

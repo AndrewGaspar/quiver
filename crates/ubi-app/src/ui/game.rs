@@ -46,7 +46,7 @@ impl Quiver {
 
     fn render_side(&mut self, th: &Theme, selected: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let games: Vec<GameRow> = self.side_games().into_iter().cloned().collect();
-        let active = |g: &GameRow| g.installed() || g.install_job().is_some();
+        let active = |g: &GameRow| g.on_disk() || g.install_job().is_some();
         let n_active = games.iter().filter(|g| active(g)).count();
         let n_rest = games.len() - n_active;
         let group = |label: &str, n: usize| {
@@ -77,7 +77,7 @@ impl Quiver {
                 cx.notify();
             }))
         };
-        let installed = self.games.iter().filter(|g| g.installed()).count();
+        let installed = self.games.iter().filter(|g| g.on_disk()).count();
         div()
             .flex()
             .flex_col()
@@ -164,7 +164,7 @@ impl Quiver {
 
     fn render_side_row(&mut self, th: &Theme, g: &GameRow, on: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        let off = !g.installed() && g.install_job().is_none();
+        let off = !g.on_disk() && g.install_job().is_none();
         let art = self.art_for(g, ArtSlot::Tile, if off { Variant::TileDimmed } else { Variant::Tile }, cx);
         let focused = self.focused(Target::SideRow(id));
         let fg = if on { th.tx1 } else if off { th.tx3 } else { th.tx2 };
@@ -453,9 +453,19 @@ impl Quiver {
             Some((PillKind::Accent, Icon::ArrowDownToLine, "Update available".into()))
         } else if g.installed() && !slim {
             Some((PillKind::Ok, Icon::CircleCheck, "Installed".into()))
+        } else if g.steam_only() {
+            Some((PillKind::Ok, Icon::Gamepad, "Installed via Steam".into()))
         } else {
             None
         };
+        // Bought on Steam: Ubisoft has no build of its own for this account.
+        let steam_owned = (g.steam_only() && !g.entry.installable).then(|| {
+            let label = if g.entry.owned_by.is_empty() { "On Steam · not on your Ubisoft account" } else { "Owned on Steam" };
+            pill(th, PillKind::Muted, None, label).py(px(5.))
+        });
+        // A Steam copy: the button switches it to Quiver (or shows that it is) instead of
+        // adding a shortcut.
+        let copy = g.steam().and_then(|s| self.steam_copy(id).or_else(|| Some(s.clone())));
         // Add to Steam shows the shortcut's state.
         let steam_state = self.gp.export(id, ubi_api::exports::ExportKind::Steam).map(|e| e.state);
         use ubi_api::exports::ExportState as S;
@@ -465,6 +475,16 @@ impl Quiver {
             Some(S::WaitingForSteam) => ("Restart Steam to show", Icon::RefreshCw, Some(th.warn)),
             Some(S::Missing) | Some(S::Changed) => ("Add to Steam again", Icon::TriangleAlert, Some(th.warn)),
         };
+        let (steam_label, steam_icon, steam_tone) = match &copy {
+            Some(c) if g.steam_only() => match (crate::ui::steamgames::control(c), c.state) {
+                (_, ubi_api::exports::PatchState::Waiting) => ("Quiver after Steam restarts", Icon::RefreshCw, Some(th.warn)),
+                (Some(false), _) => ("Starts through Quiver", Icon::CircleCheck, Some(th.ok)),
+                (Some(true), _) => ("Use Quiver", Icon::Gamepad, Some(th.acc_hi)),
+                (None, _) => ("Opens Connect first", Icon::Gamepad, None),
+            },
+            _ => (steam_label, steam_icon, steam_tone),
+        };
+        let dim_steam = !g.installed() && !g.steam_only();
         let steam = if slim {
             icon_button("act-steam", th, steam_icon, true).bg(th.ink2).when_some(steam_tone, |d, c| d.child(div().absolute().top(px(5.)).right(px(5.)).size(px(6.)).rounded_full().bg(c)))
         } else {
@@ -472,7 +492,7 @@ impl Quiver {
             let fg = steam_tone.unwrap_or(th.tx1);
             b.child(icon(steam_icon, 16., fg)).child(div().text_color(fg).child(steam_label))
         }
-        .when(!g.installed(), |d| d.opacity(0.5))
+        .when(dim_steam, |d| d.opacity(0.5))
         .focus_glow(f(ACTION_STEAM), th, 8.)
         .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_STEAM), cx)));
         let files = icon_button("act-files", th, Icon::FolderOpen, true)
@@ -501,7 +521,7 @@ impl Quiver {
                 .items_center()
                 .gap(px(8.))
                 .when_some(status, |d, (k, i, s)| d.child(pill(th, k, Some(i), s).py(px(5.))))
-                .when_some(proton_chip, |d, p| d.child(art_chip(Some(Icon::Cpu), p).h(px(30.))))
+                .when(!g.steam_only(), |d| d.when_some(proton_chip.clone(), |d, p| d.child(art_chip(Some(Icon::Cpu), p).h(px(30.)))))
                 .children(profile_chip)
                 .child(play)
                 .child(div().w(px(4.)))
@@ -519,8 +539,9 @@ impl Quiver {
             .mt(px(-58.))
             .child(play)
             .children(profile_chip)
-            .when_some(proton_chip, |d, p| d.child(chip(th, Some(Icon::Cpu), p, false).h(px(30.))))
+            .when(!g.steam_only(), |d| d.when_some(proton_chip, |d, p| d.child(chip(th, Some(Icon::Cpu), p, false).h(px(30.)))))
             .when_some(status, |d, (k, i, s)| d.child(pill(th, k, Some(i), s).py(px(5.))))
+            .children(steam_owned)
             .child(div().flex_1())
             .child(steam)
             .child(files)
@@ -549,6 +570,8 @@ impl Quiver {
                 "Installed",
                 if let Some(s) = info.and_then(|i| i.install.as_ref()).map(|i| i.size_bytes).filter(|s| *s > 0) {
                     gb(s)
+                } else if g.steam_only() {
+                    "Via Steam".into()
                 } else if g.installed() {
                     "Yes".into()
                 } else if let Some(f) = g.installing() {
@@ -559,7 +582,15 @@ impl Quiver {
             ),
             (
                 "Version",
-                info.and_then(|i| i.install.as_ref()).and_then(|i| i.version.clone()).unwrap_or_else(|| if g.installed() { "—".into() } else { "Not installed".into() }),
+                info.and_then(|i| i.install.as_ref()).and_then(|i| i.version.clone()).unwrap_or_else(|| {
+                    if g.installed() {
+                        "—".into()
+                    } else if g.steam_only() {
+                        "Steam's".into()
+                    } else {
+                        "Not installed".into()
+                    }
+                }),
             ),
             ("Account", format!("{account} · {}", if override_ { "this game" } else { "default" })),
         ];

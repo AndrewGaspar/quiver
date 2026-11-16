@@ -110,7 +110,7 @@ impl Ctx {
 
 /// The library as quiverd has it (fetched once if there's none yet); `None` without one.
 async fn library(daemon: &Arc<Daemon>) -> Option<Vec<LibraryEntry>> {
-    daemon.library(false).await.map_err(|e| tracing::debug!("library for Steam games: {e:#}")).ok()
+    daemon.owned_library(false).await.map_err(|e| tracing::debug!("library for Steam games: {e:#}")).ok()
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {

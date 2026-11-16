@@ -18,6 +18,7 @@ pub mod exports;
 pub mod mods;
 pub mod info;
 pub mod setup;
+pub mod steamlib;
 pub use client::Client;
 pub use mods::{ModsRequest, Profile};
 
@@ -170,9 +171,26 @@ pub struct LibraryEntry {
     /// Art file names from the product config (served by Ubisoft's asset CDN).
     #[serde(default)]
     pub art: Art,
-    /// User ids of the signed-in accounts that own it, default account first.
+    /// User ids of the signed-in accounts that own it, default account first. Empty for a
+    /// Steam install no signed-in account has (its Steam account isn't linked).
     #[serde(default)]
     pub owned_by: Vec<String>,
+    /// Ubisoft has a PC build Quiver can install. `false` for copies sold on Steam: the
+    /// account owns the product, but Steam installs and updates it.
+    #[serde(default = "yes")]
+    pub installable: bool,
+    /// Installed through Steam (launched with `steam://rungameid/<app_id>`). Steam
+    /// installs, updates and uninstalls it; Quiver shows it and can make it start through
+    /// Quiver instead of Ubisoft Connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam: Option<exports::SteamGame>,
+}
+
+impl LibraryEntry {
+    /// Installed only through Steam (no Quiver install of its own).
+    pub fn steam_only(&self) -> bool {
+        self.installed.is_none() && self.steam.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -252,11 +270,15 @@ pub struct ActiveSession {
     #[serde(default)]
     pub account: String,
     pub started: DateTime<Utc>,
-    /// Who holds the session open: `launcher` (games quiverd started) and/or `bridge`
-    /// (any game talking to a Quiver bridge, e.g. containers).
+    /// Who holds the session open, each once: `launcher` (games quiverd started), `steam`
+    /// (a Steam copy started through `quiver steam-run`) and/or `bridge` (any other game
+    /// talking to a Quiver bridge, e.g. containers).
     pub holders: Vec<String>,
     /// Whether Ubisoft accepted the session (play time is being recorded upstream).
     pub reported: bool,
+    /// The Steam app it was started from (`quiver steam-run`), if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_app_id: Option<u32>,
 }
 
 /// One play session recorded by the daemon.
@@ -336,6 +358,10 @@ pub enum Request {
         install_dir: Option<PathBuf>,
         #[serde(default)]
         account: Option<String>,
+        /// The Steam app this launch is for (`quiver steam-run`): its play session shows
+        /// as started from Steam.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_app_id: Option<u32>,
     },
     /// Installed Proton builds.
     ProtonList,
@@ -493,6 +519,20 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    // ---- Steam copies in the library (feat/steam-library)
+    /// What Ubisoft's ownership service says about products, raw (`Vec<OwnedProduct>`):
+    /// for finding out why a product is or isn't in the library. `product_id: None`: every
+    /// product. Read-only; uses the account's existing session.
+    Ownership {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        product_id: Option<u32>,
+        /// Account (user id or name); default: the product's launch account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    /// The launch settings `quiver steam-run` applies to a Steam copy
+    /// (`SteamLaunchPlan`): the game's environment, DLL overrides, arguments and wrappers.
+    SteamLaunchPlan { product_id: u32 },
 }
 
 fn yes() -> bool {

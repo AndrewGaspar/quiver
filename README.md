@@ -104,7 +104,8 @@ quiver account default family                  # change the default (by name or 
 quiver logout family                           # sign one account out (default: the default)
 quiver-app                                     # the app; relaunches itself on the same screen when its
                                                # binary is rebuilt (QUIVER_AUTO_RELAUNCH=0: off)
-quiver library                                 # owned games, install state, owners (2+ accounts)
+quiver library                                 # owned games, install state, owners (2+ accounts); Steam copies too
+quiver ownership 66088                         # Ubisoft's raw ownership record: why a game is (not) listed
 quiver install "chronicles china"              # by name or product id; shows progress
 quiver play rabbids                            # runs in its own prefix; syncs cloud saves
 quiver set origins proton=GE-Proton10-34 env.DXVK_HUD=fps -m "test HUD"
@@ -194,6 +195,17 @@ written it says so instead of reporting success. `quiverd` also notices Ubisoft 
 switch once (an Activity entry, and a card in the app); "Not now" isn't asked again, and
 `quiver steam offers off` stops the offers. Steam from Flatpak isn't supported (its sandbox can't run
 `quiver`).
+
+Steam copies are library games. A game bought on Steam is on your Ubisoft account without a
+Ubisoft PC build, so it used to be missing; now every Ubisoft game Steam has installed is listed
+("Installed via Steam", "Owned on Steam" when Ubisoft has no build of it), with its art, details,
+progression, Ubisoft play time and saves (read from Steam's compatibility folder). Play
+(`quiver play`, the app) asks Steam to start it (`steam://rungameid/<appid>`); Steam installs,
+updates, verifies and uninstalls it. A session started through `steam-run` shows as started
+from Steam. `steam-run` also applies the game's Quiver launch settings: `env.*`, `dll.*`
+(merged into `WINEDLLOVERRIDES`), `args` (after the game's) and `wrappers` (in front of Steam's
+command); Proton and language stay Steam's; `--no-settings` skips them. Mod profiles for Steam
+copies are designed in [design/STEAM-COPIES.md](design/STEAM-COPIES.md), not built.
 
 ## Downloads
 
