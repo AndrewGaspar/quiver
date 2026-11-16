@@ -439,13 +439,23 @@ pub async fn play(
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(run_dir.join("game.log"))?);
     let mut child = cmd.spawn()?;
+    // Don't wait on `proton run`: its steam.exe wrapper waits for every process in the
+    // prefix, including the bridge, so it never returns while the bridge is up. Watch the
+    // game's own processes instead.
+    let started = wait_for_game_start(&proton, &mut child).await;
     events(LaunchEvent::Running);
-    // `proton run` returns when the launched exe exits; games that relaunch themselves
-    // keep the prefix busy, so also wait for the wineserver to go idle (bridge excluded).
-    let status = child.wait().await?;
-    wait_for_game_processes(&proton).await;
+    if started {
+        while !game_processes(&proton).is_empty() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    let status = child.try_wait().ok().flatten();
+    let _ = child.start_kill();
     let _ = bridge.start_kill();
     let _ = proton.wineserver().arg("-k").status().await;
+    let _ = child.wait().await;
+    let _ = bridge.wait().await;
+    let status = status.unwrap_or_default();
     events(LaunchEvent::Exited(status.code()));
 
     events(LaunchEvent::Status("Uploading cloud saves…".into()));
@@ -455,26 +465,39 @@ pub async fn play(
     Ok(())
 }
 
-/// Block while Windows processes other than the bridge and Wine services run in the prefix.
-async fn wait_for_game_processes(proton: &Proton<'_>) {
-    let prefix = proton.prefix.to_string_lossy().into_owned();
-    loop {
-        let busy = std::fs::read_dir("/proc")
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
-                let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-                let in_prefix = env.split(|&b| b == 0).any(|kv| kv == format!("WINEPREFIX={prefix}").as_bytes());
-                let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-                let cmd = String::from_utf8_lossy(&cmd).to_lowercase();
-                Some(in_prefix && cmd.contains(".exe") && !cmd.contains("ubi-bridge") && !cmd.contains("\\windows\\") && !cmd.contains("proton"))
-            })
-            .any(|b| b);
-        if !busy {
-            return;
+/// Game processes in the prefix: Windows executables other than the bridge, Wine's own
+/// services and Proton's wrappers.
+fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
+    let prefix = format!("WINEPREFIX={}", proton.prefix.display());
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+            let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+            let in_prefix = env.split(|&b| b == 0).any(|kv| kv.starts_with(prefix.as_bytes()));
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let cmd = String::from_utf8_lossy(&cmd).to_lowercase();
+            let is_game = cmd.contains(".exe")
+                && !cmd.contains("ubi-bridge")
+                && !cmd.contains("\\windows\\")
+                && !cmd.contains("proton");
+            (in_prefix && is_game).then_some(pid)
+        })
+        .collect()
+}
+
+/// Wait (up to two minutes) for the game's process to appear. False if `proton run` gave up first.
+async fn wait_for_game_start(proton: &Proton<'_>, child: &mut Child) -> bool {
+    for _ in 0..240 {
+        if !game_processes(proton).is_empty() {
+            return true;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if child.try_wait().ok().flatten().is_some() {
+            return !game_processes(proton).is_empty();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    false
 }

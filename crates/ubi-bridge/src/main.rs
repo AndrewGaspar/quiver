@@ -10,6 +10,9 @@
 //! Static data comes from a [`ubi_ipc::LaunchContext`] JSON file (`ubi launch-context`),
 //! given as the first argument or via `UBI_BRIDGE_CONTEXT`.
 
+// GUI subsystem: no console window. Logging goes to UBI_BRIDGE_LOG.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("ubi-bridge runs inside Wine: build with --target x86_64-pc-windows-gnu");
