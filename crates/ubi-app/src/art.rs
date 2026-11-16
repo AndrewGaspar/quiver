@@ -34,9 +34,12 @@ pub enum Variant {
     Trimmed,
     /// 96 px wide, blurred (hero ambience).
     Ambient,
-    /// Desaturated and darkened (box art of games that aren't installed; GPUI only has
+    /// Cropped to the 240:280 box-art ratio (GPUI doesn't clip `ObjectFit::Cover`, so tiles
+    /// need images of exactly their shape; custom art can be any shape).
+    Tile,
+    /// `Tile`, desaturated and darkened, for games that aren't installed (GPUI only has
     /// full grayscale).
-    Dimmed,
+    TileDimmed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +88,18 @@ pub struct Fetcher {
     base_url: String,
     http: reqwest::Client,
     limit: Arc<tokio::sync::Semaphore>,
+    /// One lock per file being downloaded, so concurrent requests for the same file (its
+    /// hero and its ambient copy, say) download it once.
+    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temp name next to `path` that no other writer in this or another process uses.
+fn tmp_path(path: &Path) -> PathBuf {
+    let n = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.{n}.part", std::process::id()))
 }
 
 impl Fetcher {
@@ -95,11 +110,13 @@ impl Fetcher {
             .timeout(Duration::from_secs(45))
             .build()
             .expect("http client");
-        Self { cache_dir, base_url: base_url.into(), http, limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)) }
-    }
-
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
+        Self {
+            cache_dir,
+            base_url: base_url.into(),
+            http,
+            limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
+            inflight: Arc::default(),
+        }
     }
 
     /// The original file on disk, downloading it first if it isn't cached.
@@ -119,10 +136,12 @@ impl Fetcher {
                 if path.is_file() {
                     return Ok(path);
                 }
-                let _permit = self.limit.acquire().await?;
+                let lock = self.inflight.lock().unwrap().entry(file.clone()).or_default().clone();
+                let _guard = lock.lock().await;
                 if path.is_file() {
                     return Ok(path); // another task got it while we waited
                 }
+                let _permit = self.limit.acquire().await?;
                 let url = format!("{}{}", self.base_url, file);
                 let resp = self.http.get(&url).send().await.with_context(|| format!("GET {url}"))?;
                 if !resp.status().is_success() {
@@ -132,9 +151,10 @@ impl Fetcher {
                 // Only cache things that are actually images.
                 image::guess_format(&bytes).with_context(|| format!("{url} is not an image"))?;
                 tokio::fs::create_dir_all(&self.cache_dir).await?;
-                let tmp = self.cache_dir.join(format!(".{file}.{}.part", std::process::id()));
+                let tmp = tmp_path(&path);
                 tokio::fs::write(&tmp, &bytes).await?;
                 tokio::fs::rename(&tmp, &path).await?;
+                self.inflight.lock().unwrap().remove(file);
                 Ok(path)
             }
         }
@@ -155,7 +175,8 @@ impl Fetcher {
             Variant::Original => unreachable!(),
             Variant::Trimmed => format!("{stem}.trim.png"),
             Variant::Ambient => format!("{stem}.amb.jpg"),
-            Variant::Dimmed => format!("{stem}.dim.jpg"),
+            Variant::Tile => format!("{stem}.tile.jpg"),
+            Variant::TileDimmed => format!("{stem}.tile-dim.jpg"),
         };
         self.cache_dir.join("derived").join(name)
     }
@@ -198,15 +219,24 @@ fn derive(original: &Path, out: &Path, variant: Variant) -> Result<()> {
             let small = img.thumbnail(96, 96);
             image::DynamicImage::ImageRgb8(image::imageops::blur(&small.to_rgb8(), 5.0))
         }
-        Variant::Dimmed => image::DynamicImage::ImageRgb8(dim(&img.to_rgb8())),
+        Variant::Tile => image::DynamicImage::ImageRgb8(tile(&img).to_rgb8()),
+        Variant::TileDimmed => image::DynamicImage::ImageRgb8(dim(&tile(&img).to_rgb8())),
         Variant::Original => return Ok(()),
     };
     std::fs::create_dir_all(out.parent().unwrap())?;
-    let tmp = out.with_extension(format!("{}.part", std::process::id()));
+    let tmp = tmp_path(out);
     let format = if variant == Variant::Trimmed { image::ImageFormat::Png } else { image::ImageFormat::Jpeg };
     result.save_with_format(&tmp, format)?;
     std::fs::rename(&tmp, out)?;
     Ok(())
+}
+
+/// Center-crop to 240:280 and cap the size at 480×560 (2x the tile at its largest).
+pub fn tile(img: &image::DynamicImage) -> image::DynamicImage {
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let tw = w.min(h * 240 / 280).clamp(1, 480);
+    let th = (tw * 280 / 240).max(1);
+    img.resize_to_fill(tw, th, image::imageops::FilterType::Triangle)
 }
 
 /// CSS `saturate(0.35) brightness(0.62)`, as the mock-up draws games that aren't installed.
@@ -396,14 +426,31 @@ mod tests {
         assert_eq!((t.width, t.height), (20, 10));
         let amb = f.load(ArtSource::Cdn("good.png".into()), Variant::Ambient).await.unwrap();
         assert!(amb.width <= 96);
-        let dim = f.load(ArtSource::Cdn("good.png".into()), Variant::Dimmed).await.unwrap();
-        assert_eq!((dim.width, dim.height), (40, 20));
-        assert!(dim.path.to_string_lossy().ends_with("good.dim.jpg"));
+        // Tiles are cropped to 240:280 whatever the source's shape.
+        let tile = f.load(ArtSource::Cdn("good.png".into()), Variant::Tile).await.unwrap();
+        assert_eq!((tile.width, tile.height), (17, 19));
+        let dim = f.load(ArtSource::Cdn("good.png".into()), Variant::TileDimmed).await.unwrap();
+        assert!(dim.path.to_string_lossy().ends_with("good.tile-dim.jpg"));
         // Failures aren't cached.
         assert!(f.load(ArtSource::Cdn("missing.png".into()), Variant::Original).await.is_err());
         assert!(!cache.path().join("art/missing.png").exists());
         // Hostile names never reach the network or the file system.
         assert!(f.load(ArtSource::Cdn("../etc/passwd".into()), Variant::Original).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_download_once() {
+        let cache = tempfile::tempdir().unwrap();
+        let (base, hits) = serve(png(64, 64, (0, 0, 64, 64))).await;
+        let f = Fetcher::new(cache.path().join("art"), base);
+        let src = ArtSource::Cdn("good.png".into());
+        let (a, b, c) = tokio::join!(
+            f.load(src.clone(), Variant::Original),
+            f.load(src.clone(), Variant::Ambient),
+            f.load(src.clone(), Variant::Tile),
+        );
+        assert!(a.is_ok() && b.is_ok() && c.is_ok(), "{a:?} {b:?} {c:?}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

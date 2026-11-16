@@ -370,9 +370,14 @@ impl Quiver {
     }
 
     fn load_playtime(&mut self, id: u32, cx: &mut Context<Self>) {
-        self.call::<Playtime, _>(Request::Playtime { product_id: id }, cx, move |this, r, _| {
+        self.call::<Playtime, _>(Request::Playtime { product_id: id }, cx, move |this, r, cx| {
             if let (Ok(p), Some(g)) = (r, this.game_mut(id)) {
                 g.playtime = Some(p);
+            }
+            // The library hero shows the featured game's launch options too.
+            let hero = this.hero_game().filter(|g| g.settings.is_none()).map(|g| g.id());
+            if hero == Some(id) {
+                this.load_settings(id, cx);
             }
         });
     }
@@ -380,6 +385,10 @@ impl Quiver {
     /// Everything the game page shows that the library doesn't carry.
     pub fn load_details(&mut self, id: u32, cx: &mut Context<Self>) {
         self.load_playtime(id, cx);
+        self.load_settings(id, cx);
+    }
+
+    fn load_settings(&mut self, id: u32, cx: &mut Context<Self>) {
         if !self.game(id).is_some_and(|g| g.installed()) {
             return;
         }
@@ -721,7 +730,7 @@ impl Quiver {
                 }
             });
         } else if let Some(f) = g.installing() {
-            self.show_toast(format!("{name} is installing ({:.0}%)", f * 100.), cx);
+            self.show_toast(format!("{name} is installing ({:.0}%)", (f * 100.).floor()), cx);
         } else if g.queued() {
             self.show_toast(format!("{name} is queued"), cx);
         } else if !g.installed() || g.entry.update_available {
@@ -958,8 +967,15 @@ impl Quiver {
         let Ok(script) = std::env::var("QUIVER_DEMO_INPUT") else { return };
         let tokens: Vec<String> = script.split_whitespace().map(str::to_owned).collect();
         cx.spawn_in(window, async move |this, cx| {
-            let timer = |ms| cx.background_executor().timer(Duration::from_millis(ms));
-            timer(1500).await;
+            // Wait until the library is on screen.
+            for _ in 0..100 {
+                cx.background_executor().timer(Duration::from_millis(200)).await;
+                let ready = this.update_in(cx, |this, _, _| !this.layout.grid.is_empty()).unwrap_or(false);
+                if ready {
+                    break;
+                }
+            }
+            cx.background_executor().timer(Duration::from_millis(800)).await;
             let mut mode = InputMode::Keyboard;
             for t in tokens {
                 let input = match t.as_str() {

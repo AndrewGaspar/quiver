@@ -64,7 +64,7 @@ pub fn play_button(
         })
         .when(!pad_glyph, |d| d.child(icon(i, is, th.acc_ink)))
         .child(label.to_owned())
-        .focus_if(main_focus, th);
+        .focus_glow(main_focus, th, 10.);
     let more = div()
         .flex()
         .items_center()
@@ -76,7 +76,7 @@ pub fn play_button(
         .border_l_1()
         .border_color(th.acc_ink.opacity(0.25))
         .child(icon(Icon::ChevronDown, if large { 16. } else { 14. }, th.acc_ink))
-        .focus_if(more_focus, th);
+        .focus_glow(more_focus, th, 10.);
     (main, more)
 }
 
@@ -238,7 +238,7 @@ impl Quiver {
                     gpui::linear_color_stop(rgba(0x0a0c10, 0.), 1.),
                 )),
             )
-            .child(div().absolute().left_0().right_0().bottom_0().h(relative(0.45)).bg(gpui::linear_gradient(
+            .child(div().absolute().left_0().right_0().bottom_0().h(relative(if th.dark { 0.45 } else { 0.2 })).bg(gpui::linear_gradient(
                 180.,
                 gpui::linear_color_stop(th.ink1.opacity(0.), 0.),
                 gpui::linear_color_stop(th.ink1, 1.),
@@ -284,7 +284,7 @@ impl Quiver {
                 cx.notify();
             })));
         let details = button("hero-details", th, Kind::OnArt, Size::Large, None, "Game details")
-            .focus_if(focus_details, th)
+            .focus_glow(focus_details, th, 10.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Hero(1), cx)));
 
         let content = div()
@@ -352,14 +352,14 @@ impl Quiver {
             );
         for (k, (id, a)) in items.iter().enumerate() {
             let Some(g) = self.game(*id).cloned() else { continue };
-            let thumb = self.art_for(&g, ArtSlot::Tile, Variant::Original, cx);
+            let thumb = self.art_for(&g, ArtSlot::Tile, Variant::Tile, cx);
             let (what, sub): (String, AnyElement) = match a {
                 Attention::Update => (
                     "Update ready".into(),
                     div().text_size(px(11.5)).text_color(on_art::tx3()).child("Installs in place, keeps your prefix").into_any_element(),
                 ),
                 Attention::Installing(f) => (
-                    format!("Installing {:.0}%", f * 100.),
+                    format!("Installing {:.0}%", (f * 100.).floor()),
                     div().mt(px(6.)).w(px(150.)).child(progress(th, *f, Some(150.), 4., None)).into_any_element(),
                 ),
                 Attention::Failed(e) => (
@@ -403,7 +403,7 @@ impl Quiver {
                     )
                     .child(
                         button(("attn", k), th, Kind::OnArt, Size::Small, None, action)
-                            .focus_if(focused, th)
+                            .focus_ring(focused, th, 6.)
                             .on_click(cx.listener(move |this, _, _, cx| this.click(target, cx))),
                     ),
             );
@@ -415,7 +415,7 @@ impl Quiver {
         let Some(g) = self.game(id).cloned() else { return div().into_any_element() };
         let h = (w * TILE_RATIO).round();
         let dim = !g.installed() && g.install_job().is_none();
-        let art = self.art_for(&g, ArtSlot::Tile, if dim { Variant::Dimmed } else { Variant::Original }, cx);
+        let art = self.art_for(&g, ArtSlot::Tile, if dim { Variant::TileDimmed } else { Variant::Tile }, cx);
         let focused = self.focused(Target::Tile(id));
         let label = short_name(&g.entry.name);
 
@@ -431,11 +431,7 @@ impl Quiver {
         }
         let custom = self.custom_art.get(&id).is_some_and(|c| c.tile.is_some());
 
-        let ring = if focused {
-            super::focus_ring(th)
-        } else {
-            vec![soft_shadow(rgba(0x000000, 0.35), 6., 18.)]
-        };
+        let ring = vec![soft_shadow(rgba(0x000000, 0.35), 6., 18.)];
         let hover_ring = vec![
             gpui::BoxShadow {
                 color: th.acc_line,
@@ -455,7 +451,8 @@ impl Quiver {
             .shadow(ring)
             .when(!focused, |d| d.group_hover(group.clone(), move |s| s.shadow(hover_ring.clone())))
             .child(art_fill(th, &art, &label, 10., false))
-            .child(tl);
+            .child(tl)
+            .focus_glow(focused, th, 10.);
         if custom {
             boxart = boxart.child(
                 div().absolute().right(px(8.)).top(px(8.)).child(tag(th, TagKind::Plain, Some(Icon::Image), "")),
@@ -486,7 +483,7 @@ impl Quiver {
                             .font_weight(SEMIBOLD)
                             .text_color(on_art::tx1())
                             .child("Installing")
-                            .child(format!("{:.0}%", f * 100.)),
+                            .child(format!("{:.0}%", (f * 100.).floor())),
                     )
                     .child(progress(th, f, None, 4., None)),
             );

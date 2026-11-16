@@ -156,13 +156,13 @@ impl Quiver {
     fn render_side_row(&mut self, th: &Theme, g: &GameRow, on: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
         let off = !g.installed() && g.install_job().is_none();
-        let art = self.art_for(g, ArtSlot::Tile, if off { Variant::Dimmed } else { Variant::Original }, cx);
+        let art = self.art_for(g, ArtSlot::Tile, if off { Variant::TileDimmed } else { Variant::Tile }, cx);
         let focused = self.focused(Target::SideRow(id));
         let fg = if on { th.tx1 } else if off { th.tx3 } else { th.tx2 };
         let right: AnyElement = if g.running() {
             icon(Icon::Gamepad, 12., th.ok).into_any_element()
         } else if let Some(f) = g.installing() {
-            div().text_size(px(11.)).text_color(th.acc_hi).child(format!("{:.0}%", f * 100.)).into_any_element()
+            div().text_size(px(11.)).text_color(th.acc_hi).child(format!("{:.0}%", (f * 100.).floor())).into_any_element()
         } else if g.queued() {
             div().text_size(px(11.)).text_color(th.tx3).child("Queued").into_any_element()
         } else if g.failed().is_some() {
@@ -188,7 +188,7 @@ impl Quiver {
             .cursor_pointer()
             .when(on, |d| d.bg(th.sel))
             .when(!on, |d| d.hover(move |s| s.bg(hover).text_color(hover_fg)))
-            .focus_if(focused, th)
+            .focus_ring(focused, th, 7.)
             .when(on, |d| d.child(div().absolute().left(px(-8.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded(px(2.)).bg(th.acc)))
             .child(div().w(px(22.)).h(px(26.)).flex_none().child(art_fill(th, &art, "", 4., false)))
             .child(div().flex_1().min_w_0().truncate().child(short_name(&g.entry.name)))
@@ -256,7 +256,7 @@ impl Quiver {
                 gpui::linear_color_stop(rgba(0x080a0e, 0.5), 0.),
                 gpui::linear_color_stop(rgba(0x080a0e, 0.), 1.),
             )))
-            .child(div().absolute().left_0().right_0().bottom_0().h(relative(0.65)).bg(gpui::linear_gradient(
+            .child(div().absolute().left_0().right_0().bottom_0().h(relative(if th.dark { 0.65 } else { 0.3 })).bg(gpui::linear_gradient(
                 180.,
                 gpui::linear_color_stop(th.ink1.opacity(0.), 0.),
                 gpui::linear_color_stop(th.ink1, 1.),
@@ -376,7 +376,7 @@ impl Quiver {
         let status: Option<(PillKind, Icon, String)> = if g.running() {
             Some((PillKind::Ok, Icon::Gamepad, "Playing now".into()))
         } else if let Some(fr) = g.installing() {
-            Some((PillKind::Accent, Icon::Download, format!("Installing {:.0}%", fr * 100.)))
+            Some((PillKind::Accent, Icon::Download, format!("Installing {:.0}%", (fr * 100.).floor())))
         } else if g.queued() {
             Some((PillKind::Muted, Icon::Download, "Queued".into()))
         } else if g.installed() && g.entry.update_available {
@@ -387,15 +387,15 @@ impl Quiver {
             None
         };
         let steam = button("act-steam", th, Kind::Secondary, Size::Medium, Some(Icon::Gamepad), "Add to Steam")
-            .focus_if(f(ACTION_STEAM), th)
+            .focus_glow(f(ACTION_STEAM), th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_STEAM), cx)));
         let files = icon_button("act-files", th, Icon::FolderOpen, true)
             .bg(th.ink2)
-            .focus_if(f(ACTION_FILES), th)
+            .focus_ring(f(ACTION_FILES), th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_FILES), cx)));
         let launch = icon_button("act-launch", th, Icon::SlidersHorizontal, true)
             .bg(th.ink2)
-            .focus_if(f(ACTION_LAUNCH), th)
+            .focus_ring(f(ACTION_LAUNCH), th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_LAUNCH), cx)));
         let more_btn = if pad {
             button("act-menu", th, Kind::Secondary, Size::Medium, None, "")
@@ -405,7 +405,7 @@ impl Quiver {
         } else {
             icon_button("act-menu", th, Icon::Ellipsis, true).bg(th.ink2)
         }
-        .focus_if(f(ACTION_MORE), th)
+        .focus_ring(f(ACTION_MORE), th, 8.)
         .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_MORE), cx)));
 
         div()
@@ -437,7 +437,7 @@ impl Quiver {
                 if g.installed() {
                     "Installed".into()
                 } else if let Some(f) = g.installing() {
-                    format!("{:.0}%", f * 100.)
+                    format!("{:.0}%", (f * 100.).floor())
                 } else {
                     "Not installed".into()
                 },
@@ -495,7 +495,7 @@ impl Quiver {
                             .text_size(px(13.))
                             .font_weight(MEDIUM)
                             .text_color(if on { th.tx1 } else { th.tx2 })
-                            .focus_if(focused, th)
+                            .focus_ring(focused, th, 6.)
                             .child(t.label()),
                     )
                     .when(on, |d| {
@@ -540,9 +540,9 @@ impl Quiver {
                             ),
                     )
                     .child(div().w(px(90.)).font_weight(SEMIBOLD).child(duration(s.seconds)))
-                    .child(chip(th, Some(Icon::History), format!("r{}", s.settings_revision.max(1)), false).h(px(22.)))
+                    .child(chip(th, Some(Icon::Layers), "Vanilla", false).h(px(22.)))
                     .child(div().flex_1())
-                    .child(icon(Icon::CircleCheck, 14., th.tx3))
+                    .child(div().text_size(px(11.5)).text_color(th.tx3).child(format!("launch options r{}", s.settings_revision.max(1))))
                     .into_any_element()
             })
             .collect();
@@ -775,8 +775,12 @@ impl Quiver {
                 };
                 let last = i + 1 == history.len();
                 div()
+                    .relative()
                     .flex()
                     .gap(px(10.))
+                    .when(!last, |d| {
+                        d.child(div().absolute().left(px(10.)).top(px(22.)).bottom(px(0.)).w(px(1.)).bg(th.line2))
+                    })
                     .child(
                         div()
                             .relative()
@@ -801,7 +805,7 @@ impl Quiver {
                                         if is_cur { th.acc_ink } else { th.tx2 },
                                     )),
                             )
-                            .when(!last, |d| d.child(div().w(px(1.)).flex_1().bg(th.line2))),
+
                     )
                     .child(
                         div()
@@ -813,7 +817,7 @@ impl Quiver {
                             .pb(px(14.))
                             .px(px(8.))
                             .rounded(px(8.))
-                            .when(focused, |d| d.bg(th.ink3).focus_if(true, th))
+                            .when(focused, |d| d.bg(th.ink3)).focus_ring(focused, th, 8.)
                             .child(
                                 div()
                                     .flex()

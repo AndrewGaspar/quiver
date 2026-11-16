@@ -118,23 +118,43 @@ pub const BOLD: FontWeight = FontWeight::BOLD;
 // ---------------------------------------------------------------------------------------------
 // Focus
 
-/// The `focus` token as a ring: a 3 px gap in `ink-1`, a 2 px ring, and a soft halo.
-pub fn focus_ring(th: &Theme) -> Vec<BoxShadow> {
-    vec![
-        BoxShadow { color: th.focus_halo, offset: point(px(0.), px(0.)), blur_radius: px(22.), spread_radius: px(4.) },
-        BoxShadow { color: th.focus, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(5.) },
-        BoxShadow { color: th.ink1, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.) },
-    ]
+/// The `focus` token as a ring around an element with corner radius `radius`: a 2 px gap
+/// in `ink-1`, a 3 px ring, and a soft halo. Drawn as bordered overlays (GPUI doesn't paint
+/// spread-only box shadows), so the element must not clip its children.
+pub fn focus_overlay(th: &Theme, radius: f32) -> [AnyElement; 2] {
+    let ring = |inset: f32, width: f32, color: Hsla| {
+        div()
+            .absolute()
+            .top(px(-inset))
+            .left(px(-inset))
+            .right(px(-inset))
+            .bottom(px(-inset))
+            .rounded(px(radius + inset))
+            .border(px(width))
+            .border_color(color)
+    };
+    [ring(2., 2., th.ink1).into_any_element(), ring(5., 3., th.focus).into_any_element()]
 }
 
-pub trait FocusExt: Styled + Sized {
-    /// Draw the focus ring when `on`.
-    fn focus_if(self, on: bool, th: &Theme) -> Self {
-        if on { self.shadow(focus_ring(th)) } else { self }
+/// The soft halo around a focused element (drawn behind it).
+pub fn focus_halo(th: &Theme) -> BoxShadow {
+    BoxShadow { color: th.focus_halo, offset: point(px(0.), px(0.)), blur_radius: px(26.), spread_radius: px(0.) }
+}
+
+pub trait FocusExt: ParentElement + Styled + Sized {
+    /// Draw the focus ring when `on`. `radius` is the element's corner radius.
+    fn focus_ring(self, on: bool, th: &Theme, radius: f32) -> Self {
+        if on { self.relative().children(focus_overlay(th, radius)) } else { self }
+    }
+
+    /// The ring plus the soft halo. Only for elements with an opaque background: GPUI
+    /// paints a shadow's full rectangle, so a transparent element would be tinted.
+    fn focus_glow(self, on: bool, th: &Theme, radius: f32) -> Self {
+        if on { self.shadow(vec![focus_halo(th)]).focus_ring(true, th, radius) } else { self }
     }
 }
 
-impl<T: Styled + Sized> FocusExt for T {}
+impl<T: ParentElement + Styled + Sized> FocusExt for T {}
 
 pub fn soft_shadow(color: Hsla, y: f32, blur: f32) -> BoxShadow {
     BoxShadow { color, offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.) }
@@ -177,7 +197,7 @@ pub fn button(
         Kind::Primary => (th.acc, th.acc_ink, gpui::transparent_black(), th.acc_hi),
         Kind::Secondary => (th.ink4, th.tx1, th.line2, th.ink5),
         Kind::Ghost => (gpui::transparent_black(), th.tx2, gpui::transparent_black(), th.ink3),
-        Kind::OnArt => (on_art::fill(), on_art::tx1(), on_art::line(), crate::theme::rgba(0xffffff, 0.16)),
+        Kind::OnArt => (crate::theme::rgba(0x0e1016, 0.5), on_art::tx1(), on_art::line(), crate::theme::rgba(0x0e1016, 0.7)),
     };
     let label: SharedString = label.into();
     div()

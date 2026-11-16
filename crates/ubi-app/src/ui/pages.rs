@@ -45,7 +45,7 @@ impl Quiver {
             let focused = self.focused(Target::Body(i));
             let g = self.game(j.product_id).cloned();
             let thumb = match &g {
-                Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Original, cx),
+                Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                 None => crate::art::ArtState::Failed,
             };
             let queued = j.status.starts_with("Queued");
@@ -57,7 +57,7 @@ impl Quiver {
             } else if queued {
                 pill(th, PillKind::Muted, None, "Queued")
             } else {
-                pill(th, PillKind::Accent, Some(Icon::Download), format!("{:.0}%", f * 100.))
+                pill(th, PillKind::Accent, Some(Icon::Download), format!("{:.0}%", (f * 100.).floor()))
             };
             let id = j.product_id;
             rows.push(
@@ -69,7 +69,7 @@ impl Quiver {
                     .p(px(14.))
                     .mb(px(10.))
                     .cursor_pointer()
-                    .focus_if(focused, th)
+                    .focus_glow(focused, th, 12.)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_game(id, cx)))
                     .child(div().w(px(48.)).h(px(56.)).flex_none().child(art_fill(th, &thumb, "", 6., false)))
                     .child(
@@ -136,7 +136,7 @@ impl Quiver {
                     .rounded(px(10.))
                     .border_b_1()
                     .border_color(th.line1)
-                    .when(focused, |d| d.bg(th.ink3).focus_if(true, th))
+                    .when(focused, |d| d.bg(th.ink3)).focus_ring(focused, th, 10.)
                     .hover(|s| s.bg(th.ink2))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {

@@ -51,7 +51,7 @@ pub fn err_text(e: &anyhow::Error) -> String {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,ubi_app=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,quiver_app=info".into()),
         )
         .init();
     let demo = source::demo_requested();

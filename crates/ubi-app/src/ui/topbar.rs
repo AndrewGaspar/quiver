@@ -48,11 +48,11 @@ impl Quiver {
                         .text_size(px(13.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg)
-                        .focus_if(focused, th)
+                        .focus_ring(focused, th, 8.)
                         .child(icon(i, 16., fg))
                         .child(s.label())
                         .when(s == Section::Downloads && overall.is_some(), |d| {
-                            d.child(badge(th, format!("{:.0}%", overall.unwrap_or(0.) * 100.), true))
+                            d.child(badge(th, format!("{:.0}%", (overall.unwrap_or(0.) * 100.).floor()), true))
                         })
                         .when(s == Section::Downloads && overall.is_none() && !installing.is_empty(), |d| {
                             d.child(badge(th, installing.len().to_string(), true))
@@ -80,6 +80,7 @@ impl Quiver {
             );
         let brand = div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(9.))
             .child(mark)
@@ -87,8 +88,8 @@ impl Quiver {
 
         let search = div()
             .id("search")
-            .ml_auto()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(8.))
             .h(px(32.))
@@ -159,6 +160,7 @@ impl Quiver {
                     .child(nav)
                     .when(pad, |d| d.child(glyph(th, "RB", true))),
             )
+            .child(div().flex_1())
             .child(search)
             .child(daemon)
             .child(

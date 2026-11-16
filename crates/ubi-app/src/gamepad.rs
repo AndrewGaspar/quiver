@@ -66,6 +66,12 @@ pub fn dpad_dir(b: Button) -> Option<Dir> {
     }
 }
 
+/// gilrs reports anything with gamepad-ish buttons, including keyboard media/system-control
+/// interfaces. Only devices with a South (A) face button count as gamepads.
+pub fn is_gamepad(has_south: bool, name: &str) -> bool {
+    has_south && !name.to_ascii_lowercase().contains("keyboard")
+}
+
 /// Stick position -> direction, with hysteresis: a direction engages past `ENGAGE` and
 /// holds until the stick falls back under `RELEASE`, so a stick resting near the edge of
 /// the dead zone doesn't chatter.
@@ -214,8 +220,15 @@ pub fn spawn(send: impl Fn(PadEvent) + Send + 'static) {
                     return;
                 }
             };
-            for (_, pad) in gilrs.gamepads() {
-                send(PadEvent::Connected(pad.name().to_owned()));
+            let mut pads = std::collections::HashSet::new();
+            let accept = |g: gilrs::Gamepad| is_gamepad(g.button_code(Button::South).is_some(), g.name());
+            for (id, pad) in gilrs.gamepads() {
+                if accept(pad) {
+                    pads.insert(id);
+                    send(PadEvent::Connected(pad.name().to_owned()));
+                } else {
+                    tracing::debug!("ignoring input device {:?}: not a gamepad", pad.name());
+                }
             }
             let mut dirs = Directions::default();
             let (mut lx, mut ly, mut ry) = (0.0f32, 0.0f32, 0.0f32);
@@ -232,6 +245,14 @@ pub fn spawn(send: impl Fn(PadEvent) + Send + 'static) {
                 let now = Instant::now();
                 if let Some(ev) = ev {
                     use gilrs::EventType::*;
+                    if let Connected = ev.event {
+                        if accept(gilrs.gamepad(ev.id)) {
+                            pads.insert(ev.id);
+                        }
+                    }
+                    if !pads.contains(&ev.id) {
+                        continue;
+                    }
                     match ev.event {
                         ButtonPressed(b, _) => {
                             if let Some(d) = dpad_dir(b) {
@@ -273,6 +294,7 @@ pub fn spawn(send: impl Fn(PadEvent) + Send + 'static) {
                             send(PadEvent::Connected(name));
                         }
                         Disconnected => {
+                            pads.remove(&ev.id);
                             dirs.clear();
                             send(PadEvent::Disconnected);
                         }
@@ -309,6 +331,14 @@ mod tests {
         assert_eq!(map_button(Button::Mode), None);
         assert_eq!(dpad_dir(Button::Mode), None);
         assert_eq!(dpad_dir(Button::DPadLeft), Some(Dir::Left));
+    }
+
+    #[test]
+    fn only_real_gamepads_count() {
+        assert!(is_gamepad(true, "Microsoft X-Box 360 pad 0"));
+        assert!(is_gamepad(true, "Steam Virtual Gamepad"));
+        assert!(!is_gamepad(false, "Framework Laptop 16 Keyboard Module - ANSI System Control"));
+        assert!(!is_gamepad(true, "Some Keyboard Consumer Control"));
     }
 
     #[test]
