@@ -7,8 +7,12 @@
 //! - `terminal_1_uplay_api_process_ipc_pipe_` (`uplaydll`): per-process handshake
 //! - `terminal_1_uplay_ipc_pipe_` (`uplaydll`): `InitReq`, then the SDK API
 //!
-//! Static data comes from a [`ubi_ipc::LaunchContext`] JSON file (`ubi launch-context`),
+//! Static data comes from a [`ubi_ipc::LaunchContext`] JSON file (`quiver context`),
 //! given as the first argument or via `UBI_BRIDGE_CONTEXT`.
+//!
+//! Launcher mode, `ubi-bridge.exe --run <context.json> [--log <file>] -- <game.exe> [args…]`
+//! (used by `quiver steam-run`): own the pipes, start the game with `UPLAY_ARGUMENTS` as
+//! Connect would, exit with its exit code. The context file is deleted once read.
 
 // GUI subsystem: no console window. Logging goes to UBI_BRIDGE_LOG.
 #![cfg_attr(windows, windows_subsystem = "windows")]
