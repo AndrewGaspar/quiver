@@ -73,18 +73,6 @@ fn respond(req: &u::Req) -> Reply {
     if let Some(f) = &req.friends_req {
         return friends(f);
     }
-    if let Some(p) = &req.party_req {
-        if p.init_party_req.is_some() {
-            let account_id = context().map(|c| c.account_id.clone()).unwrap_or_default();
-            return rsp(|x| {
-                x.party_rsp = Some(u::PartyRsp {
-                    init_party_rsp: Some(u::InitPartyRsp { account_id }),
-                    ..Default::default()
-                })
-            });
-        }
-        return Reply::Unhandled;
-    }
     if let Some(i) = &req.installer_req {
         return installer(i);
     }
@@ -137,7 +125,6 @@ fn respond(req: &u::Req) -> Reply {
     }
     if req.set_game_session_req.is_some()
         || req.clear_game_session_req.is_some()
-        || req.game_options_req.is_some()
         || req.metadata_req.is_some()
         || req.sdk_monitoring_req.is_some()
         || req.set_language_country_code_req.is_some()
@@ -196,6 +183,31 @@ fn init_rsp(id: u32) -> u::InitRsp {
         }),
         storage: ctx.savegame_path.as_deref().map(|p| u::Storage { savegame_storage_path: Some(save_dir(p)) }),
         ubi_services: ctx.ubiservices_app_id.clone().map(|a| u::UbiServices { app_id: Some(a) }),
+        ..subsystems()
+    }
+}
+
+/// Subsystem init blocks Connect sends with `InitRsp`. Without them some SDK calls
+/// (e.g. `UPLAY_FRIENDS_Init`) wait for state that never arrives and time out.
+fn subsystems() -> u::InitRsp {
+    u::InitRsp {
+        overlay: Some(u::Overlay {
+            enabled: Some(false),
+            injection_method: Some(u::OverlayInjectionMethod::None as i32),
+        }),
+        // Mid-range defaults; Connect gets these from its hardware benchmark.
+        hw_benchmark: Some(u::HardwareBenchmark {
+            cpu_score: Some(1000),
+            gpu_score: Some(1000),
+            gpu_score_confidence_level: Some(1.0),
+        }),
+        friend_init: Some(u::FriendInit { friend_list: vec![], is_available: Some(true) }),
+        store_init: Some(u::StoreInit {
+            is_available: false,
+            target_partner: u::TargetPartner::None as i32,
+        }),
+        multiplayer_init: Some(u::MultiplayerInit { session: None, is_available: Some(false) }),
+        user_init: Some(u::UserInit { blacklisted_list: vec![], is_available: Some(true) }),
         ..Default::default()
     }
 }
@@ -218,7 +230,13 @@ fn chunks() -> u::Chunks {
 
 fn friends(f: &u::FriendsReq) -> Reply {
     if f.init_req.is_some() {
-        return Reply::None;
+        // Connect answers with the (here: empty) friend list.
+        return rsp(|x| {
+            x.friends_rsp = Some(u::FriendsRsp {
+                friend_list_updated_push: Some(u::FriendListUpdatedPush { friend_list: vec![] }),
+                ..Default::default()
+            })
+        });
     }
     if let Some(list) = &f.get_friend_list_req {
         let request_id = list.request_id;

@@ -32,12 +32,20 @@ async fn handle(n: u32, req: &aux::Req) -> Option<aux::Rsp> {
     let reply = |init_rsp, activate_rsp| aux::Rsp { request_id: req.request_id, init_rsp, activate_rsp };
     if let Some(init) = &req.init_req {
         log!("[aux {n}] <- InitReq uplay id {}", init.uplay_id);
-        let init = aux::InitRsp { result: aux::InitResult::Success as i32, uplay_pid: Some(std::process::id()) };
+        let init = aux::InitRsp {
+            result: aux::InitResult::Success as i32,
+            uplay_pid: Some(std::process::id()),
+            addons_to_validate: vec![],
+        };
         return Some(reply(Some(init), None));
     }
     let act = req.activate_req.as_ref()?;
     if let Some(t) = &act.get_cached_or_fresh_token_req {
-        log!("[aux {n}] <- GetCachedOrFreshToken (request token {} bytes)", t.request_token.len());
+        log!(
+            "[aux {n}] <- GetCachedOrFreshToken (request token {} bytes, secure DLC {})",
+            t.request_token.len(),
+            t.secure_dlc_enabled
+        );
         let uplay_id = context().map(|c| c.uplay_id).unwrap_or_default();
         let token = broker(BrokerRequest::DenuvoGameToken { uplay_id, request_token: t.request_token.clone() }).await;
         let rsp = match token {
@@ -47,6 +55,7 @@ async fn handle(n: u32, req: &aux::Req) -> Option<aux::Rsp> {
                     result: aux::OperationResult::Ok as i32,
                     error_code: None,
                     game_token: Some(game_token),
+                    ownership_list: None,
                 }
             }
             other => {
@@ -55,6 +64,7 @@ async fn handle(n: u32, req: &aux::Req) -> Option<aux::Rsp> {
                     result: aux::OperationResult::ConnectionError as i32,
                     error_code: None,
                     game_token: None,
+                    ownership_list: None,
                 }
             }
         };

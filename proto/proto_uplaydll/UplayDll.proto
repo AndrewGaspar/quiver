@@ -1,3 +1,5 @@
+// Extracted from Ubisoft Connect 13416 by tools/proto-extract/extract.py; do not edit by hand.
+// extracted: proto_uplaydll/UplayDll.proto
 syntax = "proto2";
 
 package mg.protocol.uplaydll;
@@ -9,7 +11,7 @@ message SDKMonitoringArgument {
 
 message SDKMonitoringInfoPush {
     optional string functionName = 1;
-    repeated SDKMonitoringArgument arguments = 2;
+    repeated mg.protocol.uplaydll.SDKMonitoringArgument arguments = 2;
 }
 
 message SDKMonitoringConfig {
@@ -17,11 +19,11 @@ message SDKMonitoringConfig {
 }
 
 message SDKMonitoringReq {
-    optional SDKMonitoringInfoPush sdkMonitoringInfoPush = 1;
+    optional mg.protocol.uplaydll.SDKMonitoringInfoPush sdkMonitoringInfoPush = 1;
 }
 
 message SDKMonitoringRsp {
-    optional SDKMonitoringConfig sdkMonitoringConfig = 1;
+    optional mg.protocol.uplaydll.SDKMonitoringConfig sdkMonitoringConfig = 1;
 }
 
 message Consumable {
@@ -51,12 +53,11 @@ message InitProcessReq {
     optional uint32 uplayId = 1;
     optional uint32 processId = 2;
     optional uint32 apiVersion = 3;
-    optional DevArgs devArgs = 4;
+    optional mg.protocol.uplaydll.DevArgs devArgs = 4;
     optional bool uplayEnvIsSet = 5;
 }
 
 message InitSubSystemOverlayReq {
-    
 }
 
 message GameCdKey {
@@ -64,14 +65,9 @@ message GameCdKey {
     optional string cdKey = 2;
 }
 
-message GameOptions {
-    required string name = 1;
-    required string filepath = 2;
-}
-
 message GameInstall {
     optional bool success = 1;
-    optional Chunks chunks = 2;
+    optional mg.protocol.uplaydll.Chunks chunks = 2;
     optional string language = 3;
 }
 
@@ -81,11 +77,12 @@ message Account {
     optional string nameOnPlatform = 3;
     optional string email = 4;
     optional string password = 5;
+    optional string country = 6;
 }
 
 message Overlay {
     optional bool enabled = 1;
-    optional OverlayInjectionMethod injectionMethod = 2;
+    optional mg.protocol.uplaydll.OverlayInjectionMethod injectionMethod = 2;
 }
 
 message HardwareBenchmark {
@@ -103,41 +100,40 @@ message UbiServices {
 }
 
 message InitRsp {
-    required InitResult result = 1;
-    optional Account account = 2;
+    required mg.protocol.uplaydll.InitResult result = 1;
+    optional mg.protocol.uplaydll.Account account = 2;
     optional bool connected = 3;
     optional uint32 gameUplayId = 4;
     repeated uint32 uplayIds = 5;
-    repeated GameCdKey gameCdKeys = 6;
+    repeated mg.protocol.uplaydll.GameCdKey gameCdKeys = 6;
     optional bool isInOfflineMode = 7;
     optional string upcTicket = 8;
-    repeated Consumable consumables = 9;
+    repeated mg.protocol.uplaydll.Consumable consumables = 9;
     optional uint32 uplayPID = 10;
-    optional SDKMonitoringConfig sdkMonitoringConfig = 11;
+    optional mg.protocol.uplaydll.SDKMonitoringConfig sdkMonitoringConfig = 11;
     optional bool devmode = 12;
-    optional GameOptions gameOptions = 13;
-    optional GameInstall gameInstall = 14;
-    optional Overlay overlay = 15;
-    optional HardwareBenchmark hwBenchmark = 16;
-    optional Storage storage = 17;
-    optional FriendInit friendInit = 18;
-    optional StoreInit storeInit = 19;
-    optional MultiplayerInit multiplayerInit = 20;
-    optional UserInit userInit = 21;
-    optional UbiServices ubiServices = 22;
+    optional mg.protocol.uplaydll.GameInstall gameInstall = 14;
+    optional mg.protocol.uplaydll.Overlay overlay = 15;
+    optional mg.protocol.uplaydll.HardwareBenchmark hwBenchmark = 16;
+    optional mg.protocol.uplaydll.Storage storage = 17;
+    optional mg.protocol.uplaydll.FriendInit friendInit = 18;
+    optional mg.protocol.uplaydll.StoreInit storeInit = 19;
+    optional mg.protocol.uplaydll.MultiplayerInit multiplayerInit = 20;
+    optional mg.protocol.uplaydll.UserInit userInit = 21;
+    optional mg.protocol.uplaydll.UbiServices ubiServices = 22;
+    optional mg.protocol.uplaydll.CrossBootInit crossBootInit = 23;
 }
 
 message InitProcessRsp {
-    required InitResult result = 1;
+    required mg.protocol.uplaydll.InitResult result = 1;
     optional uint32 uplayPID = 2;
     optional bool overlayEnabled = 3;
-    optional OverlayInjectionMethod overlayInjectionMethod = 4;
-    optional SDKMonitoringConfig sdkMonitoringConfig = 5;
+    optional mg.protocol.uplaydll.OverlayInjectionMethod overlayInjectionMethod = 4;
+    optional mg.protocol.uplaydll.SDKMonitoringConfig sdkMonitoringConfig = 5;
     optional bool devmode = 6;
 }
 
 message InitSubSystemOverlayRsp {
-    
 }
 
 message RichPresenceTokenPair {
@@ -148,16 +144,16 @@ message RichPresenceTokenPair {
 message SetRichPresenceReq {
     required uint32 requestId = 1;
     optional uint32 presenceId = 2;
-    repeated RichPresenceTokenPair presenceTokens = 3;
+    repeated mg.protocol.uplaydll.RichPresenceTokenPair presenceTokens = 3;
 }
 
 message SetRichPresenceRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message RichPresenceReq {
-    optional SetRichPresenceReq setReq = 1;
+    optional mg.protocol.uplaydll.SetRichPresenceReq setReq = 1;
 }
 
 message AchievementInBlob {
@@ -168,20 +164,20 @@ message AchievementInBlob {
 }
 
 message AchievementsBlob {
-    repeated AchievementInBlob achievements = 1;
+    repeated mg.protocol.uplaydll.AchievementInBlob achievements = 1;
 }
 
 message TakenAchievement {
-    required AchievementInBlob achievement = 1;
+    required mg.protocol.uplaydll.AchievementInBlob achievement = 1;
     required uint64 timestamp = 2;
 }
 
 message Spool {
-    repeated TakenAchievement achievementsTaken = 1;
+    repeated mg.protocol.uplaydll.TakenAchievement achievementsTaken = 1;
 }
 
 message WriteAchievementsReq {
-    required AchievementInBlob achievement = 1;
+    required mg.protocol.uplaydll.AchievementInBlob achievement = 1;
 }
 
 message WriteAchievementsRsp {
@@ -205,8 +201,8 @@ message GetAchievementsReq {
 
 message GetAchievementsRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated AchievementData data = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.AchievementData data = 3;
 }
 
 message GetAchievementImageReq {
@@ -216,7 +212,7 @@ message GetAchievementImageReq {
 
 message GetAchievementImageRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     optional bytes data = 3;
 }
 
@@ -227,146 +223,32 @@ message EarnAchievementReq {
 
 message EarnAchievementRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message AchievementReq {
-    optional GetAchievementsReq getReq = 1;
-    optional GetAchievementImageReq imageReq = 2;
-    optional EarnAchievementReq earnReq = 3;
+    optional mg.protocol.uplaydll.GetAchievementsReq getReq = 1;
+    optional mg.protocol.uplaydll.GetAchievementImageReq imageReq = 2;
+    optional mg.protocol.uplaydll.EarnAchievementReq earnReq = 3;
 }
 
 message AchievementRsp {
-    optional GetAchievementsRsp getRsp = 1;
-    optional GetAchievementImageRsp imageRsp = 2;
-    optional EarnAchievementRsp earnRsp = 3;
+    optional mg.protocol.uplaydll.GetAchievementsRsp getRsp = 1;
+    optional mg.protocol.uplaydll.GetAchievementImageRsp imageRsp = 2;
+    optional mg.protocol.uplaydll.EarnAchievementRsp earnRsp = 3;
 }
 
 message GameSession {
     required uint64 id = 1;
     required bytes data = 2;
-    optional GameSessionJoinability joinability = 3;
-}
-
-message UserData {
-    required bytes data = 1;
-}
-
-message Guest {
-    required string name = 1;
-}
-
-message PartyMember {
-    required string accountId = 1;
-    required string name = 2;
-    optional uint64 gameSessionId = 3;
-    optional bytes gameSessionData = 4;
-    optional Guest guest = 5;
-    optional bytes userData = 6;
-}
-
-message InitPartyReq {
-    required bool enableGameInviteReceivedEvent = 1;
-    required bool enableGuests = 2;
-}
-
-message InitPartyRsp {
-    required string accountId = 1;
-}
-
-message InviteToPartyReq {
-    required uint32 requestId = 1;
-    required string accountId = 2;
-}
-
-message InviteToPartyRsp {
-    required uint32 requestId = 1;
-    required OperationResult result = 2;
-}
-
-message InvitePartyToGameReq {
-    required uint32 requestId = 1;
-}
-
-message InvitePartyToGameRsp {
-    required uint32 requestId = 1;
-    required OperationResult result = 2;
-}
-
-message ShowGameInviteOverlayUIReq {
-    required uint32 inviteId = 1;
-    required GameSession gameSession = 2;
-}
-
-message PartyListUpdatedPush {
-    repeated PartyMember members = 1;
-    required string leader = 2;
-    optional uint64 partyId = 3;
-}
-
-message SetUserDataReq {
-    required bytes data = 1;
-}
-
-message PromoteToLeaderReq {
-    required uint32 requestId = 1;
-    required string accountId = 2;
-}
-
-message PromoteToLeaderRsp {
-    required uint32 requestId = 1;
-    required OperationResult result = 2;
-}
-
-message SetInPartyGameSessionReq {
-    
-}
-
-message GameInvitePush {
-    required uint32 inviteId = 1;
-    required GameSession gameSession = 2;
-    required string fromAccountId = 3;
-}
-
-message GameInviteAcceptedPush {
-    required uint32 inviteId = 1;
-}
-
-message GameInviteDeclinedPush {
-    required uint32 inviteId = 1;
-}
-
-message PartyInvitePush {
-    required string accountId = 1;
-}
-
-message PartyReq {
-    optional InitPartyReq initPartyReq = 1;
-    optional InviteToPartyReq inviteToPartyReq = 2;
-    optional InvitePartyToGameReq invitePartyToGameReq = 3;
-    optional SetUserDataReq setUserDataReq = 4;
-    optional PromoteToLeaderReq promoteToLeaderReq = 5;
-    optional ShowGameInviteOverlayUIReq gameInviteOverlayUIReq = 8;
-}
-
-message PartyRsp {
-    optional InitPartyRsp initPartyRsp = 1;
-    optional PartyListUpdatedPush listUpdatePush = 2;
-    optional GameInviteAcceptedPush gameInviteAcceptedPush = 3;
-    optional GameInviteDeclinedPush gameInviteDeclinedPush = 4;
-    optional InvitePartyToGameRsp invitePartyToGameRsp = 5;
-    optional InviteToPartyRsp inviteToPartyRsp = 6;
-    optional GameInvitePush gameInvitePush = 7;
-    optional PromoteToLeaderRsp promoteToLeaderRsp = 9;
-    optional PartyInvitePush partyInvitePush = 10;
+    optional mg.protocol.uplaydll.GameSessionJoinability joinability = 3;
 }
 
 message SetGameSessionReq {
-    required GameSession gameSession = 1;
+    required mg.protocol.uplaydll.GameSession gameSession = 1;
 }
 
 message ClearGameSessionReq {
-    
 }
 
 message GetCredentialsReq {
@@ -382,21 +264,18 @@ message GetCredentialsRsp {
 }
 
 message AccountSharingPush {
-    
 }
 
 message ConnectionLostPush {
-    
 }
 
 message ConnectionRestoredPush {
-    
 }
 
 message OwnershipAddedPush {
     required uint32 uplayId = 1;
     optional string cdKey = 2;
-    required Product product = 3;
+    required mg.protocol.uplaydll.Product product = 3;
 }
 
 message OwnershipRemovedPush {
@@ -408,7 +287,6 @@ message TrialAboutToExpirePush {
 }
 
 message TrialExpiredPush {
-    
 }
 
 message TicketPush {
@@ -425,19 +303,17 @@ message ConsumeItemReq {
 
 message ConsumeItemRsp {
     required uint32 requestId = 1;
-    
-    required Result result = 2;
+    required mg.protocol.uplaydll.ConsumeItemRsp.Result result = 2;
+    optional string signature = 3;
     enum Result {
         Result_Success = 0;
         Result_NotEnoughItems = 1;
         Result_Failure = 2;
     }
-    
-    optional string signature = 3;
 }
 
 message ConsumableUpdatedPush {
-    required Consumable consumable = 1;
+    required mg.protocol.uplaydll.Consumable consumable = 1;
 }
 
 message GetProfileReq {
@@ -447,42 +323,41 @@ message GetProfileReq {
 
 message GetProfileRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     optional string name = 3;
 }
 
 message UserReq {
-    optional GetCredentialsReq getCredentialsReq = 1;
-    optional ConsumeItemReq consumeItemReq = 2;
-    optional GetProfileReq getProfileReq = 3;
+    optional mg.protocol.uplaydll.GetCredentialsReq getCredentialsReq = 1;
+    optional mg.protocol.uplaydll.ConsumeItemReq consumeItemReq = 2;
+    optional mg.protocol.uplaydll.GetProfileReq getProfileReq = 3;
 }
 
 message UserRsp {
-    optional GetCredentialsRsp getCredentialsRsp = 1;
-    optional AccountSharingPush accountSharingPush = 2;
-    optional OwnershipAddedPush ownershipAddedPush = 5;
-    optional TicketPush ticketPush = 6;
-    optional ConsumeItemRsp consumeItemRsp = 7;
-    optional ConsumableUpdatedPush consumableUpdatedPush = 8;
-    optional OwnershipRemovedPush ownershipRemovedPush = 9;
-    optional GetProfileRsp getProfileRsp = 10;
-    optional TrialAboutToExpirePush trialAboutToExpirePush = 11;
-    optional TrialExpiredPush trialExpiredPush = 12;
+    optional mg.protocol.uplaydll.GetCredentialsRsp getCredentialsRsp = 1;
+    optional mg.protocol.uplaydll.AccountSharingPush accountSharingPush = 2;
+    optional mg.protocol.uplaydll.OwnershipAddedPush ownershipAddedPush = 5;
+    optional mg.protocol.uplaydll.TicketPush ticketPush = 6;
+    optional mg.protocol.uplaydll.ConsumeItemRsp consumeItemRsp = 7;
+    optional mg.protocol.uplaydll.ConsumableUpdatedPush consumableUpdatedPush = 8;
+    optional mg.protocol.uplaydll.OwnershipRemovedPush ownershipRemovedPush = 9;
+    optional mg.protocol.uplaydll.GetProfileRsp getProfileRsp = 10;
+    optional mg.protocol.uplaydll.TrialAboutToExpirePush trialAboutToExpirePush = 11;
+    optional mg.protocol.uplaydll.TrialExpiredPush trialExpiredPush = 12;
 }
 
 message Friend {
     required string accountId = 1;
     required string name = 2;
     required string nickname = 3;
-    required Relationship relationship = 4;
+    required mg.protocol.uplaydll.Relationship relationship = 4;
     required bool blackListed = 5;
-    required OnlineStatus presence = 6;
+    required mg.protocol.uplaydll.OnlineStatus presence = 6;
     required bool playingCurrentGame = 7;
-    optional GameSession gameSession = 8;
+    optional mg.protocol.uplaydll.GameSession gameSession = 8;
 }
 
 message InitFriendsReq {
-    
 }
 
 message FriendInit {
@@ -491,18 +366,18 @@ message FriendInit {
 }
 
 message FriendListUpdatedPush {
-    repeated Friend friendList = 1;
+    repeated mg.protocol.uplaydll.Friend friendList = 1;
 }
 
 message FriendListUpdatedPushV2 {
-    repeated User friendsAdded = 1;
-    repeated User friendsNameUpdated = 2;
-    repeated User friendsPresenceUpdated = 3;
-    repeated User friendsRemoved = 4;
+    repeated mg.protocol.uplaydll.User friendsAdded = 1;
+    repeated mg.protocol.uplaydll.User friendsNameUpdated = 2;
+    repeated mg.protocol.uplaydll.User friendsPresenceUpdated = 3;
+    repeated mg.protocol.uplaydll.User friendsRemoved = 4;
 }
 
 message GameSessionUpdate {
-    optional GameSession gameSession = 1;
+    optional mg.protocol.uplaydll.GameSession gameSession = 1;
 }
 
 message RequestFriendshipReq {
@@ -512,7 +387,7 @@ message RequestFriendshipReq {
 
 message RequestFriendshipRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message AddToBlackListReq {
@@ -522,7 +397,7 @@ message AddToBlackListReq {
 
 message AddToBlackListRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message RemoveFromBlackListReq {
@@ -532,7 +407,7 @@ message RemoveFromBlackListReq {
 
 message RemoveFromBlackListRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message SendGameInviteReq {
@@ -541,7 +416,7 @@ message SendGameInviteReq {
 
 message SendGameInviteRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message FriendSelectionFilter {
@@ -550,7 +425,7 @@ message FriendSelectionFilter {
 
 message ShowFriendSelectionUIReq {
     required uint32 requestId = 1;
-    optional FriendSelectionFilter filter = 2;
+    optional mg.protocol.uplaydll.FriendSelectionFilter filter = 2;
 }
 
 message ShowFriendSelectionUISuccess {
@@ -558,18 +433,16 @@ message ShowFriendSelectionUISuccess {
 }
 
 message ShowFriendSelectionUICanceled {
-    
 }
 
 message ShowFriendSelectionUIEmptyList {
-    
 }
 
 message ShowFriendSelectionUIRsp {
     required uint32 requestId = 1;
-    optional ShowFriendSelectionUISuccess success = 2;
-    optional ShowFriendSelectionUICanceled cancelled = 3;
-    optional ShowFriendSelectionUIEmptyList emptyList = 4;
+    optional mg.protocol.uplaydll.ShowFriendSelectionUISuccess success = 2;
+    optional mg.protocol.uplaydll.ShowFriendSelectionUICanceled cancelled = 3;
+    optional mg.protocol.uplaydll.ShowFriendSelectionUIEmptyList emptyList = 4;
 }
 
 message FriendCustomMenuItemSelectedPush {
@@ -583,7 +456,7 @@ message FriendsGameInviteAcceptReq {
 }
 
 message FriendsGameInviteAcceptedPush {
-    required GameSession gameSession = 1;
+    required mg.protocol.uplaydll.GameSession gameSession = 1;
     required string accountId = 2;
 }
 
@@ -599,7 +472,7 @@ message InviteFriendToGameReq {
 
 message InviteFriendToGameRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message ShowInviteFriendsToGameUIReq {
@@ -614,7 +487,7 @@ message AddPlayedWithReq {
 
 message AddPlayedWithRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message RemoveFriendshipReq {
@@ -624,7 +497,7 @@ message RemoveFriendshipReq {
 
 message RemoveFriendshipRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message GetNameReq {
@@ -634,12 +507,12 @@ message GetNameReq {
 
 message GetNameRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     required string name = 3;
 }
 
 message Presence {
-    optional OnlineStatusV2 onlineStatus = 1;
+    optional mg.protocol.uplaydll.OnlineStatusV2 onlineStatus = 1;
     optional string details = 2;
     optional uint32 titleId = 3;
     optional string titleName = 4;
@@ -653,8 +526,8 @@ message Presence {
 message User {
     required string id = 1;
     optional string name = 2;
-    optional Relationship relationship = 3;
-    optional Presence presence = 4;
+    optional mg.protocol.uplaydll.Relationship relationship = 3;
+    optional mg.protocol.uplaydll.Presence presence = 4;
 }
 
 message GetFriendListReq {
@@ -666,68 +539,68 @@ message GetFriendListReq {
 
 message GetFriendListRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated User friendList = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.User friendList = 3;
 }
 
 message FriendsReq {
-    optional InitFriendsReq initReq = 1;
-    optional RequestFriendshipReq requestFriendshipReq = 2;
-    optional AddToBlackListReq addToBlackListReq = 3;
-    optional ShowFriendSelectionUIReq showFriendSelectionUIReq = 5;
-    optional InviteFriendToGameReq inviteFriendToGameReq = 8;
-    optional ShowInviteFriendsToGameUIReq showInviteFriendsToGameUIReq = 9;
-    optional AddPlayedWithReq addPlayedWithReq = 10;
-    optional RemoveFriendshipReq removeFriendshipReq = 11;
-    optional RemoveFromBlackListReq removeFromBlackListReq = 12;
-    optional GetNameReq getNameReq = 13;
-    optional FriendsGameInviteAcceptReq gameInviteAcceptReq = 14;
-    optional GetFriendListReq getFriendListReq = 15;
+    optional mg.protocol.uplaydll.InitFriendsReq initReq = 1;
+    optional mg.protocol.uplaydll.RequestFriendshipReq requestFriendshipReq = 2;
+    optional mg.protocol.uplaydll.AddToBlackListReq addToBlackListReq = 3;
+    optional mg.protocol.uplaydll.ShowFriendSelectionUIReq showFriendSelectionUIReq = 5;
+    optional mg.protocol.uplaydll.InviteFriendToGameReq inviteFriendToGameReq = 8;
+    optional mg.protocol.uplaydll.ShowInviteFriendsToGameUIReq showInviteFriendsToGameUIReq = 9;
+    optional mg.protocol.uplaydll.AddPlayedWithReq addPlayedWithReq = 10;
+    optional mg.protocol.uplaydll.RemoveFriendshipReq removeFriendshipReq = 11;
+    optional mg.protocol.uplaydll.RemoveFromBlackListReq removeFromBlackListReq = 12;
+    optional mg.protocol.uplaydll.GetNameReq getNameReq = 13;
+    optional mg.protocol.uplaydll.FriendsGameInviteAcceptReq gameInviteAcceptReq = 14;
+    optional mg.protocol.uplaydll.GetFriendListReq getFriendListReq = 15;
 }
 
 message FriendsRsp {
-    optional FriendListUpdatedPush friendListUpdatedPush = 1;
-    optional FriendsGameInviteAcceptedPush friendsGameInviteAcceptedPush = 3;
-    optional RequestFriendshipRsp requestFriendhipRsp = 4;
-    optional AddToBlackListRsp addToBlackListRsp = 5;
-    optional SendGameInviteRsp sendGameInviteRsp = 6;
-    optional ShowFriendSelectionUIRsp showFriendSelectionUIRsp = 7;
-    optional InviteFriendToGameRsp inviteFriendToGameRsp = 8;
-    optional RemoveFriendshipRsp removeFriendshipRsp = 9;
-    optional RemoveFromBlackListRsp removeFromBlackListRsp = 10;
-    optional GetNameRsp getNameRsp = 11;
-    optional GetFriendListRsp getFriendListRsp = 12;
-    optional FriendsGameInvitePush gameInvitePush = 13;
-    optional FriendListUpdatedPushV2 friendListUpdatedPushV2 = 14;
+    optional mg.protocol.uplaydll.FriendListUpdatedPush friendListUpdatedPush = 1;
+    optional mg.protocol.uplaydll.FriendsGameInviteAcceptedPush friendsGameInviteAcceptedPush = 3;
+    optional mg.protocol.uplaydll.RequestFriendshipRsp requestFriendhipRsp = 4;
+    optional mg.protocol.uplaydll.AddToBlackListRsp addToBlackListRsp = 5;
+    optional mg.protocol.uplaydll.SendGameInviteRsp sendGameInviteRsp = 6;
+    optional mg.protocol.uplaydll.ShowFriendSelectionUIRsp showFriendSelectionUIRsp = 7;
+    optional mg.protocol.uplaydll.InviteFriendToGameRsp inviteFriendToGameRsp = 8;
+    optional mg.protocol.uplaydll.RemoveFriendshipRsp removeFriendshipRsp = 9;
+    optional mg.protocol.uplaydll.RemoveFromBlackListRsp removeFromBlackListRsp = 10;
+    optional mg.protocol.uplaydll.GetNameRsp getNameRsp = 11;
+    optional mg.protocol.uplaydll.GetFriendListRsp getFriendListRsp = 12;
+    optional mg.protocol.uplaydll.FriendsGameInvitePush gameInvitePush = 13;
+    optional mg.protocol.uplaydll.FriendListUpdatedPushV2 friendListUpdatedPushV2 = 14;
 }
 
 message GetAvatarReq {
     required uint32 requestId = 1;
     optional string accountId = 2;
-    required AvatarSize size = 3;
+    required mg.protocol.uplaydll.AvatarSize size = 3;
 }
 
 message GetAvatarRsp {
     required uint32 requestId = 1;
     optional bytes bitmap = 2;
-    required OperationResult result = 3;
+    required mg.protocol.uplaydll.OperationResult result = 3;
 }
 
 message AvatarReq {
-    optional GetAvatarReq getAvatarReq = 1;
+    optional mg.protocol.uplaydll.GetAvatarReq getAvatarReq = 1;
 }
 
 message AvatarRsp {
-    optional GetAvatarRsp getAvatarRsp = 1;
+    optional mg.protocol.uplaydll.GetAvatarRsp getAvatarRsp = 1;
 }
 
 message Product {
     required uint32 id = 1;
-    required ProductType type = 2;
-    required ProductOwnership ownership = 3;
-    required ProductState state = 4;
+    required mg.protocol.uplaydll.ProductType type = 2;
+    required mg.protocol.uplaydll.ProductOwnership ownership = 3;
+    required mg.protocol.uplaydll.ProductState state = 4;
     optional uint32 balance = 5;
-    required ProductActivation activation = 6;
+    required mg.protocol.uplaydll.ProductActivation activation = 6;
 }
 
 message GetProductListReq {
@@ -738,8 +611,8 @@ message GetProductListReq {
 
 message GetProductListRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated Product productList = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.Product productList = 3;
 }
 
 message ProductConsumeReq {
@@ -752,31 +625,43 @@ message ProductConsumeReq {
 
 message ProductConsumeRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     required string signature = 3;
 }
 
 message ProductAddedPush {
-    required Product product = 1;
+    required mg.protocol.uplaydll.Product product = 1;
 }
 
 message ProductUpdatedPush {
     required uint32 id = 1;
-    optional ProductOwnership ownership = 2;
-    optional ProductState state = 3;
+    optional mg.protocol.uplaydll.ProductOwnership ownership = 2;
+    optional mg.protocol.uplaydll.ProductState state = 3;
     optional uint32 balance = 4;
 }
 
+message ProductTrackAddonReq {
+    required uint32 requestId = 1;
+    required uint32 addonId = 2;
+}
+
+message ProductTrackAddonRsp {
+    required uint32 requestId = 1;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+}
+
 message ProductReq {
-    optional GetProductListReq getProductListReq = 1;
-    optional ProductConsumeReq productConsumeReq = 2;
+    optional mg.protocol.uplaydll.GetProductListReq getProductListReq = 1;
+    optional mg.protocol.uplaydll.ProductConsumeReq productConsumeReq = 2;
+    optional mg.protocol.uplaydll.ProductTrackAddonReq productTrackAddonReq = 3;
 }
 
 message ProductRsp {
-    optional GetProductListRsp getProductListRsp = 1;
-    optional ProductConsumeRsp productConsumeRsp = 2;
-    optional ProductAddedPush productAddedPush = 3;
-    optional ProductUpdatedPush productUpdatedPush = 4;
+    optional mg.protocol.uplaydll.GetProductListRsp getProductListRsp = 1;
+    optional mg.protocol.uplaydll.ProductConsumeRsp productConsumeRsp = 2;
+    optional mg.protocol.uplaydll.ProductAddedPush productAddedPush = 3;
+    optional mg.protocol.uplaydll.ProductUpdatedPush productUpdatedPush = 4;
+    optional mg.protocol.uplaydll.ProductTrackAddonRsp productTrackAddonRsp = 5;
 }
 
 message StoreProduct {
@@ -794,7 +679,7 @@ message StoreProduct {
 
 message StoreInit {
     required bool isAvailable = 1;
-    required TargetPartner targetPartner = 2;
+    required mg.protocol.uplaydll.TargetPartner targetPartner = 2;
 }
 
 message GetStoreProductsReq {
@@ -803,8 +688,8 @@ message GetStoreProductsReq {
 
 message GetStoreProductsRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated StoreProduct productsList = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.StoreProduct productsList = 3;
 }
 
 message CheckoutReq {
@@ -820,7 +705,6 @@ message ShowProductsReq {
 }
 
 message ProductsListChangedPush {
-    
 }
 
 message StoreCheckoutStartedPush {
@@ -829,7 +713,7 @@ message StoreCheckoutStartedPush {
 
 message StoreCheckoutFinishedPush {
     required uint32 id = 1;
-    required CheckoutResult result = 2;
+    required mg.protocol.uplaydll.CheckoutResult result = 2;
 }
 
 message StoreStatusUpdatedPush {
@@ -837,42 +721,42 @@ message StoreStatusUpdatedPush {
 }
 
 message StoreReq {
-    optional GetStoreProductsReq getStoreProductsReq = 1;
-    optional CheckoutReq checkoutReq = 2;
-    optional ShowProductDetailsReq showProductDetailsReq = 3;
-    optional ShowProductsReq showProductsReq = 4;
-    optional SetLanguageCountryCodeReq setLanguageReq = 5;
+    optional mg.protocol.uplaydll.GetStoreProductsReq getStoreProductsReq = 1;
+    optional mg.protocol.uplaydll.CheckoutReq checkoutReq = 2;
+    optional mg.protocol.uplaydll.ShowProductDetailsReq showProductDetailsReq = 3;
+    optional mg.protocol.uplaydll.ShowProductsReq showProductsReq = 4;
+    optional mg.protocol.uplaydll.SetLanguageCountryCodeReq setLanguageReq = 5;
 }
 
 message StoreRsp {
-    optional GetStoreProductsRsp getStoreProductsRsp = 1;
-    optional ProductsListChangedPush productsListChangedPush = 2;
-    optional StoreCheckoutStartedPush storeCheckoutStartedPush = 3;
-    optional StoreCheckoutFinishedPush storeCheckoutFinishedPush = 4;
-    optional StoreStatusUpdatedPush storeStatusUpdatedPush = 5;
+    optional mg.protocol.uplaydll.GetStoreProductsRsp getStoreProductsRsp = 1;
+    optional mg.protocol.uplaydll.ProductsListChangedPush productsListChangedPush = 2;
+    optional mg.protocol.uplaydll.StoreCheckoutStartedPush storeCheckoutStartedPush = 3;
+    optional mg.protocol.uplaydll.StoreCheckoutFinishedPush storeCheckoutFinishedPush = 4;
+    optional mg.protocol.uplaydll.StoreStatusUpdatedPush storeStatusUpdatedPush = 5;
 }
 
 message MultiplayerSession {
     required string id = 1;
-    required MultiplayerSessionJoinability joinability = 2;
+    required mg.protocol.uplaydll.MultiplayerSessionJoinability joinability = 2;
     required uint32 size = 3;
     required uint32 maxSize = 4;
     optional bytes internalData = 5;
 }
 
 message MultiplayerInit {
-    optional MultiplayerSession session = 1;
+    optional mg.protocol.uplaydll.MultiplayerSession session = 1;
     optional bool isAvailable = 2;
 }
 
 message MultiplayerSessionSetReq {
     required uint32 requestId = 1;
-    optional MultiplayerSession session = 2;
+    optional mg.protocol.uplaydll.MultiplayerSession session = 2;
 }
 
 message MultiplayerSessionSetRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message MultiplayerInviteReq {
@@ -882,7 +766,7 @@ message MultiplayerInviteReq {
 
 message MultiplayerInviteRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message MultiplayerInviteCancelReq {
@@ -897,17 +781,17 @@ message MultiplayerInviteAnswerReq {
 
 message MultiplayerInviteAnswerRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message MultiplayerInviteReceivedPush {
     required string senderId = 1;
-    required MultiplayerSession session = 2;
+    required mg.protocol.uplaydll.MultiplayerSession session = 2;
 }
 
 message MultiplayerInviteAcceptedPush {
     required string senderId = 1;
-    required MultiplayerSession session = 2;
+    required mg.protocol.uplaydll.MultiplayerSession session = 2;
 }
 
 message MultiplayerInviteDeclinedPush {
@@ -915,43 +799,43 @@ message MultiplayerInviteDeclinedPush {
 }
 
 message MultiplayerSessionUpdatedPush {
-    optional MultiplayerSession session = 1;
+    optional mg.protocol.uplaydll.MultiplayerSession session = 1;
 }
 
 message MultiplayerJoiningRequestedPush {
-    required MultiplayerSession session = 1;
+    required mg.protocol.uplaydll.MultiplayerSession session = 1;
 }
 
 message MultiplayerReq {
-    optional MultiplayerSessionSetReq multiplayerSessionSetReq = 1;
-    optional MultiplayerInviteReq multiplayerInviteReq = 2;
-    optional MultiplayerInviteCancelReq multiplayerInviteCancelReq = 3;
-    optional MultiplayerInviteAnswerReq multiplayerInviteAnswerReq = 4;
+    optional mg.protocol.uplaydll.MultiplayerSessionSetReq multiplayerSessionSetReq = 1;
+    optional mg.protocol.uplaydll.MultiplayerInviteReq multiplayerInviteReq = 2;
+    optional mg.protocol.uplaydll.MultiplayerInviteCancelReq multiplayerInviteCancelReq = 3;
+    optional mg.protocol.uplaydll.MultiplayerInviteAnswerReq multiplayerInviteAnswerReq = 4;
 }
 
 message MultiplayerRsp {
-    optional MultiplayerSessionSetRsp multiplayerSessionSetRsp = 1;
-    optional MultiplayerInviteRsp multiplayerInviteRsp = 2;
-    optional MultiplayerInviteAnswerRsp multiplayerInviteAnswerRsp = 3;
-    optional MultiplayerInviteReceivedPush multiplayerInviteReceivedPush = 4;
-    optional MultiplayerInviteAcceptedPush multiplayerInviteAcceptedPush = 5;
-    optional MultiplayerInviteDeclinedPush multiplayerInviteDeclinedPush = 6;
-    optional MultiplayerSessionUpdatedPush multiplayerSessionUpdatedPush = 7;
-    optional MultiplayerJoiningRequestedPush multiplayerJoiningRequestedPush = 8;
+    optional mg.protocol.uplaydll.MultiplayerSessionSetRsp multiplayerSessionSetRsp = 1;
+    optional mg.protocol.uplaydll.MultiplayerInviteRsp multiplayerInviteRsp = 2;
+    optional mg.protocol.uplaydll.MultiplayerInviteAnswerRsp multiplayerInviteAnswerRsp = 3;
+    optional mg.protocol.uplaydll.MultiplayerInviteReceivedPush multiplayerInviteReceivedPush = 4;
+    optional mg.protocol.uplaydll.MultiplayerInviteAcceptedPush multiplayerInviteAcceptedPush = 5;
+    optional mg.protocol.uplaydll.MultiplayerInviteDeclinedPush multiplayerInviteDeclinedPush = 6;
+    optional mg.protocol.uplaydll.MultiplayerSessionUpdatedPush multiplayerSessionUpdatedPush = 7;
+    optional mg.protocol.uplaydll.MultiplayerJoiningRequestedPush multiplayerJoiningRequestedPush = 8;
 }
 
 message OverlayShowReq {
     required uint32 requestId = 1;
-    required OverlaySection section = 2;
+    required mg.protocol.uplaydll.OverlaySection section = 2;
 }
 
 message OverlayShowRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message OverlayStateChangedPush {
-    required OverlayState state = 1;
+    required mg.protocol.uplaydll.OverlayState state = 1;
 }
 
 message OverlaySetShopUrlReq {
@@ -961,7 +845,7 @@ message OverlaySetShopUrlReq {
 
 message OverlaySetShopUrlRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message OverlayShowShopUrlReq {
@@ -975,7 +859,7 @@ message OverlayShowBrowserUrlReq {
 
 message OverlayShowBrowserUrlRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message OverlayShowNotificationReq {
@@ -985,7 +869,7 @@ message OverlayShowNotificationReq {
 
 message OverlayShowNotificationRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message OverlayShowFriendInvitationReq {
@@ -995,7 +879,7 @@ message OverlayShowFriendInvitationReq {
 
 message OverlayShowFriendInvitationRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message OverlayShowFriendSelectionReq {
@@ -1005,7 +889,7 @@ message OverlayShowFriendSelectionReq {
 
 message OverlayShowFriendSelectionRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     repeated string selectedIds = 3;
 }
 
@@ -1017,12 +901,12 @@ message OverlayMicroAppParam {
 message OverlayShowMicroAppReq {
     required uint32 requestId = 1;
     required string microAppName = 2;
-    repeated OverlayMicroAppParam microAppParams = 3;
+    repeated mg.protocol.uplaydll.OverlayMicroAppParam microAppParams = 3;
 }
 
 message OverlayShowMicroAppRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message SetLanguageCountryCodeReq {
@@ -1030,25 +914,25 @@ message SetLanguageCountryCodeReq {
 }
 
 message OverlayReq {
-    optional OverlayShowReq overlayShowReq = 1;
-    optional OverlaySetShopUrlReq overlaySetShopUrlReq = 2;
-    optional OverlayShowShopUrlReq overlayShowShopUrlReq = 3;
-    optional OverlayShowBrowserUrlReq overlayShowBrowserUrlReq = 4;
-    optional OverlayShowNotificationReq overlayShowNotificationReq = 5;
-    optional OverlayShowFriendInvitationReq overlayShowFriendInvitationReq = 6;
-    optional OverlayShowFriendSelectionReq overlayShowFriendSelectionReq = 7;
-    optional OverlayShowMicroAppReq overlayShowMicroAppReq = 8;
+    optional mg.protocol.uplaydll.OverlayShowReq overlayShowReq = 1;
+    optional mg.protocol.uplaydll.OverlaySetShopUrlReq overlaySetShopUrlReq = 2;
+    optional mg.protocol.uplaydll.OverlayShowShopUrlReq overlayShowShopUrlReq = 3;
+    optional mg.protocol.uplaydll.OverlayShowBrowserUrlReq overlayShowBrowserUrlReq = 4;
+    optional mg.protocol.uplaydll.OverlayShowNotificationReq overlayShowNotificationReq = 5;
+    optional mg.protocol.uplaydll.OverlayShowFriendInvitationReq overlayShowFriendInvitationReq = 6;
+    optional mg.protocol.uplaydll.OverlayShowFriendSelectionReq overlayShowFriendSelectionReq = 7;
+    optional mg.protocol.uplaydll.OverlayShowMicroAppReq overlayShowMicroAppReq = 8;
 }
 
 message OverlayRsp {
-    optional OverlayShowRsp overlayShowRsp = 1;
-    optional OverlaySetShopUrlRsp overlaySetShopUrlRsp = 2;
-    optional OverlayShowBrowserUrlRsp overlayShowBrowserUrlRsp = 3;
-    optional OverlayShowNotificationRsp overlayShowNotificationRsp = 4;
-    optional OverlayShowFriendInvitationRsp overlayShowFriendInvitationRsp = 5;
-    optional OverlayShowFriendSelectionRsp overlayShowFriendSelectionRsp = 6;
-    optional OverlayStateChangedPush overlayStateChangedPush = 7;
-    optional OverlayShowMicroAppRsp overlayShowMicroAppRsp = 8;
+    optional mg.protocol.uplaydll.OverlayShowRsp overlayShowRsp = 1;
+    optional mg.protocol.uplaydll.OverlaySetShopUrlRsp overlaySetShopUrlRsp = 2;
+    optional mg.protocol.uplaydll.OverlayShowBrowserUrlRsp overlayShowBrowserUrlRsp = 3;
+    optional mg.protocol.uplaydll.OverlayShowNotificationRsp overlayShowNotificationRsp = 4;
+    optional mg.protocol.uplaydll.OverlayShowFriendInvitationRsp overlayShowFriendInvitationRsp = 5;
+    optional mg.protocol.uplaydll.OverlayShowFriendSelectionRsp overlayShowFriendSelectionRsp = 6;
+    optional mg.protocol.uplaydll.OverlayStateChangedPush overlayStateChangedPush = 7;
+    optional mg.protocol.uplaydll.OverlayShowMicroAppRsp overlayShowMicroAppRsp = 8;
 }
 
 message UserInit {
@@ -1062,7 +946,7 @@ message UserBlacklistUpdatedPush {
 }
 
 message UserShutdownPush {
-    optional UserShutdownReason reason = 1;
+    optional mg.protocol.uplaydll.UserShutdownReason reason = 1;
 }
 
 message UserAddToBlacklistReq {
@@ -1072,7 +956,7 @@ message UserAddToBlacklistReq {
 
 message UserAddToBlacklistRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message UserGetReq {
@@ -1082,24 +966,24 @@ message UserGetReq {
 
 message UserGetRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    optional User user = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    optional mg.protocol.uplaydll.User user = 3;
 }
 
 message UserReqV2 {
-    optional UserGetReq userGetReq = 1;
-    optional UserAddToBlacklistReq userAddToBlacklistReq = 2;
-    optional SetRichPresenceReq setRichPresenceReq = 3;
-    optional AddPlayedWithReq addPlayedWithReq = 4;
+    optional mg.protocol.uplaydll.UserGetReq userGetReq = 1;
+    optional mg.protocol.uplaydll.UserAddToBlacklistReq userAddToBlacklistReq = 2;
+    optional mg.protocol.uplaydll.SetRichPresenceReq setRichPresenceReq = 3;
+    optional mg.protocol.uplaydll.AddPlayedWithReq addPlayedWithReq = 4;
 }
 
 message UserRspV2 {
-    optional UserGetRsp userGetRsp = 1;
-    optional UserAddToBlacklistRsp userAddToBlacklistRsp = 2;
-    optional SetRichPresenceRsp setRichPresenceRsp = 3;
-    optional AddPlayedWithRsp addPlayedWithRsp = 4;
-    optional UserBlacklistUpdatedPush userBlacklistUpdatedPush = 5;
-    optional UserShutdownPush userShutdownPush = 6;
+    optional mg.protocol.uplaydll.UserGetRsp userGetRsp = 1;
+    optional mg.protocol.uplaydll.UserAddToBlacklistRsp userAddToBlacklistRsp = 2;
+    optional mg.protocol.uplaydll.SetRichPresenceRsp setRichPresenceRsp = 3;
+    optional mg.protocol.uplaydll.AddPlayedWithRsp addPlayedWithRsp = 4;
+    optional mg.protocol.uplaydll.UserBlacklistUpdatedPush userBlacklistUpdatedPush = 5;
+    optional mg.protocol.uplaydll.UserShutdownPush userShutdownPush = 6;
 }
 
 message Reward {
@@ -1121,12 +1005,12 @@ message GetRewardsReq {
 
 message GetRewardsRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated Reward rewards = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.Reward rewards = 3;
 }
 
 message RewardRedeemedPush {
-    required Reward reward = 1;
+    required mg.protocol.uplaydll.Reward reward = 1;
 }
 
 message Action {
@@ -1147,12 +1031,11 @@ message GetActionsReq {
 
 message GetActionsRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    repeated Action actions = 3;
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    repeated mg.protocol.uplaydll.Action actions = 3;
 }
 
 message RefreshActionsReq {
-    
 }
 
 message SetActionsCompletedReq {
@@ -1162,7 +1045,7 @@ message SetActionsCompletedReq {
 
 message SetActionsCompletedRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message GetUnitBalanceReq {
@@ -1171,7 +1054,7 @@ message GetUnitBalanceReq {
 
 message GetUnitBalanceRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
     optional uint32 balance = 3;
 }
 
@@ -1180,20 +1063,20 @@ message UnitBalancePush {
 }
 
 message ClubReq {
-    optional GetRewardsReq getRewardsReq = 1;
-    optional RefreshActionsReq refreshActionsReq = 2;
-    optional SetActionsCompletedReq setActionsCompletedReq = 3;
-    optional GetActionsReq getActionsReq = 4;
-    optional GetUnitBalanceReq getUnitBalanceReq = 5;
+    optional mg.protocol.uplaydll.GetRewardsReq getRewardsReq = 1;
+    optional mg.protocol.uplaydll.RefreshActionsReq refreshActionsReq = 2;
+    optional mg.protocol.uplaydll.SetActionsCompletedReq setActionsCompletedReq = 3;
+    optional mg.protocol.uplaydll.GetActionsReq getActionsReq = 4;
+    optional mg.protocol.uplaydll.GetUnitBalanceReq getUnitBalanceReq = 5;
 }
 
 message ClubRsp {
-    optional GetRewardsRsp getRewardsRsp = 1;
-    optional RewardRedeemedPush rewardRedeemedPush = 2;
-    optional SetActionsCompletedRsp setActionsCompletedRsp = 3;
-    optional GetActionsRsp getActionsRsp = 4;
-    optional GetUnitBalanceRsp getUnitBalanceRsp = 5;
-    optional UnitBalancePush unitBalancePush = 6;
+    optional mg.protocol.uplaydll.GetRewardsRsp getRewardsRsp = 1;
+    optional mg.protocol.uplaydll.RewardRedeemedPush rewardRedeemedPush = 2;
+    optional mg.protocol.uplaydll.SetActionsCompletedRsp setActionsCompletedRsp = 3;
+    optional mg.protocol.uplaydll.GetActionsRsp getActionsRsp = 4;
+    optional mg.protocol.uplaydll.GetUnitBalanceRsp getUnitBalanceRsp = 5;
+    optional mg.protocol.uplaydll.UnitBalancePush unitBalancePush = 6;
 }
 
 message ChunkInfo {
@@ -1203,17 +1086,17 @@ message ChunkInfo {
 }
 
 message Chunks {
-    repeated ChunkInfo chunks = 1;
+    repeated mg.protocol.uplaydll.ChunkInfo chunks = 1;
 }
 
 message UpdateInstallOrderReq {
     required uint32 requestId = 1;
-    required Chunks chunks = 2;
+    required mg.protocol.uplaydll.Chunks chunks = 2;
 }
 
 message UpdateInstallOrderRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
+    required mg.protocol.uplaydll.OperationResult result = 2;
 }
 
 message ChunkInstalledPush {
@@ -1238,26 +1121,25 @@ message InitInstallerReq {
 
 message InitInstallerRsp {
     required bool success = 1;
-    optional Chunks chunks = 2;
+    optional mg.protocol.uplaydll.Chunks chunks = 2;
     optional string language = 3;
 }
 
 message InstallerReq {
-    optional InitInstallerReq initInstallerReq = 1;
-    optional UpdateInstallOrderReq updateInstallOrderReq = 2;
+    optional mg.protocol.uplaydll.InitInstallerReq initInstallerReq = 1;
+    optional mg.protocol.uplaydll.UpdateInstallOrderReq updateInstallOrderReq = 2;
 }
 
 message UpdateAvailablePush {
-    
 }
 
 message InstallerRsp {
-    optional InitInstallerRsp initInstallerRsp = 1;
-    optional UpdateInstallOrderRsp updateInstallOrderRsp = 2;
-    optional ChunkInstalledPush chunkInstalledPush = 3;
-    optional ChunkProgressPush chunkProgressPush = 4;
-    optional ProgressPush progressPush = 5;
-    optional UpdateAvailablePush updateAvailablePush = 6;
+    optional mg.protocol.uplaydll.InitInstallerRsp initInstallerRsp = 1;
+    optional mg.protocol.uplaydll.UpdateInstallOrderRsp updateInstallOrderRsp = 2;
+    optional mg.protocol.uplaydll.ChunkInstalledPush chunkInstalledPush = 3;
+    optional mg.protocol.uplaydll.ChunkProgressPush chunkProgressPush = 4;
+    optional mg.protocol.uplaydll.ProgressPush progressPush = 5;
+    optional mg.protocol.uplaydll.UpdateAvailablePush updateAvailablePush = 6;
 }
 
 message SingleEventTag {
@@ -1275,33 +1157,57 @@ message ClearContinuousTag {
 }
 
 message MetadataReq {
-    optional SingleEventTag singleEventTag = 1;
-    optional ContinuousTag continuousTag = 2;
-    optional ClearContinuousTag clearContinuousTag = 3;
-}
-
-message SetGameOptionsInGameStateReq {
-    optional bool canApplyOptions = 1;
-}
-
-message GameOptionsReq {
-    optional SetGameOptionsInGameStateReq setInGameStateReq = 1;
+    optional mg.protocol.uplaydll.SingleEventTag singleEventTag = 1;
+    optional mg.protocol.uplaydll.ContinuousTag continuousTag = 2;
+    optional mg.protocol.uplaydll.ClearContinuousTag clearContinuousTag = 3;
 }
 
 message TerminateGamePush {
-    
+}
+
+message LaunchAppParam {
+    required string name = 1;
+    required string value = 2;
 }
 
 message LaunchAppReq {
     required uint32 productId = 1;
+    repeated mg.protocol.uplaydll.LaunchAppParam params = 2;
 }
 
 message LaunchAppRsp {
-    required GameLaunchResult result = 1;
+    required mg.protocol.uplaydll.GameLaunchResult result = 1;
+}
+
+message CrossBootAllowedReq {
+    required uint32 requestId = 1;
+    required uint32 productId = 2;
+}
+
+message CrossBootAllowedRsp {
+    required uint32 requestId = 1;
+    required bool isAllowed = 2;
+}
+
+message CrossBootStatusReq {
+    required uint32 requestId = 1;
+    repeated uint32 productIds = 2;
+}
+
+message CrossBootStatusRsp {
+    required uint32 requestId = 1;
+    repeated mg.protocol.uplaydll.CrossBootStatusRsp.Status status = 2;
+    message Status {
+        optional uint32 productId = 1;
+        optional bool isAllowed = 2;
+    }
+}
+
+message CrossBootInit {
+    repeated mg.protocol.uplaydll.LaunchAppParam launchParams = 1;
 }
 
 message GetStreamingCurrentUserCountryReq {
-    
 }
 
 message GetStreamingCurrentUserCountryRsp {
@@ -1309,15 +1215,13 @@ message GetStreamingCurrentUserCountryRsp {
 }
 
 message GetStreamingTypeReq {
-    
 }
 
 message GetStreamingTypeRsp {
-    optional StreamingType streamingType = 1;
+    optional mg.protocol.uplaydll.StreamingType streamingType = 1;
 }
 
 message GetStreamingNetworkDelayForInputReq {
-    
 }
 
 message GetStreamingNetworkDelayForInputRsp {
@@ -1325,7 +1229,6 @@ message GetStreamingNetworkDelayForInputRsp {
 }
 
 message GetStreamingNetworkDelayForVideoReq {
-    
 }
 
 message GetStreamingNetworkDelayForVideoRsp {
@@ -1333,7 +1236,6 @@ message GetStreamingNetworkDelayForVideoRsp {
 }
 
 message GetStreamingNetworkDelayRoundtripReq {
-    
 }
 
 message GetStreamingNetworkDelayRoundtripRsp {
@@ -1341,31 +1243,27 @@ message GetStreamingNetworkDelayRoundtripRsp {
 }
 
 message GetStreamingDeviceTypeReq {
-    
 }
 
 message GetStreamingDeviceTypeRsp {
-    optional StreamingDeviceType streamingDeviceType = 1;
+    optional mg.protocol.uplaydll.StreamingDeviceType streamingDeviceType = 1;
 }
 
 message GetStreamingInputTypeReq {
-    
 }
 
 message GetStreamingInputTypeRsp {
-    optional StreamingInputType streamingInputType = 1;
+    optional mg.protocol.uplaydll.StreamingInputType streamingInputType = 1;
 }
 
 message GetStreamingInputGamepadTypeReq {
-    
 }
 
 message GetStreamingInputGamepadTypeRsp {
-    optional GamepadType streamingInputGamepadType = 1;
+    optional mg.protocol.uplaydll.GamepadType streamingInputGamepadType = 1;
 }
 
 message GetStreamingResolutionReq {
-    
 }
 
 message Dimension2d {
@@ -1374,89 +1272,107 @@ message Dimension2d {
 }
 
 message GetStreamingResolutionRsp {
-    optional Dimension2d streamingResolution = 1;
+    optional mg.protocol.uplaydll.Dimension2d streamingResolution = 1;
+}
+
+message OpenStreamingTextEntryReq {
+    required uint32 xPosition = 1;
+    required uint32 yPosition = 2;
+    required uint32 width = 3;
+    required uint32 height = 4;
+    required mg.protocol.uplaydll.TextEntryMode mode = 5;
+}
+
+message OpenStreamingTextEntryRsp {
+    required uint32 handle = 1;
+}
+
+message CloseStreamingTextEntryReq {
+    required uint32 handle = 1;
+}
+
+message CloseStreamingTextEntryRsp {
 }
 
 message StreamingReq {
     required uint32 requestId = 1;
-    
-    oneof req {
-        GetStreamingCurrentUserCountryReq getStreamingCurrentUserCountryReq = 2;
-        GetStreamingTypeReq getStreamingTypeReq = 3;
-        GetStreamingNetworkDelayForInputReq getStreamingNetworkDelayForInputReq = 4;
-        GetStreamingNetworkDelayForVideoReq getStreamingNetworkDelayForVideoReq = 5;
-        GetStreamingNetworkDelayRoundtripReq getStreamingNetworkDelayRoundtripReq = 6;
-        GetStreamingDeviceTypeReq getStreamingDeviceTypeReq = 7;
-        GetStreamingInputTypeReq getStreamingInputTypeReq = 8;
-        GetStreamingInputGamepadTypeReq getStreamingInputGamepadTypeReq = 9;
-        GetStreamingResolutionReq GetStreamingResolutionReq = 10;
-    }
+    optional mg.protocol.uplaydll.GetStreamingCurrentUserCountryReq getStreamingCurrentUserCountryReq = 2;
+    optional mg.protocol.uplaydll.GetStreamingTypeReq getStreamingTypeReq = 3;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayForInputReq getStreamingNetworkDelayForInputReq = 4;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayForVideoReq getStreamingNetworkDelayForVideoReq = 5;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayRoundtripReq getStreamingNetworkDelayRoundtripReq = 6;
+    optional mg.protocol.uplaydll.GetStreamingDeviceTypeReq getStreamingDeviceTypeReq = 7;
+    optional mg.protocol.uplaydll.GetStreamingInputTypeReq getStreamingInputTypeReq = 8;
+    optional mg.protocol.uplaydll.GetStreamingInputGamepadTypeReq getStreamingInputGamepadTypeReq = 9;
+    optional mg.protocol.uplaydll.GetStreamingResolutionReq GetStreamingResolutionReq = 10;
+    optional mg.protocol.uplaydll.OpenStreamingTextEntryReq OpenStreamingTextEntryReq = 11;
+    optional mg.protocol.uplaydll.CloseStreamingTextEntryReq CloseStreamingTextEntryReq = 12;
 }
 
 message StreamingRsp {
     required uint32 requestId = 1;
-    required OperationResult result = 2;
-    
-    oneof rsp {
-        GetStreamingCurrentUserCountryRsp getStreamingCurrentUserCountryRsp = 3;
-        GetStreamingTypeRsp getStreamingTypeRsp = 4;
-        GetStreamingNetworkDelayForInputRsp getStreamingNetworkDelayForInputRsp = 5;
-        GetStreamingNetworkDelayForVideoRsp getStreamingNetworkDelayForVideoRsp = 6;
-        GetStreamingNetworkDelayRoundtripRsp getStreamingNetworkDelayRoundtripRsp = 7;
-        GetStreamingDeviceTypeRsp getStreamingDeviceTypeRsp = 8;
-        GetStreamingInputTypeRsp getStreamingInputTypeRsp = 9;
-        GetStreamingInputGamepadTypeRsp getStreamingInputGamepadTypeRsp = 10;
-        GetStreamingResolutionRsp GetStreamingResolutionRsp = 11;
-    }
+    required mg.protocol.uplaydll.OperationResult result = 2;
+    optional mg.protocol.uplaydll.GetStreamingCurrentUserCountryRsp getStreamingCurrentUserCountryRsp = 3;
+    optional mg.protocol.uplaydll.GetStreamingTypeRsp getStreamingTypeRsp = 4;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayForInputRsp getStreamingNetworkDelayForInputRsp = 5;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayForVideoRsp getStreamingNetworkDelayForVideoRsp = 6;
+    optional mg.protocol.uplaydll.GetStreamingNetworkDelayRoundtripRsp getStreamingNetworkDelayRoundtripRsp = 7;
+    optional mg.protocol.uplaydll.GetStreamingDeviceTypeRsp getStreamingDeviceTypeRsp = 8;
+    optional mg.protocol.uplaydll.GetStreamingInputTypeRsp getStreamingInputTypeRsp = 9;
+    optional mg.protocol.uplaydll.GetStreamingInputGamepadTypeRsp getStreamingInputGamepadTypeRsp = 10;
+    optional mg.protocol.uplaydll.GetStreamingResolutionRsp GetStreamingResolutionRsp = 11;
+    optional mg.protocol.uplaydll.OpenStreamingTextEntryRsp OpenStreamingTextEntryRsp = 12;
+    optional mg.protocol.uplaydll.CloseStreamingTextEntryRsp CloseStreamingTextEntryRsp = 13;
 }
 
 message Req {
-    optional InitReq initReq = 1;
-    optional InitProcessReq initProcessReq = 2;
-    optional WriteAchievementsReq writeAchievementsReq = 3;
-    optional PartyReq partyReq = 4;
-    optional SetGameSessionReq setGameSessionReq = 5;
-    optional ClearGameSessionReq clearGameSessionReq = 6;
-    optional FriendsReq friendsReq = 7;
-    optional AchievementReq achievementReq = 8;
-    optional OverlayReq overlayReq = 9;
-    optional AvatarReq avatarReq = 10;
-    optional UserReq userReq = 11;
-    optional ClubReq clubReq = 12;
-    optional InstallerReq installerReq = 13;
-    optional MetadataReq metadataReq = 14;
-    optional SDKMonitoringReq sdkMonitoringReq = 17;
-    optional RichPresenceReq richPresenceReq = 18;
-    optional StoreReq storeReq = 20;
-    optional GameOptionsReq gameOptionsReq = 21;
-    optional SetLanguageCountryCodeReq setLanguageCountryCodeReq = 22;
-    optional ProductReq productReq = 23;
-    optional MultiplayerReq multiplayerReq = 24;
-    optional UserReqV2 userReqV2 = 25;
-    optional LaunchAppReq launchAppReq = 26;
-    optional StreamingReq streamingReq = 27;
+    optional mg.protocol.uplaydll.InitReq initReq = 1;
+    optional mg.protocol.uplaydll.InitProcessReq initProcessReq = 2;
+    optional mg.protocol.uplaydll.WriteAchievementsReq writeAchievementsReq = 3;
+    optional mg.protocol.uplaydll.SetGameSessionReq setGameSessionReq = 5;
+    optional mg.protocol.uplaydll.ClearGameSessionReq clearGameSessionReq = 6;
+    optional mg.protocol.uplaydll.FriendsReq friendsReq = 7;
+    optional mg.protocol.uplaydll.AchievementReq achievementReq = 8;
+    optional mg.protocol.uplaydll.OverlayReq overlayReq = 9;
+    optional mg.protocol.uplaydll.AvatarReq avatarReq = 10;
+    optional mg.protocol.uplaydll.UserReq userReq = 11;
+    optional mg.protocol.uplaydll.ClubReq clubReq = 12;
+    optional mg.protocol.uplaydll.InstallerReq installerReq = 13;
+    optional mg.protocol.uplaydll.MetadataReq metadataReq = 14;
+    optional mg.protocol.uplaydll.SDKMonitoringReq sdkMonitoringReq = 17;
+    optional mg.protocol.uplaydll.RichPresenceReq richPresenceReq = 18;
+    optional mg.protocol.uplaydll.StoreReq storeReq = 20;
+    optional mg.protocol.uplaydll.SetLanguageCountryCodeReq setLanguageCountryCodeReq = 22;
+    optional mg.protocol.uplaydll.ProductReq productReq = 23;
+    optional mg.protocol.uplaydll.MultiplayerReq multiplayerReq = 24;
+    optional mg.protocol.uplaydll.UserReqV2 userReqV2 = 25;
+    optional mg.protocol.uplaydll.LaunchAppReq launchAppReq = 26;
+    optional mg.protocol.uplaydll.StreamingReq streamingReq = 27;
+    optional mg.protocol.uplaydll.CrossBootAllowedReq crossBootAllowedReq = 28;
+    optional mg.protocol.uplaydll.CrossBootStatusReq crossBootStatusReq = 29;
 }
 
 message Rsp {
-    optional InitRsp initRsp = 1;
-    optional InitProcessRsp initProcessRsp = 13;
-    optional WriteAchievementsRsp writeAchievementsRsp = 2;
-    optional PartyRsp partyRsp = 3;
-    optional FriendsRsp friendsRsp = 4;
-    optional AchievementRsp achievementRsp = 5;
-    optional OverlayRsp overlayRsp = 6;
-    optional AvatarRsp avatarRsp = 7;
-    optional UserRsp userRsp = 8;
-    optional ClubRsp clubRsp = 9;
-    optional InstallerRsp installerRsp = 10;
-    optional SDKMonitoringRsp sdkMonitoringRsp = 12;
-    optional StoreRsp storeRsp = 14;
-    optional ProductRsp productRsp = 15;
-    optional MultiplayerRsp multiplayerRsp = 16;
-    optional UserRspV2 userRspV2 = 17;
-    optional TerminateGamePush terminateGamePush = 18;
-    optional LaunchAppRsp launchAppRsp = 19;
-    optional StreamingRsp streamingRsp = 20;
+    optional mg.protocol.uplaydll.InitRsp initRsp = 1;
+    optional mg.protocol.uplaydll.InitProcessRsp initProcessRsp = 13;
+    optional mg.protocol.uplaydll.WriteAchievementsRsp writeAchievementsRsp = 2;
+    optional mg.protocol.uplaydll.FriendsRsp friendsRsp = 4;
+    optional mg.protocol.uplaydll.AchievementRsp achievementRsp = 5;
+    optional mg.protocol.uplaydll.OverlayRsp overlayRsp = 6;
+    optional mg.protocol.uplaydll.AvatarRsp avatarRsp = 7;
+    optional mg.protocol.uplaydll.UserRsp userRsp = 8;
+    optional mg.protocol.uplaydll.ClubRsp clubRsp = 9;
+    optional mg.protocol.uplaydll.InstallerRsp installerRsp = 10;
+    optional mg.protocol.uplaydll.SDKMonitoringRsp sdkMonitoringRsp = 12;
+    optional mg.protocol.uplaydll.StoreRsp storeRsp = 14;
+    optional mg.protocol.uplaydll.ProductRsp productRsp = 15;
+    optional mg.protocol.uplaydll.MultiplayerRsp multiplayerRsp = 16;
+    optional mg.protocol.uplaydll.UserRspV2 userRspV2 = 17;
+    optional mg.protocol.uplaydll.TerminateGamePush terminateGamePush = 18;
+    optional mg.protocol.uplaydll.LaunchAppRsp launchAppRsp = 19;
+    optional mg.protocol.uplaydll.StreamingRsp streamingRsp = 20;
+    optional mg.protocol.uplaydll.CrossBootAllowedRsp crossBootAllowedRsp = 21;
+    optional mg.protocol.uplaydll.CrossBootStatusRsp crossBootStatusRsp = 22;
 }
 
 enum OperationResult {
@@ -1470,6 +1386,7 @@ enum OperationResult {
     unavailable = 8;
     declined = 9;
     internalError = 10;
+    unauthorizedAction = 11;
 }
 
 enum ResponseCode {
@@ -1540,7 +1457,7 @@ enum ProductType {
 
 enum ProductState {
     ProductState_Visible = 1;
-    ProductState_Installable = 2;
+    ProductState_Downloadable = 2;
     ProductState_Playable = 3;
     ProductState_Expired = 4;
 }
@@ -1633,3 +1550,15 @@ enum GamepadType {
     GamepadType_Nintendo = 2;
     GamepadType_PlayStation = 3;
 }
+
+enum TextEntryMode {
+    TextEntryMode_Default = 0;
+    TextEntryMode_Password = 1;
+    TextEntryMode_Text = 2;
+    TextEntryMode_Search = 3;
+    TextEntryMode_Url = 4;
+    TextEntryMode_Number = 5;
+    TextEntryMode_Tel = 6;
+    TextEntryMode_Email = 7;
+}
+

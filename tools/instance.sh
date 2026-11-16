@@ -5,8 +5,9 @@
 #                                            and disable Connect's executables
 #   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, ubi-bridge,
 #                                            then the game (<exe> is a Windows path). Extra game
-#                                            environment: UBI_GAME_ENV="K=V K2=V2". Filtered Wine
-#                                            trace of the game: UBI_TRACE=+file UBI_TRACE_GREP=regex
+#                                            environment: UBI_GAME_ENV="K=V K2=V2". Wine trace of
+#                                            the game (kept inside the container): UBI_TRACE=+file
+#   instance.sh trace-grep <name> <regex>    search that trace
 #   instance.sh shot <name> [file]           screenshot the container's display
 #   instance.sh keys <name> <xdotool args>   send input
 #   instance.sh logs <name>                  tail bridge and game logs
@@ -101,7 +102,7 @@ EOF
     -e PROTON_LOG=1 -e PROTON_LOG_DIR=/out \
     -e UBI_BRIDGE_LOG='Z:\out\bridge-ipc.log' \
     -e UBI_GAME_ENV="${UBI_GAME_ENV:-}" -e UBI_UPLAY_ID="$id" \
-    -e UBI_TRACE="${UBI_TRACE:-}" -e UBI_TRACE_GREP="${UBI_TRACE_GREP:-}" \
+    -e UBI_TRACE="${UBI_TRACE:-}" \
     -e UBI_PROTON="$PROTON" -e UBI_RES="$RES" -e UBI_EXE="$exe" \
     "$IMAGE" bash -c '
       mkdir -p /tmp/xdg /tmp/steam; chmod 700 /tmp/xdg
@@ -118,11 +119,9 @@ EOF
       echo "UPLAY_ARGUMENTS=$UPLAY_ARGUMENTS" >> /out/run.log
       echo "game env: $UBI_GAME_ENV" >> /out/run.log
       if [ -n "$UBI_TRACE" ]; then
-        # Filtered Wine trace of the game only; unfiltered traces reach gigabytes in seconds.
-        # Proton forces WINEDEBUG=-all unless PROTON_LOG is set, and then writes the trace to
-        # $PROTON_LOG_DIR/steam-0.log, so make that a FIFO and filter it on the way out.
-        mkdir -p /tmp/gamelog && mkfifo /tmp/gamelog/steam-0.log
-        ( while :; do cat /tmp/gamelog/steam-0.log; done | grep -a --line-buffered -E "${UBI_TRACE_GREP:-.}" >>/out/trace.log ) &
+        # Wine trace of the game. Proton forces WINEDEBUG=-all unless PROTON_LOG is set, and
+        # then writes everything to $PROTON_LOG_DIR/steam-0.log (hundreds of MB per minute), so
+        # keep it in the container'"'"'s /tmp, which is discarded with the container.
         env $UBI_GAME_ENV PROTON_LOG=1 PROTON_LOG_DIR=/tmp/gamelog WINEDEBUG="$UBI_TRACE" \
           python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
       else
@@ -139,6 +138,7 @@ cmd_shot() {
   echo "$out"
 }
 
+cmd_trace_grep() { podman exec "$(ctr "$1")" grep -a -E "$2" /tmp/gamelog/steam-0.log | cut -c1-300 | awk '!s[$0]++'; }
 cmd_keys() { local name=$1; shift; podman exec "$(ctr "$name")" xdotool "$@"; }
 cmd_logs() { local d; d=$(dir "$1")/out; tail -60 "$d/bridge-ipc.log"; echo "--- run.log"; tail -20 "$d/run.log"; }
 cmd_stop() { podman rm -f -t 5 "$(ctr "$1")" >/dev/null; }
@@ -146,5 +146,6 @@ cmd_stop() { podman rm -f -t 5 "$(ctr "$1")" >/dev/null; }
 cmd=${1:-}; shift || true
 case $cmd in
   create|run|shot|keys|logs|stop) "cmd_$cmd" "$@";;
+  trace-grep) cmd_trace_grep "$@";;
   *) sed -n '2,13p' "$0"; exit 2;;
 esac

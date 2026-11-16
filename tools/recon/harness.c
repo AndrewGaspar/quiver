@@ -13,6 +13,14 @@ typedef const char *(__cdecl *str_fn)(void);
 typedef int (__cdecl *owned_fn)(unsigned);
 typedef int (__cdecl *event_fn)(void *);
 
+/* R1 SDK structs (layout as used by games; oversized for safety). */
+typedef struct { void *reserved; unsigned completed; unsigned result; char pad[64]; } UPLAY_Overlapped;
+typedef struct { unsigned slot_id; const char *name; unsigned size; } UPLAY_SAVE_Game;
+typedef struct { unsigned count; UPLAY_SAVE_Game **games; } UPLAY_SAVE_GameList;
+typedef int (__cdecl *get_saves_fn)(UPLAY_SAVE_GameList **, UPLAY_Overlapped *);
+typedef int (__cdecl *has_completed_fn)(UPLAY_Overlapped *);
+typedef int (__cdecl *op_result_fn)(UPLAY_Overlapped *, int *);
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 3) { fprintf(stderr, "usage: %s loader.dll uplay_id [seconds]\n", argv[0]); return 2; }
@@ -30,6 +38,23 @@ int main(int argc, char **argv) {
         int u = Update();
         if (i % 10 == 0) printf("t=%ds UPLAY_Update = %d\n", i / 10, u);
         Sleep(100);
+    }
+    get_saves_fn GetSaves = (get_saves_fn)GetProcAddress(h, "UPLAY_SAVE_GetSavegames");
+    has_completed_fn HasCompleted = (has_completed_fn)GetProcAddress(h, "UPLAY_HasOverlappedOperationCompleted");
+    op_result_fn OpResult = (op_result_fn)GetProcAddress(h, "UPLAY_GetOverlappedOperationResult");
+    if (getenv("HARNESS_SAVES")) {
+        UPLAY_SAVE_GameList *list = NULL;
+        UPLAY_Overlapped ov = {0};
+        printf("UPLAY_SAVE_GetSavegames = %d\n", GetSaves(&list, &ov));
+        for (int i = 0; i < 50 && !HasCompleted(&ov); i++) { Update(); Sleep(100); }
+        int res = -1;
+        printf("completed=%d result_call=%d result=%d\n", HasCompleted(&ov), OpResult(&ov, &res), res);
+        if (list) {
+            printf("save count=%u\n", list->count);
+            for (unsigned i = 0; i < list->count && i < 32; i++)
+                printf("  slot %u size %u name '%s'\n", list->games[i]->slot_id, list->games[i]->size,
+                       list->games[i]->name ? list->games[i]->name : "(null)");
+        }
     }
     const char *s;
     printf("name=%s\n", (s = USER_GetNameUtf8()) ? s : "(null)");
