@@ -655,6 +655,12 @@ pub async fn play(
         // First into the namespace: its wineserver must start in there.
         ns.enter(bridge.as_std_mut(), None)?;
     }
+    // The bridge is the prefix's first Wine process, so the wineserver and Wine's services
+    // (winedevice's controller bus, …) start with *its* environment. Give it the game's
+    // env settings, or settings such as PROTON_DISABLE_HIDRAW never reach winebus.
+    for (k, v) in &settings.env {
+        bridge.env(k, v);
+    }
     let mut bridge = bridge
         .env("UBI_BRIDGE_LOG", win_path(&bridge_log))
         .stdout(Stdio::null())
