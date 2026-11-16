@@ -479,7 +479,13 @@ impl Proton<'_> {
             .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam)
             .env("STEAM_COMPAT_APP_ID", "0")
             .env("SteamAppId", "0")
-            .env("SteamGameId", "0");
+            .env("SteamGameId", "0")
+            // Keep compiled shaders: the NVIDIA driver otherwise trims its disk cache to
+            // 1 GB, evicting a big game's shaders between sessions (multi-second stalls when
+            // they recompile). Steam sets the same. Config and game env can override.
+            .env("__GL_SHADER_DISK_CACHE", "1")
+            .env("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1")
+            .env("MESA_SHADER_CACHE_MAX_SIZE", "10G");
         for (k, v) in &self.cfg.env {
             cmd.env(k, v);
         }
