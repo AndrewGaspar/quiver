@@ -481,6 +481,7 @@ fn sync_steam(st: &mut State, games: &[SteamGame]) {
                         owned_by: vec!["demo".into()],
                         installable: false,
                         steam: Some(g.clone()),
+                        space_id: None,
                     },
                 );
             }
@@ -973,6 +974,66 @@ fn demo_unpatched(opts: &str) -> String {
     if out.trim() == "%command%" { String::new() } else { out }
 }
 
+/// Steam's library-cache art for the demo's Black Flag Resynced (its product config has no
+/// art, as the real one's doesn't, so the app falls back to Steam's): the files in
+/// `$QUIVER_DEMO_STEAM_ART` (`library_capsule.jpg`, `library_hero.jpg`, `logo.png`,
+/// `header.jpg`, `icon.jpg`; e.g. copies of a real Steam cache), else placeholder images
+/// drawn once into the art cache.
+fn demo_steam_art() -> ubi_api::art::SteamArt {
+    let dir = match std::env::var_os("QUIVER_DEMO_STEAM_ART") {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let d = crate::art::default_cache_dir().join("demo-steam/3751950");
+            // Tests don't draw into the real cache.
+            if !cfg!(test)
+                && let Err(e) = draw_steam_fixtures(&d)
+            {
+                tracing::warn!("demo Steam art: {e:#}");
+            }
+            d
+        }
+    };
+    let f = |n: &str| Some(dir.join(n)).filter(|p| p.is_file());
+    ubi_api::art::SteamArt {
+        capsule: f("library_capsule.jpg"),
+        hero: f("library_hero.jpg"),
+        logo: f("logo.png"),
+        header: f("header.jpg"),
+        icon: f("icon.jpg"),
+    }
+}
+
+/// Placeholder Steam art: a portrait capsule and a hero (sea-and-sunset gradients) and a
+/// transparent "logo" (two bars), so the fallback is visible without Steam.
+fn draw_steam_fixtures(dir: &std::path::Path) -> anyhow::Result<()> {
+    if dir.join("logo.png").is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    let grad = |w: u32, h: u32| {
+        image::RgbImage::from_fn(w, h, |x, y| {
+            let t = y as f32 / h as f32;
+            let sun = (1.0 - ((x as f32 / w as f32 - 0.7).powi(2) + (t - 0.35).powi(2)).sqrt() * 3.0).max(0.0);
+            let sea = if t > 0.6 { 1.0 } else { 0.0 };
+            let r = (30.0 + 200.0 * sun + 20.0 * (1.0 - t)) * (1.0 - 0.6 * sea);
+            let g = (40.0 + 120.0 * sun + 60.0 * t) * (1.0 - 0.3 * sea);
+            let b = 70.0 + 90.0 * t + 40.0 * sea;
+            image::Rgb([r.min(255.0) as u8, g.min(255.0) as u8, b.min(255.0) as u8])
+        })
+    };
+    grad(300, 450).save(dir.join("library_capsule.jpg"))?;
+    grad(1920, 620).save(dir.join("library_hero.jpg"))?;
+    grad(460, 215).save(dir.join("header.jpg"))?;
+    let logo = image::RgbaImage::from_fn(640, 360, |x, y| {
+        let bar = (y > 120 && y < 190 && x > 40 && x < 600) || (y > 210 && y < 240 && x > 160 && x < 480);
+        if bar { image::Rgba([236, 226, 205, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+    });
+    let tmp = dir.join(".logo.png.part");
+    logo.save_with_format(&tmp, image::ImageFormat::Png)?;
+    std::fs::rename(&tmp, dir.join("logo.png"))?;
+    Ok(())
+}
+
 /// Ubisoft games installed through Steam (`QUIVER_DEMO_GLOBAL`: `steam-games=none` for
 /// none, `steam-offer` for a new install being offered, `steam-closed` for Steam closed).
 fn steam_games() -> Vec<SteamGame> {
@@ -993,6 +1054,7 @@ fn steam_games() -> Vec<SteamGame> {
         patchable: product.is_some(),
         offer: false,
         note: product.is_none().then(|| "Quiver can't tell which Ubisoft game this is".into()),
+        art: if app_id == 3751950 { demo_steam_art() } else { Default::default() },
     };
     let mut v = vec![
         g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched("", Some(66088)), PatchState::On),

@@ -291,11 +291,15 @@ impl Quiver {
             }
             sub.push_str(&format!("{} played", hours(pt.total_seconds)));
         }
-        let proton = g
-            .settings
-            .as_ref()
-            .and_then(|s| s.proton.clone())
-            .or_else(|| self.status.as_ref().and_then(|s| s.proton_default.clone()).map(|p| format!("{p} (default)")));
+        // Steam picks the Proton build of a Steam copy.
+        let proton = if g.steam_only() {
+            Some("Steam's Proton".to_owned())
+        } else {
+            g.settings
+                .as_ref()
+                .and_then(|s| s.proton.clone())
+                .or_else(|| self.status.as_ref().and_then(|s| s.proton_default.clone()).map(|p| format!("{p} (default)")))
+        };
         let accent_on_art: Hsla = if th.dark { th.acc_hi } else { th.focus };
 
         let focus_play = self.focused(Target::Hero(0));

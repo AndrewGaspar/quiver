@@ -21,7 +21,7 @@ use super::{
     glyph, icon, icon_button, pill, soft_shadow,
 };
 use crate::app::{ACTION_FILES, ACTION_LAUNCH, ACTION_MORE, ACTION_OPTIONS, ACTION_PRIMARY, ACTION_STEAM, InputMode, Quiver, SideFilter};
-use crate::art::{ArtSlot, Variant};
+use crate::art::{ArtPreference, ArtSlot, Variant};
 use crate::model::{GameRow, day, gb, hours, short_name};
 use crate::nav::{Tab, Target};
 use crate::theme::{Theme, on_art, rgba};
@@ -412,7 +412,6 @@ impl Quiver {
     }
 
     fn render_hero(&mut self, th: &Theme, g: &GameRow, pane_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let id = g.id();
         let hero = self.art_for(g, ArtSlot::Hero, Variant::Original, cx);
         let title = self.hero_title(g, cx);
         let pb = self.pane_bp();
@@ -444,7 +443,7 @@ impl Quiver {
             let top = if pb.narrow() { 64. } else { 28. };
             hero_el = hero_el.child(div().absolute().left(px(pad)).top(px(top)).child(t));
         }
-        let custom = self.custom_art.get(&id).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
+        let art_chip_el = self.render_art_chip(th, g, cx);
         hero_el.child(
             div()
                 .absolute()
@@ -464,12 +463,128 @@ impl Quiver {
                         .border_color(rgba(0xffffff, 0.09))
                         .child(icon(Icon::Star, 14., on_art::tx2())),
                 )
-                .child(
-                    art_chip(Some(Icon::Image), if custom { "Art: yours" } else { "Art: Ubisoft" })
-                        .h(px(32.))
-                        .child(icon(Icon::ChevronDown, 12., on_art::tx2())),
-                ),
+                .child(art_chip_el),
         )
+    }
+
+    /// Whose art the page shows ("Art: Ubisoft", "Art: Steam", "Art: yours"). For a game
+    /// with a Steam copy it opens a menu that puts Ubisoft's or Steam's art first (the
+    /// game's `art` setting, which the library, Now Playing and the home hero follow too).
+    fn render_art_chip(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
+        let id = g.id();
+        let custom = self.custom_art.get(&id).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
+        let shown = [ArtSlot::Hero, ArtSlot::Tile, ArtSlot::Logo]
+            .into_iter()
+            .find_map(|slot| match self.art_pick(g, slot, Variant::Original, cx) {
+                (ArtState::Failed, _) => None,
+                (_, c) => c.and_then(|c| c.origin),
+            });
+        let label = if custom {
+            "Art: yours".to_owned()
+        } else {
+            match shown {
+                Some(o) => format!("Art: {}", o.vendor()),
+                None => "Art: none".to_owned(),
+            }
+        };
+        let tip_text = shown.map(|o| format!("From the {}", o.describe())).unwrap_or_else(|| "No art from Ubisoft or Steam".into());
+        let Some(app_id) = g.steam().map(|s| s.app_id) else {
+            return art_chip(Some(Icon::Image), label).h(px(32.)).id("art-chip").tooltip(tip(th, &tip_text)).into_any_element();
+        };
+        let pref = self.art_pref(g);
+        let open = self.gp.art_menu;
+        let chip = art_chip(Some(Icon::Image), label)
+            .h(px(32.))
+            .child(icon(Icon::ChevronDown, 12., on_art::tx2()))
+            .id("art-chip")
+            .cursor_pointer()
+            .tooltip(tip(th, &tip_text))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.gp.art_menu = !this.gp.art_menu;
+                cx.notify();
+            }));
+        let menu = open.then(|| {
+            let opts = [
+                (ArtPreference::Ubisoft, "Ubisoft's art first", "Product config, then Ubisoft's games API, then Steam".to_owned()),
+                (ArtPreference::Steam, "Steam's art first", format!("Steam app {app_id}'s library art, then Ubisoft's")),
+            ];
+            let items: Vec<AnyElement> = opts
+                .into_iter()
+                .enumerate()
+                .map(|(i, (p, name, detail))| {
+                    let on = p == pref;
+                    div()
+                        .id(("art-opt", i))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(7.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(th.ink3))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(div().w(px(14.)).child(if on { icon(Icon::Check, 14., th.acc_hi).into_any_element() } else { div().into_any_element() }))
+                                .child(div().font_weight(if on { SEMIBOLD } else { MEDIUM }).child(name)),
+                        )
+                        .child(div().pl(px(22.)).text_size(px(11.5)).text_color(th.tx3).child(detail))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.gp.art_menu = false;
+                            this.set_art_pref(id, p, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            gpui::deferred(
+                gpui::anchored().anchor(gpui::Corner::TopRight).offset(gpui::point(px(0.), px(36.))).snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .id("art-menu")
+                        .occlude()
+                        .w(px(300.))
+                        .p(px(4.))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(10.))
+                        .bg(th.ink2)
+                        .border_1()
+                        .border_color(th.line2)
+                        .shadow(vec![soft_shadow(rgba(0x000000, 0.55), 14., 40.)])
+                        .text_size(px(12.5))
+                        .text_color(th.tx1)
+                        .on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                            this.gp.art_menu = false;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1)
+        });
+        div().relative().flex().flex_col().items_end().child(chip).children(menu).into_any_element()
+    }
+
+    /// Save the game's `art` setting (`steam`, or unset for Ubisoft's first).
+    pub fn set_art_pref(&mut self, id: u32, p: ArtPreference, cx: &mut Context<Self>) {
+        if self.game(id).is_some_and(|g| self.art_pref(g) == p) {
+            return;
+        }
+        let op = match p {
+            ArtPreference::Steam => ubi_api::SettingOp::Set { key: "art".into(), value: "steam".into() },
+            ArtPreference::Ubisoft => ubi_api::SettingOp::Unset { key: "art".into() },
+        };
+        let message = Some(match p {
+            ArtPreference::Steam => "Steam's art first".to_owned(),
+            ArtPreference::Ubisoft => "Ubisoft's art first".to_owned(),
+        });
+        self.call::<ubi_api::Revision, _>(ubi_api::Request::SettingsSet { product_id: id, ops: vec![op], message }, cx, move |this, r, cx| match r {
+            Ok(_) => this.load_details(id, cx),
+            Err(e) => this.show_toast(crate::err_text(&e), cx),
+        });
     }
 
     /// The 112 px banner over the dense tabs: logo or name, then the action bar.

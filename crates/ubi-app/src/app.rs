@@ -322,6 +322,30 @@ impl Quiver {
         .detach();
     }
 
+    /// [`Self::call`], failing with "no answer" after `limit` (the request may still run).
+    pub fn call_within<T, F>(&self, req: Request, limit: std::time::Duration, cx: &mut Context<Self>, done: F)
+    where
+        T: serde::de::DeserializeOwned + Send + 'static,
+        F: FnOnce(&mut Self, anyhow::Result<T>, &mut Context<Self>) + 'static,
+    {
+        let Some(source) = self.source.clone() else { return };
+        let rx = on_tokio(async move {
+            match tokio::time::timeout(limit, source.call::<T>(req)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow::anyhow!("quiverd didn't answer in {} s (Ubisoft may be slow); try again later", limit.as_secs())),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("cancelled")));
+            this.update(cx, |this, cx| {
+                done(this, result, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
         self.downloads_event(&e, cx);
         self.global_event(&e, cx);
@@ -453,9 +477,15 @@ impl Quiver {
                 for j in jobs {
                     this.apply_job(j);
                 }
-                let ids: Vec<u32> = this.games.iter().filter(|g| g.installed()).map(|g| g.id()).collect();
+                // Steam copies too: their sessions are recorded when Steam starts them through Quiver.
+                let ids: Vec<u32> = this.games.iter().filter(|g| g.on_disk()).map(|g| g.id()).collect();
                 for id in ids {
                     this.load_playtime(id, cx);
+                }
+                // Games with a Steam copy: their `art` setting picks whose art shows.
+                let steam: Vec<u32> = this.games.iter().filter(|g| g.steam().is_some() && g.settings.is_none()).map(|g| g.id()).collect();
+                for id in steam {
+                    this.load_settings(id, cx);
                 }
                 if let Page::Game(id) = this.nav.page {
                     this.load_details(id, cx);
@@ -576,9 +606,46 @@ impl Quiver {
         }
     }
 
+    /// The game's `art` setting (Ubisoft's art first unless it says `steam`).
+    pub fn art_pref(&self, g: &GameRow) -> crate::art::ArtPreference {
+        crate::art::ArtPreference::from_setting(g.settings.as_ref().and_then(|s| s.art.as_deref()))
+    }
+
+    /// The image for a game's slot: the first of its candidates (`art::candidates`: the
+    /// user's file, Ubisoft's config, Ubisoft's games API, Steam's cache, Steam's CDN) that
+    /// hasn't failed, and which one that is.
+    pub fn art_pick(
+        &self,
+        g: &GameRow,
+        slot: crate::art::ArtSlot,
+        variant: Variant,
+        cx: &mut Context<Self>,
+    ) -> (ArtState, Option<crate::art::Candidate>) {
+        let cands = crate::art::candidates(&g.entry, self.custom_art.get(&g.id()), slot, self.art_pref(g));
+        let (state, c) = crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx)));
+        (state, c.cloned())
+    }
+
     pub fn art_for(&self, g: &GameRow, slot: crate::art::ArtSlot, variant: Variant, cx: &mut Context<Self>) -> ArtState {
-        let src = crate::art::resolve(&g.entry.art, self.custom_art.get(&g.id()), slot);
-        self.art_state(src, variant, cx)
+        self.art_pick(g, slot, variant, cx).0
+    }
+
+    /// Steam's art for a Steam install that isn't in the library.
+    pub fn art_for_steam_game(&self, g: &ubi_api::exports::SteamGame, slot: crate::art::ArtSlot, variant: Variant, cx: &mut Context<Self>) -> ArtState {
+        let entry = LibraryEntry {
+            product_id: g.product_id.unwrap_or_default(),
+            name: g.name.clone(),
+            installed: None,
+            update_available: false,
+            running: false,
+            art: Default::default(),
+            owned_by: Vec::new(),
+            installable: false,
+            steam: Some(g.clone()),
+            space_id: None,
+        };
+        let cands = crate::art::candidates(&entry, None, slot, crate::art::ArtPreference::Steam);
+        crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx))).0
     }
 
     // -----------------------------------------------------------------------------------------
@@ -609,7 +676,7 @@ impl Quiver {
 
     /// The game the library hero features: the most recently played installed game.
     pub fn hero_game(&self) -> Option<&GameRow> {
-        self.games.iter().filter(|g| g.installed() && g.last_played().is_some()).max_by_key(|g| g.last_played())
+        self.games.iter().filter(|g| g.on_disk() && g.last_played().is_some()).max_by_key(|g| g.last_played())
     }
 
     /// Things waiting on the user, for the hero's "Needs attention" panel.
