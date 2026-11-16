@@ -64,7 +64,8 @@ pub enum SteamAction {
         json: bool,
     },
     /// Make a Steam game start through Quiver instead of Ubisoft Connect: its launch
-    /// options get `quiver … steam-run` in front of `%command%`, keeping your own. Nothing
+    /// options get `quiver … steam-run --product <id>` in front of `%command%`, keeping
+    /// your own (ones already set up, with or without `--product`, are left alone). Nothing
     /// in the game's prefix changes; `unpatch` undoes it.
     Patch {
         /// Steam app id, the game's name (or part of it), its Ubisoft product id, or `all`.

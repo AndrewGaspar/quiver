@@ -260,7 +260,9 @@ enum Cmd {
         cmd: dev::DevCmd,
     },
     /// Run a Steam copy of a Ubisoft game against Quiver instead of Ubisoft Connect. Set it
-    /// as the game's Steam launch options: `quiver steam-run %command%`.
+    /// as the game's Steam launch options: `quiver steam-run --product <id> %command%`
+    /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
+    /// game's Steam install script or its prefix's registry).
     SteamRun(steamrun::SteamRunArgs),
 }
 

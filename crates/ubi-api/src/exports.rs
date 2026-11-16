@@ -105,7 +105,7 @@ pub struct SteamExportResult {
 // Steam copies of Ubisoft games ("use Quiver instead of Ubisoft Connect")
 
 /// Whether a Steam game starts through Quiver: its launch options run
-/// `quiver --source steam steam-run %command%`.
+/// `quiver --source steam steam-run [--product <id>] %command%`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatchState {
@@ -179,7 +179,8 @@ pub struct SteamGames {
     /// Offer the switch when a Ubisoft game is newly installed in Steam (app setting).
     #[serde(default = "yes")]
     pub offers: bool,
-    /// The `quiver` launch options Quiver writes, in front of `%command%`.
+    /// The `quiver` launch options Quiver writes, in front of `%command%`, less the
+    /// per-game `--product <id>` it adds.
     #[serde(default)]
     pub command: String,
 }

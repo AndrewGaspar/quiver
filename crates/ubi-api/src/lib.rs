@@ -459,7 +459,8 @@ pub enum Request {
         steam_user: Option<String>,
     },
     /// Make a Steam game start through Quiver: its launch options become
-    /// `<quiver> --source steam steam-run %command%`, keeping the user's own options. Staged
+    /// `<quiver> --source steam steam-run --product <id> %command%`, keeping the user's own
+    /// options (an older form without `--product` counts as done already). Staged
     /// while Steam runs (it rewrites the file on exit). Returns `exports::SteamPatchResult`.
     SteamPatch {
         app_id: u32,

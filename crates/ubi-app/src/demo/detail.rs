@@ -163,7 +163,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             };
             let unchanged = g.state == before || matches!((before, g.state), (PatchState::WaitingUndo, PatchState::On) | (PatchState::Waiting, PatchState::Off));
             let staged = matches!(g.state, PatchState::Waiting | PatchState::WaitingUndo);
-            let shown = if g.state.uses_quiver() { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            let shown = if g.state.uses_quiver() { demo_patched(&g.launch_options, g.product_id) } else { demo_unpatched(&g.launch_options) };
             if !staged {
                 g.launch_options = shown.clone();
             }
@@ -834,7 +834,7 @@ impl Detail {
                 PatchState::WaitingUndo => PatchState::Off,
                 _ => continue,
             };
-            g.launch_options = if next == PatchState::On { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            g.launch_options = if next == PatchState::On { demo_patched(&g.launch_options, g.product_id) } else { demo_unpatched(&g.launch_options) };
             g.state = next;
             n += 1;
         }
@@ -846,19 +846,26 @@ fn steam_command() -> String {
     format!("{} --source steam steam-run", home().join(".local/bin/quiver").display())
 }
 
-fn demo_patched(opts: &str) -> String {
+/// Like quiverd: the product id is always written.
+fn demo_patched(opts: &str, product: Option<u32>) -> String {
     if opts.contains("steam-run") {
         return opts.to_owned();
     }
+    let cmd = match product {
+        Some(p) => format!("{} --product {p}", steam_command()),
+        None => steam_command(),
+    };
     match opts.find("%command%") {
-        Some(i) => format!("{}{} {}", &opts[..i], steam_command(), &opts[i..]),
-        None if opts.trim().is_empty() => format!("{} %command%", steam_command()),
-        None => format!("{} %command% {}", steam_command(), opts.trim()),
+        Some(i) => format!("{}{cmd} {}", &opts[..i], &opts[i..]),
+        None if opts.trim().is_empty() => format!("{cmd} %command%"),
+        None => format!("{cmd} %command% {}", opts.trim()),
     }
 }
 
 fn demo_unpatched(opts: &str) -> String {
-    let out = opts.replace(&format!("{} ", steam_command()), "");
+    let Some(s) = opts.find(&steam_command()) else { return opts.to_owned() };
+    let e = opts[s..].find("%command%").map_or(opts.len(), |i| s + i);
+    let out = format!("{}{}", &opts[..s], &opts[e..]);
     if out.trim() == "%command%" { String::new() } else { out }
 }
 
@@ -884,14 +891,14 @@ fn steam_games() -> Vec<SteamGame> {
         note: product.is_none().then(|| "Quiver can't tell which Ubisoft game this is".into()),
     };
     let mut v = vec![
-        g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched(""), PatchState::On),
+        g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched("", Some(66088)), PatchState::On),
         g(368500, "Assassin's Creed Syndicate", "Assassin's Creed Syndicate", Some(1875), "", PatchState::Off),
         g(298110, "Far Cry 4", "Far Cry 4", Some(420), "-skipintro", PatchState::Off),
         g(2239550, "Watch Dogs: Legion", "Watch Dogs Legion", Some(3353), "PROTON_ENABLE_NVAPI=1 %command%", if running { PatchState::Waiting } else { PatchState::On }),
         g(916440, "Anno 1800", "Anno 1800", None, "", PatchState::Off),
     ];
     if !running {
-        v[3].launch_options = demo_patched(&v[3].launch_options);
+        v[3].launch_options = demo_patched(&v[3].launch_options, v[3].product_id);
     }
     if crate::ui::global::demo_flag("steam-offer").is_some() {
         v[1].offer = true;
@@ -1341,7 +1348,7 @@ mod tests {
         // Far Cry 4: its own option is kept as a game argument.
         let r: SteamPatchResult = call(&demo, Request::SteamPatch { app_id: 298110, steam_user: None });
         assert!(r.staged && !r.unchanged);
-        assert!(r.launch_options.ends_with("steam-run %command% -skipintro"), "{}", r.launch_options);
+        assert!(r.launch_options.ends_with("steam-run --product 420 %command% -skipintro"), "{}", r.launch_options);
         // Undo before Steam restarted: nothing waits any more.
         let r: SteamPatchResult = call(&demo, Request::SteamUnpatch { app_id: 298110, steam_user: None });
         assert!(r.unchanged);
