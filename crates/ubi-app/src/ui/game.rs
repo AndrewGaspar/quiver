@@ -12,7 +12,7 @@ mod saves;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
-pub use page::{ExportAction, GamePage, settings_from_reply};
+pub use page::{ExportAction, GamePage, checkbox, settings_from_reply, toggle};
 
 use super::library::{play_button, primary_label};
 use super::{
@@ -157,7 +157,7 @@ impl Quiver {
                     .child(
                         button("import", th, Kind::Ghost, Size::Small, Some(Icon::FolderInput), "Import existing games")
                             .justify_start()
-                            .on_click(cx.listener(|this, _, _, cx| this.show_toast("Import: use `quiver import` for now", cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Import, cx))),
                     ),
             )
     }

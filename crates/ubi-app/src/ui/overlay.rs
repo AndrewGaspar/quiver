@@ -208,6 +208,12 @@ impl Quiver {
                     hints.push(hint(vec!["A"], "Open section"));
                     hints.push(hint(vec!["B"], "Back to library"));
                 }
+                (Page::Downloads, Zone::Body) => {
+                    hints.push(hint(vec!["A"], "Select"));
+                    hints.push(hint(vec!["X"], "Pause / resume"));
+                    hints.push(hint(vec!["LT", "RT"], "Move in queue"));
+                    hints.push(hint(vec!["B"], "Back to library"));
+                }
                 (Page::Activity, _) => {
                     hints.push(hint(vec!["A"], "Open game"));
                     hints.push(hint(vec!["Y"], if self.ui.activity_game.is_some() { "All games" } else { "Only this game" }));

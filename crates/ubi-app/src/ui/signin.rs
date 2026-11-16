@@ -346,6 +346,7 @@ impl Quiver {
                     .child(brand_mark(th, 30.))
                     .child(display(22., FontWeight::EXTRA_BOLD, th.tx1).child("Quiver")),
             )
+            .when_some(self.welcome_signin_banner(th), |d, b| d.child(b))
             .when(adding, |d| {
                 d.child(
                     div()
@@ -434,7 +435,7 @@ impl Quiver {
 
     /// The library's art, dimmed, behind the card (only once there is a library: adding an
     /// account or signing in again).
-    fn render_signin_mosaic(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn render_signin_mosaic(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.games.is_empty() {
             return None;
         }
