@@ -3,6 +3,8 @@
 //! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `ubi-api` for the protocol.
 
+mod exports;
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::Write as _;
@@ -493,6 +495,7 @@ impl Daemon {
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
             }
             Request::Sessions => json!(self.sessions.list()),
+            r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged) => exports::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {

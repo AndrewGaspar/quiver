@@ -3,6 +3,7 @@
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
 mod dev;
+mod exports;
 
 use std::io::Write;
 
@@ -139,6 +140,16 @@ enum Cmd {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// .desktop entries and Steam shortcuts for games.
+    Export {
+        #[command(subcommand)]
+        action: exports::ExportAction,
+    },
+    /// Steam users, staged shortcut changes and restarting Steam.
+    Steam {
+        #[command(subcommand)]
+        action: exports::SteamAction,
+    },
     /// Low-level tools that bypass the daemon.
     Dev {
         #[command(subcommand)]
@@ -173,7 +184,7 @@ enum AccountAction {
     Remove { account: String },
 }
 
-fn print_json(v: &impl serde::Serialize) -> Result<()> {
+pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }
@@ -220,7 +231,7 @@ async fn logout(client: &Client, account: Option<String>) -> Result<()> {
 }
 
 /// Resolve a game argument: product id, or a unique case-insensitive name match.
-async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry> {
+pub(crate) async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry> {
     let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await?;
     if let Ok(id) = game.parse::<u32>() {
         return lib.into_iter().find(|e| e.product_id == id).with_context(|| format!("product {id} is not in your library"));
@@ -312,9 +323,15 @@ async fn main() -> Result<()> {
     if let Cmd::Dev { cmd } = cli.cmd {
         return dev::run_dev(cmd).await;
     }
+    // Restarting Steam happens here, never in the daemon, and only after confirmation.
+    if let Cmd::Steam { action: exports::SteamAction::Restart { yes } } = cli.cmd {
+        return exports::steam_restart(yes, &cli.source);
+    }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
-        Cmd::Dev { .. } => unreachable!(),
+        Cmd::Dev { .. } | Cmd::Steam { action: exports::SteamAction::Restart { .. } } => unreachable!(),
+        Cmd::Export { action } => exports::export(&client, action).await?,
+        Cmd::Steam { action } => exports::steam(&client, action).await?,
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
             println!("quiverd {}", s.version);

@@ -51,6 +51,10 @@ pub struct Config {
     /// Report play sessions to Ubisoft (the play time shown in Connect and on the web).
     #[serde(default = "yes")]
     pub report_playtime: bool,
+    /// Steam user (account id, `userdata/<id>`) that gets Steam shortcuts, chosen on the
+    /// first export when the machine has several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_user: Option<String>,
 }
 
 fn yes() -> bool {
@@ -173,6 +177,7 @@ impl Config {
                 ("DXVK_ENABLE_NVAPI".into(), "1".into()),
             ],
             report_playtime: true,
+            steam_user: None,
         };
         cfg.save()?;
         Ok(cfg)
