@@ -43,16 +43,30 @@ from the Connect install directory, unmodified. They reach Connect through named
 ## Usage
 
 ```sh
-cargo build
-./target/debug/ubi ping                 # demux connectivity, no login
-./target/debug/ubi login                # email, password, 2FA; session stored in the keyring
-./target/debug/ubi whoami
-./target/debug/ubi library [--all] [--json]
-./target/debug/ubi config <product-id>  # product configuration YAML
-./target/debug/ubi manifest <path/to/uplay_install.manifest> [--files]
+# Build the Windows-side bridge (once) and everything else
+rustup target add x86_64-pc-windows-gnu
+cargo build --release -p ubi-bridge --target x86_64-pc-windows-gnu
+cargo build --release
+
+./target/release/ubi login                 # email, password, 2FA; session kept in the keyring
+./target/release/ubisoft-linux             # the GPUI app: library, install/update, play
 ```
 
-Set `RUST_LOG=ubi_core=debug` to trace demux traffic.
+The CLI does the same things as the app:
+
+```sh
+ubi library [--all]           # owned games
+ubi install <id> <dir>        # download/update (resumable), registers the game
+ubi games                     # installed games
+ubi play <id>                 # run it: own prefix, bridge, cloud-save sync around the session
+ubi status <id>=<dir>...      # update check for existing installs
+ubi saves pull|push ...       # manual cloud-save sync
+```
+
+State lives in `~/.local/share/ubisoft-linux/` (`config.json`, `games.json`, save backups).
+Defaults: games in `~/Games/ubi-library`, prefixes in `~/Games/ubi-prefixes`, newest GE-Proton
+from `~/.local/share/Steam/compatibilitytools.d`. Ubisoft's SDK DLLs are copied from an
+existing Connect install (`sdk_source` in `config.json`).
 
 ## Roadmap
 
@@ -61,5 +75,8 @@ Set `RUST_LOG=ubi_core=debug` to trace demux traffic.
 3. Bridge coverage: Origins loads saves and reaches gameplay menus. Still to do: real achievements
    and Club actions (UbiServices), cloud save sync, newer `upc_r2` games, ticket refresh on long
    sessions
-4. Installer: download slices from the CDN, verify, one prefix per game
-5. GPUI front end
+4. Installer: done (zstd `slices_v3` and legacy zlib `slices` layouts; updates in place)
+5. Cloud saves: done (cloudsave_service V2, pull before / push after each session)
+6. GPUI front end: library, install/update with progress, play
+7. Next: fetch the SDK DLLs from Ubisoft instead of a local Connect install, real
+   achievements/Club, playtime reporting, LZHAM manifests, `upc_r2` games

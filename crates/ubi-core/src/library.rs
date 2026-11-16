@@ -187,6 +187,7 @@ impl ProductConfig {
             .filter_map(|e| {
                 Some(Executable {
                     path: e["path"]["relative"].as_str()?.to_owned(),
+                    working_dir: e["working_directory"]["append"].as_str().map(str::to_owned),
                     arguments: e["arguments"].as_str().map(str::to_owned),
                     label: e["shortcut_name"].as_str().map(|s| self.localize(s)),
                 })
@@ -197,7 +198,10 @@ impl ProductConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Executable {
+    /// Relative to the working directory (install dir + `working_dir`, if any).
     pub path: String,
+    /// Subdirectory of the install dir the game runs from (`working_directory.append`).
+    pub working_dir: Option<String>,
     pub arguments: Option<String>,
     pub label: Option<String>,
 }

@@ -78,7 +78,12 @@ enum Cmd {
         /// Only print what would be installed.
         #[arg(long)]
         dry_run: bool,
+        /// Also save the downloaded manifest here (for inspection).
+        #[arg(long)]
+        manifest_out: Option<PathBuf>,
     },
+    /// Request signed CDN URLs for relative paths and report their HTTP status (debugging).
+    CdnProbe { product_id: u32, paths: Vec<String> },
     /// Download raw cloud save blobs (<slot>.savegame, zlib) as a backup.
     CloudPull { uplay_id: u32, dir: PathBuf, #[arg(long, default_value_t = 10)] max_slot: u32 },
     /// Check demux connectivity (no login needed).
@@ -295,7 +300,7 @@ async fn main() -> Result<()> {
                 println!("{:<40} {state}  (installed {}, latest {})", product.name.as_deref().unwrap_or("?"), &installed[..8], &latest[..latest.len().min(8)]);
             }
         }
-        Cmd::Install { product_id, dest, language, dry_run } => {
+        Cmd::Install { product_id, dest, language, dry_run, manifest_out } => {
             use std::sync::atomic::Ordering::Relaxed;
             let (_, demux) = ubi_core::connect(&auth).await?;
             let mut lib = Library::fetch(&demux).await?;
@@ -303,6 +308,9 @@ async fn main() -> Result<()> {
             let hash = product.latest_manifest.clone().context("product has no PC build")?;
             let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
             let (manifest, raw) = dl.manifest(&hash).await?;
+            if let Some(out) = &manifest_out {
+                std::fs::write(out, &raw)?;
+            }
             let plan = ubi_core::install::plan(&manifest, &language)?;
             println!(
                 "{}: {} files, {:.2} GB on disk, {:.2} GB to download (chunks {:?})",
@@ -370,6 +378,26 @@ async fn main() -> Result<()> {
             std::fs::write(&installed, &raw)?;
             register_game(&mut lib, product_id, &dest, &language).await?;
             println!("{} {} files in {}", if updating { "updated" } else { "installed" }, plan.files.len(), dest.display());
+        }
+        Cmd::CdnProbe { product_id, paths } => {
+            let (_, demux) = ubi_core::connect(&auth).await?;
+            let mut lib = Library::fetch(&demux).await?;
+            let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
+            let urls = dl.urls(&paths).await?;
+            for (path, mirrors) in paths.iter().zip(urls) {
+                let (status, head) = match mirrors.first() {
+                    Some(u) => match dl.http.get(u).send().await {
+                        Ok(r) => {
+                            let st = r.status().as_u16();
+                            let b = r.bytes().await.unwrap_or_default();
+                            (st, format!("{} bytes, starts {}", b.len(), hex::encode(&b[..b.len().min(8)])))
+                        }
+                        Err(_) => (0, String::new()),
+                    },
+                    None => (0, String::new()),
+                };
+                println!("{status}  {path}  ({} mirrors) {head}", mirrors.len());
+            }
         }
         Cmd::CloudPull { uplay_id, dir, max_slot } => {
             let (_, demux) = ubi_core::connect(&auth).await?;

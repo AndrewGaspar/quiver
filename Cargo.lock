@@ -6191,11 +6191,13 @@ name = "ubi-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "gpui",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ubi-core",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6217,6 +6219,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "hex",
  "rpassword",
  "serde_json",
  "tokio",
@@ -7374,8 +7377,6 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 [[package]]
 name = "xattr"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d1526bbe5aaeb5eb06885f4d987bcdfa5e23187055de9b83fe00156a821fabc"
 dependencies = [
  "libc",
 ]

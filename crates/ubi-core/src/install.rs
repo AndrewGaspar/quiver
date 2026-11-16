@@ -16,11 +16,15 @@ use futures::{StreamExt, TryStreamExt};
 use sha1::{Digest, Sha1};
 use ubi_proto::download;
 
-use crate::download::{Downloader, slice_path};
+use crate::download::{Downloader, slice_path_for};
 
 /// How many slices are fetched concurrently.
 const PARALLEL: usize = 24;
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+fn is_zlib(b: &[u8]) -> bool {
+    b.len() >= 2 && b[0] & 0x0f == 8 && (u16::from(b[0]) << 8 | u16::from(b[1])) % 31 == 0
+}
 /// Slice paths per signed-URL request.
 const URL_BATCH: usize = 256;
 
@@ -47,6 +51,8 @@ pub struct Plan {
     pub install_bytes: u64,
     pub download_bytes: u64,
     pub chunks: Vec<u32>,
+    /// `download.CompressionMethod`; decides the CDN layout.
+    pub compression: Option<i32>,
 }
 
 /// Choose chunks: all without a language, plus those for `language`; required first.
@@ -57,7 +63,10 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
         .filter(|c| c.language.as_deref().is_none_or(|l| l.is_empty() || l.eq_ignore_ascii_case(language)))
         .collect();
     chunks.sort_by_key(|c| (c.r#type, c.id));
-    let mut plan = Plan::default();
+    if manifest.compression_method == Some(download::CompressionMethod::Lzham as i32) {
+        bail!("manifest uses LZHAM compression, which is not supported yet");
+    }
+    let mut plan = Plan { compression: manifest.compression_method, ..Plan::default() };
     let mut seen = HashSet::new();
     for chunk in chunks {
         plan.chunks.push(chunk.id);
@@ -128,6 +137,8 @@ pub fn prepare_update(old: &Plan, new: &Plan, dest: &Path) -> Result<(usize, usi
 
 #[derive(Default)]
 pub struct Progress {
+    /// Bytes to download in total (set once the plan is known).
+    pub total: AtomicU64,
     pub downloaded: AtomicU64,
     pub written: AtomicU64,
     pub files_done: AtomicU64,
@@ -187,12 +198,12 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
 
     // Fetch signed URLs per batch, then download that batch in parallel.
     for batch in jobs.chunks(URL_BATCH) {
-        let paths: Vec<String> = batch.iter().map(|j| slice_path(&j.slice.sha1)).collect();
+        let paths: Vec<String> = batch.iter().map(|j| slice_path_for(plan.compression, &j.slice.sha1)).collect();
         let urls = dl.urls(&paths).await?;
         let dl_ref = &*dl;
         let finished: Vec<usize> = futures::stream::iter(batch.iter().zip(urls))
             .map(|(job, mirrors)| async move {
-                let body = dl_ref.get(&mirrors).await.with_context(|| slice_path(&job.slice.sha1))?;
+                let body = dl_ref.get(&mirrors).await.with_context(|| slice_path_for(plan.compression, &job.slice.sha1))?;
                 if Sha1::digest(&body).as_slice() != job.slice.sha1.as_slice() {
                     bail!("slice {} failed SHA-1 check", hex::encode_upper(&job.slice.sha1));
                 }
@@ -200,9 +211,15 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
                 let job_file = job.file.clone();
                 let slice = job.slice.clone();
                 let written = tokio::task::spawn_blocking(move || -> Result<u64> {
-                    // Slices that don't compress are stored raw; detect by the zstd frame magic.
-                    let data = if compressed && body.starts_with(&ZSTD_MAGIC) {
+                    // zstd (newer games) or zlib (older); slices that don't compress are raw.
+                    let data = if !compressed {
+                        body
+                    } else if body.starts_with(&ZSTD_MAGIC) {
                         zstd::bulk::decompress(&body, slice.size as usize).context("zstd")?
+                    } else if is_zlib(&body) {
+                        let mut out = Vec::with_capacity(slice.size as usize);
+                        std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(&body[..]), &mut out).context("zlib")?;
+                        out
                     } else {
                         body
                     };
