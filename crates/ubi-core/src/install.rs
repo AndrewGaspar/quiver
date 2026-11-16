@@ -2,21 +2,23 @@
 //!
 //! Each file in the manifest is a list of slices; a slice is stored on the CDN under the
 //! SHA-1 of its compressed bytes and decompresses to `size` bytes at `fileOffset`.
-//! Progress is resumable: finished files are recorded in `<dest>/.ubi-install/done`.
+//! Progress is resumable: finished files are recorded in `<dest>/.ubi-install/done`, and
+//! finished slices of unfinished files in `<dest>/.ubi-install/slices`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use futures::{StreamExt, TryStreamExt};
 use sha1::{Digest, Sha1};
 use ubi_proto::download;
 
-use crate::download::{Downloader, slice_path_for};
+use crate::download::slice_path_for;
 
 /// How many slices are fetched concurrently.
 const PARALLEL: usize = 24;
@@ -30,10 +32,37 @@ const URL_BATCH: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct SliceRef {
+    /// SHA-1 of the bytes as stored on the CDN (compressed, if the build is).
     pub sha1: Vec<u8>,
+    /// SHA-1 of the decompressed bytes as they are on disk (the manifest's legacy
+    /// `slices` list); empty if the manifest doesn't have it.
+    pub data_sha1: Vec<u8>,
     pub size: u64,
     pub download_size: u64,
     pub offset: u64,
+}
+
+impl SliceRef {
+    /// The hash the installed bytes of this slice must have, if the manifest says.
+    pub fn disk_sha1(&self) -> Option<&[u8]> {
+        if self.data_sha1.len() == 20 {
+            Some(&self.data_sha1)
+        } else if self.download_size == self.size && self.sha1.len() == 20 {
+            Some(&self.sha1) // stored raw: the CDN hash is the data's hash
+        } else {
+            None
+        }
+    }
+
+    /// Same bytes at the same place (so an old copy on disk is already right).
+    fn same_data(&self, other: &SliceRef) -> bool {
+        self.offset == other.offset
+            && self.size == other.size
+            && match (self.disk_sha1(), other.disk_sha1()) {
+                (Some(a), Some(b)) => a == b,
+                _ => self.sha1 == other.sha1,
+            }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +73,7 @@ pub struct PlannedFile {
     pub slices: Vec<SliceRef>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Plan {
     pub files: Vec<PlannedFile>,
     pub dirs: Vec<String>,
@@ -91,10 +120,14 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    // Oldest manifests keep slice hashes in the legacy `slices` list.
+                    // Oldest manifests keep slice hashes in the legacy `slices` list. That
+                    // list is the SHA-1 of the decompressed data, which equals the CDN hash
+                    // only for slices stored raw.
+                    let data_sha1 = f.slices.get(i).cloned().unwrap_or_default();
                     let sha1 = s.download_sha1.clone().filter(|h| !h.is_empty()).or_else(|| f.slices.get(i).cloned());
                     let r = SliceRef {
                         sha1: sha1.unwrap_or_default(),
+                        data_sha1,
                         size: u64::from(s.size),
                         download_size: u64::from(s.download_size.unwrap_or(s.size)),
                         offset: s.file_offset.unwrap_or(offset),
@@ -114,34 +147,240 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
     Ok(plan)
 }
 
-/// Prepare `dest` for installing `new` over an existing install of `old`: files whose slices
-/// are unchanged are recorded as done, files no longer in the game are deleted, and the
-/// rest will be (re)downloaded. Returns (kept, removed) counts.
-pub fn prepare_update(old: &Plan, new: &Plan, dest: &Path) -> Result<(usize, usize)> {
-    use std::collections::HashMap;
+/// Languages a manifest offers: its language list plus any chunk language, with the
+/// download and install size of each language's own chunks.
+pub fn languages(manifest: &download::Manifest) -> Vec<(String, u64, u64)> {
+    let mut out: Vec<(String, u64, u64)> = Vec::new();
+    let mut add = |code: &str, dl: u64, inst: u64| match out.iter_mut().find(|(c, ..)| c.eq_ignore_ascii_case(code)) {
+        Some(e) => {
+            e.1 += dl;
+            e.2 += inst;
+        }
+        None => out.push((code.to_owned(), dl, inst)),
+    };
+    for code in manifest.languages.iter().filter_map(|l| l.code.as_deref()) {
+        add(code, 0, 0);
+    }
+    for c in &manifest.chunks {
+        let Some(code) = c.language.as_deref().filter(|l| !l.is_empty()) else { continue };
+        let files = c.files.iter().filter(|f| !f.is_dir);
+        let inst = files.clone().map(|f| f.size).sum();
+        let dl = files.flat_map(|f| &f.slice_list).map(|s| u64::from(s.download_size.unwrap_or(s.size))).sum();
+        add(code, dl, inst);
+    }
+    out
+}
+
+/// What moving an install from `old` to `new` involves (nothing is changed on disk).
+#[derive(Debug, Default, Clone)]
+pub struct UpdateDiff {
+    /// Files already right on disk.
+    pub unchanged: Vec<String>,
+    /// Files in both builds that must be (partly) rewritten.
+    pub changed: Vec<String>,
+    pub added: Vec<String>,
+    /// Files only in `old`; deleted by [`prepare_update`].
+    pub removed: Vec<String>,
+    /// Slices of changed files whose bytes are already in place: `(path, slice index in new)`.
+    pub reusable: Vec<(String, usize)>,
+    pub download_bytes: u64,
+    /// Bytes that will be written (new and changed slices): the disk space the update
+    /// may need, on a copy-on-write filesystem too.
+    pub write_bytes: u64,
+}
+
+/// Compare an installed build with a new one. A file counts as unchanged when its slices
+/// are the same, it has the right size on disk and (if the install keeps a done list) it
+/// was finished.
+pub fn diff(old: &Plan, new: &Plan, dest: &Path) -> UpdateDiff {
     let old_files: HashMap<&str, &PlannedFile> = old.files.iter().map(|f| (f.path.as_str(), f)).collect();
     let new_paths: HashSet<&str> = new.files.iter().map(|f| f.path.as_str()).collect();
-    let unchanged = |f: &PlannedFile| {
-        old_files.get(f.path.as_str()).is_some_and(|o| {
-            o.size == f.size
-                && o.slices.len() == f.slices.len()
-                && o.slices.iter().zip(&f.slices).all(|(a, b)| a.sha1 == b.sha1 && a.offset == b.offset)
-        }) && dest.join(&f.path).metadata().is_ok_and(|m| m.len() == f.size)
-    };
+    let done = done_list(dest);
+    let finished = |path: &str| done.as_ref().is_none_or(|d| d.contains(path));
+    let mut d = UpdateDiff::default();
+    for f in &new.files {
+        let Some(o) = old_files.get(f.path.as_str()) else {
+            d.added.push(f.path.clone());
+            d.download_bytes += f.slices.iter().map(|s| s.download_size).sum::<u64>();
+            d.write_bytes += f.size;
+            continue;
+        };
+        let on_disk = dest.join(&f.path).symlink_metadata().ok().filter(|m| m.is_file());
+        let same = o.size == f.size && o.slices.len() == f.slices.len() && o.slices.iter().zip(&f.slices).all(|(a, b)| a.same_data(b));
+        if same && on_disk.as_ref().is_some_and(|m| m.len() == f.size) && finished(&f.path) {
+            d.unchanged.push(f.path.clone());
+            continue;
+        }
+        d.changed.push(f.path.clone());
+        // A finished old copy keeps the slices that didn't move or change.
+        let old_ok = on_disk.is_some() && finished(&f.path);
+        for (i, s) in f.slices.iter().enumerate() {
+            if old_ok && o.slices.iter().any(|os| os.offset == s.offset && os.same_data(s)) {
+                d.reusable.push((f.path.clone(), i));
+            } else {
+                d.download_bytes += s.download_size;
+                d.write_bytes += s.size;
+            }
+        }
+    }
+    d.removed = old.files.iter().filter(|f| !new_paths.contains(f.path.as_str())).map(|f| f.path.clone()).collect();
+    d
+}
+
+/// Prepare `dest` for installing `new` over an existing install of `old`: files whose slices
+/// are unchanged are recorded as done, slices of changed files that are already in place
+/// are recorded too, files no longer in the game are deleted, and the rest will be
+/// (re)downloaded. Returns (kept, removed) counts.
+pub fn prepare_update(old: &Plan, new: &Plan, dest: &Path) -> Result<(usize, usize)> {
+    let d = diff(old, new, dest);
     std::fs::create_dir_all(state_dir(dest))?;
     let mut done = std::fs::File::create(state_dir(dest).join("done"))?;
-    let mut kept = 0;
-    for f in new.files.iter().filter(|f| unchanged(f)) {
-        writeln!(done, "{}", f.path)?;
-        kept += 1;
+    for p in &d.unchanged {
+        writeln!(done, "{p}")?;
+    }
+    let new_files: HashMap<&str, &PlannedFile> = new.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let mut slices = std::fs::File::create(state_dir(dest).join("slices"))?;
+    for (path, i) in &d.reusable {
+        writeln!(slices, "{}", slice_key(path, &new_files[path.as_str()].slices[*i]))?;
     }
     let mut removed = 0;
-    for f in old.files.iter().filter(|f| !new_paths.contains(f.path.as_str())) {
-        if std::fs::remove_file(dest.join(&f.path)).is_ok() {
+    for p in &d.removed {
+        if std::fs::remove_file(dest.join(p)).is_ok() {
             removed += 1;
         }
     }
-    Ok((kept, removed))
+    Ok((d.unchanged.len(), removed))
+}
+
+/// Start over: forget which files and slices are done.
+pub fn reset_progress(dest: &Path) -> Result<()> {
+    for name in ["done", "slices"] {
+        match std::fs::remove_file(state_dir(dest).join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Manifest hash of the build `dest` is being (or was last) installed from.
+pub fn target(dest: &Path) -> Option<String> {
+    std::fs::read_to_string(state_dir(dest).join("target")).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+pub fn set_target(dest: &Path, hash: &str) -> Result<()> {
+    std::fs::create_dir_all(state_dir(dest))?;
+    std::fs::write(state_dir(dest).join("target"), hash)?;
+    Ok(())
+}
+
+/// Bytes still to download and to write for `plan` in `dest`, after files and slices
+/// recorded as done.
+pub fn remaining(plan: &Plan, dest: &Path) -> (u64, u64) {
+    let done = load_done(dest);
+    let slices = load_slices(dest);
+    let (mut dl, mut write) = (0, 0);
+    for f in plan.files.iter().filter(|f| !done.contains(&f.path)) {
+        for s in f.slices.iter().filter(|s| !slices.contains(&slice_key(&f.path, s))) {
+            dl += s.download_size;
+            write += s.size;
+        }
+    }
+    (dl, write)
+}
+
+/// Free bytes for unprivileged writes on the filesystem holding `path` (or its nearest
+/// existing parent).
+pub fn free_space(path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent().context("no existing parent directory")?;
+    }
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes())?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` a valid out-pointer.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("statvfs {}", p.display()));
+    }
+    Ok(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+/// Space kept free on top of what an install needs: 1 GiB or 5%, whichever is more.
+pub fn space_margin(required: u64) -> u64 {
+    (1 << 30).max(required / 20)
+}
+
+/// Refuse to start when `required` bytes (plus the margin) don't fit at `dest`.
+pub fn check_space(dest: &Path, required: u64) -> Result<()> {
+    let free = free_space(dest)?;
+    let margin = space_margin(required);
+    if free < required + margin {
+        bail!(
+            "not enough free space for {}: needs {} plus {} margin, {} free",
+            dest.display(),
+            human_bytes(required),
+            human_bytes(margin),
+            human_bytes(free)
+        );
+    }
+    Ok(())
+}
+
+pub fn human_bytes(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 => format!("{:.1} GiB", n as f64 / (1u64 << 30) as f64),
+        n if n >= 1 << 20 => format!("{:.1} MiB", n as f64 / (1u64 << 20) as f64),
+        n if n >= 1 << 10 => format!("{:.1} KiB", n as f64 / 1024.0),
+        n => format!("{n} B"),
+    }
+}
+
+/// Paces downloads to a byte rate shared by every install using it (0 = unlimited).
+/// The rate can change while downloads run.
+#[derive(Debug)]
+pub struct Throttle {
+    rate: AtomicU64,
+    next: Mutex<Instant>,
+}
+
+impl Default for Throttle {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl Throttle {
+    pub fn new(bytes_per_sec: u64) -> Self {
+        Self { rate: AtomicU64::new(bytes_per_sec), next: Mutex::new(Instant::now()) }
+    }
+
+    pub fn set_rate(&self, bytes_per_sec: u64) {
+        self.rate.store(bytes_per_sec, Ordering::Relaxed);
+        *self.next.lock().unwrap() = Instant::now();
+    }
+
+    pub fn rate(&self) -> u64 {
+        self.rate.load(Ordering::Relaxed)
+    }
+
+    /// Wait until `bytes` more may be fetched.
+    pub async fn take(&self, bytes: u64) {
+        let rate = self.rate();
+        if rate == 0 {
+            return;
+        }
+        let wait = {
+            let mut next = self.next.lock().unwrap();
+            let now = Instant::now();
+            let start = (*next).max(now);
+            *next = start + Duration::from_secs_f64(bytes as f64 / rate as f64);
+            start - now
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -151,8 +390,13 @@ pub struct Progress {
     pub downloaded: AtomicU64,
     pub written: AtomicU64,
     pub files_done: AtomicU64,
+    /// Verifying: bytes hashed so far, of `hash_total`.
+    pub hashed: AtomicU64,
+    pub hash_total: AtomicU64,
     /// Set to stop the install; finished files stay recorded, so it can be resumed.
     pub cancel: std::sync::atomic::AtomicBool,
+    /// Bandwidth limit shared with other downloads.
+    pub throttle: Option<Arc<Throttle>>,
 }
 
 impl Progress {
@@ -178,14 +422,55 @@ pub fn is_cancelled(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Cancelled>())
 }
 
-fn state_dir(dest: &Path) -> PathBuf {
+pub(crate) fn state_dir(dest: &Path) -> PathBuf {
     dest.join(".ubi-install")
 }
 
 fn load_done(dest: &Path) -> HashSet<String> {
-    std::fs::read_to_string(state_dir(dest).join("done"))
+    done_list(dest).unwrap_or_default()
+}
+
+/// The done list, or `None` if the install has none at all.
+fn done_list(dest: &Path) -> Option<HashSet<String>> {
+    std::fs::read_to_string(state_dir(dest).join("done")).ok().map(|s| s.lines().map(str::to_owned).collect())
+}
+
+fn slice_key(path: &str, s: &SliceRef) -> String {
+    format!("{} {} {path}", s.offset, hex::encode_upper(&s.sha1))
+}
+
+fn load_slices(dest: &Path) -> HashSet<String> {
+    std::fs::read_to_string(state_dir(dest).join("slices"))
         .map(|s| s.lines().map(str::to_owned).collect())
         .unwrap_or_default()
+}
+
+/// Remove files from the done list (and their slices from the slice list), so the next
+/// install rewrites them.
+pub(crate) fn forget_done(dest: &Path, paths: &HashSet<&str>) -> Result<()> {
+    if let Some(done) = done_list(dest) {
+        let mut keep: Vec<&String> = done.iter().filter(|p| !paths.contains(p.as_str())).collect();
+        keep.sort();
+        let mut text = String::new();
+        for p in keep {
+            text.push_str(p);
+            text.push('\n');
+        }
+        std::fs::write(state_dir(dest).join("done"), text)?;
+    }
+    match std::fs::remove_file(state_dir(dest).join("slices")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Where slices come from: the CDN through `download_service`, or a stand-in in tests.
+#[allow(async_fn_in_trait)]
+pub trait SliceSource {
+    /// Signed URLs (one or more mirrors each) for relative CDN paths.
+    async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>>;
+    /// GET the first working mirror.
+    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>>;
 }
 
 struct Job {
@@ -195,21 +480,33 @@ struct Job {
 }
 
 /// Install `plan` into `dest`. `compressed` says whether slices are zstd-compressed.
-pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: bool, progress: &Progress) -> Result<()> {
+///
+/// Cancelling (see [`Progress::cancel`]) stops at a slice boundary: slices in flight
+/// finish and are recorded, so a later install picks up where this one stopped.
+pub async fn install(
+    dl: &mut impl SliceSource,
+    plan: &Plan,
+    dest: &Path,
+    compressed: bool,
+    progress: &Progress,
+) -> Result<()> {
+    let _ = compressed; // decided per slice from its bytes
     std::fs::create_dir_all(state_dir(dest))?;
     for d in &plan.dirs {
         std::fs::create_dir_all(dest.join(d))?;
     }
     let done = load_done(dest);
+    let slices_done = load_slices(dest);
     let mut done_log = std::fs::OpenOptions::new().create(true).append(true).open(state_dir(dest).join("done"))?;
+    let mut slice_log = std::fs::OpenOptions::new().create(true).append(true).open(state_dir(dest).join("slices"))?;
 
     // Open every pending file at its final size; slices are written in place.
     let mut jobs = Vec::new();
     let mut remaining: Vec<usize> = Vec::with_capacity(plan.files.len());
     for (i, f) in plan.files.iter().enumerate() {
-        remaining.push(f.slices.len());
         if done.contains(&f.path) {
             // Already installed by an earlier (interrupted) run: count it as done.
+            remaining.push(0);
             progress.files_done.fetch_add(1, Ordering::Relaxed);
             progress.written.fetch_add(f.size, Ordering::Relaxed);
             progress.downloaded.fetch_add(f.slices.iter().map(|s| s.download_size).sum::<u64>(), Ordering::Relaxed);
@@ -221,16 +518,30 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
         }
         let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path)?;
         file.set_len(f.size)?;
-        if f.slices.is_empty() {
+        let pending: Vec<&SliceRef> = f
+            .slices
+            .iter()
+            .filter(|s| {
+                let have = slices_done.contains(&slice_key(&f.path, s));
+                if have {
+                    progress.downloaded.fetch_add(s.download_size, Ordering::Relaxed);
+                    progress.written.fetch_add(s.size, Ordering::Relaxed);
+                }
+                !have
+            })
+            .collect();
+        remaining.push(pending.len());
+        if pending.is_empty() {
             writeln!(done_log, "{}", f.path)?;
             progress.files_done.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         let file = Arc::new(file);
-        for s in &f.slices {
+        for s in pending {
             jobs.push(Job { file: file.clone(), file_idx: i, slice: s.clone() });
         }
     }
+    done_log.flush()?;
 
     // Fetch signed URLs per batch, then download that batch in parallel.
     for batch in jobs.chunks(URL_BATCH) {
@@ -240,10 +551,13 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
         let paths: Vec<String> = batch.iter().map(|j| slice_path_for(plan.compression, &j.slice.sha1)).collect();
         let urls = dl.urls(&paths).await?;
         let dl_ref = &*dl;
-        let finished: Vec<usize> = futures::stream::iter(batch.iter().zip(urls))
+        let finished: Vec<Option<&Job>> = futures::stream::iter(batch.iter().zip(urls))
             .map(|(job, mirrors)| async move {
+                if let Some(t) = &progress.throttle {
+                    t.take(job.slice.download_size).await;
+                }
                 if progress.cancelled() {
-                    return Err(Cancelled.into());
+                    return Ok(None); // stop at this slice boundary
                 }
                 let body = dl_ref.get(&mirrors).await.with_context(|| slice_path_for(plan.compression, &job.slice.sha1))?;
                 if Sha1::digest(&body).as_slice() != job.slice.sha1.as_slice() {
@@ -255,7 +569,6 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
                 let written = tokio::task::spawn_blocking(move || -> Result<u64> {
                     // Stored raw when the download is as large as the data (uncompressed
                     // manifests, or slices that didn't compress); else zstd or zlib.
-                    let _ = compressed;
                     let data = if body.len() as u64 == slice.size {
                         body
                     } else if body.starts_with(&ZSTD_MAGIC) {
@@ -275,19 +588,180 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
                 })
                 .await??;
                 progress.written.fetch_add(written, Ordering::Relaxed);
-                Ok::<usize, anyhow::Error>(job.file_idx)
+                Ok::<_, anyhow::Error>(Some(job))
             })
             .buffer_unordered(PARALLEL)
             .try_collect()
             .await?;
-        for idx in finished {
+        for job in finished.into_iter().flatten() {
+            let idx = job.file_idx;
             remaining[idx] -= 1;
             if remaining[idx] == 0 {
                 writeln!(done_log, "{}", plan.files[idx].path)?;
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
+            } else {
+                writeln!(slice_log, "{}", slice_key(&plan.files[idx].path, &job.slice))?;
             }
         }
         done_log.flush()?;
+        slice_log.flush()?;
+        if progress.cancelled() {
+            return Err(Cancelled.into());
+        }
     }
+    drop(slice_log);
+    let _ = std::fs::remove_file(state_dir(dest).join("slices"));
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use ubi_proto::download::{Chunk, File, Manifest, Slice};
+
+    /// A file's bytes, cut into slices of `slice` bytes, each zstd-compressed.
+    pub(crate) fn file_entry(name: &str, data: &[u8], slice: usize, cdn: &mut HashMap<String, Vec<u8>>) -> File {
+        let mut f = File { name: name.into(), size: data.len() as u64, is_dir: false, ..Default::default() };
+        for (i, part) in data.chunks(slice.max(1)).enumerate() {
+            let body = zstd::bulk::compress(part, 3).unwrap();
+            let sha = Sha1::digest(&body).to_vec();
+            cdn.insert(hex::encode_upper(&sha), body.clone());
+            f.slices.push(Sha1::digest(part).to_vec());
+            f.slice_list.push(Slice {
+                size: part.len() as u32,
+                download_size: Some(body.len() as u32),
+                download_sha1: Some(sha),
+                file_offset: Some((i * slice) as u64),
+            });
+        }
+        f
+    }
+
+    /// A zstd-era manifest: one required chunk with `files`, plus a `fr-FR` chunk.
+    pub(crate) fn fixture(files: &[(&str, Vec<u8>)], cdn: &mut HashMap<String, Vec<u8>>) -> Manifest {
+        let main = files.iter().filter(|(n, _)| !n.starts_with("fr/")).map(|(n, d)| file_entry(n, d, 1000, cdn)).collect();
+        let fr = files.iter().filter(|(n, _)| n.starts_with("fr/")).map(|(n, d)| file_entry(n, d, 1000, cdn)).collect();
+        Manifest {
+            chunks: vec![
+                Chunk { id: 0, r#type: 0, files: main, ..Default::default() },
+                Chunk { id: 1, r#type: 0, files: fr, language: Some("fr-FR".into()), ..Default::default() },
+            ],
+            compression_method: Some(download::CompressionMethod::Zstd as i32),
+            is_compressed: Some(true),
+            game_version: Some("1.0".into()),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn data(seed: u8, len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) ^ (i >> 8) as u8).collect()
+    }
+
+    /// Serves slices from memory, by the hash at the end of the CDN path.
+    #[derive(Default)]
+    pub(crate) struct FakeCdn {
+        pub slices: HashMap<String, Vec<u8>>,
+        pub gets: std::sync::atomic::AtomicUsize,
+        /// Set the progress's cancel flag after this many GETs.
+        pub cancel_after: Option<(usize, Arc<Progress>)>,
+    }
+
+    impl SliceSource for FakeCdn {
+        async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+            Ok(paths.iter().map(|p| vec![p.rsplit('/').next().unwrap().to_owned()]).collect())
+        }
+        async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>> {
+            let n = self.gets.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((after, p)) = &self.cancel_after
+                && n >= *after
+            {
+                p.cancel.store(true, Ordering::SeqCst);
+            }
+            tokio::task::yield_now().await;
+            self.slices.get(&mirrors[0]).cloned().context("404")
+        }
+    }
+
+    #[tokio::test]
+    async fn install_pause_resume_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("game");
+        let mut cdn = FakeCdn::default();
+        let v1 = fixture(
+            &[("a.bin", data(1, 25_000)), ("sub/b.bin", data(2, 3_500)), ("empty", vec![]), ("fr/voice.bin", data(3, 2_000))],
+            &mut cdn.slices,
+        );
+        let plan1 = plan(&v1, "en-US").unwrap();
+        assert_eq!(plan1.files.len(), 3, "fr-FR chunk left out");
+        assert_eq!(languages(&v1), vec![("fr-FR".to_owned(), plan(&v1, "fr-FR").unwrap().download_bytes - plan1.download_bytes, 2_000)]);
+        assert_eq!(remaining(&plan1, &dest), (plan1.download_bytes, plan1.install_bytes));
+
+        // Pause after a few slices: what finished is kept.
+        let progress = Arc::new(Progress::default());
+        cdn.cancel_after = Some((5, progress.clone()));
+        let err = install(&mut cdn, &plan1, &dest, true, &progress).await.unwrap_err();
+        assert!(is_cancelled(&err));
+        let (left, _) = remaining(&plan1, &dest);
+        assert!(left < plan1.download_bytes && left > 0, "partial progress recorded ({left})");
+        let before = cdn.gets.load(Ordering::SeqCst);
+
+        // Resume fetches only what is left.
+        cdn.cancel_after = None;
+        let progress = Progress::default();
+        install(&mut cdn, &plan1, &dest, true, &progress).await.unwrap();
+        let fetched = cdn.gets.load(Ordering::SeqCst) - before;
+        let total_slices: usize = plan1.files.iter().map(|f| f.slices.len()).sum();
+        assert!(fetched < total_slices, "resume refetched {fetched} of {total_slices}");
+        assert_eq!(std::fs::read(dest.join("a.bin")).unwrap(), data(1, 25_000));
+        assert_eq!(std::fs::read(dest.join("sub/b.bin")).unwrap(), data(2, 3_500));
+        assert_eq!(std::fs::read(dest.join("empty")).unwrap(), b"");
+        assert_eq!(remaining(&plan1, &dest), (0, 0));
+        assert!(!state_dir(&dest).join("slices").exists());
+
+        // Update: a.bin changes in one slice, b.bin goes, c.bin is new.
+        let mut a2 = data(1, 25_000);
+        a2[12_345] ^= 0xff;
+        let v2 = fixture(&[("a.bin", a2.clone()), ("c.bin", data(4, 1_500)), ("empty", vec![])], &mut cdn.slices);
+        let plan2 = plan(&v2, "en-US").unwrap();
+        let d = diff(&plan1, &plan2, &dest);
+        assert_eq!(d.changed, ["a.bin"]);
+        assert_eq!(d.added, ["c.bin"]);
+        assert_eq!(d.removed, ["sub/b.bin"]);
+        assert_eq!(d.unchanged, ["empty"]);
+        assert_eq!(d.reusable.len(), 24, "only the changed slice of a.bin is downloaded");
+        let a_slice = &plan2.files.iter().find(|f| f.path == "a.bin").unwrap().slices[12];
+        let c_bytes: u64 = plan2.files.iter().find(|f| f.path == "c.bin").unwrap().slices.iter().map(|s| s.download_size).sum();
+        assert_eq!(d.download_bytes, a_slice.download_size + c_bytes);
+        assert_eq!(prepare_update(&plan1, &plan2, &dest).unwrap(), (1, 1));
+        assert_eq!(remaining(&plan2, &dest).0, d.download_bytes);
+        let before = cdn.gets.load(Ordering::SeqCst);
+        install(&mut cdn, &plan2, &dest, true, &Progress::default()).await.unwrap();
+        assert_eq!(cdn.gets.load(Ordering::SeqCst) - before, 3, "one slice of a.bin, two of c.bin");
+        assert_eq!(std::fs::read(dest.join("a.bin")).unwrap(), a2);
+        assert!(!dest.join("sub/b.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn throttle_paces() {
+        let t = Throttle::new(1_000_000);
+        let start = Instant::now();
+        for _ in 0..4 {
+            t.take(50_000).await;
+        }
+        // Three waits of 50 ms after the first.
+        assert!(start.elapsed() >= Duration::from_millis(140), "{:?}", start.elapsed());
+        t.set_rate(0);
+        let start = Instant::now();
+        t.take(u64::MAX / 2).await;
+        assert!(start.elapsed() < Duration::from_millis(20));
+    }
+
+    #[test]
+    fn free_space_of_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let free = free_space(&dir.path().join("not/yet")).unwrap();
+        assert!(free > 0);
+        assert!(check_space(dir.path(), u64::MAX / 4).unwrap_err().to_string().contains("not enough free space"));
+        check_space(dir.path(), 0).ok(); // fits unless the test machine is nearly full
+    }
 }

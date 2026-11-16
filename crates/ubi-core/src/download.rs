@@ -104,3 +104,13 @@ impl Downloader {
         Ok((crate::manifest::parse_manifest(&raw)?, raw))
     }
 }
+
+impl crate::install::SliceSource for Downloader {
+    async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+        Downloader::urls(self, paths).await
+    }
+
+    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>> {
+        Downloader::get(self, mirrors).await
+    }
+}
