@@ -184,6 +184,23 @@ pub enum LoginResult {
     TwoFactorRequired,
 }
 
+/// One play session recorded by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaySession {
+    pub started: DateTime<Utc>,
+    pub ended: DateTime<Utc>,
+    pub seconds: u64,
+    #[serde(default)]
+    pub settings_revision: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Playtime {
+    pub total_seconds: u64,
+    pub last_played: Option<DateTime<Utc>>,
+    pub sessions: Vec<PlaySession>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEntry {
     pub at: DateTime<Utc>,
@@ -217,6 +234,8 @@ pub enum Request {
     SettingsRestore { product_id: u32, revision: u32 },
     /// Installed Proton builds.
     ProtonList,
+    /// Play sessions recorded by this launcher.
+    Playtime { product_id: u32 },
     Activity { limit: usize },
     Subscribe,
     Shutdown,

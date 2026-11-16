@@ -87,6 +87,8 @@ enum Cmd {
     Restore { game: String, revision: u32 },
     /// Installed Proton builds.
     Protons,
+    /// Play sessions recorded by this launcher.
+    Playtime { game: String },
     /// Recent changes and actions, with who made them.
     Activity {
         #[arg(short, default_value_t = 30)]
@@ -316,6 +318,19 @@ async fn main() -> Result<()> {
             let e = resolve(&client, &game).await?;
             let rev: Revision = client.call(Request::SettingsRestore { product_id: e.product_id, revision }).await?;
             println!("{}: restored r{revision} as revision {}", e.name, rev.revision);
+        }
+        Cmd::Playtime { game } => {
+            let e = resolve(&client, &game).await?;
+            let p: ubi_api::Playtime = client.call(Request::Playtime { product_id: e.product_id }).await?;
+            println!("{}: {}h{:02}m over {} session(s)", e.name, p.total_seconds / 3600, p.total_seconds % 3600 / 60, p.sessions.len());
+            for s in p.sessions.iter().rev().take(10) {
+                println!(
+                    "  {}  {:>4} min  (settings r{})",
+                    s.started.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    s.seconds / 60,
+                    s.settings_revision
+                );
+            }
         }
         Cmd::Protons => {
             let list: Vec<String> = client.call(Request::ProtonList).await?;

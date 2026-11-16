@@ -57,6 +57,29 @@ pub fn apply(product_id: u32, ops: &[SettingOp], source: &str, message: Option<S
     append(product_id, settings, source, message)
 }
 
+/// Append a finished play session to `<data>/games/<id>/playtime.jsonl`.
+pub fn record_session(product_id: u32, session: &ubi_api::PlaySession) -> Result<()> {
+    let path = history_path(product_id).with_file_name("playtime.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{}", serde_json::to_string(session)?)?;
+    Ok(())
+}
+
+pub fn playtime(product_id: u32) -> Result<ubi_api::Playtime> {
+    let path = history_path(product_id).with_file_name("playtime.jsonl");
+    let sessions: Vec<ubi_api::PlaySession> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    Ok(ubi_api::Playtime {
+        total_seconds: sessions.iter().map(|s| s.seconds).sum(),
+        last_played: sessions.iter().map(|s| s.ended).max(),
+        sessions,
+    })
+}
+
 /// Make an old revision current again (recorded as a new revision).
 pub fn restore(product_id: u32, revision: u32, source: &str) -> Result<Revision> {
     let target = if revision == 0 {

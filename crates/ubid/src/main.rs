@@ -235,6 +235,7 @@ impl Daemon {
                 json!(rev)
             }
             Request::ProtonList => json!(launcher::list_protons()),
+            Request::Playtime { product_id } => json!(settings::playtime(product_id)?),
             Request::Activity { limit } => {
                 let a = self.activity.lock().unwrap();
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
@@ -372,10 +373,13 @@ impl Daemon {
             let (cfg, auth, broker) = (this.cfg.clone(), this.auth.clone(), this.broker.clone());
             let ev_this = this.clone();
             let g = game.clone();
+            let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
+            let started = started_at.clone();
             let result = run_local(move || async move {
                 launcher::play(&cfg, &auth, &g, &s, &broker, |e| match e {
                     LaunchEvent::Status(msg) => ev_this.update_job(id, |j| j.status = msg),
                     LaunchEvent::Running => {
+                        *started.lock().unwrap() = Some(chrono::Utc::now());
                         ev_this.update_job(id, |j| j.status = "Running".into());
                         ev_this.emit(Event::GameStarted { product_id });
                     }
@@ -385,6 +389,18 @@ impl Daemon {
             })
             .await;
             this.running.lock().unwrap().remove(&product_id);
+            if let Some(start) = *started_at.lock().unwrap() {
+                let end = chrono::Utc::now();
+                let session = ubi_api::PlaySession {
+                    started: start,
+                    ended: end,
+                    seconds: (end - start).num_seconds().max(0) as u64,
+                    settings_revision: rev,
+                };
+                if let Err(e) = settings::record_session(product_id, &session) {
+                    tracing::warn!("recording play session: {e:#}");
+                }
+            }
             this.emit(Event::GameStopped { product_id });
             this.update_job(id, |j| {
                 j.done = true;
