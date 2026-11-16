@@ -58,6 +58,10 @@ pub struct Config {
     /// Queue, bandwidth and auto-update settings.
     #[serde(default)]
     pub downloads: ubi_api::downloads::DownloadSettings,
+    /// Mods v2: apply enabled built-in `fix` mods to vanilla launches too. `None`: not
+    /// decided yet (a first-launch prompt asks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixes_on_vanilla: Option<bool>,
 }
 
 fn yes() -> bool {
@@ -182,6 +186,7 @@ impl Config {
             report_playtime: true,
             steam_user: None,
             downloads: Default::default(),
+            fixes_on_vanilla: None,
         };
         cfg.save()?;
         Ok(cfg)
@@ -539,6 +544,29 @@ pub enum LaunchEvent {
     Status(String),
     Running,
     Exited(Option<i32>),
+    /// Lines worth keeping with the launch (config patches applied, pending or undone).
+    Detail(Vec<String>),
+}
+
+/// One line per config patch status, for a launch's job detail.
+pub fn describe_patches(statuses: &[ubi_api::mods::PatchStatus]) -> Vec<String> {
+    use ubi_api::mods::PatchState;
+    statuses
+        .iter()
+        .map(|s| {
+            let state = match s.state {
+                PatchState::Applied => "applied",
+                PatchState::Unchanged => "already set",
+                PatchState::Pending => "pending until first run",
+                PatchState::Undone => "undone",
+                PatchState::Failed => "FAILED",
+                PatchState::Unknown => "not checked",
+            };
+            let file = s.files.first().map_or(s.file.as_str(), |f| f.rel.as_str());
+            let detail = if s.detail.is_empty() || s.state == PatchState::Pending { String::new() } else { format!(" ({})", s.detail) };
+            format!("config {}: {file} [{}] {state}{detail}", s.mod_id, s.target)
+        })
+        .collect()
 }
 
 /// Arguments Connect hands a game it starts (read by `uplay_aux_r164.dll`).
@@ -566,8 +594,9 @@ async fn wait_for_bridge(log: &Path, bridge: &mut Child) -> Result<()> {
 }
 
 /// Where a profile's SDK saves live, relative to the Connect directory in the prefix.
-/// Vanilla uses Connect's own `savegames/<user>/<product>`; a mod profile gets a sibling
-/// folder of its own, so its saves never mix with vanilla's.
+/// Vanilla uses Connect's own `savegames/<user>/<product>`; a profile with separate saves
+/// (see [`crate::mods::ModStore::saves_plan`]) gets a sibling folder of its own, so its
+/// saves never mix with vanilla's. A profile that shares vanilla's saves passes `None`.
 pub fn saves_rel(user_id: &str, product_id: u32, profile: Option<&str>) -> String {
     match profile {
         None => format!("savegames/{user_id}/{product_id}"),
@@ -575,21 +604,25 @@ pub fn saves_rel(user_id: &str, product_id: u32, profile: Option<&str>) -> Strin
     }
 }
 
-/// Launch a game and wait for it to exit. `broker` is the address of a running broker.
-/// With a mod `profile`, the bridge and the game run in a user + mount namespace where the
-/// profile's layers are mounted over the install folder (see [`crate::overlay`]); the
-/// profile has its own saves, synced with the cloud only if it opts in.
+/// Launch a game as `plan` says (see [`crate::mods::ModStore::plan`]) and wait for it to
+/// exit. `broker` is the address of a running broker. With mounts (a mod profile, or
+/// vanilla with fixes that change files), the bridge and the game run in a user + mount
+/// namespace where the mods are mounted over the install folder and the profile's own
+/// prefix folders over the prefix's (see [`crate::overlay`]). Config patches are applied
+/// just before, to the files as the launch will see them. Saves are the profile's own or
+/// vanilla's as the plan says, synced with the cloud as it says.
 #[allow(clippy::too_many_arguments)]
 pub async fn play(
     cfg: &Config,
     online: &Online,
     game: &Game,
-    settings: &GameSettings,
-    profile: Option<&crate::mods::ProfileLaunch>,
+    plan: &crate::mods::Plan,
     broker: &str,
     sessions: &PlaySessions,
     events: impl Fn(LaunchEvent),
 ) -> Result<()> {
+    let settings = &plan.api.settings;
+    let profile = plan.api.profile.as_ref();
     let build = match &settings.proton {
         Some(name) => resolve_proton(name)?,
         None => cfg.proton.clone(),
@@ -607,8 +640,8 @@ pub async fn play(
     let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
     let mut ctx = launch::build(&online.auth, &session, &mut lib, game.product_id).await?;
-    let saves_rel = saves_rel(&session.user_id, game.product_id, profile.map(|p| p.profile.id.as_str()));
-    let cloud_sync = profile.is_none_or(|p| p.profile.cloud_saves);
+    let saves_rel = saves_rel(&session.user_id, game.product_id, plan.saves_profile.as_deref());
+    let cloud_sync = plan.api.saves.cloud;
     let saves_dir = game.prefix.join(UPC_REL).join(&saves_rel);
     ctx.savegame_path = Some(format!(r"{UPC_WIN}\{}", saves_rel.replace('/', "\\")));
     ctx.broker = Some(broker.to_owned());
@@ -640,13 +673,34 @@ pub async fn play(
     let _ = previous.wineserver().arg("-w").status().await;
     record_session_build(game, &build)?;
     let proton = Proton { cfg, prefix: &game.prefix, build };
-    let ns = match profile {
-        Some(p) => {
-            events(LaunchEvent::Status(format!("Mounting mods ({})…", p.profile.name)));
-            tracing::info!(profile = %p.profile.id, layers = ?p.overlay.lower, "mounting overlay");
-            Some(crate::overlay::Namespace::create(&p.overlay)?)
+    // Config patches go to the files as this launch will see them, before anything is
+    // mounted (never under a live overlay). A broken record is reported, not fatal.
+    if !plan.patches.is_empty() {
+        events(LaunchEvent::Status("Applying config patches…".into()));
+    }
+    match plan.apply_patches() {
+        Ok(st) => {
+            tracing::info!(?st, "config patches");
+            if !st.is_empty() {
+                events(LaunchEvent::Detail(describe_patches(&st)));
+            }
         }
-        None => None,
+        Err(e) => {
+            tracing::warn!("config patches: {e:#}");
+            events(LaunchEvent::Detail(vec![format!("config patches not applied: {e:#}")]));
+        }
+    }
+    let ns = if plan.overlays.is_empty() {
+        None
+    } else {
+        let what = profile.map_or_else(|| "fixes".to_owned(), |p| p.name.clone());
+        events(LaunchEvent::Status(format!("Mounting mods ({what})…")));
+        for o in &plan.overlays {
+            // A profile's own prefix folder may not exist yet (the game hasn't run).
+            std::fs::create_dir_all(&o.target)?;
+        }
+        tracing::info!(profile = ?profile.map(|p| &p.id), mounts = ?plan.api.mounts, "mounting overlays");
+        Some(crate::overlay::Namespace::create_many(&plan.overlays)?)
     };
 
     events(LaunchEvent::Status("Starting…".into()));
@@ -694,7 +748,7 @@ pub async fn play(
         ns.enter(cmd.as_std_mut(), Some(workdir))?;
     }
     if let Some(p) = profile {
-        cmd.env("QUIVER_PROFILE", &p.profile.id);
+        cmd.env("QUIVER_PROFILE", &p.id);
     }
     cmd.env("UPLAY_ARGUMENTS", uplay_arguments(game.product_id, &exe_win, &workdir_win))
         .current_dir(workdir)

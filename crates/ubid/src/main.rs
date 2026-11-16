@@ -581,18 +581,24 @@ impl Daemon {
 
     fn start_play(self: &Arc<Self>, source: &str, product_id: u32, profile: Option<String>, online: Arc<Online>) -> Result<u64> {
         let game = Games::load()?.get(product_id).cloned().context("not installed")?;
-        // A mod profile: its layers, own saves and setting overrides (None: vanilla).
-        let modded = ubi_core::mods::ModStore::open(product_id).launch(profile.as_deref(), &game.install_dir)?;
-        let (mut s, rev) = settings::current(product_id)?;
-        if let Some(m) = &modded {
-            s = s.merged(&m.profile.settings);
+        // The launch plan (Mods v2): the profile's mod stack (or vanilla, with fixes if
+        // that's on), settings resolved through it, mounts, saves and config patches.
+        let plan = mods::launch_plan(&game, profile.as_deref(), source)?;
+        if !plan.api.problems.is_empty() {
+            bail!("can't launch {}: {}", game.name, plan.api.problems.join("; "));
         }
+        let (_, rev) = settings::current(product_id)?;
         if !self.running.lock().unwrap().insert(product_id) {
             bail!("{} is already running", game.name);
         }
         let id = self.new_job(JobKind::Play, product_id, game.name.clone());
-        let with = match &modded {
-            Some(m) => format!(", profile '{}' ({}) r{}", m.profile.name, m.profile.id, m.revision),
+        let detail = mods::plan_lines(&plan.api);
+        if !detail.is_empty() {
+            self.update_job(id, |j| j.detail = detail);
+        }
+        let with = match &plan.api.profile {
+            Some(p) => format!(", profile '{}' ({}) r{}", p.name, p.id, plan.api.revision),
+            None if !plan.api.mods.is_empty() => format!(", fixes {}", plan.api.mods.join(",")),
             None => String::new(),
         };
         self.log_activity(source, format!("play {}{} (settings r{rev}{with})", game.name, self.as_account(&online)), Some(product_id));
@@ -604,9 +610,11 @@ impl Daemon {
             let g = game.clone();
             let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
             let started = started_at.clone();
-            let (profile_id, profile_revision) = (modded.as_ref().map(|m| m.profile.id.clone()), modded.as_ref().map(|m| m.revision));
+            let (profile_id, profile_revision) =
+                (plan.api.profile.as_ref().map(|p| p.id.clone()), plan.api.profile.as_ref().map(|_| plan.api.revision));
             let result = run_local(move || async move {
-                launcher::play(&cfg, &online, &g, &s, modded.as_ref(), &broker, &sessions, |e| match e {
+                launcher::play(&cfg, &online, &g, &plan, &broker, &sessions, |e| match e {
+                    LaunchEvent::Detail(lines) => ev_this.update_job(id, |j| j.detail.extend(lines)),
                     LaunchEvent::Status(msg) => ev_this.update_job(id, |j| j.status = msg),
                     LaunchEvent::Running => {
                         *started.lock().unwrap() = Some(chrono::Utc::now());
