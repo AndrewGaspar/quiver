@@ -89,9 +89,12 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
             let slices = f
                 .slice_list
                 .iter()
-                .map(|s| {
+                .enumerate()
+                .map(|(i, s)| {
+                    // Oldest manifests keep slice hashes in the legacy `slices` list.
+                    let sha1 = s.download_sha1.clone().filter(|h| !h.is_empty()).or_else(|| f.slices.get(i).cloned());
                     let r = SliceRef {
-                        sha1: s.download_sha1.clone().unwrap_or_default(),
+                        sha1: sha1.unwrap_or_default(),
                         size: u64::from(s.size),
                         download_size: u64::from(s.download_size.unwrap_or(s.size)),
                         offset: s.file_offset.unwrap_or(offset),
@@ -100,6 +103,9 @@ pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
                     r
                 })
                 .collect::<Vec<_>>();
+            if let Some(bad) = slices.iter().find(|s| s.sha1.len() != 20) {
+                bail!("{path}: slice at offset {} has no SHA-1 in the manifest", bad.offset);
+            }
             plan.install_bytes += f.size;
             plan.download_bytes += slices.iter().map(|s| s.download_size).sum::<u64>();
             plan.files.push(PlannedFile { path, size: f.size, slices });
@@ -145,6 +151,31 @@ pub struct Progress {
     pub downloaded: AtomicU64,
     pub written: AtomicU64,
     pub files_done: AtomicU64,
+    /// Set to stop the install; finished files stay recorded, so it can be resumed.
+    pub cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Progress {
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// The error an install returns when it was cancelled through [`Progress::cancel`].
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Whether an install error means it was cancelled.
+pub fn is_cancelled(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Cancelled>())
 }
 
 fn state_dir(dest: &Path) -> PathBuf {
@@ -178,8 +209,10 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
     for (i, f) in plan.files.iter().enumerate() {
         remaining.push(f.slices.len());
         if done.contains(&f.path) {
+            // Already installed by an earlier (interrupted) run: count it as done.
             progress.files_done.fetch_add(1, Ordering::Relaxed);
             progress.written.fetch_add(f.size, Ordering::Relaxed);
+            progress.downloaded.fetch_add(f.slices.iter().map(|s| s.download_size).sum::<u64>(), Ordering::Relaxed);
             continue;
         }
         let path = dest.join(&f.path);
@@ -201,11 +234,17 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
 
     // Fetch signed URLs per batch, then download that batch in parallel.
     for batch in jobs.chunks(URL_BATCH) {
+        if progress.cancelled() {
+            return Err(Cancelled.into());
+        }
         let paths: Vec<String> = batch.iter().map(|j| slice_path_for(plan.compression, &j.slice.sha1)).collect();
         let urls = dl.urls(&paths).await?;
         let dl_ref = &*dl;
         let finished: Vec<usize> = futures::stream::iter(batch.iter().zip(urls))
             .map(|(job, mirrors)| async move {
+                if progress.cancelled() {
+                    return Err(Cancelled.into());
+                }
                 let body = dl_ref.get(&mirrors).await.with_context(|| slice_path_for(plan.compression, &job.slice.sha1))?;
                 if Sha1::digest(&body).as_slice() != job.slice.sha1.as_slice() {
                     bail!("slice {} failed SHA-1 check", hex::encode_upper(&job.slice.sha1));
@@ -214,8 +253,10 @@ pub async fn install(dl: &mut Downloader, plan: &Plan, dest: &Path, compressed: 
                 let job_file = job.file.clone();
                 let slice = job.slice.clone();
                 let written = tokio::task::spawn_blocking(move || -> Result<u64> {
-                    // zstd (newer games) or zlib (older); slices that don't compress are raw.
-                    let data = if !compressed {
+                    // Stored raw when the download is as large as the data (uncompressed
+                    // manifests, or slices that didn't compress); else zstd or zlib.
+                    let _ = compressed;
+                    let data = if body.len() as u64 == slice.size {
                         body
                     } else if body.starts_with(&ZSTD_MAGIC) {
                         zstd::bulk::decompress(&body, slice.size as usize).context("zstd")?

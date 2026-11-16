@@ -36,6 +36,7 @@ struct Inner {
     pending: Mutex<HashMap<u32, oneshot::Sender<demux::Rsp>>>,
     connections: Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>,
     timeout: Duration,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -70,6 +71,7 @@ impl Demux {
             pending: Mutex::default(),
             connections: Mutex::default(),
             timeout: Duration::from_secs(15),
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         tokio::spawn(read_loop(reader, Arc::downgrade(&inner)));
         let demux = Self { inner };
@@ -88,6 +90,11 @@ impl Demux {
         w.write_all(payload).await?;
         w.flush().await?;
         Ok(())
+    }
+
+    /// False once the server closed the socket (e.g. another login replaced this one).
+    pub fn is_alive(&self) -> bool {
+        !self.inner.closed.load(Ordering::Relaxed)
     }
 
     pub async fn push(&self, push: demux::Push) -> Result<()> {
@@ -214,6 +221,10 @@ async fn read_loop(mut reader: ReadHalf<Stream>, inner: std::sync::Weak<Inner>) 
                 }
                 if let Some(closed) = push.connection_closed {
                     tracing::warn!(id = closed.connection_id, code = ?closed.error_code, "demux closed connection");
+                    if closed.error_code == Some(demux::connection_closed_push::ConnectionErrorCode::ConnectionMultipleLogin as i32) {
+                        tracing::warn!("another Ubisoft login replaced this one");
+                        inner.closed.store(true, Ordering::Relaxed);
+                    }
                     inner.connections.lock().unwrap().remove(&closed.connection_id);
                 }
                 if push.client_outdated.is_some() {
@@ -227,6 +238,7 @@ async fn read_loop(mut reader: ReadHalf<Stream>, inner: std::sync::Weak<Inner>) 
         tracing::debug!("demux reader stopped: {e:#}");
     }
     if let Some(inner) = inner.upgrade() {
+        inner.closed.store(true, Ordering::Relaxed);
         inner.pending.lock().unwrap().clear();
         inner.connections.lock().unwrap().clear();
     }

@@ -343,7 +343,18 @@ impl Launcher {
         let mut right = div().flex().flex_none().items_center().gap_3();
         if let Some(j) = installing {
             let frac = if j.total > 0 { j.downloaded as f32 / j.total as f32 } else { 0. };
-            right = right.child(progress_bar(frac));
+            let job_id = j.id;
+            right = right.child(progress_bar(frac)).child(
+                button(format!("cancel-{id}"), "Cancel", false, j.status != "Cancelling…").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.call::<(), _>(Request::Cancel { job_id, discard: false }, cx, |this, r, _| {
+                            if let Err(e) = r {
+                                this.error = Some(err_text(&e));
+                            }
+                        });
+                    },
+                )),
+            );
         } else if launching {
             right = right.child(button(format!("stop-{id}"), "Stop", false, true).on_click(cx.listener(move |this, _, _, cx| {
                 this.call::<(), _>(Request::Stop { product_id: id }, cx, |_, _, _| {});

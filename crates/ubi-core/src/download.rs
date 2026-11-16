@@ -12,13 +12,13 @@ use crate::library::Library;
 
 const BASE32: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
 
-/// CDN path of a slice. Zstd-era manifests use `slices_v3/<c>/<SHA1>`; older (deflate)
-/// manifests use `slices/<SHA1>`.
+/// CDN path of a slice. Zstd-era manifests use `slices_v3/<c>/<SHA1>`; older ones
+/// (deflate or uncompressed) use `slices/<SHA1>`.
 pub fn slice_path_for(compression: Option<i32>, sha1: &[u8]) -> String {
-    if compression == Some(download::CompressionMethod::Deflate as i32) {
-        format!("slices/{}", hex::encode_upper(sha1))
-    } else {
+    if compression == Some(download::CompressionMethod::Zstd as i32) {
         slice_path(sha1)
+    } else {
+        format!("slices/{}", hex::encode_upper(sha1))
     }
 }
 

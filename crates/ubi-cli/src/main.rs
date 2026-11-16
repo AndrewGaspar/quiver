@@ -69,6 +69,13 @@ enum Cmd {
     },
     /// Stop a running game.
     Stop { game: String },
+    /// Cancel a game's running install (resume later by installing again) or launch.
+    Cancel {
+        game: String,
+        /// Also delete the partially downloaded files (new installs only).
+        #[arg(long)]
+        discard: bool,
+    },
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
@@ -151,10 +158,26 @@ async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry> {
     }
 }
 
-/// Print job events for `job_id` until it finishes.
-async fn follow(mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id: u64) -> Result<()> {
+/// Print job events for `job_id` until it finishes. Ctrl-C cancels the job (once; a
+/// second Ctrl-C leaves it running in the daemon and exits).
+async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id: u64) -> Result<()> {
     let mut last_status = String::new();
-    while let Some(e) = events.recv().await {
+    let mut cancelled = false;
+    loop {
+        let e = tokio::select! {
+            e = events.recv() => e,
+            _ = tokio::signal::ctrl_c() => {
+                if cancelled {
+                    eprintln!("\nleft running in ubid (ubi cancel <game> to stop it)");
+                    return Ok(());
+                }
+                cancelled = true;
+                eprintln!("\ncancelling… (Ctrl-C again to detach)");
+                let _: () = client.call(Request::Cancel { job_id, discard: false }).await?;
+                continue;
+            }
+        };
+        let Some(e) = e else { break };
         let Event::Job(job) = e else { continue };
         if job.id != job_id {
             continue;
@@ -270,7 +293,7 @@ async fn main() -> Result<()> {
             let id: u64 = client.call(Request::Install { product_id: e.product_id, language }).await?;
             eprintln!("installing {} (job {id})", e.name);
             if !detach {
-                follow(events, id).await?;
+                follow(&client, events, id).await?;
             }
         }
         Cmd::Import { game, path, language } => {
@@ -279,7 +302,7 @@ async fn main() -> Result<()> {
             let events = client.subscribe().await?;
             let id: u64 = client.call(Request::Import { product_id: e.product_id, path, language }).await?;
             eprintln!("importing {} (job {id})", e.name);
-            follow(events, id).await?;
+            follow(&client, events, id).await?;
         }
         Cmd::Uninstall { game, prefix } => {
             let e = resolve(&client, &game).await?;
@@ -292,8 +315,20 @@ async fn main() -> Result<()> {
             let id: u64 = client.call(Request::Play { product_id: e.product_id }).await?;
             eprintln!("launching {} (job {id})", e.name);
             if !detach {
-                follow(events, id).await?;
+                follow(&client, events, id).await?;
             }
+        }
+        Cmd::Cancel { game, discard } => {
+            let e = resolve(&client, &game).await?;
+            let status: Status = client.call(Request::Status).await?;
+            let job = status
+                .jobs
+                .iter()
+                .filter(|j| j.product_id == e.product_id && !j.done)
+                .max_by_key(|j| j.id)
+                .with_context(|| format!("nothing running for {}", e.name))?;
+            let () = client.call(Request::Cancel { job_id: job.id, discard }).await?;
+            println!("cancelling {:?} job {} for {}", job.kind, job.id, e.name);
         }
         Cmd::Stop { game } => {
             let e = resolve(&client, &game).await?;

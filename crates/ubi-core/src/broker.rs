@@ -10,24 +10,24 @@ use tokio::sync::Mutex;
 use ubi_ipc::{BrokerRequest, BrokerResponse};
 use ubi_proto::denuvo_service;
 
-use crate::auth::Auth;
 use crate::demux::{Demux, Denuvo, ServiceConnection};
 use crate::library::Library;
+use crate::online::Online;
 
-struct Online {
-    _demux: Demux,
+struct Conns {
+    demux: Demux,
     library: Library,
     denuvo: ServiceConnection<Denuvo>,
 }
 
 pub struct Broker {
-    auth: Auth,
-    online: Mutex<Option<Online>>,
+    shared: Arc<Online>,
+    online: Mutex<Option<Conns>>,
 }
 
 impl Broker {
-    pub fn new(auth: Auth) -> Arc<Self> {
-        Arc::new(Self { auth, online: Mutex::new(None) })
+    pub fn new(shared: Arc<Online>) -> Arc<Self> {
+        Arc::new(Self { shared, online: Mutex::new(None) })
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
@@ -61,17 +61,20 @@ impl Broker {
         Ok(())
     }
 
-    async fn connect(&self) -> Result<Online> {
-        let (_, demux) = crate::connect(&self.auth).await?;
+    async fn connect(&self) -> Result<Conns> {
+        let demux = self.shared.demux().await?;
         let library = Library::fetch(&demux).await?;
         let denuvo = demux.open::<Denuvo>().await?;
-        Ok(Online { _demux: demux, library, denuvo })
+        Ok(Conns { demux, library, denuvo })
     }
 
     async fn handle(&self, req: BrokerRequest) -> Result<BrokerResponse> {
         // One retry on a fresh connection: the demux socket may have gone stale.
         for attempt in 0..2 {
             let mut guard = self.online.lock().await;
+            if guard.as_ref().is_some_and(|c| !c.demux.is_alive()) {
+                *guard = None;
+            }
             if guard.is_none() {
                 *guard = Some(self.connect().await?);
             }
@@ -88,7 +91,7 @@ impl Broker {
         unreachable!()
     }
 
-    async fn handle_online(online: &mut Online, req: &BrokerRequest) -> Result<BrokerResponse> {
+    async fn handle_online(online: &mut Conns, req: &BrokerRequest) -> Result<BrokerResponse> {
         match req {
             BrokerRequest::DenuvoGameToken { uplay_id, request_token } => {
                 tracing::info!(uplay_id, len = request_token.len(), "denuvo game token requested");

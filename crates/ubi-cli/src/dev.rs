@@ -235,7 +235,7 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
         DevCmd::Broker { listen } => {
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             eprintln!("broker listening on {listen}");
-            ubi_core::broker::Broker::new(auth).serve(listener).await?;
+            ubi_core::broker::Broker::new(ubi_core::online::Online::new(auth)).serve(listener).await?;
         }
         DevCmd::Saves { action } => {
             let (_, demux) = ubi_core::connect(&auth).await?;

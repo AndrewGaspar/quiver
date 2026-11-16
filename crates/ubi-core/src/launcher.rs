@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
-use crate::auth::Auth;
+use crate::online::Online;
 use crate::cloudsave::CloudSaves;
 use crate::library::{Library, ProductConfig};
 use crate::{launch, savesync};
@@ -229,7 +229,7 @@ pub async fn register(cfg: &Config, lib: &mut Library, product_id: u32, install_
 /// Install (or update) a product into `<library>/<slug>` and register it.
 pub async fn install_game(
     cfg: &Config,
-    auth: &Auth,
+    online: &Online,
     product_id: u32,
     language: &str,
     progress: &crate::install::Progress,
@@ -237,7 +237,7 @@ pub async fn install_game(
 ) -> Result<Game> {
     use crate::{download::Downloader, install, manifest};
     status("Fetching manifest…".into());
-    let (_, demux) = crate::connect(auth).await?;
+    let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
     let product = lib.get(product_id).context("not in your library")?.clone();
     let hash = product.latest_manifest.clone().context("product has no PC build")?;
@@ -285,7 +285,7 @@ pub struct ImportReport {
 /// filesystem supports them; the source is left untouched.
 pub async fn import_game(
     cfg: &Config,
-    auth: &Auth,
+    online: &Online,
     product_id: u32,
     source: &Path,
     language: &str,
@@ -295,7 +295,7 @@ pub async fn import_game(
     let raw = std::fs::read(source.join("uplay_install.manifest"))
         .with_context(|| format!("{} has no uplay_install.manifest", source.display()))?;
     let parsed = manifest::parse_manifest(&raw)?;
-    let (_, demux) = crate::connect(auth).await?;
+    let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
     let product = lib.get(product_id).context("not in your library")?.clone();
     let name = product.name.clone().unwrap_or_else(|| product_id.to_string());
@@ -541,7 +541,7 @@ async fn wait_for_bridge(log: &Path, bridge: &mut Child) -> Result<()> {
 /// Launch a game and wait for it to exit. `broker` is the address of a running broker.
 pub async fn play(
     cfg: &Config,
-    auth: &Auth,
+    online: &Online,
     game: &Game,
     settings: &GameSettings,
     broker: &str,
@@ -560,9 +560,10 @@ pub async fn play(
     std::fs::create_dir_all(&run_dir)?;
 
     events(LaunchEvent::Status("Signing in…".into()));
-    let (session, demux) = crate::connect(auth).await?;
+    let session = online.session().await?;
+    let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
-    let mut ctx = launch::build(auth, &session, &mut lib, game.product_id).await?;
+    let mut ctx = launch::build(&online.auth, &session, &mut lib, game.product_id).await?;
     let saves_rel = format!("savegames/{}/{}", session.user_id, game.product_id);
     let saves_dir = game.prefix.join(UPC_REL).join(&saves_rel);
     ctx.savegame_path = Some(format!(r"{UPC_WIN}\{}", saves_rel.replace('/', "\\")));

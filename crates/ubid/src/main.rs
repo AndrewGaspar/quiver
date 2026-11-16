@@ -21,13 +21,15 @@ use ubi_api::{
 use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
 use ubi_core::install::Progress;
 use ubi_core::launcher::{self, Config, Games, LaunchEvent};
+use ubi_core::online::Online;
 use ubi_core::library::{Library, ProductConfig};
 use ubi_core::{settings, store};
 
 const ACTIVITY_KEEP: usize = 1000;
 
 struct Daemon {
-    auth: Arc<Auth>,
+    /// The single shared Ubisoft login (one demux socket for everything).
+    online: Arc<Online>,
     cfg: Arc<Config>,
     broker: String,
     pending_2fa: Mutex<Option<TwoFactorChallenge>>,
@@ -35,6 +37,9 @@ struct Daemon {
     jobs: Mutex<BTreeMap<u64, Job>>,
     next_job: AtomicU64,
     running: Mutex<HashSet<u32>>,
+    /// Running installs: progress handle (to cancel), whether to discard on cancel, and the
+    /// install folder.
+    installs: Mutex<BTreeMap<u64, (Arc<Progress>, bool, std::path::PathBuf)>>,
     library: tokio::sync::Mutex<Option<Vec<LibraryEntry>>>,
     activity: Mutex<VecDeque<ActivityEntry>>,
     events: broadcast::Sender<Event>,
@@ -108,9 +113,9 @@ impl Daemon {
     async fn library(&self, refresh: bool) -> Result<Vec<LibraryEntry>> {
         let mut cache = self.library.lock().await;
         if refresh || cache.is_none() {
-            let auth = self.auth.clone();
+            let online = self.online.clone();
             let entries = run_local(move || async move {
-                let (_, demux) = ubi_core::connect(&auth).await?;
+                let demux = online.demux().await?;
                 let lib = Library::fetch(&demux).await?;
                 let installed = Games::load()?;
                 let mut out: Vec<LibraryEntry> = lib
@@ -170,18 +175,25 @@ impl Daemon {
                 })
             }
             Request::Login { email, password } => {
-                let auth = self.auth.clone();
-                let outcome = run_local(move || async move { auth.login(&email, &password).await }).await?;
-                json!(self.finish_login(source, outcome)?)
+                let online = self.online.clone();
+                let outcome = run_local(move || async move { online.auth.login(&email, &password).await }).await?;
+                let r = self.finish_login(source, outcome)?;
+                if matches!(r, LoginResult::SignedIn { .. }) {
+                    self.online.reset().await;
+                }
+                json!(r)
             }
             Request::Login2fa { code } => {
                 let challenge = self.pending_2fa.lock().unwrap().clone().context("no sign-in waiting for a 2FA code")?;
-                let auth = self.auth.clone();
-                let session = run_local(move || async move { auth.complete_2fa(&challenge, &code).await }).await?;
-                json!(self.finish_login(source, LoginOutcome::Done(session))?)
+                let online = self.online.clone();
+                let session = run_local(move || async move { online.auth.complete_2fa(&challenge, &code).await }).await?;
+                let r = self.finish_login(source, LoginOutcome::Done(session))?;
+                self.online.reset().await;
+                json!(r)
             }
             Request::Logout => {
                 store::clear()?;
+                self.online.reset().await;
                 *self.signed_in.lock().unwrap() = None;
                 *self.library.lock().await = None;
                 self.log_activity(source, "signed out".into(), None);
@@ -189,7 +201,15 @@ impl Daemon {
                 Value::Null
             }
             Request::Library { refresh } => json!(self.library(refresh).await?),
-            Request::Install { product_id, language } => json!(self.start_install(source, product_id, language)),
+            Request::Install { product_id, language } => {
+                let name = self
+                    .library(false)
+                    .await
+                    .ok()
+                    .and_then(|l| l.into_iter().find(|e| e.product_id == product_id).map(|e| e.name))
+                    .unwrap_or_else(|| self.product_name(product_id));
+                json!(self.start_install(source, product_id, name, language))
+            }
             Request::Play { product_id } => json!(self.start_play(source, product_id)?),
             Request::Import { product_id, path, language } => json!(self.start_import(source, product_id, path, language)),
             Request::Uninstall { product_id, remove_prefix } => {
@@ -204,6 +224,29 @@ impl Daemon {
                     Some(product_id),
                 );
                 self.emit(Event::LibraryChanged);
+                Value::Null
+            }
+            Request::Cancel { job_id, discard } => {
+                let job = self.jobs.lock().unwrap().get(&job_id).cloned().context("no such job")?;
+                if job.done {
+                    bail!("job {job_id} already finished");
+                }
+                match job.kind {
+                    JobKind::Install => {
+                        let mut installs = self.installs.lock().unwrap();
+                        let entry = installs.get_mut(&job_id).context("install not cancellable yet")?;
+                        entry.0.cancel.store(true, Ordering::Relaxed);
+                        entry.1 = discard;
+                        drop(installs);
+                        self.update_job(job_id, |j| j.status = "Cancelling…".into());
+                    }
+                    JobKind::Play => {
+                        let game = Games::load()?.get(job.product_id).cloned().context("not installed")?;
+                        launcher::stop(&self.cfg, &game).await?;
+                    }
+                    JobKind::Import => bail!("imports can't be cancelled"),
+                }
+                self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), Some(job.product_id));
                 Value::Null
             }
             Request::Stop { product_id } => {
@@ -236,11 +279,12 @@ impl Daemon {
                 json!(rev)
             }
             Request::LaunchContext { product_id, savegame_path, install_dir } => {
-                let (auth, broker) = (self.auth.clone(), self.broker.clone());
+                let (online, broker) = (self.online.clone(), self.broker.clone());
                 let ctx = run_local(move || async move {
-                    let (session, demux) = ubi_core::connect(&auth).await?;
+                    let session = online.session().await?;
+                    let demux = online.demux().await?;
                     let mut lib = Library::fetch(&demux).await?;
-                    let mut ctx = ubi_core::launch::build(&auth, &session, &mut lib, product_id).await?;
+                    let mut ctx = ubi_core::launch::build(&online.auth, &session, &mut lib, product_id).await?;
                     ctx.savegame_path = savegame_path;
                     ctx.broker = Some(broker);
                     if let Some(dir) = install_dir {
@@ -291,12 +335,16 @@ impl Daemon {
         }
     }
 
-    fn start_install(self: &Arc<Self>, source: &str, product_id: u32, language: Option<String>) -> u64 {
-        let name = self.product_name(product_id);
+    fn start_install(self: &Arc<Self>, source: &str, product_id: u32, name: String, language: Option<String>) -> u64 {
         let id = self.new_job(JobKind::Install, product_id, name.clone());
+        let dest = Games::load()
+            .ok()
+            .and_then(|g| g.get(product_id).map(|g| g.install_dir.clone()))
+            .unwrap_or_else(|| self.cfg.library.join(launcher::slug(&name)));
         self.log_activity(source, format!("install {name}"), Some(product_id));
         let this = self.clone();
         let progress = Arc::new(Progress::default());
+        self.installs.lock().unwrap().insert(id, (progress.clone(), false, dest));
         // Progress ticker.
         {
             let this = this.clone();
@@ -316,21 +364,33 @@ impl Daemon {
             });
         }
         tokio::spawn(async move {
-            let (cfg, auth) = (this.cfg.clone(), this.auth.clone());
+            let (cfg, online) = (this.cfg.clone(), this.online.clone());
             let lang = language.unwrap_or_else(|| "en-US".into());
             let status_this = this.clone();
             let p = progress.clone();
             let result = run_local(move || async move {
-                launcher::install_game(&cfg, &auth, product_id, &lang, &p, |s| status_this.update_job(id, |j| j.status = s))
+                launcher::install_game(&cfg, &online, product_id, &lang, &p, |s| status_this.update_job(id, |j| j.status = s))
                     .await
             })
             .await;
+            let (discard, dest) = this.installs.lock().unwrap().remove(&id).map(|(_, d, p)| (d, Some(p))).unwrap_or_default();
+            let cancelled = result.as_ref().err().is_some_and(ubi_core::install::is_cancelled);
+            let mut discarded = false;
+            if let (true, true, Some(dir)) = (cancelled, discard, dest) {
+                // Only when never registered: then the folder holds just this partial install.
+                if Games::load().map(|g| g.get(product_id).is_none()).unwrap_or(false) {
+                    discarded = std::fs::remove_dir_all(&dir).is_ok();
+                }
+            }
             *this.library.lock().await = None;
             this.update_job(id, |j| {
                 j.done = true;
                 j.downloaded = progress.downloaded.load(Ordering::Relaxed);
                 match &result {
                     Ok(_) => j.status = "Installed".into(),
+                    Err(_) if cancelled => {
+                        j.status = if discarded { "Cancelled (files removed)".into() } else { "Cancelled (install again to resume)".into() }
+                    }
                     Err(e) => {
                         j.status = "Failed".into();
                         j.error = Some(format!("{e:#}"));
@@ -347,11 +407,11 @@ impl Daemon {
         self.log_activity(source, format!("import {product_id} from {}", path.display()), Some(product_id));
         let this = self.clone();
         tokio::spawn(async move {
-            let (cfg, auth) = (this.cfg.clone(), this.auth.clone());
+            let (cfg, online) = (this.cfg.clone(), this.online.clone());
             let lang = language.unwrap_or_else(|| "en-US".into());
             let st = this.clone();
             let result = run_local(move || async move {
-                launcher::import_game(&cfg, &auth, product_id, &path, &lang, |s| st.update_job(id, |j| j.status = s)).await
+                launcher::import_game(&cfg, &online, product_id, &path, &lang, |s| st.update_job(id, |j| j.status = s)).await
             })
             .await;
             *this.library.lock().await = None;
@@ -388,13 +448,13 @@ impl Daemon {
         self.log_activity(source, format!("play {} (settings r{rev})", game.name), Some(product_id));
         let this = self.clone();
         tokio::spawn(async move {
-            let (cfg, auth, broker) = (this.cfg.clone(), this.auth.clone(), this.broker.clone());
+            let (cfg, online, broker) = (this.cfg.clone(), this.online.clone(), this.broker.clone());
             let ev_this = this.clone();
             let g = game.clone();
             let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
             let started = started_at.clone();
             let result = run_local(move || async move {
-                launcher::play(&cfg, &auth, &g, &s, &broker, |e| match e {
+                launcher::play(&cfg, &online, &g, &s, &broker, |e| match e {
                     LaunchEvent::Status(msg) => ev_this.update_job(id, |j| j.status = msg),
                     LaunchEvent::Running => {
                         *started.lock().unwrap() = Some(chrono::Utc::now());
@@ -505,7 +565,7 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
 
     let cfg = Arc::new(Config::load()?);
-    let auth = Arc::new(Auth::default());
+    let online = Online::new(Auth::default());
     // A fixed port lets external bridges (containers, Steam prefixes) find the broker.
     let broker_addr = std::env::var("UBID_BROKER").unwrap_or_else(|_| "127.0.0.1:47810".into());
     let broker_listener = match tokio::net::TcpListener::bind(&broker_addr).await {
@@ -516,9 +576,9 @@ async fn main() -> Result<()> {
         }
     };
     let broker = broker_listener.local_addr()?.to_string();
-    tokio::spawn(ubi_core::broker::Broker::new(Auth::default()).serve(broker_listener));
+    tokio::spawn(ubi_core::broker::Broker::new(online.clone()).serve(broker_listener));
 
-    let signed_in = match store::current(&auth).await {
+    let signed_in = match online.session().await {
         Ok(s) => Some(s.name),
         Err(e) => {
             tracing::info!("not signed in: {e:#}");
@@ -537,7 +597,7 @@ async fn main() -> Result<()> {
         .collect();
     let (events, _) = broadcast::channel(256);
     let daemon = Arc::new(Daemon {
-        auth,
+        online,
         cfg,
         broker,
         pending_2fa: Mutex::new(None),
@@ -545,6 +605,7 @@ async fn main() -> Result<()> {
         jobs: Mutex::new(BTreeMap::new()),
         next_job: AtomicU64::new(1),
         running: Mutex::new(HashSet::new()),
+        installs: Mutex::new(BTreeMap::new()),
         library: tokio::sync::Mutex::new(None),
         activity: Mutex::new(activity),
         events,

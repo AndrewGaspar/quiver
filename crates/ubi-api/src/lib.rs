@@ -231,6 +231,10 @@ pub enum Request {
     Uninstall { product_id: u32, remove_prefix: bool },
     Play { product_id: u32 },
     Stop { product_id: u32 },
+    /// Cancel a job. Installs stop and can be resumed by installing again; `discard`
+    /// also deletes the partial files (only for games that weren't installed before).
+    /// Launches stop the game.
+    Cancel { job_id: u64, discard: bool },
     SettingsGet { product_id: u32 },
     SettingsSet { product_id: u32, ops: Vec<SettingOp>, message: Option<String> },
     SettingsHistory { product_id: u32 },
