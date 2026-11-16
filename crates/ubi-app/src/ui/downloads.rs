@@ -683,7 +683,7 @@ impl Quiver {
         let (active, waiting, failed) = self.dl_split();
         let recent = self.recent_jobs();
         let side_w = 340.;
-        let main_w = (self.viewport.0 - 2. * Self::GUTTER - side_w - 24.).max(420.);
+        let main_w = (self.viewport.0 - 2. * self.gutter() - side_w - 24.).max(420.);
         let row_ix = |r: Row| rows.iter().position(|(x, _)| *x == r).unwrap_or(usize::MAX);
         let mut children: Vec<AnyElement> = Vec::new();
         let mut row_child: Vec<Option<usize>> = vec![None; rows.len()];
@@ -867,7 +867,7 @@ impl Quiver {
             .overflow_y_scroll()
             .pt(px(76.))
             .pb(px(40.))
-            .pr(px(Self::GUTTER))
+            .pr(px(self.gutter()))
             .child(self.render_storage(th))
             .child(self.render_rules(th, &rows, cx));
 
@@ -883,7 +883,7 @@ impl Quiver {
                     .min_w_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.body_scroll)
-                    .pl(px(Self::GUTTER))
+                    .pl(px(self.gutter()))
                     .pb(px(40.))
                     .children(children),
             )

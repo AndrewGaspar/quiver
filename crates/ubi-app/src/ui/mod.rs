@@ -9,6 +9,7 @@ pub mod library;
 pub mod overlay;
 pub mod downloads;
 pub mod palette;
+pub mod responsive;
 pub mod settings;
 pub mod signin;
 pub mod steamgames;
@@ -498,8 +499,10 @@ pub fn card(th: &Theme) -> Div {
 pub fn card_header(th: &Theme, title: impl Into<SharedString>) -> Div {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(10.))
+        .gap_x(px(10.))
+        .gap_y(px(4.))
         .px(px(16.))
         .py(px(12.))
         .border_b_1()

@@ -21,6 +21,8 @@ pub enum LibFilter {
 }
 
 pub const HERO_HEIGHT: f32 = 396.;
+/// The hero's Needs attention panel, beside the game from `Medium` up.
+const ATTENTION_W: f32 = 372.;
 /// Box art is Ubisoft's 240×280 thumb ratio.
 pub const TILE_RATIO: f32 = 280. / 240.;
 
@@ -104,7 +106,7 @@ impl Quiver {
                     .id(("grid-row", r))
                     .flex()
                     .gap(px(Self::GRID_GAP))
-                    .px(px(Self::GUTTER))
+                    .px(px(self.gutter()))
                     .pt(px(if r == 0 { 0. } else { 22. }))
                     .children(tiles)
                     .into_any_element(),
@@ -113,7 +115,7 @@ impl Quiver {
         if ids.is_empty() {
             rows.push(
                 div()
-                    .px(px(Self::GUTTER))
+                    .px(px(self.gutter()))
                     .py(px(40.))
                     .text_color(th.tx3)
                     .child(if self.games.is_empty() { "Loading your library…" } else { "Nothing matches this filter." })
@@ -164,11 +166,13 @@ impl Quiver {
             )
             .child(chip(th, Some(Icon::Star), "Favorites", false).opacity(0.55))
             .child(chip(th, Some(Icon::Layers), "Modded", false).opacity(0.55));
+        let bp = self.bp();
         let field = div()
             .flex()
             .items_center()
             .gap(px(8.))
-            .w(px(220.))
+            .when(!bp.stacked(), |d| d.w(px(220.)))
+            .when(bp.stacked(), |d| d.flex_1().min_w(px(90.)))
             .h(px(32.))
             .px(px(10.))
             .rounded(px(8.))
@@ -177,10 +181,11 @@ impl Quiver {
             .border_color(th.line2)
             .text_color(th.tx3)
             .child(icon(Icon::ListFilter, 16., th.tx3))
-            .child(div().flex_1().child("Filter"))
+            .child(div().flex_1().min_w_0().truncate().child("Filter"))
             .child(super::kbd(th, "/"));
         let seg = div()
             .flex()
+            .flex_none()
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(8.))
@@ -193,21 +198,27 @@ impl Quiver {
             .flex()
             .flex_col()
             .gap(px(18.))
-            .px(px(Self::GUTTER))
+            .px(px(self.gutter()))
             .pt(px(6.))
             .pb(px(18.))
-            .child(
-                div()
+            .map(|d| {
+                let title = div()
                     .flex()
-                    .items_center()
-                    .gap(px(14.))
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_x(px(14.))
+                    .gap_y(px(2.))
                     .child(display(20., FontWeight::BOLD, th.tx1).child("Library"))
-                    .child(div().text_color(th.tx3).child(format!("{total} games · {installed} installed")))
-                    .child(div().flex_1())
-                    .child(field)
-                    .child(button("sort", th, Kind::Secondary, Size::Medium, Some(Icon::ArrowDownUp), "Recently played"))
-                    .child(seg),
-            )
+                    .child(div().text_color(th.tx3).child(format!("{total} games · {installed} installed")));
+                let sort = button("sort", th, Kind::Secondary, Size::Medium, Some(Icon::ArrowDownUp), if bp.narrow() { "" } else { "Recently played" })
+                    .when(bp.narrow(), |b| b.tooltip(super::responsive::tip(th, "Recently played")));
+                let controls = div().flex().items_center().gap(px(if bp.narrow() { 8. } else { 14. })).child(field).child(sort).child(seg);
+                if bp.stacked() {
+                    d.child(div().flex().flex_col().gap(px(12.)).child(title).child(controls))
+                } else {
+                    d.child(div().flex().items_center().gap(px(14.)).child(title).child(div().flex_1()).child(controls))
+                }
+            })
             .child(chips)
     }
 
@@ -220,13 +231,31 @@ impl Quiver {
         let art = self.art_for(&g, ArtSlot::Hero, Variant::Original, cx);
         // The logo (or the name until it loads); nothing when the art has it painted in.
         let title = self.hero_title(&g, cx);
-        let mut hero = div().id("hero").relative().h(px(HERO_HEIGHT)).w_full().overflow_hidden().bg(th.ink0);
+        let bp = self.bp();
+        let gutter = bp.gutter();
+        let attention = self.attention();
+        // Below Medium the hero stacks: Needs attention on top, the game under it, and it
+        // grows to fit them; the art is cropped to a generous height and clipped.
+        let stacked = bp.stacked();
+        let side_panel = !attention.is_empty() && !stacked;
+        let content_w = (w - 2. * gutter - if side_panel { ATTENTION_W + 32. + 24. } else { 0. }).clamp(200., 540.);
+        let art_h = if stacked { HERO_HEIGHT + 120. + 70. * attention.len() as f32 } else { HERO_HEIGHT };
+        let mut hero = div().id("hero").relative().w_full().overflow_hidden().bg(th.ink0);
+        hero = if stacked { hero.flex().flex_col().min_h(px(HERO_HEIGHT)) } else { hero.h(px(HERO_HEIGHT)) };
+        let art_layer = div().absolute().inset_0().overflow_hidden();
         hero = match &art {
-            ArtState::Ready(img) => hero.child(cover(img, w, HERO_HEIGHT, (0.5, 0.35))),
-            other => hero.child(super::art_placeholder(th, other, "", px(0.))),
+            ArtState::Ready(img) => hero.child(art_layer.child(cover(img, w, art_h, (0.5, 0.35)))),
+            other => hero.child(art_layer.child(super::art_placeholder(th, other, "", px(0.)))),
         };
         let scrim = rgba(0x0a0c10, 0.92);
         hero = hero
+            .when(stacked, |d| {
+                d.child(div().absolute().inset_0().bg(gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(rgba(0x0a0c10, 0.35), 0.),
+                    gpui::linear_color_stop(rgba(0x0a0c10, 0.7), 1.),
+                )))
+            })
             .child(
                 div().absolute().left_0().top_0().bottom_0().w(relative(0.58)).bg(gpui::linear_gradient(
                     90.,
@@ -290,41 +319,45 @@ impl Quiver {
             .focus_glow(focus_details, th, 10.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Hero(1), cx)));
 
+        let title_box = if bp.narrow() {
+            TitleBox { max_w: 300f32.min(content_w), max_h: 80., max_scale: 1.3, text: 30., text_w: content_w }
+        } else {
+            TitleBox { max_w: 380f32.min(content_w), max_h: 96., max_scale: 1.4, text: 40., text_w: content_w }
+        };
         let content = div()
-            .absolute()
-            .left(px(Self::GUTTER))
-            .bottom(px(44.))
-            .w(px(540.))
+            .when(!stacked, |d| d.absolute().left(px(gutter)).bottom(px(44.)))
+            .when(stacked, |d| d.relative().mx(px(gutter)).mt_auto().pt(px(28.)).pb(px(36.)))
+            .w(px(content_w))
             .flex()
             .flex_col()
             .gap(px(14.))
             .child(caption("Continue playing", accent_on_art))
-            .children(title_slot(&title, &g.entry.name, TitleBox { max_w: 380., max_h: 96., max_scale: 1.4, text: 40., text_w: 540. }))
+            .children(title_slot(&title, &g.entry.name, title_box))
             .when(!sub.is_empty(), |d| d.child(div().text_size(px(13.5)).text_color(on_art::tx2()).child(sub)))
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(6.))
                     .when_some(proton, |d, p| d.child(art_chip(Some(Icon::Cpu), p)))
                     .when_some(g.current_revision(), |d, r| d.child(art_chip(Some(Icon::History), format!("Launch options r{r}"))))
                     .when(g.running(), |d| d.child(art_chip(Some(Icon::Gamepad), "Playing now"))),
             )
-            .child(div().flex().gap(px(10.)).mt(px(4.)).child(play).child(details));
-        hero = hero.child(content);
+            .child(div().flex().flex_wrap().gap(px(10.)).mt(px(4.)).child(play).child(details));
 
-        let attention = self.attention();
         if !attention.is_empty() {
-            hero = hero.child(self.render_attention(th, &attention, cx));
+            let panel = self.render_attention(th, &attention, cx);
+            hero = if stacked {
+                hero.child(panel.relative().mx(px(gutter)).mt(px(20.)))
+            } else {
+                hero.child(panel.absolute().right(px(32.)).top(px(28.)).w(px(ATTENTION_W)))
+            };
         }
-        hero.into_any_element()
+        hero.child(content).into_any_element()
     }
 
-    fn render_attention(&mut self, th: &Theme, items: &[(u32, Attention)], cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_attention(&mut self, th: &Theme, items: &[(u32, Attention)], cx: &mut Context<Self>) -> gpui::Div {
         let mut panel = div()
-            .absolute()
-            .right(px(32.))
-            .top(px(28.))
-            .w(px(372.))
             .flex()
             .flex_col()
             .pt(px(14.))
@@ -396,7 +429,8 @@ impl Quiver {
                             .child(
                                 div()
                                     .flex()
-                                    .gap(px(4.))
+                                    .flex_wrap()
+                                    .gap_x(px(4.))
                                     .text_size(px(12.5))
                                     .text_color(on_art::tx1())
                                     .child(div().font_weight(SEMIBOLD).child(short_name(&g.entry.name)))

@@ -629,11 +629,10 @@ impl Quiver {
     }
 
     pub const GRID_GAP: f32 = 18.;
-    pub const GUTTER: f32 = 40.;
 
     /// Grid columns and tile width for the current window.
     pub fn grid_metrics(&self) -> (usize, f32) {
-        let avail = (self.viewport.0 - 2. * Self::GUTTER).max(160.);
+        let avail = (self.viewport.0 - 2. * self.gutter()).max(160.);
         let cols = (((avail + Self::GRID_GAP) / (150. + Self::GRID_GAP)).floor() as usize).clamp(2, 12);
         let w = (avail - Self::GRID_GAP * (cols as f32 - 1.)) / cols as f32;
         (cols, w)

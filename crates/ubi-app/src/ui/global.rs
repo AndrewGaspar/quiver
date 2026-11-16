@@ -1012,7 +1012,8 @@ impl Quiver {
     }
 
     /// The top bar's now-playing pill (any launch path, containers included).
-    pub fn render_now_playing_pill(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// `compact`: icon and clock only (narrower windows), the name as a tooltip.
+    pub fn render_now_playing_pill(&mut self, th: &Theme, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let first = self.ui.sessions.first()?.clone();
         let n = self.ui.sessions.len();
         let label = if n == 1 { self.game_name(first.product_id) } else { format!("{n} games") };
@@ -1041,9 +1042,13 @@ impl Quiver {
                     cx.notify();
                 }))
                 .child(icon(Icon::Gamepad, 14., th.ok))
-                .child(div().font_weight(SEMIBOLD).text_color(th.tx1).max_w(px(150.)).truncate().child(label))
+                .when(compact, |d| d.pr(px(10.)).tooltip(super::responsive::tip(th, label.clone())))
+                .when(!compact || n > 1, |d| {
+                    let label = if compact { n.to_string() } else { label.clone() };
+                    d.child(div().font_weight(SEMIBOLD).text_color(th.tx1).max_w(px(150.)).truncate().child(label))
+                })
                 .when(n == 1, |d| d.child(super::mono(12., th.tx2).child(elapsed(secs))))
-                .when(reported, |d| d.child(icon(Icon::Cloud, 13., th.ok)))
+                .when(reported && !compact, |d| d.child(icon(Icon::Cloud, 13., th.ok)))
                 .into_any_element(),
         )
     }
@@ -1066,7 +1071,7 @@ impl Quiver {
                 .items_center()
                 .gap(px(10.))
                 .h(px(38.))
-                .px(px(Self::GUTTER))
+                .px(px(self.gutter()))
                 .bg(th.warn_soft)
                 .border_b_1()
                 .border_color(th.warn.opacity(0.3))
