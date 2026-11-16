@@ -1,6 +1,7 @@
 //! The native broker: holds the Ubisoft session on the host and answers live requests
 //! from `ubi-bridge` instances (one JSON object per line over TCP).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -12,7 +13,7 @@ use ubi_proto::denuvo_service;
 
 use crate::demux::{Demux, Denuvo, ServiceConnection};
 use crate::library::Library;
-use crate::online::Online;
+use crate::online::{Accounts, Online};
 use crate::playsession::PlaySessions;
 
 struct Conns {
@@ -22,15 +23,16 @@ struct Conns {
 }
 
 pub struct Broker {
-    shared: Arc<Online>,
-    online: Mutex<Option<Conns>>,
+    accounts: Arc<Accounts>,
+    /// Live service connections per account (user id).
+    conns: Mutex<HashMap<String, Conns>>,
     sessions: Option<Arc<PlaySessions>>,
 }
 
 impl Broker {
     /// `sessions`: where bridges' play sessions are tracked (none: answered but not tracked).
-    pub fn new(shared: Arc<Online>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
-        Arc::new(Self { shared, online: Mutex::new(None), sessions })
+    pub fn new(accounts: Arc<Accounts>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
+        Arc::new(Self { accounts, conns: Mutex::new(HashMap::new()), sessions })
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
@@ -53,9 +55,9 @@ impl Broker {
         let mut _lease = None;
         while let Some(line) = lines.next_line().await? {
             let rsp = match serde_json::from_str::<BrokerRequest>(&line) {
-                Ok(BrokerRequest::PlaySession { uplay_id }) => {
+                Ok(BrokerRequest::PlaySession { uplay_id, account_id }) => {
                     tracing::info!(uplay_id, "bridge reports game running");
-                    _lease = self.sessions.as_ref().map(|s| s.begin(uplay_id, "bridge"));
+                    _lease = self.sessions.as_ref().map(|s| s.begin(account_id.as_deref(), uplay_id, "bridge"));
                     BrokerResponse::Ok
                 }
                 Ok(req) => self.handle(req).await.unwrap_or_else(|e| {
@@ -71,8 +73,8 @@ impl Broker {
         Ok(())
     }
 
-    async fn connect(&self) -> Result<Conns> {
-        let demux = self.shared.demux().await?;
+    async fn connect(online: &Online) -> Result<Conns> {
+        let demux = online.demux().await?;
         let library = Library::fetch(&demux).await?;
         let denuvo = demux.open::<Denuvo>().await?;
         Ok(Conns { demux, library, denuvo })
@@ -80,20 +82,26 @@ impl Broker {
 
     async fn handle(&self, req: BrokerRequest) -> Result<BrokerResponse> {
         // One retry on a fresh connection: the demux socket may have gone stale.
+        let account = match &req {
+            BrokerRequest::DenuvoGameToken { account_id, .. } | BrokerRequest::PlaySession { account_id, .. } => account_id.clone(),
+        };
+        let online = self.accounts.get(account.as_deref())?;
+        let user_id = online.session().await?.user_id;
         for attempt in 0..2 {
-            let mut guard = self.online.lock().await;
-            if guard.as_ref().is_some_and(|c| !c.demux.is_alive()) {
-                *guard = None;
+            let mut guard = self.conns.lock().await;
+            if guard.get(&user_id).is_some_and(|c| !c.demux.is_alive()) {
+                guard.remove(&user_id);
             }
-            if guard.is_none() {
-                *guard = Some(self.connect().await?);
+            if !guard.contains_key(&user_id) {
+                let c = Self::connect(&online).await?;
+                guard.insert(user_id.clone(), c);
             }
-            let online = guard.as_mut().unwrap();
-            match Self::handle_online(online, &req).await {
+            let conns = guard.get_mut(&user_id).unwrap();
+            match Self::handle_online(conns, &req).await {
                 Ok(rsp) => return Ok(rsp),
                 Err(e) if attempt == 0 => {
                     tracing::warn!("retrying on a new demux connection after: {e:#}");
-                    *guard = None;
+                    guard.remove(&user_id);
                 }
                 Err(e) => return Err(e),
             }
@@ -104,7 +112,7 @@ impl Broker {
     async fn handle_online(online: &mut Conns, req: &BrokerRequest) -> Result<BrokerResponse> {
         match req {
             BrokerRequest::PlaySession { .. } => unreachable!("handled per connection"),
-            BrokerRequest::DenuvoGameToken { uplay_id, request_token } => {
+            BrokerRequest::DenuvoGameToken { uplay_id, request_token, .. } => {
                 tracing::info!(uplay_id, len = request_token.len(), "denuvo game token requested");
                 let ownership_token = online.library.ownership_token(*uplay_id).await?;
                 let rsp = online

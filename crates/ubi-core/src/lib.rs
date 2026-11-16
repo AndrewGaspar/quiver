@@ -21,7 +21,7 @@ pub use ubi_proto as proto;
 
 /// Log in (refreshing if needed) and return an authenticated demux socket.
 pub async fn connect(auth: &auth::Auth) -> anyhow::Result<(auth::Session, demux::Demux)> {
-    let session = store::current(auth).await?;
+    let session = store::current(auth, None).await?;
     let demux = demux::Demux::connect().await?;
     demux.authenticate(&session.ticket).await?;
     Ok((session, demux))

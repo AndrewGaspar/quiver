@@ -48,11 +48,21 @@ pub struct CdKey {
 #[serde(rename_all = "snake_case")]
 pub enum BrokerRequest {
     /// Denuvo activation: relay the game's request token, get a game token back.
-    DenuvoGameToken { uplay_id: u32, request_token: Vec<u8> },
+    DenuvoGameToken {
+        uplay_id: u32,
+        request_token: Vec<u8>,
+        /// The launch context's account (user id); older bridges omit it: default account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+    },
     /// The game started (SDK initialized). The broker answers `Ok` and keeps a play session
     /// open for `uplay_id` until this connection closes, so the bridge holds the connection
     /// for as long as the game's SDK connection lives.
-    PlaySession { uplay_id: u32 },
+    PlaySession {
+        uplay_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

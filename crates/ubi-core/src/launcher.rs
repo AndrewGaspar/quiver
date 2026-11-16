@@ -673,7 +673,7 @@ pub async fn play(
     events(LaunchEvent::Running);
     if started {
         // The bridge holds a lease too once the SDK initializes; both share one session.
-        let _lease = sessions.begin(game.product_id, "launcher");
+        let _lease = sessions.begin(online.user_id(), game.product_id, "launcher");
         while !game_processes(&proton).is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

@@ -24,7 +24,7 @@ use reqwest::Method;
 use tokio::sync::mpsc;
 pub use ubi_api::ActiveSession;
 
-use crate::online::Online;
+use crate::online::{Accounts, Online};
 
 /// Connect's heartbeat interval.
 pub const HEARTBEAT: Duration = Duration::from_secs(330);
@@ -70,14 +70,19 @@ pub async fn end(online: &Online, product_id: u32) -> Result<()> {
     call(online, Method::DELETE, product_id).await
 }
 
+/// Sessions are per account and game (the URL carries the account's user id).
+type Key = (String, u32);
+
 enum Cmd {
-    Begin { product_id: u32, holder: String },
-    End { product_id: u32, holder: String },
+    Begin { account: Option<String>, product_id: u32, holder: String, lease: u64 },
+    End { lease: u64 },
 }
 
 struct Active {
+    online: Arc<Online>,
     started: chrono::DateTime<Utc>,
-    holders: Vec<String>,
+    /// (lease id, holder name)
+    holders: Vec<(u64, String)>,
     reported: bool,
     last_beat: Instant,
 }
@@ -86,35 +91,37 @@ struct Active {
 pub struct PlaySessions {
     tx: mpsc::UnboundedSender<Cmd>,
     snapshot: Arc<Mutex<Vec<ActiveSession>>>,
+    next_lease: std::sync::atomic::AtomicU64,
 }
 
 /// Holds a play session open; dropping it releases this holder's share.
 pub struct Lease {
     tx: mpsc::UnboundedSender<Cmd>,
-    product_id: u32,
-    holder: String,
+    id: u64,
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let _ = self.tx.send(Cmd::End { product_id: self.product_id, holder: std::mem::take(&mut self.holder) });
+        let _ = self.tx.send(Cmd::End { lease: self.id });
     }
 }
 
 impl PlaySessions {
     /// Start the tracker. With `report` false, sessions are tracked (for `sessions` and the
     /// UI) but nothing is sent to Ubisoft. `on_change` runs after every change.
-    pub fn new(online: Arc<Online>, report: bool, on_change: impl Fn() + Send + 'static) -> Arc<Self> {
+    pub fn new(accounts: Arc<Accounts>, report: bool, on_change: impl Fn() + Send + 'static) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let snapshot = Arc::new(Mutex::new(Vec::new()));
-        tokio::spawn(run(online, report, rx, snapshot.clone(), on_change));
-        Arc::new(Self { tx, snapshot })
+        tokio::spawn(run(accounts, report, rx, snapshot.clone(), on_change));
+        Arc::new(Self { tx, snapshot, next_lease: Default::default() })
     }
 
-    /// Hold a session open for `product_id` until the lease is dropped.
-    pub fn begin(&self, product_id: u32, holder: &str) -> Lease {
-        let _ = self.tx.send(Cmd::Begin { product_id, holder: holder.to_owned() });
-        Lease { tx: self.tx.clone(), product_id, holder: holder.to_owned() }
+    /// Hold a session open for `product_id` on `account` (`None`: the default account)
+    /// until the lease is dropped.
+    pub fn begin(&self, account: Option<&str>, product_id: u32, holder: &str) -> Lease {
+        let id = self.next_lease.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send(Cmd::Begin { account: account.map(str::to_owned), product_id, holder: holder.to_owned(), lease: id });
+        Lease { tx: self.tx.clone(), id }
     }
 
     pub fn list(&self) -> Vec<ActiveSession> {
@@ -123,43 +130,52 @@ impl PlaySessions {
 }
 
 async fn run(
-    online: Arc<Online>,
+    accounts: Arc<Accounts>,
     report: bool,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     snapshot: Arc<Mutex<Vec<ActiveSession>>>,
     on_change: impl Fn(),
 ) {
-    let mut active: HashMap<u32, Active> = HashMap::new();
+    let mut active: HashMap<Key, Active> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         let mut changed = false;
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 None => return,
-                Some(Cmd::Begin { product_id, holder }) => {
+                Some(Cmd::Begin { account, product_id, holder, lease }) => {
+                    let online = match accounts.get(account.as_deref()) {
+                        Ok(o) => o,
+                        Err(e) => { tracing::warn!(product_id, "play session for unknown account: {e:#}"); continue }
+                    };
+                    let user_id = match online.session().await {
+                        Ok(s) => s.user_id,
+                        Err(e) => { tracing::warn!(product_id, "play session without a session: {e:#}"); continue }
+                    };
                     changed = true;
-                    if let Some(a) = active.get_mut(&product_id) {
-                        a.holders.push(holder);
+                    let key = (user_id, product_id);
+                    if let Some(a) = active.get_mut(&key) {
+                        a.holders.push((lease, holder));
                     } else {
                         tracing::info!(product_id, %holder, "game started");
                         let reported = report && match start(&online, product_id).await {
                             Ok(()) => { tracing::info!(product_id, "play session started"); true }
                             Err(e) => { tracing::warn!(product_id, "play session start failed: {e:#}"); false }
                         };
-                        active.insert(product_id, Active { started: Utc::now(), holders: vec![holder], reported, last_beat: Instant::now() });
+                        active.insert(key, Active { online, started: Utc::now(), holders: vec![(lease, holder)], reported, last_beat: Instant::now() });
                     }
                 }
-                Some(Cmd::End { product_id, holder }) => {
-                    let Some(a) = active.get_mut(&product_id) else { continue };
-                    if let Some(i) = a.holders.iter().position(|h| *h == holder) {
-                        a.holders.remove(i);
-                    }
+                Some(Cmd::End { lease }) => {
+                    let Some(key) = active.iter().find(|(_, a)| a.holders.iter().any(|h| h.0 == lease)).map(|(k, _)| k.clone()) else { continue };
+                    let a = active.get_mut(&key).unwrap();
+                    a.holders.retain(|h| h.0 != lease);
                     changed = true;
                     if a.holders.is_empty() {
-                        let a = active.remove(&product_id).unwrap();
+                        let product_id = key.1;
+                        let a = active.remove(&key).unwrap();
                         tracing::info!(product_id, minutes = (Utc::now() - a.started).num_minutes(), "game stopped");
                         if report {
-                            match end(&online, product_id).await {
+                            match end(&a.online, product_id).await {
                                 Ok(()) => tracing::info!(product_id, "play session ended"),
                                 Err(e) => tracing::warn!(product_id, "play session end failed: {e:#}"),
                             }
@@ -169,7 +185,8 @@ async fn run(
             },
             _ = tick.tick() => {
                 if !report { continue }
-                for (&product_id, a) in active.iter_mut() {
+                for (&(_, product_id), a) in active.iter_mut() {
+                    let online = a.online.clone();
                     // Heartbeat on schedule; a failed start is retried on the same schedule.
                     if a.last_beat.elapsed() < HEARTBEAT {
                         continue;
@@ -191,7 +208,13 @@ async fn run(
         if changed {
             let mut list: Vec<ActiveSession> = active
                 .iter()
-                .map(|(&product_id, a)| ActiveSession { product_id, started: a.started, holders: a.holders.clone(), reported: a.reported })
+                .map(|((user_id, product_id), a)| ActiveSession {
+                    product_id: *product_id,
+                    account: user_id.clone(),
+                    started: a.started,
+                    holders: a.holders.iter().map(|h| h.1.clone()).collect(),
+                    reported: a.reported,
+                })
                 .collect();
             list.sort_by_key(|s| s.started);
             *snapshot.lock().unwrap() = list;

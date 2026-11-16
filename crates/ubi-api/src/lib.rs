@@ -191,6 +191,9 @@ pub enum LoginResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveSession {
     pub product_id: u32,
+    /// User id of the account playing.
+    #[serde(default)]
+    pub account: String,
     pub started: DateTime<Utc>,
     /// Who holds the session open: `launcher` (games quiverd started) and/or `bridge`
     /// (any game talking to a Quiver bridge, e.g. containers).

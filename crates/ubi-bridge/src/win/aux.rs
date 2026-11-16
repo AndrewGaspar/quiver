@@ -47,7 +47,11 @@ async fn handle(n: u32, req: &aux::Req) -> Option<aux::Rsp> {
             t.secure_dlc_enabled
         );
         let uplay_id = context().map(|c| c.uplay_id).unwrap_or_default();
-        let token = broker(BrokerRequest::DenuvoGameToken { uplay_id, request_token: t.request_token.clone() }).await;
+        let token = broker(BrokerRequest::DenuvoGameToken {
+            uplay_id,
+            request_token: t.request_token.clone(),
+            account_id: super::context().map(|c| c.account_id.clone()),
+        }).await;
         let rsp = match token {
             Ok(BrokerResponse::GameToken { game_token }) => {
                 log!("[aux {n}] -> game token ({} bytes)", game_token.len());

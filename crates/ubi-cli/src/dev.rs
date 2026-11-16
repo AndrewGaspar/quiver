@@ -159,11 +159,11 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
             println!("Logged in as {} ({})", session.name, session.user_id);
         }
         DevCmd::Logout => {
-            store::clear()?;
+            store::clear(None)?;
             println!("Session removed from keyring.");
         }
         DevCmd::Whoami => {
-            let s = store::current(&auth).await?;
+            let s = store::current(&auth, None).await?;
             println!("{} ({})", s.name, s.user_id);
             match auth.account_email(&s).await {
                 Ok(e) => println!("email on file: {}", if e.contains('@') { "yes" } else { "unexpected format" }),
@@ -237,7 +237,7 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
         DevCmd::Broker { listen } => {
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             eprintln!("broker listening on {listen}");
-            ubi_core::broker::Broker::new(ubi_core::online::Online::new(auth), None).serve(listener).await?;
+            ubi_core::broker::Broker::new(ubi_core::online::Accounts::new(), None).serve(listener).await?;
         }
         DevCmd::Saves { action } => {
             let (_, demux) = ubi_core::connect(&auth).await?;

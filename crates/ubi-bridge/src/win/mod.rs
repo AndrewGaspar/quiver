@@ -147,7 +147,7 @@ pub async fn play_session_lease() -> Result<tokio::net::TcpStream> {
     let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
     let addr = ctx.broker.clone().ok_or_else(|| anyhow!("no broker in launch context"))?;
     let mut stream = tokio::net::TcpStream::connect(&addr).await?;
-    let mut line = serde_json::to_vec(&BrokerRequest::PlaySession { uplay_id: ctx.uplay_id })?;
+    let mut line = serde_json::to_vec(&BrokerRequest::PlaySession { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()) })?;
     line.push(b'\n');
     stream.write_all(&line).await?;
     let mut rsp = String::new();
