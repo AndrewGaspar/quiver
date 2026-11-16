@@ -364,3 +364,39 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
         _ => return Ok(None),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accounts_and_exports() {
+        let (demo, _events) = Demo::start();
+        let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
+        assert!(status.accounts.len() >= 2, "two accounts to start with");
+        // Who owns what: shared and family-only games, the default account first.
+        let lib: Vec<LibraryEntry> = serde_json::from_value(demo.handle(Request::Library { refresh: false }).unwrap()).unwrap();
+        let origins = lib.iter().find(|e| e.product_id == 3539).unwrap();
+        assert_eq!(origins.owned_by[0], "demo");
+        assert!(lib.iter().any(|e| e.owned_by == [FAMILY]));
+        // Sign in a third account with 2FA, then sign it out.
+        let r: LoginResult = serde_json::from_value(
+            demo.handle(Request::Login { email: "tester@example.com".into(), password: "pw".into() }).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(r, LoginResult::TwoFactorRequired));
+        assert!(demo.handle(Request::Login2fa { code: "000000".into() }).is_err());
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "123456".into() }).unwrap()).unwrap();
+        assert!(matches!(r, LoginResult::SignedIn { ref name } if name == "tester"));
+        demo.handle(Request::Logout { account: Some("tester".into()) }).unwrap();
+        let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
+        assert!(status.accounts.iter().all(|a| a.name != "tester"));
+        assert_eq!(status.signed_in.as_deref(), Some("demo"));
+        // Exports and Steam: one shortcut staged while Steam runs.
+        let x: Vec<ExportStatus> = serde_json::from_value(demo.handle(Request::ExportList).unwrap()).unwrap();
+        assert!(x.iter().any(|x| x.state == ExportState::WaitingForSteam));
+        let s: SteamUsers = serde_json::from_value(demo.handle(Request::SteamUsers).unwrap()).unwrap();
+        assert!(s.running && !s.staged.is_empty());
+        assert!(demo.handle(Request::SteamApplyStaged).is_err(), "not while Steam runs");
+    }
+}

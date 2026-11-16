@@ -276,9 +276,11 @@ impl Quiver {
                 card(th)
                     .p(px(18.))
                     .text_color(th.tx2)
-                    .child(
-                        if self.demo { "Demo data has no accounts." } else { "No account is signed in. Add one to see its games." },
-                    )
+                    .child(match self.status.as_ref().and_then(|s| s.signed_in.clone()) {
+                        // A daemon from before multiple accounts reports only the name.
+                        Some(name) => format!("Signed in as {name}. This quiverd doesn't list accounts; update it to manage several."),
+                        None => "No account is signed in. Add one to see its games.".to_owned(),
+                    })
                     .into_any_element(),
             );
         }
