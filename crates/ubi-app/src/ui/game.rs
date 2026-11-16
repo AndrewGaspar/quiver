@@ -565,7 +565,8 @@ impl Quiver {
             )
             .with_priority(1)
         });
-        div().relative().flex().flex_col().items_end().child(chip).children(menu).into_any_element()
+        // The menu hangs from the chip's right edge.
+        div().relative().child(chip).children(menu.map(|m| div().absolute().right_0().top_0().child(m))).into_any_element()
     }
 
     /// Save the game's `art` setting (`steam`, or unset for Ubisoft's first).

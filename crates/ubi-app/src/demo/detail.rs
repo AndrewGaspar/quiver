@@ -120,7 +120,10 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             json!({ "revision": revision, "settings": settings })
         }
         Request::SettingsSet { product_id, ops, message } => {
-            installed(st, product_id)?;
+            // As quiverd: a Steam copy's settings apply when Steam starts it through Quiver.
+            if entry(st, product_id)?.steam.is_none() {
+                installed(st, product_id)?;
+            }
             let mut s = st.settings.get(&product_id).cloned().unwrap_or_default();
             for op in &ops {
                 if let SettingOp::Set { key, value } = op
