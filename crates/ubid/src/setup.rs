@@ -30,7 +30,8 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
         Request::ScanInstalls => {
             // Ownership needs a signed-in account; without one, installs are still listed.
             let lib = match daemon.library(false).await {
-                Ok(l) => Some(l),
+                // Only games Quiver can install can be imported.
+                Ok(l) => Some(l.into_iter().filter(|e| e.installable).collect::<Vec<_>>()),
                 Err(e) => {
                     tracing::info!("scan without the library: {e:#}");
                     None
@@ -532,6 +533,8 @@ mod tests {
             running: false,
             art: Default::default(),
             owned_by: vec!["me".into()],
+            installable: true,
+            steam: None,
         }
     }
 

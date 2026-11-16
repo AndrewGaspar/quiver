@@ -215,7 +215,15 @@ async fn saves_report(daemon: &Arc<Daemon>, product_id: u32, cloud: bool) -> Res
     let online = daemon.account_for(product_id, None).await?;
     let account = user_id(&online)?;
     let game = Games::load()?.get(product_id).cloned();
-    let dir = game.as_ref().map(|g| saves::save_dir(g, &account));
+    // A Steam copy keeps its saves in Steam's prefix.
+    let steam = match &game {
+        Some(_) => None,
+        None => daemon.library(false).await.ok().and_then(|l| l.into_iter().find(|e| e.product_id == product_id)).and_then(|e| e.steam),
+    };
+    let dir = game
+        .as_ref()
+        .map(|g| saves::save_dir(g, &account))
+        .or_else(|| steam.as_ref().and_then(|g| crate::steamlib::steam_save_dir(g, &account, product_id)));
     let mut report = SavesReport { product_id, account: Some(account.clone()), dir: dir.clone(), ..Default::default() };
     let max_local = dir.as_deref().and_then(|d| saves::local_slots(d).ok()).and_then(|m| m.keys().max().copied()).unwrap_or(0);
     let mut cloud_items = None;

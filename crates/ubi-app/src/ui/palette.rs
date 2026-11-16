@@ -68,6 +68,8 @@ impl Quiver {
         let name = short_name(&g.entry.name);
         if g.running() {
             cmd(Icon::Square, format!("Stop {name}"), None, Some(format!("quiver stop {id}")), Cmd::Primary(id))
+        } else if g.steam_only() {
+            cmd(Icon::Play, format!("Play {name}"), Some("Starts from Steam".into()), Some(format!("quiver play {id}")), Cmd::Primary(id))
         } else if !g.installed() {
             cmd(Icon::Download, format!("Install {name}"), None, Some(format!("quiver install {id}")), Cmd::Primary(id))
         } else if g.entry.update_available {

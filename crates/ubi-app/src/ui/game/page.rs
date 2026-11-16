@@ -697,6 +697,18 @@ impl Quiver {
 
     /// The action bar's Steam button.
     pub fn steam_button(&mut self, id: u32, cx: &mut Context<Self>) {
+        // A Steam copy: switch it to Quiver, or show its options.
+        if let Some(g) = self.game(id).filter(|g| g.steam_only()).and_then(|g| g.steam().cloned()) {
+            let copy = self.steam_copy(id).unwrap_or(g);
+            match crate::ui::steamgames::control(&copy) {
+                Some(true) => self.steam_patch(copy.app_id, false, cx),
+                _ => {
+                    self.gp.play_menu = false;
+                    self.nav.open_menu(id);
+                }
+            }
+            return;
+        }
         match self.gp.export(id, ExportKind::Steam).map(|e| e.state) {
             None | Some(ExportState::Missing) | Some(ExportState::Changed) => self.run_export(id, ExportAction::SteamAdd, cx),
             Some(ExportState::WaitingForSteam) => self.run_export(id, ExportAction::SteamRestart, cx),

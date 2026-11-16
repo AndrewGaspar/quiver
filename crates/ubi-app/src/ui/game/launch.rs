@@ -19,7 +19,7 @@ const COMMON_WRAPPERS: &[(&str, &str)] = &[("gamemoderun", "GameMode"), ("mangoh
 impl Quiver {
     pub(super) fn render_launch(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        if !g.installed() {
+        if !g.installed() && !g.steam_only() {
             return card(th)
                 .p(px(24.))
                 .text_color(th.tx3)
@@ -54,13 +54,19 @@ impl Quiver {
             .child(self.render_kv_section(th, true, is_changed("dll"), cx))
             .child(self.render_resolved(th, g, &staged, &ops, cx));
 
-        div()
-            .flex()
-            .gap(px(20.))
-            .items_start()
-            .child(form)
-            .child(self.render_history(th, g, cx))
-            .into_any_element()
+        let row = div().flex().gap(px(20.)).items_start().child(form).child(self.render_history(th, g, cx));
+        if g.steam_only() {
+            let note = "A Steam copy: Steam picks Proton and the language. Environment, DLL overrides, arguments and wrappers \
+                        apply when Steam starts it through Quiver (quiver steam-run reads them at every launch).";
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .child(card(th).p(px(16.)).text_size(px(12.5)).text_color(th.tx2).child(note))
+                .child(row)
+                .into_any_element();
+        }
+        row.into_any_element()
     }
 
     /// A dropdown button and, when open, its options under it.

@@ -27,6 +27,21 @@ impl GameRow {
         self.entry.installed.is_some()
     }
 
+    /// Installed through Steam (whether or not Quiver has its own install too).
+    pub fn steam(&self) -> Option<&ubi_api::exports::SteamGame> {
+        self.entry.steam.as_ref()
+    }
+
+    /// Only Steam has it installed: Steam plays, updates and uninstalls it.
+    pub fn steam_only(&self) -> bool {
+        self.entry.steam_only()
+    }
+
+    /// Installed by Quiver or by Steam (it belongs with the installed games).
+    pub fn on_disk(&self) -> bool {
+        self.installed() || self.entry.steam.is_some()
+    }
+
     /// An install job that hasn't finished.
     pub fn install_job(&self) -> Option<&Job> {
         self.job.as_ref().filter(|j| j.kind == JobKind::Install && !j.done)
@@ -85,6 +100,8 @@ impl GameRow {
             (true, false, Some(s), Some(t)) => format!("{} played · {}", hours(s), day(t)),
             (true, false, Some(s), None) => format!("{} played", hours(s)),
             (true, false, None, _) => "Installed · not played yet".into(),
+            (false, _, Some(s), _) if self.steam_only() => format!("Installed via Steam · {} played", hours(s)),
+            (false, _, _, _) if self.steam_only() => "Installed via Steam".into(),
             (false, _, _, _) => "Not installed".into(),
         }
     }
