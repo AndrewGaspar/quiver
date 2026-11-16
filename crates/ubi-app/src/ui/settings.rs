@@ -59,7 +59,7 @@ pub const POLICY: [(&str, &str, &str); 8] = [
     ("Launch and stop games", "Allow", "Allow"),
     ("Install and update", "Allow", "Allow"),
     ("Restore saves or settings", "Allow", "Ask"),
-    ("Uninstall, delete prefixes, profiles or saves", "Allow", "Ask"),
+    ("Uninstall, delete compatibility folders, profiles or saves", "Allow", "Ask"),
     ("Restart Steam", "Ask", "Ask"),
     ("Sign in, sign out, add or remove accounts", "Ask", "Deny"),
 ];
@@ -774,7 +774,7 @@ impl Quiver {
                 .items_center()
                 .gap(px(10.))
                 .child(pill(th, PillKind::Future, None, "Not wired yet"))
-                .child(div().text_size(px(12.)).text_color(th.tx3).child("Downloading GE-Proton releases and prefix snapshots before a build change."))
+                .child(div().text_size(px(12.)).text_color(th.tx3).child("Downloading GE-Proton releases and compatibility folder snapshots before a build change."))
                 .into_any_element(),
         ]
     }

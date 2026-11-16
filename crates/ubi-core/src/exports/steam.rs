@@ -502,19 +502,31 @@ pub fn remove(paths: &Paths, steam: &Steam, user: Option<&str>, key: &ExportKey,
 // ---------------------------------------------------------------------------------------
 // Restart
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RestartReport {
-    pub was_running: bool,
-    pub applied: usize,
-    pub started: bool,
+pub use ubi_api::exports::RestartReport;
+
+/// Write everything staged (Steam closed) and check nothing is left: a change that failed to
+/// write stays staged, and that's an error here rather than a quiet success.
+pub(crate) fn apply_all_or_fail(paths: &Paths) -> Result<usize> {
+    let applied = apply_staged(paths, false)?;
+    let left = staged_descriptions(paths);
+    if !left.is_empty() {
+        bail!(
+            "{} change(s) couldn't be written and still wait for Steam (see quiverd's log): {}",
+            left.len(),
+            left.join("; ")
+        );
+    }
+    Ok(applied)
 }
 
-/// Close Steam cleanly, write staged shortcut changes and start Steam again.
+/// Close Steam cleanly, write staged changes (shortcuts and launch options) and start Steam again.
 ///
-/// **Only call this after the user explicitly confirmed it, every time.** Never from the
-/// daemon, as a side effect, or because an agent asked. Refuses while a game launched
+/// **Only call this after the user explicitly confirmed it, every time.** Never on the
+/// daemon's own initiative (it runs this only for a confirmed `Request::SteamRestart`), as a
+/// side effect, or because an agent asked. Refuses while a game launched
 /// from Steam is running. If Steam doesn't exit within `timeout` nothing is written (and
-/// Steam is not killed). If Steam wasn't running, only writes the staged changes.
+/// Steam is not killed). If Steam wasn't running, only writes the staged changes. Steam is
+/// started again even when writing failed; the error then says what still waits.
 pub fn restart_steam(paths: &Paths, steam: &Steam, timeout: Duration) -> Result<RestartReport> {
     if game_running() {
         bail!("a game launched from Steam is running; restart Steam after it exits");
@@ -540,18 +552,27 @@ pub fn restart_steam(paths: &Paths, steam: &Steam, timeout: Duration) -> Result<
         // Steam writes shortcuts.vdf as it exits; give it a moment after the process ends.
         std::thread::sleep(Duration::from_secs(1));
     }
-    let applied = apply_staged(paths, false)?;
+    let applied = apply_all_or_fail(paths);
     if was_running {
         use std::os::unix::process::CommandExt;
-        steam
+        let started = steam
             .command()
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .process_group(0)
             .spawn()
-            .context("start Steam")?;
+            .context("start Steam again");
+        if let Err(e) = started {
+            return Err(match applied {
+                Ok(_) => e,
+                Err(a) => e.context(format!("{a:#}")),
+            });
+        }
     }
+    let applied = applied.with_context(|| {
+        if was_running { "Steam was restarted, but not everything was written" } else { "not everything was written" }
+    })?;
     Ok(RestartReport { was_running, applied, started: was_running })
 }
 

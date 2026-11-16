@@ -986,7 +986,7 @@ impl Quiver {
                         if total > 0 { format!("Download · {:.0}%", (f * 100.).floor()) } else { "Download".into() },
                         if downloading { 1 } else if total == 0 { 2 } else { 0 },
                     ),
-                    (if e.kind == QueueKind::Install { "Register, create prefix".into() } else { "Register".into() }, if total > 0 && done >= total { 1 } else { 2 }),
+                    (if e.kind == QueueKind::Install { "Register, create compatibility folder".into() } else { "Register".into() }, if total > 0 && done >= total { 1 } else { 2 }),
                 ]
             }
         };
@@ -1376,14 +1376,14 @@ impl Quiver {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().text_color(th.tx2).font_weight(MEDIUM).child("Prefixes"))
+                            .child(div().text_color(th.tx2).font_weight(MEDIUM).child("Compatibility folders"))
                             .child(div().flex_1())
                             .child(div().text_color(th.tx4).child("same disk")),
                     )
                     .child(mono(11.5, th.tx3).truncate().child(tilde(&s.prefixes))),
             );
         } else {
-            c = c.child(disk("Prefixes", &s.prefixes, s.prefixes_free, s.prefixes_total));
+            c = c.child(disk("Compatibility folders", &s.prefixes, s.prefixes_free, s.prefixes_total));
         }
         c.child(div().h(px(1.)).bg(th.line1))
             .child(

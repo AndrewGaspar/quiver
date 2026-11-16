@@ -359,7 +359,7 @@ impl Quiver {
             let (what, sub): (String, AnyElement) = match a {
                 Attention::Update => (
                     "Update ready".into(),
-                    div().text_size(px(11.5)).text_color(on_art::tx3()).child("Installs in place, keeps your prefix").into_any_element(),
+                    div().text_size(px(11.5)).text_color(on_art::tx3()).child("Installs in place, keeps your compatibility folder").into_any_element(),
                 ),
                 Attention::Installing(f) => (
                     format!("Installing {:.0}%", (f * 100.).floor()),

@@ -3,8 +3,9 @@
 //! and noticing new installs to offer the switch.
 //!
 //! Like shortcuts, launch options can only be written while Steam is closed, so changes made
-//! while it runs are staged. The daemon never restarts Steam: front ends do, after the user
-//! confirms. The watcher writes staged changes once Steam has been seen closed twice in a row.
+//! while it runs are staged. The daemon never restarts Steam on its own: front ends ask the
+//! user, then send a confirmed `SteamRestart` (see `exports`). The watcher writes staged
+//! changes once Steam has been seen closed twice in a row.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -157,13 +158,14 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 let c = if undo {
                     steamgames::unpatch(&ctx.paths, &ctx.steam, &user, app_id, &f.app.name, running)?
                 } else {
-                    let Some((id, from)) = product else {
+                    let Some((id, _)) = product else {
                         bail!("Quiver can't tell which Ubisoft game {} is; set its launch options by hand: quiver --source steam steam-run --product <id> %command%", f.app.name)
                     };
                     let quiver = steamgames::quiver_for_steam(&ctx.paths.home)
                         .context("the quiver command wasn't found next to quiverd, in ~/.local/bin or on PATH")?;
-                    // steam-run finds the product itself, except when only the name matched.
-                    let cmd = steamgames::command(&quiver, (from == "library_name").then_some(id));
+                    // The id is always written: steam-run could often find it itself, but
+                    // not when only the library name matched, and it's plainer to read.
+                    let cmd = steamgames::command(&quiver, Some(id));
                     steamgames::patch(&ctx.paths, &ctx.steam, &user, app_id, &f.app.name, &cmd, running)?
                 };
                 Ok((

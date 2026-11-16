@@ -15,7 +15,8 @@ use chrono::{DateTime, Duration as Span, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use ubi_api::exports::{
-    ExportKind, ExportRecord, ExportState, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUser,
+    ExportKind, ExportRecord, ExportState, ExportStatus, PatchState, RestartReport, SteamExportResult, SteamGame, SteamGames, SteamPatchResult,
+    SteamUser,
     SteamUsers,
 };
 use ubi_api::info::{
@@ -163,7 +164,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             };
             let unchanged = g.state == before || matches!((before, g.state), (PatchState::WaitingUndo, PatchState::On) | (PatchState::Waiting, PatchState::Off));
             let staged = matches!(g.state, PatchState::Waiting | PatchState::WaitingUndo);
-            let shown = if g.state.uses_quiver() { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            let shown = if g.state.uses_quiver() { demo_patched(&g.launch_options, g.product_id) } else { demo_unpatched(&g.launch_options) };
             if !staged {
                 g.launch_options = shown.clone();
             }
@@ -241,6 +242,13 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 applied_staged: 0,
             })
         }
+        Request::SteamRestart { confirmed } => {
+            if !confirmed {
+                bail!("restarting Steam needs the person's confirmation every time");
+            }
+            let was_running = d.steam_running;
+            json!(RestartReport { was_running, applied: d.apply_staged(), started: was_running })
+        }
         Request::SteamApplyStaged => {
             if d.steam_running {
                 bail!("Steam is running; staged shortcuts are written when it closes");
@@ -286,16 +294,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         demo.emit(e);
     }
     Ok(Ok(out))
-}
-
-impl Demo {
-    /// What `quiver steam restart` does once the person confirmed it: Steam closes, the
-    /// staged shortcuts are written, Steam starts again. Demo only.
-    pub fn restart_steam(&self) -> usize {
-        let key = self as *const Demo as usize;
-        let mut all = DETAILS.lock().unwrap();
-        all.get_mut(&key).map(|d| d.apply_staged()).unwrap_or(0)
-    }
 }
 
 /// The text of a per-launch log in `<prefix>/ubi-run/` for the demo's games.
@@ -834,7 +832,7 @@ impl Detail {
                 PatchState::WaitingUndo => PatchState::Off,
                 _ => continue,
             };
-            g.launch_options = if next == PatchState::On { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            g.launch_options = if next == PatchState::On { demo_patched(&g.launch_options, g.product_id) } else { demo_unpatched(&g.launch_options) };
             g.state = next;
             n += 1;
         }
@@ -846,19 +844,26 @@ fn steam_command() -> String {
     format!("{} --source steam steam-run", home().join(".local/bin/quiver").display())
 }
 
-fn demo_patched(opts: &str) -> String {
+/// Like quiverd: the product id is always written.
+fn demo_patched(opts: &str, product: Option<u32>) -> String {
     if opts.contains("steam-run") {
         return opts.to_owned();
     }
+    let cmd = match product {
+        Some(p) => format!("{} --product {p}", steam_command()),
+        None => steam_command(),
+    };
     match opts.find("%command%") {
-        Some(i) => format!("{}{} {}", &opts[..i], steam_command(), &opts[i..]),
-        None if opts.trim().is_empty() => format!("{} %command%", steam_command()),
-        None => format!("{} %command% {}", steam_command(), opts.trim()),
+        Some(i) => format!("{}{cmd} {}", &opts[..i], &opts[i..]),
+        None if opts.trim().is_empty() => format!("{cmd} %command%"),
+        None => format!("{cmd} %command% {}", opts.trim()),
     }
 }
 
 fn demo_unpatched(opts: &str) -> String {
-    let out = opts.replace(&format!("{} ", steam_command()), "");
+    let Some(s) = opts.find(&steam_command()) else { return opts.to_owned() };
+    let e = opts[s..].find("%command%").map_or(opts.len(), |i| s + i);
+    let out = format!("{}{}", &opts[..s], &opts[e..]);
     if out.trim() == "%command%" { String::new() } else { out }
 }
 
@@ -884,14 +889,14 @@ fn steam_games() -> Vec<SteamGame> {
         note: product.is_none().then(|| "Quiver can't tell which Ubisoft game this is".into()),
     };
     let mut v = vec![
-        g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched(""), PatchState::On),
+        g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched("", Some(66088)), PatchState::On),
         g(368500, "Assassin's Creed Syndicate", "Assassin's Creed Syndicate", Some(1875), "", PatchState::Off),
         g(298110, "Far Cry 4", "Far Cry 4", Some(420), "-skipintro", PatchState::Off),
         g(2239550, "Watch Dogs: Legion", "Watch Dogs Legion", Some(3353), "PROTON_ENABLE_NVAPI=1 %command%", if running { PatchState::Waiting } else { PatchState::On }),
         g(916440, "Anno 1800", "Anno 1800", None, "", PatchState::Off),
     ];
     if !running {
-        v[3].launch_options = demo_patched(&v[3].launch_options);
+        v[3].launch_options = demo_patched(&v[3].launch_options, v[3].product_id);
     }
     if crate::ui::global::demo_flag("steam-offer").is_some() {
         v[1].offer = true;
@@ -1321,8 +1326,11 @@ mod tests {
         let r: SteamExportResult = call(&demo, Request::ExportSteam { product_id: 1651, remove: false, steam_user: None });
         assert!(r.staged);
         assert!(demo.handle(Request::SteamApplyStaged).is_err(), "Steam is running");
+        // Only once the person confirmed.
+        assert!(demo.handle(Request::SteamRestart { confirmed: false }).is_err());
         // Two shortcuts and Watch Dogs: Legion's launch options.
-        assert_eq!(demo.restart_steam(), 3);
+        let r: RestartReport = call(&demo, Request::SteamRestart { confirmed: true });
+        assert_eq!((r.was_running, r.applied), (true, 3));
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
         assert!(list.iter().all(|e| e.state != ExportState::WaitingForSteam));
         let _: ExportRecord = call(&demo, Request::ExportDesktop { product_id: 1651, remove: false });
@@ -1341,7 +1349,7 @@ mod tests {
         // Far Cry 4: its own option is kept as a game argument.
         let r: SteamPatchResult = call(&demo, Request::SteamPatch { app_id: 298110, steam_user: None });
         assert!(r.staged && !r.unchanged);
-        assert!(r.launch_options.ends_with("steam-run %command% -skipintro"), "{}", r.launch_options);
+        assert!(r.launch_options.ends_with("steam-run --product 420 %command% -skipintro"), "{}", r.launch_options);
         // Undo before Steam restarted: nothing waits any more.
         let r: SteamPatchResult = call(&demo, Request::SteamUnpatch { app_id: 298110, steam_user: None });
         assert!(r.unchanged);
@@ -1351,7 +1359,7 @@ mod tests {
         assert!(demo.handle(Request::SteamPatch { app_id: 916440, steam_user: None }).is_err());
         let u: SteamUsers = call(&demo, Request::SteamUsers);
         assert!(u.staged.iter().any(|s| s.contains("Watch Dogs: Legion")));
-        demo.restart_steam();
+        let _: RestartReport = call(&demo, Request::SteamRestart { confirmed: true });
         let s: SteamGames = call(&demo, Request::SteamGames { steam_user: None });
         assert_eq!(state(&s, 2239550), PatchState::On);
         let v: Value = call(&demo, Request::SteamOffers { enabled: Some(false) });

@@ -79,7 +79,7 @@ fn seed_activity(st: &mut State) {
         act(60 * 26, "gui", "added account family", None),
         act(60 * 24 * 2, "aco-dlss", "issued launch context for 3539 as family", Some(3539)),
         act(60 * 24 * 3, "system", "cloud saves pulled (5 slots)", Some(3539)),
-        act(60 * 24 * 4, "cli", &format!("uninstalled {} (and its prefix)", name(3600)), Some(3600)),
+        act(60 * 24 * 4, "cli", &format!("uninstalled {} (and its compatibility folder)", name(3600)), Some(3600)),
         act(60 * 24 * 9, "gui", &format!("play {} (settings r1)", name(277)), Some(277)),
         act(60 * 24 * 9 + 3, "gui", &format!("install {}", name(277)), Some(277)),
     ];

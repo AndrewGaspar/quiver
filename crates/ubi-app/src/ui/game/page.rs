@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, AppContext, ClipboardItem, Context, Entity, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 use serde::Deserialize;
-use ubi_api::exports::{ExportKind, ExportState, ExportStatus, SteamExportResult, SteamUser, SteamUsers};
+use ubi_api::exports::{ExportKind, ExportState, ExportStatus, RestartReport, SteamExportResult, SteamUser, SteamUsers};
 use ubi_api::info::{GameInfo, Progress, RestoreResult, SaveBackup, SavesReport};
 use ubi_api::mods::{Layer, ModsState, ProfileRevision, VANILLA};
 use ubi_api::{GameSettings, ModsRequest, Profile, Request, Revision, SettingOp};
@@ -331,15 +331,6 @@ pub fn log_lines(bytes: &[u8], max: usize) -> (Vec<SharedString>, bool) {
         lines.remove(0); // probably cut mid-line
     }
     (lines, truncated)
-}
-
-/// The `quiver` binary next to this app, else on PATH.
-fn quiver_bin() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("quiver")))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("quiver"))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -782,45 +773,23 @@ impl Quiver {
         });
     }
 
-    /// "Restart Steam" in a confirmation dialog: the person asked for it just now.
+    /// "Restart Steam" in a confirmation dialog: the person asked for it just now. quiverd
+    /// does it (it knows what's staged), so this app's version doesn't matter.
     pub fn restart_steam(&mut self, cx: &mut Context<Self>) {
-        match self.source.clone() {
-            Some(Source::Demo(d)) => {
-                let n = d.restart_steam();
-                self.show_toast(format!("Steam restarted; {n} staged change(s) written (demo)"), cx);
-                self.load_exports(cx);
-                self.load_global_exports(cx);
-            }
-            Some(Source::Daemon(_)) => {
-                self.show_toast("Closing Steam…", cx);
-                let bin = quiver_bin();
-                let rx = crate::on_tokio(async move {
-                    tokio::process::Command::new(bin)
-                        .args(["steam", "restart", "--yes"])
-                        .env("QUIVER_SOURCE", "cli")
-                        .stdin(std::process::Stdio::null())
-                        .output()
-                        .await
-                });
-                cx.spawn(async move |this, cx| {
-                    let r = rx.await;
-                    this.update(cx, |this, cx| {
-                        let msg = match r {
-                            Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-                            Ok(Ok(o)) => format!("Steam restart failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
-                            Ok(Err(e)) => format!("Could not run quiver: {e}"),
-                            Err(_) => "cancelled".into(),
-                        };
-                        this.show_toast(msg, cx);
-                        this.load_exports(cx);
-                        this.load_global_exports(cx);
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-            None => {}
+        let demo = matches!(self.source, Some(Source::Demo(_)));
+        if !demo {
+            self.show_toast("Closing Steam…", cx);
         }
+        self.call::<RestartReport, _>(Request::SteamRestart { confirmed: true }, cx, move |this, r, cx| {
+            let msg = match r {
+                Ok(r) if !r.was_running => format!("Steam isn't running; {} staged change(s) written", r.applied),
+                Ok(r) => format!("Steam restarted; {} staged change(s) written{}", r.applied, if demo { " (demo)" } else { "" }),
+                Err(e) => format!("Steam restart failed: {}", err_text(&e)),
+            };
+            this.show_toast(msg, cx);
+            this.load_exports(cx);
+            this.load_global_exports(cx);
+        });
     }
 
     // -----------------------------------------------------------------------------------
@@ -1344,8 +1313,8 @@ impl Quiver {
         });
         vec![
             ("Install folder", game.install_dir.clone(), "The base install; mod profiles never change it"),
-            ("Prefix", game.prefix.clone(), "This game's own Wine prefix"),
-            ("Save folder", saves, "savegames/<user>/<product> in the prefix"),
+            ("Compatibility folder", game.prefix.clone(), "This game's own Windows setup (its Proton prefix)"),
+            ("Save folder", saves, "savegames/<user>/<product> in the compatibility folder"),
             ("Launch logs", game.prefix.join("ubi-run"), "bridge.log, game.log, bridge-proton.log"),
         ]
     }

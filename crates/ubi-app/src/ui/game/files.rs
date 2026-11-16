@@ -14,7 +14,7 @@ impl Quiver {
     pub(super) fn render_files(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
         if !g.installed() {
-            return card(th).child(card_header(th, "Files")).child(note(th, "Not installed. Installing creates the game's folder and its own Wine prefix.")).into_any_element();
+            return card(th).child(card_header(th, "Files")).child(note(th, "Not installed. Installing creates the game's folder and its own compatibility folder.")).into_any_element();
         }
         // The save folder comes from the saves report (it depends on the launch account).
         if self.gp.id == id && self.gp.saves.is_idle() {
@@ -97,7 +97,7 @@ impl Quiver {
                     .flex_1()
                     .min_w_0()
                     .gap(px(14.))
-                    .child(card(th).child(card_header(th, "Locations").child(div().text_size(px(12.)).text_color(th.tx3).child("each game has its own prefix; nothing is shared"))).children(rows))
+                    .child(card(th).child(card_header(th, "Locations").child(div().text_size(px(12.)).text_color(th.tx3).child("each game has its own compatibility folder; nothing is shared"))).children(rows))
                     .child(
                         div()
                             .flex()

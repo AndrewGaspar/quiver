@@ -10,7 +10,8 @@
 //! Steam reads `shortcuts.vdf` at startup and writes it back on exit, so while Steam runs
 //! shortcut changes are staged (`<data>/steam-staged.json`) and written the next time
 //! Quiver touches Steam's files with Steam closed. Nothing here restarts Steam except
-//! [`steam::restart_steam`], which front ends call only after the user confirms.
+//! [`steam::restart_steam`], which runs only after the user confirms (in a front end, or in
+//! quiverd for a confirmed `SteamRestart` request).
 
 pub mod art;
 pub mod desktop;

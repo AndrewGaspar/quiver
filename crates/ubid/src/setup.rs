@@ -100,7 +100,7 @@ async fn setup(
     let prefixes = prefixes.map(|p| expand(&p)).transpose()?.filter(|p| *p != daemon.cfg.prefixes);
     if library.is_some() || prefixes.is_some() {
         if locked {
-            bail!("games are installed, queued or importing, so the library and prefix folders can't change now");
+            bail!("games are installed, queued or importing, so the library and compatibility folders can't change now");
         }
         if !daemon.sessions.list().is_empty() {
             bail!("a game is running through a Quiver bridge; stop it first");

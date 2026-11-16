@@ -105,7 +105,7 @@ pub struct SteamExportResult {
 // Steam copies of Ubisoft games ("use Quiver instead of Ubisoft Connect")
 
 /// Whether a Steam game starts through Quiver: its launch options run
-/// `quiver --source steam steam-run %command%`.
+/// `quiver --source steam steam-run [--product <id>] %command%`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatchState {
@@ -179,13 +179,24 @@ pub struct SteamGames {
     /// Offer the switch when a Ubisoft game is newly installed in Steam (app setting).
     #[serde(default = "yes")]
     pub offers: bool,
-    /// The `quiver` launch options Quiver writes, in front of `%command%`.
+    /// The `quiver` launch options Quiver writes, in front of `%command%`, less the
+    /// per-game `--product <id>` it adds.
     #[serde(default)]
     pub command: String,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Reply to `Request::SteamRestart` (and what `quiver steam restart` does locally).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RestartReport {
+    /// Steam was running, so it was closed and started again.
+    pub was_running: bool,
+    /// Staged changes written.
+    pub applied: usize,
+    pub started: bool,
 }
 
 /// Reply to `Request::SteamPatch` / `Request::SteamUnpatch`.

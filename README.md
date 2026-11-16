@@ -117,8 +117,8 @@ quiver export desktop origins [--remove]       # ~/.local/share/applications/qui
 quiver export steam origins [--user NAME]      # non-Steam shortcut with Ubisoft art (staged while Steam runs)
 quiver export list                             # exports and whether they're still as written
 quiver steam users                             # Steam users; which one gets shortcuts
-quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
-quiver steam-run %command%                     # as a Steam game's launch options: Steam copies of Ubisoft games use Quiver, not Connect
+quiver steam restart                           # asks first; writes staged shortcuts and launch options while Steam is closed
+quiver steam-run --product 66088 %command%     # as a Steam game's launch options: Steam copies of Ubisoft games use Quiver, not Connect
 quiver steam games                             # Ubisoft games installed through Steam; which start through Quiver
 quiver steam patch "black flag"                # set its launch options to use Quiver (keeps yours); or an app id, or `all`
 quiver steam unpatch "black flag"              # put its launch options back the way they were
@@ -167,15 +167,18 @@ quiver verify origins [--repair]               # hash files against the manifest
 ## Ubisoft games bought on Steam
 
 A Steam copy of a Ubisoft game normally opens Ubisoft Connect first. With its Steam launch options
-set to `<abs path>/quiver --source steam steam-run %command%`, Steam's own Proton runs Quiver's
+set to `<abs path>/quiver --source steam steam-run --product <id> %command%`, Steam's own Proton runs Quiver's
 bridge instead: no Connect window, no second sign-in, and play time is reported through `quiverd`.
 Nothing in the game's prefix changes, and clearing the launch option undoes it.
 
 `quiver steam patch` (and the app: the welcome's Steam step, Settings › Steam and shortcuts, the
 game page) writes that launch option for you, in the Steam user's
 `userdata/<id>/config/localconfig.vdf` (`UserLocalConfigStore/Software/Valve/Steam/apps/<appid>/LaunchOptions`).
-Your own options are kept: `FOO=1 %command% -bar` becomes `FOO=1 /…/quiver --source steam steam-run
-%command% -bar`, and options without `%command%` are kept as game arguments after it.
+Quiver always writes the Ubisoft product id (`--product`), so you can see which game it starts;
+`steam-run` without it finds the id itself where it can, and options written that way (or typed by
+hand) count as switched and are left alone. Your own options are kept: `FOO=1 %command% -bar`
+becomes `FOO=1 /…/quiver --source steam steam-run --product 66088 %command% -bar`, and options
+without `%command%` are kept as game arguments after it.
 `quiver steam unpatch` restores exactly what was there (or, if you edited it since, takes only
 Quiver's part out). The path is absolute because Steam's `PATH` usually lacks `~/.local/bin`.
 
@@ -185,7 +188,9 @@ id), by Connect's SDK loaders or installer in the game folder, or by a small tab
 otherwise comes from the prefix's registry or a same-named game in your library. Steam rewrites
 `localconfig.vdf` when it exits, so while Steam runs the change is staged: it's written when Steam
 closes (quiverd checks every 30 s), on `quiver steam apply`, or by `quiver steam restart`, which
-always asks first. `quiverd` also notices Ubisoft games newly installed through Steam and offers the
+always asks first. The restart itself (from the CLI or the app's "Restart Steam") is done by
+`quiverd` once you've confirmed, so it always writes what quiverd staged; if anything can't be
+written it says so instead of reporting success. `quiverd` also notices Ubisoft games newly installed through Steam and offers the
 switch once (an Activity entry, and a card in the app); "Not now" isn't asked again, and
 `quiver steam offers off` stops the offers. Steam from Flatpak isn't supported (its sandbox can't run
 `quiver`).

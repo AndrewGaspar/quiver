@@ -1,8 +1,9 @@
 //! Ubisoft games installed through Steam, and switching them to start through Quiver
 //! instead of Ubisoft Connect (the "Connect patch").
 //!
-//! The switch is a launch option: `<quiver> --source steam steam-run %command%` (see
-//! [`crate::steamrun`]). It lives in the Steam user's `userdata/<id>/config/localconfig.vdf`
+//! The switch is a launch option: `<quiver> --source steam steam-run --product <id> %command%`
+//! (see [`crate::steamrun`]). Options written before the id was always included (no
+//! `--product`), and a hand-typed `quiver steam-run %command%`, count as switched too. It lives in the Steam user's `userdata/<id>/config/localconfig.vdf`
 //! at `UserLocalConfigStore/Software/Valve/Steam/apps/<appid>/LaunchOptions`. The user's own
 //! options are kept: with a `%command%`, Quiver's part goes right before it; without one,
 //! what was there are game arguments, so they go after `%command%`. Undoing restores what was
@@ -283,7 +284,9 @@ pub fn shell_quote(a: &str) -> String {
     }
 }
 
-/// Quiver's part of the launch options, in front of `%command%`.
+/// Quiver's part of the launch options, in front of `%command%`. Quiver always passes the
+/// product when it patches (a game whose product isn't known can't be patched); `None` gives
+/// the generic form shown for typing by hand.
 pub fn command(quiver: &Path, product: Option<u32>) -> String {
     let mut s = format!("{} --source steam steam-run", shell_quote(&quiver.to_string_lossy()));
     if let Some(p) = product {
@@ -679,7 +682,10 @@ pub fn quiver_for_steam(home: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    const Q: &str = "/h/.local/bin/quiver --source steam steam-run";
+    /// What Quiver writes now: always with the product id.
+    const Q: &str = "/h/.local/bin/quiver --source steam steam-run --product 66088";
+    /// What earlier versions wrote when steam-run could find the product itself.
+    const OLD: &str = "/h/.local/bin/quiver --source steam steam-run";
 
     #[test]
     fn word_spans() {
@@ -709,6 +715,8 @@ mod tests {
         let p = patched("FOO=1 %command% -bar", Q);
         assert_eq!(patched(&p, Q), p);
         assert_eq!(patched("quiver steam-run %command%", Q), "quiver steam-run %command%");
+        let old = format!("FOO=1 {OLD} %command% -bar");
+        assert_eq!(patched(&old, Q), old, "the form without --product counts as patched");
         let other = "PROTON_LOG=1 '/opt/my quiver/quiver' --source x steam-run --product 5 %command%";
         assert_eq!(patched(other, Q), other);
         // %command% inside a quoted wrapper: refused rather than guessed.
@@ -730,20 +738,24 @@ mod tests {
             at: Utc::now(),
         };
         for original in ["", "FOO=1 %command% -bar", "-skipvideos", "gamemoderun %command%", "  odd  spacing %command%"] {
-            let w = patched(original, Q);
-            // As Quiver wrote it: exactly what was there.
-            assert_eq!(unpatched(&w, Some(&rec(original, &w))), original, "{original:?}");
+            // As Quiver wrote it (now, or before --product was always added): exactly what was there.
+            for cmd in [Q, OLD] {
+                let w = patched(original, cmd);
+                assert_eq!(unpatched(&w, Some(&rec(original, &w))), original, "{original:?} {cmd:?}");
+            }
         }
         // Edited since (or patched by hand): Quiver's part comes out, the rest stays.
         let r = rec("FOO=1 %command% -bar", &patched("FOO=1 %command% -bar", Q));
         assert_eq!(unpatched(&format!("FOO=2 {Q} %command% -bar"), Some(&r)), "FOO=2 %command% -bar");
         assert_eq!(unpatched("quiver steam-run %command%", None), "");
         assert_eq!(unpatched("X=1 ~/.local/bin/quiver --source steam steam-run %command% -y", None), "X=1 %command% -y");
-        assert_eq!(unpatched(&format!("{Q} --product 66088 %command% -skipvideos"), None), "%command% -skipvideos");
+        assert_eq!(unpatched(&format!("{Q} %command% -skipvideos"), None), "%command% -skipvideos");
+        assert_eq!(unpatched(&format!("{OLD} %command% -skipvideos"), None), "%command% -skipvideos");
         // Not patched: unchanged.
         assert_eq!(unpatched("FOO=1 %command%", None), "FOO=1 %command%");
         // The command Quiver writes.
-        assert_eq!(command(Path::new("/h/.local/bin/quiver"), None), Q);
+        assert_eq!(command(Path::new("/h/.local/bin/quiver"), Some(66088)), Q);
+        assert_eq!(command(Path::new("/h/.local/bin/quiver"), None), OLD);
         assert_eq!(
             command(Path::new("/h/My Games/quiver"), Some(66088)),
             "'/h/My Games/quiver' --source steam steam-run --product 66088"
@@ -889,10 +901,38 @@ mod tests {
         assert_eq!(load(&paths).patch_state("1001", 552520, &launch_options(&steam, "1001", 552520)), PatchState::ByHand);
         unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", false).unwrap();
         assert_eq!(launch_options(&steam, "1001", 552520), "PROTON_LOG=1 %command% -skipintro");
+        // Patched by an earlier Quiver, without --product: still on, left as it is, and undone exactly.
+        let c = patch(&paths, &steam, "1001", 552520, "Far Cry 5", OLD, false).unwrap();
+        assert_eq!(c.launch_options, format!("PROTON_LOG=1 {OLD} %command% -skipintro"));
+        let c = patch(&paths, &steam, "1001", 552520, "Far Cry 5", Q, false).unwrap();
+        assert!(c.unchanged);
+        assert_eq!(c.launch_options, format!("PROTON_LOG=1 {OLD} %command% -skipintro"));
+        assert_eq!(load(&paths).patch_state("1001", 552520, &c.launch_options), PatchState::On);
+        unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", false).unwrap();
+        assert_eq!(launch_options(&steam, "1001", 552520), "PROTON_LOG=1 %command% -skipintro");
+        assert!(load(&paths).patches.is_empty());
         // No localconfig.vdf for this user: refused, not created.
         std::fs::create_dir_all(steam.root.join("userdata/2002/config")).unwrap();
         assert!(patch(&paths, &steam, "2002", 552520, "Far Cry 5", Q, false).unwrap_err().to_string().contains("start Steam"));
         assert!(!localconfig(&steam, "2002").exists());
+    }
+
+    /// What a Steam restart writes: a change that can't be written stays staged, and that
+    /// is a failure (not "Steam restarted").
+    #[test]
+    fn restart_apply_fails_when_something_stays_staged() {
+        let (_tmp, paths, steam) = fixture();
+        patch(&paths, &steam, "1001", 552520, "Far Cry 5", Q, true).unwrap();
+        assert_eq!(super::super::steam::apply_all_or_fail(&paths).unwrap(), 1);
+        assert_eq!(launch_options(&steam, "1001", 552520), format!("PROTON_LOG=1 {Q} %command% -skipintro"));
+        // Nothing staged: fine, nothing written.
+        assert_eq!(super::super::steam::apply_all_or_fail(&paths).unwrap(), 0);
+        // Its file is gone by the time Steam is closed: the change stays, and it's an error.
+        unpatch(&paths, &steam, "1001", 552520, "Far Cry 5", true).unwrap();
+        std::fs::remove_file(localconfig(&steam, "1001")).unwrap();
+        let e = super::super::steam::apply_all_or_fail(&paths).unwrap_err().to_string();
+        assert!(e.contains("1 change(s) couldn't be written") && e.contains("Far Cry 5"), "{e}");
+        assert_eq!(load(&paths).staged.len(), 1);
     }
 
     #[test]
