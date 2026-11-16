@@ -12,6 +12,7 @@ publish = false
 ubi-proto = { path = "crates/ubi-proto" }
 ubi-core = { path = "crates/ubi-core" }
 ubi-ipc = { path = "crates/ubi-ipc" }
+ubi-api = { path = "crates/ubi-api" }
 anyhow = "1"
 thiserror = "2"
 prost = "0.14"
@@ -31,7 +32,7 @@ sha1 = "0.10"
 hex = "0.4"
 futures = "0.3"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

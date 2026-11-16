@@ -1,133 +1,167 @@
-use std::io::{BufRead, Write};
-use std::path::PathBuf;
+//! `ubi`: command-line front end. Everything except `ubi dev …` goes through the `ubid`
+//! daemon (started on demand), so the CLI, the GUI and agents share one runtime and one
+//! history of changes. Label automated callers with `--source agent` (or `UBI_SOURCE`).
 
-use anyhow::{Context, Result};
+mod dev;
+
+use std::io::Write;
+
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ubi_core::auth::{Auth, LoginOutcome};
-use ubi_core::library::{Library, ProductConfig};
-use ubi_core::{manifest, store};
+use ubi_api::{ActivityEntry, Client, Event, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status};
 
 #[derive(Parser)]
-#[command(name = "ubi", about = "Native Ubisoft Connect client")]
+#[command(name = "ubi", about = "Native Ubisoft launcher for Linux")]
 struct Cli {
+    /// Who is making changes (recorded in settings history and the activity log).
+    #[arg(long, global = true, env = "UBI_SOURCE", default_value = "cli")]
+    source: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Log in with email/password (+2FA) and store the session in the keyring.
+    /// Daemon and account status, running games and jobs.
+    Status,
+    /// Sign in (email, password, 2FA).
     Login {
         #[arg(long)]
         email: Option<String>,
     },
-    /// Forget the stored session.
+    /// Sign out and forget the stored session.
     Logout,
-    /// Show the logged-in account, refreshing the session if needed.
-    Whoami,
-    /// List owned products.
+    /// Owned games and their install state.
     Library {
-        /// Include DLC, bundles and products without a PC build.
+        /// Re-fetch from Ubisoft instead of using the daemon's cache.
         #[arg(long)]
-        all: bool,
+        refresh: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Print a product's configuration YAML.
-    Config { product_id: u32 },
-    /// Write the launch context ubi-bridge needs to stand in for Connect.
-    LaunchContext {
-        uplay_id: u32,
-        /// Windows path the game should store SDK savegames under.
-        #[arg(long)]
-        savegame_path: Option<String>,
-        /// Broker address the bridge should use for live requests.
-        #[arg(long)]
-        broker: Option<String>,
-        /// Host path of the game's install directory (to report installed chunks).
-        #[arg(long)]
-        install_dir: Option<PathBuf>,
-        #[arg(short, long)]
-        out: PathBuf,
-    },
-    /// Run the native broker that ubi-bridge instances ask for live tokens.
-    Broker {
-        #[arg(long, default_value = "127.0.0.1:47810")]
-        listen: String,
-    },
-    /// Sync a game's local save folder with the cloud.
-    Saves {
-        #[command(subcommand)]
-        action: SavesAction,
-    },
-    /// List games installed by this launcher.
-    Games,
-    /// Launch an installed game (blocks until it exits; syncs cloud saves around it).
-    Play { product_id: u32 },
-    /// Compare installed games (dirs containing uplay_install.manifest) with the latest builds.
-    Status {
-        /// Game install directories, as `product_id=path`.
-        installs: Vec<String>,
-    },
-    /// Download and install a game (resumable).
+    /// Install or update a game (follows progress unless --detach).
     Install {
-        product_id: u32,
-        dest: PathBuf,
-        #[arg(long, default_value = "en-US")]
-        language: String,
-        /// Only print what would be installed.
+        game: String,
         #[arg(long)]
-        dry_run: bool,
-        /// Also save the downloaded manifest here (for inspection).
+        language: Option<String>,
         #[arg(long)]
-        manifest_out: Option<PathBuf>,
+        detach: bool,
     },
-    /// Request signed CDN URLs for relative paths and report their HTTP status (debugging).
-    CdnProbe { product_id: u32, paths: Vec<String> },
-    /// Download raw cloud save blobs (<slot>.savegame, zlib) as a backup.
-    CloudPull { uplay_id: u32, dir: PathBuf, #[arg(long, default_value_t = 10)] max_slot: u32 },
-    /// Check demux connectivity (no login needed).
-    Ping,
-    /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
-    Manifest {
-        path: PathBuf,
-        /// List every file.
+    /// Launch a game (follows it until it exits unless --detach).
+    Play {
+        game: String,
         #[arg(long)]
-        files: bool,
+        detach: bool,
+    },
+    /// Stop a running game.
+    Stop { game: String },
+    /// Show a game's launch settings.
+    Get { game: String },
+    /// Change launch settings: key=value to set, key= to unset.
+    /// Keys: proton, language, args, wrappers, env.NAME, dll.NAME.
+    Set {
+        game: String,
+        #[arg(required = true)]
+        changes: Vec<String>,
+        /// Note recorded with this revision.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// A game's settings history.
+    History { game: String },
+    /// Make an earlier settings revision current again (0 = defaults).
+    Restore { game: String, revision: u32 },
+    /// Installed Proton builds.
+    Protons,
+    /// Recent changes and actions, with who made them.
+    Activity {
+        #[arg(short, default_value_t = 30)]
+        n: usize,
+    },
+    /// Print daemon events as they happen.
+    Watch,
+    /// Control the daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Low-level tools that bypass the daemon.
+    Dev {
+        #[command(subcommand)]
+        cmd: dev::DevCmd,
     },
 }
 
 #[derive(Subcommand)]
-enum SavesAction {
-    /// Cloud -> local (slots with unsynced local changes are kept).
-    Pull {
-        uplay_id: u32,
-        /// Local folder holding <slot>.save files.
-        dir: PathBuf,
-        /// Where overwritten local saves are copied first.
-        #[arg(long)]
-        backup_dir: PathBuf,
-    },
-    /// Local -> cloud for slots the game marked with <slot>.save.upload.
-    Push { uplay_id: u32, dir: PathBuf },
+enum DaemonAction {
+    /// Ask ubid to exit.
+    Stop,
 }
 
-async fn register_game(lib: &mut Library, product_id: u32, dest: &std::path::Path, language: &str) -> Result<()> {
-    use ubi_core::launcher;
-    let cfg = launcher::Config::load()?;
-    let game = launcher::register(&cfg, lib, product_id, &dest.canonicalize()?, language).await?;
-    eprintln!("registered {} (runs {} in prefix {})", game.name, game.exe, game.prefix.display());
-    let mut games = launcher::Games::load()?;
-    games.upsert(game);
-    games.save()
+fn print_json(v: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
 }
 
-fn prompt(label: &str) -> Result<String> {
-    eprint!("{label}");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim().to_owned())
+/// Resolve a game argument: product id, or a unique case-insensitive name match.
+async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry> {
+    let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await?;
+    if let Ok(id) = game.parse::<u32>() {
+        return lib.into_iter().find(|e| e.product_id == id).with_context(|| format!("product {id} is not in your library"));
+    }
+    let norm = |s: &str| s.to_lowercase().replace(['®', '™', '’', '\''], "");
+    let needle = norm(game);
+    let matches: Vec<LibraryEntry> = lib.into_iter().filter(|e| norm(&e.name).contains(&needle)).collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => bail!("no game matches '{game}'"),
+        _ => bail!(
+            "'{game}' matches several games: {}",
+            matches.iter().map(|e| format!("{} ({})", e.name, e.product_id)).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// Print job events for `job_id` until it finishes.
+async fn follow(mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id: u64) -> Result<()> {
+    let mut last_status = String::new();
+    while let Some(e) = events.recv().await {
+        let Event::Job(job) = e else { continue };
+        if job.id != job_id {
+            continue;
+        }
+        if job.total > 0 && !job.done {
+            eprint!(
+                "\r{:5.1}%  {:.2}/{:.2} GB  {}   ",
+                100.0 * job.downloaded as f64 / job.total as f64,
+                job.downloaded as f64 / 1e9,
+                job.total as f64 / 1e9,
+                job.status
+            );
+            let _ = std::io::stderr().flush();
+        } else if job.status != last_status {
+            eprintln!("{}", job.status);
+        }
+        last_status = job.status.clone();
+        if job.done {
+            if let Some(err) = job.error {
+                bail!(err);
+            }
+            return Ok(());
+        }
+    }
+    bail!("lost connection to ubid")
+}
+
+fn print_settings(v: &serde_json::Value) {
+    println!("revision {}", v["revision"]);
+    let s = &v["settings"];
+    if s.as_object().is_none_or(|o| o.is_empty()) {
+        println!("  (defaults)");
+    }
+    for (k, val) in s.as_object().into_iter().flatten() {
+        println!("  {k}: {val}");
+    }
 }
 
 #[tokio::main]
@@ -137,312 +171,140 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    let auth = Auth::default();
+    if let Cmd::Dev { cmd } = cli.cmd {
+        return dev::run_dev(cmd).await;
+    }
+    let client = Client::connect(&cli.source).await?;
     match cli.cmd {
+        Cmd::Dev { .. } => unreachable!(),
+        Cmd::Status => {
+            let s: Status = client.call(Request::Status).await?;
+            println!("ubid {}", s.version);
+            match &s.signed_in {
+                Some(n) => println!("signed in as {n}"),
+                None if s.awaiting_2fa => println!("waiting for a 2FA code (ubi login)"),
+                None => println!("not signed in (ubi login)"),
+            }
+            println!("default Proton: {}", s.proton_default.as_deref().unwrap_or("?"));
+            if !s.running.is_empty() {
+                println!("running: {:?}", s.running);
+            }
+            for j in s.jobs.iter().filter(|j| !j.done) {
+                println!("job {} {:?} {}: {}", j.id, j.kind, j.name, j.status);
+            }
+        }
         Cmd::Login { email } => {
             let email = match email {
                 Some(e) => e,
-                None => prompt("Email: ")?,
+                None => dev::prompt("Email: ")?,
             };
             let password = rpassword::prompt_password("Password: ")?;
-            let session = match auth.login(&email, &password).await? {
-                LoginOutcome::Done(s) => s,
-                LoginOutcome::TwoFactor(challenge) => {
-                    // `masked_phone` is present even for authenticator-app accounts,
-                    // so describe the code source from the method list instead.
-                    let methods = &challenge.methods;
-                    let has = |m: &str| methods.iter().any(|x| x.eq_ignore_ascii_case(m));
-                    let source = if has("googleAuthenticator") || methods.is_empty() {
-                        "authenticator app".to_owned()
-                    } else if has("sms") {
-                        format!("SMS to {}", challenge.masked_phone.as_deref().unwrap_or("your phone"))
-                    } else {
-                        methods.join("/")
-                    };
-                    let code = prompt(&format!("2FA code ({source}): "))?;
-                    auth.complete_2fa(&challenge, &code).await?
-                }
-            };
-            store::save(&session)?;
-            if session.remember_me_ticket.is_none() {
-                eprintln!("warning: no remember-me ticket issued; you'll need to log in again in a few hours");
+            let mut result: LoginResult = client.call(Request::Login { email, password }).await?;
+            if let LoginResult::TwoFactorRequired = result {
+                let code = dev::prompt("2FA code (authenticator app): ")?;
+                result = client.call(Request::Login2fa { code }).await?;
             }
-            println!("Logged in as {} ({})", session.name, session.user_id);
+            match result {
+                LoginResult::SignedIn { name } => println!("Signed in as {name}"),
+                LoginResult::TwoFactorRequired => bail!("2FA still required"),
+            }
         }
         Cmd::Logout => {
-            store::clear()?;
-            println!("Session removed from keyring.");
+            let () = client.call(Request::Logout).await?;
+            println!("Signed out.");
         }
-        Cmd::Whoami => {
-            let s = store::current(&auth).await?;
-            println!("{} ({})", s.name, s.user_id);
-            match auth.account_email(&s).await {
-                Ok(e) => println!("email on file: {}", if e.contains('@') { "yes" } else { "unexpected format" }),
-                Err(e) => println!("email lookup failed: {e:#}"),
-            }
-            println!("ticket expires {}", s.expiration.with_timezone(&chrono::Local));
-        }
-        Cmd::Library { all, json } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let lib = Library::fetch(&demux).await?;
-            let mut products: Vec<_> = lib
-                .products
-                .iter()
-                .filter(|p| all || (p.owned && p.is_installable()))
-                .collect();
-            products.sort_by(|a, b| a.name.cmp(&b.name));
+        Cmd::Library { refresh, json } => {
+            let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh }).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&products)?);
-            } else {
-                println!("{:>6}  {:>4} {:>5}  {}", "id", "type", "state", "name");
-                for p in &products {
-                    let flags = match (p.owned, p.is_installable(), p.locked_by_subscription) {
-                        (_, _, true) => " [subscription-locked]",
-                        (false, _, _) => " [not owned]",
-                        (true, false, _) => " [no download]",
-                        _ => "",
-                    };
-                    println!(
-                        "{:>6}  {:>4} {:>5}  {}{flags}",
-                        p.product_id,
-                        p.product_type,
-                        p.state,
-                        p.name.as_deref().unwrap_or("?")
-                    );
-                }
-                eprintln!("{} of {} products shown", products.len(), lib.products.len());
+                return print_json(&lib);
             }
-        }
-        Cmd::Config { product_id } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let config = match lib.get(product_id).and_then(|p| p.configuration.clone()) {
-                Some(c) => c,
-                None => lib.product_config(product_id).await?,
-            };
-            println!("{config}");
-            if let Ok(cfg) = ProductConfig::parse(&config) {
-                for exe in cfg.executables() {
-                    eprintln!("executable: {}{}", exe.path, exe.arguments.map(|a| format!(" {a}")).unwrap_or_default());
-                }
-            }
-        }
-        Cmd::LaunchContext { uplay_id, savegame_path, broker, install_dir, out } => {
-            let (session, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let mut ctx = ubi_core::launch::build(&auth, &session, &mut lib, uplay_id).await?;
-            ctx.savegame_path = savegame_path;
-            ctx.broker = broker;
-            if let Some(dir) = install_dir {
-                ctx.chunks = ubi_core::launch::installed_chunks(&dir)?;
-            }
-            std::fs::write(&out, serde_json::to_vec_pretty(&ctx)?)?;
-            eprintln!(
-                "wrote {} (owned ids: {:?}, {} cd key(s), ticket {} chars)",
-                out.display(),
-                ctx.owned_uplay_ids,
-                ctx.cd_keys.len(),
-                ctx.upc_ticket.len()
-            );
-        }
-        Cmd::Broker { listen } => {
-            let listener = tokio::net::TcpListener::bind(&listen).await?;
-            eprintln!("broker listening on {listen}");
-            ubi_core::broker::Broker::new(auth).serve(listener).await?;
-        }
-        Cmd::Saves { action } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let mut cloud = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
-            let report = match action {
-                SavesAction::Pull { uplay_id, dir, backup_dir } => {
-                    ubi_core::savesync::pull(&mut cloud, &mut lib, uplay_id, &dir, &backup_dir).await?
-                }
-                SavesAction::Push { uplay_id, dir } => ubi_core::savesync::push(&mut cloud, &mut lib, uplay_id, &dir).await?,
-            };
-            println!(
-                "downloaded {:?} unchanged {:?} kept-local {:?} uploaded {:?}",
-                report.downloaded, report.unchanged, report.kept_local, report.uploaded
-            );
-            if let Some(b) = report.backup_dir {
-                println!("previous local copies backed up to {}", b.display());
-            }
-        }
-        Cmd::Games => {
-            for g in ubi_core::launcher::Games::load()?.games {
-                println!("{:>6}  {:<40} {}", g.product_id, g.name, g.install_dir.display());
-            }
-        }
-        Cmd::Play { product_id } => {
-            use ubi_core::launcher::{self, LaunchEvent};
-            let cfg = launcher::Config::load()?;
-            let game = launcher::Games::load()?.get(product_id).cloned().context("not installed (see `ubi games`)")?;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let broker_addr = listener.local_addr()?.to_string();
-            tokio::spawn(ubi_core::broker::Broker::new(Auth::default()).serve(listener));
-            launcher::play(&cfg, &auth, &game, &broker_addr, |e| match e {
-                LaunchEvent::Status(s) => eprintln!("{s}"),
-                LaunchEvent::Running => eprintln!("{} is running", game.name),
-                LaunchEvent::Exited(code) => eprintln!("game exited ({code:?})"),
-            })
-            .await?;
-        }
-        Cmd::Status { installs } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let lib = Library::fetch(&demux).await?;
-            for spec in installs {
-                let (id, path) = spec.split_once('=').context("expected product_id=path")?;
-                let id: u32 = id.parse()?;
-                let installed = manifest::manifest_hash(&std::fs::read(PathBuf::from(path).join("uplay_install.manifest"))?)?;
-                let product = lib.get(id).context("not in library")?;
-                let latest = product.latest_manifest.clone().unwrap_or_default();
-                let state = if latest.eq_ignore_ascii_case(&installed) { "up to date" } else { "UPDATE AVAILABLE" };
-                println!("{:<40} {state}  (installed {}, latest {})", product.name.as_deref().unwrap_or("?"), &installed[..8], &latest[..latest.len().min(8)]);
-            }
-        }
-        Cmd::Install { product_id, dest, language, dry_run, manifest_out } => {
-            use std::sync::atomic::Ordering::Relaxed;
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let product = lib.get(product_id).context("not in your library")?.clone();
-            let hash = product.latest_manifest.clone().context("product has no PC build")?;
-            let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
-            let (manifest, raw) = dl.manifest(&hash).await?;
-            if let Some(out) = &manifest_out {
-                std::fs::write(out, &raw)?;
-            }
-            let plan = ubi_core::install::plan(&manifest, &language)?;
-            println!(
-                "{}: {} files, {:.2} GB on disk, {:.2} GB to download (chunks {:?})",
-                product.name.as_deref().unwrap_or("?"),
-                plan.files.len(),
-                plan.install_bytes as f64 / 1e9,
-                plan.download_bytes as f64 / 1e9,
-                plan.chunks
-            );
-            let installed = dest.join("uplay_install.manifest");
-            let mut updating = false;
-            if let Ok(old_raw) = std::fs::read(&installed) {
-                if manifest::manifest_hash(&old_raw)?.eq_ignore_ascii_case(&hash) {
-                    let done = std::fs::read_to_string(dest.join(".ubi-install/done")).unwrap_or_default();
-                    let done: std::collections::HashSet<&str> = done.lines().collect();
-                    if dry_run || plan.files.iter().all(|f| done.contains(f.path.as_str())) {
-                        println!("already installed and up to date");
-                        if !dry_run {
-                            register_game(&mut lib, product_id, &dest, &language).await?;
-                        }
-                        return Ok(());
-                    }
-                    println!("resuming incomplete install");
-                } else {
-                    updating = true;
-                    let old_plan = ubi_core::install::plan(&manifest::parse_manifest(&old_raw)?, &language)?;
-                    if dry_run {
-                        println!("update from {}", manifest::manifest_hash(&old_raw)?);
-                        return Ok(());
-                    }
-                    let (kept, removed) = ubi_core::install::prepare_update(&old_plan, &plan, &dest)?;
-                    println!("updating: {kept} files unchanged, {removed} removed");
-                }
-            }
-            if dry_run {
-                return Ok(());
-            }
-            let progress = std::sync::Arc::new(ubi_core::install::Progress::default());
-            let reporter = {
-                let p = progress.clone();
-                let total = plan.download_bytes;
-                let files = plan.files.len();
-                tokio::spawn(async move {
-                    let start = std::time::Instant::now();
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        let d = p.downloaded.load(Relaxed);
-                        let rate = d as f64 / start.elapsed().as_secs_f64() / 1e6;
-                        eprintln!(
-                            "{:5.1}%  {:.2}/{:.2} GB  {:.1} MB/s  files {}/{}",
-                            100.0 * d as f64 / total.max(1) as f64,
-                            d as f64 / 1e9,
-                            total as f64 / 1e9,
-                            rate,
-                            p.files_done.load(Relaxed),
-                            files
-                        );
-                    }
-                })
-            };
-            let compressed = manifest.is_compressed.unwrap_or(false);
-            let result = ubi_core::install::install(&mut dl, &plan, &dest, compressed, &progress).await;
-            reporter.abort();
-            result?;
-            std::fs::write(&installed, &raw)?;
-            register_game(&mut lib, product_id, &dest, &language).await?;
-            println!("{} {} files in {}", if updating { "updated" } else { "installed" }, plan.files.len(), dest.display());
-        }
-        Cmd::CdnProbe { product_id, paths } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
-            let urls = dl.urls(&paths).await?;
-            for (path, mirrors) in paths.iter().zip(urls) {
-                let (status, head) = match mirrors.first() {
-                    Some(u) => match dl.http.get(u).send().await {
-                        Ok(r) => {
-                            let st = r.status().as_u16();
-                            let b = r.bytes().await.unwrap_or_default();
-                            (st, format!("{} bytes, starts {}", b.len(), hex::encode(&b[..b.len().min(8)])))
-                        }
-                        Err(_) => (0, String::new()),
-                    },
-                    None => (0, String::new()),
+            for e in &lib {
+                let state = match (&e.installed, e.update_available, e.running) {
+                    (_, _, true) => "running",
+                    (Some(_), true, _) => "update",
+                    (Some(_), false, _) => "installed",
+                    (None, _, _) => "",
                 };
-                println!("{status}  {path}  ({} mirrors) {head}", mirrors.len());
+                println!("{:>6}  {:<10} {}", e.product_id, state, e.name);
             }
         }
-        Cmd::CloudPull { uplay_id, dir, max_slot } => {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let mut cloud = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
-            std::fs::create_dir_all(&dir)?;
-            let names: Vec<String> = (1..=max_slot).map(|s| s.to_string()).collect();
-            let items: Vec<(u32, &str)> = (1..=max_slot).zip(names.iter().map(String::as_str)).collect();
-            let reqs = cloud.get_requests_v2(&mut lib, uplay_id, &items).await?;
-            for ((slot, _), req) in items.iter().zip(&reqs) {
-                let (status, body) = cloud.execute(req, None).await?;
-                if status == 200 {
-                    std::fs::write(dir.join(format!("{slot}.savegame")), &body)?;
-                    println!("slot {slot}: {} bytes", body.len());
-                } else {
-                    println!("slot {slot}: HTTP {status}");
-                }
+        Cmd::Install { game, language, detach } => {
+            let e = resolve(&client, &game).await?;
+            let events = client.subscribe().await?;
+            let id: u64 = client.call(Request::Install { product_id: e.product_id, language }).await?;
+            eprintln!("installing {} (job {id})", e.name);
+            if !detach {
+                follow(events, id).await?;
             }
         }
-        Cmd::Ping => {
-            let demux = ubi_core::demux::Demux::connect().await?;
-            let info = demux.patch_info().await?;
-            println!("demux ok: latest client {} (we send {})", info.latest_version, ubi_core::demux::CLIENT_VERSION);
-            println!("patch base url: {}", info.patch_base_url);
+        Cmd::Play { game, detach } => {
+            let e = resolve(&client, &game).await?;
+            let events = client.subscribe().await?;
+            let id: u64 = client.call(Request::Play { product_id: e.product_id }).await?;
+            eprintln!("launching {} (job {id})", e.name);
+            if !detach {
+                follow(events, id).await?;
+            }
         }
-        Cmd::Manifest { path, files } => {
-            let m = manifest::load_manifest(&path)?;
-            let s = manifest::summarize(&m);
-            println!("{}", serde_json::to_string_pretty(&s)?);
-            println!("compression: {:?}, slicer: {:?}", m.compression_method, m.slicer_config);
-            for c in &m.chunks {
-                let (n, bytes) = c.files.iter().filter(|f| !f.is_dir).fold((0, 0u64), |(n, b), f| (n + 1, b + f.size));
+        Cmd::Stop { game } => {
+            let e = resolve(&client, &game).await?;
+            let () = client.call(Request::Stop { product_id: e.product_id }).await?;
+        }
+        Cmd::Get { game } => {
+            let e = resolve(&client, &game).await?;
+            let v: serde_json::Value = client.call(Request::SettingsGet { product_id: e.product_id }).await?;
+            println!("{}", e.name);
+            print_settings(&v);
+        }
+        Cmd::Set { game, changes, message } => {
+            let e = resolve(&client, &game).await?;
+            let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
+            let rev: Revision = client.call(Request::SettingsSet { product_id: e.product_id, ops, message }).await?;
+            println!("{}: settings revision {}", e.name, rev.revision);
+        }
+        Cmd::History { game } => {
+            let e = resolve(&client, &game).await?;
+            let revs: Vec<Revision> = client.call(Request::SettingsHistory { product_id: e.product_id }).await?;
+            if revs.is_empty() {
+                println!("{}: no changes (defaults)", e.name);
+            }
+            for r in revs {
                 println!(
-                    "chunk {:>3} type {} lang {:<6} tags {:<24} uplay {:?} files {:>4} {:>8.2} GB",
-                    c.id, c.r#type, c.language.as_deref().unwrap_or("-"), c.tags.as_deref().unwrap_or("-"),
-                    c.uplay_id, n, bytes as f64 / 1e9
+                    "r{:<3} {}  by {:<8} {}  {}",
+                    r.revision,
+                    r.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    r.source,
+                    serde_json::to_string(&r.settings)?,
+                    r.message.unwrap_or_default()
                 );
             }
-            if files {
-                for chunk in &m.chunks {
-                    for f in chunk.files.iter().filter(|f| !f.is_dir) {
-                        println!("{:>14}  chunk {:<4} {}", f.size, chunk.id, f.name);
-                    }
-                }
+        }
+        Cmd::Restore { game, revision } => {
+            let e = resolve(&client, &game).await?;
+            let rev: Revision = client.call(Request::SettingsRestore { product_id: e.product_id, revision }).await?;
+            println!("{}: restored r{revision} as revision {}", e.name, rev.revision);
+        }
+        Cmd::Protons => {
+            let list: Vec<String> = client.call(Request::ProtonList).await?;
+            for p in list {
+                println!("{p}");
             }
+        }
+        Cmd::Activity { n } => {
+            let list: Vec<ActivityEntry> = client.call(Request::Activity { limit: n }).await?;
+            for a in list.into_iter().rev() {
+                println!("{}  {:<8} {}", a.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"), a.source, a.action);
+            }
+        }
+        Cmd::Watch => {
+            let mut events = client.subscribe().await?;
+            while let Some(e) = events.recv().await {
+                println!("{}", serde_json::to_string(&e)?);
+            }
+        }
+        Cmd::Daemon { action: DaemonAction::Stop } => {
+            let () = client.call(Request::Shutdown).await?;
+            println!("ubid stopping");
         }
     }
     Ok(())

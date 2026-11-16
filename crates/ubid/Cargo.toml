@@ -1,0 +1,18 @@
+[package]
+name = "ubid"
+description = "Background daemon: owns the Ubisoft session, games, settings and jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ubi-core.workspace = true
+ubi-api.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true

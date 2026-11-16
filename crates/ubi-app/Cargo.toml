@@ -11,7 +11,8 @@ name = "ubisoft-linux"
 path = "src/main.rs"
 
 [dependencies]
-ubi-core.workspace = true
+ubi-api.workspace = true
+serde.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

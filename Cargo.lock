@@ -6187,16 +6187,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ubi-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ubi-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
  "gpui",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "ubi-core",
+ "ubi-api",
  "unicode-segmentation",
 ]
 
@@ -6221,9 +6233,11 @@ dependencies = [
  "clap",
  "hex",
  "rpassword",
+ "serde",
  "serde_json",
  "tokio",
  "tracing-subscriber",
+ "ubi-api",
  "ubi-core",
 ]
 
@@ -6248,6 +6262,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "ubi-api",
  "ubi-ipc",
  "ubi-proto",
  "webpki-roots",
@@ -6267,6 +6282,21 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-build",
+]
+
+[[package]]
+name = "ubid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ubi-api",
+ "ubi-core",
 ]
 
 [[package]]

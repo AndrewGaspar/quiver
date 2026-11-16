@@ -60,11 +60,34 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
+fn compat_tools_dir() -> PathBuf {
+    home().join(".local/share/Steam/compatibilitytools.d")
+}
+
+/// Installed Proton builds (directory names), oldest to newest.
+pub fn list_protons() -> Vec<String> {
+    find_protons().into_iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect()
+}
+
+/// A Proton build by name (directory in compatibilitytools.d) or absolute path.
+pub fn resolve_proton(name: &str) -> Result<PathBuf> {
+    let p = if name.starts_with('/') { PathBuf::from(name) } else { compat_tools_dir().join(name) };
+    if !p.join("proton").is_file() {
+        bail!("no Proton build '{name}' (installed: {})", list_protons().join(", "));
+    }
+    Ok(p)
+}
+
 /// Newest GE-Proton (or any Proton) in Steam's compatibilitytools.d.
 fn find_proton() -> Option<PathBuf> {
-    let dir = home().join(".local/share/Steam/compatibilitytools.d");
+    find_protons().pop()
+}
+
+fn find_protons() -> Vec<PathBuf> {
+    let dir = compat_tools_dir();
     let mut builds: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
+        .into_iter()
+        .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.join("proton").is_file())
         .collect();
@@ -74,7 +97,7 @@ fn find_proton() -> Option<PathBuf> {
         let nums: Vec<u32> = name.split(|c: char| !c.is_ascii_digit()).filter_map(|s| s.parse().ok()).collect();
         (name.starts_with("GE-Proton"), nums)
     });
-    builds.pop()
+    builds
 }
 
 impl Config {
@@ -120,20 +143,7 @@ fn default_bridge_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/x86_64-pc-windows-gnu/release/ubi-bridge.exe")
 }
 
-/// An installed game this launcher manages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Game {
-    pub product_id: u32,
-    pub name: String,
-    pub install_dir: PathBuf,
-    pub prefix: PathBuf,
-    /// Executable relative to `install_dir` and its arguments, from the product config.
-    pub exe: String,
-    #[serde(default)]
-    pub args: Option<String>,
-    #[serde(default)]
-    pub language: Option<String>,
-}
+pub use ubi_api::{Game, GameSettings};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Games {
@@ -273,12 +283,26 @@ pub fn win_path(p: &Path) -> String {
 struct Proton<'a> {
     cfg: &'a Config,
     prefix: &'a Path,
+    /// Proton build to use (per-game override or the configured default).
+    build: PathBuf,
 }
 
 impl Proton<'_> {
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new("python3");
-        cmd.arg(self.cfg.proton.join("proton")).arg("run").args(args);
+        self.wrapped(&[], args)
+    }
+
+    /// `wrappers... python3 <proton> run args...`
+    fn wrapped(&self, wrappers: &[String], args: &[&str]) -> Command {
+        let mut cmd = match wrappers.split_first() {
+            Some((first, rest)) => {
+                let mut c = Command::new(first);
+                c.args(rest).arg("python3");
+                c
+            }
+            None => Command::new("python3"),
+        };
+        cmd.arg(self.build.join("proton")).arg("run").args(args);
         let steam = data_dir().join("steam-stub");
         let _ = std::fs::create_dir_all(&steam);
         cmd.env("STEAM_COMPAT_DATA_PATH", self.prefix)
@@ -294,7 +318,7 @@ impl Proton<'_> {
     }
 
     fn wineserver(&self) -> Command {
-        let mut cmd = Command::new(self.cfg.proton.join("files/bin/wineserver"));
+        let mut cmd = Command::new(self.build.join("files/bin/wineserver"));
         cmd.env("WINEPREFIX", self.prefix);
         cmd
     }
@@ -323,7 +347,7 @@ pub async fn ensure_prefix(cfg: &Config, game: &Game) -> Result<()> {
         // Proton initializes <compat>/pfx; pointing it at the root keeps a plain Wine layout.
         std::os::unix::fs::symlink(".", &pfx_link)?;
     }
-    let proton = Proton { cfg, prefix: &game.prefix };
+    let proton = Proton { cfg, prefix: &game.prefix, build: cfg.proton.clone() };
     let log = game.prefix.join("ubi-setup.log");
     proton.run_to_end(&["wineboot", "-u"], &log).await?;
     let upc = game.prefix.join(UPC_REL);
@@ -378,9 +402,14 @@ pub async fn play(
     cfg: &Config,
     auth: &Auth,
     game: &Game,
+    settings: &GameSettings,
     broker: &str,
     events: impl Fn(LaunchEvent),
 ) -> Result<()> {
+    let build = match &settings.proton {
+        Some(name) => resolve_proton(name)?,
+        None => cfg.proton.clone(),
+    };
     events(LaunchEvent::Status("Preparing prefix…".into()));
     ensure_prefix(cfg, game).await?;
     if !cfg.bridge_exe.is_file() {
@@ -398,7 +427,7 @@ pub async fn play(
     ctx.savegame_path = Some(format!(r"{UPC_WIN}\{}", saves_rel.replace('/', "\\")));
     ctx.broker = Some(broker.to_owned());
     ctx.chunks = launch::installed_chunks(&game.install_dir).unwrap_or_default();
-    ctx.language = game.language.clone().or(ctx.language);
+    ctx.language = settings.language.clone().or(game.language.clone()).or(ctx.language);
     let ctx_path = run_dir.join("context.json");
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -412,7 +441,7 @@ pub async fn play(
     tracing::info!(?pulled.downloaded, ?pulled.kept_local, "saves pulled");
 
     events(LaunchEvent::Status("Starting…".into()));
-    let proton = Proton { cfg, prefix: &game.prefix };
+    let proton = Proton { cfg, prefix: &game.prefix, build };
     let bridge_dst = game.prefix.join("drive_c/ubi/ubi-bridge.exe");
     std::fs::create_dir_all(bridge_dst.parent().unwrap())?;
     std::fs::copy(&cfg.bridge_exe, &bridge_dst)?;
@@ -433,7 +462,15 @@ pub async fn play(
     let mut args = vec![exe_win.as_str()];
     let extra: Vec<String> = game.args.as_deref().map(|a| a.split_whitespace().map(str::to_owned).collect()).unwrap_or_default();
     args.extend(extra.iter().map(String::as_str));
-    let mut cmd = proton.command(&args);
+    args.extend(settings.args.iter().map(String::as_str));
+    let mut cmd = proton.wrapped(&settings.wrappers, &args);
+    for (k, v) in &settings.env {
+        cmd.env(k, v);
+    }
+    if !settings.dll_overrides.is_empty() {
+        let overrides: Vec<String> = settings.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        cmd.env("WINEDLLOVERRIDES", overrides.join(";"));
+    }
     cmd.env("UPLAY_ARGUMENTS", uplay_arguments(game.product_id, &exe_win, &workdir_win))
         .current_dir(exe.parent().unwrap_or(&game.install_dir))
         .stdout(Stdio::null())
@@ -462,6 +499,18 @@ pub async fn play(
     let pushed = savesync::push(&mut cloud, &mut lib, game.product_id, &saves_dir).await?;
     tracing::info!(?pushed.uploaded, "saves pushed");
     events(LaunchEvent::Status(format!("Done ({} save slots uploaded)", pushed.uploaded.len())));
+    Ok(())
+}
+
+/// Ask a running game to stop by shutting its prefix down.
+pub async fn stop(cfg: &Config, game: &Game) -> Result<()> {
+    let settings = crate::settings::current(game.product_id)?.0;
+    let build = match &settings.proton {
+        Some(name) => resolve_proton(name)?,
+        None => cfg.proton.clone(),
+    };
+    let proton = Proton { cfg, prefix: &game.prefix, build };
+    proton.wineserver().arg("-k").status().await?;
     Ok(())
 }
 

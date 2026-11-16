@@ -1,28 +1,23 @@
-//! Ubisoft Library: a GPUI front end for ubi-core. Sign in, list owned games,
-//! install/update them, and play them through ubi-bridge in per-game Proton prefixes.
+//! Ubisoft Library: GPUI front end. A client of the `ubid` daemon (see `ubi-api`): it shows
+//! the daemon's state and sends it requests; installs, launches and settings all live in
+//! the daemon, so the CLI and agents see and drive the same thing.
 
 mod text_input;
 
 use std::future::Future;
-use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::OnceLock;
 
+use futures::StreamExt;
 use gpui::{
     App, Application, Bounds, Context, Entity, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
     WindowOptions, div, prelude::*, px, rgb, size,
 };
 use text_input::TextInput;
-use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
-use ubi_core::install::Progress;
-use ubi_core::launcher::{self, Config, Game, Games, LaunchEvent};
-use ubi_core::library::Library;
-
-const LANGUAGE: &str = "en-US";
+use ubi_api::{Client, Event, Job, JobKind, LibraryEntry, LoginResult, Request, Status};
 
 // ---------------------------------------------------------------------------------------------
-// ubi-core is tokio-based; GPUI has its own executor. Core work runs on a tokio runtime and
-// hands results back through oneshot channels, which GPUI tasks can await.
+// ubi-api's client is tokio-based; GPUI has its own executor. Calls run on a tokio runtime and
+// hand results back through oneshot channels, which GPUI tasks can await.
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -42,55 +37,23 @@ where
     rx
 }
 
-/// Like `on_tokio`, for futures that aren't `Send` (rustc can't prove it for some borrowing
-/// stream combinators in ubi-core): the future is built and driven on a blocking thread.
-fn on_tokio_local<F, Fut>(f: F) -> futures::channel::oneshot::Receiver<Fut::Output>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future,
-    Fut::Output: Send + 'static,
-{
-    let (tx, rx) = futures::channel::oneshot::channel();
-    rt().spawn_blocking(move || {
-        let _ = tx.send(tokio::runtime::Handle::current().block_on(f()));
-    });
-    rx
-}
-
 fn err_text(e: &anyhow::Error) -> String {
     format!("{e:#}")
 }
 
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
-enum RowState {
-    NotInstalled,
-    Installed { update: bool },
-    Installing(Arc<Progress>),
-    Running,
-}
-
 struct Row {
-    product_id: u32,
-    name: String,
-    game: Option<Game>,
-    state: RowState,
-    /// Latest status line from an install/launch, shared with the worker.
-    status: Arc<Mutex<Option<String>>>,
-}
-
-impl Row {
-    fn set_status(&self, s: impl Into<String>) {
-        *self.status.lock().unwrap() = Some(s.into());
-    }
+    entry: LibraryEntry,
+    /// Latest install/launch job for this game.
+    job: Option<Job>,
 }
 
 struct LoginForm {
     email: Entity<TextInput>,
     password: Entity<TextInput>,
     code: Entity<TextInput>,
-    challenge: Option<TwoFactorChallenge>,
+    needs_code: bool,
     busy: bool,
     error: Option<String>,
 }
@@ -102,9 +65,7 @@ enum Screen {
 }
 
 struct Launcher {
-    auth: Arc<Auth>,
-    cfg: Option<Arc<Config>>,
-    broker: Option<String>,
+    client: Option<Client>,
     screen: Screen,
     account: Option<String>,
     rows: Vec<Row>,
@@ -113,26 +74,58 @@ struct Launcher {
 
 impl Launcher {
     fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
-            auth: Arc::new(Auth::default()),
-            cfg: None,
-            broker: None,
-            screen: Screen::Loading("Starting…".into()),
+        let this = Self {
+            client: None,
+            screen: Screen::Loading("Connecting to ubid…".into()),
             account: None,
             rows: Vec::new(),
             error: None,
         };
-        match Config::load() {
-            Ok(c) => this.cfg = Some(Arc::new(c)),
-            Err(e) => this.error = Some(format!("Configuration: {}", err_text(&e))),
-        }
-        this.start_broker(cx);
-        this.resume_session(cx);
-        // Repaint while background work (downloads, launches) updates shared state.
+        let rx = on_tokio(async {
+            let client = Client::connect("gui").await?;
+            let status: Status = client.call(Request::Status).await?;
+            // Forward daemon events into a channel GPUI can await.
+            let mut events = client.subscribe().await?;
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            tokio::spawn(async move {
+                while let Some(e) = events.recv().await {
+                    if tx.unbounded_send(e).is_err() {
+                        break;
+                    }
+                }
+            });
+            anyhow::Ok((client, status, rx))
+        });
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_millis(500)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+            let result = rx.await;
+            let events = this
+                .update(cx, |this, cx| {
+                    let out = match result {
+                        Ok(Ok((client, status, events))) => {
+                            this.client = Some(client);
+                            match status.signed_in {
+                                Some(name) => {
+                                    this.account = Some(name);
+                                    this.load_library(false, cx);
+                                }
+                                None => this.show_login(None, cx),
+                            }
+                            Some(events)
+                        }
+                        Ok(Err(e)) => {
+                            this.screen = Screen::Loading(format!("Could not reach ubid: {}", err_text(&e)));
+                            None
+                        }
+                        Err(_) => None,
+                    };
+                    cx.notify();
+                    out
+                })
+                .ok()
+                .flatten();
+            let Some(mut events) = events else { return };
+            while let Some(e) = events.next().await {
+                if this.update(cx, |this, cx| this.on_event(e, cx)).is_err() {
                     break;
                 }
             }
@@ -141,43 +134,43 @@ impl Launcher {
         this
     }
 
-    /// The broker serves Denuvo token requests from every running game's bridge.
-    fn start_broker(&mut self, cx: &mut Context<Self>) {
-        let rx = on_tokio(async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let addr = listener.local_addr()?.to_string();
-            tokio::spawn(ubi_core::broker::Broker::new(Auth::default()).serve(listener));
-            anyhow::Ok(addr)
-        });
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(addr)) => this.broker = Some(addr),
-                    Ok(Err(e)) => this.error = Some(format!("Broker: {}", err_text(&e))),
-                    Err(_) => {}
+    fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
+        match e {
+            Event::Job(job) => {
+                if let Some(row) = self.rows.iter_mut().find(|r| r.entry.product_id == job.product_id) {
+                    row.job = Some(job);
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            }
+            Event::GameStarted { product_id } | Event::GameStopped { product_id } => {
+                let running = matches!(e, Event::GameStarted { .. });
+                if let Some(row) = self.rows.iter_mut().find(|r| r.entry.product_id == product_id) {
+                    row.entry.running = running;
+                }
+            }
+            Event::SessionChanged { signed_in: Some(name) } => self.account = Some(name),
+            Event::SessionChanged { signed_in: None } => {
+                self.account = None;
+                self.rows.clear();
+                self.show_login(None, cx);
+            }
+            Event::LibraryChanged => self.load_library(false, cx),
+            Event::SettingsChanged { .. } => {}
+        }
+        cx.notify();
     }
 
-    fn resume_session(&mut self, cx: &mut Context<Self>) {
-        self.screen = Screen::Loading("Signing in…".into());
-        let auth = self.auth.clone();
-        let rx = on_tokio(async move { ubi_core::store::current(&auth).await });
+    /// Send a request to the daemon; `done` runs on the UI thread with the result.
+    fn call<T, F>(&self, req: Request, cx: &mut Context<Self>, done: F)
+    where
+        T: serde::de::DeserializeOwned + Send + 'static,
+        F: FnOnce(&mut Self, anyhow::Result<T>, &mut Context<Self>) + 'static,
+    {
+        let Some(client) = self.client.clone() else { return };
+        let rx = on_tokio(async move { client.call::<T>(req).await });
         cx.spawn(async move |this, cx| {
-            let result = rx.await;
+            let result = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("cancelled")));
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(session)) => {
-                        this.account = Some(session.name);
-                        this.load_library(cx);
-                    }
-                    _ => this.show_login(None, cx),
-                }
+                done(this, result, cx);
                 cx.notify();
             })
             .ok();
@@ -190,7 +183,7 @@ impl Launcher {
             email: cx.new(|cx| TextInput::new(cx, "Email", false)),
             password: cx.new(|cx| TextInput::new(cx, "Password", true)),
             code: cx.new(|cx| TextInput::new(cx, "Authenticator code", false)),
-            challenge: None,
+            needs_code: false,
             busy: false,
             error,
         });
@@ -203,182 +196,69 @@ impl Launcher {
         }
         form.busy = true;
         form.error = None;
-        let auth = self.auth.clone();
-        let rx = match form.challenge.clone() {
-            Some(challenge) => {
-                let code = form.code.read(cx).text().trim().to_owned();
-                on_tokio(async move { auth.complete_2fa(&challenge, &code).await.map(LoginOutcome::Done) })
-            }
-            None => {
-                let email = form.email.read(cx).text().trim().to_owned();
-                let password = form.password.read(cx).text().to_owned();
-                on_tokio(async move { auth.login(&email, &password).await })
+        let req = if form.needs_code {
+            Request::Login2fa { code: form.code.read(cx).text().trim().to_owned() }
+        } else {
+            Request::Login {
+                email: form.email.read(cx).text().trim().to_owned(),
+                password: form.password.read(cx).text().to_owned(),
             }
         };
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                let Screen::Login(form) = &mut this.screen else { return };
-                form.busy = false;
-                match result {
-                    Ok(Ok(LoginOutcome::Done(session))) => {
-                        if let Err(e) = ubi_core::store::save(&session) {
-                            form.error = Some(err_text(&e));
-                        } else {
-                            this.account = Some(session.name);
-                            this.load_library(cx);
-                        }
-                    }
-                    Ok(Ok(LoginOutcome::TwoFactor(c))) => form.challenge = Some(c),
-                    Ok(Err(e)) => form.error = Some(err_text(&e)),
-                    Err(_) => form.error = Some("cancelled".into()),
+        self.call::<LoginResult, _>(req, cx, |this, result, cx| {
+            let Screen::Login(form) = &mut this.screen else { return };
+            form.busy = false;
+            match result {
+                Ok(LoginResult::SignedIn { name }) => {
+                    this.account = Some(name);
+                    this.load_library(false, cx);
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+                Ok(LoginResult::TwoFactorRequired) => form.needs_code = true,
+                Err(e) => form.error = Some(err_text(&e)),
+            }
+        });
     }
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
-        let _ = ubi_core::store::clear();
-        self.rows.clear();
-        self.account = None;
-        self.show_login(None, cx);
-        cx.notify();
+        self.call::<(), _>(Request::Logout, cx, |_, _, _| {});
     }
 
-    fn load_library(&mut self, cx: &mut Context<Self>) {
-        self.screen = Screen::Loading("Loading your library…".into());
-        let auth = self.auth.clone();
-        let rx = on_tokio(async move {
-            let (_, demux) = ubi_core::connect(&auth).await?;
-            let lib = Library::fetch(&demux).await?;
-            let installed = Games::load()?;
-            let mut rows: Vec<(u32, String, Option<Game>, bool)> = lib
-                .products
-                .iter()
-                .filter(|p| p.owned && p.is_installable() && p.product_type == 0 && !p.locked_by_subscription)
-                .map(|p| {
-                    let game = installed.get(p.product_id).cloned();
-                    let update = game.as_ref().is_some_and(|g| launcher::update_available(g, &lib));
-                    (p.product_id, p.name.clone().unwrap_or_else(|| p.product_id.to_string()), game, update)
-                })
-                .collect();
-            rows.sort_by(|a, b| b.2.is_some().cmp(&a.2.is_some()).then_with(|| a.1.cmp(&b.1)));
-            anyhow::Ok(rows)
-        });
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(rows)) => {
-                        this.rows = rows
-                            .into_iter()
-                            .map(|(product_id, name, game, update)| Row {
-                                product_id,
-                                name,
-                                state: match &game {
-                                    Some(_) => RowState::Installed { update },
-                                    None => RowState::NotInstalled,
-                                },
-                                game,
-                                status: Arc::default(),
-                            })
-                            .collect();
-                        this.screen = Screen::Library;
-                    }
-                    Ok(Err(e)) => {
-                        this.error = Some(err_text(&e));
-                        this.screen = Screen::Library;
-                    }
-                    Err(_) => {}
+    fn load_library(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        if self.rows.is_empty() {
+            self.screen = Screen::Loading("Loading your library…".into());
+        }
+        self.call::<Vec<LibraryEntry>, _>(Request::Library { refresh }, cx, |this, result, _| {
+            match result {
+                Ok(entries) => {
+                    let old: Vec<Row> = std::mem::take(&mut this.rows);
+                    this.rows = entries
+                        .into_iter()
+                        .map(|entry| {
+                            let job = old.iter().find(|r| r.entry.product_id == entry.product_id).and_then(|r| r.job.clone());
+                            Row { entry, job }
+                        })
+                        .collect();
+                    this.error = None;
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn row_mut(&mut self, product_id: u32) -> Option<&mut Row> {
-        self.rows.iter_mut().find(|r| r.product_id == product_id)
+                Err(e) => this.error = Some(err_text(&e)),
+            }
+            this.screen = Screen::Library;
+        });
     }
 
     fn install(&mut self, product_id: u32, cx: &mut Context<Self>) {
-        let Some(cfg) = self.cfg.clone() else { return };
-        let auth = self.auth.clone();
-        let Some(row) = self.row_mut(product_id) else { return };
-        let progress = Arc::new(Progress::default());
-        row.state = RowState::Installing(progress.clone());
-        row.set_status("Starting…");
-        let status = row.status.clone();
-        let rx = on_tokio_local(move || async move {
-            launcher::install_game(&cfg, &auth, product_id, LANGUAGE, &progress, |s| {
-                *status.lock().unwrap() = Some(s);
-            })
-            .await
+        self.call::<u64, _>(Request::Install { product_id, language: None }, cx, |this, r, _| {
+            if let Err(e) = r {
+                this.error = Some(err_text(&e));
+            }
         });
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                if let Some(row) = this.row_mut(product_id) {
-                    match result {
-                        Ok(Ok(game)) => {
-                            row.game = Some(game);
-                            row.state = RowState::Installed { update: false };
-                            row.set_status("Installed");
-                        }
-                        Ok(Err(e)) => {
-                            row.state = match row.game {
-                                Some(_) => RowState::Installed { update: true },
-                                None => RowState::NotInstalled,
-                            };
-                            row.set_status(format!("Install failed: {}", err_text(&e)));
-                        }
-                        Err(_) => {}
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn play(&mut self, product_id: u32, cx: &mut Context<Self>) {
-        let (Some(cfg), Some(broker)) = (self.cfg.clone(), self.broker.clone()) else { return };
-        let auth = self.auth.clone();
-        let Some(row) = self.row_mut(product_id) else { return };
-        let Some(game) = row.game.clone() else { return };
-        row.state = RowState::Running;
-        row.set_status("Starting…");
-        let status = row.status.clone();
-        let rx = on_tokio_local(move || async move {
-            launcher::play(&cfg, &auth, &game, &broker, |e| {
-                let text = match e {
-                    LaunchEvent::Status(s) => s,
-                    LaunchEvent::Running => "Running".into(),
-                    LaunchEvent::Exited(_) => "Game exited".into(),
-                };
-                *status.lock().unwrap() = Some(text);
-            })
-            .await
+        self.call::<u64, _>(Request::Play { product_id }, cx, |this, r, _| {
+            if let Err(e) = r {
+                this.error = Some(err_text(&e));
+            }
         });
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                if let Some(row) = this.row_mut(product_id) {
-                    row.state = RowState::Installed { update: false };
-                    if let Ok(Err(e)) = result {
-                        row.set_status(format!("Launch failed: {}", err_text(&e)));
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 }
 
@@ -421,7 +301,7 @@ fn progress_bar(fraction: f32) -> gpui::Div {
 impl Launcher {
     fn render_login(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let Screen::Login(form) = &self.screen else { return div() };
-        let two_factor = form.challenge.is_some();
+        let two_factor = form.needs_code;
         let mut col = div()
             .flex()
             .flex_col()
@@ -455,39 +335,41 @@ impl Launcher {
     }
 
     fn render_row(&self, row: &Row, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = row.product_id;
-        let status = row.status.lock().unwrap().clone();
-        let (label, detail): (Option<(&str, bool)>, Option<gpui::AnyElement>) = match &row.state {
-            RowState::NotInstalled => (Some(("Install", false)), None),
-            RowState::Installed { update: true } => (Some(("Update", false)), None),
-            RowState::Installed { update: false } => (Some(("Play", true)), None),
-            RowState::Running => (None, None),
-            RowState::Installing(p) => {
-                let total = p.total.load(Relaxed).max(1) as f32;
-                let frac = p.downloaded.load(Relaxed) as f32 / total;
-                (None, Some(progress_bar(frac).into_any_element()))
-            }
-        };
+        let e = &row.entry;
+        let id = e.product_id;
+        let active = row.job.as_ref().filter(|j| !j.done);
+        let installing = active.filter(|j| j.kind == JobKind::Install);
+        let launching = active.filter(|j| j.kind == JobKind::Play).is_some() || e.running;
         let mut right = div().flex().flex_none().items_center().gap_3();
-        if let Some(d) = detail {
-            right = right.child(d);
-        }
-        if let Some((label, primary)) = label {
-            let is_play = label == "Play";
+        if let Some(j) = installing {
+            let frac = if j.total > 0 { j.downloaded as f32 / j.total as f32 } else { 0. };
+            right = right.child(progress_bar(frac));
+        } else if launching {
+            right = right.child(button(format!("stop-{id}"), "Stop", false, true).on_click(cx.listener(move |this, _, _, cx| {
+                this.call::<(), _>(Request::Stop { product_id: id }, cx, |_, _, _| {});
+            })));
+        } else {
+            let (label, primary, is_play) = match (&e.installed, e.update_available) {
+                (None, _) => ("Install", false, false),
+                (Some(_), true) => ("Update", false, false),
+                (Some(_), false) => ("Play", true, true),
+            };
             right = right.child(button(format!("act-{id}"), label, primary, true).on_click(cx.listener(
                 move |this, _, _, cx| {
                     if is_play { this.play(id, cx) } else { this.install(id, cx) }
-                    cx.notify();
                 },
             )));
         }
-        let mut left = div().flex().flex_col().flex_1().min_w_0().gap_1().child(div().truncate().child(row.name.clone()));
-        let sub = match (&row.state, &status) {
-            (_, Some(s)) => s.clone(),
-            (RowState::Installed { update: true }, None) => "Update available".into(),
-            (RowState::Installed { .. }, None) => "Installed".into(),
+        let sub = match (&row.job, &e.installed) {
+            (Some(j), _) if !j.done || j.error.is_some() => match &j.error {
+                Some(err) => format!("{}: {err}", j.status),
+                None => j.status.clone(),
+            },
+            (_, Some(_)) if e.update_available => "Update available".into(),
+            (_, Some(_)) => "Installed".into(),
             _ => String::new(),
         };
+        let mut left = div().flex().flex_col().flex_1().min_w_0().gap_1().child(div().truncate().child(e.name.clone()));
         if !sub.is_empty() {
             left = left.child(div().text_sm().text_color(rgb(MUTED)).truncate().child(sub));
         }
@@ -520,7 +402,7 @@ impl Launcher {
                     .items_center()
                     .gap_3()
                     .child(div().text_sm().text_color(rgb(MUTED)).child(self.account.clone().unwrap_or_default()))
-                    .child(button("refresh", "Refresh", false, true).on_click(cx.listener(|this, _, _, cx| this.load_library(cx))))
+                    .child(button("refresh", "Refresh", false, true).on_click(cx.listener(|this, _, _, cx| this.load_library(true, cx))))
                     .child(button("signout", "Sign out", false, true).on_click(cx.listener(|this, _, _, cx| this.sign_out(cx)))),
             );
         let rows: Vec<_> = self.rows.iter().map(|r| self.render_row(r, cx).into_any_element()).collect();

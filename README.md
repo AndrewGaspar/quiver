@@ -40,33 +40,49 @@ from the Connect install directory, unmodified. They reach Connect through named
 - `tools/proto-extract/extract.py <binary>`: dump the protobuf schemas embedded in Ubisoft binaries.
 - `UBI_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
 
+## Architecture
+
+```
+ ubisoft-linux (GPUI)   ubi (CLI)   scripts / agents
+            \              |              /
+             +---- ubi-api: JSON lines over $XDG_RUNTIME_DIR/ubisoft-linux/ubid.sock
+                            |
+                          ubid  (daemon; started on demand by any client)
+            session · library · installs · launches · settings history · activity log
+                 · Denuvo token broker for every running game's ubi-bridge
+                            |
+                         ubi-core (Ubisoft protocols, installer, saves, launcher)
+```
+
+Front ends hold no state. Every request carries a source label (`gui`, `cli`, or whatever
+`--source`/`UBI_SOURCE` says), so the activity log and each game's settings history show who
+changed what.
+
 ## Usage
 
 ```sh
-# Build the Windows-side bridge (once) and everything else
 rustup target add x86_64-pc-windows-gnu
 cargo build --release -p ubi-bridge --target x86_64-pc-windows-gnu
 cargo build --release
+export PATH=$PWD/target/release:$PATH
 
-./target/release/ubi login                 # email, password, 2FA; session kept in the keyring
-./target/release/ubisoft-linux             # the GPUI app: library, install/update, play
+ubi login                                   # email, password, 2FA (or sign in from the app)
+ubisoft-linux                               # the app
+ubi library                                 # owned games and install state
+ubi install "chronicles china"              # by name or product id; shows progress
+ubi play rabbids                            # runs in its own prefix; syncs cloud saves
+ubi set origins proton=GE-Proton10-34 env.DXVK_HUD=fps -m "test HUD"
+ubi history origins                         # every revision, with who made it
+ubi restore origins 2                       # make revision 2 current again (0 = defaults)
+ubi --source agent set origins wrappers=gamemoderun,mangohud
+ubi activity                                # recent actions across GUI/CLI/agents
+ubi watch                                   # live daemon events (JSON)
+ubi dev …                                   # low-level tools that bypass the daemon
 ```
 
-The CLI does the same things as the app:
-
-```sh
-ubi library [--all]           # owned games
-ubi install <id> <dir>        # download/update (resumable), registers the game
-ubi games                     # installed games
-ubi play <id>                 # run it: own prefix, bridge, cloud-save sync around the session
-ubi status <id>=<dir>...      # update check for existing installs
-ubi saves pull|push ...       # manual cloud-save sync
-```
-
-State lives in `~/.local/share/ubisoft-linux/` (`config.json`, `games.json`, save backups).
-Defaults: games in `~/Games/ubi-library`, prefixes in `~/Games/ubi-prefixes`, newest GE-Proton
-from `~/.local/share/Steam/compatibilitytools.d`. Ubisoft's SDK DLLs are copied from an
-existing Connect install (`sdk_source` in `config.json`).
+Settings keys: `proton`, `language`, `args`, `wrappers`, `env.NAME`, `dll.NAME` (`key=` unsets).
+State lives in `~/.local/share/ubisoft-linux/` (`config.json`, `games.json`,
+`games/<id>/history.jsonl`, `activity.jsonl`, save backups, `ubid.log`).
 
 ## Roadmap
 

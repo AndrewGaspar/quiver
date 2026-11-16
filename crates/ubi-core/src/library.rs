@@ -147,6 +147,8 @@ impl Library {
     }
 }
 
+pub const ART_BASE_URL: &str = "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_0/assets/";
+
 /// A product's configuration: YAML with `root:` (name, executables, registry
 /// keys, ...) and `localizations:` (strings referenced by key from `root`).
 pub struct ProductConfig {
@@ -165,6 +167,14 @@ impl ProductConfig {
     /// Resolve a string that may be a localization key (e.g. `l1`).
     pub fn localize(&self, s: &str) -> String {
         self.yaml["localizations"]["default"][s].as_str().unwrap_or(s).to_owned()
+    }
+
+    /// An art file name from the config root (`thumb_image`, `background_image`, …),
+    /// resolving localization keys. Served from Ubisoft's asset CDN ([`ART_BASE_URL`]).
+    pub fn art(&self, field: &str) -> Option<String> {
+        let v = self.root()[field].as_str()?;
+        let resolved = self.localize(v);
+        resolved.contains('.').then_some(resolved)
     }
 
     pub fn name(&self) -> Option<String> {
