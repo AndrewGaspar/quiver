@@ -168,6 +168,7 @@ impl Quiver {
             confirm: "Restart Steam".into(),
             cli: Some("quiver steam restart".into()),
             action: ConfirmAction::RestartSteam,
+            alt: None,
             selected: 0,
         });
         cx.notify();
