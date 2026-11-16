@@ -6,19 +6,19 @@ const SCREENS = [
       '<b>Hero</b> is the last-played game, showing the profile and Proton build it will launch with, so Play never surprises.',
       '<b>Needs attention</b> collects what is waiting on you: updates, installs, save conflicts, agent approvals. It disappears when empty.',
       '<b>Pinned profiles are tiles of their own.</b> “AC Odyssey · Visual overhaul” launches straight into that mod profile, has its own art, and has its own .desktop entry and Steam shortcut.',
-      '<b>Grid</b> uses Ubisoft’s 240×280 thumb art by default; any game or pinned profile can use SteamGridDB or your own image instead. Badges encode state: update, conflict, queued, mod layers, favorite, and which account owns a game when it isn’t your default one.',
+      '<b>Grid</b> uses Ubisoft’s 240×280 thumb art by default; any game or pinned profile can use your own image instead. Badges encode state: update, conflict, queued, mod layers, favorite, and which account owns a game when it isn’t your default one.',
       '<b>Collections</b>: smart ones (Installed, Favorites, Modded, Pinned profiles), franchise ones derived from <code>sort_string</code> in product configs, and your own. An account filter narrows the merged library to one account.',
       '<b>Keyboard and controller</b>: arrows or D-pad move, Enter or A opens, P or A plays, / filters, Ctrl K or Start opens the command palette.',
     ],
-    src: [['Owned games, names, art', P, 'demux ownership + product config (thumb, background, logo), per account'], ['Install state, size, update available', P, 'manifests, compared with local install records'], ['Play time', P, 'Ubisoft total once wired; local sessions until then'], ['Franchise collections', P, 'sort_string, e.g. “Assassin’s Creed 16”'], ['Custom art', D, 'SteamGridDB, or files you pick'], ['Favorites, collections, pinned profiles', L, ''], ['Agent requests', L, 'quiverd approval queue']] },
+    src: [['Owned games, names, art', P, 'demux ownership + product config (thumb, background, logo), per account'], ['Install state, size, update available', P, 'manifests, compared with local install records'], ['Play time', P, 'Ubisoft total once wired; local sessions until then'], ['Franchise collections', P, 'sort_string, e.g. “Assassin’s Creed 16”'], ['Custom art', L, 'image files you pick'], ['Favorites, collections, pinned profiles', L, ''], ['Agent requests', L, 'quiverd approval queue']] },
   { id: 'game', grp: 'Library', label: 'Game detail', title: 'Game detail', sub: 'List on the left, the game on the right, the way Steam’s library works.', render: () => scrGame(false),
     notes: [
       '<b>List</b>: recent and installed first, then not installed. Pinned profiles sit indented under their game. The right edge carries status (progress, update, conflict, mods).',
       '<b>Play is a split button.</b> The arrow picks a mod profile or one-off options like “launch once with GE-Proton10-26”.',
       '<b>Add to Steam</b> is always one click away, for the game and for each pinned profile. It is also offered when an install finishes.',
       '<b>Add-ons</b> lists everything associated with the game. Ones you don’t own get a “View in Ubisoft Store” link; there is no store inside Quiver.',
-      '<b>Owned by</b> names the account that will launch the game when more than one account owns it.',
-      '<b>Art</b> menu on the hero switches between Ubisoft art, SteamGridDB and your own image.',
+      '<b>Launch account</b>: a game owned by more than one account launches with the default account unless you override it here. The launch account also decides whose cloud saves the game uses.',
+      '<b>Art</b> menu on the hero switches between Ubisoft art and your own image file, per slot (tile, hero, logo).',
     ],
     src: [['Hero art, executable, Denuvo, cloud saves, “Animus Control Panel”, links', P, 'product config'], ['Version, manifest, size', P, 'manifest + local install record'], ['Add-ons owned, add-on names', P, 'ownership associations; names from each add-on’s own product config (not fetched in this dump)'], ['Store links', D, 'Ubisoft web store'], ['Achievements, player stats', F, 'UbiServices; the stat ids are already in the config'], ['Sessions, crash codes', L, 'quiverd'], ['Steam shortcut and .desktop state', L, 'shortcuts.vdf and ~/.local/share/applications']] },
   { id: 'launch', grp: 'Library', label: 'Launch options', title: 'Launch options and history', sub: 'Every change is a revision you can compare, test and restore.', render: scrLaunch,
@@ -35,6 +35,7 @@ const SCREENS = [
     notes: [
       '<b>Profiles are named stacks of layers.</b> Vanilla always exists and runs the base install directly, with no mount.',
       '<b>The profile menu</b> (open here) pins the profile to the library, creates its .desktop entry and adds it to Steam, each with its current status. Exports use the profile’s stable id, so renaming never breaks them.',
+      '<b>Restarting Steam needs your confirmation every time.</b> Steam only shows new shortcuts after a restart, so Quiver asks “Restart Steam now to show the new shortcut?” (shown here). Not now keeps the shortcut staged until Steam restarts on its own. Quiver never restarts Steam silently, as a side effect, or for an agent without your approval.',
       '<b>Deleting a profile</b> asks whether to remove its pin, .desktop entry, Steam shortcut and saves as well.',
       '<b>At launch</b> quiverd mounts base (read-only) + layers + a per-profile writable layer with unprivileged overlayfs in a user namespace, calling mount() directly so the game still runs as your uid. Verified on this machine.',
       '<b>Modded profiles get their own saves.</b> Cloud sync for them is off by default and can be turned on per profile.',
@@ -53,7 +54,7 @@ const SCREENS = [
   { id: 'queue', grp: 'System', label: 'Downloads', title: 'Downloads', sub: 'One active job, a queue you can reorder, and where the space goes.', render: scrDownloads,
     notes: [
       '<b>Every job shows who started it</b>: you in the app, you in the CLI, an agent, or the auto-updater.',
-      '<b>When it finishes</b>: add to Steam and create a .desktop entry are offered at install time, both on by default. Steam lists a new shortcut only after it restarts, so Quiver says so.',
+      '<b>When it finishes</b>: add to Steam and create a .desktop entry are offered at install time, both on by default. Steam lists a new shortcut only after it restarts; if Steam is running, Quiver asks before restarting it and otherwise leaves the shortcut staged.',
       '<b>Phases mirror the installer</b>: manifest, slices, verify, then register, create the prefix and write shortcuts.',
       '<b>Throughput</b> plots network against disk writes. Slice installs are often disk-bound, and this shows it.',
       '<b>Rules</b>: speed limit, pause while playing, an update window, snapshot before updating (automatic on btrfs/xfs).',
@@ -62,8 +63,8 @@ const SCREENS = [
   { id: 'prefs', grp: 'System', label: 'Settings', title: 'Settings', sub: 'Accounts, appearance, Proton builds, storage, and what scripts and agents may do.', render: () => scrSettings(SETSEC),
     notes: [
       '<b>Every setting is a <code>quiver config</code> key.</b> Hovering a row shows the key and a copy-as-CLI button.',
-      '<b>Accounts</b>: several Ubisoft accounts, one merged library. Each account keeps its own single live session, because Ubisoft allows only one per account. Games owned by more than one account launch with the one you pick.',
-      '<b>Appearance</b>: follow Omarchy (default), art sources, and when to show controller button hints.',
+      '<b>Accounts</b>: several Ubisoft accounts, one merged library. Each account keeps its own single live session, because Ubisoft allows only one per account. Games owned by more than one account launch with the default account, with a per-game override that also picks whose cloud saves are used.',
+      '<b>Appearance</b>: follow Omarchy (default), custom art, controller input and the markers on launched games.',
       '<b>Compatibility</b>: Proton builds with usage counts, the newest-GE-Proton policy, and prefix snapshots (automatic on btrfs/xfs, opt-in on ext4).',
       '<b>Automation and CLI</b>: daemon status, agent tokens, the MCP server, and the confirmed approval policy.',
       '<b>About</b> carries the line “a third-party launcher for your Ubisoft library, not affiliated with or endorsed by Ubisoft”, also shown at the foot of this sidebar.',
@@ -80,7 +81,7 @@ const SCREENS = [
     src: [['Palette', L, 'Omarchy theme files'], ['Fallback palette', L, 'built into Quiver']] },
   { id: 'signin', grp: 'System', label: 'Sign in', title: 'Sign in with two-step verification', sub: 'Shown here as one account’s session expiring while the other stays signed in.', render: scrSignin,
     notes: [
-      '<b>Three cases</b>: first run, adding another account, and a session that expired (shown here).',
+      '<b>Three cases</b>: first run, adding another account, and a session that ended (shown here). When another device signs in with the same account, Quiver shows a notification with a “Sign in again” action and never reconnects on its own.',
       '<b>Six digit boxes</b> accept paste and auto-advance. Email code and backup code are alternatives Ubisoft supports.',
       '<b>Login runs in the daemon.</b> The session ticket goes to the system keyring. <code>quiver login [--account NAME]</code> is the same flow in a terminal.',
       '<b>This mock-up has no real inputs</b>: it is a picture of the screen, not a form.',
@@ -99,10 +100,11 @@ const SCREENS = [
       '<b>Spatial focus</b>: D-pad and left stick move focus to the nearest control in that direction. The focus ring is a theme token (<code>focus</code>, 2 px plus a soft halo) and is drawn only on the focused control.',
       '<b>Buttons</b>: A selects or plays, B goes back, X opens play options, Y opens the menu or details, LB/RB switch Library, Downloads and Activity, LT/RT switch tabs, Start opens the command palette.',
       '<b>Hints appear when the last input was a gamepad</b> and disappear on the next mouse or keyboard input.',
-      '<b>The Guide button is never used.</b> hyprpad owns guide chords and keeps Steam Input working; Quiver only sees ordinary buttons. A hyprpad mode for Quiver’s window (<code>forward = true</code>) hands it the pad directly; without one, hyprpad’s desktop bindings (D-pad as arrow keys) still drive the keyboard path.',
+      '<b>The Guide button is never used.</b> hyprpad owns guide chords and keeps Steam Input working. hyprpad forwards the pad to Quiver whenever Quiver has focus, and Quiver reads it as a gamepad.',
+      '<b>Games Quiver launches are marked</b> with the Hyprland tag <code>quiver-game</code> (plus <code>quiver-game:&lt;id&gt;</code>), <code>QUIVER_*</code> environment variables, a systemd scope per session and a socket query, so hyprpad needs one rule for all of them.',
       '<b>No separate big-picture mode.</b> The normal app is controller-friendly, and every game and pinned profile can be added to Steam for Steam’s own big picture.',
     ],
-    src: [['Gamepad input', L, 'evdev / SDL game controller mapping'], ['Desktop chords', D, 'hyprpad (~/code/hyprsc)']] },
+    src: [['Gamepad input', L, 'forwarded by hyprpad while Quiver has focus; read via SDL game controller mapping'], ['Desktop chords', D, 'hyprpad (~/code/hyprsc)'], ['Launched-game markers', L, 'Hyprland tag, environment, systemd scope, quiverd socket']] },
   { id: 'import', grp: 'Flows', label: 'Import', title: 'Import existing installs', sub: 'Adopt games from Lutris, Steam or a folder without re-downloading.', render: scrImport,
     notes: [
       '<b>Scans</b> Lutris game configs and prefixes, Steam compatdata for a Ubisoft Connect shortcut, and folders you point at.',
@@ -191,7 +193,7 @@ function renderProposal() {
     h.id = slug(h.textContent);
     const a = document.createElement('a');
     a.href = '#' + h.id; a.textContent = h.textContent; a.className = h.tagName.toLowerCase();
-    if (h.tagName === 'H2' || /^(Color|Omarchy|Type|Spacing|Components|Pinning|Stable ids|What agents)/.test(h.textContent)) toc.appendChild(a);
+    if (h.tagName === 'H2' || /^(Color|Omarchy|Type|Spacing|Components|Pinning|Stable ids|Marking|What agents)/.test(h.textContent)) toc.appendChild(a);
   });
   const colorH = [...box.querySelectorAll('h3')].find((h) => /^Color/.test(h.textContent));
   if (colorH) {

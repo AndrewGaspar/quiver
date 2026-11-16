@@ -64,7 +64,7 @@ Exports      Steam shortcuts and .desktop entries for games and pinned profiles
 |---|---|
 | Mods | Overlay layers, profiles, conflict view, own saves per modded profile, profile launch overrides |
 | Pinned profiles | Profile tiles in the library and list, their own .desktop entry and Steam shortcut, stable ids, clean-up on delete |
-| Art | SteamGridDB and your own images per game or pinned profile, also copied into Steam’s grid folder for exported shortcuts |
+| Art | Your own image files per game or pinned profile; exported Steam shortcuts use the current art |
 | History | Test launch, “launch once with…”, automatic known-good tags, “restore last known good” |
 | Agents | Scoped tokens, the approval policy, approvals in Activity and as notifications, MCP server (`quiver mcp`) |
 | Progress | Ubisoft play time as the headline, achievements and player stats from UbiServices |
@@ -89,7 +89,7 @@ There is no separate big-picture mode. The normal app works with a controller, a
 |---|---|---|---|
 | Library | Owned games, product ids, add-on associations | Platform | demux ownership, per account, merged; 23 installable games, many with 30 to 66 associated SKUs |
 | Library | Box art, hero, logo | Platform | product config `thumb_image`, `background_image`, `logo_image`, sometimes a localization key such as `l2` |
-| Library | Custom art | Third party | SteamGridDB, or image files you choose |
+| Library | Custom art | Local | image files you choose |
 | Library | Franchise grouping and series order | Platform | product config `sort_string`, for example “Assassin's Creed 16” |
 | Library | Install state, size, update available | Platform | manifests compared with local install records |
 | Library | Pinned profiles, collections, favorites | Local | `quiverd` |
@@ -126,9 +126,9 @@ There is no separate big-picture mode. The normal app works with a controller, a
 ## Accounts
 
 - **One library, several accounts.** Each signed-in account contributes its ownership. A game owned by more than one account appears once, with an “Owned by” line naming every owner.
-- **Launch account.** A game launches with the default account unless you pick another for it (Settings › Accounts › Who owns what, or `quiver config set <game> account=family`). Cloud saves belong to an account, so switching a game’s launch account shows that account’s slots, and Quiver warns before the first launch on the new account.
+- **Launch account (decided).** A game owned by more than one account launches with the default account. Each game can override that (game page › This install › Launch account, Settings › Accounts › Who owns what, or `quiver config set <game> account=family`). The launch account also decides whose cloud saves the game uses: the Saves tab, the pull before launch and the push after exit all follow it. Changing it shows that account’s slots, and Quiver confirms before the first launch on the new account, since that continues a different save history. The override is an ordinary launch-option key, so it is revisioned and can be restored like any other.
 - **One live session per account.** Ubisoft allows one live demux login per account, so `quiverd` holds at most one per account. Accounts whose games are not running stay signed in (ticket in the keyring) and connect when needed.
-- **Signed in elsewhere.** If Ubisoft Connect on another machine logs in with the same account, Ubisoft ends Quiver’s session. Quiver marks the account “signed in elsewhere”, pauses that account’s downloads and sends a notification. It does not reconnect on its own, because two clients reconnecting would keep logging each other out.
+- **Signed in elsewhere (decided).** If another device signs in with the same account, Ubisoft ends Quiver’s session. Quiver marks the account “signed in elsewhere”, pauses that account’s downloads and shows a notification with a **Sign in again** action. It never reconnects on its own, because two clients reconnecting would keep logging each other out.
 - **Badges.** In the grid, a game owned only by a non-default account carries that account’s tag. The library has an account filter.
 - **CLI.** `quiver account list | add | remove | default NAME`, and `--account NAME` on `play`, `install` and `saves`.
 
@@ -145,13 +145,21 @@ There is no separate big-picture mode. The normal app works with a controller, a
 - Every profile gets an id when it is created, for example `p7f3k2q`. It is random, never derived from the name, and never changes. Vanilla has the fixed id `vanilla`.
 - Every export is keyed by `quiver:<product id>/<profile id>`, for example `quiver:5059/p7f3k2q`, or `quiver:5059` for the game itself.
 - **.desktop entry:** `~/.local/share/applications/quiver-5059-p7f3k2q.desktop`, with `Exec=quiver play 5059 --profile-id p7f3k2q`, `Name=AC Odyssey · Visual overhaul`, the game’s `icon_image` as the icon, and `X-Quiver-Id=quiver:5059/p7f3k2q`.
-- **Steam shortcut:** an entry in `shortcuts.vdf` for the most recent Steam user, launching `quiver play … --profile-id …` with no compatibility tool (Quiver runs Proton itself). Quiver writes an explicit `appid` derived from the export key, `crc32("quiver:5059/p7f3k2q") | 0x80000000`, instead of letting it follow the name. Art is copied into Steam’s `grid/` folder under that appid.
+- **Steam shortcut:** an entry in `shortcuts.vdf` for the most recent Steam user, launching `quiver play … --profile-id …` with no compatibility tool (Quiver runs Proton itself). Quiver writes an explicit `appid` derived from the export key, `crc32("quiver:5059/p7f3k2q") | 0x80000000`, instead of letting it follow the name. Steam’s artwork for the shortcut is the current art of the game or profile (custom if set, otherwise Ubisoft’s), copied into Steam’s `grid/` folder under that appid and refreshed when that art changes.
 - **Renames** rewrite the name in both exports. File names, appids and Steam artwork stay the same.
 - Quiver records each export (target, path, appid, time written, content hash). If one is deleted or edited outside Quiver, the profile menu shows it as missing or changed and offers to recreate it.
 
 ### Steam needs a restart
 
-Steam reads `shortcuts.vdf` when it starts and writes it back when it exits. Changes made while Steam is running would be lost. So Quiver writes the file only when Steam is not running. If Steam is running, the change waits and the UI says “Restart Steam to show it”. Restarting Steam from that message closes Steam cleanly, writes the file and starts Steam again.
+Steam reads `shortcuts.vdf` when it starts and writes it back when it exits. Changes made while Steam is running would be lost. So Quiver writes the file only when Steam is not running. If Steam is running, the change is staged and the export shows “Waiting for Steam restart”.
+
+Quiver restarts Steam only when you explicitly confirm it, every time, in a dialog: **“Restart Steam now to show the new shortcut?”** The dialog names the shortcuts that are waiting and offers **Restart Steam** and **Not now**.
+
+- **Restart Steam** closes Steam cleanly, writes the file and starts Steam again.
+- **Not now** keeps the change staged. Quiver writes it the next time Steam is not running, so it appears after Steam next restarts on its own.
+- Quiver never restarts Steam silently, as a side effect of another action (an install finishing, a profile being pinned), or because an agent asked. An agent can request a restart, but it waits for your approval like any other “Ask” action.
+- The dialog is not offered while a game launched from Steam is running.
+- From the CLI, `quiver steam restart` asks for confirmation in the terminal before doing anything.
 
 ### Deleting
 
@@ -170,9 +178,37 @@ Uninstalling a game offers the same clean-up for the game’s exports and those 
 - **Buttons.** A selects or plays. B goes back. X opens play options (profile, launch once with…). Y opens the menu or details. LB and RB switch between Library, Downloads and Activity. LT and RT switch tabs. Start opens the command palette. The right stick scrolls.
 - **Hints.** When the last input came from a gamepad, controls show their button glyph and a hint bar appears at the bottom. The next mouse or keyboard input hides them. Glyphs follow the device (A/B/X/Y letters for Steam Controller and Xbox layouts, shapes for PlayStation pads). Settings › Appearance can force hints on or off.
 - **Never the Guide button.** hyprpad (`~/code/hyprsc`) owns guide-button chords for the desktop and keeps Steam Input working, so Quiver ignores Guide entirely and never grabs input devices exclusively.
-- **Two input paths.** If hyprpad has a mode for Quiver’s window that forwards the pad, Quiver reads it as a gamepad. If not, hyprpad’s desktop bindings already turn the D-pad into arrow keys and A into Enter, and Quiver’s keyboard navigation handles them. Both paths have to work; which one is the default is an open question.
-- **Games launched by Quiver.** hyprpad’s `game` mode recognises Steam games by window class. Wine windows started by Quiver have the executable’s name as their class (for example `acorigins.exe`). Quiver can generate a hyprpad rule listing the executables of installed games, taken from the product configs, so guide chords and forwarding behave the same as for Steam games.
+- **Input path (decided).** hyprpad forwards gamepad input to Quiver whenever Quiver’s window has focus, and Quiver reads the gamepad itself. Quiver does not depend on hyprpad’s desktop bindings (D-pad as arrow keys); keyboard navigation still works for a real keyboard.
+- **Games launched by Quiver** carry markers so hyprpad needs one generic rule for all of them, with no per-game or per-executable rules. See [Marking launched games](#marking-launched-games).
 - **No big-picture mode.** The app itself is controller-friendly, and for a TV session games and profiles go into Steam.
+
+### Marking launched games
+
+Wine windows have the executable’s name as their class (for example `acorigins.exe`), which says nothing about who launched them. Quiver marks every game it launches in four layers, from the primary hook down to fallbacks:
+
+1. **Hyprland window tag (primary).** quiverd listens on Hyprland’s event socket. When a window opens, it looks up the window’s pid and checks whether that pid belongs to a running Quiver session (through the session’s cgroup, layer 3). For the session’s windows it runs `hyprctl dispatch tagwindow +quiver-game address:<addr>` and `tagwindow +quiver-game:<product_id> address:<addr>`, or sends the same dispatch over the IPC socket. Every window the game opens later (launchers, the main window, dialogs) is tagged the same way. hyprpad targets `tag:quiver-game`.
+2. **Environment on the game’s process tree:** `QUIVER=1`, `QUIVER_GAME_ID=<product id>`, `QUIVER_PROFILE=<profile id>`, `QUIVER_SESSION=<uuid>`. Proton and Wine pass the environment on to every child, so these survive into the game’s processes and can be read from `/proc/<pid>/environ` by anything running as you.
+3. **A systemd user scope per session,** `app-quiver-game-<product id>-<session>.scope`, created through systemd’s D-Bus API when the game starts. It is the cgroup fallback for anything that can only see pids, it lets Stop game end the whole process tree at once, and it is how quiverd itself recognises the session’s windows in layer 1.
+4. **The daemon socket** answers “which game is this?” directly. `sessions.list` returns each running session with its product id, profile, account, pids and Hyprland window addresses, and `sessions.watch` streams window-mapped and session-ended events. hyprpad can query it instead of scraping `/proc` or cgroups. `quiver sessions --json` prints the same thing.
+
+Example hyprpad modes. This needs one small hyprpad addition: exposing the focused window’s Hyprland tags to rules (Hyprland already reports them in `activewindow`).
+
+```lua
+-- Quiver's own window: forward the pad so Quiver reads it as a gamepad.
+h.mode("quiver", { forward = true }).when(function(ctx)
+  return ctx.focus.class == "quiver"
+end)
+
+-- Any game Quiver launched, whatever its executable: one rule.
+h.mode("game", { forward = true }).when(function(ctx)
+  local c = ctx.focus.class:lower()
+  return ctx.focus:has_tag("quiver-game")
+      or c:match("^steam_app_") ~= nil
+      or c:match("^gamescope") ~= nil
+end)
+```
+
+A per-game hyprpad mode, such as a button remap for one title, can match `quiver-game:3539` instead of an executable name.
 
 ## Design system for GPUI
 
@@ -293,7 +329,7 @@ Soft fills are the same hue at 12 to 16% alpha. Text on the accent is chosen by 
   - `splash_image` (700×330): optional wide cards later.
   - `icon_image` (.ico): desktop entries.
   - Values can be localization keys (`l2`, `THUMBIMAGE`), resolved through `localizations.default`.
-- **Custom:** per game or pinned profile, each slot (tile, hero, logo) can come from SteamGridDB (with your API key) or from an image file. A reset puts the Ubisoft art back. Exported Steam shortcuts get the same art.
+- **Custom:** per game or pinned profile, each slot (tile, hero, logo) can be replaced with an image file you choose. A reset puts the Ubisoft art back. There is no online art source, so no API key to manage. Exported Steam shortcuts use whatever art the game or profile currently has.
 - **Cache:** `~/.cache/quiver/art`, with the derived ambient image and dominant color.
 
 ## Settings history and restore
@@ -391,7 +427,7 @@ struct Profile {
     saves: SaveNamespace,         // Shared (Vanilla only) | Own
     cloud_sync: bool,             // false by default when saves = Own
     pinned: bool,
-    art: ArtOverrides,            // per-slot: Ubisoft | SteamGridDb(id) | File(path)
+    art: ArtOverrides,            // per-slot: Ubisoft | File(path)
     upper_dir: PathBuf,
 }
 
@@ -425,12 +461,13 @@ Rules for every command:
 | Prefix snapshots | `quiver prefix snapshot origins`, `quiver prefix snapshots origins`, `quiver prefix restore origins SNAP` |
 | Mods | `quiver mods list odyssey`, `quiver mods add odyssey ./reshade.zip --name ReShade`, `quiver mods enable/disable/move/remove …`, `quiver mods conflicts odyssey --profile visual-overhaul` |
 | Mod profiles | `quiver mods profile list/create/rename/duplicate/delete odyssey …`, `quiver mods profile pin odyssey visual-overhaul` |
-| Steam and .desktop | `quiver export steam odyssey[/visual-overhaul]`, `quiver export desktop …`, `quiver export list`, `quiver export remove …` |
-| Art | `quiver art set odyssey/visual-overhaul tile --steamgriddb 4512` or `--file ~/Pictures/odyssey.png`, `quiver art reset odyssey` |
+| Steam and .desktop | `quiver export steam odyssey[/visual-overhaul]`, `quiver export desktop …`, `quiver export list`, `quiver export remove …`, `quiver steam restart` (always asks) |
+| Art | `quiver art set odyssey/visual-overhaul tile --file ~/Pictures/odyssey.png`, `quiver art reset odyssey` |
 | Saves | `quiver saves list origins`, `quiver saves sync origins`, `quiver saves pull/push`, `quiver saves backup origins --name "before Siwa"`, `quiver saves restore origins BACKUP` |
 | Proton builds | `quiver runtime list`, `quiver runtime install GE-Proton10-26`, `quiver runtime remove …` |
 | Activity, undo, approvals | `quiver activity [--actor agent] [--game origins] [--since 1d]`, `quiver undo EVENT`, `quiver approve EVENT`, `quiver deny EVENT` |
-| Accounts | `quiver login [--account NAME]`, `quiver logout NAME`, `quiver account list \| add \| remove \| default NAME` |
+| Accounts | `quiver login [--account NAME]`, `quiver logout NAME`, `quiver account list \| add \| remove \| default NAME`, `quiver config set <game> account=NAME` (launch-account override) |
+| Running games | `quiver sessions [--json] [--watch]` (product, profile, account, pids, window addresses) |
 | Tokens, MCP | `quiver token create --name claude-code --scopes …`, `quiver token revoke …`, `quiver mcp` |
 | Import | `quiver import scan [--from lutris \| steam \| DIR]`, `quiver import apply PLAN` |
 | Theme | `quiver theme show` (prints the resolved tokens and their contrast) |
@@ -458,6 +495,7 @@ Confirmed policy, editable in Settings › Automation and CLI:
 | Install and update | Allow | Allow |
 | Restore saves or settings | Allow | Ask |
 | Uninstall, delete prefixes, profiles or saves | Allow | Ask |
+| Restart Steam | Ask | Ask |
 | Sign in, sign out, add or remove accounts | Ask | Deny |
 
 The command palette, `quiver --help` and the MCP tool list all come from one command registry in the daemon, so they cannot drift apart.
@@ -470,7 +508,7 @@ The command palette, `quiver --help` and the MCP tool list all come from one com
 - **Automatic known-good tags** and a “restore last known good” button.
 - **Prefix snapshots** before Proton changes and updates.
 - **Export records with drift detection,** so a deleted .desktop file or Steam shortcut shows up as missing instead of silently breaking.
-- **A generated hyprpad rule** for the games Quiver launches.
+- **Launched-game markers** (window tag, environment, systemd scope, socket query), so hyprpad and other tools can recognise every Quiver game with one rule.
 - **`quiver theme show`** to debug a palette’s contrast from the terminal.
 - **Copy as CLI** on settings, the palette and every Activity entry.
 - **Import that checks against manifests,** so adopted installs are verified, not trusted.
@@ -488,21 +526,20 @@ Each decision is written into the sections above; this list is the record.
 - **Modded saves:** own saves per modded profile, cloud sync off by default, per-profile toggle.
 - **Store:** add-ons you don't own are listed with a “View in Ubisoft Store” link.
 - **Steam shortcuts:** offered at install time and from the game page, for games and pinned profiles. Steam needs a restart to show them. No separate big-picture mode.
+- **Restarting Steam:** only after you explicitly confirm it, each time, in the “Restart Steam now to show the new shortcut?” dialog. Never silently, as a side effect, or because an agent asked (agents: Ask). If you decline, the change stays staged until Steam restarts on its own. See [Steam needs a restart](#steam-needs-a-restart).
 - **Controller-friendly:** everywhere, without the Guide button, alongside hyprpad. See [Controller and hyprpad](#controller-and-hyprpad).
-- **Custom art:** SteamGridDB and your own images per game or profile; Ubisoft art stays the default.
+- **Custom art:** your own image files per game or profile; Ubisoft art stays the default. SteamGridDB is dropped (no API key to manage). Exported Steam shortcuts use the current art.
+- **Signed in elsewhere:** a notification with a “Sign in again” action; Quiver never reconnects automatically.
 - **Icons:** unchanged from the original proposal (box-art thumbnails in lists; the game's
   `icon_image` for desktop entries).
 - **Multiple Ubisoft accounts:** supported now. See [Accounts](#accounts).
+- **Launch account:** a game owned by more than one account launches with the default account, with a per-game override. The launch account also decides whose cloud saves are used.
+- **Controller input:** hyprpad forwards the gamepad to Quiver whenever Quiver has focus, and Quiver reads it directly. Quiver marks every game it launches (Hyprland tag `quiver-game`, `QUIVER_*` environment, a systemd scope per session, a socket query) so hyprpad needs one generic rule. This replaces generating per-executable hyprpad rules. See [Marking launched games](#marking-launched-games).
 - **Theme:** inherit Omarchy's theme and restyle on `theme.generation`. See [Omarchy theme](#omarchy-theme).
 - **Prefix snapshots:** automatic on btrfs/xfs, opt-in elsewhere.
 - **Play time:** Ubisoft's total is the headline once wired; local sessions are the detail.
 
 ## Open questions
 
-1. **Restarting Steam.** Shortcuts appear only after Steam restarts. May Quiver restart Steam itself when no game is running, or only tell you?
-2. **Controller input path.** Should hyprpad forward the pad to Quiver’s window (Quiver reads a gamepad), or should Quiver rely on hyprpad’s desktop bindings (arrow keys, Enter)? And should Quiver generate a hyprpad `game` rule from the executables of installed games?
-3. **Which account launches a game both accounts own.** Always the default account, or the account whose cloud saves are newest? Saves are per account, so this decides which progress you continue.
-4. **Signed in elsewhere.** Quiver will not reconnect an account that was logged in from another machine, to avoid two clients logging each other out. Is a notification and a manual “Sign in again” enough?
-5. **SteamGridDB.** It needs a personal API key. Is asking for one in Settings › Appearance acceptable, and should custom art also be pushed into Steam for exported shortcuts by default?
-6. **Store links.** Product configs have no store URL, so the first version opens a store search for the add-on’s name. Is that good enough until a better source turns up?
-7. **Steam user.** On a machine with several Steam users, Quiver writes shortcuts for the most recent one. Should it ask instead?
+1. **Store links.** Product configs have no store URL, so the first version opens a store search for the add-on’s name. Is that good enough until a better source turns up?
+2. **Steam user.** On a machine with several Steam users, Quiver writes shortcuts for the most recent one. Should it ask instead?

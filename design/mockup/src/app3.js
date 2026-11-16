@@ -86,7 +86,7 @@ function scrDownloads() {
               <span class="row" style="gap:8px"><span class="check on">${ic('check')}</span>Add to Steam</span>
               <span class="row" style="gap:8px"><span class="check on">${ic('check')}</span>Create .desktop entry</span>
               <span class="row" style="gap:8px"><span class="check">${''}</span>Start the game</span>
-              <span class="grow"></span><span class="muted" style="font-size:11.5px">Steam lists new shortcuts after it restarts</span>
+              <span class="grow"></span><span class="muted" style="font-size:11.5px">Steam is running: Quiver will ask “Restart Steam now?” when this finishes</span>
             </div>
           </div>
         </div>
@@ -132,7 +132,7 @@ function scrSettings(section = 'Compatibility') {
         <table class="tbl"><tbody>${[['gamescope', '3.16.4', '/usr/bin/gamescope', 1], ['MangoHud', '0.8.1', '/usr/bin/mangohud', 1], ['GameMode', '1.8.2', '/usr/bin/gamemoderun', 1], ['NTSync', 'kernel 7.2', '/dev/ntsync', 1], ['fuse-overlayfs', 'not installed', 'kernel overlayfs in user namespace is used instead', 0]].map(([n, v, p, ok]) => `<tr><td style="width:180px"><span class="row" style="gap:8px"><span class="dot ${ok ? '' : 'off'}"></span><b style="font-weight:600">${n}</b></span></td><td class="dim num" style="width:140px">${v}</td><td class="mono muted">${p}</td></tr>`).join('')}</tbody></table></div>
     </div>`;
   } else if (section === 'Automation and CLI') {
-    const pol = [['Read library and status', 'Allow', 'Allow'], ['Change launch options, mod profiles, exports', 'Allow', 'Allow'], ['Launch and stop games', 'Allow', 'Allow'], ['Install and update', 'Allow', 'Allow'], ['Restore saves or settings', 'Allow', 'Ask'], ['Uninstall, delete prefixes, profiles or saves', 'Allow', 'Ask'], ['Sign in, sign out, add or remove accounts', 'Ask', 'Deny']];
+    const pol = [['Read library and status', 'Allow', 'Allow'], ['Change launch options, mod profiles, exports', 'Allow', 'Allow'], ['Launch and stop games', 'Allow', 'Allow'], ['Install and update', 'Allow', 'Allow'], ['Restore saves or settings', 'Allow', 'Ask'], ['Uninstall, delete prefixes, profiles or saves', 'Allow', 'Ask'], ['Restart Steam', 'Ask', 'Ask'], ['Sign in, sign out, add or remove accounts', 'Ask', 'Deny']];
     const sel = (v) => `<span class="field" style="height:26px;width:96px;color:${v === 'Ask' ? 'var(--warn)' : v === 'Deny' ? 'var(--bad)' : 'var(--tx-1)'}">${v}<span class="grow"></span>${ic('chevron-down')}</span>`;
     body = `<div class="col" style="gap:18px;max-width:900px">
       <div><div style="font-size:20px;font-weight:700">Automation and CLI</div><div class="muted">The app, the <span class="mono">quiver</span> command and agents all talk to the same background service.</div></div>
@@ -161,9 +161,9 @@ function scrSettings(section = 'Compatibility') {
       ${acct('AG', 'linear-gradient(135deg,#3b4a7a,#6a5aa8)', 'ajg', 'a•••@g•••.com', '23 games', 'Live session in quiverd · ticket refreshes in 41 min', '', '<span class="pill acc">Default</span>')}
       ${acct('F', 'linear-gradient(135deg,#2f6b5e,#4a9a83)', 'Family', 'f•••@g•••.com', '6 games, 2 only on this account', 'Signed in · connects when one of its games starts', 'off', '')}
       <div class="row" style="gap:10px;padding:12px 14px;border-radius:10px;background:var(--warn-soft);font-size:12.5px;align-items:flex-start">${ic('triangle-alert', 'sm')}<span style="color:var(--warn)">Ubisoft allows one live session per account. Signing in to Ubisoft Connect elsewhere with the same account ends Quiver's session for it, and its games won't start here until you sign in again.</span></div>
-      <div class="card"><div class="card-h"><h4>Who owns what</h4><span class="muted" style="font-size:12px">Showing the 3 games that involve Family</span></div>
-        <table class="tbl"><thead><tr><th>Game</th><th>Owned by</th><th>Launch with</th></tr></thead><tbody>
-          ${[[3539, 'ajg, Family', 'ajg (default)'], [5408, 'Family', 'Family'], [5277, 'Family', 'Family']].map(([id, o, l]) => `<tr><td><span class="row" style="gap:10px"><img src="${A(id, 'thumb')}" alt="" style="width:22px;height:26px;border-radius:4px;object-fit:cover">${nm(id)}</span></td><td class="dim">${o}</td><td><span class="field" style="height:26px;width:150px">${l}<span class="grow"></span>${ic('chevron-down')}</span></td></tr>`).join('')}
+      <div class="card"><div class="card-h"><h4>Who owns what</h4><span class="muted" style="font-size:12px">Games owned by both launch with the default account (ajg) unless overridden</span></div>
+        <table class="tbl"><thead><tr><th>Game</th><th>Owned by</th><th>Launch account</th><th>Cloud saves from</th></tr></thead><tbody>
+          ${[[3539, 'ajg, Family', 'Default (ajg)', 'ajg', 0, 1], [5059, 'ajg, Family', 'Family', 'Family', 1, 1], [5408, 'Family', 'Family', 'Family', 0, 0], [5277, 'Family', 'Family', 'Family', 0, 0]].map(([id, o, l, sv, ov, both]) => `<tr><td><span class="row" style="gap:10px"><img src="${A(id, 'thumb')}" alt="" style="width:22px;height:26px;border-radius:4px;object-fit:cover">${nm(id)}</span></td><td class="dim">${o}</td><td><span class="row" style="gap:8px">${both ? `<span class="field" style="height:26px;width:140px">${l}<span class="grow"></span>${ic('chevron-down')}</span>` : `<span class="muted">${l} · only owner</span>`}${ov ? '<span class="pill warn">Override</span>' : ''}</span></td><td class="dim">${ic('cloud', 'xs')} ${sv}</td></tr>`).join('')}
         </tbody></table></div>
     </div>`;
   } else if (section === 'Appearance') {
@@ -176,12 +176,15 @@ function scrSettings(section = 'Compatibility') {
         frow('Density', `<div class="seg"><span class="on">Comfortable</span><span>Compact</span></div>`),
       ].join(''))}
       ${section_('Art', 'Ubisoft art is the default', [
-        frow('Sources', `<span class="check on">${ic('check')}</span>Ubisoft<span class="check on" style="margin-left:12px">${ic('check')}</span>SteamGridDB<span class="pill ok">API key set</span><span class="check on" style="margin-left:12px">${ic('check')}</span>My own images`),
-        frow('Custom art', `<span class="dim">2 games, 1 pinned profile</span><span class="btn sm ghost">Reset all to Ubisoft</span>`),
+        frow('Default', `<span class="dim">Ubisoft art from each game’s product config</span>`),
+        frow('Custom art', `<span class="dim">Your own images on 2 games and 1 pinned profile</span><span class="btn sm ghost">Reset all to Ubisoft</span>`, { help: 'Set per game or profile from its Art menu' }),
+        frow('Steam shortcuts', `<span class="dim">Use each game’s or profile’s current art</span>`),
       ].join(''))}
       ${section_('Controller', '', [
         frow('Button hints', `<div class="seg"><span class="on">When I use a gamepad</span><span>Always</span><span>Never</span></div>`),
-        frow('Guide button', `<span class="dim">Not used by Quiver. hyprpad owns guide chords.</span><span class="pill ok">hyprpad detected</span>`),
+        frow('Gamepad input', `<span class="dim">Read directly; hyprpad forwards the pad while Quiver has focus</span><span class="pill ok">hyprpad detected · forwarding</span>`),
+        frow('Mark launched games', `<span class="toggle on"></span>${['tag:quiver-game', 'QUIVER_* env', 'systemd scope', 'sessions socket'].map((t) => `<span class="chip mono" style="height:22px;font-family:var(--f-mono);font-size:11px">${t}</span>`).join('')}`, { help: 'One generic hyprpad rule covers every game Quiver starts' }),
+        frow('Guide button', `<span class="dim">Not used by Quiver. hyprpad owns guide chords.</span>`),
       ].join(''))}
     </div>`;
   } else {
@@ -369,7 +372,7 @@ function scrNowPlaying() {
         <div class="row" style="gap:10px;align-items:baseline"><span style="font-weight:700;font-size:16px">Assassin's Creed Origins</span><span class="grow"></span><span class="num" style="font-size:20px;font-weight:700;font-family:var(--f-mono)">1:12:08</span></div>
         <div class="row" style="gap:6px;flex-wrap:wrap"><span class="chip" style="height:22px">${ic('layers', 'xs')}Vanilla</span><span class="chip" style="height:22px">${ic('cpu', 'xs')}GE-Proton10-25 · r14</span><span class="chip" style="height:22px">${ic('monitor', 'xs')}gamescope HDR</span></div>
         <div class="col" style="gap:6px;font-size:12px">
-          ${[['Ubisoft bridge', 'Connected · 3 pipes', 'ok'], ['Denuvo activation', 'Token valid', 'ok'], ['Ticket refresh', 'Next in 41 min', 'ok'], ['Cloud saves', 'Upload when the game exits', 'acc']].map(([k, v, s]) => `<div class="row" style="gap:8px"><span class="dot ${s === 'ok' ? '' : 'acc'}"></span><span class="dim" style="width:130px">${k}</span><span class="muted">${v}</span></div>`).join('')}
+          ${[['Ubisoft bridge', 'Connected · 3 pipes', 'ok'], ['Denuvo activation', 'Token valid', 'ok'], ['Ticket refresh', 'Next in 41 min', 'ok'], ['Marked for hyprpad', 'tag quiver-game:3539 · scope …-3539-7c1e', 'ok'], ['Cloud saves', 'Upload when the game exits', 'acc']].map(([k, v, s]) => `<div class="row" style="gap:8px"><span class="dot ${s === 'ok' ? '' : 'acc'}"></span><span class="dim" style="width:130px">${k}</span><span class="muted">${v}</span></div>`).join('')}
         </div>
         <div class="row" style="gap:8px"><span class="btn danger" style="flex:1">${ic('square', 'sm')}Stop game</span><span class="btn" style="flex:1">${ic('scroll-text', 'sm')}Live log</span><span class="iconbtn bd">${ic('ellipsis', 'sm')}</span></div>
       </div>

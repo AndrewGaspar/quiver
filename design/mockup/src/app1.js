@@ -269,7 +269,8 @@ function scrGame(pad = false) {
             <dt>Cloud saves</dt><dd>On · pull before, push after</dd>
             <dt>Game settings</dt><dd>Animus Control Panel <span class="muted mono">ACP.ini</span></dd>
             <dt>Add-ons</dt><dd>4 of 43 owned · all installed</dd>
-            <dt>Owned by</dt><dd>ajg <span class="muted">· also owned by Family</span></dd>
+            <dt>Owned by</dt><dd>ajg, Family</dd>
+            <dt>Launch account</dt><dd style="overflow:visible"><span class="row" style="gap:8px"><span class="field" style="height:26px;width:130px">Default (ajg)<span class="grow"></span>${ic('chevron-down')}</span><span class="muted" style="font-size:11.5px">${ic('cloud', 'xs')} saves from ajg</span></span></dd>
             <dt>Steam</dt><dd><span style="color:var(--ok)">Shortcut added</span> <span class="muted">· Nov 4</span></dd>
             <dt>Desktop entry</dt><dd>Created <span class="muted mono">quiver-3539.desktop</span></dd>
           </dl></div></div>
@@ -296,7 +297,7 @@ function scrGame(pad = false) {
       <span class="btn" style="height:32px">${ic('gamepad-2', 'sm')}Add to Steam</span><span class="iconbtn bd">${ic('folder-open')}</span><span class="iconbtn bd">${ic('sliders-horizontal')}</span>${pad ? `<span class="btn" style="height:32px;padding:0 8px">${gp('Y')}${ic('ellipsis')}</span>` : `<span class="iconbtn bd">${ic('ellipsis')}</span>`}
     </div>
     <div class="stats">
-      ${[['Last played', 'Yesterday'], ['Play time', '86 h'], ['Achievements', '41 / 62'], ['Installed', '61.8 GB'], ['Version', '1.6.0'], ['Owned by', 'ajg']].map(([k, v]) => `<div class="stat"><span class="cap">${k}</span><b>${v}</b></div>`).join('')}
+      ${[['Last played', 'Yesterday'], ['Play time', '86 h'], ['Achievements', '41 / 62'], ['Installed', '61.8 GB'], ['Version', '1.6.0'], ['Account', 'ajg · default']].map(([k, v]) => `<div class="stat"><span class="cap">${k}</span><b>${v}</b></div>`).join('')}
     </div>
     ${tabs('Overview', id)}`;
   const hint = pad ? `<div class="hintbar"><span class="h">${gp('A')}Play</span><span class="h">${gp('X')}Play options</span><span class="h">${gp('Y')}Menu</span><span class="h">${gp('B')}Back to library</span><span class="h">${gp('LB')}${gp('RB')}Library · Downloads · Activity</span><span class="h">${gp('LT')}${gp('RT')}Tabs</span><span class="grow"></span><span class="h">${gp('≡')}Commands</span></div>` : '';

@@ -107,12 +107,21 @@ function scrMods() {
       <div class="col grow" style="gap:2px"><div class="row" style="gap:6px;font-weight:650">${n}${n === 'Vanilla' ? '<span class="pill mut">Default</span>' : ''}</div><div class="muted" style="font-size:11.5px">${s}</div></div>
       ${on ? '' : `<span class="row muted" style="gap:4px;font-size:11px">${ic(sv === 'Cloud saves' ? 'cloud' : 'hard-drive', 'xs')}${sv}</span>`}${on ? `<span class="muted">${ic('pin', 'xs')}</span><span class="iconbtn" style="width:26px;height:26px;background:var(--ink-4);color:var(--tx-1)">${ic('ellipsis', 'sm')}</span>` : ''}</div>`).join('');
   const st = (cls, t) => `<span class="pill ${cls}">${t}</span>`;
+  const steamDlg = `<div class="menu" style="left:0;top:120px;width:430px;padding:18px 20px;z-index:7;box-shadow:0 30px 80px rgba(0,0,0,.6)">
+      <div class="row" style="gap:12px;align-items:flex-start">
+        <div style="width:36px;height:36px;border-radius:10px;background:var(--warn-soft);color:var(--warn);display:grid;place-items:center;flex:none">${ic('refresh-cw', 'sm')}</div>
+        <div class="col" style="gap:6px"><div style="font-weight:700;font-size:14.5px">Restart Steam now to show the new shortcut?</div>
+          <div class="dim" style="font-size:12.5px">Steam is running. Quiver will close it cleanly, add <b style="color:var(--tx-1)">AC Odyssey · Visual overhaul</b>, and start Steam again. No game is running in Steam.</div>
+          <div class="muted" style="font-size:11.5px">Not now keeps the shortcut staged. It appears the next time Steam restarts.</div></div>
+      </div>
+      <div class="row" style="gap:8px;justify-content:flex-end;margin-top:16px"><span class="btn">Not now</span><span class="btn pri">Restart Steam</span></div>
+    </div>`;
   const menu = `<div class="menu" style="left:calc(33.3% + 120px);top:62px">
       <div class="row" style="padding:6px 10px 8px;gap:8px"><span style="font-weight:650">Visual overhaul</span><span class="mono muted" style="font-size:11px">id p7f3k2q</span></div>
       <div class="sep"></div>
       <div class="mi">${ic('pin', 'sm')}<span class="grow">Pin to Library</span>${st('ok', 'Pinned')}</div>
       <div class="mi">${ic('app-window', 'sm')}<span class="grow col" style="gap:1px"><span>Create .desktop entry</span><span class="mono muted" style="font-size:10.5px">quiver-5059-p7f3k2q.desktop</span></span>${st('ok', 'Created')}</div>
-      <div class="mi on">${ic('gamepad-2', 'sm')}<span class="grow col" style="gap:1px"><span>Add to Steam</span><span class="muted" style="font-size:11px">Steam shows it after a restart</span></span>${st('warn', 'Restart Steam')}</div>
+      <div class="mi on">${ic('gamepad-2', 'sm')}<span class="grow col" style="gap:1px"><span>Add to Steam</span><span class="muted" style="font-size:11px">Staged · shows after Steam restarts</span></span>${st('warn', 'Waiting for Steam')}</div>
       <div class="sep"></div>
       <div class="mi">${ic('image', 'sm')}<span class="grow">Change art…</span><span class="muted" style="font-size:11px">custom</span></div>
       <div class="mi">${ic('pencil', 'sm')}<span class="grow">Rename…</span></div>
@@ -167,7 +176,7 @@ function scrMods() {
       </div></div>`;
 
   const inner = `<div class="body scroll col" style="gap:18px;padding-top:18px">
-    <div class="row" style="gap:12px;position:relative;z-index:5">${prof}${menu}<div style="width:120px;align-self:stretch;border-radius:12px;border:1px dashed var(--line-2);display:grid;place-items:center;color:var(--tx-3)" class="col"><span class="row" style="gap:6px">${ic('plus', 'sm')}New profile</span></div></div>
+    <div class="row" style="gap:12px;position:relative;z-index:5">${prof}${menu}${steamDlg}<div style="width:120px;align-self:stretch;border-radius:12px;border:1px dashed var(--line-2);display:grid;place-items:center;color:var(--tx-3)" class="col"><span class="row" style="gap:6px">${ic('plus', 'sm')}New profile</span></div></div>
     <div style="display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:20px">
       ${stack}
       <div class="col" style="gap:14px">${insp}
