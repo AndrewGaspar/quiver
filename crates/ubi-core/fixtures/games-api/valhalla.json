@@ -1,0 +1,97 @@
+{
+ "games": [
+  {
+   "spaceId": "c4f15d67-1300-4e9e-bbe3-12e11a148e81",
+   "installmentSpaceId": "1743f45b-18a6-4f49-b0a8-b4bb98c9f330",
+   "displayName": "Assassin's Creed® Valhalla",
+   "displayDescription": "Become a legendary Viking on a quest for glory. Raid your enemies, grow your settlement, and build your political power.",
+   "platforms": [
+    {
+     "type": "XboxScarlett",
+     "displayName": "Xbox Series X|S",
+     "applicationId": "02d94411-c6e5-4f4b-b25a-a0b49f3707db"
+    },
+    {
+     "type": "PS5",
+     "displayName": "PS5®",
+     "applicationId": "b16c3382-0d5e-4cdc-8f71-a3599fc54264"
+    },
+    {
+     "type": "DURANGO",
+     "displayName": "Xbox One",
+     "applicationId": "17bdcbb7-dcba-4f89-b3b3-a277e8d1c35e"
+    },
+    {
+     "type": "ORBIS",
+     "displayName": "PS4®",
+     "applicationId": "2dee0217-d33f-4ffc-99b5-d2947990277d"
+    },
+    {
+     "type": "PC",
+     "displayName": "PC",
+     "applicationId": "9da14e51-9433-421b-a396-2ac916649564"
+    },
+    {
+     "type": "AmazonStreaming",
+     "displayName": "Luna",
+     "applicationId": "9a385af4-46e8-446f-9199-59475214cc74"
+    }
+   ],
+   "siblingGames": [],
+   "installmentDefault": true,
+   "ageRating": {
+    "system": "ESRB",
+    "imageUrl": null,
+    "descriptors": [
+     {
+      "imageUrl": null,
+      "displayName": "Intense Violence"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Sexual Themes"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Strong Language"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Blood and Gore"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Use of Alcohol"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Partial Nudity"
+     },
+     {
+      "imageUrl": null,
+      "displayName": "Use of Drugs"
+     }
+    ]
+   },
+   "releaseAt": "2020-11-10T00:00:00Z",
+   "releaseStatusDisplayName": null,
+   "imageUrls": {
+    "lowThumbnail": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/lowThumbnailAssetId.png",
+    "highThumbnail": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/highThumbnailAssetId.jpg",
+    "background": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/backgroundAssetIdv2.jpg",
+    "lowBoxArt": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/lowBoxArtAssetId.jpg",
+    "highBoxArt": null,
+    "gameLogoFlat": null,
+    "gameLogoColor": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/LogoColor.png",
+    "gameAvatar": "https://ubiservices.cdn.ubi.com/c4f15d67-1300-4e9e-bbe3-12e11a148e81/spaceCardAsset/gameIconAssetId.png"
+   },
+   "linkUrls": {
+    "facebook": "ttps://www.facebook.com/assassinscreed/",
+    "twitter": "https://twitter.com/assassinscreed/",
+    "instagram": "https://www.instagram.com/assassinscreed_us/",
+    "reddit": "https://www.reddit.com/r/assassinscreed/",
+    "website": "https://www.ubisoft.com/en-gb/game/assassins-creed/valhalla"
+   }
+  }
+ ]
+}

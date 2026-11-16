@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod art;
 pub mod client;
 pub mod downloads;
 pub mod exports;
@@ -72,13 +73,18 @@ pub struct GameSettings {
     /// that doesn't exist any more (deleted) launches vanilla, with a warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Whose art the app shows for the game: `steam` puts Steam's art (for games with a
+    /// Steam install) ahead of Ubisoft's; `None`/`ubisoft`: Ubisoft's first (see [`art`]).
+    /// Display only; launches ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
 }
 
 impl GameSettings {
     /// Apply one edit. Keys: `proton`, `language`, `account` (a user id; the daemon
     /// resolves names), `profile` (the default mod profile's id; `vanilla` or empty: none;
-    /// the daemon resolves names), `args` (whitespace-separated), `wrappers`
-    /// (comma/space-separated), `env.NAME`, `dll.NAME`.
+    /// the daemon resolves names), `art` (`steam` or `ubisoft`), `args`
+    /// (whitespace-separated), `wrappers` (comma/space-separated), `env.NAME`, `dll.NAME`.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
         let (key, value) = match op {
             SettingOp::Set { key, value } => (key.as_str(), Some(value.as_str())),
@@ -90,6 +96,14 @@ impl GameSettings {
             "language" => self.language = opt(value),
             "account" => self.account = opt(value),
             "profile" => self.profile = opt(value).filter(|v| !v.trim().eq_ignore_ascii_case(mods::VANILLA)),
+            "art" => {
+                self.art = match opt(value).map(|v| v.trim().to_ascii_lowercase()) {
+                    None => None,
+                    Some(v) if v == "ubisoft" => None,
+                    Some(v) if v == "steam" => Some(v),
+                    Some(v) => return Err(format!("art: expected steam or ubisoft, got '{v}'")),
+                }
+            }
             "args" => self.args = value.map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             "wrappers" => {
                 self.wrappers = value
@@ -102,7 +116,7 @@ impl GameSettings {
                 } else if let Some(n) = k.strip_prefix("dll.") {
                     (&mut self.dll_overrides, n)
                 } else {
-                    return Err(format!("unknown setting '{k}' (proton, language, account, profile, args, wrappers, env.NAME, dll.NAME)"));
+                    return Err(format!("unknown setting '{k}' (proton, language, account, profile, art, args, wrappers, env.NAME, dll.NAME)"));
                 };
                 if name.is_empty() {
                     return Err(format!("missing name in '{k}'"));
@@ -177,7 +191,8 @@ pub struct LibraryEntry {
     pub installed: Option<Game>,
     pub update_available: bool,
     pub running: bool,
-    /// Art file names from the product config (served by Ubisoft's asset CDN).
+    /// Ubisoft's art: file names from the product config (served by Ubisoft's asset CDN)
+    /// and URLs from the games API. Steam's art is in `steam` (see [`art::candidates`]).
     #[serde(default)]
     pub art: Art,
     /// User ids of the signed-in accounts that own it, default account first. Empty for a
@@ -193,6 +208,9 @@ pub struct LibraryEntry {
     /// Quiver instead of Ubisoft Connect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam: Option<exports::SteamGame>,
+    /// The game's UbiServices space (ownership data, else its product config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
 }
 
 impl LibraryEntry {
@@ -210,6 +228,10 @@ pub struct Art {
     /// `icon_image` (an .ico), used for .desktop entries and Steam shortcuts.
     #[serde(default)]
     pub icon: Option<String>,
+    /// From UbiServices' games API, for slots the config leaves empty (games bought on
+    /// Steam have no config art).
+    #[serde(default, skip_serializing_if = "art::SpaceArt::is_empty")]
+    pub space: art::SpaceArt,
 }
 
 /// A signed-in Ubisoft account.

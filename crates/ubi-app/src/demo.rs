@@ -314,10 +314,11 @@ pub fn library() -> Vec<LibraryEntry> {
                 name,
                 update_available: fx.is_some_and(|i| FIXTURES[i].update),
                 running: false,
-                art: Art { thumb: r.thumb_image, background: r.background_image, logo: r.logo_image, icon: None },
+                art: Art { thumb: r.thumb_image, background: r.background_image, logo: r.logo_image, ..Default::default() },
                 owned_by: vec!["demo".into()],
                 installable: true,
                 steam: None,
+                space_id: None,
             };
             (order, entry)
         })

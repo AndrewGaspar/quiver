@@ -1,5 +1,9 @@
-//! Game art: Ubisoft's product-config art from the public asset CDN, cached on disk under
-//! `$XDG_CACHE_HOME/quiver/art`, or a local image file the user picked for a game.
+//! Game art: Ubisoft's product-config art from the public asset CDN, art URLs from
+//! Ubisoft's games API and Steam's CDN (all cached on disk under `$XDG_CACHE_HOME/quiver/art`),
+//! Steam's local library cache, or a local image file the user picked for a game. Which
+//! one a game shows is [`candidates`]: the user's file, then `ubi_api::art::candidates`
+//! (Ubisoft's config, Ubisoft's games API, Steam's cache, Steam's CDN), the first that
+//! loads.
 //!
 //! Loads run on the tokio runtime; the store notifies GPUI when one lands. Views ask for
 //! art every frame with [`ArtStore::get`] and draw a placeholder until it's `Ready`, or
@@ -23,9 +27,21 @@ pub const CDN: &str = "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_
 pub enum ArtSource {
     /// A file name from a product config, served by Ubisoft's asset CDN.
     Cdn(String),
-    /// An image file the user chose.
+    /// A full URL on a known art host ([`ART_HOSTS`]): Ubisoft's games API, Steam's CDN.
+    Url(String),
+    /// An image file on this machine: one the user chose, or Steam's library cache.
     Local(PathBuf),
 }
+
+/// Hosts [`ArtSource::Url`] may download from.
+pub const ART_HOSTS: &[&str] = &[
+    "ubiservices.cdn.ubi.com",
+    "static-live.ubisoft.com",
+    "shared.steamstatic.com",
+    "cdn.cloudflare.steamstatic.com",
+    "cdn.akamai.steamstatic.com",
+    "steamcdn-a.akamaihd.net",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Variant {
@@ -54,6 +70,9 @@ enum Slot {
     Loading,
     Ready(ArtImage),
     Failed(Instant),
+    /// Failed before and being tried again: still reported as failed, so a fallback that
+    /// is showing doesn't flicker back to a placeholder while the retry runs.
+    Retrying,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +101,9 @@ pub struct Fetcher {
     base_url: String,
     http: reqwest::Client,
     limit: Arc<tokio::sync::Semaphore>,
+    /// Hosts URL art may come from, and whether plain `http` is allowed (tests only).
+    hosts: Arc<Vec<String>>,
+    allow_http: bool,
     /// One lock per file being downloaded, so concurrent requests for the same file (its
     /// hero and its ambient copy, say) download it once.
     inflight: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -110,7 +132,69 @@ impl Fetcher {
             http,
             limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
             inflight: Arc::default(),
+            hosts: Arc::new(ART_HOSTS.iter().map(|h| h.to_string()).collect()),
+            allow_http: false,
         }
+    }
+
+    /// Allow URL art from `host` over plain http too (test servers).
+    #[cfg(test)]
+    pub fn allow_test_host(mut self, host: &str) -> Self {
+        let mut hosts = (*self.hosts).clone();
+        hosts.push(host.to_owned());
+        self.hosts = Arc::new(hosts);
+        self.allow_http = true;
+        self
+    }
+
+    /// Where a URL's image is cached, relative to the cache dir: `url/<host>/<path>`. `None`
+    /// for URLs Quiver won't fetch (unknown host, odd characters, not an image).
+    fn url_cache_rel(&self, url: &str) -> Option<PathBuf> {
+        let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://").filter(|_| self.allow_http))?;
+        let (host, path) = rest.split_once('/')?;
+        if !self.hosts.iter().any(|h| h == host) {
+            return None;
+        }
+        let segs: Vec<&str> = path.split('/').collect();
+        let ok = |s: &&str| {
+            !s.is_empty() && s.len() <= 128 && !s.starts_with('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        };
+        if segs.is_empty() || segs.len() > 8 || !segs.iter().all(ok) {
+            return None;
+        }
+        let ext = segs.last()?.rsplit_once('.')?.1.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            return None;
+        }
+        let mut rel = PathBuf::from("url").join(host.replace(':', "_"));
+        rel.extend(segs);
+        Some(rel)
+    }
+
+    /// Download `url` to `path` (once, however many ask at the same time).
+    async fn download(&self, key: &str, url: &str, path: &Path) -> Result<PathBuf> {
+        if path.is_file() {
+            return Ok(path.to_owned());
+        }
+        let lock = self.inflight.lock().unwrap().entry(key.to_owned()).or_default().clone();
+        let _guard = lock.lock().await;
+        if path.is_file() {
+            return Ok(path.to_owned()); // another task got it while we waited
+        }
+        let _permit = self.limit.acquire().await?;
+        let resp = self.http.get(url).send().await.with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            bail!("GET {url}: {}", resp.status());
+        }
+        let bytes = resp.bytes().await.with_context(|| format!("GET {url}"))?;
+        // Only cache things that are actually images.
+        image::guess_format(&bytes).with_context(|| format!("{url} is not an image"))?;
+        tokio::fs::create_dir_all(path.parent().unwrap_or(&self.cache_dir)).await?;
+        let tmp = tmp_path(path);
+        tokio::fs::write(&tmp, &bytes).await?;
+        tokio::fs::rename(&tmp, path).await?;
+        self.inflight.lock().unwrap().remove(key);
+        Ok(path.to_owned())
     }
 
     /// The original file on disk, downloading it first if it isn't cached.
@@ -126,30 +210,12 @@ impl Fetcher {
                 if !valid_cdn_name(file) {
                     bail!("refusing art file name {file:?}");
                 }
-                let path = self.cache_dir.join(file);
-                if path.is_file() {
-                    return Ok(path);
-                }
-                let lock = self.inflight.lock().unwrap().entry(file.clone()).or_default().clone();
-                let _guard = lock.lock().await;
-                if path.is_file() {
-                    return Ok(path); // another task got it while we waited
-                }
-                let _permit = self.limit.acquire().await?;
                 let url = format!("{}{}", self.base_url, file);
-                let resp = self.http.get(&url).send().await.with_context(|| format!("GET {url}"))?;
-                if !resp.status().is_success() {
-                    bail!("GET {url}: {}", resp.status());
-                }
-                let bytes = resp.bytes().await.with_context(|| format!("GET {url}"))?;
-                // Only cache things that are actually images.
-                image::guess_format(&bytes).with_context(|| format!("{url} is not an image"))?;
-                tokio::fs::create_dir_all(&self.cache_dir).await?;
-                let tmp = tmp_path(&path);
-                tokio::fs::write(&tmp, &bytes).await?;
-                tokio::fs::rename(&tmp, &path).await?;
-                self.inflight.lock().unwrap().remove(file);
-                Ok(path)
+                self.download(file, &url, &self.cache_dir.join(file)).await
+            }
+            ArtSource::Url(url) => {
+                let rel = self.url_cache_rel(url).with_context(|| format!("refusing art URL {url:?}"))?;
+                self.download(url, url, &self.cache_dir.join(rel)).await
             }
         }
     }
@@ -157,6 +223,12 @@ impl Fetcher {
     fn derived_path(&self, src: &ArtSource, original: &Path, variant: Variant) -> PathBuf {
         let stem = match src {
             ArtSource::Cdn(file) => file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_owned(),
+            ArtSource::Url(url) => {
+                let rel = self.url_cache_rel(url).unwrap_or_default();
+                let flat: Vec<String> = rel.iter().skip(1).map(|s| s.to_string_lossy().into_owned()).collect();
+                let flat = flat.join("_");
+                format!("url-{}", flat.rsplit_once('.').map(|(s, _)| s).unwrap_or(&flat))
+            }
             ArtSource::Local(p) => {
                 // Key local files on path + mtime, so replacing the file refreshes it.
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -278,13 +350,15 @@ impl ArtStore {
     /// The current state of a piece of art, starting a load if it hasn't been asked for.
     pub fn get(&mut self, src: &ArtSource, variant: Variant, cx: &mut Context<Self>) -> ArtState {
         let key = (src.clone(), variant);
-        match self.slots.get(&key) {
+        let retry = match self.slots.get(&key) {
             Some(Slot::Ready(img)) => return ArtState::Ready(img.clone()),
             Some(Slot::Loading) => return ArtState::Loading,
+            Some(Slot::Retrying) => return ArtState::Failed,
             Some(Slot::Failed(when)) if when.elapsed() < RETRY_AFTER => return ArtState::Failed,
-            _ => {}
-        }
-        self.slots.insert(key.clone(), Slot::Loading);
+            Some(Slot::Failed(_)) => true,
+            None => false,
+        };
+        self.slots.insert(key.clone(), if retry { Slot::Retrying } else { Slot::Loading });
         let fetcher = self.fetcher.clone();
         let (src, variant) = key.clone();
         let rx = crate::on_tokio(async move { fetcher.load(src, variant).await });
@@ -304,7 +378,7 @@ impl ArtStore {
             .ok();
         })
         .detach();
-        ArtState::Loading
+        if retry { ArtState::Failed } else { ArtState::Loading }
     }
 }
 
@@ -340,21 +414,47 @@ pub fn load_custom_art(path: &Path) -> HashMap<u32, CustomArt> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArtSlot {
-    Tile,
-    Hero,
-    Logo,
+pub use ubi_api::art::{ArtOrigin, ArtPreference, ArtSlot};
+
+/// One image that could fill a slot. `origin` is `None` for the user's own file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Candidate {
+    pub src: ArtSource,
+    pub origin: Option<ArtOrigin>,
 }
 
-/// Which image to show for a game's slot: the user's file if set, else Ubisoft's.
-pub fn resolve(art: &ubi_api::Art, custom: Option<&CustomArt>, slot: ArtSlot) -> Option<ArtSource> {
-    let (mine, theirs) = match slot {
-        ArtSlot::Tile => (custom.and_then(|c| c.tile.clone()), art.thumb.clone()),
-        ArtSlot::Hero => (custom.and_then(|c| c.hero.clone()), art.background.clone()),
-        ArtSlot::Logo => (custom.and_then(|c| c.logo.clone()), art.logo.clone()),
-    };
-    mine.map(ArtSource::Local).or(theirs.filter(|f| valid_cdn_name(f)).map(ArtSource::Cdn))
+/// The images that could fill a game's slot, best first: the user's file, then
+/// `ubi_api::art::candidates` in the order the game's `art` setting asks for.
+pub fn candidates(entry: &ubi_api::LibraryEntry, custom: Option<&CustomArt>, slot: ArtSlot, pref: ArtPreference) -> Vec<Candidate> {
+    let mine = custom.and_then(|c| match slot {
+        ArtSlot::Tile => c.tile.clone(),
+        ArtSlot::Hero => c.hero.clone(),
+        ArtSlot::Logo => c.logo.clone(),
+        ArtSlot::Icon => None,
+    });
+    let mut out: Vec<Candidate> = mine.into_iter().map(|p| Candidate { src: ArtSource::Local(p), origin: None }).collect();
+    for (origin, r) in ubi_api::art::candidates(entry, slot, pref) {
+        let src = match r {
+            ubi_api::art::ArtRef::Asset(f) if valid_cdn_name(&f) => ArtSource::Cdn(f),
+            ubi_api::art::ArtRef::Asset(_) => continue,
+            ubi_api::art::ArtRef::Url(u) => ArtSource::Url(u),
+            ubi_api::art::ArtRef::File(p) => ArtSource::Local(p),
+        };
+        out.push(Candidate { src, origin: Some(origin) });
+    }
+    out
+}
+
+/// The first candidate's image that hasn't failed (`Loading` while the best untried one
+/// loads), and where it came from. `(Failed, None)` when nothing is left.
+pub fn pick(cands: &[Candidate], mut state: impl FnMut(&ArtSource) -> ArtState) -> (ArtState, Option<&Candidate>) {
+    for c in cands {
+        match state(&c.src) {
+            ArtState::Failed => continue,
+            s => return (s, Some(c)),
+        }
+    }
+    (ArtState::Failed, None)
 }
 
 #[cfg(test)]
@@ -463,10 +563,71 @@ mod tests {
         std::fs::write(&json, format!(r#"{{"3539": {{"tile": "{}"}}, "bad": {{}}}}"#, file.display())).unwrap();
         let custom = load_custom_art(&json);
         assert_eq!(custom.len(), 1);
-        let art = ubi_api::Art { thumb: Some("abc.jpg".into()), background: Some("def.jpg".into()), logo: None, icon: None };
-        assert_eq!(resolve(&art, custom.get(&3539), ArtSlot::Tile), Some(ArtSource::Local(file)));
-        assert_eq!(resolve(&art, custom.get(&3539), ArtSlot::Hero), Some(ArtSource::Cdn("def.jpg".into())));
-        assert_eq!(resolve(&art, None, ArtSlot::Logo), None);
+        let art = ubi_api::Art { thumb: Some("abc.jpg".into()), background: Some("def.jpg".into()), ..Default::default() };
+        let entry = entry_with(art, None);
+        let first = |c: Option<&CustomArt>, slot| candidates(&entry, c, slot, ArtPreference::Ubisoft).first().map(|c| c.src.clone());
+        assert_eq!(first(custom.get(&3539), ArtSlot::Tile), Some(ArtSource::Local(file)));
+        assert_eq!(first(custom.get(&3539), ArtSlot::Hero), Some(ArtSource::Cdn("def.jpg".into())));
+        assert_eq!(first(None, ArtSlot::Logo), None);
+    }
+
+    fn entry_with(art: ubi_api::Art, steam: Option<ubi_api::art::SteamArt>) -> ubi_api::LibraryEntry {
+        let mut g: ubi_api::exports::SteamGame = serde_json::from_value(serde_json::json!({
+            "app_id": 3751950, "name": "BF", "install_dir": "/s/common/BF", "state": "off"
+        }))
+        .unwrap();
+        g.art = steam.clone().unwrap_or_default();
+        serde_json::from_value::<ubi_api::LibraryEntry>(serde_json::json!({
+            "product_id": 66088, "name": "BF", "installed": null, "update_available": false, "running": false,
+        }))
+        .map(|mut e| {
+            e.art = art;
+            e.steam = steam.map(|_| g);
+            e
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn steam_copies_fall_back_to_steam_art() {
+        let steam = ubi_api::art::SteamArt { hero: Some("/lc/3751950/h/library_hero.jpg".into()), ..Default::default() };
+        let e = entry_with(ubi_api::Art::default(), Some(steam));
+        let hero = candidates(&e, None, ArtSlot::Hero, ArtPreference::Ubisoft);
+        assert_eq!(hero[0], Candidate { src: ArtSource::Local("/lc/3751950/h/library_hero.jpg".into()), origin: Some(ArtOrigin::SteamCache) });
+        let tile = candidates(&e, None, ArtSlot::Tile, ArtPreference::Ubisoft);
+        assert_eq!(tile[0].src, ArtSource::Url("https://shared.steamstatic.com/store_item_assets/steam/apps/3751950/library_600x900.jpg".into()));
+        // The first that hasn't failed wins; loading stops the search.
+        let failed = ArtSource::Local("/lc/3751950/h/library_hero.jpg".into());
+        let (s, c) = pick(&hero, |s| if *s == failed { ArtState::Failed } else { ArtState::Loading });
+        assert_eq!((s, c.unwrap().origin), (ArtState::Loading, Some(ArtOrigin::SteamCdn)));
+        assert_eq!(pick(&hero, |_| ArtState::Failed), (ArtState::Failed, None));
+    }
+
+    #[tokio::test]
+    async fn url_art_is_cached_by_host_and_path() {
+        let cache = tempfile::tempdir().unwrap();
+        let (base, hits) = serve(png(40, 20, (10, 5, 30, 15))).await;
+        let host = base.trim_start_matches("http://").split('/').next().unwrap().to_owned();
+        let f = Fetcher::new(cache.path().join("art"), "http://127.0.0.1:9/").allow_test_host(&host);
+        let url = format!("{base}good.png");
+        let a = f.load(ArtSource::Url(url.clone()), Variant::Original).await.unwrap();
+        assert!(a.path.ends_with(format!("url/{}/assets/good.png", host.replace(':', "_"))), "{:?}", a.path);
+        let t = f.load(ArtSource::Url(url.clone()), Variant::Trimmed).await.unwrap();
+        assert_eq!((t.width, t.height), (20, 10));
+        assert!(t.path.to_string_lossy().contains("derived/url-"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Unknown hosts, http in production, odd paths and non-images are refused.
+        let prod = Fetcher::new(cache.path().join("art"), "http://127.0.0.1:9/");
+        assert!(prod.load(ArtSource::Url(url), Variant::Original).await.is_err());
+        for bad in [
+            "https://evil.example/x.png",
+            "https://shared.steamstatic.com/../x.png",
+            "https://shared.steamstatic.com/a/b.ico",
+            "https://shared.steamstatic.com/a/b.png?x=1",
+        ] {
+            assert!(prod.url_cache_rel(bad).is_none(), "{bad}");
+        }
+        assert!(prod.url_cache_rel("https://shared.steamstatic.com/store_item_assets/steam/apps/3751950/logo.png").is_some());
     }
 
     #[test]

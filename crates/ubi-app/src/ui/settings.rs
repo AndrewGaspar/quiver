@@ -1091,7 +1091,7 @@ impl Quiver {
                     let lib = g.product_id.and_then(|p| self.game(p)).cloned();
                     let art = match &lib {
                         Some(l) => self.art_for(l, ArtSlot::Tile, Variant::Tile, cx),
-                        None => crate::art::ArtState::Failed,
+                        None => self.art_for_steam_game(&g, ArtSlot::Tile, Variant::Tile, cx),
                     };
                     let mut buttons = div().flex().flex_none().items_center().gap(px(6.));
                     match super::steamgames::control(&g) {

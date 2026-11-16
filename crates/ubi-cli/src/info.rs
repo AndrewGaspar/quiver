@@ -6,7 +6,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
 use ubi_api::info::{GameInfo, Progress, RestoreResult, SaveBackup, SavesReport, SlotState};
-use ubi_api::{Client, Request, Status};
+use ubi_api::{Client, LibraryEntry, Request, Status};
 
 use crate::{print_json, resolve};
 
@@ -80,6 +80,24 @@ async fn account_name(client: &Client, id: Option<&str>) -> String {
     }
 }
 
+/// Where each piece of art comes from: the first source of each slot, in the order the app
+/// tries them (`ubi_api::art`), honouring the game's `art` setting.
+fn art_line(e: &LibraryEntry, pref: ubi_api::art::ArtPreference) -> String {
+    use ubi_api::art::{ArtSlot, candidates};
+    let slots = [("tile", ArtSlot::Tile), ("hero", ArtSlot::Hero), ("logo", ArtSlot::Logo)];
+    let parts: Vec<String> = slots
+        .iter()
+        .map(|(name, slot)| {
+            let c = candidates(e, *slot, pref);
+            match c.first() {
+                Some((o, _)) => format!("{name}: {}", o.describe()),
+                None => format!("{name}: none"),
+            }
+        })
+        .collect();
+    parts.join(", ")
+}
+
 pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: bool) -> Result<()> {
     let e = resolve(client, game).await?;
     let i: GameInfo = client.call(Request::GameInfo { product_id: e.product_id, refresh }).await?;
@@ -115,9 +133,23 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         if let Ok(s) = client.call::<ubi_api::mods::ModsState>(mods).await {
             row("plays", &crate::mods::default_label(&s));
         }
-    } else {
+    }
+    if let Some(g) = &e.steam {
+        let label = if i.install.is_some() { "also on Steam" } else { "installed" };
+        row(label, &format!("via Steam (app {}, {})", g.app_id, g.install_dir.display()));
+    } else if i.install.is_none() {
         row("installed", "no");
     }
+    if let Some(r) = &i.release_date {
+        row("released", r);
+    }
+    let art_setting = client
+        .call::<serde_json::Value>(Request::SettingsGet { product_id: e.product_id })
+        .await
+        .ok()
+        .and_then(|v| v["settings"]["art"].as_str().map(str::to_owned));
+    let pref = ubi_api::art::ArtPreference::from_setting(art_setting.as_deref());
+    row("art from", &art_line(&e, pref));
     let f = &i.features;
     let mut feats = Vec::new();
     for (on, name) in [(f.cloud_saves, "cloud saves"), (f.achievements, "achievements"), (f.challenges, "challenges"), (f.denuvo, "Denuvo")] {
@@ -146,7 +178,7 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         println!("\nadd-ons ({} shown{}):", shown.len(), if hidden > 0 { format!(", {hidden} hidden; --all lists them") } else { String::new() });
     }
     for a in shown {
-        let name = a.name.as_deref().unwrap_or("(unnamed)");
+        let name = a.display_name();
         let kind = serde_json::to_value(a.kind).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         println!("  {} {:>6}  {:<15} {name}", if a.owned { "✓" } else { " " }, a.product_id, kind);
         if let Some(url) = &a.store_url {
@@ -168,7 +200,7 @@ pub async fn progress(client: &Client, game: &str, json: bool, refresh: bool) ->
         Some(s) => {
             let src = match p.playtime_source.as_deref() {
                 Some("playtime_service") => "Ubisoft",
-                Some(_) => "the game's TimePlayed stat",
+                Some(_) => "the game's play-time stat",
                 None => "?",
             };
             println!("  play time      {} ({src})", hours(s))

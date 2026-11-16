@@ -125,6 +125,25 @@ pub fn apply_config(info: &mut GameInfo, cfg: &ProductConfig) {
     };
 }
 
+/// Fill what the config left out from UbiServices' games API: release date, description,
+/// and links of kinds the config doesn't have (`website`, `twitter`, …).
+pub fn apply_space(info: &mut GameInfo, g: &crate::spaces::SpaceGame) {
+    if info.release_date.is_none() {
+        info.release_date = g.release_date();
+    }
+    if info.description.is_none() {
+        info.description = g.display_description.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(str::to_owned);
+    }
+    for (kind, url) in g.links() {
+        let kind = if kind == "website" { "homepage".to_owned() } else { kind };
+        if !info.links.iter().any(|l| l.kind == kind || l.url == url) {
+            info.links.push(Link { kind, url });
+        }
+    }
+    let have = [("release_date", info.release_date.is_some()), ("description", info.description.is_some())];
+    info.unavailable.retain(|u| !have.iter().any(|(k, h)| *h && u == k));
+}
+
 /// What we know about an associated product.
 #[derive(Debug, Clone, Default)]
 pub struct Associated {
@@ -360,5 +379,30 @@ mod tests {
             assert!(!info.name.is_empty(), "{name}");
             assert_eq!(info.publisher.as_deref(), Some("Ubisoft"), "{name}");
         }
+    }
+
+    #[test]
+    fn games_api_fills_gaps() {
+        let mut info = GameInfo {
+            unavailable: UNAVAILABLE.iter().map(|s| s.to_string()).collect(),
+            links: vec![Link { kind: "homepage".into(), url: "http://assassinscreed.ubi.com/".into() }],
+            ..Default::default()
+        };
+        let g = crate::spaces::SpaceGame {
+            space_id: "s".into(),
+            display_description: Some(" Pirates. ".into()),
+            release_at: Some("2013-11-19T00:00:00Z".into()),
+            link_urls: [("website", Some("https://example.com/bf")), ("twitter", Some("https://twitter.com/ac")), ("reddit", None)]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.map(str::to_owned)))
+                .collect(),
+            ..Default::default()
+        };
+        apply_space(&mut info, &g);
+        assert_eq!(info.release_date.as_deref(), Some("2013-11-19"));
+        assert_eq!(info.description.as_deref(), Some("Pirates."));
+        // The config's homepage stays; twitter is new.
+        assert_eq!(info.links.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(), ["homepage", "twitter"]);
+        assert_eq!(info.unavailable, ["developer", "genres"]);
     }
 }

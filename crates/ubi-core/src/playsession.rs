@@ -13,6 +13,11 @@
 //! [`PlaySessions`] is the daemon's single owner of these calls. Every launch path takes a
 //! [`Lease`] while its game runs (the launcher for games quiverd starts, the broker for any
 //! bridge, including containers); leases for the same game share one upstream session.
+//!
+//! When a session no launcher lease held ends (a Steam copy started by `quiver steam-run`,
+//! a bridge in a container or another launcher), the tracker hands it to the daemon as a
+//! [`Finished`] session so it lands in the game's local play history, as quiverd's own
+//! launches do (those are recorded by the launch job, with their settings and profile).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -86,9 +91,26 @@ const STEAM_HINT_TTL: Duration = Duration::from_secs(10 * 60);
 /// A bridge holder for a game `quiver steam-run` started shows as this.
 pub const STEAM_HOLDER: &str = "steam";
 
+/// A play session that ended without a launcher lease (see the module docs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finished {
+    pub product_id: u32,
+    pub account: String,
+    pub started: chrono::DateTime<Utc>,
+    pub ended: chrono::DateTime<Utc>,
+    /// Holder names, each once.
+    pub holders: Vec<String>,
+    pub steam_app_id: Option<u32>,
+}
+
+/// The holder name of quiverd's own launches.
+pub const LAUNCHER_HOLDER: &str = "launcher";
+
 struct Active {
     online: Arc<Online>,
     started: chrono::DateTime<Utc>,
+    /// Everyone who held it, each once (holders come and go).
+    ever: Vec<String>,
     /// (lease id, holder name)
     holders: Vec<(u64, String)>,
     reported: bool,
@@ -130,10 +152,16 @@ impl Drop for Lease {
 impl PlaySessions {
     /// Start the tracker. With `report` false, sessions are tracked (for `sessions` and the
     /// UI) but nothing is sent to Ubisoft. `on_change` runs after every change.
-    pub fn new(accounts: Arc<Accounts>, report: bool, on_change: impl Fn() + Send + 'static) -> Arc<Self> {
+    /// `on_finished` gets every session that ended without a launcher lease.
+    pub fn new(
+        accounts: Arc<Accounts>,
+        report: bool,
+        on_change: impl Fn() + Send + 'static,
+        on_finished: impl Fn(Finished) + Send + 'static,
+    ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let snapshot = Arc::new(Mutex::new(Vec::new()));
-        tokio::spawn(run(accounts, report, rx, snapshot.clone(), on_change));
+        tokio::spawn(run(accounts, report, rx, snapshot.clone(), on_change, on_finished));
         Arc::new(Self { tx, snapshot, next_lease: Default::default() })
     }
 
@@ -162,6 +190,7 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     snapshot: Arc<Mutex<Vec<ActiveSession>>>,
     on_change: impl Fn(),
+    on_finished: impl Fn(Finished),
 ) {
     let mut active: HashMap<Key, Active> = HashMap::new();
     let mut steam_hints: HashMap<u32, (u32, Instant)> = HashMap::new();
@@ -192,6 +221,9 @@ async fn run(
                         holder = STEAM_HOLDER.to_owned();
                     }
                     if let Some(a) = active.get_mut(&key) {
+                        if !a.ever.contains(&holder) {
+                            a.ever.push(holder.clone());
+                        }
                         a.holders.push((lease, holder));
                         a.steam_app_id = steam_app_id;
                     } else {
@@ -200,7 +232,15 @@ async fn run(
                             Ok(()) => { tracing::info!(product_id, "play session started"); true }
                             Err(e) => { tracing::warn!(product_id, "play session start failed: {e:#}"); false }
                         };
-                        active.insert(key, Active { online, started: Utc::now(), holders: vec![(lease, holder)], reported, last_beat: Instant::now(), steam_app_id });
+                        active.insert(key, Active {
+                            online,
+                            started: Utc::now(),
+                            ever: vec![holder.clone()],
+                            holders: vec![(lease, holder)],
+                            reported,
+                            last_beat: Instant::now(),
+                            steam_app_id,
+                        });
                     }
                 }
                 Some(Cmd::End { lease }) => {
@@ -215,6 +255,9 @@ async fn run(
                             steam_hints.remove(&product_id);
                         }
                         tracing::info!(product_id, minutes = (Utc::now() - a.started).num_minutes(), "game stopped");
+                        if let Some(f) = finished(&key, a.started, &a.ever, a.steam_app_id, Utc::now()) {
+                            on_finished(f);
+                        }
                         if report {
                             match end(&a.online, product_id).await {
                                 Ok(()) => tracing::info!(product_id, "play session ended"),
@@ -265,6 +308,25 @@ async fn run(
     }
 }
 
+/// The session to record for `a` ending now, unless a launcher held it (the launch job
+/// records those).
+fn finished(
+    key: &Key,
+    started: chrono::DateTime<Utc>,
+    ever: &[String],
+    steam_app_id: Option<u32>,
+    ended: chrono::DateTime<Utc>,
+) -> Option<Finished> {
+    (!ever.iter().any(|h| h == LAUNCHER_HOLDER)).then(|| Finished {
+        product_id: key.1,
+        account: key.0.clone(),
+        started,
+        ended,
+        holders: ever.to_vec(),
+        steam_app_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +337,18 @@ mod tests {
         assert_eq!(unique_holders(&h(&[(1, "bridge"), (2, "bridge"), (3, "bridge")])), ["bridge"]);
         assert_eq!(unique_holders(&h(&[(1, "launcher"), (2, "bridge"), (3, "launcher")])), ["launcher", "bridge"]);
         assert!(unique_holders(&[]).is_empty());
+    }
+
+    #[test]
+    fn sessions_without_a_launcher_are_handed_over() {
+        let key: Key = ("uid".into(), 66088);
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::TimeDelta::minutes(5);
+        let f = finished(&key, t0, &[STEAM_HOLDER.into()], Some(3751950), t1).unwrap();
+        assert_eq!((f.product_id, f.account.as_str(), f.steam_app_id), (66088, "uid", Some(3751950)));
+        assert_eq!((f.started, f.ended), (t0, t1));
+        assert!(finished(&key, t0, &["bridge".into()], None, t1).is_some());
+        // quiverd's own launch (its bridge joins the launcher's session): the job records it.
+        assert!(finished(&key, t0, &[LAUNCHER_HOLDER.into(), "bridge".into()], None, t1).is_none());
     }
 }

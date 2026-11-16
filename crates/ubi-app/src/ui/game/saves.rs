@@ -378,7 +378,12 @@ impl Quiver {
                     )),
             );
         } else {
-            c = c.child(div().px(px(16.)).py(px(10.)).text_size(px(11.5)).text_color(th.tx3).child("Pulled before each launch and pushed after it exits; Quiver backs up before overwriting anything."));
+            let note = if g.steam_only() {
+                "Quiver doesn't sync this game's cloud saves when Steam starts it; Ubisoft Connect does when Connect starts it."
+            } else {
+                "Pulled before each launch and pushed after it exits; Quiver backs up before overwriting anything."
+            };
+            c = c.child(div().px(px(16.)).py(px(10.)).text_size(px(11.5)).text_color(th.tx3).child(note));
         }
         if let Some(r) = &s.connect_record {
             c = c.child(

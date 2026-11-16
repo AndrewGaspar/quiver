@@ -1,7 +1,7 @@
 //! A game's title over its hero art, shared by the library home's hero and the game page:
-//! the trimmed logo from the product config (or the user's own logo), nothing when the
-//! Ubisoft art already has the logo painted in, and the name in display type while the logo
-//! loads or when there is none.
+//! the trimmed logo (the user's own, Ubisoft's, or Steam's transparent `logo.png`; the same
+//! order as the art), nothing when Ubisoft's config art already has the logo painted in,
+//! and the name in display type while the logo loads or when there is none.
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, div, img, px};
 
@@ -38,9 +38,13 @@ pub struct TitleBox {
 impl Quiver {
     pub fn hero_title(&mut self, g: &GameRow, cx: &mut Context<Self>) -> HeroTitle {
         let id = g.id();
-        // Custom art (any slot) means the hero may not be Ubisoft's any more.
+        // Only the config's own hero has the logo painted in: custom art (any slot) or a
+        // fallback (games API, Steam) doesn't.
         if BAKED_LOGO.contains(&id) && !self.custom_art.contains_key(&id) {
-            return HeroTitle::Baked;
+            let (state, from) = self.art_pick(g, ArtSlot::Hero, Variant::Original, cx);
+            if state != ArtState::Failed && from.and_then(|c| c.origin) == Some(ubi_api::art::ArtOrigin::Config) {
+                return HeroTitle::Baked;
+            }
         }
         match self.art_for(g, ArtSlot::Logo, Variant::Trimmed, cx) {
             ArtState::Ready(l) => HeroTitle::Logo(l),

@@ -16,6 +16,7 @@
 pub mod art;
 pub mod desktop;
 pub mod steam;
+pub mod steamart;
 pub mod steamgames;
 pub mod steamlaunch;
 pub mod textvdf;

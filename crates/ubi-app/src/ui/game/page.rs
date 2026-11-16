@@ -161,6 +161,8 @@ pub struct GamePage {
     pub stores: Load<ubi_api::savestores::SaveStoresReport>,
     /// Narrow windows: the game list is open over the page.
     pub side_open: bool,
+    /// The hero's art chip menu (Ubisoft's or Steam's art first) is open.
+    pub art_menu: bool,
 }
 
 impl GamePage {
@@ -351,6 +353,10 @@ pub fn log_lines(bytes: &[u8], max: usize) -> (Vec<SharedString>, bool) {
 // ---------------------------------------------------------------------------------------
 // Loading
 
+/// Game info, progression and Ubisoft's play time ask Ubisoft; past this the page says so
+/// instead of loading forever.
+const PAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Quiver {
     /// Load what the open game page shows (called with the app's own `load_details`).
     pub fn load_page(&mut self, id: u32, cx: &mut Context<Self>) {
@@ -388,7 +394,7 @@ impl Quiver {
         if self.gp.info.ready().is_none() {
             self.gp.info = Load::Loading;
         }
-        self.call::<GameInfo, _>(Request::GameInfo { product_id: id, refresh }, cx, move |this, r, _| {
+        self.call_within::<GameInfo, _>(Request::GameInfo { product_id: id, refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.info = match r {
                     Ok(i) => Load::Ready(i),
@@ -402,7 +408,7 @@ impl Quiver {
         if self.gp.progress.ready().is_none() {
             self.gp.progress = Load::Loading;
         }
-        self.call::<Progress, _>(Request::GameProgress { product_id: id, refresh }, cx, move |this, r, _| {
+        self.call_within::<Progress, _>(Request::GameProgress { product_id: id, refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.progress = match r {
                     Ok(p) => Load::Ready(p),
@@ -414,7 +420,7 @@ impl Quiver {
 
     fn load_remote(&mut self, id: u32, cx: &mut Context<Self>) {
         self.gp.remote = Load::Loading;
-        self.call::<RemotePlaytime, _>(Request::RemotePlaytime { product_id: id }, cx, move |this, r, _| {
+        self.call_within::<RemotePlaytime, _>(Request::RemotePlaytime { product_id: id }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.remote = match r {
                     Ok(p) => Load::Ready(p),
@@ -1455,11 +1461,21 @@ impl Quiver {
         if self.gp.id != id {
             return None;
         }
-        if let Some(p) = self.gp.progress.ready()
-            && let Some(s) = p.playtime_seconds
-        {
-            let src = if p.playtime_source.as_deref() == Some("stat:TimePlayed") { "the game's TimePlayed stat" } else { "Ubisoft's play-session record" };
-            return Some((s, src));
+        if let Some(p) = self.gp.progress.ready() {
+            if let Some(s) = p.playtime_seconds {
+                let stat = p.playtime_source.as_deref().is_some_and(|s| s.starts_with("stat:"));
+                return Some((s, if stat { "the game's play-time stat" } else { "Ubisoft's play-session record" }));
+            }
+            // Older quiverd only knew `TimePlayed`; Black Flag Resynced calls it `Playtime`.
+            if let Some(s) = p
+                .stats
+                .iter()
+                .find(|s| ["TimePlayed", "Playtime", "PlayTime"].iter().any(|id| s.id.eq_ignore_ascii_case(id)))
+                .and_then(|s| s.number)
+                .filter(|n| *n > 0.)
+            {
+                return Some((s as u64, "the game's play-time stat"));
+            }
         }
         self.gp.remote.ready().and_then(|r| r.seconds).filter(|s| *s > 0).map(|s| (s, "Ubisoft's play-time record"))
     }

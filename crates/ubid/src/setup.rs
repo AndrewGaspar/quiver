@@ -535,6 +535,7 @@ mod tests {
             owned_by: vec!["me".into()],
             installable: true,
             steam: None,
+            space_id: None,
         }
     }
 

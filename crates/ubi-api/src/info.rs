@@ -178,6 +178,14 @@ pub struct AddOn {
     pub store_url: Option<String>,
 }
 
+impl AddOn {
+    /// Its name, or "Add-on <id>" when neither its config nor the game's list names it
+    /// (the configs of some add-ons of games bought on Steam have no name).
+    pub fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| format!("Add-on {}", self.product_id))
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Progression (UbiServices)
 

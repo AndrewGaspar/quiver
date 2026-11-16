@@ -452,7 +452,15 @@ impl Quiver {
             if i.features.denuvo {
                 kvs = kvs.child(kv(th, "DRM", txt("Denuvo, activated by quiverd".into())));
             }
-            kvs = kvs.child(kv(th, "Cloud saves", if i.features.cloud_saves { txt("On · pull before, push after".into()) } else { muted("Not supported by this game".into()) }));
+            // steam-run doesn't sync cloud saves yet (design/STEAM-COPIES.md, "Cloud saves").
+            let cloud = if !i.features.cloud_saves {
+                muted("Not supported by this game".into())
+            } else if g.steam_only() {
+                muted("Not synced by Quiver for Steam launches".into())
+            } else {
+                txt("On · pull before, push after".into())
+            };
+            kvs = kvs.child(kv(th, "Cloud saves", cloud));
             if let Some(o) = &i.features.game_options {
                 kvs = kvs.child(kv(th, "Game settings", txt(o.clone())));
             }

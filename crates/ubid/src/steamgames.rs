@@ -104,6 +104,7 @@ impl Ctx {
             patchable: product.is_some() && !self.steam.flatpak && quiver.is_some() && user.is_some(),
             offer: st.offers.contains(&f.app.app_id),
             note,
+            art: ubi_core::exports::steamart::library_art(&self.steam.root, f.app.app_id),
         }
     }
 }
