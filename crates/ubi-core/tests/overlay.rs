@@ -115,6 +115,76 @@ fn overlay_in_user_namespace() {
     assert!(!mounts.contains(install.to_str().unwrap().replace(' ', "\\040").as_str()));
 }
 
+/// Layer deletions end to end: layers made by the mod store (whiteouts and an opaque
+/// folder), launched through its overlay spec. Inside the namespace the deleted files are
+/// gone and the replaced folder holds only the layer's files; the host's install still has
+/// everything.
+#[test]
+fn deletions_in_user_namespace() {
+    use ubi_core::mods::ModStore;
+    if !available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let install = t.join("Games/My Game");
+    for (p, s) in [
+        ("Videos/Intro.bik", "intro"),
+        ("Videos/Logo.bik", "logo"),
+        ("Videos/Credits/roll.bik", "credits"),
+        ("DataPC/keep.txt", "keep"),
+        ("DataPC/old.txt", "old"),
+        ("Shaders/a.fx", "a"),
+        ("game.exe", "exe"),
+    ] {
+        write(&install.join(p), s);
+    }
+    let store = ModStore::new(&t.join("data"), 1);
+    // Bottom: a mod folder that adds a shader, replaces DataPC wholesale and ships its own
+    // whiteout (made like any mod tool would, with mknod).
+    let src = t.join("src");
+    write(&src.join("datapc/new.txt"), "new");
+    write(&src.join("shaders/b.fx"), "b");
+    let status = Command::new("mknod").arg(src.join("shaders/a.fx")).args(["c", "0", "0"]).status().unwrap();
+    assert!(status.success());
+    let rework = store.add_layer_with("Rework", Some(&src), &["DATAPC".into()], Some(&install), "cli").unwrap();
+    assert_eq!(rework.layer.deletes, ["DataPC", "Shaders/a.fx"]);
+    // Top: deletions only ("delete the intro videos"), in the wrong case on purpose.
+    let no_intro = store
+        .add_layer_with("No intro", None, &["videos/intro.BIK".into(), "videos/credits".into()], Some(&install), "agent")
+        .unwrap();
+    assert_eq!(no_intro.layer.deletes, ["Videos/Credits", "Videos/Intro.bik"]);
+    store.create_profile("P", &["Rework".into(), "No intro".into()], "cli", None).unwrap();
+    let launch = store.launch(Some("P"), &install).unwrap().unwrap();
+    let ns = Namespace::create(&launch.overlay).unwrap();
+
+    let i = install.display();
+    let seen = run(&ns, None, &format!("cd '{i}' && find . -mindepth 1 | LC_ALL=C sort"));
+    assert_eq!(
+        seen,
+        "./DataPC\n./DataPC/new.txt\n./Shaders\n./Shaders/b.fx\n./Videos\n./Videos/Logo.bik\n./game.exe\n",
+        "merged view"
+    );
+    assert_eq!(run(&ns, None, &format!("cat '{i}/DataPC/new.txt'; test ! -e '{i}/Videos/Intro.bik' && echo gone")), "newgone\n");
+    // Writing a deleted name inside the namespace lands in the upper dir, as usual.
+    run(&ns, Some(&install), "echo mine > Videos/Intro.bik");
+    assert_eq!(run(&ns, Some(&install), "cat Videos/Intro.bik"), "mine\n");
+
+    // The host still has every file, unchanged.
+    for (p, s) in [("Videos/Intro.bik", "intro"), ("Videos/Credits/roll.bik", "credits"), ("DataPC/old.txt", "old"), ("Shaders/a.fx", "a")] {
+        assert_eq!(read(&install.join(p)), s, "{p}");
+    }
+    assert!(!install.join("DataPC/new.txt").exists());
+    drop(ns);
+
+    // Taking a deletion back shows the file again in the next launch (same upper dir).
+    store.change_deletions("No intro", &[], &["Videos/Credits".into()], Some(&install), "cli", None).unwrap();
+    let ns = Namespace::create(&store.launch(Some("P"), &install).unwrap().unwrap().overlay).unwrap();
+    assert_eq!(run(&ns, None, &format!("cat '{i}/Videos/Credits/roll.bik'; ls '{i}/Videos'")), "creditsCredits\nIntro.bik\nLogo.bik\n");
+    // What the game wrote over a deleted file stays in the profile's upper dir.
+    assert_eq!(run(&ns, None, &format!("cat '{i}/Videos/Intro.bik'")), "mine\n");
+}
+
 #[test]
 fn bad_layer_is_reported() {
     if !available() {

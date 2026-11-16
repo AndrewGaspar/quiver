@@ -110,6 +110,9 @@ quiver saves origins restore latest            # backs up the current saves firs
 quiver dev …                                   # low-level tools that bypass the daemon
 
 quiver mods odyssey layer add ReShade ~/mods/reshade   # copy a folder laid out like the install
+quiver mods odyssey layer add "No intro" --delete videos/intro.bik --delete videos/logo.bik
+quiver mods odyssey layer delete-files "No intro" videos/credits   # keep-files PATH… takes it back
+quiver mods odyssey layer show "No intro"      # files, origin, what it deletes; history / restore N
 quiver mods odyssey profile create "Visual overhaul" --layers hd-textures,ReShade
 quiver mods odyssey profile set "Visual overhaul" dll.dxgi=n,b cloud_saves=on
 quiver mods odyssey list                       # layers, profiles, file conflicts between layers
@@ -151,6 +154,18 @@ settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and has its own saves
 (`savegames/<user>/<product>-<profile id>` in the prefix), synced with the cloud only with
 `cloud_saves=on`. Vanilla is implicit and never mounted.
 
+A layer can also **delete** files and folders (`--delete PATH`, `layer delete-files`,
+`layer keep-files`; paths are relative to the install folder and matched to its case). A
+deletion hides the path from the install and from the layers below, only inside a modded
+launch; nothing on disk is deleted. In the layer's folder it is an overlayfs whiteout (a
+character device 0:0, which needs Linux 5.8+ to create unprivileged), or, for a folder the
+layer has files of its own in, an opaque folder (`user.overlay.opaque=y`): the layer's
+version replaces the install's whole folder. Whiteouts already in a copied folder are kept as
+deletions. The list of deletions is in the layer's metadata; each change is a revision in
+`games/<product>/layers/<id>.jsonl` (`layer history`, `layer restore`). Changing deletions is
+refused while the game runs, and `mods list` shows layers that provide or delete the same
+path.
+
 A modded launch never changes the install folder. `quiverd` starts a holder process that calls
 `unshare(CLONE_NEWUSER | CLONE_NEWNS)`, maps your uid and gid to themselves and mounts
 overlayfs over the install path (lower: the layers, then the install; upper:
@@ -158,7 +173,8 @@ overlayfs over the install path (lower: the layers, then the install; upper:
 Proton, its wineserver and the game join that namespace with `setns`; the daemon never does.
 Profile changes are revisions in `games/<product>/profiles/<id>.jsonl` (`profile history`,
 `profile restore`), and deleting a profile is a revision too. Agents (`--source` other than
-`cli`/`gui`) need a person's confirmation to delete or restore profiles and remove layers.
+`cli`/`gui`) need a person's confirmation to delete or restore profiles, restore layer
+revisions and remove layers; adding layers and changing their deletions are normal edits.
 
 Settings keys: `proton`, `language`, `account`, `args`, `wrappers`, `env.NAME`, `dll.NAME`
 (`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its

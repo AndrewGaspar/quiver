@@ -6,6 +6,7 @@
 //! <data>/mods/<product>/profiles/<id>/upper/      what the game wrote while running the profile
 //! <data>/mods/<product>/profiles/<id>/work/       overlayfs scratch space
 //! <data>/games/<product>/profiles/<id>.jsonl      the profile's history; the last line is current
+//! <data>/games/<product>/layers/<layer-id>.jsonl  the history of the layer's deletions
 //! ```
 //!
 //! Profile history lives next to the game's settings history (`games/<product>/`) and uses
@@ -13,13 +14,23 @@
 //! own revision numbers, so restoring game settings never touches a profile and the
 //! reverse. Deleting a profile appends a `deleted` revision; restoring an earlier one
 //! brings it back with its saves and writable layer intact.
+//!
+//! A layer's files never change after `add`, but its deletions can, so those get the same
+//! kind of per-layer history. A deletion is an overlayfs whiteout in the layer's folder (a
+//! character device 0:0, which unprivileged users may create since Linux 5.8) or, for a
+//! folder the layer has files of its own in, an opaque folder (`user.overlay.opaque=y`,
+//! read because the overlay is mounted with `userxattr`). Both only act inside a launch's
+//! mount: the install itself is never touched.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::ffi::{CStr, CString};
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-pub use ubi_api::mods::{Conflict, Layer, ModsState, Profile, ProfileInfo, ProfileRevision, VANILLA};
+pub use ubi_api::mods::{Conflict, Layer, LayerChange, LayerRevision, ModsState, Profile, ProfileInfo, ProfileRevision, VANILLA};
 use ubi_api::SettingOp;
 
 use crate::overlay::OverlaySpec;
@@ -58,7 +69,7 @@ fn same_name(a: &str, b: &str) -> bool {
 }
 
 /// Files under `dir` (relative paths with `/`) and their total size. Symlinks count as
-/// files and aren't followed.
+/// files and aren't followed; whiteouts (deletions) aren't files.
 fn walk(dir: &Path) -> Result<Vec<(String, u64)>> {
     fn go(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> Result<()> {
         for e in std::fs::read_dir(dir)? {
@@ -66,7 +77,7 @@ fn walk(dir: &Path) -> Result<Vec<(String, u64)>> {
             let ty = e.file_type()?;
             if ty.is_dir() {
                 go(root, &e.path(), out)?;
-            } else {
+            } else if !(ty.is_char_device() && is_whiteout(&e.metadata()?)) {
                 let rel = e.path().strip_prefix(root).unwrap().to_string_lossy().into_owned();
                 out.push((rel, if ty.is_file() { e.metadata()?.len() } else { 0 }));
             }
@@ -77,6 +88,244 @@ fn walk(dir: &Path) -> Result<Vec<(String, u64)>> {
     go(dir, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+// -- deletions ------------------------------------------------------------------------------
+
+/// The xattr that makes a folder opaque in `userxattr` mode.
+const OPAQUE: &CStr = c"user.overlay.opaque";
+
+/// An overlayfs whiteout: a character device 0:0 (as `lstat` sees it).
+fn is_whiteout(m: &std::fs::Metadata) -> bool {
+    m.file_type().is_char_device() && m.rdev() == 0
+}
+
+fn cpath(p: &Path) -> Result<CString> {
+    CString::new(p.as_os_str().as_bytes()).context("path contains a NUL byte")
+}
+
+fn make_whiteout(p: &Path) -> Result<()> {
+    let c = cpath(p)?;
+    // SAFETY: a plain syscall on an owned C string.
+    if unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o600, 0) } != 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("creating the whiteout {} (unprivileged whiteouts need Linux 5.8+)", p.display()));
+    }
+    Ok(())
+}
+
+fn is_opaque(p: &Path) -> bool {
+    let Ok(c) = cpath(p) else { return false };
+    let mut buf = [0u8; 2];
+    // SAFETY: the buffer outlives the call and its length is passed.
+    let n = unsafe { libc::lgetxattr(c.as_ptr(), OPAQUE.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    n == 1 && buf[0] == b'y'
+}
+
+fn set_opaque(p: &Path, on: bool) -> Result<()> {
+    let c = cpath(p)?;
+    // SAFETY: plain syscalls on owned C strings.
+    let r = unsafe {
+        if on {
+            libc::lsetxattr(c.as_ptr(), OPAQUE.as_ptr(), c"y".as_ptr().cast(), 1, 0)
+        } else {
+            libc::lremovexattr(c.as_ptr(), OPAQUE.as_ptr())
+        }
+    };
+    if r != 0 {
+        let e = io::Error::last_os_error();
+        if !on && e.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(());
+        }
+        return Err(e).with_context(|| format!("{} user.overlay.opaque on {}", if on { "setting" } else { "removing" }, p.display()));
+    }
+    Ok(())
+}
+
+/// Whether `dir` holds any file (whiteouts and empty folders don't count).
+fn has_files(dir: &Path) -> Result<bool> {
+    Ok(!walk(dir)?.is_empty())
+}
+
+/// Deletions already in a layer folder (e.g. a copied mod that ships whiteouts): its
+/// whiteouts and opaque folders, as relative paths. Whiteouts inside an opaque folder
+/// change nothing, so they are dropped.
+fn scan_deletions(dir: &Path) -> Result<Vec<String>> {
+    fn go(root: &Path, dir: &Path, in_opaque: bool, out: &mut Vec<String>) -> Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let (path, m) = (e.path(), e.metadata()?);
+            let rel = || path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if m.is_dir() {
+                let opaque = !in_opaque && is_opaque(&path);
+                if opaque {
+                    out.push(rel());
+                }
+                go(root, &path, in_opaque || opaque, out)?;
+            } else if is_whiteout(&m) {
+                if in_opaque {
+                    std::fs::remove_file(&path)?;
+                } else {
+                    out.push(rel());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    go(dir, dir, false, &mut out)?;
+    out.sort_by_key(|d| d.to_lowercase());
+    Ok(out)
+}
+
+/// A path to delete, as given (relative to the install folder; `\` works as a separator;
+/// an absolute path must be inside `install`), as a clean relative path with `/`.
+/// Refuses `..` and anything outside the install folder.
+pub fn normalize_path(path: &str, install: Option<&Path>) -> Result<String> {
+    if path.contains('\0') {
+        bail!("{path:?}: contains a NUL byte");
+    }
+    let mut rel = path.replace('\\', "/");
+    if rel.starts_with('/') {
+        let p = Path::new(&rel);
+        let roots: Vec<PathBuf> = install.into_iter().flat_map(|i| [Some(i.to_owned()), i.canonicalize().ok()]).flatten().collect();
+        let Some(inside) = roots.iter().find_map(|r| p.strip_prefix(r).ok()) else {
+            bail!("{path}: outside the install folder (give paths relative to it)");
+        };
+        rel = inside.to_string_lossy().into_owned();
+    }
+    let mut parts = Vec::new();
+    for c in rel.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => bail!("{path}: '..' isn't allowed; paths stay inside the install folder"),
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() {
+        bail!("{path:?}: that's the install folder itself; name a file or folder inside it");
+    }
+    Ok(parts.join("/"))
+}
+
+/// `rel` with each component spelled as in `install` (Windows games don't care about case;
+/// overlayfs does, and a whiteout only hides an exact name), and whether the whole path
+/// exists there. Components past the first missing one stay as given.
+pub fn match_install_case(install: &Path, rel: &str) -> (String, bool) {
+    let mut cur = install.to_owned();
+    let mut out: Vec<String> = Vec::new();
+    let mut found = true;
+    for comp in rel.split('/') {
+        if found {
+            if cur.join(comp).symlink_metadata().is_ok() {
+                cur.push(comp);
+                out.push(comp.to_owned());
+                continue;
+            }
+            let lower = comp.to_lowercase();
+            let mut hits: Vec<String> = std::fs::read_dir(&cur)
+                .map(|rd| rd.filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.to_lowercase() == lower).collect())
+                .unwrap_or_default();
+            hits.sort();
+            if let Some(name) = hits.into_iter().next() {
+                cur.push(&name);
+                out.push(name);
+                continue;
+            }
+            found = false;
+        }
+        out.push(comp.to_owned());
+    }
+    (out.join("/"), found)
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Whether `path` is strictly inside the folder `dir` (ignoring case).
+fn is_under(path: &str, dir: &str) -> bool {
+    path.to_lowercase().strip_prefix(&dir.to_lowercase()).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A layer's deletions after deleting `add` and keeping `keep` (normalized paths), sorted,
+/// with notes for deletions folded into a new folder deletion.
+fn plan_deletions(current: &[String], add: &[String], keep: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut list = current.to_vec();
+    let mut notes = Vec::new();
+    for k in keep {
+        if let Some(i) = list.iter().position(|d| same_path(d, k)) {
+            list.remove(i);
+        } else if let Some(d) = list.iter().find(|d| is_under(k, d)) {
+            bail!("{k} is hidden because the layer deletes the folder {d}; keep {d} instead");
+        } else {
+            bail!("the layer doesn't delete {k}");
+        }
+    }
+    for a in add {
+        if list.iter().any(|d| same_path(d, a)) {
+            continue;
+        }
+        if let Some(d) = list.iter().find(|d| is_under(a, d)) {
+            bail!("{a} is already deleted with the folder {d}");
+        }
+        let before = list.len();
+        list.retain(|d| !is_under(d, a));
+        if list.len() < before {
+            notes.push(format!("the deletion of {a} takes in {} deletion(s) inside it", before - list.len()));
+        }
+        list.push(a.clone());
+    }
+    list.sort_by_key(|d| d.to_lowercase());
+    Ok((list, notes))
+}
+
+/// Make the layer folder hide `rel`: a whiteout, or an opaque folder if the layer has files
+/// of its own in that folder (they then replace the install's whole folder).
+fn apply_deletion(dir: &Path, rel: &str) -> Result<()> {
+    let p = dir.join(rel);
+    match p.symlink_metadata() {
+        Ok(m) if is_whiteout(&m) => Ok(()),
+        Ok(m) if m.is_dir() => {
+            if has_files(&p)? {
+                set_opaque(&p, true)
+            } else {
+                std::fs::remove_dir_all(&p)?;
+                make_whiteout(&p)
+            }
+        }
+        Ok(_) => bail!("the layer has its own {rel}, which already replaces the install's; it can't also delete it"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let parent = p.parent().context("deletion path")?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("{rel}: the layer has a file where a folder of this path would be"))?;
+            make_whiteout(&p)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Undo [`apply_deletion`]. Folders created for a whiteout stay (empty folders change
+/// nothing in the merged view of a folder the install has).
+fn undo_deletion(dir: &Path, rel: &str) -> Result<()> {
+    let p = dir.join(rel);
+    match p.symlink_metadata() {
+        Ok(m) if is_whiteout(&m) => std::fs::remove_file(&p)?,
+        Ok(m) if m.is_dir() => set_opaque(&p, false)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Bring the whiteouts in `dir` from `old` to `new`.
+fn sync_deletions(dir: &Path, old: &[String], new: &[String]) -> Result<()> {
+    for d in old.iter().filter(|d| !new.contains(d)) {
+        undo_deletion(dir, d)?;
+    }
+    for d in new.iter().filter(|d| !old.contains(d)) {
+        apply_deletion(dir, d)?;
+    }
+    Ok(())
 }
 
 /// Rename entries under `layer` whose names differ only in case from the install's, so
@@ -150,6 +399,18 @@ impl ModStore {
         self.histories_dir().join(format!("{id}.jsonl"))
     }
 
+    fn layer_history_path(&self, id: &str) -> PathBuf {
+        self.data.join("games").join(self.product_id.to_string()).join("layers").join(format!("{id}.jsonl"))
+    }
+
+    fn write_layer_meta(&self, layer: &Layer) -> Result<()> {
+        let path = self.layer_meta(&layer.id);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(layer)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
     // -- layers ---------------------------------------------------------------------------
 
     /// All layers, oldest first.
@@ -187,6 +448,43 @@ impl ModStore {
     /// Copy `src` into the store as a new layer (reflinks where the filesystem supports
     /// them), with names matched to `install`'s case.
     pub fn add_layer(&self, name: &str, src: &Path, install: Option<&Path>, source: &str) -> Result<Layer> {
+        Ok(self.add_layer_with(name, Some(src), &[], install, source)?.layer)
+    }
+
+    /// Paths to delete as given, normalized and matched to `install`'s case, with a
+    /// warning for each one the install doesn't have.
+    fn resolve_deletions(&self, paths: &[String], install: Option<&Path>) -> Result<(Vec<String>, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut warnings = Vec::new();
+        for p in paths {
+            let rel = normalize_path(p, install)?;
+            let Some(install) = install else {
+                out.push(rel);
+                continue;
+            };
+            let (rel, exists) = match_install_case(install, &rel);
+            if !exists {
+                warnings.push(format!(
+                    "{rel} is not in the install folder; the deletion is kept and hides it if a layer below or a game update adds it"
+                ));
+            }
+            out.push(rel);
+        }
+        Ok((out, warnings))
+    }
+
+    /// A new layer: `src`'s files (if any) copied into the store, with names matched to
+    /// `install`'s case, plus `deletes` (paths relative to the install folder). Whiteouts
+    /// and opaque folders already in `src` are kept as deletions. Revision 1 of the layer's
+    /// history records its deletions.
+    pub fn add_layer_with(
+        &self,
+        name: &str,
+        src: Option<&Path>,
+        deletes: &[String],
+        install: Option<&Path>,
+        source: &str,
+    ) -> Result<LayerChange> {
         let name = name.trim();
         if name.is_empty() {
             bail!("a layer needs a name");
@@ -194,12 +492,22 @@ impl ModStore {
         if self.layers()?.iter().any(|l| same_name(&l.name, name)) {
             bail!("there is already a layer named '{name}'");
         }
-        let src = src.canonicalize().with_context(|| format!("{} not found", src.display()))?;
-        if !src.is_dir() {
-            bail!("{} is not a folder", src.display());
-        }
-        if src.starts_with(self.data.join("mods")) {
-            bail!("{} is already in the mod store", src.display());
+        let src = match src {
+            Some(src) => {
+                let src = src.canonicalize().with_context(|| format!("{} not found", src.display()))?;
+                if !src.is_dir() {
+                    bail!("{} is not a folder", src.display());
+                }
+                if src.starts_with(self.data.join("mods")) {
+                    bail!("{} is already in the mod store", src.display());
+                }
+                Some(src)
+            }
+            None => None,
+        };
+        let (deletes, mut warnings) = self.resolve_deletions(deletes, install)?;
+        if src.is_none() && deletes.is_empty() {
+            bail!("a layer needs a folder of files, files to delete, or both");
         }
         let id = loop {
             let id = new_id('l')?;
@@ -209,26 +517,39 @@ impl ModStore {
         };
         std::fs::create_dir_all(self.layers_dir())?;
         let tmp = self.layers_dir().join(format!(".partial-{id}"));
-        let copied = (|| -> Result<()> {
+        let copied = (|| -> Result<(Vec<String>, Vec<String>)> {
             std::fs::create_dir(&tmp)?;
-            let out = std::process::Command::new("cp")
-                .args(["-a", "--reflink=auto", "--no-preserve=ownership"])
-                .arg(src.join("."))
-                .arg(&tmp)
-                .output()
-                .context("running cp")?;
-            if !out.status.success() {
-                bail!("copying {} failed: {}", src.display(), String::from_utf8_lossy(&out.stderr).trim());
+            if let Some(src) = &src {
+                // -a keeps device nodes, so whiteouts in the source are copied as whiteouts
+                // (and xattrs, so opaque folders stay opaque).
+                let out = std::process::Command::new("cp")
+                    .args(["-a", "--reflink=auto", "--no-preserve=ownership"])
+                    .arg(src.join("."))
+                    .arg(&tmp)
+                    .output()
+                    .context("running cp")?;
+                if !out.status.success() {
+                    bail!("copying {} failed: {}", src.display(), String::from_utf8_lossy(&out.stderr).trim());
+                }
             }
             if let Some(install) = install {
                 match_case(&tmp, install)?;
             }
-            Ok(())
+            let shipped = scan_deletions(&tmp)?;
+            let (list, notes) = plan_deletions(&shipped, &deletes, &[])?;
+            sync_deletions(&tmp, &shipped, &list)?;
+            Ok((list, notes))
         })();
-        if let Err(e) = copied {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return Err(e);
-        }
+        let deletes = match copied {
+            Ok((list, notes)) => {
+                warnings.extend(notes);
+                list
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e);
+            }
+        };
         let files = walk(&tmp)?;
         std::fs::rename(&tmp, self.layer_dir(&id))?;
         let layer = Layer {
@@ -236,12 +557,104 @@ impl ModStore {
             name: name.to_owned(),
             added: chrono::Utc::now(),
             added_by: source.to_owned(),
-            origin: Some(src),
+            origin: src,
             files: files.len() as u64,
             bytes: files.iter().map(|f| f.1).sum(),
+            deletes,
         };
-        std::fs::write(self.layer_meta(&id), serde_json::to_vec_pretty(&layer)?)?;
-        Ok(layer)
+        self.write_layer_meta(&layer)?;
+        let _ = std::fs::remove_file(self.layer_history_path(&id));
+        let rev = self.append_layer_revision(&layer.id, &layer.deletes, layer.added, source, Some("added".into()))?;
+        Ok(LayerChange { layer, revision: rev.revision, warnings })
+    }
+
+    pub fn layer_history(&self, id: &str) -> Result<Vec<LayerRevision>> {
+        read_jsonl(&self.layer_history_path(id))
+    }
+
+    /// A layer's history by id or name.
+    pub fn layer_history_of(&self, query: &str) -> Result<(Layer, Vec<LayerRevision>)> {
+        let layer = self.layer(query)?;
+        let hist = self.layer_history(&layer.id)?;
+        Ok((layer, hist))
+    }
+
+    fn append_layer_revision(
+        &self,
+        id: &str,
+        deletes: &[String],
+        at: chrono::DateTime<chrono::Utc>,
+        source: &str,
+        message: Option<String>,
+    ) -> Result<LayerRevision> {
+        let path = self.layer_history_path(id);
+        let revision = read_jsonl::<LayerRevision>(&path)?.last().map_or(0, |r| r.revision) + 1;
+        let rev = LayerRevision { revision, at, source: source.to_owned(), message, deletes: deletes.to_vec() };
+        append_jsonl(&path, &rev)?;
+        Ok(rev)
+    }
+
+    /// Give `layer` the deletions `list`: whiteouts first (undone again if one fails), then
+    /// its metadata, then a revision. No change, no revision.
+    fn set_deletions(
+        &self,
+        mut layer: Layer,
+        list: Vec<String>,
+        source: &str,
+        message: Option<String>,
+        warnings: Vec<String>,
+    ) -> Result<LayerChange> {
+        let hist = self.layer_history(&layer.id)?;
+        if list == layer.deletes {
+            return Ok(LayerChange { revision: hist.last().map_or(0, |r| r.revision), layer, warnings });
+        }
+        let dir = self.layer_dir(&layer.id);
+        if !dir.is_dir() {
+            bail!("layer '{}' has lost its folder ({}); remove it and add it again", layer.name, dir.display());
+        }
+        if let Err(e) = sync_deletions(&dir, &layer.deletes, &list) {
+            let _ = sync_deletions(&dir, &list, &layer.deletes);
+            return Err(e);
+        }
+        if hist.is_empty() {
+            // A layer from before deletions had a history: record how it was added first.
+            self.append_layer_revision(&layer.id, &layer.deletes, layer.added, &layer.added_by, Some("added".into()))?;
+        }
+        layer.deletes = list;
+        self.write_layer_meta(&layer)?;
+        let rev = self.append_layer_revision(&layer.id, &layer.deletes, chrono::Utc::now(), source, message)?;
+        Ok(LayerChange { layer, revision: rev.revision, warnings })
+    }
+
+    /// Add deletions (`delete`) to a layer or take them back (`keep`); paths are relative
+    /// to the install folder. Deleting a folder takes in deletions inside it; a path the
+    /// install doesn't have is kept, with a warning.
+    pub fn change_deletions(
+        &self,
+        query: &str,
+        delete: &[String],
+        keep: &[String],
+        install: Option<&Path>,
+        source: &str,
+        message: Option<String>,
+    ) -> Result<LayerChange> {
+        let layer = self.layer(query)?;
+        let (add, mut warnings) = self.resolve_deletions(delete, install)?;
+        let keep: Vec<String> = keep.iter().map(|k| normalize_path(k, install)).collect::<Result<_>>()?;
+        let (list, notes) = plan_deletions(&layer.deletes, &add, &keep)?;
+        warnings.extend(notes);
+        self.set_deletions(layer, list, source, message, warnings)
+    }
+
+    /// Make an earlier revision of a layer's deletions current again (as a new revision).
+    pub fn restore_layer(&self, query: &str, revision: u32, source: &str) -> Result<LayerChange> {
+        let layer = self.layer(query)?;
+        let target = self
+            .layer_history(&layer.id)?
+            .into_iter()
+            .find(|r| r.revision == revision)
+            .with_context(|| format!("layer '{}' has no revision {revision}", layer.name))?;
+        self.set_deletions(layer, target.deletes, source, Some(format!("restore revision {revision}")), Vec::new())
     }
 
     /// Delete a layer and its files. Refused while a profile uses it.
@@ -257,6 +670,7 @@ impl ModStore {
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
+        let _ = std::fs::remove_file(self.layer_history_path(&layer.id));
         Ok(layer)
     }
 
@@ -273,17 +687,40 @@ impl ModStore {
         Ok(ids)
     }
 
-    /// Files that more than one of `layers` (bottom to top) provides, compared without
+    /// Files that more than one of `layers` (bottom to top) provides, or that a layer
+    /// provides and a higher one deletes (the path or a folder above it), compared without
     /// case like the game does.
     pub fn conflicts(&self, layers: &[String]) -> Vec<Conflict> {
-        let mut seen: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+        let metas = self.layers().unwrap_or_default();
+        // lowercase path -> (path, [(layer, deletes it)])
+        let mut seen: BTreeMap<String, (String, Vec<(String, bool)>)> = BTreeMap::new();
         for id in layers {
+            let deletes = metas.iter().find(|l| &l.id == id).map(|l| l.deletes.as_slice()).unwrap_or_default();
+            for d in deletes {
+                for (key, (_, by)) in seen.iter_mut() {
+                    if (same_path(key, d) || is_under(key, d)) && by.last().is_some_and(|(l, _)| l != id) {
+                        by.push((id.clone(), true));
+                    }
+                }
+            }
+            // A file of the layer's own under a folder it deletes (an opaque folder) is
+            // what it provides there.
             for (path, _) in walk(&self.layer_dir(id)).unwrap_or_default() {
                 let e = seen.entry(path.to_lowercase()).or_insert_with(|| (path.clone(), Vec::new()));
-                e.1.push(id.clone());
+                match e.1.last_mut() {
+                    Some((l, deleted)) if l == id => *deleted = false,
+                    _ => e.1.push((id.clone(), false)),
+                }
             }
         }
-        seen.into_values().filter(|(_, l)| l.len() > 1).map(|(path, layers)| Conflict { path, layers }).collect()
+        seen.into_values()
+            .filter(|(_, by)| by.len() > 1)
+            .map(|(path, by)| Conflict {
+                path,
+                deleted_by: by.iter().filter(|b| b.1).map(|b| b.0.clone()).collect(),
+                layers: by.into_iter().map(|b| b.0).collect(),
+            })
+            .collect()
     }
 
     // -- profiles -------------------------------------------------------------------------
@@ -558,7 +995,10 @@ mod tests {
         // Conflicts between layers ignore case; the top layer is listed last.
         let state = store.state().unwrap();
         assert_eq!(state.profiles.len(), 1);
-        assert_eq!(state.profiles[0].conflicts, [Conflict { path: "x.txt".into(), layers: vec![a.id.clone(), b.id.clone()] }]);
+        assert_eq!(
+            state.profiles[0].conflicts,
+            [Conflict { path: "x.txt".into(), layers: vec![a.id.clone(), b.id.clone()], ..Default::default() }]
+        );
 
         // Restore r1, then delete and restore again.
         let r4 = store.restore_profile("VO", 1, "cli").unwrap();
@@ -582,6 +1022,170 @@ mod tests {
         assert_eq!(hist.iter().map(|r| r.source.as_str()).collect::<Vec<_>>(), ["gui", "agent", "cli", "cli", "cli", "cli"]);
         // Deleted profiles are found by name too.
         assert!(store.restore_profile("visual overhaul", 1, "cli").is_ok());
+    }
+
+    fn strs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn whiteout_at(p: &Path) -> bool {
+        p.symlink_metadata().is_ok_and(|m| is_whiteout(&m))
+    }
+
+    #[test]
+    fn deletion_paths_are_validated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("My Game");
+        std::fs::create_dir_all(&install).unwrap();
+        let n = |p: &str| normalize_path(p, Some(&install));
+        assert_eq!(n("videos/intro.bik").unwrap(), "videos/intro.bik");
+        assert_eq!(n("./videos//intro.bik").unwrap(), "videos/intro.bik");
+        assert_eq!(n(r"Videos\Intro.bik").unwrap(), "Videos/Intro.bik");
+        assert_eq!(n("videos/").unwrap(), "videos");
+        // Absolute paths only inside the install folder.
+        assert_eq!(n(&format!("{}/data/x.dds", install.display())).unwrap(), "data/x.dds");
+        assert!(n("/etc/passwd").unwrap_err().to_string().contains("outside"));
+        assert!(normalize_path("/etc/passwd", None).is_err());
+        assert!(n(&format!("{}/../other/x", install.display())).unwrap_err().to_string().contains(".."));
+        // No climbing out, and not the root itself.
+        for bad in ["../x", "a/../../x", "a/..", "..", r"a\..\..\x"] {
+            assert!(n(bad).unwrap_err().to_string().contains(".."), "{bad}");
+        }
+        assert!(n("/").unwrap_err().to_string().contains("outside"));
+        for bad in ["", ".", "./", &install.display().to_string()] {
+            assert!(n(bad).unwrap_err().to_string().contains("install folder itself"), "{bad}");
+        }
+        assert!(n("a\0b").is_err());
+    }
+
+    #[test]
+    fn deletion_paths_match_install_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = folder(&tmp.path().join("install"), &[("Videos/Intro.BIK", "v"), ("DataPC/a.forge", "f")]);
+        assert_eq!(match_install_case(&install, "videos/intro.bik"), ("Videos/Intro.BIK".into(), true));
+        assert_eq!(match_install_case(&install, "Videos/Intro.BIK"), ("Videos/Intro.BIK".into(), true));
+        assert_eq!(match_install_case(&install, "VIDEOS"), ("Videos".into(), true));
+        // Past the first missing component, the rest stays as given.
+        assert_eq!(match_install_case(&install, "videos/outro.bik"), ("Videos/outro.bik".into(), false));
+        assert_eq!(match_install_case(&install, "movies/a/b"), ("movies/a/b".into(), false));
+        // Exact names win over case-insensitive ones.
+        std::fs::create_dir_all(install.join("videos")).unwrap();
+        assert_eq!(match_install_case(&install, "videos").0, "videos");
+    }
+
+    #[test]
+    fn deletion_plans() {
+        let (l, notes) = plan_deletions(&[], &strs(&["b/x", "a", "B/X"]), &[]).unwrap();
+        assert_eq!((l.as_slice(), notes.len()), (&strs(&["a", "b/x"])[..], 0));
+        // A folder takes in deletions inside it; inside a deleted folder is refused.
+        let (l2, notes) = plan_deletions(&l, &strs(&["b"]), &[]).unwrap();
+        assert_eq!(l2, strs(&["a", "b"]));
+        assert_eq!(notes.len(), 1);
+        assert!(plan_deletions(&l2, &strs(&["B/y"]), &[]).unwrap_err().to_string().contains("folder b"));
+        // `b/` isn't `bc`.
+        assert_eq!(plan_deletions(&l2, &strs(&["bc"]), &[]).unwrap().0, strs(&["a", "b", "bc"]));
+        // Keep takes deletions back, ignoring case.
+        assert_eq!(plan_deletions(&l2, &[], &strs(&["A"])).unwrap().0, strs(&["b"]));
+        assert!(plan_deletions(&l2, &[], &strs(&["c"])).unwrap_err().to_string().contains("doesn't delete"));
+        assert!(plan_deletions(&l2, &[], &strs(&["b/x"])).unwrap_err().to_string().contains("keep b"));
+    }
+
+    #[test]
+    fn layer_deletions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let install = folder(
+            &t.join("install"),
+            &[("Videos/Intro.bik", "i"), ("Videos/Logo.bik", "l"), ("Data/keep.txt", "k"), ("Data/old.txt", "o"), ("game.exe", "e")],
+        );
+        let store = ModStore::new(&t.join("data"), 3);
+
+        // Deletions only: no folder at all. Case follows the install.
+        let c = store.add_layer_with("No intro", None, &strs(&["videos/intro.bik", "nope.txt"]), Some(&install), "agent").unwrap();
+        let ni = c.layer.clone();
+        assert_eq!(ni.deletes, strs(&["nope.txt", "Videos/Intro.bik"]));
+        assert_eq!((ni.files, ni.bytes, ni.origin.as_ref()), (0, 0, None));
+        assert_eq!(c.revision, 1);
+        assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+        assert!(c.warnings[0].contains("nope.txt"));
+        let dir = store.layer_dir(&ni.id);
+        assert!(whiteout_at(&dir.join("Videos/Intro.bik")) && whiteout_at(&dir.join("nope.txt")));
+        // The install keeps its files.
+        assert!(install.join("Videos/Intro.bik").is_file());
+        assert!(store.add_layer_with("Empty", None, &[], Some(&install), "cli").is_err());
+        assert!(store.add_layer_with("Bad", None, &strs(&["../x"]), Some(&install), "cli").is_err());
+        assert!(!store.layers().unwrap().iter().any(|l| l.name == "Bad"));
+
+        // A folder whose own whiteouts come along (cp -a keeps device nodes), and a
+        // deleted folder the layer has files in becomes opaque.
+        let src = folder(&t.join("src"), &[("data/new.txt", "n")]);
+        make_whiteout(&src.join("game.exe")).unwrap();
+        let c = store.add_layer_with("Rework", Some(&src), &strs(&["data"]), Some(&install), "cli").unwrap();
+        let rw = c.layer.clone();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(rw.deletes, strs(&["Data", "game.exe"]));
+        assert_eq!(rw.files, 1);
+        let rdir = store.layer_dir(&rw.id);
+        assert!(whiteout_at(&rdir.join("game.exe")));
+        assert!(is_opaque(&rdir.join("Data")) && rdir.join("Data/new.txt").is_file());
+        assert!(whiteout_at(&src.join("game.exe")), "the source is left as it was");
+        // The layer can't delete a file it provides.
+        let e = store.change_deletions("Rework", &strs(&["data/new.txt"]), &[], Some(&install), "cli", None).unwrap_err();
+        assert!(e.to_string().contains("folder Data"), "{e}");
+        let src2 = folder(&t.join("src2"), &[("game.exe", "x")]);
+        let e = store.add_layer_with("Both", Some(&src2), &strs(&["game.exe"]), Some(&install), "cli").unwrap_err();
+        assert!(e.to_string().contains("its own game.exe"), "{e}");
+        assert!(std::fs::read_dir(t.join("data/mods/3/layers")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".partial")));
+
+        // Later changes are revisions; a folder whiteout replaces whiteouts inside it.
+        let c = store.change_deletions("no intro", &strs(&["VIDEOS"]), &strs(&["nope.txt"]), Some(&install), "agent", None).unwrap();
+        assert_eq!((c.layer.deletes.as_slice(), c.revision), (&strs(&["Videos"])[..], 2));
+        assert!(whiteout_at(&dir.join("Videos")) && !dir.join("nope.txt").exists());
+        // No-op: no revision.
+        assert_eq!(store.change_deletions(&ni.id, &strs(&["videos"]), &[], Some(&install), "cli", None).unwrap().revision, 2);
+        let c = store.change_deletions(&ni.id, &[], &strs(&["videos"]), Some(&install), "cli", Some("intro back".into())).unwrap();
+        assert!(c.layer.deletes.is_empty() && !dir.join("Videos").exists());
+        assert_eq!(store.layer(&ni.id).unwrap().deletes, c.layer.deletes, "metadata is updated");
+        // Keeping the opaque folder leaves the layer's files and clears the flag.
+        store.change_deletions("rework", &[], &strs(&["data"]), Some(&install), "cli", None).unwrap();
+        assert!(!is_opaque(&rdir.join("Data")) && rdir.join("Data/new.txt").is_file());
+
+        let (_, hist) = store.layer_history_of("No intro").unwrap();
+        assert_eq!(hist.iter().map(|r| r.revision).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(hist[0].deletes, strs(&["nope.txt", "Videos/Intro.bik"]));
+        assert_eq!(hist[2].message.as_deref(), Some("intro back"));
+        let c = store.restore_layer("No intro", 1, "cli").unwrap();
+        assert_eq!((c.layer.deletes, c.revision), (hist[0].deletes.clone(), 4));
+        assert!(whiteout_at(&dir.join("Videos/Intro.bik")));
+        assert!(store.restore_layer("No intro", 9, "cli").is_err());
+
+        // A layer from before deletions gets its "added" revision on first change.
+        let old = store.add_layer("Old", &folder(&t.join("old"), &[("a.txt", "a")]), None, "gui").unwrap();
+        std::fs::remove_file(store.layer_history_path(&old.id)).unwrap();
+        let c = store.change_deletions("Old", &strs(&["b.txt"]), &[], None, "cli", None).unwrap();
+        let hist = store.layer_history(&old.id).unwrap();
+        assert_eq!((c.revision, hist[0].source.as_str(), hist[0].deletes.len()), (2, "gui", 0));
+
+        store.remove_layer("No intro").unwrap();
+        assert!(!store.layer_history_path(&ni.id).exists());
+    }
+
+    #[test]
+    fn conflicts_with_deletions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let store = ModStore::new(&t.join("data"), 4);
+        let a = store.add_layer("A", &folder(&t.join("a"), &[("v/intro.bik", "a"), ("v/logo.bik", "a"), ("x.txt", "a")]), None, "cli").unwrap();
+        let b = store.add_layer_with("B", Some(&folder(&t.join("b"), &[("v/logo.bik", "b")])), &strs(&["v", "X.txt"]), None, "cli").unwrap().layer;
+        let c = store.conflicts(&[a.id.clone(), b.id.clone()]);
+        let by = |path: &str| c.iter().find(|c| c.path == path).cloned();
+        // B deletes the folder: A's intro is hidden, B's logo replaces A's.
+        assert_eq!(by("v/intro.bik").unwrap(), Conflict { path: "v/intro.bik".into(), layers: vec![a.id.clone(), b.id.clone()], deleted_by: vec![b.id.clone()] });
+        assert_eq!(by("v/logo.bik").unwrap().deleted_by, Vec::<String>::new());
+        assert_eq!(by("x.txt").unwrap().deleted_by, [b.id.clone()]);
+        // Below, a deletion hides nothing of a higher layer.
+        assert!(store.conflicts(&[b.id.clone(), a.id.clone()]).iter().all(|c| c.deleted_by.is_empty()));
+        assert_eq!(store.conflicts(&[b.id.clone(), a.id.clone()]).len(), 1);
     }
 
     #[test]
