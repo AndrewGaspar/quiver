@@ -13,7 +13,7 @@ static LOG: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None
 /// Log to stdout and to `UBI_BRIDGE_LOG` if set (stdout is unreliable under Proton).
 macro_rules! log {
     ($($t:tt)*) => {{
-        let line = format!($($t)*);
+        let line = format!("{} {}", crate::win::timestamp(), format!($($t)*));
         println!("{line}");
         if let Some(f) = crate::win::LOG.lock().unwrap().as_mut() {
             use std::io::Write as _;
@@ -21,6 +21,19 @@ macro_rules! log {
             let _ = f.flush();
         }
     }};
+}
+
+/// Local wall-clock time as HH:MM:SS.mmm, matching the SDK proxy's log.
+pub fn timestamp() -> String {
+    #[repr(C)]
+    #[derive(Default)]
+    struct SystemTime { y: u16, mo: u16, dow: u16, d: u16, h: u16, mi: u16, s: u16, ms: u16 }
+    unsafe extern "system" {
+        fn GetLocalTime(t: *mut SystemTime);
+    }
+    let mut t = SystemTime::default();
+    unsafe { GetLocalTime(&mut t) };
+    format!("{:02}:{:02}:{:02}.{:03}", t.h, t.mi, t.s, t.ms)
 }
 
 mod api;
