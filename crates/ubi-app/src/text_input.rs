@@ -45,6 +45,8 @@ pub struct TextInput {
     masked: bool,
     /// Dense form style: 28 px tall, optionally in the mono font.
     compact: Option<bool>,
+    /// No box around the text (the command palette draws its own).
+    bare: bool,
 }
 
 impl TextInput {
@@ -61,7 +63,14 @@ impl TextInput {
             is_selecting: false,
             masked,
             compact: None,
+            bare: false,
         }
+    }
+
+    /// Draw only the text and cursor, larger, for a field that sits in its own frame.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 
     pub fn text(&self) -> &str {
@@ -174,6 +183,10 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        // Nothing selected: let an ancestor use Ctrl C (the palette copies its command).
+        if self.selected_range.is_empty() {
+            cx.propagate();
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -630,22 +643,25 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(if self.compact.is_some() { 18. } else { 20. }))
-            .text_size(px(if self.compact.is_some() { 12.5 } else { 13.5 }))
+            .text_size(px(if self.bare { 15. } else if self.compact.is_some() { 12.5 } else { 13.5 }))
             .when(self.compact == Some(true), |d| d.font_family(crate::assets::MONO_FONT).text_size(px(12.)))
             .text_color(th.tx1)
-            .child(
-                div()
-                    .h(px(if self.compact.is_some() { 28. } else { 36. }))
-                    .w_full()
-                    .px(px(if self.compact.is_some() { 9. } else { 10. }))
-                    .py(px(if self.compact.is_some() { 4. } else { 8. }))
-                    .overflow_hidden()
-                    .rounded(px(8.))
-                    .bg(th.ink1)
-                    .border_1()
-                    .border_color(if focused { th.acc } else { th.line2 })
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .when(self.bare, |d| d.w_full().child(div().h(px(22.)).w_full().child(TextElement { input: cx.entity() })))
+            .when(!self.bare, |d| {
+                d.child(
+                    div()
+                        .h(px(if self.compact.is_some() { 28. } else { 36. }))
+                        .w_full()
+                        .px(px(if self.compact.is_some() { 9. } else { 10. }))
+                        .py(px(if self.compact.is_some() { 4. } else { 8. }))
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .bg(th.ink1)
+                        .border_1()
+                        .border_color(if focused { th.acc } else { th.line2 })
+                        .child(TextElement { input: cx.entity() }),
+                )
+            })
     }
 }
 

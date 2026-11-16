@@ -12,6 +12,9 @@ use crate::theme::{Theme, rgba};
 impl Quiver {
     pub fn render_overlay(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let overlay = self.nav.overlay?;
+        if let Overlay::Palette { selected } = overlay {
+            return Some(self.render_palette(th, selected, cx));
+        }
         let (title, context, commands, selected) = match overlay {
             Overlay::Palette { selected } => {
                 let ctx = self.nav.focused_game(&self.layout).and_then(|id| self.game(id)).map(|g| short_name(&g.entry.name));
@@ -197,14 +200,30 @@ impl Quiver {
                     hints.push(hint(vec!["Y"], "Menu"));
                     hints.push(hint(vec!["B"], "Back to library"));
                 }
+                (Page::Settings, Zone::Body) => {
+                    hints.push(hint(vec!["A"], "Select"));
+                    hints.push(hint(vec!["B"], "Sections"));
+                }
+                (Page::Settings, _) => {
+                    hints.push(hint(vec!["A"], "Open section"));
+                    hints.push(hint(vec!["B"], "Back to library"));
+                }
+                (Page::Activity, _) => {
+                    hints.push(hint(vec!["A"], "Open game"));
+                    hints.push(hint(vec!["Y"], if self.ui.activity_game.is_some() { "All games" } else { "Only this game" }));
+                    hints.push(hint(vec!["B"], "Back to library"));
+                }
                 _ => {
                     hints.push(hint(vec!["A"], "Open game"));
                     hints.push(hint(vec!["B"], "Back to library"));
                 }
             }
             hints.push(hint(vec!["LB", "RB"], "Library · Downloads · Activity"));
-            if matches!(self.nav.page, Page::Game(_)) {
-                hints.push(hint(vec!["LT", "RT"], "Tabs"));
+            match self.nav.page {
+                Page::Game(_) => hints.push(hint(vec!["LT", "RT"], "Tabs")),
+                Page::Settings => hints.push(hint(vec!["LT", "RT"], "Sections")),
+                Page::Activity => hints.push(hint(vec!["LT", "RT"], "Source")),
+                _ => {}
             }
         }
         div()

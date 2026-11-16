@@ -1,0 +1,1255 @@
+//! App-wide state and behaviour that belongs to no single screen: accounts and sessions
+//! (now playing), the daemon link (reconnecting), the confirmation dialog, focus for the
+//! palette and sign-in fields, live refreshes, and the demo-mode setup for these screens.
+//!
+//! `app.rs` calls in through a handful of hooks (`start_global`, `global_event`,
+//! `global_status`, `global_input`, `on_link_lost`, ...), so the screens in `settings.rs`,
+//! `palette.rs`, `activity.rs` and `signin.rs` stay out of the shared files.
+
+use std::time::{Duration, Instant};
+
+use futures::StreamExt;
+use gpui::{
+    AnyElement, App, Context, Entity, EntityId, Focusable, IntoElement, KeyBinding, ParentElement, SharedString, Stateful,
+    Styled, Window, actions, div, prelude::*, px,
+};
+use ubi_api::exports::{ExportKind, ExportStatus, SteamUsers};
+use ubi_api::{ActiveSession, ActivityEntry, Event, Request, Status};
+
+use super::{BOLD, FocusExt, Icon, Kind, PillKind, SEMIBOLD, Size, art_fill, button, icon, pill, soft_shadow};
+use crate::app::{Conn, InputMode, NAV_CONTEXT, Quiver};
+use crate::art::{ArtSlot, Variant};
+use crate::model::{Actor, actor, clean_name, clock, short_name};
+use crate::nav::{Input, Overlay, Page, Section, SettingsSection};
+use crate::source::Source;
+use crate::text_input::TextInput;
+use crate::theme::{Theme, rgba};
+use crate::{err_text, on_tokio};
+
+actions!(
+    quiver_global,
+    [
+        PaletteUp,
+        PaletteDown,
+        PaletteRun,
+        PaletteClose,
+        PaletteToggle,
+        OpenSettings,
+        SubmitSignin,
+        CancelSignin,
+        NextField,
+    ]
+);
+
+/// Key context while the command palette's search field has focus: letters go to the
+/// field, arrows and Enter to the list.
+pub const PALETTE_CONTEXT: &str = "QuiverPalette";
+/// Key context of the sign-in screen (set by `app.rs`).
+pub const LOGIN_CONTEXT: &str = "QuiverLogin";
+
+pub fn bind_keys(cx: &mut App) {
+    let p = Some(PALETTE_CONTEXT);
+    let l = Some(LOGIN_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("up", PaletteUp, p),
+        KeyBinding::new("down", PaletteDown, p),
+        KeyBinding::new("ctrl-p", PaletteUp, p),
+        KeyBinding::new("ctrl-n", PaletteDown, p),
+        KeyBinding::new("enter", PaletteRun, p),
+        KeyBinding::new("escape", PaletteClose, p),
+        KeyBinding::new("ctrl-k", PaletteToggle, p),
+        KeyBinding::new("ctrl-,", OpenSettings, Some(NAV_CONTEXT)),
+        KeyBinding::new("enter", SubmitSignin, l),
+        KeyBinding::new("escape", CancelSignin, l),
+        KeyBinding::new("tab", NextField, l),
+    ]);
+}
+
+/// Who an Activity entry came from, for the source filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceFilter {
+    All,
+    App,
+    Cli,
+    Agent,
+    System,
+}
+
+impl SourceFilter {
+    pub const ALL: [SourceFilter; 5] =
+        [SourceFilter::All, SourceFilter::App, SourceFilter::Cli, SourceFilter::Agent, SourceFilter::System];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceFilter::All => "Everyone",
+            SourceFilter::App => "App",
+            SourceFilter::Cli => "CLI",
+            SourceFilter::Agent => "Agents",
+            SourceFilter::System => "System",
+        }
+    }
+
+    pub fn icon(self) -> Option<Icon> {
+        match self {
+            SourceFilter::All => None,
+            SourceFilter::App => Some(Icon::MousePointer),
+            SourceFilter::Cli => Some(Icon::SquareTerminal),
+            SourceFilter::Agent => Some(Icon::Bot),
+            SourceFilter::System => Some(Icon::Cog),
+        }
+    }
+
+    pub fn matches(self, source: &str) -> bool {
+        match self {
+            SourceFilter::All => true,
+            SourceFilter::App => actor(source) == Actor::App,
+            SourceFilter::Cli => actor(source) == Actor::Cli,
+            SourceFilter::Agent => actor(source) == Actor::Agent,
+            SourceFilter::System => actor(source) == Actor::System,
+        }
+    }
+
+    pub fn step(self, delta: isize) -> SourceFilter {
+        let n = Self::ALL.len() as isize;
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0) as isize;
+        Self::ALL[((i + delta).rem_euclid(n)) as usize]
+    }
+}
+
+/// Commands from the palette and the global screens. `Copy`, so they fit in
+/// [`crate::app::Cmd`]; accounts and exports are indexes into the current lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalCmd {
+    /// Open the sign-in screen to add another account.
+    AddAccount,
+    /// Ask, then sign out `status.accounts[i]`.
+    SignOut(usize),
+    /// Make `status.accounts[i]` the default account.
+    MakeDefault(usize),
+    /// Ask, then remove `exports[i]`.
+    RemoveExport(usize),
+    /// Write staged Steam shortcut changes (only offered while Steam is closed).
+    SteamApply,
+    RescanProtons,
+    Stop(u32),
+    /// Open Activity with this source filter.
+    ActivityFrom(SourceFilter),
+    /// The now-playing card.
+    NowPlaying,
+}
+
+/// The connection to `quiverd` once the app is up.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Link {
+    Up,
+    /// The connection dropped; the app keeps showing what it had and retries.
+    Reconnecting { attempt: u32, since: Instant, error: Option<String> },
+}
+
+#[derive(Clone, Debug)]
+pub enum ConfirmAction {
+    SignOut { user_id: String, name: String },
+    RemoveExport { kind: ExportKind, product_id: u32 },
+}
+
+/// A yes/no question, drawn over everything (sign out, remove a shortcut).
+#[derive(Clone, Debug)]
+pub struct Confirm {
+    pub title: SharedString,
+    pub body: SharedString,
+    pub confirm: SharedString,
+    pub cli: Option<SharedString>,
+    pub action: ConfirmAction,
+    /// 0: Cancel, 1: the action. Starts on Cancel.
+    pub selected: usize,
+}
+
+#[derive(Default)]
+pub struct GlobalUi {
+    pub sessions: Vec<ActiveSession>,
+    pub protons: Option<Result<Vec<String>, String>>,
+    pub exports: Option<Result<Vec<ExportStatus>, String>>,
+    pub steam: Option<Result<SteamUsers, String>>,
+    pub link: Option<Link>,
+    pub confirm: Option<Confirm>,
+    pub now_playing_open: bool,
+    pub palette_input: Option<Entity<TextInput>>,
+    pub palette_query: String,
+    pub activity_source: Option<SourceFilter>,
+    pub activity_game: Option<u32>,
+    pub activity_games_open: bool,
+    pub activity_checked: Option<Instant>,
+    activity_loading: bool,
+    pub login_adding: bool,
+    pub login_email: Option<String>,
+    login_focused: Option<EntityId>,
+    /// hyprpad seen running (checked when Appearance is shown).
+    pub hyprpad: Option<(bool, Instant)>,
+}
+
+impl GlobalUi {
+    pub fn link_up(&self) -> bool {
+        !matches!(self.link, Some(Link::Reconnecting { .. }))
+    }
+
+    pub fn source_filter(&self) -> SourceFilter {
+        self.activity_source.unwrap_or(SourceFilter::All)
+    }
+}
+
+/// Flags for demo-mode screenshots: `QUIVER_DEMO_GLOBAL="settings=accounts,playing"`.
+/// See `demo_global.rs` for the data side.
+pub fn demo_flags() -> Vec<String> {
+    std::env::var("QUIVER_DEMO_GLOBAL")
+        .unwrap_or_default()
+        .split([',', ' '])
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn demo_flag(name: &str) -> Option<String> {
+    demo_flags().into_iter().find_map(|f| match f.split_once('=') {
+        Some((k, v)) if k == name => Some(v.to_owned()),
+        None if f == name => Some(String::new()),
+        _ => None,
+    })
+}
+
+/// "1:12:08" / "4:07".
+pub fn elapsed(seconds: i64) -> String {
+    let s = seconds.max(0);
+    let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+impl Quiver {
+    // -----------------------------------------------------------------------------------------
+    // Hooks called from app.rs
+
+    /// Once, from `Quiver::new`: key bindings, the 1 s tick (now-playing clock, Activity
+    /// polling) and the demo-mode screen setup.
+    pub fn start_global(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        bind_keys(cx);
+        cx.spawn(async move |this, cx| {
+            let mut n: u64 = 0;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                n += 1;
+                let alive = this.update(cx, |this, cx| this.global_tick(n, cx));
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        if self.demo {
+            self.start_global_demo(window, cx);
+        }
+    }
+
+    fn global_tick(&mut self, n: u64, cx: &mut Context<Self>) {
+        if !matches!(self.conn, Conn::Ready) {
+            return;
+        }
+        if !self.ui.sessions.is_empty() || matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
+            cx.notify(); // clocks
+        }
+        if self.nav.page == Page::Activity {
+            cx.notify(); // "checked 3 s ago"
+            // No ActivityAppended event yet: poll while the page is open.
+            if n % 4 == 0 {
+                self.reload_activity(cx);
+            }
+        }
+        if self.nav.page == Page::Settings && self.nav.settings == SettingsSection::Steam && n % 6 == 0 {
+            self.load_exports(cx);
+        }
+    }
+
+    /// After every `Status` the app gets on (re)connecting.
+    pub fn global_status(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = &self.status {
+            if !s.accounts.is_empty() || s.signed_in.is_some() {
+                self.ui.login_adding = false;
+            }
+            // A sign-in started elsewhere (the CLI) is waiting for its code.
+            if s.awaiting_2fa {
+                if let Conn::Login(form) = &mut self.conn {
+                    form.needs_code = true;
+                }
+            }
+        }
+        if matches!(self.conn, Conn::Ready) {
+            self.load_sessions(cx);
+            self.load_protons(cx);
+            self.load_exports(cx);
+            self.reload_activity(cx);
+        }
+    }
+
+    /// Every daemon event, before `app.rs` handles it.
+    pub fn global_event(&mut self, e: &Event, cx: &mut Context<Self>) {
+        match e {
+            Event::SessionChanged { signed_in } => {
+                self.refresh_status(cx);
+                if signed_in.is_some() && self.ui.login_adding {
+                    self.ui.login_adding = false;
+                    self.nav.open_settings(SettingsSection::Accounts);
+                    let added = self.ui.login_email.take().unwrap_or_default();
+                    self.show_toast(format!("Signed in {added}"), cx);
+                }
+            }
+            Event::SessionsChanged { sessions } => {
+                self.ui.sessions = sessions.clone();
+                if self.ui.sessions.is_empty() {
+                    self.ui.now_playing_open = false;
+                }
+            }
+            Event::GameStarted { .. } | Event::GameStopped { .. } => self.load_sessions(cx),
+            Event::Job(j) if !j.done => return,
+            _ => {}
+        }
+        // Anything that changes state may have logged an Activity entry.
+        self.reload_activity(cx);
+        if matches!(e, Event::LibraryChanged) {
+            self.load_exports(cx);
+        }
+    }
+
+    /// The event stream ended: the daemon went away (or restarted). Keep the screen as it
+    /// is, say so, and reconnect with backoff. If the client gets its own reconnect (and an
+    /// `Event::Reconnected`), call [`Self::on_link_up`] from that event instead.
+    pub fn on_link_lost(&mut self, cx: &mut Context<Self>) {
+        if self.demo || matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
+            return;
+        }
+        if matches!(self.conn, Conn::Connecting | Conn::Failed(_)) {
+            return;
+        }
+        tracing::warn!("lost the connection to quiverd; reconnecting");
+        self.ui.link = Some(Link::Reconnecting { attempt: 0, since: Instant::now(), error: None });
+        self.source = None;
+        self.ui.confirm = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut delay = Duration::from_millis(500);
+            loop {
+                cx.background_executor().timer(delay).await;
+                let go = this
+                    .update(cx, |this, cx| match &mut this.ui.link {
+                        Some(Link::Reconnecting { attempt, .. }) => {
+                            *attempt += 1;
+                            cx.notify();
+                            true
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    return;
+                }
+                let rx = on_tokio(async move { open_source(false).await });
+                match rx.await {
+                    Ok(Ok((source, status, events))) => {
+                        let _ = this.update(cx, |this, cx| this.adopt_source(source, status, events, cx));
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(Link::Reconnecting { error, .. }) = &mut this.ui.link {
+                                *error = Some(err_text(&e));
+                            }
+                            cx.notify();
+                        });
+                    }
+                    Err(_) => return,
+                }
+                delay = (delay * 2).min(Duration::from_secs(10));
+            }
+        })
+        .detach();
+    }
+
+    /// "Retry now" in the reconnecting banner: skip the rest of the backoff.
+    pub fn reconnect_now(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
+            return;
+        }
+        let rx = on_tokio(async move { open_source(false).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok((source, status, events))) = rx.await {
+                let _ = this.update(cx, |this, cx| this.adopt_source(source, status, events, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// A new connection after a drop: take it over, refresh everything, pump its events.
+    fn adopt_source(
+        &mut self,
+        source: Source,
+        status: Status,
+        mut events: futures::channel::mpsc::UnboundedReceiver<Event>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.ui.link, Some(Link::Reconnecting { .. })) {
+            return; // another attempt won
+        }
+        self.source = Some(source);
+        self.on_link_up(cx);
+        self.on_status(status, cx);
+        cx.spawn(async move |this, cx| {
+            while let Some(e) = events.next().await {
+                if this.update(cx, |this, cx| this.on_event(e, cx)).is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, cx| this.on_link_lost(cx));
+        })
+        .detach();
+    }
+
+    /// The daemon is reachable again (also the hook for a client-side reconnect event).
+    pub fn on_link_up(&mut self, cx: &mut Context<Self>) {
+        let was_down = matches!(self.ui.link, Some(Link::Reconnecting { .. }));
+        self.ui.link = Some(Link::Up);
+        if was_down {
+            self.show_toast("Reconnected to quiverd", cx);
+            if matches!(self.conn, Conn::Ready) {
+                self.refresh_status(cx);
+                self.load_library(false, cx);
+                self.global_status(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Input while one of the global overlays is up, or on the global pages, before
+    /// [`crate::nav::Nav`] sees it. Returns whether it was handled.
+    pub fn global_input(&mut self, input: Input, cx: &mut Context<Self>) -> bool {
+        if let Some(c) = &mut self.ui.confirm {
+            match input {
+                Input::Left | Input::Right | Input::Up | Input::Down => c.selected = 1 - c.selected.min(1),
+                Input::Activate => {
+                    let run = c.selected == 1;
+                    self.close_confirm(run, cx);
+                }
+                Input::Back => self.ui.confirm = None,
+                _ => {}
+            }
+            return true;
+        }
+        if self.ui.activity_games_open && input == Input::Back {
+            self.ui.activity_games_open = false;
+            return true;
+        }
+        if self.ui.now_playing_open {
+            match input {
+                Input::Back => {
+                    self.ui.now_playing_open = false;
+                    return true;
+                }
+                Input::Activate => {
+                    self.ui.now_playing_open = false;
+                    if let Some(s) = self.ui.sessions.first() {
+                        let id = s.product_id;
+                        self.open_game(id, cx);
+                    }
+                    return true;
+                }
+                _ => self.ui.now_playing_open = false,
+            }
+        }
+        if self.nav.overlay.is_none() && self.nav.page == Page::Activity {
+            match input {
+                // LT / RT: the source filter.
+                Input::PrevTab | Input::NextTab => {
+                    let d = if input == Input::NextTab { 1 } else { -1 };
+                    self.set_activity_source(self.ui.source_filter().step(d));
+                    return true;
+                }
+                // Y: only this entry's game (again: every game).
+                Input::Menu => {
+                    let game = self.activity_rows().get(self.nav.body_index()).and_then(|a| a.product_id);
+                    self.ui.activity_game = if self.ui.activity_game.is_some() { None } else { game };
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Run a [`GlobalCmd`] (palette entry or a focused control).
+    pub fn run_global(&mut self, cmd: GlobalCmd, cx: &mut Context<Self>) {
+        match cmd {
+            GlobalCmd::AddAccount => self.start_add_account(cx),
+            GlobalCmd::SignOut(i) => {
+                let Some(a) = self.status.as_ref().and_then(|s| s.accounts.get(i)).cloned() else { return };
+                let playing: Vec<String> = self
+                    .ui
+                    .sessions
+                    .iter()
+                    .filter(|s| s.account == a.user_id)
+                    .map(|s| self.game_name(s.product_id))
+                    .collect();
+                let only: usize = self
+                    .games
+                    .iter()
+                    .filter(|g| g.entry.owned_by.len() == 1 && g.entry.owned_by[0] == a.user_id)
+                    .count();
+                let mut body = String::new();
+                if !playing.is_empty() {
+                    body.push_str(&format!("{} is running on this account; quiverd will ask you to stop it first. ", playing.join(", ")));
+                }
+                if only > 0 {
+                    body.push_str(&format!(
+                        "{only} game{} owned only by {} will leave the library until you sign in again. ",
+                        if only == 1 { "" } else { "s" },
+                        a.name
+                    ));
+                }
+                if a.default {
+                    body.push_str("The next account becomes the default. ");
+                }
+                body.push_str("Its session ticket is removed from the keyring; installs and saves stay.");
+                self.ui.confirm = Some(Confirm {
+                    title: format!("Sign out {}?", a.name).into(),
+                    body: body.into(),
+                    confirm: "Sign out".into(),
+                    cli: Some(format!("quiver logout {}", a.name).into()),
+                    action: ConfirmAction::SignOut { user_id: a.user_id, name: a.name },
+                    selected: 0,
+                });
+            }
+            GlobalCmd::MakeDefault(i) => {
+                let Some(a) = self.status.as_ref().and_then(|s| s.accounts.get(i)).cloned() else { return };
+                self.call::<(), _>(Request::AccountDefault { account: a.user_id.clone() }, cx, move |this, r, cx| match r {
+                    Ok(()) => {
+                        this.show_toast(format!("{} is now the default account", a.name), cx);
+                        this.refresh_status(cx);
+                    }
+                    Err(e) => this.show_toast(err_text(&e), cx),
+                });
+            }
+            GlobalCmd::RemoveExport(i) => {
+                let Some(Ok(list)) = &self.ui.exports else { return };
+                let Some(x) = list.get(i).cloned() else { return };
+                let r = &x.record;
+                let (what, cli, body) = match r.kind {
+                    ExportKind::Desktop => (
+                        ".desktop entry",
+                        format!("quiver export desktop {} --remove", r.product_id),
+                        format!("Deletes {} from your app launcher.", crate::model::tilde(&r.path)),
+                    ),
+                    ExportKind::Steam => {
+                        let running = matches!(&self.ui.steam, Some(Ok(s)) if s.running);
+                        (
+                            "Steam shortcut",
+                            format!("quiver export steam {} --remove", r.product_id),
+                            if running {
+                                "Steam is running, so the removal is staged and shows after Steam restarts. Quiver doesn't restart Steam for you.".to_owned()
+                            } else {
+                                "Removes the shortcut and its artwork from Steam's shortcuts.vdf.".to_owned()
+                            },
+                        )
+                    }
+                };
+                self.ui.confirm = Some(Confirm {
+                    title: format!("Remove the {what} for {}?", short_name(&r.name)).into(),
+                    body: body.into(),
+                    confirm: "Remove".into(),
+                    cli: Some(cli.into()),
+                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id: r.product_id },
+                    selected: 0,
+                });
+            }
+            GlobalCmd::SteamApply => {
+                self.call::<serde_json::Value, _>(Request::SteamApplyStaged, cx, |this, r, cx| {
+                    match r {
+                        Ok(v) => {
+                            let n = v.get("applied").and_then(|n| n.as_u64()).unwrap_or(0);
+                            this.show_toast(format!("Wrote {n} staged shortcut change{}", if n == 1 { "" } else { "s" }), cx);
+                        }
+                        Err(e) => this.show_toast(err_text(&e), cx),
+                    }
+                    this.load_exports(cx);
+                });
+            }
+            GlobalCmd::RescanProtons => {
+                self.load_protons(cx);
+                self.show_toast("Looking for Proton builds…", cx);
+            }
+            GlobalCmd::Stop(id) => {
+                let name = self.game_name(id);
+                self.call::<(), _>(Request::Stop { product_id: id }, cx, move |this, r, cx| match r {
+                    Ok(()) => this.show_toast(format!("Stopping {name}"), cx),
+                    Err(e) => this.show_toast(err_text(&e), cx),
+                });
+            }
+            GlobalCmd::ActivityFrom(f) => {
+                self.nav.open_section(Section::Activity);
+                self.set_activity_source(f);
+                self.ui.activity_game = None;
+            }
+            GlobalCmd::NowPlaying => self.ui.now_playing_open = !self.ui.sessions.is_empty(),
+        }
+        cx.notify();
+    }
+
+    pub fn close_confirm(&mut self, run: bool, cx: &mut Context<Self>) {
+        let Some(c) = self.ui.confirm.take() else { return };
+        if !run {
+            return;
+        }
+        match c.action {
+            ConfirmAction::SignOut { user_id, name } => {
+                self.call::<(), _>(Request::Logout { account: Some(user_id) }, cx, move |this, r, cx| match r {
+                    Ok(()) => {
+                        this.show_toast(format!("Signed out {name}"), cx);
+                        this.refresh_status(cx);
+                    }
+                    Err(e) => this.show_toast(err_text(&e), cx),
+                });
+            }
+            ConfirmAction::RemoveExport { kind, product_id } => {
+                let req = match kind {
+                    ExportKind::Desktop => Request::ExportDesktop { product_id, remove: true },
+                    ExportKind::Steam => Request::ExportSteam { product_id, remove: true, steam_user: None },
+                };
+                self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
+                    match r {
+                        Ok(v) if v.get("staged").and_then(|s| s.as_bool()) == Some(true) => {
+                            this.show_toast("Removal staged: Steam shows it after its next restart", cx)
+                        }
+                        Ok(_) => this.show_toast("Removed", cx),
+                        Err(e) => this.show_toast(err_text(&e), cx),
+                    }
+                    this.load_exports(cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Loading
+
+    pub fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        self.call::<Status, _>(Request::Status, cx, |this, r, cx| {
+            if let Ok(s) = r {
+                // Keep job progress from events; the daemon's list is as fresh.
+                this.status = Some(s);
+                this.global_status_light(cx);
+            }
+        });
+    }
+
+    fn global_status_light(&mut self, cx: &mut Context<Self>) {
+        let _ = cx;
+        if let Some(s) = &self.status {
+            if !s.accounts.is_empty() && !matches!(self.conn, Conn::Login(_)) {
+                self.ui.login_adding = false;
+            }
+        }
+    }
+
+    pub fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.call::<Vec<ActiveSession>, _>(Request::Sessions, cx, |this, r, _| {
+            if let Ok(s) = r {
+                this.ui.sessions = s;
+                if this.ui.sessions.is_empty() {
+                    this.ui.now_playing_open = false;
+                }
+            }
+        });
+    }
+
+    pub fn load_protons(&mut self, cx: &mut Context<Self>) {
+        self.call::<Vec<String>, _>(Request::ProtonList, cx, |this, r, _| {
+            this.ui.protons = Some(r.map_err(|e| err_text(&e)));
+        });
+    }
+
+    pub fn load_exports(&mut self, cx: &mut Context<Self>) {
+        self.call::<Vec<ExportStatus>, _>(Request::ExportList, cx, |this, r, _| {
+            this.ui.exports = Some(r.map_err(|e| err_text(&e)));
+        });
+        self.call::<SteamUsers, _>(Request::SteamUsers, cx, |this, r, _| {
+            this.ui.steam = Some(r.map_err(|e| err_text(&e)));
+        });
+    }
+
+    /// Activity with a bigger window than the library's first load, at most one request at
+    /// a time.
+    pub fn reload_activity(&mut self, cx: &mut Context<Self>) {
+        if self.ui.activity_loading {
+            return;
+        }
+        self.ui.activity_loading = true;
+        self.call::<Vec<ActivityEntry>, _>(Request::Activity { limit: 500 }, cx, |this, r, _| {
+            this.ui.activity_loading = false;
+            if let Ok(a) = r {
+                this.activity = a;
+                this.ui.activity_checked = Some(Instant::now());
+            }
+        });
+        if self.source.is_none() {
+            self.ui.activity_loading = false;
+        }
+    }
+
+    pub fn set_activity_source(&mut self, f: SourceFilter) {
+        self.ui.activity_source = Some(f);
+        self.nav.focus(&self.layout, crate::nav::Target::Body(0));
+        self.nav.zone = crate::nav::Zone::Body;
+        self.body_scroll.set_offset(gpui::point(px(0.), px(0.)));
+    }
+
+    pub fn game_name(&self, id: u32) -> String {
+        self.game(id).map(|g| short_name(&g.entry.name)).unwrap_or_else(|| format!("Game {id}"))
+    }
+
+    pub fn account_name(&self, user_id: &str) -> String {
+        self.status
+            .as_ref()
+            .and_then(|s| s.accounts.iter().find(|a| a.user_id == user_id))
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| if user_id.is_empty() { "your account".into() } else { user_id.chars().take(8).collect() })
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Sign in again / another account
+
+    pub fn start_add_account(&mut self, cx: &mut Context<Self>) {
+        self.nav.close_overlay();
+        self.ui.now_playing_open = false;
+        self.ui.login_adding = true;
+        self.ui.login_email = None;
+        self.show_login(None, cx);
+        cx.notify();
+    }
+
+    /// Leave the add-account screen without signing in.
+    pub fn cancel_add_account(&mut self, cx: &mut Context<Self>) {
+        if !self.ui.login_adding || self.status.as_ref().is_none_or(|s| s.signed_in.is_none()) {
+            return;
+        }
+        self.ui.login_adding = false;
+        self.conn = Conn::Ready;
+        cx.notify();
+    }
+
+    /// Submit the sign-in form, remembering the email for the 2FA step's "code for …".
+    pub fn submit_signin(&mut self, cx: &mut Context<Self>) {
+        if let Conn::Login(form) = &self.conn {
+            if !form.needs_code {
+                let email = form.email.read(cx).text().trim().to_owned();
+                if !email.is_empty() {
+                    self.ui.login_email = Some(email);
+                }
+            }
+        }
+        self.submit_login(cx);
+    }
+
+    /// Back from the code step to email and password ("Not you?").
+    pub fn restart_signin(&mut self, cx: &mut Context<Self>) {
+        self.ui.login_email = None;
+        self.show_login(None, cx);
+        cx.notify();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Rendering glue
+
+    /// The root key context: the palette's while its field has focus.
+    pub fn root_context(&self) -> &'static str {
+        if matches!(self.nav.overlay, Some(Overlay::Palette { .. })) && self.ui.palette_input.is_some() {
+            PALETTE_CONTEXT
+        } else {
+            NAV_CONTEXT
+        }
+    }
+
+    /// Move keyboard focus to wherever text goes now (start of every render): the palette's
+    /// field while it is open, back to the app when it closes, the sign-in fields.
+    pub fn sync_global_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let palette_open = matches!(self.conn, Conn::Ready) && matches!(self.nav.overlay, Some(Overlay::Palette { .. }));
+        match (palette_open, self.ui.palette_input.is_some()) {
+            (true, false) => {
+                let input = cx.new(|cx| TextInput::new(cx, "Type a command or a game", false).bare());
+                cx.observe(&input, |this, input, cx| {
+                    let q = input.read(cx).text().to_owned();
+                    if q != this.ui.palette_query {
+                        this.ui.palette_query = q;
+                        if let Some(Overlay::Palette { selected }) = &mut this.nav.overlay {
+                            *selected = 0;
+                        }
+                    }
+                    cx.notify();
+                })
+                .detach();
+                if let Some(q) = demo_flag("palette").filter(|q| !q.is_empty() && self.demo) {
+                    let q = q.replace('+', " ");
+                    input.update(cx, |i, cx| i.set_text(&q, cx));
+                    self.ui.palette_query = q;
+                }
+                let h = input.read(cx).focus_handle(cx);
+                window.focus(&h);
+                self.ui.palette_input = Some(input);
+            }
+            (false, true) => {
+                self.ui.palette_input = None;
+                self.ui.palette_query.clear();
+                if matches!(self.conn, Conn::Ready) {
+                    window.focus(&self.focus);
+                }
+            }
+            _ => {}
+        }
+        if let Conn::Login(form) = &self.conn {
+            let target = if form.needs_code { &form.code } else { &form.email };
+            if self.ui.login_focused != Some(target.entity_id()) {
+                self.ui.login_focused = Some(target.entity_id());
+                let h = target.read(cx).focus_handle(cx);
+                window.focus(&h);
+            }
+        } else if self.ui.login_focused.take().is_some() && matches!(self.conn, Conn::Ready) {
+            window.focus(&self.focus);
+        }
+    }
+
+    /// Action handlers the global screens need on the app's root element.
+    pub fn global_actions(&self, root: Stateful<gpui::Div>, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &PaletteUp, _, cx| this.input(Input::Up, InputMode::Keyboard, cx)))
+            .on_action(cx.listener(|this, _: &PaletteDown, _, cx| this.input(Input::Down, InputMode::Keyboard, cx)))
+            .on_action(cx.listener(|this, _: &PaletteRun, _, cx| this.input(Input::Activate, InputMode::Keyboard, cx)))
+            .on_action(cx.listener(|this, _: &PaletteClose, _, cx| this.input(Input::Back, InputMode::Keyboard, cx)))
+            .on_action(cx.listener(|this, _: &PaletteToggle, _, cx| this.input(Input::Palette, InputMode::Keyboard, cx)))
+            .on_action(cx.listener(|this, _: &crate::text_input::Copy, _, cx| this.copy_palette_cli(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.nav.open_settings(this.nav.settings);
+                this.mode = InputMode::Keyboard;
+                cx.notify();
+            }))
+    }
+
+    /// Things drawn over the page: the now-playing card and the confirmation dialog.
+    pub fn render_global_overlay(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.ui.confirm.is_some() {
+            return Some(self.render_confirm(th, cx));
+        }
+        if self.ui.now_playing_open && !self.ui.sessions.is_empty() {
+            return Some(self.render_now_playing(th, cx));
+        }
+        None
+    }
+
+    fn render_confirm(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(c) = self.ui.confirm.clone() else { return div().into_any_element() };
+        let keys = self.mode != InputMode::Pointer;
+        let width = 460.;
+        let left = ((self.viewport.0 - width) / 2.).max(16.);
+        let cancel = button("confirm-cancel", th, Kind::Secondary, Size::Medium, None, "Cancel")
+            .focus_ring(keys && c.selected == 0, th, 8.)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_confirm(false, cx);
+                cx.notify();
+            }));
+        let ok = button("confirm-ok", th, Kind::Primary, Size::Medium, Some(Icon::CircleX), c.confirm.clone())
+            .bg(th.bad)
+            .text_color(rgba(0xffffff, 1.0))
+            .hover(|s| s.opacity(0.9))
+            .focus_ring(keys && c.selected == 1, th, 8.)
+            .on_click(cx.listener(|this, _, _, cx| this.close_confirm(true, cx)));
+        div()
+            .id("confirm-scrim")
+            .absolute()
+            .inset_0()
+            .bg(th.scrim)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ui.confirm = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("confirm")
+                    .absolute()
+                    .top(px((self.viewport.1 * 0.28).max(80.)))
+                    .left(px(left))
+                    .w(px(width))
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .p(px(22.))
+                    .rounded(px(14.))
+                    .bg(th.ink2)
+                    .border_1()
+                    .border_color(th.line2)
+                    .shadow(vec![soft_shadow(rgba(0x000000, 0.7), 30., 90.)])
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(34.))
+                                    .rounded(px(10.))
+                                    .bg(th.bad_soft)
+                                    .child(icon(Icon::TriangleAlert, 16., th.bad)),
+                            )
+                            .child(div().text_size(px(16.)).font_weight(BOLD).child(c.title.clone())),
+                    )
+                    .child(div().text_color(th.tx2).text_size(px(12.5)).line_height(px(19.)).child(c.body.clone()))
+                    .when_some(c.cli.clone(), |d, cli| d.child(super::command_line(th, cli)))
+                    .child(div().flex().justify_end().gap(px(8.)).child(cancel).child(ok)),
+            )
+            .into_any_element()
+    }
+
+    fn render_now_playing(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let sessions = self.ui.sessions.clone();
+        let now = chrono::Utc::now();
+        let mut cards: Vec<AnyElement> = Vec::new();
+        for (i, s) in sessions.iter().enumerate() {
+            let g = self.game(s.product_id).cloned();
+            let art = match &g {
+                Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
+                None => crate::art::ArtState::Failed,
+            };
+            let name = g.as_ref().map(|g| clean_name(&g.entry.name)).unwrap_or_else(|| format!("Game {}", s.product_id));
+            let launcher = s.holders.iter().any(|h| h == "launcher");
+            let bridge = s.holders.iter().any(|h| h == "bridge");
+            let how = match (launcher, bridge) {
+                (true, true) => "Started by Quiver · bridge connected",
+                (true, false) => "Started by Quiver",
+                (false, true) => "Through a Quiver bridge (container or another launcher)",
+                _ => "Tracked by quiverd",
+            };
+            let id = s.product_id;
+            let row = |label: &str, value: AnyElement| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .child(div().w(px(92.)).flex_none().text_color(th.tx3).child(label.to_owned()))
+                    .child(value)
+            };
+            cards.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .p(px(14.))
+                    .when(i > 0, |d| d.border_t_1().border_color(th.line1))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(div().w(px(40.)).h(px(47.)).flex_none().child(art_fill(th, &art, "", 6., false)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(div().font_weight(BOLD).text_size(px(14.)).truncate().child(name))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(th.tx3)
+                                            .child(format!("Since {} · {}", clock(s.started), self.account_name(&s.account))),
+                                    ),
+                            )
+                            .child(
+                                super::mono(20., th.tx1)
+                                    .font_weight(BOLD)
+                                    .child(elapsed((now - s.started).num_seconds())),
+                            ),
+                    )
+                    .child(row("Play time", if s.reported {
+                        pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Reported to Ubisoft").into_any_element()
+                    } else {
+                        pill(th, PillKind::Muted, None, "Not reported to Ubisoft").into_any_element()
+                    }))
+                    .child(row("Launched", div().text_color(th.tx2).child(how).into_any_element()))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .pt(px(2.))
+                            .child(
+                                button(("np-open", i), th, Kind::Secondary, Size::Small, Some(Icon::Info), "Open game")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.ui.now_playing_open = false;
+                                        this.open_game(id, cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(launcher, |d| {
+                                d.child(
+                                    button(("np-stop", i), th, Kind::Secondary, Size::Small, Some(Icon::Square), "Stop game")
+                                        .text_color(th.bad)
+                                        .on_click(cx.listener(move |this, _, _, cx| this.run_global(GlobalCmd::Stop(id), cx))),
+                                )
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        div()
+            .id("np-scrim")
+            .absolute()
+            .inset_0()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ui.now_playing_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("now-playing")
+                    .absolute()
+                    .top(px(58.))
+                    .right(px(150.))
+                    .w(px(400.))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(14.))
+                    .bg(th.ink2)
+                    .border_1()
+                    .border_color(th.line2)
+                    .shadow(vec![soft_shadow(rgba(0x000000, 0.6), 24., 70.)])
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(14.))
+                            .pt(px(12.))
+                            .pb(px(4.))
+                            .child(div().size(px(7.)).rounded_full().bg(th.ok))
+                            .child(super::caption("Now playing", th.tx3))
+                            .child(div().flex_1())
+                            .child(super::mono(11., th.tx4).child("quiver sessions")),
+                    )
+                    .children(cards),
+            )
+            .into_any_element()
+    }
+
+    /// The top bar's now-playing pill (any launch path, containers included).
+    pub fn render_now_playing_pill(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let first = self.ui.sessions.first()?.clone();
+        let n = self.ui.sessions.len();
+        let label = if n == 1 { self.game_name(first.product_id) } else { format!("{n} games") };
+        let secs = (chrono::Utc::now() - first.started).num_seconds();
+        let reported = self.ui.sessions.iter().all(|s| s.reported);
+        let open = self.ui.now_playing_open;
+        Some(
+            div()
+                .id("now-playing-pill")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .h(px(32.))
+                .pl(px(10.))
+                .pr(px(12.))
+                .rounded_full()
+                .bg(th.ok_soft)
+                .border_1()
+                .border_color(th.ok.opacity(if open { 0.7 } else { 0.35 }))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .hover(|s| s.border_color(th.ok.opacity(0.7)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.ui.now_playing_open = !this.ui.now_playing_open;
+                    cx.notify();
+                }))
+                .child(icon(Icon::Gamepad, 14., th.ok))
+                .child(div().font_weight(SEMIBOLD).text_color(th.tx1).max_w(px(150.)).truncate().child(label))
+                .when(n == 1, |d| d.child(super::mono(12., th.tx2).child(elapsed(secs))))
+                .when(reported, |d| d.child(icon(Icon::Cloud, 13., th.ok)))
+                .into_any_element(),
+        )
+    }
+
+    /// Under the top bar while the daemon is gone.
+    pub fn render_link_banner(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Link::Reconnecting { attempt, since, error }) = self.ui.link.clone() else { return None };
+        let secs = since.elapsed().as_secs();
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(10.))
+                .h(px(38.))
+                .px(px(Self::GUTTER))
+                .bg(th.warn_soft)
+                .border_b_1()
+                .border_color(th.warn.opacity(0.3))
+                .text_size(px(12.5))
+                .child(icon(Icon::RefreshCw, 14., th.warn))
+                .child(div().font_weight(SEMIBOLD).text_color(th.warn).child("Reconnecting to quiverd…"))
+                .child(div().text_color(th.tx2).truncate().child(format!(
+                    "Lost the connection {} ago · attempt {attempt}{}",
+                    if secs < 60 { format!("{secs} s") } else { format!("{} min", secs / 60) },
+                    error.map(|e| format!(" · {e}")).unwrap_or_default()
+                )))
+                .child(div().flex_1())
+                .child(div().text_color(th.tx3).child("Showing what Quiver knew; actions wait for the daemon"))
+                .child(
+                    button("reconnect", th, Kind::Secondary, Size::Small, Some(Icon::RefreshCw), "Retry now")
+                        .on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Demo setup
+
+    fn start_global_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let flags = demo_flags();
+        if flags.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            for _ in 0..100 {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let ready = this
+                    .update_in(cx, |this, _, _| match this.conn {
+                        Conn::Ready => !this.games.is_empty(),
+                        Conn::Login(_) | Conn::Failed(_) => true,
+                        Conn::Connecting => false,
+                    })
+                    .unwrap_or(true);
+                if ready {
+                    break;
+                }
+            }
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                for f in demo_flags() {
+                    let (k, v) = f.split_once('=').unwrap_or((f.as_str(), ""));
+                    match k {
+                        "settings" => {
+                            let s = SettingsSection::ALL
+                                .into_iter()
+                                .find(|s| s.label().to_lowercase().starts_with(&v.to_lowercase()))
+                                .unwrap_or(SettingsSection::Accounts);
+                            this.nav.open_settings(s);
+                        }
+                        "activity" => this.nav.open_section(Section::Activity),
+                        "activity-source" => {
+                            this.nav.open_section(Section::Activity);
+                            let f = SourceFilter::ALL
+                                .into_iter()
+                                .find(|s| s.label().to_lowercase().starts_with(&v.to_lowercase()))
+                                .unwrap_or(SourceFilter::All);
+                            this.set_activity_source(f);
+                        }
+                        "activity-game" => {
+                            this.nav.open_section(Section::Activity);
+                            this.ui.activity_game = v.parse().ok();
+                        }
+                        "game" => {
+                            if let Ok(id) = v.parse() {
+                                this.open_game(id, cx);
+                            }
+                        }
+                        "palette" => this.nav.open_palette(),
+                        "add-account" => this.start_add_account(cx),
+                        "confirm-signout" => this.run_global(GlobalCmd::SignOut(1), cx),
+                        "now-playing" => this.ui.now_playing_open = true,
+                        "reconnecting" => {
+                            this.ui.link = Some(Link::Reconnecting {
+                                attempt: 3,
+                                since: Instant::now() - Duration::from_secs(14),
+                                error: Some("connection refused (os error 111)".into()),
+                            })
+                        }
+                        "signin-error" => {
+                            if let Conn::Login(form) = &mut this.conn {
+                                form.error = Some("That code didn't work. Codes change every 30 seconds.".into());
+                            }
+                        }
+                        "pad" => this.mode = InputMode::Pad,
+                        "keys" => this.mode = InputMode::Keyboard,
+                        "focus-body" => {
+                            this.nav.zone = crate::nav::Zone::Body;
+                            this.mode = InputMode::Keyboard;
+                        }
+                        _ => {}
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Ctrl C in the palette with nothing selected in the field: copy the highlighted
+    /// entry's `quiver` command.
+    fn copy_palette_cli(&mut self, cx: &mut Context<Self>) {
+        let Some(Overlay::Palette { selected }) = self.nav.overlay else { return };
+        if let Some(cli) = self.palette_commands().get(selected).and_then(|c| c.cli.clone()) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cli.to_string()));
+            self.show_toast(format!("Copied: {cli}"), cx);
+        }
+    }
+}
+
+/// Connect (or, in demo mode, start the fixtures) and forward events into a channel GPUI
+/// tasks can await. The same thing `app.rs` does at startup.
+pub async fn open_source(
+    demo: bool,
+) -> anyhow::Result<(Source, Status, futures::channel::mpsc::UnboundedReceiver<Event>)> {
+    let (source, status, mut events) = Source::connect(demo).await?;
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    tokio::spawn(async move {
+        while let Some(e) = events.recv().await {
+            if tx.unbounded_send(e).is_err() {
+                break;
+            }
+        }
+    });
+    Ok((source, status, rx))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clocks() {
+        assert_eq!(elapsed(4 * 60 + 7), "4:07");
+        assert_eq!(elapsed(3600 + 12 * 60 + 8), "1:12:08");
+        assert_eq!(elapsed(-5), "0:00");
+    }
+
+    #[test]
+    fn source_filters() {
+        assert!(SourceFilter::Agent.matches("aco-dlss"));
+        assert!(SourceFilter::Agent.matches("claude-code"));
+        assert!(!SourceFilter::Agent.matches("gui"));
+        assert!(SourceFilter::Cli.matches("cli"));
+        assert!(SourceFilter::System.matches("system"));
+        assert!(SourceFilter::All.matches("anything"));
+        assert_eq!(SourceFilter::All.step(-1), SourceFilter::System);
+        assert_eq!(SourceFilter::System.step(1), SourceFilter::All);
+    }
+}

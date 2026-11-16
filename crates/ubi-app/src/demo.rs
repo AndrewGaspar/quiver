@@ -21,6 +21,10 @@ use ubi_api::{
     Request, Revision, Status,
 };
 
+/// Accounts, exports, Steam and more Activity for the global screens.
+#[path = "demo_global.rs"]
+mod global;
+
 /// The product configs the mock-ups were made from.
 const ART_JSON: &str = include_str!("../../../design/art/art.json");
 
@@ -185,6 +189,9 @@ impl Demo {
     pub fn handle(&self, req: Request) -> Result<Value> {
         let mut st = self.state.lock().unwrap();
         let req = match detail::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
+        if let Some(v) = global::handle(self, &mut st, &req)? {
+            return Ok(v);
+        }
         Ok(match req {
             Request::Status => json!(Status {
                 version: format!("{} (demo)", env!("CARGO_PKG_VERSION")),
