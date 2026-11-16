@@ -47,6 +47,20 @@ enum Cmd {
         #[arg(long)]
         detach: bool,
     },
+    /// Adopt an existing install (e.g. from Lutris): copies only the game's own files
+    /// (reflinks on btrfs/xfs) and lists anything else it found, such as mods.
+    Import {
+        game: String,
+        path: std::path::PathBuf,
+        #[arg(long)]
+        language: Option<String>,
+    },
+    /// Remove a game's files (and with --prefix, its Wine prefix and local saves).
+    Uninstall {
+        game: String,
+        #[arg(long)]
+        prefix: bool,
+    },
     /// Launch a game (follows it until it exits unless --detach).
     Play {
         game: String,
@@ -147,6 +161,12 @@ async fn follow(mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, job_id:
             if let Some(err) = job.error {
                 bail!(err);
             }
+            if !job.detail.is_empty() {
+                eprintln!("{} other file(s) were not copied:", job.detail.len());
+                for d in &job.detail {
+                    eprintln!("  {d}");
+                }
+            }
             return Ok(());
         }
     }
@@ -236,6 +256,19 @@ async fn main() -> Result<()> {
             if !detach {
                 follow(events, id).await?;
             }
+        }
+        Cmd::Import { game, path, language } => {
+            let e = resolve(&client, &game).await?;
+            let path = path.canonicalize().with_context(|| format!("{} not found", path.display()))?;
+            let events = client.subscribe().await?;
+            let id: u64 = client.call(Request::Import { product_id: e.product_id, path, language }).await?;
+            eprintln!("importing {} (job {id})", e.name);
+            follow(events, id).await?;
+        }
+        Cmd::Uninstall { game, prefix } => {
+            let e = resolve(&client, &game).await?;
+            let () = client.call(Request::Uninstall { product_id: e.product_id, remove_prefix: prefix }).await?;
+            println!("uninstalled {}", e.name);
         }
         Cmd::Play { game, detach } => {
             let e = resolve(&client, &game).await?;

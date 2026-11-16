@@ -266,6 +266,119 @@ pub async fn install_game(
     Ok(game)
 }
 
+/// Result of importing an existing install.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub game: Game,
+    pub files: usize,
+    /// Files in the source folder that the manifest doesn't list (mods, logs, configs…).
+    pub extras: Vec<String>,
+    pub update_available: bool,
+}
+
+/// Import an existing install (e.g. from a Lutris/Connect prefix) into the library.
+/// Only files listed in its `uplay_install.manifest` are copied, as reflinks when the
+/// filesystem supports them; the source is left untouched.
+pub async fn import_game(
+    cfg: &Config,
+    auth: &Auth,
+    product_id: u32,
+    source: &Path,
+    language: &str,
+    status: impl Fn(String),
+) -> Result<ImportReport> {
+    use crate::{install, manifest};
+    let raw = std::fs::read(source.join("uplay_install.manifest"))
+        .with_context(|| format!("{} has no uplay_install.manifest", source.display()))?;
+    let parsed = manifest::parse_manifest(&raw)?;
+    let (_, demux) = crate::connect(auth).await?;
+    let mut lib = Library::fetch(&demux).await?;
+    let product = lib.get(product_id).context("not in your library")?.clone();
+    let name = product.name.clone().unwrap_or_else(|| product_id.to_string());
+    // Every language's files may be present; take all chunks the source actually has.
+    let mut plan = install::plan(&parsed, language)?;
+    let all = install::plan(&parsed, "*")?;
+    for f in all.files {
+        if !plan.files.iter().any(|p| p.path == f.path) && source.join(&f.path).is_file() {
+            plan.files.push(f);
+        }
+    }
+    let dest = cfg.library.join(slug(&name));
+    if dest.exists() {
+        bail!("{} already exists", dest.display());
+    }
+    let listed: std::collections::HashSet<String> = plan.files.iter().map(|f| f.path.to_lowercase()).collect();
+    let mut done = String::new();
+    for (i, f) in plan.files.iter().enumerate() {
+        let src = source.join(&f.path);
+        let meta = src.metadata().with_context(|| format!("missing {}", f.path))?;
+        if meta.len() != f.size {
+            bail!("{}: size {} differs from manifest ({})", f.path, meta.len(), f.size);
+        }
+        let dst = dest.join(&f.path);
+        std::fs::create_dir_all(dst.parent().unwrap())?;
+        let ok = tokio::process::Command::new("cp")
+            .args(["--reflink=auto", "--preserve=timestamps"])
+            .arg(&src)
+            .arg(&dst)
+            .status()
+            .await?
+            .success();
+        if !ok {
+            bail!("copying {} failed", f.path);
+        }
+        done.push_str(&f.path);
+        done.push('\n');
+        if i % 50 == 0 {
+            status(format!("Copying files {}/{}…", i + 1, plan.files.len()));
+        }
+    }
+    for d in &plan.dirs {
+        std::fs::create_dir_all(dest.join(d))?;
+    }
+    std::fs::write(dest.join("uplay_install.manifest"), &raw)?;
+    std::fs::create_dir_all(dest.join(".ubi-install"))?;
+    std::fs::write(dest.join(".ubi-install/done"), done)?;
+    let mut extras = Vec::new();
+    collect_extras(source, source, &listed, &mut extras);
+    extras.sort();
+    let game = register(cfg, &mut lib, product_id, &dest.canonicalize()?, language).await?;
+    let mut games = Games::load()?;
+    games.upsert(game.clone());
+    games.save()?;
+    let update_available = update_available(&game, &lib);
+    status(format!("Imported {} files", plan.files.len()));
+    Ok(ImportReport { game, files: plan.files.len(), extras, update_available })
+}
+
+fn collect_extras(root: &Path, dir: &Path, listed: &std::collections::HashSet<String>, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        if p.is_dir() {
+            collect_extras(root, &p, listed, out);
+        } else if !listed.contains(&rel.to_lowercase()) && rel != "uplay_install.manifest" && rel != "uplay_install.state" {
+            out.push(rel);
+        }
+    }
+}
+
+/// Remove a game: its files, and optionally its prefix (which holds local saves and settings).
+pub fn uninstall(product_id: u32, remove_prefix: bool) -> Result<Game> {
+    let mut games = Games::load()?;
+    let game = games.get(product_id).cloned().context("not installed")?;
+    if game.install_dir.exists() {
+        std::fs::remove_dir_all(&game.install_dir)?;
+    }
+    if remove_prefix && game.prefix.exists() {
+        std::fs::remove_dir_all(&game.prefix)?;
+    }
+    games.games.retain(|g| g.product_id != product_id);
+    games.save()?;
+    Ok(game)
+}
+
 /// Whether a newer build than the installed one is available.
 pub fn update_available(game: &Game, lib: &Library) -> bool {
     let Some(latest) = lib.get(game.product_id).and_then(|p| p.latest_manifest.clone()) else { return false };

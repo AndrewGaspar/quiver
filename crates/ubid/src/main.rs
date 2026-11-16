@@ -81,7 +81,18 @@ impl Daemon {
 
     fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64 {
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
-        let job = Job { id, kind, product_id, name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None };
+        let job = Job {
+            id,
+            kind,
+            product_id,
+            name,
+            status: "Queued".into(),
+            downloaded: 0,
+            total: 0,
+            done: false,
+            error: None,
+            detail: Vec::new(),
+        };
         self.jobs.lock().unwrap().insert(id, job.clone());
         self.emit(Event::Job(job));
         id
@@ -179,6 +190,21 @@ impl Daemon {
             Request::Library { refresh } => json!(self.library(refresh).await?),
             Request::Install { product_id, language } => json!(self.start_install(source, product_id, language)),
             Request::Play { product_id } => json!(self.start_play(source, product_id)?),
+            Request::Import { product_id, path, language } => json!(self.start_import(source, product_id, path, language)),
+            Request::Uninstall { product_id, remove_prefix } => {
+                if self.running.lock().unwrap().contains(&product_id) {
+                    bail!("stop the game first");
+                }
+                let game = launcher::uninstall(product_id, remove_prefix)?;
+                *self.library.lock().await = None;
+                self.log_activity(
+                    source,
+                    format!("uninstalled {}{}", game.name, if remove_prefix { " (and its prefix)" } else { "" }),
+                    Some(product_id),
+                );
+                self.emit(Event::LibraryChanged);
+                Value::Null
+            }
             Request::Stop { product_id } => {
                 let game = Games::load()?.get(product_id).cloned().context("not installed")?;
                 launcher::stop(&self.cfg, &game).await?;
@@ -286,6 +312,42 @@ impl Daemon {
                 j.downloaded = progress.downloaded.load(Ordering::Relaxed);
                 match &result {
                     Ok(_) => j.status = "Installed".into(),
+                    Err(e) => {
+                        j.status = "Failed".into();
+                        j.error = Some(format!("{e:#}"));
+                    }
+                }
+            });
+            this.emit(Event::LibraryChanged);
+        });
+        id
+    }
+
+    fn start_import(self: &Arc<Self>, source: &str, product_id: u32, path: std::path::PathBuf, language: Option<String>) -> u64 {
+        let id = self.new_job(JobKind::Import, product_id, product_id.to_string());
+        self.log_activity(source, format!("import {product_id} from {}", path.display()), Some(product_id));
+        let this = self.clone();
+        tokio::spawn(async move {
+            let (cfg, auth) = (this.cfg.clone(), this.auth.clone());
+            let lang = language.unwrap_or_else(|| "en-US".into());
+            let st = this.clone();
+            let result = run_local(move || async move {
+                launcher::import_game(&cfg, &auth, product_id, &path, &lang, |s| st.update_job(id, |j| j.status = s)).await
+            })
+            .await;
+            *this.library.lock().await = None;
+            this.update_job(id, |j| {
+                j.done = true;
+                match &result {
+                    Ok(r) => {
+                        j.name = r.game.name.clone();
+                        j.status = format!(
+                            "Imported {} files{}",
+                            r.files,
+                            if r.update_available { "; an update is available" } else { "" }
+                        );
+                        j.detail = r.extras.clone();
+                    }
                     Err(e) => {
                         j.status = "Failed".into();
                         j.error = Some(format!("{e:#}"));

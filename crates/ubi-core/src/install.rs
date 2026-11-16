@@ -55,12 +55,15 @@ pub struct Plan {
     pub compression: Option<i32>,
 }
 
-/// Choose chunks: all without a language, plus those for `language`; required first.
+/// Choose chunks: all without a language, plus those for `language` (`*` = every
+/// language); required first.
 pub fn plan(manifest: &download::Manifest, language: &str) -> Result<Plan> {
     let mut chunks: Vec<&download::Chunk> = manifest
         .chunks
         .iter()
-        .filter(|c| c.language.as_deref().is_none_or(|l| l.is_empty() || l.eq_ignore_ascii_case(language)))
+        .filter(|c| {
+            language == "*" || c.language.as_deref().is_none_or(|l| l.is_empty() || l.eq_ignore_ascii_case(language))
+        })
         .collect();
     chunks.sort_by_key(|c| (c.r#type, c.id));
     if manifest.compression_method == Some(download::CompressionMethod::Lzham as i32) {

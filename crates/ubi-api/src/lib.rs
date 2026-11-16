@@ -158,6 +158,7 @@ pub struct Status {
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Install,
+    Import,
     Play,
 }
 
@@ -172,6 +173,9 @@ pub struct Job {
     pub total: u64,
     pub done: bool,
     pub error: Option<String>,
+    /// Extra result lines (e.g. files an import didn't copy).
+    #[serde(default)]
+    pub detail: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +206,9 @@ pub enum Request {
     /// Owned, installable games with install state.
     Library { refresh: bool },
     Install { product_id: u32, language: Option<String> },
+    /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
+    Import { product_id: u32, path: PathBuf, language: Option<String> },
+    Uninstall { product_id: u32, remove_prefix: bool },
     Play { product_id: u32 },
     Stop { product_id: u32 },
     SettingsGet { product_id: u32 },
