@@ -449,7 +449,8 @@ fn print_state(name: &str, s: &ModsState) {
         let versions = versions_note(m);
         println!(
             "           {flags}{}{}",
-            l.mod_id().map(|x| format!(" [{x}]")).unwrap_or_default(),
+            // A package's id; a store id (what `set` gave a layer) says nothing new.
+            l.mod_id().filter(|x| *x != m.id && !m.has(x)).map(|x| format!(" [{x}]")).unwrap_or_default(),
             if versions.is_empty() { String::new() } else { format!("; {versions} (quiver mods {} version list {})", s.product_id, m.id) }
         );
     }
@@ -707,10 +708,17 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             println!("{}: Play uses {}", g.name, default_label(&state));
         }
         ModsAction::Layer { action: LayerAction::Add { name, dir, delete, version_of: Some(of) } } => {
+            // "DLSS-v5" as a version of DLSS is "v5".
+            let label = match name.get(..of.len()) {
+                Some(head) if head.eq_ignore_ascii_case(&of) && name.len() > of.len() => {
+                    name[of.len()..].trim_start_matches(['-', '_', ' ']).to_owned()
+                }
+                _ => name,
+            };
             let action = VersionAction::Add {
                 mod_id: of,
                 dir,
-                label: Some(name),
+                label: Some(label).filter(|l| !l.is_empty()),
                 notes: None,
                 no_update: false,
                 prerelease: false,
