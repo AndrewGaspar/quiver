@@ -14,6 +14,8 @@ use chrono::{DateTime, Duration as Span, Local, NaiveTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+pub mod detail;
+
 use ubi_api::{
     ActiveSession, ActivityEntry, Art, Event, Game, GameSettings, Job, JobKind, LibraryEntry, PlaySession, Playtime,
     Request, Revision, Status,
@@ -182,6 +184,7 @@ impl Demo {
 
     pub fn handle(&self, req: Request) -> Result<Value> {
         let mut st = self.state.lock().unwrap();
+        let req = match detail::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         Ok(match req {
             Request::Status => json!(Status {
                 version: format!("{} (demo)", env!("CARGO_PKG_VERSION")),
