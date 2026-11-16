@@ -114,3 +114,17 @@ as an alias for `quiver`.
 6. GPUI front end: library, install/update with progress, play
 7. Next: fetch the SDK DLLs from Ubisoft instead of a local Connect install, real
    achievements/Club, LZHAM manifests, `upc_r2` games
+
+## License and credits
+
+Quiver is MIT-licensed (see [LICENSE](LICENSE)). It is an independent project, not affiliated
+with or endorsed by Ubisoft; "Ubisoft" and game names are trademarks of their owners. Quiver
+needs your own Ubisoft account and only runs games you own.
+
+- `proto/`: protobuf definitions of Ubisoft Connect's protocols, originally vendored from
+  [YoobieRE/ubisoft-demux-node](https://github.com/YoobieRE/ubisoft-demux-node) and refreshed
+  from the client's embedded descriptors with `tools/proto-extract` (see `proto/README.md`).
+- `crates/ubi-app/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
+  Copyright Zed Industries).
+- `third_party/xattr-0.2.3`: the `xattr` crate (MIT/Apache-2.0) with a one-line patch GPUI
+  needs; its license files are included.
