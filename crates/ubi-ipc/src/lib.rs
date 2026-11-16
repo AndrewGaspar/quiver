@@ -9,6 +9,9 @@ pub struct LaunchContext {
     pub account_id: String,
     pub username: String,
     pub name_on_platform: String,
+    /// Games read it via `UPLAY_USER_GetEmailUtf8`; Origins skips loading saves without it.
+    #[serde(default)]
+    pub email: Option<String>,
     /// Per-game ticket from `ownership_service.GetUplayPCTicketReq`.
     pub upc_ticket: String,
     /// The game plus owned associated products (DLC, editions).

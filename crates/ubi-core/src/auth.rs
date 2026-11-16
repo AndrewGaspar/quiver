@@ -150,6 +150,31 @@ impl Auth {
     }
 }
 
+impl Auth {
+    /// The account's email address (`GET /v3/users/{userId}`), which games read via
+    /// `UPLAY_USER_GetEmailUtf8`.
+    pub async fn account_email(&self, session: &Session) -> Result<String> {
+        #[derive(Deserialize)]
+        struct User {
+            email: Option<String>,
+        }
+        let resp = self
+            .http
+            .get(format!("https://public-ubiservices.ubi.com/v3/users/{}", session.user_id))
+            .header("Ubi-AppId", &self.app_id)
+            .header("Ubi-SessionId", &session.session_id)
+            .header("Authorization", format!("Ubi_v1 t={}", session.ticket))
+            .send()
+            .await
+            .context("UbiServices request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("GET /v3/users returned {status}: {}", resp.text().await.unwrap_or_default());
+        }
+        resp.json::<User>().await?.email.context("no email in user profile")
+    }
+}
+
 fn into_session(rsp: SessionResponse, prev_remember_me: Option<&str>) -> Result<Session> {
     Ok(Session {
         ticket: rsp.ticket.context("session response had no ticket")?,

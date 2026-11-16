@@ -120,6 +120,10 @@ async fn main() -> Result<()> {
         Cmd::Whoami => {
             let s = store::current(&auth).await?;
             println!("{} ({})", s.name, s.user_id);
+            match auth.account_email(&s).await {
+                Ok(e) => println!("email on file: {}", if e.contains('@') { "yes" } else { "unexpected format" }),
+                Err(e) => println!("email lookup failed: {e:#}"),
+            }
             println!("ticket expires {}", s.expiration.with_timezone(&chrono::Local));
         }
         Cmd::Library { all, json } => {
@@ -170,7 +174,7 @@ async fn main() -> Result<()> {
         Cmd::LaunchContext { uplay_id, savegame_path, broker, install_dir, out } => {
             let (session, demux) = ubi_core::connect(&auth).await?;
             let mut lib = Library::fetch(&demux).await?;
-            let mut ctx = ubi_core::launch::build(&session, &mut lib, uplay_id).await?;
+            let mut ctx = ubi_core::launch::build(&auth, &session, &mut lib, uplay_id).await?;
             ctx.savegame_path = savegame_path;
             ctx.broker = broker;
             if let Some(dir) = install_dir {

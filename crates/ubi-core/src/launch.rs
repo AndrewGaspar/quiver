@@ -5,10 +5,10 @@ use std::path::Path;
 
 pub use ubi_ipc::{CdKey, Chunk, LaunchContext};
 
-use crate::auth::Session;
+use crate::auth::{Auth, Session};
 use crate::library::Library;
 
-pub async fn build(session: &Session, lib: &mut Library, uplay_id: u32) -> Result<LaunchContext> {
+pub async fn build(auth: &Auth, session: &Session, lib: &mut Library, uplay_id: u32) -> Result<LaunchContext> {
     let product = lib
         .get(uplay_id)
         .with_context(|| format!("product {uplay_id} is not in your library"))?
@@ -34,6 +34,13 @@ pub async fn build(session: &Session, lib: &mut Library, uplay_id: u32) -> Resul
         account_id: session.user_id.clone(),
         username: session.name.clone(),
         name_on_platform: session.name.clone(),
+        email: match auth.account_email(session).await {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!("no account email for launch context: {e:#}");
+                None
+            }
+        },
         upc_ticket,
         owned_uplay_ids,
         cd_keys,

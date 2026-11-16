@@ -163,6 +163,7 @@ fn init_rsp(id: u32) -> u::InitRsp {
             account_id: Some(ctx.account_id.clone()),
             username: Some(ctx.username.clone()),
             name_on_platform: Some(ctx.name_on_platform.clone()),
+            email: ctx.email.clone(),
             ..Default::default()
         }),
         connected: Some(true),
