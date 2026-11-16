@@ -357,7 +357,7 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
         DevCmd::CdnProbe { product_id, paths } => {
             let (_, demux) = ubi_core::connect(&auth).await?;
             let mut lib = Library::fetch(&demux).await?;
-            let mut dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
+            let dl = ubi_core::download::Downloader::open(&demux, &mut lib, product_id).await?;
             let urls = dl.urls(&paths).await?;
             for (path, mirrors) in paths.iter().zip(urls) {
                 let (status, head) = match mirrors.first() {

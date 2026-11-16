@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use sha1::{Digest, Sha1};
 use tokio::sync::Semaphore;
-use ubi_core::install::{self, Plan, PlannedFile, SliceRef, SliceSource};
+use ubi_core::install::{self, Plan, PlannedFile, SliceError, SliceRef, SliceSource};
 
 use super::*;
 use std::path::Path;
@@ -18,11 +18,13 @@ struct Cdn {
     owner: HashMap<String, u32>,
     gets: Mutex<HashMap<u32, usize>>,
     gate: Semaphore,
+    /// Slice hash -> GETs that still fail as timeouts.
+    flaky: Mutex<HashMap<String, usize>>,
 }
 
 impl Default for Cdn {
     fn default() -> Self {
-        Self { slices: Mutex::default(), owner: HashMap::new(), gets: Mutex::default(), gate: Semaphore::new(0) }
+        Self { slices: Mutex::default(), owner: HashMap::new(), gets: Mutex::default(), gate: Semaphore::new(0), flaky: Mutex::default() }
     }
 }
 
@@ -38,15 +40,19 @@ impl Cdn {
 struct Src(Arc<Cdn>);
 
 impl SliceSource for Src {
-    async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+    async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
         Ok(paths.iter().map(|p| vec![p.rsplit('/').next().unwrap().to_owned()]).collect())
     }
-    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>> {
-        self.0.gate.acquire().await?.forget();
+    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
+        self.0.gate.acquire().await.map_err(|e| SliceError::Fatal(e.into()))?.forget();
         if let Some(&p) = self.0.owner.get(&mirrors[0]) {
             *self.0.gets.lock().unwrap().entry(p).or_default() += 1;
         }
-        self.0.slices.lock().unwrap().get(&mirrors[0]).cloned().context("404")
+        if let Some(n) = self.0.flaky.lock().unwrap().get_mut(&mirrors[0]).filter(|n| **n > 0) {
+            *n -= 1;
+            return Err(SliceError::Retry(anyhow::anyhow!("connection timed out")));
+        }
+        self.0.slices.lock().unwrap().get(&mirrors[0]).cloned().ok_or_else(|| SliceError::Fatal(anyhow::anyhow!("404")))
     }
 }
 
@@ -353,6 +359,7 @@ fn bad_queue_file_is_ignored_and_states_restored() {
         done_bytes: 5,
         total_bytes: 10,
         speed: 3,
+        retries: 0,
     };
     let saved = Saved {
         items: vec![
@@ -371,4 +378,27 @@ fn bad_queue_file_is_ignored_and_states_restored() {
         [(1, QueueState::Queued, 1), (3, QueueState::Paused, 2), (4, QueueState::Failed, 3), (5, QueueState::Queued, 4)]
     );
     assert!(l.iter().all(|e| e.job_id.is_none() && e.speed == 0 && e.language.as_deref() == Some("fr-FR")));
+}
+
+#[test]
+fn retries_show_in_the_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let mut cdn = Cdn::default();
+    let (plan, contents) = fixture(A, 1, 3, &mut cdn);
+    cdn.flaky.get_mut().unwrap().insert(hex::encode_upper(&plan.files[0].slices[1].sha1), 2);
+    let cdn = Arc::new(cdn);
+    cdn.open();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(HashMap::from([(A, plan)]), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        d.start(&host);
+        let job = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None).unwrap();
+        until("retrying shown", || host.job(Some(job)).status.starts_with("Retrying…")).await;
+        until("A done", || d.list().is_empty()).await;
+        let j = host.job(Some(job));
+        assert!(j.done && j.error.is_none() && j.status == "Installed", "{j:?}");
+        assert!(files_ok(&root, A, &contents));
+    });
 }

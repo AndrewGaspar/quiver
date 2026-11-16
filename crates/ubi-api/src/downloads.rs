@@ -86,6 +86,9 @@ pub struct QueueEntry {
     /// Current download speed in bytes per second.
     #[serde(default)]
     pub speed: u64,
+    /// Slice downloads tried again so far (connection trouble, expired URLs).
+    #[serde(default)]
+    pub retries: u64,
 }
 
 /// Download settings (`config.json` → `downloads`).

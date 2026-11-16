@@ -121,6 +121,7 @@ impl Downloads {
                 }
                 entry.job_id = None;
                 entry.speed = 0;
+                entry.retries = 0;
                 Item { entry, progress: None, stop: None, status: None }
             })
             .collect();
@@ -279,6 +280,7 @@ impl Downloads {
             done_bytes: 0,
             total_bytes: 0,
             speed: 0,
+            retries: 0,
         };
         self.items.lock().unwrap().push(Item { entry, progress: None, stop: None, status: None });
         let what = match kind {
@@ -477,9 +479,10 @@ impl Downloads {
             tokio::spawn(async move {
                 let mut last = (Instant::now(), 0u64);
                 let mut speed = 0f64;
+                let mut was_retrying = false;
                 loop {
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    let (done, total) = {
+                    let (done, total, line) = {
                         let mut items = this.items.lock().unwrap();
                         let Some(it) = items.iter_mut().find(|i| i.progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, &progress))) else { break };
                         let (done, total) = if it.entry.state == QueueState::Verifying {
@@ -495,12 +498,28 @@ impl Downloads {
                         it.entry.done_bytes = done;
                         it.entry.total_bytes = total;
                         it.entry.speed = speed as u64;
-                        (done, total)
+                        let retries = progress.retries.load(Ordering::Relaxed);
+                        it.entry.retries = retries;
+                        // While slices wait to be tried again, say so (then back to the
+                        // worker's own line).
+                        let retrying = progress.retrying.load(Ordering::Relaxed) > 0 && it.stop.is_none();
+                        let line = if retrying {
+                            Some(format!("Retrying… ({retries} {})", if retries == 1 { "retry" } else { "retries" }))
+                        } else if was_retrying {
+                            it.status.clone()
+                        } else {
+                            None
+                        };
+                        was_retrying = retrying;
+                        (done, total, line)
                     };
                     if let Some(id) = job {
                         host.update_job(id, &mut |j| {
                             j.downloaded = done;
                             j.total = total;
+                            if let Some(l) = &line {
+                                j.status = l.clone();
+                            }
                         });
                     }
                 }

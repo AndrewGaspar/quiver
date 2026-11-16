@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use sha1::{Digest, Sha1};
 use ubi_proto::download;
 
@@ -397,6 +397,38 @@ pub struct Progress {
     pub cancel: std::sync::atomic::AtomicBool,
     /// Bandwidth limit shared with other downloads.
     pub throttle: Option<Arc<Throttle>>,
+    /// Slice retries so far, and slices waiting to retry right now.
+    pub retries: AtomicU64,
+    pub retrying: AtomicU64,
+    pub retry: RetryPolicy,
+}
+
+/// How often and how patiently a failing slice is tried again.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Tries per slice, the first included.
+    pub attempts: u32,
+    /// Wait before the first retry; doubles each time (with jitter) up to `max_delay`.
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+    /// Signed URLs older than this are renewed before use.
+    pub url_max_age: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { attempts: 6, base_delay: Duration::from_secs(1), max_delay: Duration::from_secs(30), url_max_age: Duration::from_secs(600) }
+    }
+}
+
+impl RetryPolicy {
+    /// Wait before retry `n` (1-based): base·2^(n-1), capped, ±25% jitter.
+    pub fn delay(&self, n: u32) -> Duration {
+        let d = self.base_delay.saturating_mul(1 << (n.saturating_sub(1)).min(16)).min(self.max_delay);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+        let jitter = 0.75 + (nanos % 1000) as f64 / 2000.0;
+        d.mul_f64(jitter)
+    }
 }
 
 impl Progress {
@@ -464,13 +496,108 @@ pub(crate) fn forget_done(dest: &Path, paths: &HashSet<&str>) -> Result<()> {
     }
 }
 
+/// Why fetching a slice failed, and what to do about it.
+#[derive(Debug)]
+pub enum SliceError {
+    /// Transient (connection, timeout, cut-off body, 5xx, 429): try again later.
+    Retry(anyhow::Error),
+    /// The signed URL was refused or has expired (403/404/410…): get a fresh one.
+    Refresh(anyhow::Error),
+    /// Retrying won't help.
+    Fatal(anyhow::Error),
+}
+
+impl SliceError {
+    pub fn into_inner(self) -> anyhow::Error {
+        match self {
+            Self::Retry(e) | Self::Refresh(e) | Self::Fatal(e) => e,
+        }
+    }
+}
+
 /// Where slices come from: the CDN through `download_service`, or a stand-in in tests.
 #[allow(async_fn_in_trait)]
 pub trait SliceSource {
     /// Signed URLs (one or more mirrors each) for relative CDN paths.
-    async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>>;
+    async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>>;
     /// GET the first working mirror.
-    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>>;
+    async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError>;
+}
+
+/// Fetch one slice and check its hash, retrying transient failures with backoff and
+/// renewing its URL when the CDN refuses it or it is old. `Ok(None)`: cancelled.
+async fn fetch_slice(
+    dl: &impl SliceSource,
+    path: &str,
+    sha1: &[u8],
+    mut mirrors: Vec<String>,
+    mut issued: Instant,
+    progress: &Progress,
+) -> Result<Option<Vec<u8>>> {
+    let policy = progress.retry;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        if issued.elapsed() > policy.url_max_age {
+            if let Ok(mut fresh) = dl.urls(&[path.to_owned()]).await
+                && let Some(m) = fresh.pop()
+            {
+                (mirrors, issued) = (m, Instant::now());
+            }
+        }
+        let err = match dl.get(&mirrors).await {
+            Ok(body) if Sha1::digest(&body).as_slice() == sha1 => return Ok(Some(body)),
+            // A cut-off or mangled body: the next try usually works.
+            Ok(_) => SliceError::Retry(anyhow::anyhow!("slice {} failed SHA-1 check", hex::encode_upper(sha1))),
+            Err(e) => e,
+        };
+        let refresh = matches!(err, SliceError::Refresh(_));
+        let e = match err {
+            SliceError::Fatal(e) => return Err(e.context(path.to_owned())),
+            SliceError::Retry(e) | SliceError::Refresh(e) => e,
+        };
+        if attempt >= policy.attempts {
+            return Err(e.context(format!("{path}: gave up after {attempt} tries")));
+        }
+        tracing::debug!("{path}: try {attempt} failed ({e:#}); retrying");
+        progress.retries.fetch_add(1, Ordering::Relaxed);
+        progress.retrying.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(policy.delay(attempt)).await;
+        progress.retrying.fetch_sub(1, Ordering::Relaxed);
+        if progress.cancelled() {
+            return Ok(None);
+        }
+        if refresh {
+            // Expired or refused: ask download_service again (that can fail transiently too).
+            match dl.urls(&[path.to_owned()]).await {
+                Ok(mut fresh) if !fresh.is_empty() => (mirrors, issued) = (fresh.pop().unwrap(), Instant::now()),
+                Ok(_) => {}
+                Err(e) => tracing::debug!("{path}: renewing the URL failed: {e:#}"),
+            }
+        }
+    }
+}
+
+/// Signed URLs for a batch, retrying transient download_service failures.
+async fn batch_urls(dl: &impl SliceSource, paths: &[String], progress: &Progress) -> Result<Vec<Vec<String>>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match dl.urls(paths).await {
+            Ok(u) => return Ok(u),
+            Err(e) if attempt >= progress.retry.attempts => return Err(e.context("requesting download URLs")),
+            Err(e) => {
+                tracing::debug!("URL request failed ({e:#}); retrying");
+                progress.retries.fetch_add(1, Ordering::Relaxed);
+                progress.retrying.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(progress.retry.delay(attempt)).await;
+                progress.retrying.fetch_sub(1, Ordering::Relaxed);
+                if progress.cancelled() {
+                    return Err(Cancelled.into());
+                }
+            }
+        }
+    }
 }
 
 struct Job {
@@ -549,20 +676,23 @@ pub async fn install(
             return Err(Cancelled.into());
         }
         let paths: Vec<String> = batch.iter().map(|j| slice_path_for(plan.compression, &j.slice.sha1)).collect();
-        let urls = dl.urls(&paths).await?;
+        let urls = batch_urls(&*dl, &paths, progress).await?;
+        if urls.len() != paths.len() {
+            bail!("asked for {} URLs, got {}", paths.len(), urls.len());
+        }
+        let issued = Instant::now();
         let dl_ref = &*dl;
-        let finished: Vec<Option<&Job>> = futures::stream::iter(batch.iter().zip(urls))
-            .map(|(job, mirrors)| async move {
+        let results: Vec<Result<Option<&Job>>> = futures::stream::iter(batch.iter().zip(paths.iter()).zip(urls))
+            .map(|((job, path), mirrors)| async move {
                 if let Some(t) = &progress.throttle {
                     t.take(job.slice.download_size).await;
                 }
                 if progress.cancelled() {
                     return Ok(None); // stop at this slice boundary
                 }
-                let body = dl_ref.get(&mirrors).await.with_context(|| slice_path_for(plan.compression, &job.slice.sha1))?;
-                if Sha1::digest(&body).as_slice() != job.slice.sha1.as_slice() {
-                    bail!("slice {} failed SHA-1 check", hex::encode_upper(&job.slice.sha1));
-                }
+                let Some(body) = fetch_slice(dl_ref, path, &job.slice.sha1, mirrors, issued, progress).await? else {
+                    return Ok(None);
+                };
                 progress.downloaded.fetch_add(body.len() as u64, Ordering::Relaxed);
                 let job_file = job.file.clone();
                 let slice = job.slice.clone();
@@ -591,9 +721,20 @@ pub async fn install(
                 Ok::<_, anyhow::Error>(Some(job))
             })
             .buffer_unordered(PARALLEL)
-            .try_collect()
-            .await?;
-        for job in finished.into_iter().flatten() {
+            .collect()
+            .await;
+        // Record every slice that made it, even if another one failed for good.
+        let mut failed = None;
+        let mut finished = Vec::new();
+        for r in results {
+            match r {
+                Ok(j) => finished.extend(j),
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
+        }
+        for job in finished {
             let idx = job.file_idx;
             remaining[idx] -= 1;
             if remaining[idx] == 0 {
@@ -605,6 +746,9 @@ pub async fn install(
         }
         done_log.flush()?;
         slice_log.flush()?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
         if progress.cancelled() {
             return Err(Cancelled.into());
         }
@@ -664,13 +808,20 @@ pub(crate) mod tests {
         pub gets: std::sync::atomic::AtomicUsize,
         /// Set the progress's cancel flag after this many GETs.
         pub cancel_after: Option<(usize, Arc<Progress>)>,
+        /// Slice hash -> how many more GETs of it fail as transient errors.
+        pub flaky: Mutex<HashMap<String, usize>>,
+        /// URLs are `<hash>@<generation>`; GETs of an older generation are refused (403).
+        pub generation: AtomicU64,
+        pub url_requests: std::sync::atomic::AtomicUsize,
     }
 
     impl SliceSource for FakeCdn {
-        async fn urls(&mut self, paths: &[String]) -> Result<Vec<Vec<String>>> {
-            Ok(paths.iter().map(|p| vec![p.rsplit('/').next().unwrap().to_owned()]).collect())
+        async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+            self.url_requests.fetch_add(1, Ordering::SeqCst);
+            let g = self.generation.load(Ordering::SeqCst);
+            Ok(paths.iter().map(|p| vec![format!("{}@{g}", p.rsplit('/').next().unwrap())]).collect())
         }
-        async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>> {
+        async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
             let n = self.gets.fetch_add(1, Ordering::SeqCst) + 1;
             if let Some((after, p)) = &self.cancel_after
                 && n >= *after
@@ -678,8 +829,101 @@ pub(crate) mod tests {
                 p.cancel.store(true, Ordering::SeqCst);
             }
             tokio::task::yield_now().await;
-            self.slices.get(&mirrors[0]).cloned().context("404")
+            let (hash, g) = mirrors[0].split_once('@').unwrap();
+            if g.parse::<u64>().unwrap() < self.generation.load(Ordering::SeqCst) {
+                return Err(SliceError::Refresh(anyhow::anyhow!("HTTP 403 Forbidden")));
+            }
+            if let Some(left) = self.flaky.lock().unwrap().get_mut(hash).filter(|n| **n > 0) {
+                *left -= 1;
+                return Err(SliceError::Retry(anyhow::anyhow!("connection timed out")));
+            }
+            self.slices.get(hash).cloned().ok_or_else(|| SliceError::Fatal(anyhow::anyhow!("404")))
         }
+    }
+
+    fn quick() -> Progress {
+        Progress {
+            retry: RetryPolicy { base_delay: Duration::from_millis(1), max_delay: Duration::from_millis(4), ..RetryPolicy::default() },
+            ..Progress::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_failures_are_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("game");
+        let mut cdn = FakeCdn::default();
+        let m = fixture(&[("a.bin", data(1, 5_000)), ("b.bin", data(2, 1_000))], &mut cdn.slices);
+        let p = plan(&m, "en-US").unwrap();
+        let a = p.files[0].slices.clone();
+        // One slice times out twice, another five times (the sixth try works).
+        cdn.flaky.lock().unwrap().insert(hex::encode_upper(&a[1].sha1), 2);
+        cdn.flaky.lock().unwrap().insert(hex::encode_upper(&a[3].sha1), 5);
+        let progress = quick();
+        install(&mut cdn, &p, &dest, true, &progress).await.unwrap();
+        assert_eq!(progress.retries.load(Ordering::SeqCst), 7);
+        assert_eq!(progress.retrying.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(dest.join("a.bin")).unwrap(), data(1, 5_000));
+
+        // Six failures exhaust the tries: the job fails, but what finished is kept.
+        std::fs::remove_dir_all(&dest).unwrap();
+        cdn.flaky.lock().unwrap().insert(hex::encode_upper(&a[2].sha1), 6);
+        let err = install(&mut cdn, &p, &dest, true, &quick()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("gave up after 6 tries"), "{err:#}");
+        assert!(!is_cancelled(&err));
+        let (left, _) = remaining(&p, &dest);
+        assert_eq!(left, a[2].download_size, "only the failed slice is left");
+        let before = cdn.gets.load(Ordering::SeqCst);
+        install(&mut cdn, &p, &dest, true, &quick()).await.unwrap();
+        assert_eq!(cdn.gets.load(Ordering::SeqCst) - before, 1);
+        assert_eq!(std::fs::read(dest.join("a.bin")).unwrap(), data(1, 5_000));
+    }
+
+    /// Hands out URLs that expire right away the first time.
+    struct Expiring(FakeCdn, std::sync::atomic::AtomicBool);
+
+    impl SliceSource for Expiring {
+        async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
+            let u = self.0.urls(paths).await;
+            if !self.1.swap(true, Ordering::SeqCst) {
+                self.0.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            u
+        }
+        async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
+            self.0.get(mirrors).await
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_urls_are_renewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("game");
+        let mut cdn = FakeCdn::default();
+        let m = fixture(&[("a.bin", data(5, 4_000))], &mut cdn.slices);
+        let p = plan(&m, "en-US").unwrap();
+        let mut src = Expiring(cdn, Default::default());
+        let progress = quick();
+        install(&mut src, &p, &dest, true, &progress).await.unwrap();
+        assert_eq!(std::fs::read(dest.join("a.bin")).unwrap(), data(5, 4_000));
+        assert_eq!(progress.retries.load(Ordering::SeqCst), 4, "each slice was refused once");
+        assert_eq!(src.0.url_requests.load(Ordering::SeqCst), 1 + 4, "one batch request, one renewal per slice");
+
+        // URLs past their age are renewed before use, without a failed GET.
+        std::fs::remove_dir_all(&dest).unwrap();
+        let progress = Progress { retry: RetryPolicy { url_max_age: Duration::ZERO, ..quick().retry }, ..Progress::default() };
+        src.1.store(false, Ordering::SeqCst);
+        install(&mut src, &p, &dest, true, &progress).await.unwrap();
+        assert_eq!(progress.retries.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        let r = RetryPolicy::default();
+        let d: Vec<Duration> = (1..6).map(|n| r.delay(n)).collect();
+        assert!(d[0] >= Duration::from_millis(750) && d[0] <= Duration::from_millis(1250));
+        assert!(d[4] >= Duration::from_secs(12) && d[4] <= Duration::from_secs(20));
+        assert!(r.delay(30) <= Duration::from_millis(37_500));
     }
 
     #[tokio::test]
