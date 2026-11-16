@@ -30,6 +30,9 @@ use crate::text_input::TextInput;
 use crate::theme::{Theme, rgba};
 use crate::err_text;
 
+/// Below this content width, the welcome flow's rows of cards stack.
+const WC_ROW_MIN: f32 = 520.;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Step {
     #[default]
@@ -689,13 +692,28 @@ impl Quiver {
         let step = self.wc.step;
         let compact = self.wc.mode != Mode::Full;
         let (vw, vh) = self.viewport;
-        let pw = if compact { 760f32.min(vw - 48.) } else { 1100f32.min(vw - 48.) };
-        self.wc.cw = pw - if compact { 0. } else { 280. } - 64.;
+        // Below Medium the step rail gives way to a "Step N of 7" header with a bar of
+        // steps, and narrow windows get the dialog nearly edge to edge.
+        let bp = self.bp();
+        let rail = !compact && bp.two_columns();
+        let narrow = bp.narrow();
+        let margin = if narrow { 8. } else { 24. };
+        let side = if narrow { 18. } else { 32. };
+        let pw = if compact { 760f32.min(vw - 2. * margin) } else { 1100f32.min(vw - 2. * margin) };
+        self.wc.cw = pw - if rail { 280. } else { 0. } - 2. * side;
         let ph = match self.wc.mode {
             Mode::FixesOnly => (vh - 120.).min(560.),
             Mode::ImportOnly => (vh - 120.).min(720.),
+            Mode::Full if narrow => (vh - 2. * margin - 40.).min(900.),
             Mode::Full => (vh - 72.).min(760.),
         };
+        let steps_bar = (!rail && self.wc.mode == Mode::Full).then(|| {
+            let cur = step.index();
+            div().flex().gap(px(4.)).pt(px(4.)).pb(px(2.)).children(Step::ALL.iter().map(|s| {
+                let i = s.index();
+                div().flex_1().h(px(4.)).rounded(px(2.)).bg(if i < cur { th.acc.opacity(0.5) } else if i == cur { th.acc } else { th.track })
+            }))
+        });
 
         let content = div()
             .flex()
@@ -708,9 +726,10 @@ impl Quiver {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .px(px(32.))
-                    .pt(px(28.))
+                    .px(px(side))
+                    .pt(px(if narrow { 20. } else { 28. }))
                     .pb(px(18.))
+                    .children(steps_bar)
                     .child(div().flex().items_center().gap(px(7.)).child(icon(step.icon(), 13., th.acc_hi)).child(caption(
                         &match self.wc.mode {
                             Mode::Full => format!("Step {} of 7 · {}", step.index() + 1, step.label()),
@@ -719,10 +738,10 @@ impl Quiver {
                         },
                         th.acc_hi,
                     )))
-                    .child(display(24., FontWeight::BOLD, th.tx1).child(step.title()))
+                    .child(display(if narrow { 21. } else { 24. }, FontWeight::BOLD, th.tx1).child(step.title()))
                     .child(div().text_color(th.tx2).text_size(px(13.)).line_height(px(19.)).child(step.sub())),
             )
-            .child(div().id("wc-body").flex_1().min_h_0().overflow_y_scroll().px(px(32.)).pb(px(24.)).child(div().flex().flex_col().gap(px(14.)).w(px(self.wc.cw)).children(body)))
+            .child(div().id("wc-body").flex_1().min_h_0().overflow_y_scroll().px(px(side)).pb(px(24.)).child(div().flex().flex_col().gap(px(14.)).w(px(self.wc.cw)).children(body)))
             .child(footer);
 
         let mut panel = div()
@@ -737,7 +756,7 @@ impl Quiver {
             .border_color(th.line2)
             .shadow(vec![soft_shadow(th.acc.opacity(0.10), 0., 180.), soft_shadow(rgba(0x000000, 0.6), 30., 80.)])
             .on_click(|_, _, cx| cx.stop_propagation());
-        if !compact {
+        if rail {
             panel = panel.child(self.welcome_rail(th, cx));
         }
         panel = panel.child(content);
@@ -755,6 +774,9 @@ impl Quiver {
             root.child(div().absolute().inset_0().flex().flex_col().items_center().justify_center().gap(px(14.)).child(panel).when(!compact, |d| {
                 d.child(
                     div()
+                        .max_w(px(pw))
+                        .px(px(margin))
+                        .text_center()
                         .text_size(px(11.5))
                         .text_color(th.tx3)
                         .child("Quiver is a third-party launcher for your Ubisoft library. Not affiliated with or endorsed by Ubisoft."),
@@ -867,7 +889,17 @@ impl Quiver {
             (Mode::FixesOnly, _) if self.wc.fixes.is_none() => "Ask me later",
             (Mode::FixesOnly | Mode::ImportOnly, _) => "Done",
         };
-        let mut row = div().flex().items_center().gap(px(10.)).px(px(32.)).py(px(16.)).border_t_1().border_color(th.line1).bg(th.ink1.opacity(0.5));
+        let side = if self.bp().narrow() { 18. } else { 32. };
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(10.))
+            .px(px(side))
+            .py(px(16.))
+            .border_t_1()
+            .border_color(th.line1)
+            .bg(th.ink1.opacity(0.5));
         if mode == Mode::Full {
             row = row.child(
                 button("wc-skip", th, Kind::Ghost, Size::Medium, None, "Skip setup")
@@ -937,6 +969,7 @@ impl Quiver {
             panel(th).children(rows).into_any_element(),
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(12.))
                 .child(
@@ -944,7 +977,7 @@ impl Quiver {
                         .focus_ring(self.wfocused(WCtl::AddAccount), th, 8.)
                         .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::AddAccount, cx))),
                 )
-                .child(div().text_size(px(12.)).text_color(th.tx3).child("Games from every account show up in one library; shared games launch with the default account."))
+                .child(div().flex_1().min_w(px(200.)).text_size(px(12.)).text_color(th.tx3).child("Games from every account show up in one library; shared games launch with the default account."))
                 .into_any_element(),
         ]
     }
@@ -1093,12 +1126,13 @@ impl Quiver {
         v.push(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(8.))
                 .text_size(px(12.))
                 .text_color(th.tx3)
                 .child(icon(Icon::Info, 13., th.tx3))
-                .child("Quiver's own state (accounts, settings history, save backups) stays in")
+                .child(div().flex_1().min_w(px(200.)).child("Quiver's own state (accounts, settings history, save backups) stays in"))
                 .child(mono(11.5, th.tx2).child(ubi_api::client::daemon_log().parent().map(tilde).unwrap_or_default()))
                 .into_any_element(),
         );
@@ -1123,7 +1157,9 @@ impl Quiver {
             p.dedup();
             p.len()
         };
-        let third = (self.wc.cw - 24.) / 3.;
+        // One per row when three don't fit.
+        let stack = self.wc.cw < WC_ROW_MIN;
+        let third = if stack { self.wc.cw } else { (self.wc.cw - 24.) / 3. };
         let source_card = |i: Icon, name: &str, detail: String, n: usize| {
             div()
                 .flex()
@@ -1147,6 +1183,7 @@ impl Quiver {
         };
         let sources = div()
             .flex()
+            .when(stack, |d| d.flex_col())
             .gap(px(12.))
             .child(source_card(
                 Icon::Layers,
@@ -1471,6 +1508,7 @@ impl Quiver {
         v.push(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(10.))
                 .child(caption("Ubisoft games in Steam", th.tx3))
@@ -1526,8 +1564,10 @@ impl Quiver {
             rows.push(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(12.))
+                    .gap_x(px(12.))
+                    .gap_y(px(6.))
                     .px(px(14.))
                     .py(px(8.))
                     .when(i > 0, |d| d.border_t_1().border_color(th.line1))
@@ -1537,7 +1577,7 @@ impl Quiver {
                             .flex()
                             .flex_col()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.))
                             .gap(px(1.))
                             .child(div().truncate().child(clean_name(&g.name)))
                             .child(div().text_size(px(11.5)).text_color(if g.note.is_some() && !g.patchable { th.warn } else { th.tx3 }).truncate().child(super::steamgames::state_line(g))),
@@ -1652,7 +1692,7 @@ impl Quiver {
                 .px(px(14.))
                 .py(px(12.))
                 .child(div().flex().items_center().justify_center().size(px(34.)).rounded(px(9.)).bg(if ok { th.ok_soft } else { th.ink4 }).child(icon(i, 16., if ok { th.ok } else { th.tx3 })))
-                .child(div().flex().flex_col().flex_1().gap(px(1.)).child(div().font_weight(SEMIBOLD).child(label.to_owned())).child(div().text_size(px(12.)).text_color(th.tx3).child(detail)))
+                .child(div().flex().flex_col().flex_1().min_w_0().gap(px(1.)).child(div().font_weight(SEMIBOLD).child(label.to_owned())).child(div().text_size(px(12.)).text_color(th.tx3).child(detail)))
                 .child(if ok { pill(th, PillKind::Ok, Some(Icon::CircleCheck), on) } else { pill(th, PillKind::Muted, None, off) })
         };
         let map: [(&[&'static str], &str); 8] = [
@@ -1670,7 +1710,7 @@ impl Quiver {
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .w(px((self.wc.cw - 10.) / 2.))
+                .w(px(if self.wc.cw < WC_ROW_MIN { self.wc.cw } else { (self.wc.cw - 10.) / 2. }))
                 .px(px(12.))
                 .py(px(9.))
                 .rounded(px(10.))
@@ -1678,7 +1718,7 @@ impl Quiver {
                 .border_1()
                 .border_color(th.line1)
                 .child(div().flex().gap(px(4.)).w(px(60.)).children(g.iter().map(|g| glyph(th, g, false))))
-                .child(div().text_size(px(12.5)).text_color(th.tx2).child(label.to_string()))
+                .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(th.tx2).child(label.to_string()))
         }));
         vec![
             panel(th)
@@ -1709,7 +1749,8 @@ impl Quiver {
 
     fn wc_fixes(&mut self, th: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let sel = self.wc.fixes;
-        let third = (self.wc.cw - 20.) / 3.;
+        let stack = self.wc.cw < WC_ROW_MIN;
+        let third = if stack { self.wc.cw } else { (self.wc.cw - 20.) / 3. };
         let example = |i: Icon, t: &str, d: &str| {
             div()
                 .flex()
@@ -1759,6 +1800,7 @@ impl Quiver {
         vec![
             div()
                 .flex()
+                .when(stack, |d| d.flex_col())
                 .gap(px(10.))
                 .child(example(Icon::Play, "Skip intro videos", "No more logo reels and studio intros before the menu."))
                 .child(example(Icon::MousePointer, "Mouse fixes", "Raw input, no forced acceleration or smoothing, where a game needs it."))
@@ -1775,10 +1817,11 @@ impl Quiver {
                 .text_size(px(12.5))
                 .text_color(th.ok)
                 .child(icon(Icon::ShieldCheck, 15., th.ok))
-                .child("They never change gameplay or your saves, and nothing is downloaded from third parties.")
+                .child(div().flex_1().min_w_0().child("They never change gameplay or your saves, and nothing is downloaded from third parties."))
                 .into_any_element(),
             div()
                 .flex()
+                .when(stack, |d| d.flex_col())
                 .gap(px(10.))
                 .child(option(FixesChoice::Yes, "Yes, apply them", "Unmodded games get the recommended fixes. Mod profiles choose their own.", cx))
                 .child(option(FixesChoice::No, "No, keep games as shipped", "Unmodded games run exactly as Ubisoft ships them.", cx))
@@ -1800,6 +1843,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(12.))
                     .child(icon(Icon::Palette, 18., th.acc_hi))
@@ -1811,6 +1855,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(10.))
                     .child(sw(th.ink0, "ink-0"))
                     .child(sw(th.ink2, "ink-2"))
@@ -1824,6 +1869,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .child(button("wc-t1", th, Kind::Primary, Size::Medium, Some(Icon::Play), "Play"))
@@ -1889,6 +1935,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .px(px(16.))
@@ -1907,13 +1954,14 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .px(px(16.))
                     .py(px(12.))
                     .text_size(px(12.5))
                     .child(div().w(px(180.)).text_color(th.tx2).child("Recommended fixes"))
-                    .child(div().flex_1().text_color(th.tx1).child(fixes))
+                    .child(div().flex_1().min_w(px(140.)).text_color(th.tx1).child(fixes))
                     .child(command_line(th, "quiver setup").w(px(160.))),
             )
             .into_any_element()
