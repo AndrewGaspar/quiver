@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use ubi_api::mods::{GameProfiles, Layer, ModsState, ProfileInfo, ProfileRevision, is_human_source};
+use ubi_api::mods::{GameProfiles, Layer, LayerChange, LayerRevision, ModsState, ProfileInfo, ProfileRevision, is_human_source};
 use ubi_api::{Client, ModsRequest, Request, SettingOp};
 
 #[derive(Subcommand)]
@@ -31,10 +31,42 @@ pub enum ModsAction {
 #[derive(Subcommand)]
 pub enum LayerAction {
     /// Copy a folder into Quiver's mod store (reflinks where possible) as a new layer.
-    /// Lay it out like the install folder (e.g. `dxgi.dll`, `DataPC/…`).
-    Add { name: String, dir: PathBuf },
+    /// Lay it out like the install folder (e.g. `dxgi.dll`, `DataPC/…`). `--delete PATH`
+    /// (relative to the install folder) hides a file or folder of the install in launches
+    /// with this layer; the install itself is never changed. Deleting a folder the layer
+    /// has files in replaces the install's whole folder with the layer's. DIR may be left
+    /// out for a layer that only deletes.
+    Add {
+        name: String,
+        dir: Option<PathBuf>,
+        #[arg(long = "delete", value_name = "PATH")]
+        delete: Vec<String>,
+    },
     /// Delete a layer's files (refused while a profile uses it).
     Remove { layer: String },
+    /// Hide more files or folders of the install (paths relative to it) in launches with
+    /// this layer. Recorded in the layer's history.
+    DeleteFiles {
+        layer: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Stop hiding files or folders the layer deletes.
+    KeepFiles {
+        layer: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// A layer's details: size, where it came from, what it deletes.
+    Show { layer: String },
+    /// The revisions of a layer's deletions.
+    History { layer: String },
+    /// Make an earlier revision of a layer's deletions current again.
+    Restore { layer: String, revision: u32 },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +139,49 @@ fn size(bytes: u64) -> String {
     }
 }
 
+/// "deletes N files", for layers that delete anything.
+fn deletes_note(l: &Layer) -> Option<String> {
+    match l.deletes.len() {
+        0 => None,
+        1 => Some("deletes 1 file".into()),
+        n => Some(format!("deletes {n} files")),
+    }
+}
+
+fn print_change(game: &str, verb: &str, c: &LayerChange) {
+    let l = &c.layer;
+    println!(
+        "{game}: {verb} layer {} '{}' ({} files, {}; {}; revision {})",
+        l.id,
+        l.name,
+        l.files,
+        size(l.bytes),
+        deletes_note(l).unwrap_or_else(|| "deletes nothing".into()),
+        c.revision
+    );
+    for w in &c.warnings {
+        eprintln!("note: {w}");
+    }
+}
+
+fn print_layer(l: &Layer) {
+    println!("{} '{}'", l.id, l.name);
+    println!("  {} files, {}", l.files, size(l.bytes));
+    println!("  added {} by {}", l.added.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"), l.added_by);
+    if let Some(o) = &l.origin {
+        println!("  copied from {}", o.display());
+    }
+    match deletes_note(l) {
+        None => println!("  deletes nothing"),
+        Some(d) => {
+            println!("  {d} (hidden in launches with this layer; the install keeps them):");
+            for d in &l.deletes {
+                println!("    {d}");
+            }
+        }
+    }
+}
+
 fn print_state(name: &str, s: &ModsState) {
     let layer_name = |id: &String| s.layers.iter().find(|l| &l.id == id).map_or(format!("{id} (missing)"), |l| l.name.clone());
     println!("{name} ({})", s.product_id);
@@ -116,13 +191,14 @@ fn print_state(name: &str, s: &ModsState) {
     }
     for l in &s.layers {
         println!(
-            "  {}  {:<24} {:>6} files {:>9}  added {} by {}",
+            "  {}  {:<24} {:>6} files {:>9}  added {} by {}{}",
             l.id,
             l.name,
             l.files,
             size(l.bytes),
             l.added.with_timezone(&chrono::Local).format("%Y-%m-%d"),
-            l.added_by
+            l.added_by,
+            deletes_note(l).map(|d| format!("; {d}")).unwrap_or_default()
         );
     }
     println!("profiles:");
@@ -140,7 +216,13 @@ fn print_state(name: &str, s: &ModsState) {
             println!("           overrides: {overrides}");
         }
         for c in &i.conflicts {
-            println!("           {} from {} (top wins)", c.path, c.layers.iter().map(layer_name).collect::<Vec<_>>().join(" < "));
+            let by = c
+                .layers
+                .iter()
+                .map(|id| if c.deleted_by.contains(id) { format!("{} (deletes)", layer_name(id)) } else { layer_name(id) })
+                .collect::<Vec<_>>();
+            let hidden = if c.layers.last().is_some_and(|top| c.deleted_by.contains(top)) { ", hidden" } else { "" };
+            println!("           {} from {} (top wins{hidden})", c.path, by.join(" < "));
         }
     };
     s.profiles.iter().for_each(print_profile);
@@ -163,11 +245,63 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 print_state(&g.name, &state);
             }
         }
-        ModsAction::Layer { action: LayerAction::Add { name, dir } } => {
-            let path = dir.canonicalize().with_context(|| format!("{} not found", dir.display()))?;
-            eprintln!("copying {}…", path.display());
-            let l: Layer = client.call(Request::Mods(ModsRequest::LayerAdd { product_id, name, path })).await?;
-            println!("{}: layer {} '{}' ({} files, {})", g.name, l.id, l.name, l.files, size(l.bytes));
+        ModsAction::Layer { action: LayerAction::Add { name, dir, delete } } => {
+            if dir.is_none() && delete.is_empty() {
+                bail!("give a folder to copy, --delete PATH, or both");
+            }
+            // An empty path: a layer with deletions only.
+            let path = match dir {
+                Some(dir) => {
+                    let path = dir.canonicalize().with_context(|| format!("{} not found", dir.display()))?;
+                    eprintln!("copying {}…", path.display());
+                    path
+                }
+                None => PathBuf::new(),
+            };
+            let c: LayerChange = client.call(Request::Mods(ModsRequest::LayerAdd { product_id, name, path, deletes: delete })).await?;
+            print_change(&g.name, "added", &c);
+        }
+        ModsAction::Layer { action: LayerAction::DeleteFiles { layer, paths, message } } => {
+            let req = ModsRequest::LayerDeletes { product_id, layer, delete: paths, keep: Vec::new(), message };
+            let c: LayerChange = client.call(Request::Mods(req)).await?;
+            print_change(&g.name, "changed", &c);
+        }
+        ModsAction::Layer { action: LayerAction::KeepFiles { layer, paths, message } } => {
+            let req = ModsRequest::LayerDeletes { product_id, layer, delete: Vec::new(), keep: paths, message };
+            let c: LayerChange = client.call(Request::Mods(req)).await?;
+            print_change(&g.name, "changed", &c);
+        }
+        ModsAction::Layer { action: LayerAction::Show { layer } } => {
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            let found: Vec<&Layer> = match state.layers.iter().find(|l| l.id == layer) {
+                Some(l) => vec![l],
+                None => state.layers.iter().filter(|l| l.name.trim().to_lowercase() == layer.trim().to_lowercase()).collect(),
+            };
+            let [l] = found.as_slice() else { bail!("no single layer '{layer}' in {} (quiver mods {product_id} list)", g.name) };
+            print_layer(l);
+            let users: Vec<&str> =
+                state.profiles.iter().filter(|i| i.profile.layers.contains(&l.id)).map(|i| i.profile.name.as_str()).collect();
+            println!("  used by {}", if users.is_empty() { "no profile".into() } else { users.join(", ") });
+        }
+        ModsAction::Layer { action: LayerAction::History { layer } } => {
+            let revs: Vec<LayerRevision> = client.call(Request::Mods(ModsRequest::LayerHistory { product_id, layer })).await?;
+            for r in revs {
+                println!(
+                    "r{:<3} {}  by {:<8} deletes {:<3} {}  {}",
+                    r.revision,
+                    r.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                    r.source,
+                    r.deletes.len(),
+                    r.deletes.join(", "),
+                    r.message.unwrap_or_default()
+                );
+            }
+        }
+        ModsAction::Layer { action: LayerAction::Restore { layer, revision } } => {
+            let confirmed = confirm(source, &format!("restore the deletions of mod layer '{layer}' of {} to revision {revision}", g.name))?;
+            let req = ModsRequest::LayerRestore { product_id, layer, revision, confirmed };
+            let c: LayerChange = client.call(Request::Mods(req)).await?;
+            print_change(&g.name, "restored", &c);
         }
         ModsAction::Layer { action: LayerAction::Remove { layer } } => {
             let confirmed = confirm(source, &format!("delete mod layer '{layer}' of {}", g.name))?;

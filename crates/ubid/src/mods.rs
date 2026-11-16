@@ -1,9 +1,11 @@
 //! `Request::Mods`: mod layers and profiles (`ubi_core::mods` does the work). None of
 //! these requests reach Ubisoft.
 //!
-//! Agent policy (design/PROPOSAL.md, "What agents may do"): changing profiles is allowed
-//! for everyone; deleting a profile or a layer, and restoring a profile revision, are
-//! "Ask" for agents. A request from a source other than a person at a front end
+//! Agent policy (design/PROPOSAL.md, "What agents may do"): changing profiles, adding
+//! layers and changing a layer's deletions are allowed for everyone (a deletion is a
+//! whiteout that hides a file inside a launch's private mount; no real file is deleted);
+//! deleting a profile or a layer, and restoring a profile or layer revision, are "Ask"
+//! for agents. A request from a source other than a person at a front end
 //! (`cli`, `gui`) is refused unless it carries `confirmed`, which front ends set only
 //! after asking the person.
 
@@ -68,22 +70,26 @@ impl Daemon {
                 installed(product_id)?;
                 json!(blocking(move || ModStore::open(product_id).state()).await?)
             }
-            ModsRequest::LayerAdd { product_id, name, path } => {
+            ModsRequest::LayerAdd { product_id, name, path, deletes } => {
                 let game = installed(product_id)?;
-                let layer = blocking(move || ModStore::open(product_id).add_layer(&name, &path, Some(&game.install_dir), &src)).await?;
+                let change = blocking(move || {
+                    let path = (!path.as_os_str().is_empty()).then_some(path);
+                    ModStore::open(product_id).add_layer_with(&name, path.as_deref(), &deletes, Some(&game.install_dir), &src)
+                })
+                .await?;
+                let l = &change.layer;
+                let deletes = if l.deletes.is_empty() { String::new() } else { format!(", deletes {}", l.deletes.len()) };
                 self.mods_changed(
                     source,
                     product_id,
-                    format!("added mod layer '{}' ({} files) to {}", layer.name, layer.files, self.product_name(product_id)),
+                    format!("added mod layer '{}' ({} files{deletes}) to {}", l.name, l.files, self.product_name(product_id)),
                 );
-                json!(layer)
+                json!(change)
             }
             ModsRequest::LayerRemove { product_id, layer, confirmed } => {
                 ask(source, confirmed, "removing a mod layer")?;
                 installed(product_id)?;
-                if self.running.lock().unwrap().contains(&product_id) {
-                    bail!("{} is running; stop it before removing a layer", self.product_name(product_id));
-                }
+                self.not_running(product_id, "removing a layer")?;
                 let layer = blocking(move || ModStore::open(product_id).remove_layer(&layer)).await?;
                 self.mods_changed(source, product_id, format!("removed mod layer '{}' from {}", layer.name, self.product_name(product_id)));
                 json!(layer)
@@ -152,7 +158,57 @@ impl Daemon {
                 );
                 json!(rev)
             }
+            ModsRequest::LayerDeletes { product_id, layer, delete, keep, message } => {
+                // Whiteouts only hide files inside a launch's mount, so this is a normal
+                // edit for agents too. A mounted layer must not change underneath it.
+                let game = installed(product_id)?;
+                self.not_running(product_id, "changing a layer's deletions")?;
+                let change = blocking(move || {
+                    ModStore::open(product_id).change_deletions(&layer, &delete, &keep, Some(&game.install_dir), &src, message)
+                })
+                .await?;
+                self.layer_changed(source, product_id, &change, None);
+                json!(change)
+            }
+            ModsRequest::LayerHistory { product_id, layer } => {
+                let (_, history) = blocking(move || ModStore::open(product_id).layer_history_of(&layer)).await?;
+                json!(history)
+            }
+            ModsRequest::LayerRestore { product_id, layer, revision, confirmed } => {
+                ask(source, confirmed, "restoring a mod layer revision")?;
+                installed(product_id)?;
+                self.not_running(product_id, "restoring a layer's deletions")?;
+                let change = blocking(move || ModStore::open(product_id).restore_layer(&layer, revision, &src)).await?;
+                self.layer_changed(source, product_id, &change, Some(revision));
+                json!(change)
+            }
         })
+    }
+
+    fn not_running(&self, product_id: u32, what: &str) -> Result<()> {
+        if self.running.lock().unwrap().contains(&product_id) {
+            bail!("{} is running; stop it before {what}", self.product_name(product_id));
+        }
+        Ok(())
+    }
+
+    fn layer_changed(&self, source: &str, product_id: u32, change: &ubi_api::mods::LayerChange, restored: Option<u32>) {
+        let l = &change.layer;
+        let what = match restored {
+            Some(r) => format!("restored r{r} of"),
+            None => "changed deletions of".into(),
+        };
+        self.mods_changed(
+            source,
+            product_id,
+            format!(
+                "{what} mod layer '{}' of {}: deletes {} (r{})",
+                l.name,
+                self.product_name(product_id),
+                l.deletes.len(),
+                change.revision
+            ),
+        );
     }
 
     fn mods_changed(&self, source: &str, product_id: u32, action: String) {

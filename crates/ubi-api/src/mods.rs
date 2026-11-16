@@ -9,6 +9,14 @@
 //!
 //! Every profile change (including deleting it) is a revision in the profile's own
 //! history, so any earlier state can be restored, the same way as game settings.
+//!
+//! A layer can also **delete** files and folders of the install (or of layers below it),
+//! e.g. intro videos. Deletions are paths relative to the install folder, recorded in the
+//! layer's metadata and kept on disk as overlayfs whiteouts in the layer's folder, so they
+//! only hide files inside a launch's private mount; nothing is ever deleted from the
+//! install. Deleting a folder the layer has files of its own in makes it an opaque folder:
+//! the layer's version replaces the install's whole folder. Each change to a layer's
+//! deletions is a revision in the layer's own history.
 
 use std::path::PathBuf;
 
@@ -41,6 +49,36 @@ pub struct Layer {
     pub origin: Option<PathBuf>,
     pub files: u64,
     pub bytes: u64,
+    /// Paths (relative to the install folder, `/`-separated, in the install's case) this
+    /// layer hides from the layers below it and the install.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deletes: Vec<String>,
+}
+
+/// A layer after a change, with the revision of its deletions and anything worth telling
+/// the person (e.g. a deleted path that isn't in the install).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerChange {
+    #[serde(flatten)]
+    pub layer: Layer,
+    /// Revision of the layer's deletions (its history's last entry).
+    #[serde(default)]
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// One entry in a layer's history: the deletions it had from then on. A layer's files
+/// never change after it's added; its deletions can.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LayerRevision {
+    pub revision: u32,
+    pub at: DateTime<Utc>,
+    pub source: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub deletes: Vec<String>,
 }
 
 /// A named stack of layers with its own saves.
@@ -123,11 +161,15 @@ pub struct ProfileRevision {
     pub profile: Profile,
 }
 
-/// A file more than one of a profile's layers provides; the last layer listed wins.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A file more than one of a profile's layers provides or deletes; the last layer listed
+/// wins. A layer in `deleted_by` hides the file (it deletes the path or a folder above
+/// it) instead of providing its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Conflict {
     pub path: String,
     pub layers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,8 +212,16 @@ pub enum ModsRequest {
     /// A game's layers and profiles (`ModsState`).
     List { product_id: u32 },
     /// Copy a folder into the store as a new layer (reflinks where the filesystem allows).
-    /// File names are matched to the install's case.
-    LayerAdd { product_id: u32, name: String, path: PathBuf },
+    /// File names are matched to the install's case. An empty `path` adds a layer with
+    /// only `deletes` (paths relative to the install folder to hide); whiteouts already in
+    /// the folder are kept as deletions. Answers a [`LayerChange`].
+    LayerAdd {
+        product_id: u32,
+        name: String,
+        path: PathBuf,
+        #[serde(default)]
+        deletes: Vec<String>,
+    },
     /// Delete a layer's files. Refused while a profile uses it. `confirmed`: a person
     /// approved it in a front end (needed for agent sources).
     LayerRemove {
@@ -211,6 +261,30 @@ pub enum ModsRequest {
     ProfileRestore {
         product_id: u32,
         profile: String,
+        revision: u32,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    /// Add (`delete`) or take back (`keep`) a layer's deletions: paths relative to the
+    /// install folder. Records a revision in the layer's history; answers a
+    /// [`LayerChange`]. Refused while the game is running.
+    LayerDeletes {
+        product_id: u32,
+        layer: String,
+        #[serde(default)]
+        delete: Vec<String>,
+        #[serde(default)]
+        keep: Vec<String>,
+        #[serde(default)]
+        message: Option<String>,
+    },
+    /// A layer's history of deletions (`Vec<LayerRevision>`).
+    LayerHistory { product_id: u32, layer: String },
+    /// Make an earlier revision of a layer's deletions current again, as a new revision.
+    /// Agents need `confirmed`, as for profile restores.
+    LayerRestore {
+        product_id: u32,
+        layer: String,
         revision: u32,
         #[serde(default)]
         confirmed: bool,
@@ -264,5 +338,33 @@ mod tests {
         assert!(v.get("settings").is_none());
         let back: Profile = serde_json::from_value(serde_json::json!({ "id": "p", "name": "n" })).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn layer_wire() {
+        // Requests from before deletions still parse.
+        let r: crate::Request = serde_json::from_str(
+            r#"{"method":"mods","params":{"op":"layer_add","product_id":5,"name":"x","path":"/m"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::LayerAdd { ref deletes, .. }) if deletes.is_empty()));
+        let r: crate::Request = serde_json::from_str(
+            r#"{"method":"mods","params":{"op":"layer_deletes","product_id":5,"layer":"x","delete":["a/b"]}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::LayerDeletes { ref keep, .. }) if keep.is_empty()));
+        // Layer metadata from before deletions; no deletions stay out of the JSON.
+        let old = serde_json::json!({
+            "id": "l1", "name": "n", "added": "2026-01-01T00:00:00Z", "added_by": "cli", "files": 1, "bytes": 2
+        });
+        let l: Layer = serde_json::from_value(old).unwrap();
+        assert!(l.deletes.is_empty());
+        assert!(serde_json::to_value(&l).unwrap().get("deletes").is_none());
+        // A LayerChange reads as a Layer (older clients expect one from layer_add).
+        let c = LayerChange { layer: l.clone(), revision: 1, warnings: vec!["w".into()] };
+        let back: Layer = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(back, l);
+        let c = Conflict { path: "a".into(), layers: vec!["l1".into()], ..Default::default() };
+        assert!(serde_json::to_value(&c).unwrap().get("deleted_by").is_none());
     }
 }
