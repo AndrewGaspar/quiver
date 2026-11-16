@@ -68,6 +68,8 @@ struct Daemon {
     /// install folder.
     installs: Mutex<BTreeMap<u64, (Arc<Progress>, bool, std::path::PathBuf)>>,
     library: tokio::sync::Mutex<Option<Vec<LibraryEntry>>>,
+    /// Accounts whose library the cached one is missing (fetch failed).
+    library_failed: Mutex<Vec<String>>,
     activity: Mutex<VecDeque<ActivityEntry>>,
     events: broadcast::Sender<Event>,
     /// Games being played, from any launch path; reports play time to Ubisoft.
@@ -194,6 +196,9 @@ impl Daemon {
         // Ownership only matters when there is a choice to make.
         let owners = if setting.is_none() && accounts.len() > 1 {
             match self.library(false).await {
+                // If the default's library couldn't be fetched, its ownership is unknown:
+                // keep the default rather than silently switching save histories.
+                Ok(_) if default.as_ref().is_some_and(|d| self.library_failed.lock().unwrap().contains(d)) => Vec::new(),
                 Ok(lib) => lib.into_iter().find(|e| e.product_id == product_id).map(|e| e.owned_by).unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(product_id, "library unavailable to pick an account; using the default: {e:#}");
@@ -220,7 +225,7 @@ impl Daemon {
                 let mut out: Vec<LibraryEntry> = Vec::new();
                 let mut seen: HashMap<u32, usize> = HashMap::new();
                 let mut first_err = None;
-                let mut fetched = 0;
+                let mut failed = Vec::new();
                 for online in &onlines {
                     let user_id = online.user_id().unwrap_or_default().to_owned();
                     let lib = match async { Library::fetch(&online.demux().await?).await }.await {
@@ -228,10 +233,10 @@ impl Daemon {
                         Err(e) => {
                             tracing::warn!(account = %user_id, "library fetch failed: {e:#}");
                             first_err.get_or_insert(e);
+                            failed.push(user_id);
                             continue;
                         }
                     };
-                    fetched += 1;
                     for p in lib
                         .products
                         .iter()
@@ -262,13 +267,15 @@ impl Daemon {
                         });
                     }
                 }
-                if fetched == 0 {
+                if failed.len() == onlines.len() {
                     return Err(first_err.unwrap_or_else(|| anyhow::anyhow!("no library")));
                 }
                 out.sort_by(|a, b| b.installed.is_some().cmp(&a.installed.is_some()).then_with(|| a.name.cmp(&b.name)));
-                Ok(out)
+                Ok((out, failed))
             })
             .await?;
+            let (entries, failed) = entries;
+            *self.library_failed.lock().unwrap() = failed;
             *cache = Some(entries);
         }
         let running = self.running.lock().unwrap().clone();
@@ -834,6 +841,7 @@ async fn main() -> Result<()> {
         running: Mutex::new(HashSet::new()),
         installs: Mutex::new(BTreeMap::new()),
         library: tokio::sync::Mutex::new(None),
+        library_failed: Mutex::new(Vec::new()),
         activity: Mutex::new(activity),
         events,
         sessions,
