@@ -105,13 +105,14 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 selected: steam::choose_user(&users, None, cfg.steam_user.as_deref()).ok().map(|u| u.id),
                 users,
                 running: steam::is_running(),
-                staged: steam::staged(&paths).iter().map(|s| s.describe()).collect(),
+                staged: steam::staged_descriptions(&paths),
             })
         }
         Request::SteamApplyStaged => {
             let applied = steam::apply_staged(&paths, steam::is_running())?;
             if applied > 0 {
-                daemon.log_activity(source, format!("wrote {applied} staged Steam shortcut change(s)"), None);
+                daemon.log_activity(source, format!("wrote {applied} staged Steam change(s)"), None);
+                daemon.emit(ubi_api::Event::SteamGamesChanged { offer: vec![] });
             }
             json!({ "applied": applied })
         }

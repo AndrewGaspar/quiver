@@ -4,7 +4,7 @@
 use std::io::IsTerminal;
 
 use anyhow::{Result, bail};
-use ubi_api::exports::{ExportKind, ExportStatus, SteamExportResult, SteamUsers};
+use ubi_api::exports::{ExportKind, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUsers};
 use ubi_api::setup::{FinishSetup, FixesChoice, FoundInstall, SetupState};
 use ubi_api::mods::{ModPrefs, ModsRequest};
 use ubi_api::{Client, LibraryEntry, Request, Status};
@@ -87,20 +87,24 @@ pub async fn run(client: &Client) -> Result<()> {
         println!("  Signed in: {}", names.join(", "));
     }
 
-    step(2, "Where games and prefixes live");
+    step(2, "Where games are installed");
     let mut s: SetupState = client.call(Request::Setup { library: None, prefixes: None, finish: None }).await?;
     let free = |f: Option<u64>| f.map(|b| format!("  ({} free)", gb(b))).unwrap_or_default();
-    println!("  Games:    {}{}", tilde(&s.library), free(s.library_free));
-    println!("  Prefixes: {}{}", tilde(&s.prefixes), free(s.prefixes_free));
+    println!("  Games: {}{}", tilde(&s.library), free(s.library_free));
+    println!("  (Advanced: each game's Windows compatibility folder, its Proton prefix, goes in {})", tilde(&s.prefixes));
     if s.paths_locked {
         println!("  {} game(s) installed, so these stay as they are.", s.installed);
-    } else if yes("Change them?", false)? {
+    } else if yes("Change where games go?", false)? {
         let ask = |what: &str, cur: &std::path::Path| -> Result<Option<std::path::PathBuf>> {
             let a = dev::prompt(&format!("  {what} [{}]: ", tilde(cur)))?;
             Ok((!a.is_empty()).then(|| a.into()))
         };
         let library = ask("Games folder", &s.library)?;
-        let prefixes = ask("Prefixes folder", &s.prefixes)?;
+        let prefixes = if yes("Also move the compatibility folders (advanced)?", false)? {
+            ask("Compatibility folders (Proton prefixes)", &s.prefixes)?
+        } else {
+            None
+        };
         if library.is_some() || prefixes.is_some() {
             s = client.call(Request::Setup { library, prefixes, finish: None }).await?;
             println!("  Now: {} and {}", tilde(&s.library), tilde(&s.prefixes));
@@ -111,8 +115,10 @@ pub async fn run(client: &Client) -> Result<()> {
         }
     }
 
-    step(3, "Bring in existing installs");
-    println!("  Looking in Lutris, ~/Games and Steam prefixes for Ubisoft Connect games (read-only)…");
+    step(3, "Ubisoft Connect games you already downloaded");
+    println!("  Games downloaded with Ubisoft Connect under Lutris, Wine or inside a Steam game can join");
+    println!("  your library without downloading again. (Ubisoft games bought on Steam: see step 4.)");
+    println!("  Looking in Lutris, ~/Games and Steam games for Ubisoft Connect downloads (read-only)…");
     let found: Vec<FoundInstall> = client.call(Request::ScanInstalls).await?;
     if found.is_empty() {
         println!("  None found.");
@@ -151,6 +157,39 @@ pub async fn run(client: &Client) -> Result<()> {
     if users.root.is_none() {
         println!("  Steam isn't installed; skipping.");
     } else {
+        // Ubisoft games bought on Steam: start them through Quiver instead of Connect.
+        let sg: SteamGames = client.call(Request::SteamGames { steam_user: None }).await?;
+        let switchable: Vec<&SteamGame> = sg.games.iter().filter(|g| g.patchable && g.state == PatchState::Off).collect();
+        if sg.games.is_empty() {
+            println!("  No Ubisoft games are installed through Steam.");
+        } else {
+            println!("  Ubisoft games installed through Steam:");
+            for g in &sg.games {
+                let how = if g.state.uses_quiver() { "starts through Quiver" } else { "opens Ubisoft Connect first" };
+                println!("    {} ({how}){}", g.name, g.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default());
+            }
+            println!("  Started through Quiver they skip the Connect window and its second sign-in; play time");
+            println!("  still counts. Only their Steam launch options change; `quiver steam unpatch` undoes it.");
+        }
+        if !switchable.is_empty() && yes(&format!("Start {} of them through Quiver?", switchable.len()), true)? {
+            let mut staged = false;
+            for g in switchable {
+                match client.call::<SteamPatchResult>(Request::SteamPatch { app_id: g.app_id, steam_user: None }).await {
+                    Ok(r) => {
+                        staged |= r.staged;
+                        println!("  {} now starts through Quiver", r.name);
+                    }
+                    Err(e) => println!("  {}: {e:#}", g.name),
+                }
+            }
+            if staged {
+                println!("  {}", exports::restart_hint());
+            }
+        }
+        let offers = yes("Offer this when a Ubisoft game is installed through Steam later?", sg.offers)?;
+        if offers != sg.offers {
+            let _: serde_json::Value = client.call(Request::SteamOffers { enabled: Some(offers) }).await?;
+        }
         println!("  Quiver can add games to Steam as non-Steam shortcuts with Ubisoft art.");
         println!("  Steam reads shortcuts only when it starts, so new ones show after it restarts;");
         println!("  Quiver never restarts Steam without asking you first.");

@@ -139,12 +139,24 @@ pub enum GlobalCmd {
     /// Add a game to Steam (staged while Steam runs) or to the app launcher.
     ExportSteam(u32),
     ExportDesktop(u32),
+    /// A Steam copy of a Ubisoft game (by Steam app id): start it through Quiver, or
+    /// through Ubisoft Connect again.
+    SteamPatch(u32),
+    SteamUnpatch(u32),
+    /// "Not now" on the offer for a newly installed Steam game.
+    SteamDismiss(u32),
+    /// Offer the switch for Ubisoft games newly installed in Steam: on/off.
+    SteamOffers,
+    /// Ask, then restart Steam so it picks up staged changes.
+    SteamRestart,
 }
 
 #[derive(Clone, Debug)]
 pub enum ConfirmAction {
     SignOut { user_id: String, name: String },
     RemoveExport { kind: ExportKind, product_id: u32 },
+    /// Close Steam, write staged changes, start it again (`quiver steam restart`).
+    RestartSteam,
 }
 
 /// A yes/no question, drawn over everything (sign out, remove a shortcut).
@@ -165,6 +177,8 @@ pub struct GlobalUi {
     pub protons: Option<Result<Vec<String>, String>>,
     pub exports: Option<Result<Vec<ExportStatus>, String>>,
     pub steam: Option<Result<SteamUsers, String>>,
+    /// Ubisoft games installed through Steam (`steamgames.rs`).
+    pub sg: super::steamgames::SteamGamesUi,
     /// When the daemon connection dropped (`Event::Disconnected`), for the banner.
     pub down_since: Option<Instant>,
     pub confirm: Option<Confirm>,
@@ -179,6 +193,8 @@ pub struct GlobalUi {
     pub login_adding: bool,
     pub login_email: Option<String>,
     login_focused: Option<EntityId>,
+    /// Settings › Library and storage › Advanced is open.
+    pub lib_advanced: bool,
     /// hyprpad seen running (checked when Appearance is shown).
     pub hyprpad: Option<(bool, Instant)>,
 }
@@ -313,6 +329,7 @@ impl Quiver {
             Event::Job(j) if !j.done => return,
             _ => {}
         }
+        self.steam_games_event(e, cx);
         // Anything that changes state may have logged an Activity entry.
         self.reload_activity(cx);
         if matches!(e, Event::LibraryChanged) {
@@ -509,6 +526,14 @@ impl Quiver {
                     this.load_global_exports(cx);
                 });
             }
+            GlobalCmd::SteamPatch(app_id) => self.steam_patch(app_id, false, cx),
+            GlobalCmd::SteamUnpatch(app_id) => self.steam_patch(app_id, true, cx),
+            GlobalCmd::SteamDismiss(app_id) => self.steam_dismiss(app_id, cx),
+            GlobalCmd::SteamOffers => {
+                let on = !self.steam_offers_enabled();
+                self.set_steam_offers(on, cx);
+            }
+            GlobalCmd::SteamRestart => self.ask_restart_steam(cx),
             GlobalCmd::ExportDesktop(id) => {
                 let name = self.game_name(id);
                 let req = Request::ExportDesktop { product_id: id, remove: false };
@@ -539,6 +564,7 @@ impl Quiver {
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
             }
+            ConfirmAction::RestartSteam => self.restart_steam(cx),
             ConfirmAction::RemoveExport { kind, product_id } => {
                 let req = match kind {
                     ExportKind::Desktop => Request::ExportDesktop { product_id, remove: true },
@@ -596,6 +622,7 @@ impl Quiver {
         self.call::<SteamUsers, _>(Request::SteamUsers, cx, |this, r, _| {
             this.ui.steam = Some(r.map_err(|e| err_text(&e)));
         });
+        self.load_steam_games(cx);
     }
 
     /// Activity with a bigger window than the library's first load, at most one request at
@@ -782,7 +809,15 @@ impl Quiver {
             .font_weight(SEMIBOLD)
             .cursor_pointer()
             .hover(move |s| s.bg(bad.opacity(0.85)))
-            .child(icon(if matches!(c.action, ConfirmAction::SignOut { .. }) { Icon::LogOut } else { Icon::Trash }, 15., white))
+            .child(icon(
+                match c.action {
+                    ConfirmAction::SignOut { .. } => Icon::LogOut,
+                    ConfirmAction::RestartSteam => Icon::RefreshCw,
+                    ConfirmAction::RemoveExport { .. } => Icon::Trash,
+                },
+                15.,
+                white,
+            ))
             .child(c.confirm.clone())
             .focus_ring(keys && c.selected == 1, th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.close_confirm(true, cx)));

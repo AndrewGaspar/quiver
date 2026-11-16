@@ -101,7 +101,7 @@ pub struct FoundInstall {
     /// The Wine prefix it is in.
     pub prefix: PathBuf,
     pub source: InstallSource,
-    /// "Lutris · Ubisoft Connect", "Wine prefix · ~/Games/ubisoft-connect"…
+    /// "Lutris · Ubisoft Connect", "Wine · ~/Games/ubisoft-connect", "Connect inside Steam · Far Cry 5"…
     pub source_label: String,
     /// Lutris games (names) that launch through this prefix.
     #[serde(default)]

@@ -450,6 +450,37 @@ pub enum Request {
     /// Find existing Ubisoft Connect installs in Lutris, Wine and Steam prefixes, matched
     /// to owned games (`Vec<setup::FoundInstall>`). Read-only; import one with `Import`.
     ScanInstalls,
+    // ---- Steam copies of Ubisoft games: "use Quiver instead of Ubisoft Connect"
+    /// Ubisoft games installed through Steam, with whether each starts through Quiver
+    /// (`exports::SteamGames`). `steam_user` (id or name) reads that user's launch options
+    /// instead of each game's installer's.
+    SteamGames {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// Make a Steam game start through Quiver: its launch options become
+    /// `<quiver> --source steam steam-run %command%`, keeping the user's own options. Staged
+    /// while Steam runs (it rewrites the file on exit). Returns `exports::SteamPatchResult`.
+    SteamPatch {
+        app_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// Undo [`Request::SteamPatch`] (or a hand-made one): the launch options go back to what
+    /// they were. Staged while Steam runs.
+    SteamUnpatch {
+        app_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// "Not now" on the offer for a newly installed game: it isn't offered again.
+    SteamDismissOffer { app_id: u32 },
+    /// Read (and with `enabled`, change) whether quiverd offers the switch for Ubisoft
+    /// games newly installed in Steam. Returns `{ "enabled": bool }`.
+    SteamOffers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
 }
 
 fn yes() -> bool {
@@ -492,6 +523,12 @@ pub enum Event {
     /// Not sent by quiverd: [`Client`] is connected and subscribed again after
     /// [`Event::Disconnected`]. The daemon may have restarted; reload state.
     Reconnected,
+    /// Ubisoft games installed through Steam, or whether they start through Quiver, changed
+    /// (see `Request::SteamGames`). `offer`: app ids newly installed and offered the switch.
+    SteamGamesChanged {
+        #[serde(default)]
+        offer: Vec<u32>,
+    },
 }
 
 /// Socket path for the current user.
@@ -599,6 +636,23 @@ mod tests {
         assert!(matches!(r, Request::ScanInstalls));
         let v = serde_json::to_value(Request::Setup { library: None, prefixes: None, finish: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "setup", "params": {} }));
+    }
+
+    #[test]
+    fn steam_games_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"steam_games","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::SteamGames { steam_user: None }));
+        let r: Request = serde_json::from_str(r#"{"method":"steam_patch","params":{"app_id":3751950}}"#).unwrap();
+        assert!(matches!(r, Request::SteamPatch { app_id: 3751950, steam_user: None }));
+        let v = serde_json::to_value(Request::SteamOffers { enabled: None }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_offers", "params": {} }));
+        let e: Event = serde_json::from_str(r#"{"type":"steam_games_changed"}"#).unwrap();
+        assert!(matches!(e, Event::SteamGamesChanged { offer } if offer.is_empty()));
+        // Minimal and newer replies decode.
+        let g: exports::SteamGames = serde_json::from_str(r#"{"games":[{"app_id":1,"name":"x","install_dir":"/g","state":"later_state"}]}"#).unwrap();
+        assert!(g.offers && g.root.is_none());
+        assert_eq!(g.games[0].state, exports::PatchState::Other);
+        assert!(!g.games[0].patchable && !g.games[0].state.uses_quiver());
     }
 
     #[test]

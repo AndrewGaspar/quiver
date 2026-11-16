@@ -482,6 +482,36 @@ impl Quiver {
             };
             kvs = kvs.child(kv(th, "Steam", export(ExportKind::Steam))).child(kv(th, "Desktop entry", export(ExportKind::Desktop)));
         }
+        // Also installed through Steam: whether that copy starts through Quiver.
+        if let Some(sc) = self.steam_copy(id) {
+            let app_id = sc.app_id;
+            let action = crate::ui::steamgames::control(&sc);
+            let (col, label) = if sc.state.uses_quiver() { (th.ok, "Starts through Quiver") } else { (th.tx2, "Opens Connect first") };
+            kvs = kvs.child(kv(
+                th,
+                "Steam copy",
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(div().text_color(col).child(label))
+                    .when(matches!(sc.state, ubi_api::exports::PatchState::Waiting | ubi_api::exports::PatchState::WaitingUndo), |d| {
+                        d.child(div().text_color(th.warn).child("· after Steam restarts"))
+                    })
+                    .when_some(action, |d, on| {
+                        d.child(
+                            div()
+                                .id("ov-steam-copy")
+                                .text_color(th.acc_hi)
+                                .cursor_pointer()
+                                .child(if on { "· Use Quiver" } else { "· Undo" })
+                                .on_click(cx.listener(move |this, _, _, cx| this.steam_patch(app_id, !on, cx))),
+                        )
+                    })
+                    .into_any_element(),
+            ));
+        }
         c = c.child(kvs);
         c
     }

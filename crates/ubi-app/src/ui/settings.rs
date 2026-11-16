@@ -29,6 +29,8 @@ pub enum SettingsAction {
     Url(String),
     /// The welcome flow again (`welcome.rs`).
     Welcome,
+    /// Library and storage › Advanced: show or hide the compatibility folders.
+    Advanced,
 }
 
 /// Avatar gradients, by sign-in order.
@@ -78,12 +80,30 @@ impl Quiver {
                     }
                 }
             }
-            SettingsSection::Library => v.push(SettingsAction::Welcome),
+            SettingsSection::Library => v.extend([SettingsAction::Welcome, SettingsAction::Advanced]),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
             SettingsSection::Steam => {
+                if matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some()) {
+                    for g in self.steam_copies() {
+                        match super::steamgames::control(&g) {
+                            Some(true) => {
+                                if g.offer {
+                                    v.push(SettingsAction::Cmd(GlobalCmd::SteamDismiss(g.app_id)));
+                                }
+                                v.push(SettingsAction::Cmd(GlobalCmd::SteamPatch(g.app_id)));
+                            }
+                            Some(false) => v.push(SettingsAction::Cmd(GlobalCmd::SteamUnpatch(g.app_id))),
+                            None => {}
+                        }
+                    }
+                    v.push(SettingsAction::Cmd(GlobalCmd::SteamOffers));
+                }
                 if let Some(Ok(s)) = &self.ui.steam {
                     if !s.running && !s.staged.is_empty() {
                         v.push(SettingsAction::Cmd(GlobalCmd::SteamApply));
+                    }
+                    if s.running && !s.staged.is_empty() {
+                        v.push(SettingsAction::Cmd(GlobalCmd::SteamRestart));
                     }
                 }
                 if let Some(Ok(list)) = &self.ui.exports {
@@ -120,6 +140,7 @@ impl Quiver {
                 self.show_toast(format!("Opening {url}"), cx);
             }
             SettingsAction::Welcome => self.run_dl(crate::ui::downloads::DlCmd::Welcome, cx),
+            SettingsAction::Advanced => self.ui.lib_advanced = !self.ui.lib_advanced,
         }
     }
 
@@ -159,7 +180,7 @@ impl Quiver {
         let body = match section {
             SettingsSection::Accounts => self.settings_accounts(th, &actions, cx),
             SettingsSection::Library => {
-                let mut v = self.settings_library(th, cx);
+                let mut v = self.settings_library(th, &actions, cx);
                 let f = self.action_focused(&actions, &SettingsAction::Welcome);
                 v.insert(1, self.settings_setup_group(th, f, cx));
                 v
@@ -523,7 +544,7 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Library and storage
 
-    fn settings_library(&mut self, th: &Theme, _cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settings_library(&mut self, th: &Theme, actions: &[SettingsAction], cx: &mut Context<Self>) -> Vec<AnyElement> {
         let installed: Vec<&ubi_api::Game> = self.games.iter().filter_map(|g| g.entry.installed.as_ref()).collect();
         let parents = |f: &dyn Fn(&ubi_api::Game) -> &std::path::Path| {
             let mut m: BTreeMap<String, usize> = BTreeMap::new();
@@ -557,7 +578,7 @@ impl Quiver {
         };
         let custom = self.custom_art.len();
         vec![
-            head_row(th, "Library and storage", "Where games, prefixes, Quiver's own state and art live.", None),
+            head_row(th, "Library and storage", "Where games, Quiver's own state and art live.", None),
             group(
                 th,
                 "Library",
@@ -578,9 +599,36 @@ impl Quiver {
                             .into_any_element(),
                     ),
                     frow(th, "Game folders", Some("Each game installs into its own folder"), dir_rows(&games_dirs, "installs")),
-                    frow(th, "Prefixes", Some("One Proton prefix per game"), dir_rows(&prefix_dirs, "prefixes")),
                 ],
             ),
+            {
+                // The per-game Wine prefixes: a detail most people never need.
+                let open = self.ui.lib_advanced;
+                let toggle = self.action_button(
+                    th,
+                    actions,
+                    SettingsAction::Advanced,
+                    Kind::Ghost,
+                    Some(if open { Icon::ChevronDown } else { Icon::ChevronRight }),
+                    if open { "Hide" } else { "Show" },
+                    cx,
+                );
+                let mut c = card(th).child(card_head(
+                    th,
+                    "Advanced",
+                    "Windows compatibility folders: each game's own small Windows setup",
+                    Some(toggle),
+                ));
+                if open {
+                    c = c.child(div().px(px(16.)).child(frow(
+                        th,
+                        "Compatibility folders",
+                        Some("One per game (Proton prefixes), so games never affect each other"),
+                        dir_rows(&prefix_dirs, "folders"),
+                    )));
+                }
+                c.into_any_element()
+            },
             group(
                 th,
                 "Quiver's files",
@@ -742,7 +790,7 @@ impl Quiver {
             None,
         )];
         // Steam itself.
-        match &self.ui.steam {
+        match self.ui.steam.clone() {
             None => out.push(card(th).p(px(16.)).text_color(th.tx3).child("Looking for Steam…").into_any_element()),
             Some(Err(e)) => out.push(card(th).p(px(16.)).text_color(th.bad).child(format!("Could not read Steam's users: {e}")).into_any_element()),
             Some(Ok(steam)) => {
@@ -798,6 +846,9 @@ impl Quiver {
                     div().flex().flex_col().gap(px(8.)).children(users).into_any_element(),
                 ));
                 out.push(group(th, "Steam", "", rows));
+                if steam.root.is_some() {
+                    out.push(self.settings_steam_copies(th, actions, cx));
+                }
 
                 if !steam.staged.is_empty() {
                     let n = steam.staged.len();
@@ -818,7 +869,7 @@ impl Quiver {
                                 .gap(px(10.))
                                 .child(icon(Icon::ClockAlert, 16., th.warn))
                                 .child(div().font_weight(SEMIBOLD).text_color(th.warn).child(format!(
-                                    "{n} shortcut change{} waiting for Steam to restart",
+                                    "{n} change{} waiting for Steam to restart",
                                     if n == 1 { "" } else { "s" }
                                 ))),
                         )
@@ -838,15 +889,15 @@ impl Quiver {
                                 .flex_col()
                                 .gap(px(8.))
                                 .child(div().text_size(px(12.5)).text_color(th.tx2).child(
-                                    "Steam rewrites its shortcut file when it exits, so Quiver waits. Restart Steam when it suits you.",
+                                    "Steam rewrites its settings files when it exits, so Quiver waits. Restart Steam when it suits you; Quiver asks before it does.",
                                 ))
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap(px(10.))
-                                        .child(command_line(th, "quiver steam restart").w(px(260.)).flex_none())
-                                        .child(div().text_size(px(12.)).text_color(th.tx3).child("restarts it for you, after asking in the terminal")),
+                                        .child(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::SteamRestart), Kind::Secondary, Some(Icon::RefreshCw), "Restart Steam…", cx))
+                                        .child(command_line(th, "quiver steam restart").w(px(260.)).flex_none()),
                                 ),
                         );
                     } else {
@@ -947,6 +998,111 @@ impl Quiver {
                 .into_any_element(),
         );
         out
+    }
+
+    /// Ubisoft games installed through Steam: start each through Quiver, or undo it.
+    fn settings_steam_copies(&mut self, th: &Theme, actions: &[SettingsAction], cx: &mut Context<Self>) -> AnyElement {
+        let mut rows: Vec<AnyElement> = vec![];
+        match &self.ui.sg.list {
+            None => rows.push(note_row(th, "Looking for Ubisoft games in Steam…")),
+            Some(Err(e)) => rows.push(note_row(th, &format!("Could not look for Ubisoft games in Steam: {e}"))),
+            Some(Ok(list)) if list.games.is_empty() => rows.push(note_row(th, "No Ubisoft games are installed through Steam.")),
+            Some(Ok(list)) => {
+                for g in list.games.clone() {
+                    let busy = self.ui.sg.busy.contains(&g.app_id);
+                    let lib = g.product_id.and_then(|p| self.game(p)).cloned();
+                    let art = match &lib {
+                        Some(l) => self.art_for(l, ArtSlot::Tile, Variant::Tile, cx),
+                        None => crate::art::ArtState::Failed,
+                    };
+                    let mut buttons = div().flex().flex_none().items_center().gap(px(6.));
+                    match super::steamgames::control(&g) {
+                        Some(true) => {
+                            if g.offer {
+                                buttons = buttons.child(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::SteamDismiss(g.app_id)), Kind::Ghost, None, "Not now", cx));
+                            }
+                            buttons = buttons.child(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::SteamPatch(g.app_id)), Kind::Primary, Some(Icon::Check), "Use Quiver", cx));
+                        }
+                        Some(false) => {
+                            buttons = buttons.child(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::SteamUnpatch(g.app_id)), Kind::Ghost, Some(Icon::Undo), "Undo", cx));
+                        }
+                        None => {}
+                    }
+                    let id = g.product_id;
+                    rows.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .px(px(16.))
+                            .py(px(9.))
+                            .border_t_1()
+                            .border_color(th.line1)
+                            .child(div().w(px(22.)).h(px(26.)).flex_none().child(art_fill(th, &art, "", 4., lib.is_none())))
+                            .child(
+                                div()
+                                    .id(("sg-row", g.app_id as usize))
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(1.))
+                                    .when(lib.is_some(), |d| d.cursor_pointer())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(id) = id.filter(|id| this.game(*id).is_some()) {
+                                            this.open_game(id, cx);
+                                        }
+                                    }))
+                                    .child(div().flex().items_center().gap(px(8.)).child(div().truncate().child(clean_name(&g.name))).when(g.offer, |d| d.child(pill(th, PillKind::Accent, None, "New"))))
+                                    .child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(super::steamgames::state_line(&g))),
+                            )
+                            .when(busy || g.state != ubi_api::exports::PatchState::Off || !g.patchable, |d| {
+                                d.child(div().flex_none().child(super::steamgames::state_pill(th, &g, busy)))
+                            })
+                            .child(buttons)
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let offers = self.steam_offers_enabled();
+        let f = self.action_focused(actions, &SettingsAction::Cmd(GlobalCmd::SteamOffers));
+        rows.insert(
+            0,
+            div()
+                .px(px(16.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(th.line1)
+                .text_size(px(12.5))
+                .line_height(px(18.))
+                .text_color(th.tx2)
+                .child(super::steamgames::EXPLAIN)
+                .into_any_element(),
+        );
+        rows.push(div().px(px(16.)).child(frow(
+            th,
+            "Ask about new installs",
+            Some("When a Ubisoft game is installed through Steam, Quiver offers this once"),
+            div()
+                .id("sg-offers")
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .cursor_pointer()
+                .child(div().rounded(px(9.)).child(super::game::toggle(th, offers)).focus_ring(f, th, 9.))
+                .child(div().text_color(th.tx2).child(if offers { "On" } else { "Off" }))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let on = !this.steam_offers_enabled();
+                    this.set_steam_offers(on, cx);
+                }))
+                .into_any_element(),
+        )).into_any_element());
+        card(th)
+            .child(card_head(th, "Ubisoft games in Steam", "Steam copies can start through Quiver instead of Ubisoft Connect", None))
+            .children(rows)
+            .child(foot_cli(th, "quiver steam games", "the same list; quiver steam patch / unpatch <game>"))
+            .into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------

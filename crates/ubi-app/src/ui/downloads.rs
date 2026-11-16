@@ -717,7 +717,7 @@ impl Quiver {
             let (i, label) = match b {
                 Btn::PauseAll => (Icon::Pause, "Pause all"),
                 Btn::ResumeAll => (Icon::Play, "Resume all"),
-                _ => (Icon::FolderInput, "Import existing games"),
+                _ => (Icon::FolderInput, "Import Connect downloads"),
             };
             let b = *b;
             head = head.child(

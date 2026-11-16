@@ -3,7 +3,9 @@
 //! Steam reads shortcuts.vdf when it starts and writes it back when it exits, so a change
 //! written while Steam runs would be lost. While Steam runs, changes go to a staging file
 //! (`<data>/steam-staged.json`) and are written the next time Quiver touches Steam's files
-//! with Steam closed, or on request ([`apply_staged`]). Restarting Steam
+//! with Steam closed, on request ([`apply_staged`]), or by quiverd once it has seen Steam
+//! closed for a while. Launch-option changes ([`super::steamgames`]) are staged the same way
+//! and written together with these. Restarting Steam
 //! ([`restart_steam`]) is only for front ends to call after the user explicitly confirms.
 //!
 //! Grid art isn't rewritten by Steam, so it's written straight away.
@@ -389,23 +391,31 @@ fn stage_or_apply(paths: &Paths, change: Staged, running: bool) -> Result<usize>
     Ok(earlier)
 }
 
-/// Write everything staged (Steam must be closed). Returns how many changes were written.
-/// Never starts or stops Steam.
+/// Write everything staged (Steam must be closed): shortcut changes and launch-option
+/// changes ([`super::steamgames`]). Returns how many changes were written. Never starts or
+/// stops Steam.
 pub fn apply_staged(paths: &Paths, running: bool) -> Result<usize> {
     let _lock = lock(paths)?;
     let list = staged(paths);
-    if list.is_empty() {
+    let launch = super::steamgames::staged_count(paths);
+    if list.is_empty() && launch == 0 {
         return Ok(0);
     }
     if running {
-        bail!(
-            "Steam is running; {} shortcut change(s) stay staged until it closes (quiver steam restart)",
-            list.len()
-        );
+        bail!("Steam is running; {} change(s) stay staged until it closes (quiver steam restart)", list.len() + launch);
     }
-    apply(paths, &list)?;
-    save_staged(paths, &[])?;
-    Ok(list.len())
+    if !list.is_empty() {
+        apply(paths, &list)?;
+        save_staged(paths, &[])?;
+    }
+    Ok(list.len() + super::steamgames::apply_staged_locked(paths)?)
+}
+
+/// Every change waiting for Steam to close, described: shortcuts, then launch options.
+pub fn staged_descriptions(paths: &Paths) -> Vec<String> {
+    let mut v: Vec<String> = staged(paths).iter().map(Staged::describe).collect();
+    v.extend(super::steamgames::staged_descriptions(paths));
+    v
 }
 
 // ---------------------------------------------------------------------------------------

@@ -266,7 +266,7 @@ fn prefixes(r: &Roots) -> Vec<Prefix> {
         dirs.sort();
         for d in dirs {
             for p in [d.clone(), d.join("pfx")] {
-                let label = format!("Wine prefix · {}", tilde(&r.home, &d));
+                let label = format!("Wine · {}", tilde(&r.home, &d));
                 add(&mut out, Prefix { path: p, source: InstallSource::Wine, label, lutris_games: Vec::new() });
             }
         }
@@ -277,7 +277,15 @@ fn prefixes(r: &Roots) -> Vec<Prefix> {
         dirs.sort();
         for d in dirs {
             let appid = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let label = format!("Steam · compatdata {appid}");
+            // Name the Steam game whose prefix it is, when its manifest is there.
+            let game = std::fs::read_to_string(steam.join(format!("steamapps/appmanifest_{appid}.acf")))
+                .ok()
+                .and_then(|t| ubi_core::exports::steamgames::AppManifest::parse(&t, steam))
+                .map(|m| m.name);
+            let label = match game {
+                Some(name) => format!("Connect inside Steam · {name}"),
+                None => format!("Connect inside Steam · app {appid}"),
+            };
             add(&mut out, Prefix { path: d.join("pfx"), source: InstallSource::Steam, label, lutris_games: Vec::new() });
         }
     }
@@ -599,7 +607,7 @@ mod tests {
 
         let w = by("Watch_Dogs");
         assert_eq!((w.product_id, w.source), (Some(2688), InstallSource::Steam));
-        assert_eq!(w.source_label, "Steam · compatdata 3127");
+        assert_eq!(w.source_label, "Connect inside Steam · app 3127");
         assert!(w.importable);
 
         let a = by("III Remastered");
