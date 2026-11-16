@@ -75,8 +75,8 @@ A game bought on Steam has no art in its product config (no `thumb_image`,
    account's session, and keeps answers (and misses) a day in
    `$XDG_CACHE_HOME/quiver/spaces.json`; after a failure it waits 5 minutes. It also fills
    game info's release date, description and extra links. Not yet exercised against
-   Ubisoft (no session in development): `quiver info 66088` shows `art  tile: Ubisoft games
-   API, …` and a `released` row when it works, `quiver library --json` the URLs (`art.space`).
+   Ubisoft (no session in development): `quiver info 66088` shows `art from  tile: Ubisoft
+   games API, …` and a `released` row when it works, `quiver library --json` the URLs (`art.space`).
 3. Steam's local library cache (`<Steam>/appcache/librarycache`, read-only;
    `exports::steamart`), in `SteamGame.art`: current hashed layout
    (`<appid>/<sha1>/library_capsule.jpg` 300×450, `library_hero.jpg` 1920×620, `logo.png`,
@@ -84,6 +84,9 @@ A game bought on Steam has no art in its product config (no `thumb_image`,
    (`<appid>/library_600x900.jpg`, …) and the old `<appid>_library_600x900.jpg`;
 4. Steam's CDN (`https://shared.steamstatic.com/store_item_assets/steam/apps/<appid>/
    library_600x900.jpg`, `library_hero.jpg`, `logo.png`), cached by the app like Ubisoft's.
+   Only older apps are served at these flat paths: newer ones (3751950 among them) live
+   under a content hash (`<appid>/<sha1>/library_hero.jpg`, the same hashes as the local
+   cache's folders) and 404 here, so for them the local cache is what counts.
 
 The user's own files (custom art) win over all of them. The per-game setting `art=steam`
 (`quiver set <game> art=steam`, or the game page's "Art: … ▾" menu, offered for games with

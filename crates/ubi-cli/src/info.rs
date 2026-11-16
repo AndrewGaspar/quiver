@@ -149,7 +149,7 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         .ok()
         .and_then(|v| v["settings"]["art"].as_str().map(str::to_owned));
     let pref = ubi_api::art::ArtPreference::from_setting(art_setting.as_deref());
-    row("art", &art_line(&e, pref));
+    row("art from", &art_line(&e, pref));
     let f = &i.features;
     let mut feats = Vec::new();
     for (on, name) in [(f.cloud_saves, "cloud saves"), (f.achievements, "achievements"), (f.challenges, "challenges"), (f.denuvo, "Denuvo")] {
