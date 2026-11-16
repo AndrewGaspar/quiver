@@ -7,11 +7,12 @@ pub mod global;
 pub mod hero;
 pub mod library;
 pub mod overlay;
-pub mod pages;
+pub mod downloads;
 pub mod palette;
 pub mod settings;
 pub mod signin;
 pub mod topbar;
+pub mod welcome;
 
 use gpui::{
     AnyElement, BoxShadow, Div, ElementId, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, Pixels, SharedString,

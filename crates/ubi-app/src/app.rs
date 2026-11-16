@@ -9,7 +9,7 @@ use gpui::{
     App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, ScrollHandle, SharedString,
     Window, actions, div, prelude::*, px,
 };
-use ubi_api::{ActivityEntry, Event, Job, JobKind, LibraryEntry, LoginResult, Playtime, Request, Revision, Status};
+use ubi_api::{ActivityEntry, Event, Job, LibraryEntry, LoginResult, Playtime, Request, Revision, Status};
 
 use crate::art::{ArtSource, ArtState, ArtStore, CustomArt, Fetcher, Variant};
 use crate::assets::UI_FONT;
@@ -145,6 +145,8 @@ pub enum Cmd {
     Settings(crate::nav::SettingsSection),
     /// Accounts, exports, sessions, Activity filters (`ui/global.rs`).
     Global(crate::ui::global::GlobalCmd),
+    /// The verify dialog, the welcome flow (`ui/downloads.rs`).
+    Downloads(crate::ui::downloads::DlCmd),
 }
 
 pub struct Quiver {
@@ -178,6 +180,9 @@ pub struct Quiver {
     pub gp: crate::ui::game::GamePage,
     /// State of the global screens: Settings, palette, Activity, sign-in, now playing.
     pub ui: crate::ui::global::GlobalUi,
+    /// Downloads page and dialogs (`ui/downloads.rs`), and the welcome flow (`ui/welcome.rs`).
+    pub dl: crate::ui::downloads::DlState,
+    pub wc: crate::ui::welcome::Welcome,
 }
 
 impl Quiver {
@@ -213,11 +218,14 @@ impl Quiver {
             relaunch: Default::default(),
             gp: Default::default(),
             ui: Default::default(),
+            dl: Default::default(),
+            wc: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
         this.start_gamepad(window, cx);
         this.start_global(window, cx);
+        this.start_downloads(window, cx);
         if demo {
             this.start_demo_script(window, cx);
         }
@@ -289,6 +297,7 @@ impl Quiver {
             self.show_login(None, cx);
         }
         self.global_status(cx);
+        self.downloads_status(cx);
     }
 
     /// Send a request; `done` runs on the UI thread with the result.
@@ -311,6 +320,7 @@ impl Quiver {
     }
 
     fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
+        self.downloads_event(&e, cx);
         self.global_event(&e, cx);
         match e {
             Event::Job(job) => self.apply_job(job),
@@ -622,7 +632,7 @@ impl Quiver {
         let side: Vec<u32> = self.side_games().iter().map(|g| g.id()).collect();
         let hero_buttons = if self.hero_game().is_some() { 2 + self.attention().len() } else { 0 };
         let body = match self.nav.page {
-            Page::Downloads => self.download_jobs().len(),
+            Page::Downloads => self.downloads_body_len(),
             Page::Activity => self.activity_rows().len(),
             Page::Settings => self.settings_actions().len(),
             Page::Game(id) => self.page_body_len(id, self.nav.tab),
@@ -641,17 +651,6 @@ impl Quiver {
                 _ => 0,
             },
         }
-    }
-
-    /// Install jobs for the Downloads page: active first, then finished.
-    pub fn download_jobs(&self) -> Vec<Job> {
-        let mut jobs: Vec<Job> = self
-            .status
-            .as_ref()
-            .map(|s| s.jobs.iter().filter(|j| j.kind != JobKind::Play).cloned().collect())
-            .unwrap_or_default();
-        jobs.sort_by_key(|j| (j.done, j.status.starts_with("Queued"), std::cmp::Reverse(j.id)));
-        jobs
     }
 
     // -----------------------------------------------------------------------------------------
@@ -739,6 +738,7 @@ impl Quiver {
             Cmd::Export(id, a) => self.run_export(id, a, cx),
             Cmd::Settings(s) => self.nav.open_settings(s),
             Cmd::Global(g) => self.run_global(g, cx),
+            Cmd::Downloads(d) => self.run_dl(d, cx),
         }
     }
 
@@ -764,12 +764,10 @@ impl Quiver {
             self.show_toast(format!("{name} is installing ({:.0}%)", (f * 100.).floor()), cx);
         } else if g.queued() {
             self.show_toast(format!("{name} is queued"), cx);
-        } else if !g.installed() || g.entry.update_available {
-            let verb = if g.installed() { "Updating" } else { "Installing" };
-            self.call::<u64, _>(Request::Install { product_id: id, language: None }, cx, move |this, r, cx| match r {
-                Ok(_) => this.show_toast(format!("{verb} {name}"), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
-            });
+        } else if !g.installed() {
+            self.open_install_dialog(id, cx);
+        } else if g.entry.update_available {
+            self.open_update_dialog(id, cx);
         } else {
             let profile = self.gp.play_profile(id);
             self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
@@ -829,12 +827,7 @@ impl Quiver {
                 _ => {}
             },
             Effect::Body(i) => match self.nav.page {
-                Page::Downloads => {
-                    if let Some(j) = self.download_jobs().get(i) {
-                        let id = j.product_id;
-                        self.open_game(id, cx);
-                    }
-                }
+                Page::Downloads => self.downloads_activate(i, cx),
                 Page::Activity => self.activity_open(i, cx),
                 Page::Settings => self.settings_activate(i, cx),
                 Page::Game(id) => self.page_body_activate(id, i, cx),
@@ -861,7 +854,7 @@ impl Quiver {
             return;
         }
         self.mode = mode;
-        if self.global_input(input, cx) || self.page_input(input, cx) {
+        if self.downloads_input(input, cx) || self.global_input(input, cx) || self.page_input(input, cx) {
             cx.notify();
             return;
         }
@@ -900,10 +893,7 @@ impl Quiver {
                     self.body_scroll.set_offset(gpui::point(px(0.), px(0.)));
                 }
             }
-            (Page::Downloads, Zone::Body) => {
-                // Children: title, then one per row.
-                self.body_scroll.scroll_to_item(1 + self.nav.body_index());
-            }
+            (Page::Downloads, Zone::Body) => self.downloads_scroll(),
             (Page::Activity | Page::Settings, _) => self.scroll_global_focus(),
             _ => {}
         }
@@ -1173,6 +1163,7 @@ impl Render for Quiver {
                 .when(self.mode == InputMode::Pad, |d| d.child(self.render_hintbar(&th)))
                 .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
+                .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(o))
                 .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t))),
         };
         // The top bar shows the daemon link; other screens get a notice instead.

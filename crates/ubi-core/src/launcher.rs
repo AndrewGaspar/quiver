@@ -65,6 +65,9 @@ pub struct Config {
     /// decided yet (a first-launch prompt asks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixes_on_vanilla: Option<bool>,
+    /// First-run setup, once done or skipped (every front end's welcome flow checks it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_run: Option<ubi_api::setup::FirstRun>,
 }
 
 fn yes() -> bool {
@@ -116,7 +119,7 @@ fn migrate_legacy_data(old: &Path, new: &Path) -> Result<()> {
     Ok(())
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
@@ -190,6 +193,7 @@ impl Config {
             steam_user: None,
             downloads: Default::default(),
             fixes_on_vanilla: None,
+            first_run: None,
         };
         cfg.save()?;
         Ok(cfg)

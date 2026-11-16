@@ -381,9 +381,8 @@ impl Quiver {
     fn render_install_card(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let info = self.gp.info.ready().filter(|_| self.gp.id == id).cloned();
-        let verify = button("verify", th, Kind::Ghost, Size::Small, Some(Icon::ShieldCheck), "Verify")
-            .child(pill(th, PillKind::Future, None, "Not yet"))
-            .on_click(cx.listener(|this, _, _, cx| this.show_toast("Verify: the daemon can't verify installs yet (`quiver verify` is coming)", cx)));
+        let verify = button("verify", th, Kind::Ghost, Size::Small, Some(Icon::ShieldCheck), "Verify…")
+            .on_click(cx.listener(move |this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Verify(id), cx)));
         let mut c = card(th).child(card_header(th, "This install").child(div().flex_1()).when(g.installed(), |d| d.child(verify)));
         let txt = |s: String| div().child(s).into_any_element();
         let muted = |s: String| div().text_color(th.tx3).child(s).into_any_element();

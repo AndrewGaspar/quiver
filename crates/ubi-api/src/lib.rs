@@ -17,6 +17,7 @@ pub mod downloads;
 pub mod exports;
 pub mod mods;
 pub mod info;
+pub mod setup;
 pub use client::Client;
 pub use mods::{ModsRequest, Profile};
 
@@ -434,6 +435,21 @@ pub enum Request {
         #[serde(default)]
         profile: Option<String>,
     },
+    /// First-run state and storage paths (`setup::SetupState`). `library` / `prefixes`
+    /// change where games and prefixes go; that is refused once anything is installed,
+    /// queued or importing, and quiverd restarts to use them (clients reconnect on their
+    /// own). `finish` records that setup was done (or skipped).
+    Setup {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefixes: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish: Option<setup::FinishSetup>,
+    },
+    /// Find existing Ubisoft Connect installs in Lutris, Wine and Steam prefixes, matched
+    /// to owned games (`Vec<setup::FoundInstall>`). Read-only; import one with `Import`.
+    ScanInstalls,
 }
 
 fn yes() -> bool {
@@ -573,6 +589,16 @@ mod tests {
         assert_eq!(s.slots[0].state, info::SlotState::Unknown);
         assert_eq!(serde_json::to_value(info::SlotState::CloudNewer).unwrap(), "cloud_newer");
         assert_eq!(serde_json::to_value(info::ProductKind::SeasonPass).unwrap(), "season_pass");
+    }
+
+    #[test]
+    fn setup_requests_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"setup","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::Setup { library: None, prefixes: None, finish: None }));
+        let r: Request = serde_json::from_str(r#"{"method":"scan_installs"}"#).unwrap();
+        assert!(matches!(r, Request::ScanInstalls));
+        let v = serde_json::to_value(Request::Setup { library: None, prefixes: None, finish: None }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "setup", "params": {} }));
     }
 
     #[test]

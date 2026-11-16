@@ -691,14 +691,16 @@ impl Quiver {
                 future: !installed,
             }),
         }
-        v.push(Command {
-            icon: Icon::ShieldCheck,
-            label: "Verify files".into(),
-            detail: Some("Checks the install against its manifest; not in the daemon yet".into()),
-            cli: Some(format!("quiver verify {id}").into()),
-            action: Cmd::NotYet,
-            future: true,
-        });
+        if installed {
+            v.push(Command {
+                icon: Icon::ShieldCheck,
+                label: "Verify files…".into(),
+                detail: Some("Hash the install against its manifest; repair only what's bad".into()),
+                cli: Some(format!("quiver verify {id}").into()),
+                action: Cmd::Downloads(crate::ui::downloads::DlCmd::Verify(id)),
+                future: false,
+            });
+        }
         v
     }
 

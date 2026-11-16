@@ -6427,9 +6427,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "flate2",
  "hex",
+ "libc",
+ "prost",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha1",
  "tempfile",
  "tokio",

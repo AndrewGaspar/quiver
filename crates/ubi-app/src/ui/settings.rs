@@ -27,6 +27,8 @@ pub enum SettingsAction {
     Cmd(GlobalCmd),
     Copy(String),
     Url(String),
+    /// The welcome flow again (`welcome.rs`).
+    Welcome,
 }
 
 /// Avatar gradients, by sign-in order.
@@ -76,7 +78,7 @@ impl Quiver {
                     }
                 }
             }
-            SettingsSection::Library => {}
+            SettingsSection::Library => v.push(SettingsAction::Welcome),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
             SettingsSection::Steam => {
                 if let Some(Ok(s)) = &self.ui.steam {
@@ -117,6 +119,7 @@ impl Quiver {
                 cx.open_url(&url);
                 self.show_toast(format!("Opening {url}"), cx);
             }
+            SettingsAction::Welcome => self.run_dl(crate::ui::downloads::DlCmd::Welcome, cx),
         }
     }
 
@@ -155,7 +158,12 @@ impl Quiver {
         let actions = self.settings_actions();
         let body = match section {
             SettingsSection::Accounts => self.settings_accounts(th, &actions, cx),
-            SettingsSection::Library => self.settings_library(th, cx),
+            SettingsSection::Library => {
+                let mut v = self.settings_library(th, cx);
+                let f = self.action_focused(&actions, &SettingsAction::Welcome);
+                v.insert(1, self.settings_setup_group(th, f, cx));
+                v
+            }
             SettingsSection::Compatibility => self.settings_compat(th, &actions, cx),
             SettingsSection::Steam => self.settings_steam(th, &actions, cx),
             SettingsSection::Appearance => self.settings_appearance(th, cx),
@@ -600,7 +608,7 @@ impl Quiver {
                 .items_center()
                 .gap(px(10.))
                 .child(pill(th, PillKind::Future, None, "Not wired yet"))
-                .child(div().text_size(px(12.)).text_color(th.tx3).child("Library folders, moving installs and disk usage come with the downloads backend."))
+                .child(div().text_size(px(12.)).text_color(th.tx3).child("Moving installs between folders isn't wired yet. Free space and download rules are on the Downloads page."))
                 .into_any_element(),
         ]
     }
@@ -1200,7 +1208,7 @@ impl Quiver {
     }
 
     /// Whether hyprpad is running (a /proc scan, at most every 10 s).
-    fn hyprpad_running(&mut self) -> bool {
+    pub fn hyprpad_running(&mut self) -> bool {
         if let Some((v, at)) = self.ui.hyprpad {
             if at.elapsed().as_secs() < 10 {
                 return v;

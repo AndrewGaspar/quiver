@@ -7,6 +7,7 @@ mod downloads;
 mod exports;
 mod mods;
 mod info;
+mod setup;
 
 use std::io::Write;
 
@@ -241,6 +242,15 @@ enum Cmd {
         local: bool,
         #[command(subcommand)]
         action: Option<info::SavesAction>,
+    },
+    /// First-run setup in the terminal: sign in, where games live, importing existing
+    /// installs, Steam, controller, recommended fixes (the app's welcome, same choices).
+    Setup {
+        /// Only print what was chosen.
+        #[arg(long)]
+        show: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Low-level tools that bypass the daemon.
     Dev {
@@ -509,6 +519,13 @@ async fn main() -> Result<()> {
         }
         Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,
         Cmd::Queue { action, json } => downloads::queue(&client, action, json).await?,
+        Cmd::Setup { show, json } => {
+            if show || json {
+                setup::show(&client, json).await?
+            } else {
+                setup::run(&client).await?
+            }
+        }
         Cmd::Pause { game } => downloads::pause(&client, &game).await?,
         Cmd::Resume { game } => downloads::resume(&client, &game).await?,
         Cmd::Update { game, preview, detach, json } => downloads::update(&client, &game, preview, detach, json).await?,

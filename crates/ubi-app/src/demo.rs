@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 pub mod detail;
+pub mod downloads;
 
 use ubi_api::{
     ActiveSession, ActivityEntry, Art, Event, Game, GameSettings, Job, JobKind, LibraryEntry, PlaySession, Playtime,
@@ -154,33 +155,9 @@ impl Demo {
         let _ = self.events.send(e);
     }
 
-    /// Advance the running install (about 45 MB/s) and start the next queued one.
+    /// Advance the download queue, verifies and imports (`demo/downloads.rs`).
     fn tick(&self) {
-        let mut events = Vec::new();
-        {
-            let mut st = self.state.lock().unwrap();
-            let mut finished = None;
-            if let Some(job) = st.jobs.iter_mut().find(|j| j.kind == JobKind::Install && !j.done && j.status != "Queued") {
-                job.downloaded = (job.downloaded + 22_500_000).min(job.total);
-                let pct = job.downloaded * 100 / job.total.max(1);
-                job.status = if job.downloaded >= job.total { "Installed".into() } else { format!("Downloading · {pct}%") };
-                if job.downloaded >= job.total {
-                    job.done = true;
-                    finished = Some(job.product_id);
-                }
-                events.push(Event::Job(job.clone()));
-            } else if let Some(job) = st.jobs.iter_mut().find(|j| j.kind == JobKind::Install && !j.done) {
-                job.status = "Downloading · 0%".into();
-                events.push(Event::Job(job.clone()));
-            }
-            if let Some(id) = finished {
-                if let Some(e) = st.entries.iter_mut().find(|e| e.product_id == id) {
-                    e.installed = Some(game_for(id, &e.name, None));
-                }
-                st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "system".into(), action: "install finished".into(), product_id: Some(id) });
-                events.push(Event::LibraryChanged);
-            }
-        }
+        let events = downloads::tick(self, &mut self.state.lock().unwrap());
         for e in events {
             self.emit(e);
         }
@@ -188,6 +165,7 @@ impl Demo {
 
     pub fn handle(&self, req: Request) -> Result<Value> {
         let mut st = self.state.lock().unwrap();
+        let req = match downloads::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         let req = match detail::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = global::handle(self, &mut st, &req)? {
             return Ok(v);
@@ -451,7 +429,7 @@ mod tests {
         let (demo, mut events) = Demo::start();
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert_eq!(status.signed_in.as_deref(), Some("demo"));
-        assert_eq!(status.jobs.len(), 2);
+        assert!(status.jobs.iter().filter(|j| j.kind == JobKind::Install && !j.done).count() >= 2);
         let pt: Playtime = serde_json::from_value(demo.handle(Request::Playtime { product_id: 3539 }).unwrap()).unwrap();
         assert_eq!(pt.total_seconds / 3600, 87);
         assert!(pt.sessions[0].started > pt.sessions[1].started, "newest first");

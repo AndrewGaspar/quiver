@@ -36,8 +36,13 @@ impl GameRow {
         self.install_job().is_some_and(|j| j.status.starts_with("Queued"))
     }
 
+    /// Paused in the download queue (it keeps its place).
+    pub fn paused(&self) -> bool {
+        self.install_job().is_some_and(|j| j.status == "Paused")
+    }
+
     pub fn installing(&self) -> Option<f32> {
-        self.install_job().filter(|_| !self.queued()).map(job_fraction)
+        self.install_job().filter(|_| !self.queued() && !self.paused()).map(job_fraction)
     }
 
     pub fn running(&self) -> bool {
@@ -66,7 +71,10 @@ impl GameRow {
         }
         if let Some(j) = self.install_job() {
             if self.queued() {
-                return format!("Queued · {}", gb(j.total));
+                return if j.total > 0 { format!("Queued · {}", gb(j.total)) } else { "Queued".into() };
+            }
+            if self.paused() {
+                return if j.total > 0 { format!("Paused · {} of {}", gb(j.downloaded), gb(j.total)) } else { "Paused".into() };
             }
             return format!("{} of {}", gb(j.downloaded), gb(j.total));
         }

@@ -20,8 +20,12 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
+libc.workspace = true
+serde_yaml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 sha1.workspace = true
 hex.workspace = true
+prost.workspace = true
+flate2.workspace = true
