@@ -700,6 +700,19 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // No options: any argument is for a person, so never start the daemon for one.
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "-V" | "--version" => println!("quiverd {}", env!("CARGO_PKG_VERSION")),
+            "-h" | "--help" => println!(
+                "quiverd: Quiver's daemon. Takes no arguments; clients (quiver, quiver-app) start it on demand.\n\
+                 Socket: {}\nStop it with: quiver daemon stop",
+                ubi_api::socket_path().display()
+            ),
+            _ => bail!("quiverd takes no arguments (try --help)"),
+        }
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,ubid=info,ubi_core=info".into()),

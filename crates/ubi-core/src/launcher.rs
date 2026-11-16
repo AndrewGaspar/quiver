@@ -41,8 +41,11 @@ pub struct Config {
     pub proton: PathBuf,
     /// Directory holding Ubisoft's SDK DLLs (an existing Connect install).
     pub sdk_source: PathBuf,
-    /// `ubi-bridge.exe` (built for x86_64-pc-windows-gnu).
-    pub bridge_exe: PathBuf,
+    /// `ubi-bridge.exe` (built for x86_64-pc-windows-gnu), when set by hand. Unset (the
+    /// default) means it is looked up at each launch, so one config works for a dev build
+    /// and the package; see [`Config::bridge_exe`].
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "bridge_override")]
+    pub bridge_exe: Option<PathBuf>,
     /// Overwritten local saves are copied here before cloud downloads replace them.
     pub save_backups: PathBuf,
     /// Extra environment for games (e.g. PROTON_ENABLE_NVAPI=1).
@@ -173,7 +176,7 @@ impl Config {
                 let lutris = games.join("ubisoft-connect").join(UPC_REL);
                 if lutris.join("uplay_r164.dll").is_file() { lutris } else { data_dir().join("sdk") }
             },
-            bridge_exe: default_bridge_exe(),
+            bridge_exe: None,
             save_backups: data_dir().join("save-backups"),
             env: vec![
                 ("PROTON_ENABLE_NVAPI".into(), "1".into()),
@@ -194,13 +197,63 @@ impl Config {
     }
 }
 
-/// Next to the running binary, else the workspace build output.
-fn default_bridge_exe() -> PathBuf {
-    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("ubi-bridge.exe")));
-    if let Some(p) = beside.filter(|p| p.is_file()) {
-        return p;
+impl Config {
+    /// The bridge to copy into the prefix: the override in config.json if there is one,
+    /// else the first of [`bridge_candidates`] that exists.
+    pub fn bridge_exe(&self) -> Result<PathBuf> {
+        match &self.bridge_exe {
+            Some(p) if p.is_file() => Ok(p.clone()),
+            Some(p) => bail!("ubi-bridge.exe not found at {} (bridge_exe in config.json)", p.display()),
+            None => {
+                let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+                let candidates = bridge_candidates(exe_dir.as_deref());
+                find_bridge_exe(&candidates, Path::is_file).with_context(|| {
+                    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+                    format!("ubi-bridge.exe not found (looked for {})", tried.join(", "))
+                })
+            }
+        }
     }
+}
+
+/// The cross build in this checkout (what `cargo build --release -p ubi-bridge --target
+/// x86_64-pc-windows-gnu` writes).
+fn dev_bridge_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/x86_64-pc-windows-gnu/release/ubi-bridge.exe")
+}
+
+/// Where `ubi-bridge.exe` may be, best first, for a binary in `exe_dir`: beside it, then
+/// `../lib/quiver/` from it (the package: `/usr/bin/quiverd` -> `/usr/lib/quiver/`), then
+/// the checkout's cross build (a dev binary in `target/release`).
+pub fn bridge_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = exe_dir {
+        out.push(dir.join("ubi-bridge.exe"));
+        if let Some(prefix) = dir.parent() {
+            out.push(prefix.join("lib/quiver/ubi-bridge.exe"));
+        }
+    }
+    out.push(dev_bridge_exe());
+    out
+}
+
+/// The first of `candidates` that `exists`.
+fn find_bridge_exe(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    candidates.iter().find(|p| exists(p)).cloned()
+}
+
+/// `bridge_exe` as stored. Configs written before it became optional hold the automatic
+/// pick of the time, the checkout's cross build spelled
+/// `<checkout>/crates/ubi-core/../../target/...`; that reads as unset, so the package uses
+/// its own bridge rather than a dev build's (and a dev build still finds its own). Any other
+/// path is an override someone chose and is kept.
+fn bridge_override<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<PathBuf>, D::Error> {
+    let p = Option::<PathBuf>::deserialize(d)?;
+    Ok(p.filter(|p| !is_legacy_default_bridge(p)))
+}
+
+fn is_legacy_default_bridge(p: &Path) -> bool {
+    p.ends_with("crates/ubi-core/../../target/x86_64-pc-windows-gnu/release/ubi-bridge.exe")
 }
 
 pub use ubi_api::{Game, GameSettings};
@@ -596,9 +649,7 @@ pub async fn play(
     };
     events(LaunchEvent::Status("Preparing prefix…".into()));
     ensure_prefix(cfg, game).await?;
-    if !cfg.bridge_exe.is_file() {
-        bail!("ubi-bridge.exe not found at {}", cfg.bridge_exe.display());
-    }
+    let bridge_exe = cfg.bridge_exe()?;
     let run_dir = game.prefix.join("ubi-run");
     std::fs::create_dir_all(&run_dir)?;
 
@@ -652,7 +703,7 @@ pub async fn play(
     events(LaunchEvent::Status("Starting…".into()));
     let bridge_dst = game.prefix.join("drive_c/ubi/ubi-bridge.exe");
     std::fs::create_dir_all(bridge_dst.parent().unwrap())?;
-    std::fs::copy(&cfg.bridge_exe, &bridge_dst)?;
+    std::fs::copy(&bridge_exe, &bridge_dst)?;
     let bridge_log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&bridge_log);
     let mut bridge = proton.command(&[r"C:\ubi\ubi-bridge.exe", &win_path(&ctx_path)]);
@@ -866,5 +917,95 @@ mod steam_input_tests {
         assert_eq!(env[0], ("PROTON_DISABLE_HIDRAW", "0x28DE/0x1302,0x28DE/0x1303".to_string()));
         assert_eq!(env[1], ("SDL_GAMECONTROLLER_IGNORE_DEVICES", "0x28de/0x1302,0x28de/0x1303".to_string()));
         assert!(steam_input_env_for(&[(0x28de, 0x11ff)]).is_empty(), "virtual pad alone: nothing to hide");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_json(bridge: Option<&str>) -> String {
+        let mut v = serde_json::json!({
+            "library": "/g/lib",
+            "prefixes": "/g/pfx",
+            "proton": "/p/GE-Proton10-34",
+            "sdk_source": "/g/sdk",
+            "save_backups": "/d/save-backups",
+        });
+        if let Some(b) = bridge {
+            v["bridge_exe"] = b.into();
+        }
+        v.to_string()
+    }
+
+    #[test]
+    fn bridge_candidates_cover_package_and_dev_layouts() {
+        let c = bridge_candidates(Some(Path::new("/usr/bin")));
+        assert_eq!(c[0], Path::new("/usr/bin/ubi-bridge.exe"));
+        assert_eq!(c[1], Path::new("/usr/lib/quiver/ubi-bridge.exe"));
+        assert_eq!(c[2], dev_bridge_exe());
+        assert_eq!(c.len(), 3);
+        assert_eq!(bridge_candidates(None), vec![dev_bridge_exe()]);
+    }
+
+    #[test]
+    fn find_bridge_prefers_beside_then_installed_then_dev() {
+        let c = bridge_candidates(Some(Path::new("/usr/bin")));
+        let installed = Path::new("/usr/lib/quiver/ubi-bridge.exe");
+        let dev = dev_bridge_exe();
+        // The package, with a leftover cross build in the checkout it was built from.
+        let found = find_bridge_exe(&c, |p| p == installed || p == dev);
+        assert_eq!(found.as_deref(), Some(installed));
+        // Beside the binary wins over both.
+        let found = find_bridge_exe(&c, |_| true);
+        assert_eq!(found.as_deref(), Some(Path::new("/usr/bin/ubi-bridge.exe")));
+        // A dev binary in target/release: only the cross build exists.
+        let c = bridge_candidates(Some(Path::new("/src/quiver/target/release")));
+        assert_eq!(c[1], Path::new("/src/quiver/target/lib/quiver/ubi-bridge.exe"));
+        assert_eq!(find_bridge_exe(&c, |p| p == dev), Some(dev.clone()));
+        assert_eq!(find_bridge_exe(&c, |_| false), None);
+    }
+
+    #[test]
+    fn legacy_default_bridge_reads_as_auto() {
+        let old = "/home/u/code/ubisoft-linux/crates/ubi-core/../../target/x86_64-pc-windows-gnu/release/ubi-bridge.exe";
+        let cfg: Config = serde_json::from_str(&config_json(Some(old))).unwrap();
+        assert_eq!(cfg.bridge_exe, None);
+        // Saving drops it, and the result still loads.
+        let saved = serde_json::to_value(&cfg).unwrap();
+        assert!(saved.get("bridge_exe").is_none());
+        let again: Config = serde_json::from_value(saved).unwrap();
+        assert_eq!(again.bridge_exe, None);
+    }
+
+    #[test]
+    fn missing_bridge_reads_as_auto() {
+        let cfg: Config = serde_json::from_str(&config_json(None)).unwrap();
+        assert_eq!(cfg.bridge_exe, None);
+    }
+
+    #[test]
+    fn chosen_bridge_is_kept() {
+        for p in ["/opt/bridges/ubi-bridge.exe", "/src/q/target/x86_64-pc-windows-gnu/debug/ubi-bridge.exe"] {
+            let cfg: Config = serde_json::from_str(&config_json(Some(p))).unwrap();
+            assert_eq!(cfg.bridge_exe.as_deref(), Some(Path::new(p)));
+            let saved = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(saved["bridge_exe"], p);
+        }
+    }
+
+    #[test]
+    fn chosen_bridge_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ubi-bridge.exe");
+        let mut cfg: Config = serde_json::from_str(&config_json(Some(exe.to_str().unwrap()))).unwrap();
+        assert!(cfg.bridge_exe().unwrap_err().to_string().contains("not found at"));
+        std::fs::write(&exe, b"MZ").unwrap();
+        assert_eq!(cfg.bridge_exe().unwrap(), exe);
+        cfg.bridge_exe = None;
+        // The automatic pick is only ever a file that's there.
+        if let Ok(p) = cfg.bridge_exe() {
+            assert!(p.is_file());
+        }
     }
 }

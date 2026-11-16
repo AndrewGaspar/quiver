@@ -1,5 +1,6 @@
-# systemd user unit for the Quiver daemon. Install with:
-#   cp quiverd.service ~/.config/systemd/user/ && systemctl --user enable --now quiverd
+# systemd user unit for the Quiver daemon (optional: clients start quiverd on demand).
+# tools/install-user.sh and the Arch package install it; enable it with
+#   systemctl --user enable --now quiverd
 # Games inherit this service's environment, so the session's display variables must be
 # imported into the user manager (most compositors do; otherwise run
 # `systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP`).

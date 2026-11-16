@@ -1,0 +1,80 @@
+# Maintainer: Andrew Gaspar
+#
+# VCS package built from a git checkout. tools/package.sh builds it from the checkout it
+# lives in (QUIVER_REPO, at QUIVER_COMMIT, with a persistent QUIVER_CARGO_TARGET_DIR);
+# without those it builds the default branch from GitHub.
+
+pkgname=quiver-git
+pkgver=0.1.0.r74.g0b57469
+pkgrel=1
+pkgdesc="Native Linux launcher for your Ubisoft library (third-party, not affiliated with Ubisoft)"
+arch=('x86_64')
+url="https://github.com/AndrewGaspar/quiver"
+license=('MIT' 'OFL-1.1' 'ISC' 'Apache-2.0')
+depends=(
+  'gcc-libs' 'glibc'
+  'dbus'              # keyring (Secret Service) for the Ubisoft session
+  'systemd-libs'      # libudev for controllers
+  'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader'  # GPUI
+  'python'            # Proton's launcher script
+  '7zip'              # extracting the SDK DLLs from the Connect installer
+)
+optdepends=(
+  'gnome-keyring: a Secret Service provider to keep you signed in (or KeePassXC, KWallet)'
+  'xdg-utils: opening folders and links from the app'
+  'desktop-file-utils: refreshing the menu after desktop shortcuts are exported'
+  'gamemode: the gamemoderun wrapper'
+  'mangohud: the mangohud wrapper'
+)
+makedepends=('cargo' 'git' 'mingw-w64-gcc' 'protobuf')
+provides=('quiver')
+conflicts=('quiver')
+options=('!debug' '!lto')
+install=quiver.install
+_repo=${QUIVER_REPO:-https://github.com/AndrewGaspar/quiver.git}
+[[ $_repo == /* ]] && _repo=file://$_repo
+source=("quiver::git+$_repo${QUIVER_COMMIT:+#commit=$QUIVER_COMMIT}")
+sha256sums=('SKIP')
+
+_bridge_target=x86_64-pc-windows-gnu
+
+pkgver() {
+  cd quiver
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd quiver
+  export RUSTUP_TOOLCHAIN=stable
+  # ubi-bridge.exe needs the Windows standard library, which only rustup ships (Arch's
+  # rust package has no mingw target).
+  if [[ ! -d "$(rustc --print sysroot)/lib/rustlib/$_bridge_target" ]]; then
+    if command -v rustup >/dev/null; then
+      rustup target add "$_bridge_target"
+    else
+      error "Rust's $_bridge_target target is missing. Install rustup (it replaces the rust package), then: rustup target add $_bridge_target"
+      return 1
+    fi
+  fi
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')" --target "$_bridge_target"
+}
+
+build() {
+  cd quiver
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=${QUIVER_CARGO_TARGET_DIR:-$srcdir/target}
+  # makepkg sets SOURCE_DATE_EPOCH to the time of each build, and the cc crate reruns every
+  # C build script (ring, zstd-sys, …) when it changes, which defeats a cached target dir.
+  env -u SOURCE_DATE_EPOCH cargo build --frozen --release
+  env -u SOURCE_DATE_EPOCH cargo build --frozen --release -p ubi-bridge --target "$_bridge_target"
+}
+
+package() {
+  cd quiver
+  BINDIR=/usr/bin LIBDIR=/usr/lib/quiver DATADIR=/usr/share UNITDIR=/usr/lib/systemd/user \
+    LICENSEDIR=/usr/share/licenses/quiver EXEC_START=/usr/bin/quiverd \
+    packaging/layout.sh "${QUIVER_CARGO_TARGET_DIR:-$srcdir/target}" "$pkgdir"
+}

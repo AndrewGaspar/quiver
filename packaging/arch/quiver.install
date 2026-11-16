@@ -1,0 +1,17 @@
+post_install() {
+  cat <<'EOF'
+==> Quiver is installed in /usr/bin. If ~/.local/bin has quiver, quiverd, quiver-app or ubi
+    (an older per-user or dev install), they come first on PATH; remove them, or uninstall
+    with tools/install-user.sh --uninstall.
+==> A quiverd already running keeps its old build; restart it when no game is running:
+    quiver daemon stop   (any quiver command starts the new one)
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> quiverd keeps running the previous build until restarted (games may be running).
+    Restart the daemon when no game is running: quiver daemon stop
+    (any quiver command starts the new one). quiver-app relaunches itself.
+EOF
+}
