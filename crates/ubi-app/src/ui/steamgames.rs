@@ -237,6 +237,16 @@ impl Quiver {
     }
 }
 
+/// The action a game offers: `Some(true)` switch to Quiver, `Some(false)` undo, `None`
+/// nothing (can't be switched).
+pub fn control(g: &SteamGame) -> Option<bool> {
+    match g.state {
+        PatchState::On | PatchState::ByHand | PatchState::Waiting => Some(false),
+        PatchState::Off | PatchState::WaitingUndo if g.patchable => Some(true),
+        _ => None,
+    }
+}
+
 /// The game's state as a pill.
 pub fn state_pill(th: &Theme, g: &SteamGame, busy: bool) -> AnyElement {
     if busy {
@@ -253,13 +263,14 @@ pub fn state_pill(th: &Theme, g: &SteamGame, busy: bool) -> AnyElement {
     .into_any_element()
 }
 
-/// The one-line status under a game's name.
+/// The line under a game's name, next to its state pill.
 pub fn state_line(g: &SteamGame) -> String {
     let base = match g.state {
-        PatchState::On | PatchState::ByHand => "Starts through Quiver",
-        PatchState::Waiting => "Switches to Quiver when Steam restarts",
+        PatchState::On => "Play it from Steam as usual",
+        PatchState::ByHand => "Its launch options were set by hand; play it from Steam as usual",
+        PatchState::Waiting => "Steam picks this up when it restarts",
         PatchState::WaitingUndo => "Goes back to Ubisoft Connect when Steam restarts",
-        _ => "Starts through Ubisoft Connect",
+        _ => "Opens Ubisoft Connect first",
     };
     match &g.note {
         Some(n) => format!("{base} · {n}"),

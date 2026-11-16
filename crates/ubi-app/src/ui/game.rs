@@ -155,7 +155,7 @@ impl Quiver {
                             .child(div().text_color(th.tx3).child(format!("{} owned", self.games.len()))),
                     )
                     .child(
-                        button("import", th, Kind::Ghost, Size::Small, Some(Icon::FolderInput), "Import existing games")
+                        button("import", th, Kind::Ghost, Size::Small, Some(Icon::FolderInput), "Import Connect downloads")
                             .justify_start()
                             .on_click(cx.listener(|this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Import, cx))),
                     ),

@@ -1,8 +1,10 @@
 //! The welcome flow: shown when quiverd has no first-run record (`Request::Setup`), and
 //! again from Settings. Seven short steps, each skippable: sign in (the sign-in screen
-//! itself), where games and prefixes live, bringing in existing installs, Steam, the
-//! controller, recommended fixes for unmodded games, and the theme. `quiver setup` walks
-//! the same choices in a terminal.
+//! itself), where games are installed (the per-game compatibility folders are under
+//! "Advanced"), importing Ubisoft Connect downloads from elsewhere, Steam (Ubisoft games
+//! bought on Steam starting through Quiver, and shortcuts), the controller, recommended
+//! fixes for unmodded games, and the theme. `quiver setup` walks the same choices in a
+//! terminal.
 //!
 //! When setup was finished but "recommended fixes" was left at "ask me later", only that
 //! question comes back, once per app start. Skipping setup doesn't ask again.
@@ -51,7 +53,7 @@ impl Step {
         match self {
             Step::SignIn => "Sign in",
             Step::Storage => "Where games live",
-            Step::Import => "Existing installs",
+            Step::Import => "Connect downloads",
             Step::Steam => "Steam",
             Step::Controller => "Controller",
             Step::Fixes => "Recommended fixes",
@@ -62,9 +64,9 @@ impl Step {
     fn hint(self) -> &'static str {
         match self {
             Step::SignIn => "Your Ubisoft account",
-            Step::Storage => "Library and prefix folders",
-            Step::Import => "From Lutris and other prefixes",
-            Step::Steam => "Shortcuts in your Steam library",
+            Step::Storage => "The install folder",
+            Step::Import => "Already downloaded elsewhere",
+            Step::Steam => "Your Steam games, shortcuts",
             Step::Controller => "Pads, hyprpad, button hints",
             Step::Fixes => "For unmodded games",
             Step::Theme => "Follows Omarchy",
@@ -74,9 +76,9 @@ impl Step {
     fn title(self) -> &'static str {
         match self {
             Step::SignIn => "Sign in with your Ubisoft account",
-            Step::Storage => "Where games and prefixes live",
-            Step::Import => "Bring in games you already have",
-            Step::Steam => "Add games to Steam",
+            Step::Storage => "Where games are installed",
+            Step::Import => "Ubisoft Connect games you already downloaded",
+            Step::Steam => "Steam and your Ubisoft games",
             Step::Controller => "Playing with a controller",
             Step::Fixes => "Recommended fixes for unmodded games",
             Step::Theme => "Your theme, already",
@@ -86,9 +88,9 @@ impl Step {
     fn sub(self) -> &'static str {
         match self {
             Step::SignIn => "Quiver signs in to Ubisoft the way Ubisoft Connect does, then shows every game you own.",
-            Step::Storage => "Each game gets its own folder and its own Proton prefix. Pick where both go before anything is installed.",
-            Step::Import => "Ubisoft Connect installs under Lutris, Wine or Steam prefixes can join your library without downloading them again.",
-            Step::Steam => "Every game Quiver installs can also be a Steam shortcut, with Ubisoft's art, for Big Picture and the Steam Deck UI.",
+            Step::Storage => "Each game gets its own folder here. Pick the place before anything is installed; most people keep the default.",
+            Step::Import => "Games you downloaded with Ubisoft Connect (under Lutris, Wine, or inside a Steam game) can join your library without downloading again. Ubisoft games you bought on Steam are handled under Steam instead.",
+            Step::Steam => "Ubisoft games you bought on Steam can start through Quiver instead of Ubisoft Connect, and games Quiver installs can show up in your Steam library.",
             Step::Controller => "The whole app works from a pad, next to hyprpad. Nothing to set up; here is what the buttons do.",
             Step::Fixes => "Small, audited tweaks that make games behave on a PC. You decide whether unmodded games get them.",
             Step::Theme => "Quiver takes its colors from Omarchy and restyles the moment you switch themes.",
@@ -120,7 +122,7 @@ pub enum Mode {
     Full,
     /// Only "recommended fixes" (it was left at "ask me later").
     FixesOnly,
-    /// Only "existing installs" (Downloads' and the game list's "Import existing games").
+    /// Only "Connect downloads" (Downloads' and the game list's "Import Connect downloads").
     ImportOnly,
 }
 
@@ -128,6 +130,8 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WCtl {
     AddAccount,
+    /// Show or hide the compatibility folder (Storage › Advanced).
+    Advanced,
     ApplyPaths,
     Rescan,
     Import(usize),
@@ -135,6 +139,16 @@ pub enum WCtl {
     SteamUser(usize),
     SteamAdd(u32),
     SteamAddAll,
+    /// A Ubisoft game in Steam (by app id): start it through Quiver, or undo that.
+    SteamPatch(u32),
+    SteamUndo(u32),
+    SteamPatchAll,
+    /// Offer the switch for later Steam installs.
+    SteamOffers,
+    /// Restart Steam: ask (inline), then "Not now" or "Restart Steam".
+    SteamRestart,
+    SteamRestartNo,
+    SteamRestartYes,
     Fix(FixesChoice),
     Skip,
     Back,
@@ -162,6 +176,10 @@ pub struct Welcome {
     steam_busy: HashSet<u32>,
     lib_input: Option<Entity<TextInput>>,
     pre_input: Option<Entity<TextInput>>,
+    /// Storage › Advanced is open.
+    advanced: bool,
+    /// The inline "Restart Steam now?" question is showing.
+    restart_ask: bool,
     /// Paths changed: quiverd is restarting.
     restarting: bool,
     /// Width of the step body, as of the last render (rows of cards share it).
@@ -226,7 +244,8 @@ impl Quiver {
     }
 
     /// Demo flags (`QUIVER_DEMO_GLOBAL`): `welcome[=step]`, `welcome-fixes`,
-    /// `welcome-import`, `wfocus=N` (focus control N), `wfix=yes|no|later`.
+    /// `welcome-import`, `wfocus=N` (focus control N), `wfix=yes|no|later`, `wadv` (Storage ›
+    /// Advanced open), `wrestart` (the Steam step asking to restart Steam).
     pub fn welcome_demo(&mut self, k: &str, v: &str, cx: &mut Context<Self>) {
         match k {
             "welcome" => {
@@ -237,6 +256,8 @@ impl Quiver {
             "welcome-import" => self.open_import(cx),
             "wfocus" => self.wc.focus = v.parse().unwrap_or(usize::MAX),
             "wfix" => self.wc.fixes = v.parse().ok(),
+            "wadv" => self.wc.advanced = true,
+            "wrestart" => self.wc.restart_ask = true,
             _ => {}
         }
     }
@@ -252,7 +273,7 @@ impl Quiver {
         self.open_welcome_mode(Mode::Full, step, cx);
     }
 
-    /// "Import existing games": just that step.
+    /// "Import Connect downloads": just that step.
     pub fn open_import(&mut self, cx: &mut Context<Self>) {
         self.open_welcome_mode(Mode::ImportOnly, Step::Import, cx);
     }
@@ -282,7 +303,10 @@ impl Quiver {
                 self.wc.lib_input = None;
                 self.wc.pre_input = None;
             }
-            Step::Steam => self.load_global_exports(cx),
+            Step::Steam => {
+                self.wc.restart_ask = false;
+                self.load_global_exports(cx);
+            }
             _ => {}
         }
         cx.notify();
@@ -386,6 +410,7 @@ impl Quiver {
         match self.wc.step {
             Step::SignIn => v.push(WCtl::AddAccount),
             Step::Storage => {
+                v.push(WCtl::Advanced);
                 if self.dl.setup.as_ref().is_some_and(|s| !s.paths_locked) {
                     v.push(WCtl::ApplyPaths);
                 }
@@ -400,6 +425,15 @@ impl Quiver {
             }
             Step::Steam => {
                 if matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some()) {
+                    if self.steam_switchable().len() > 1 {
+                        v.push(WCtl::SteamPatchAll);
+                    }
+                    for g in self.steam_copies() {
+                        if let Some(c) = steam_copy_control(&g) {
+                            v.push(c);
+                        }
+                    }
+                    v.push(WCtl::SteamOffers);
                     v.push(WCtl::SteamOnInstall);
                     v.extend((0..self.steam_choice().len()).map(WCtl::SteamUser));
                     let missing = self.steam_missing();
@@ -407,6 +441,13 @@ impl Quiver {
                         v.push(WCtl::SteamAddAll);
                     }
                     v.extend(missing.into_iter().map(WCtl::SteamAdd));
+                    if self.steam_waiting() && self.steam_running() {
+                        if self.wc.restart_ask {
+                            v.extend([WCtl::SteamRestartNo, WCtl::SteamRestartYes]);
+                        } else {
+                            v.push(WCtl::SteamRestart);
+                        }
+                    }
                 }
             }
             Step::Controller | Step::Theme => {}
@@ -477,6 +518,7 @@ impl Quiver {
         }
         match c {
             WCtl::AddAccount => self.start_add_account(cx),
+            WCtl::Advanced => self.wc.advanced = !self.wc.advanced,
             WCtl::ApplyPaths => {
                 let read = |e: &Option<Entity<TextInput>>, cx: &Context<Self>| e.as_ref().map(|e| e.read(cx).text().trim().to_owned()).filter(|t| !t.is_empty()).map(PathBuf::from);
                 let (library, prefixes) = (read(&self.wc.lib_input, cx), read(&self.wc.pre_input, cx));
@@ -516,6 +558,22 @@ impl Quiver {
             WCtl::SteamAddAll => {
                 let ids = self.steam_missing();
                 self.welcome_add_steam(ids, cx);
+            }
+            WCtl::SteamPatch(app_id) => self.steam_patch(app_id, false, cx),
+            WCtl::SteamUndo(app_id) => self.steam_patch(app_id, true, cx),
+            WCtl::SteamPatchAll => self.steam_patch_all(cx),
+            WCtl::SteamOffers => {
+                let on = !self.steam_offers_enabled();
+                self.set_steam_offers(on, cx);
+            }
+            WCtl::SteamRestart => self.wc.restart_ask = true,
+            WCtl::SteamRestartNo => {
+                self.wc.restart_ask = false;
+                self.show_toast("Not restarting Steam. The changes apply the next time Steam starts", cx);
+            }
+            WCtl::SteamRestartYes => {
+                self.wc.restart_ask = false;
+                self.restart_steam(cx);
             }
             WCtl::Fix(choice) => {
                 self.set_fixes(choice, cx);
@@ -607,7 +665,7 @@ impl Quiver {
                         .min_w_0()
                         .gap(px(1.))
                         .child(div().font_weight(SEMIBOLD).text_color(th.acc_hi).child("Welcome to Quiver · step 1 of 7"))
-                        .child(div().text_color(th.tx2).child("Next: folders, existing installs, Steam, controller, fixes, theme")),
+                        .child(div().text_color(th.tx2).child("Next: install folder, Connect downloads, Steam, controller, fixes, theme")),
                 )
                 .child(dots)
                 .into_any_element(),
@@ -962,10 +1020,51 @@ impl Quiver {
                         })),
                 )
         };
-        let mut v = vec![
-            folder("wc-lib", "Games", "each game in its own folder", &s.library, self.wc.lib_input.clone(), s.library_free, s.library_total).into_any_element(),
-            folder("wc-pre", "Prefixes", "one Proton prefix per game", &s.prefixes, self.wc.pre_input.clone(), s.prefixes_free, s.prefixes_total).into_any_element(),
-        ];
+        let mut v = vec![folder("wc-lib", "Games", "each game in its own folder", &s.library, self.wc.lib_input.clone(), s.library_free, s.library_total).into_any_element()];
+        // The prefixes folder is a detail most people never need: behind "Advanced".
+        let open = self.wc.advanced;
+        v.push(
+            div()
+                .id("wc-adv")
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(4.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(th.tx2)
+                .child(icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 14., th.tx3))
+                .child(div().font_weight(MEDIUM).child("Advanced"))
+                .child(div().text_color(th.tx3).child("Windows compatibility folders"))
+                .focus_ring(self.wfocused(WCtl::Advanced), th, 6.)
+                .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::Advanced, cx)))
+                .into_any_element(),
+        );
+        if open {
+            v.push(
+                folder(
+                    "wc-pre",
+                    "Compatibility folders",
+                    "one per game (Proton prefixes)",
+                    &s.prefixes,
+                    self.wc.pre_input.clone(),
+                    s.prefixes_free,
+                    s.prefixes_total,
+                )
+                .into_any_element(),
+            );
+            v.push(
+                div()
+                    .px(px(4.))
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(th.tx3)
+                    .child("Each game runs in its own small Windows setup: settings, Ubisoft's files and anything else a Windows game expects. Quiver keeps one per game, so games never affect each other. Leave this as it is unless you want them on another disk.")
+                    .into_any_element(),
+            );
+        }
         if s.paths_locked {
             v.push(note(
                 th,
@@ -983,11 +1082,11 @@ impl Quiver {
                     .items_center()
                     .gap(px(12.))
                     .child(
-                        button("wc-apply", th, Kind::Secondary, Size::Medium, Some(Icon::Check), if self.wc.restarting { "Restarting quiverd…" } else { "Use these folders" })
+                        button("wc-apply", th, Kind::Secondary, Size::Medium, Some(Icon::Check), if self.wc.restarting { "Restarting…" } else if open { "Use these folders" } else { "Use this folder" })
                             .focus_ring(self.wfocused(WCtl::ApplyPaths), th, 8.)
                             .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::ApplyPaths, cx))),
                     )
-                    .child(div().flex_1().text_size(px(12.)).text_color(th.tx3).child("Nothing is installed yet, so changing them moves nothing. quiverd restarts to pick them up."))
+                    .child(div().flex_1().text_size(px(12.)).text_color(th.tx3).child("Nothing is installed yet, so changing this moves nothing. Quiver's background service restarts to use it."))
                     .into_any_element(),
             );
         }
@@ -1011,7 +1110,7 @@ impl Quiver {
     fn wc_import(&mut self, th: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let found = match &self.wc.scan {
             None => {
-                return vec![loading_row(th, "Looking in Lutris, ~/Games and Steam prefixes for Ubisoft Connect games (read-only)…")];
+                return vec![loading_row(th, "Looking for Ubisoft Connect downloads in Lutris, ~/Games and Steam games (read-only)…")];
             }
             Some(Err(e)) => {
                 return vec![note(th, Icon::CircleX, e), self.rescan_button(th, cx)];
@@ -1052,18 +1151,18 @@ impl Quiver {
             .child(source_card(
                 Icon::Layers,
                 "Lutris",
-                if lutris_names.is_empty() { "game configs that run Ubisoft Connect".into() } else { lutris_names.join(", ") },
+                if lutris_names.is_empty() { "games that run Ubisoft Connect".into() } else { lutris_names.join(", ") },
                 count(InstallSource::Lutris),
             ))
-            .child(source_card(Icon::FolderOpen, "Wine prefixes", format!("~/Games · {} prefix{}", prefixes(InstallSource::Wine), if prefixes(InstallSource::Wine) == 1 { "" } else { "es" }), count(InstallSource::Wine)))
-            .child(source_card(Icon::Gamepad, "Steam", "Proton prefixes".into(), count(InstallSource::Steam)));
+            .child(source_card(Icon::FolderOpen, "Wine", format!("~/Games · {} folder{}", prefixes(InstallSource::Wine), if prefixes(InstallSource::Wine) == 1 { "" } else { "s" }), count(InstallSource::Wine)))
+            .child(source_card(Icon::Gamepad, "Inside Steam", "Connect in a Steam game".into(), count(InstallSource::Steam)));
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for (i, f) in found.iter().enumerate() {
             rows.push(self.found_row(th, i, f, cx));
         }
         if rows.is_empty() {
-            rows.push(div().p(px(18.)).text_color(th.tx3).child("No Ubisoft Connect installs found. Games you install with Quiver go straight into your library.").into_any_element());
+            rows.push(div().p(px(18.)).text_color(th.tx3).child("No Ubisoft Connect downloads found. Games you install with Quiver go straight into your library.").into_any_element());
         }
         vec![
             sources.into_any_element(),
@@ -1217,7 +1316,19 @@ impl Quiver {
             .iter()
             .find(|u| Some(&u.id) == info.selected.as_ref())
             .map(|u| u.persona_name.clone().unwrap_or_else(|| u.id.clone()));
-        let mut v = vec![];
+        // 1. Ubisoft games bought on Steam: start them through Quiver.
+        let mut v = self.wc_steam_copies(th, cx);
+        // 2. Shortcuts for games Quiver installs.
+        v.push(
+            div()
+                .pt(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(caption("Shortcuts for games Quiver installs", th.tx3))
+                .child(div().text_size(px(12.5)).text_color(th.tx2).child("Games you install with Quiver can show up in your Steam library, with Ubisoft's art, for Big Picture and the Steam Deck UI."))
+                .into_any_element(),
+        );
         v.push(
             panel(th)
                 .child(
@@ -1335,12 +1446,197 @@ impl Quiver {
         } else {
             v.push(panel(th).children(rows).into_any_element());
         }
-        v.push(note(
-            th,
-            Icon::RefreshCw,
-            "Steam reads shortcuts only when it starts. While it runs, new shortcuts wait and appear after its next restart. Quiver never restarts Steam on its own: it asks you every time, and “Not now” leaves the shortcut waiting.",
-        ));
+        if self.steam_waiting() && self.steam_running() {
+            v.push(self.wc_steam_restart(th, cx));
+        } else {
+            v.push(note(
+                th,
+                Icon::RefreshCw,
+                "Steam reads shortcuts and launch options only when it starts. While it runs, changes wait for its next restart. Quiver never restarts Steam on its own: it asks you every time.",
+            ));
+        }
         v
+    }
+
+    /// "Ubisoft games in Steam": each one, and starting it through Quiver.
+    fn wc_steam_copies(&mut self, th: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut v = vec![];
+        let list = match &self.ui.sg.list {
+            None => return vec![loading_row(th, "Looking for Ubisoft games in Steam…")],
+            Some(Err(e)) => return vec![note(th, Icon::CircleX, e)],
+            Some(Ok(s)) => s.clone(),
+        };
+        let switchable = self.steam_switchable();
+        let using = list.games.iter().filter(|g| g.state.uses_quiver()).count();
+        v.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(caption("Ubisoft games in Steam", th.tx3))
+                .when(!list.games.is_empty(), |d| {
+                    d.child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{using} of {} start through Quiver", list.games.len())))
+                })
+                .child(div().flex_1())
+                .when(switchable.len() > 1, |d| {
+                    d.child(
+                        button("wc-sg-all", th, Kind::Secondary, Size::Small, Some(Icon::Check), format!("Use Quiver for all {}", switchable.len()))
+                            .focus_ring(self.wfocused(WCtl::SteamPatchAll), th, 6.)
+                            .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::SteamPatchAll, cx))),
+                    )
+                })
+                .into_any_element(),
+        );
+        v.push(
+            div()
+                .text_size(px(12.5))
+                .line_height(px(18.))
+                .text_color(th.tx2)
+                .child("Started through Quiver, they skip the Ubisoft Connect window and its second sign-in, and your play time still counts. Nothing in the game changes, and you can undo it any time.")
+                .into_any_element(),
+        );
+        let mut rows: Vec<AnyElement> = vec![];
+        for (i, g) in list.games.iter().enumerate() {
+            let busy = self.ui.sg.busy.contains(&g.app_id);
+            let lib = g.product_id.and_then(|p| self.game(p)).cloned();
+            let art = match &lib {
+                Some(l) => self.art_for(l, ArtSlot::Tile, Variant::Tile, cx),
+                None => ArtState::Failed,
+            };
+            let id = g.app_id;
+            let right: AnyElement = match steam_copy_control(g) {
+                _ if busy => super::steamgames::state_pill(th, g, true),
+                Some(WCtl::SteamPatch(_)) => button(("wc-sg", id as usize), th, Kind::Primary, Size::Small, Some(Icon::Check), "Use Quiver")
+                    .focus_ring(self.wfocused(WCtl::SteamPatch(id)), th, 6.)
+                    .on_click(cx.listener(move |this, _, _, cx| this.welcome_press(WCtl::SteamPatch(id), cx)))
+                    .into_any_element(),
+                Some(WCtl::SteamUndo(_)) => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(super::steamgames::state_pill(th, g, false))
+                    .child(
+                        button(("wc-sgu", id as usize), th, Kind::Ghost, Size::Small, Some(Icon::Undo), "Undo")
+                            .focus_ring(self.wfocused(WCtl::SteamUndo(id)), th, 6.)
+                            .on_click(cx.listener(move |this, _, _, cx| this.welcome_press(WCtl::SteamUndo(id), cx))),
+                    )
+                    .into_any_element(),
+                _ => super::steamgames::state_pill(th, g, false),
+            };
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(8.))
+                    .when(i > 0, |d| d.border_t_1().border_color(th.line1))
+                    .child(div().w(px(26.)).h(px(30.)).flex_none().child(art_fill(th, &art, "", 4., lib.is_none())))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .child(div().truncate().child(clean_name(&g.name)))
+                            .child(div().text_size(px(11.5)).text_color(if g.note.is_some() && !g.patchable { th.warn } else { th.tx3 }).truncate().child(super::steamgames::state_line(g))),
+                    )
+                    .child(right)
+                    .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .px(px(14.))
+                    .py(px(12.))
+                    .text_size(px(12.5))
+                    .text_color(th.tx3)
+                    .child(if list.offers {
+                        "No Ubisoft games are installed through Steam. If you install one later, Quiver offers this then."
+                    } else {
+                        "No Ubisoft games are installed through Steam."
+                    })
+                    .into_any_element(),
+            );
+        }
+        let offers = list.offers;
+        rows.push(
+            div()
+                .id("wc-sg-offers")
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(th.line1)
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::SteamOffers, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .gap(px(1.))
+                        .child(div().font_weight(SEMIBOLD).child("Ask about games installed later"))
+                        .child(div().text_size(px(12.)).text_color(th.tx3).child("When a Ubisoft game is installed through Steam, Quiver offers this once")),
+                )
+                .child(div().rounded(px(9.)).child(toggle(th, offers)).focus_ring(self.wfocused(WCtl::SteamOffers), th, 9.))
+                .into_any_element(),
+        );
+        v.push(panel(th).children(rows).into_any_element());
+        v
+    }
+
+    /// Steam is running with changes waiting: offer (and confirm) a restart.
+    fn wc_steam_restart(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let ask = self.wc.restart_ask;
+        let mut b = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(px(10.))
+            .bg(th.warn_soft)
+            .border_1()
+            .border_color(th.warn.opacity(0.3))
+            .text_size(px(12.5))
+            .line_height(px(18.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(div().pt(px(1.)).child(icon(Icon::RefreshCw, 14., th.warn)))
+                    .child(div().flex_1().min_w_0().text_color(th.tx2).child(if ask {
+                        "Close Steam and start it again now? Quiver closes it cleanly and writes the changes while it's closed. Close any game you started from Steam first."
+                    } else {
+                        "Steam is running, so these changes wait for it to restart: Steam only reads them when it starts. Quiver won't restart Steam unless you ask."
+                    })),
+            );
+        let row = div().flex().justify_end().gap(px(8.));
+        b = b.child(if ask {
+            row.child(
+                button("wc-rs-no", th, Kind::Secondary, Size::Small, None, "Not now")
+                    .focus_ring(self.wfocused(WCtl::SteamRestartNo), th, 6.)
+                    .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::SteamRestartNo, cx))),
+            )
+            .child(
+                button("wc-rs-yes", th, Kind::Primary, Size::Small, Some(Icon::RefreshCw), "Restart Steam")
+                    .focus_ring(self.wfocused(WCtl::SteamRestartYes), th, 6.)
+                    .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::SteamRestartYes, cx))),
+            )
+        } else {
+            row.child(
+                button("wc-rs", th, Kind::Secondary, Size::Small, Some(Icon::RefreshCw), "Restart Steam…")
+                    .focus_ring(self.wfocused(WCtl::SteamRestart), th, 6.)
+                    .on_click(cx.listener(|this, _, _, cx| this.welcome_press(WCtl::SteamRestart, cx))),
+            )
+        });
+        b.into_any_element()
     }
 
     // ---- Step 5
@@ -1622,6 +1918,11 @@ impl Quiver {
             )
             .into_any_element()
     }
+}
+
+/// The button a Ubisoft game in Steam gets: switch to Quiver, or undo.
+fn steam_copy_control(g: &ubi_api::exports::SteamGame) -> Option<WCtl> {
+    super::steamgames::control(g).map(|on| if on { WCtl::SteamPatch(g.app_id) } else { WCtl::SteamUndo(g.app_id) })
 }
 
 /// Copy progress from an import job's status ("Copying files 51/1204…").

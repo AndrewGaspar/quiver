@@ -214,15 +214,30 @@ impl Quiver {
         if let Some(Ok(steam)) = &self.ui.steam {
             if !steam.staged.is_empty() && steam.running {
                 add(
-                    cmd(Icon::Gamepad, "Restart Steam to show staged shortcuts…", Some("Quiver never restarts Steam itself; the terminal command asks first".into()), Some("quiver steam restart".into()), Cmd::Settings(SettingsSection::Steam)),
-                    "steam shortcuts restart staged",
+                    cmd(Icon::RefreshCw, "Restart Steam to apply staged changes…", Some("Asks first; Quiver never restarts Steam on its own".into()), Some("quiver steam restart".into()), Cmd::Global(GlobalCmd::SteamRestart)),
+                    "steam shortcuts restart staged launch options",
                 );
             }
             if !steam.staged.is_empty() && !steam.running {
                 add(
-                    cmd(Icon::Gamepad, "Write staged Steam shortcuts", Some(format!("{} waiting; Steam is closed", steam.staged.len())), Some("quiver steam apply".into()), Cmd::Global(GlobalCmd::SteamApply)),
+                    cmd(Icon::Gamepad, "Write staged Steam changes", Some(format!("{} waiting; Steam is closed", steam.staged.len())), Some("quiver steam apply".into()), Cmd::Global(GlobalCmd::SteamApply)),
                     "steam shortcuts apply",
                 );
+            }
+        }
+        // Ubisoft games installed through Steam: start them through Quiver, or undo that.
+        for g in self.steam_copies() {
+            let name = crate::model::clean_name(&g.name);
+            match super::steamgames::control(&g) {
+                Some(true) => add(
+                    cmd(Icon::Gamepad, format!("Start {name} from Steam through Quiver"), Some("Instead of Ubisoft Connect; undo any time".into()), Some(format!("quiver steam patch {}", g.app_id)), Cmd::Global(GlobalCmd::SteamPatch(g.app_id))),
+                    "steam connect patch launch options ubisoft",
+                ),
+                Some(false) => add(
+                    cmd(Icon::Undo, format!("Start {name} from Steam through Ubisoft Connect again"), None, Some(format!("quiver steam unpatch {}", g.app_id)), Cmd::Global(GlobalCmd::SteamUnpatch(g.app_id))),
+                    "steam connect unpatch undo launch options ubisoft",
+                ),
+                None => {}
             }
         }
         for s in &self.ui.sessions {

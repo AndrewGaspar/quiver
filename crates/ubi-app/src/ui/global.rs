@@ -193,6 +193,8 @@ pub struct GlobalUi {
     pub login_adding: bool,
     pub login_email: Option<String>,
     login_focused: Option<EntityId>,
+    /// Settings › Library and storage › Advanced is open.
+    pub lib_advanced: bool,
     /// hyprpad seen running (checked when Appearance is shown).
     pub hyprpad: Option<(bool, Instant)>,
 }

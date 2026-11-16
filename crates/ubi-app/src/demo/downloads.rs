@@ -376,7 +376,7 @@ impl Dl {
                 steam_pfx.join("drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Watch Dogs Legion"),
                 &steam_pfx,
                 InstallSource::Steam,
-                "Steam · compatdata 2195250",
+                "Connect inside Steam · Riders Republic",
                 Some(3353),
                 Some(MatchedBy::Name),
                 47.5,
