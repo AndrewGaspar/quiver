@@ -54,8 +54,9 @@ impl BridgeArgs {
 }
 
 /// `UPLAY_ARGUMENTS` as Connect sets it for a game it starts. The SDK reads the uplay id
-/// from it; without it the aux DLL relaunches the game through `UbisoftGameLauncher.exe`,
-/// and in Steam mode the SDK starts Connect's game starter.
+/// from it. Without it the aux DLL relaunches the game through `UbisoftGameLauncher.exe`,
+/// and the R1/R2 API DLLs start Connect (`UbisoftGameLauncher.exe … -upc_game_starter`)
+/// when no pipe answers; with it they fail instead of starting Connect.
 pub fn uplay_arguments(uplay_id: u32, exe: &str, workdir: &str) -> String {
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
     format!(
@@ -72,42 +73,6 @@ pub fn win_parent(path: &str) -> &str {
         Some(i) if path[..i].ends_with(':') => &path[..=i],
         Some(i) => &path[..i],
     }
-}
-
-/// A Windows command line for `CreateProcessW` that `CommandLineToArgvW` / the MSVC CRT
-/// split back into exactly `args` (quotes and backslashes escaped as they expect).
-pub fn windows_command_line<S: AsRef<str>>(args: &[S]) -> String {
-    let mut out = String::new();
-    for (i, arg) in args.iter().enumerate() {
-        let arg = arg.as_ref();
-        if i > 0 {
-            out.push(' ');
-        }
-        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\u{b}', '"']) {
-            out.push_str(arg);
-            continue;
-        }
-        out.push('"');
-        let mut backslashes = 0;
-        for c in arg.chars() {
-            match c {
-                '\\' => backslashes += 1,
-                '"' => {
-                    out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
-                    out.push('"');
-                    backslashes = 0;
-                }
-                c => {
-                    out.extend(std::iter::repeat_n('\\', backslashes));
-                    out.push(c);
-                    backslashes = 0;
-                }
-            }
-        }
-        out.extend(std::iter::repeat_n('\\', backslashes * 2));
-        out.push('"');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -171,20 +136,5 @@ mod tests {
         assert_eq!(win_parent(r"C:\a\b.exe"), r"C:\a");
         assert_eq!(win_parent(r"C:\b.exe"), r"C:\");
         assert_eq!(win_parent("b.exe"), "b.exe");
-    }
-
-    #[test]
-    fn command_line_quoting() {
-        assert_eq!(windows_command_line(&["a.exe", "-x"]), "a.exe -x");
-        assert_eq!(
-            windows_command_line(&[r"Z:\Steam\common\Assassin's Creed Black Flag Resynced\ACBlackFlag.exe", "-uplay_steam_mode"]),
-            r#""Z:\Steam\common\Assassin's Creed Black Flag Resynced\ACBlackFlag.exe" -uplay_steam_mode"#
-        );
-        assert_eq!(windows_command_line(&[""]), r#""""#);
-        assert_eq!(windows_command_line(&[r#"say "hi""#]), r#""say \"hi\"""#);
-        // Trailing backslashes before the closing quote are doubled.
-        assert_eq!(windows_command_line(&[r"C:\dir with space\"]), r#""C:\dir with space\\""#);
-        // Backslashes not followed by a quote stay as they are.
-        assert_eq!(windows_command_line(&[r"C:\a\b"]), r"C:\a\b");
     }
 }

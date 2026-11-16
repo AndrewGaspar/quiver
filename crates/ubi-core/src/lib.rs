@@ -24,6 +24,7 @@ pub mod progress;
 pub mod saves;
 pub mod savesync;
 pub mod settings;
+pub mod steamrun;
 pub mod store;
 pub mod ubiservices;
 pub mod zipread;
