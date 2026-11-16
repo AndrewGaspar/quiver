@@ -70,8 +70,12 @@ cargo build --release
 export PATH=$PWD/target/release:$PATH
 
 quiver login                                   # email, password, 2FA (or sign in from the app)
+quiver login                                   # again: adds a second account (first stays default)
+quiver account list                            # signed-in accounts; * marks the default
+quiver account default family                  # change the default (by name or user id)
+quiver logout family                           # sign one account out (default: the default)
 quiver-app                                  # the app
-quiver library                                 # owned games and install state
+quiver library                                 # owned games, install state, owners (2+ accounts)
 quiver install "chronicles china"              # by name or product id; shows progress
 quiver play rabbids                            # runs in its own prefix; syncs cloud saves
 quiver set origins proton=GE-Proton10-34 env.DXVK_HUD=fps -m "test HUD"
@@ -83,8 +87,10 @@ quiver watch                                   # live daemon events (JSON)
 quiver dev …                                   # low-level tools that bypass the daemon
 ```
 
-Settings keys: `proton`, `language`, `args`, `wrappers`, `env.NAME`, `dll.NAME` (`key=` unsets).
-State lives in `~/.local/share/quiver/` (`config.json`, `games.json`,
+Settings keys: `proton`, `language`, `account`, `args`, `wrappers`, `env.NAME`, `dll.NAME`
+(`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its
+`account` if set, else the default account if it owns the game, else the first account that does.
+State lives in `~/.local/share/quiver/` (`config.json`, `games.json`, `accounts.json`,
 `games/<id>/history.jsonl`, `activity.jsonl`, save backups, `quiverd.log`); a pre-Quiver
 `~/.local/share/ubisoft-linux/` and keyring entry are moved there automatically. `ubi` is kept
 as an alias for `quiver`.

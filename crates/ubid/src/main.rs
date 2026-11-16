@@ -183,13 +183,13 @@ impl Daemon {
             None => settings::current(product_id)?.0.account,
         };
         let (accounts, default) = store::accounts_and_default()?;
-        if let Some(id) = &setting {
-            if !accounts.iter().any(|a| &a.user_id == id) {
-                bail!(
-                    "{}'s launch account ({id}) is not signed in; sign it in, or clear it with `quiver set {product_id} account=`",
-                    self.product_name(product_id)
-                );
-            }
+        if let Some(id) = &setting
+            && !accounts.iter().any(|a| &a.user_id == id)
+        {
+            bail!(
+                "{}'s launch account ({id}) is not signed in; sign it in, or clear it with `quiver set {product_id} account=`",
+                self.product_name(product_id)
+            );
         }
         // Ownership only matters when there is a choice to make.
         let owners = if setting.is_none() && accounts.len() > 1 {

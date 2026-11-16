@@ -8,7 +8,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use ubi_api::{ActivityEntry, Client, Event, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status};
+use ubi_api::{Account, ActivityEntry, Client, Event, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status};
 
 #[derive(Parser)]
 #[command(name = "quiver", about = "Quiver: a third-party launcher for your Ubisoft library")]
@@ -24,13 +24,22 @@ struct Cli {
 enum Cmd {
     /// Daemon and account status, running games and jobs.
     Status,
-    /// Sign in (email, password, 2FA).
+    /// Sign in an account (email, password, 2FA). Each sign-in adds an account; the first
+    /// becomes the default.
     Login {
         #[arg(long)]
         email: Option<String>,
     },
-    /// Sign out and forget the stored session.
-    Logout,
+    /// Sign an account out and forget its stored session (default: the default account).
+    Logout {
+        /// Username, user id or user-id prefix.
+        account: Option<String>,
+    },
+    /// Signed-in Ubisoft accounts.
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Owned games and their install state.
     Library {
         /// Re-fetch from Ubisoft instead of using the daemon's cache.
@@ -79,7 +88,8 @@ enum Cmd {
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
-    /// Keys: proton, language, args, wrappers, env.NAME, dll.NAME.
+    /// Keys: proton, language, account, args, wrappers, env.NAME, dll.NAME.
+    /// `account` (username or user id) picks the account the game launches with.
     Set {
         game: String,
         #[arg(required = true)]
@@ -104,6 +114,9 @@ enum Cmd {
         /// Host path of the game's install dir (for installed-chunk info).
         #[arg(long)]
         install_dir: Option<std::path::PathBuf>,
+        /// Account to issue it for (username or user id); default: the game's launch account.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Installed Proton builds.
     Protons,
@@ -139,8 +152,70 @@ enum DaemonAction {
     Stop,
 }
 
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Signed-in accounts (* marks the default).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make an account the default (it launches games every account owns).
+    Default {
+        /// Username, user id or user-id prefix.
+        account: String,
+    },
+    /// Sign in another account (same as `quiver login`).
+    Add {
+        #[arg(long)]
+        email: Option<String>,
+    },
+    /// Sign an account out (same as `quiver logout`).
+    Remove { account: String },
+}
+
 fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
+fn print_accounts(accounts: &[Account]) {
+    for a in accounts {
+        println!("{} {:<20} {}", if a.default { "*" } else { " " }, a.name, a.user_id);
+    }
+}
+
+async fn login(client: &Client, email: Option<String>) -> Result<()> {
+    let email = match email {
+        Some(e) => e,
+        None => dev::prompt("Email: ")?,
+    };
+    let password = rpassword::prompt_password("Password: ")?;
+    let mut result: LoginResult = client.call(Request::Login { email, password }).await?;
+    if let LoginResult::TwoFactorRequired = result {
+        let code = dev::prompt("2FA code (authenticator app): ")?;
+        result = client.call(Request::Login2fa { code }).await?;
+    }
+    let name = match result {
+        LoginResult::SignedIn { name } => name,
+        LoginResult::TwoFactorRequired => bail!("2FA still required"),
+    };
+    let status: Status = client.call(Request::Status).await?;
+    let default = status.accounts.iter().find(|a| a.default).map(|a| a.name.as_str());
+    match default {
+        Some(d) if d == name => println!("Signed in as {name} (default account)"),
+        Some(d) => println!("Signed in as {name}; {d} stays the default (quiver account default {name})"),
+        None => println!("Signed in as {name}"),
+    }
+    Ok(())
+}
+
+async fn logout(client: &Client, account: Option<String>) -> Result<()> {
+    let () = client.call(Request::Logout { account }).await?;
+    let status: Status = client.call(Request::Status).await?;
+    match status.signed_in {
+        Some(d) => println!("Signed out. Default account: {d}"),
+        None => println!("Signed out. No accounts are signed in."),
+    }
     Ok(())
 }
 
@@ -243,10 +318,17 @@ async fn main() -> Result<()> {
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
             println!("quiverd {}", s.version);
-            match &s.signed_in {
-                Some(n) => println!("signed in as {n}"),
-                None if s.awaiting_2fa => println!("waiting for a 2FA code (quiver login)"),
-                None => println!("not signed in (quiver login)"),
+            match (&s.signed_in, s.accounts.len()) {
+                (Some(n), 0 | 1) => println!("signed in as {n}"),
+                (_, 0) if s.awaiting_2fa => println!("waiting for a 2FA code (quiver login)"),
+                (_, 0) => println!("not signed in (quiver login)"),
+                _ => {
+                    println!("accounts (* default):");
+                    print_accounts(&s.accounts);
+                }
+            }
+            if s.awaiting_2fa && !s.accounts.is_empty() {
+                println!("a sign-in is waiting for its 2FA code (quiver login)");
             }
             println!("default Proton: {}", s.proton_default.as_deref().unwrap_or("?"));
             println!("broker: {}", s.broker);
@@ -257,30 +339,40 @@ async fn main() -> Result<()> {
                 println!("job {} {:?} {}: {}", j.id, j.kind, j.name, j.status);
             }
         }
-        Cmd::Login { email } => {
-            let email = match email {
-                Some(e) => e,
-                None => dev::prompt("Email: ")?,
-            };
-            let password = rpassword::prompt_password("Password: ")?;
-            let mut result: LoginResult = client.call(Request::Login { email, password }).await?;
-            if let LoginResult::TwoFactorRequired = result {
-                let code = dev::prompt("2FA code (authenticator app): ")?;
-                result = client.call(Request::Login2fa { code }).await?;
+        Cmd::Login { email } | Cmd::Account { action: AccountAction::Add { email } } => login(&client, email).await?,
+        Cmd::Logout { account } => logout(&client, account).await?,
+        Cmd::Account { action: AccountAction::Remove { account } } => logout(&client, Some(account)).await?,
+        Cmd::Account { action: AccountAction::List { json } } => {
+            let s: Status = client.call(Request::Status).await?;
+            if json {
+                return print_json(&s.accounts);
             }
-            match result {
-                LoginResult::SignedIn { name } => println!("Signed in as {name}"),
-                LoginResult::TwoFactorRequired => bail!("2FA still required"),
+            if s.accounts.is_empty() {
+                println!("no accounts signed in (quiver login)");
             }
+            print_accounts(&s.accounts);
         }
-        Cmd::Logout => {
-            let () = client.call(Request::Logout).await?;
-            println!("Signed out.");
+        Cmd::Account { action: AccountAction::Default { account } } => {
+            let () = client.call(Request::AccountDefault { account }).await?;
+            let s: Status = client.call(Request::Status).await?;
+            println!("default account: {}", s.signed_in.as_deref().unwrap_or("?"));
         }
         Cmd::Library { refresh, json } => {
             let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh }).await?;
             if json {
                 return print_json(&lib);
+            }
+            let accounts = client.call::<Status>(Request::Status).await?.accounts;
+            let owners = |e: &LibraryEntry| {
+                e.owned_by
+                    .iter()
+                    .map(|id| accounts.iter().find(|a| &a.user_id == id).map_or(id.as_str(), |a| a.name.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let width = lib.iter().map(|e| owners(e).chars().count()).max().unwrap_or(0).max("owned by".len());
+            if accounts.len() > 1 {
+                println!("{:>6}  {:<10} {:<width$}  name", "id", "state", "owned by");
             }
             for e in &lib {
                 let state = match (&e.installed, e.update_available, e.running) {
@@ -289,7 +381,11 @@ async fn main() -> Result<()> {
                     (Some(_), false, _) => "installed",
                     (None, _, _) => "",
                 };
-                println!("{:>6}  {:<10} {}", e.product_id, state, e.name);
+                if accounts.len() > 1 {
+                    println!("{:>6}  {:<10} {:<width$}  {}", e.product_id, state, owners(e), e.name);
+                } else {
+                    println!("{:>6}  {:<10} {}", e.product_id, state, e.name);
+                }
             }
         }
         Cmd::Install { game, language, detach } => {
@@ -344,6 +440,13 @@ async fn main() -> Result<()> {
             let v: serde_json::Value = client.call(Request::SettingsGet { product_id: e.product_id }).await?;
             println!("{}", e.name);
             print_settings(&v);
+            if let Some(id) = v["settings"]["account"].as_str() {
+                let s: Status = client.call(Request::Status).await?;
+                match s.accounts.iter().find(|a| a.user_id == id) {
+                    Some(a) => println!("  (launches as {})", a.name),
+                    None => println!("  (launch account {id} is not signed in)"),
+                }
+            }
         }
         Cmd::Set { game, changes, message } => {
             let e = resolve(&client, &game).await?;
@@ -390,10 +493,11 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Context { game, out, savegame_path, install_dir } => {
+        Cmd::Context { game, out, savegame_path, install_dir, account } => {
             let e = resolve(&client, &game).await?;
-            let ctx: serde_json::Value =
-                client.call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir }).await?;
+            let ctx: serde_json::Value = client
+                .call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir, account })
+                .await?;
             {
                 use std::os::unix::fs::OpenOptionsExt;
                 let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&out)?;
