@@ -138,8 +138,11 @@ pub enum Cmd {
     CopyCli(u32),
     Refresh,
     NotYet,
-    /// Game page: play with play-menu entry `i` (0: vanilla); Steam/.desktop exports.
+    /// Game page: play once with play-menu entry `i` (0: vanilla); Steam/.desktop exports.
     PlayWith(u32, usize),
+    /// Game page: make profile entry `i` (0: vanilla) the default for Play; open that menu.
+    DefaultProfile(u32, usize),
+    DefaultMenu(u32),
     Export(u32, crate::ui::game::ExportAction),
     /// Settings at a section.
     Settings(crate::nav::SettingsSection),
@@ -735,6 +738,11 @@ impl Quiver {
             }
             Cmd::NotYet => self.show_toast(format!("{}: not wired yet", cmd.label), cx),
             Cmd::PlayWith(id, i) => self.play_with(id, i, cx),
+            Cmd::DefaultProfile(id, i) => self.set_default_profile(id, i, cx),
+            Cmd::DefaultMenu(id) => {
+                (self.gp.play_menu, self.gp.default_menu) = (true, true);
+                self.nav.open_menu(id);
+            }
             Cmd::Export(id, a) => self.run_export(id, a, cx),
             Cmd::Settings(s) => self.nav.open_settings(s),
             Cmd::Global(g) => self.run_global(g, cx),
@@ -769,9 +777,10 @@ impl Quiver {
         } else if g.entry.update_available {
             self.open_update_dialog(id, cx);
         } else {
-            let profile = self.gp.play_profile(id);
-            self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
-                Ok(_) => this.show_toast(format!("Starting {name}…"), cx),
+            // No profile named: the daemon runs the game's default.
+            let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
+            self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
+                Ok(_) => this.show_toast(format!("Starting {name}{}…", with.unwrap_or_default()), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
         }
@@ -818,7 +827,9 @@ impl Quiver {
             Effect::Action(id, i) => match i {
                 ACTION_PRIMARY => self.primary(id, cx),
                 ACTION_OPTIONS | ACTION_MORE => {
+                    // The profile chip sets `default_menu` before this; the arrow clears it.
                     self.gp.play_menu = i == ACTION_OPTIONS;
+                    self.gp.default_menu &= self.gp.play_menu;
                     self.nav.open_menu(id);
                 }
                 ACTION_STEAM => self.steam_button(id, cx),

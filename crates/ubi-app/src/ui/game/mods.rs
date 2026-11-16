@@ -80,7 +80,7 @@ impl Quiver {
 
     fn render_profile_cards(&mut self, th: &Theme, g: &GameRow, m: &ModsState, sel: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
-        let playing = self.gp.play_profile(id);
+        let playing = self.default_profile(id);
         let mut cards: Vec<AnyElement> = Vec::new();
         let entry = |i: usize, key: Option<String>, name: String, sub: String, saves: (Icon, &str), ic: Icon, pinned: bool, this: &mut Self, cx: &mut Context<Self>| {
             let on = key.as_deref().unwrap_or(VANILLA) == sel;
@@ -128,7 +128,7 @@ impl Quiver {
                                 .gap(px(6.))
                                 .font_weight(SEMIBOLD)
                                 .child(div().truncate().child(name))
-                                .when(is_play, |d| d.child(pill(th, PillKind::Muted, Some(crate::ui::Icon::Play), "Plays"))),
+                                .when(is_play, |d| d.child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), "Default"))),
                         )
                         .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(sub)),
                 )
@@ -561,6 +561,7 @@ impl Quiver {
         let pinned = switch("pinned", prof.pinned, self, cx);
         let del_prof = prof.clone();
         let play_i = self.gp.profiles().iter().position(|x| x.id == prof.id).map(|i| i + 1).unwrap_or(0);
+        let is_default = self.default_profile(id).as_deref() == Some(prof.id.as_str());
         card(th)
             .p(px(16.))
             .gap(px(12.))
@@ -596,8 +597,10 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(8.))
                     .child(button("prof-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play this profile").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, play_i, cx))))
+                    .child(self.make_default_button(th, id, play_i, is_default, cx))
                     .child(div().flex_1())
                     .child(danger("prof-del", th, Some(Icon::Trash), "Delete profile…").on_click(cx.listener(move |this, _, _, cx| {
                         this.open_dialog(Dialog::DeleteProfile { game: id, profile: del_prof.clone() });
@@ -609,15 +612,33 @@ impl Quiver {
     fn render_vanilla_card(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let cloud = self.gp.info.ready().map(|i| i.features.cloud_saves).unwrap_or(true);
+        let is_default = self.default_profile(id).is_none();
         card(th)
             .p(px(16.))
             .gap(px(10.))
-            .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).text_size(px(14.)).child("Vanilla")).child(pill(th, PillKind::Muted, None, "Default")))
+            .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).text_size(px(14.)).child("Vanilla")))
             .child(kv(th, "Runs", div().child("The base install, unmounted")))
             .child(kv(th, "Saves", div().child(if cloud { "The game's own, synced with the cloud" } else { "The game's own (no cloud saves)" })))
             .child(kv(th, "Settings", div().child("This game's launch options")))
-            .child(self.cli_line("van-cli", th, format!("quiver play {id}"), cx))
-            .child(div().flex().child(button("van-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play Vanilla").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, 0, cx)))))
+            .child(self.cli_line("van-cli", th, format!("quiver play {id} --vanilla"), cx))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(button("van-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play Vanilla").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, 0, cx))))
+                    .child(self.make_default_button(th, id, 0, is_default, cx)),
+            )
+    }
+
+    /// "Make default" (profile entry `i`, 0: vanilla), or a "Default for Play" mark when it
+    /// already is: the game's default profile, which Play and shortcuts run.
+    fn make_default_button(&mut self, th: &Theme, id: u32, i: usize, is_default: bool, cx: &mut Context<Self>) -> AnyElement {
+        if is_default {
+            return div().flex().items_center().child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), "Default for Play")).into_any_element();
+        }
+        small(("make-default", i), th, Some(Icon::CircleCheck), "Make default")
+            .on_click(cx.listener(move |this, _, _, cx| this.set_default_profile(id, i, cx)))
+            .into_any_element()
     }
 
     fn render_profile_history(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {

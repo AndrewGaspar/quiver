@@ -406,7 +406,10 @@ impl Quiver {
             .shadow(vec![soft_shadow(th.acc.opacity(0.28), 8., 30.)])
             .cursor_pointer()
             .child(main.id("act-play").on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_PRIMARY), cx))))
-            .child(more.id("act-more").on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_OPTIONS), cx))));
+            .child(more.id("act-more").on_click(cx.listener(|this, _, _, cx| {
+                this.gp.default_menu = false;
+                this.click(Target::Action(ACTION_OPTIONS), cx)
+            })));
         let proton = g.settings.as_ref().and_then(|s| s.proton.clone()).or_else(|| self.status.as_ref().and_then(|s| s.proton_default.clone()));
         let rev = g.current_revision();
         let proton_chip = match (proton, rev) {
@@ -415,10 +418,11 @@ impl Quiver {
             (None, Some(r)) => Some(format!("r{r}")),
             _ => None,
         };
-        // Which profile Play uses, once the game has any.
+        // The game's default profile (what Play runs), once it has any; picking one here
+        // changes the default.
         let profiles = if self.gp.id == id { self.gp.profiles() } else { vec![] };
         let profile_chip = (g.installed() && !profiles.is_empty()).then(|| {
-            let cur = self.gp.play_profile(id).and_then(|p| profiles.iter().find(|x| x.id == p).map(|x| x.name.clone()));
+            let cur = self.default_profile(id).and_then(|p| profiles.iter().find(|x| x.id == p).map(|x| x.name.clone()));
             let on = cur.is_some();
             let label = cur.unwrap_or_else(|| "Vanilla".into());
             let (bg, fg, line) = if slim { (rgba(0x0e1016, 0.62), on_art::tx1(), on_art::line()) } else { (th.ink2, th.tx1, th.line2) };
@@ -441,7 +445,10 @@ impl Quiver {
                 .child(icon(Icon::Layers, 14., if on { th.acc_hi } else { fg }))
                 .child(label)
                 .child(icon(Icon::ChevronDown, 12., fg))
-                .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_OPTIONS), cx)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gp.default_menu = true;
+                    this.click(Target::Action(ACTION_OPTIONS), cx)
+                }))
         });
         let status: Option<(PillKind, Icon, String)> = if g.running() {
             Some((PillKind::Ok, Icon::Gamepad, "Playing now".into()))
