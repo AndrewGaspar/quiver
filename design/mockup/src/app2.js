@@ -35,7 +35,7 @@ function scrLaunch() {
       <span class="row muted" style="font-size:12px;gap:8px"><span class="toggle on"></span>Show inherited values</span>
     </div>
     ${section('Runtime', 'Wine/Proton build and translation layers', [
-      frow('Compatibility tool', `<span class="field" style="width:250px">${ic('cpu')}<b style="font-weight:550">GE-Proton10-25</b><span class="grow"></span><span class="muted">Steam</span>${ic('chevron-down')}</span><span class="pill acc">${ic('pin', 'xs')}Pinned</span><span class="muted" style="font-size:12px">global default is GE-Proton10-26</span>`, { help: 'Changing it upgrades the prefix. ubi snapshots the prefix first.' }),
+      frow('Compatibility tool', `<span class="field" style="width:250px">${ic('cpu')}<b style="font-weight:550">GE-Proton10-25</b><span class="grow"></span><span class="muted">Steam</span>${ic('chevron-down')}</span><span class="pill acc">${ic('pin', 'xs')}Pinned</span><span class="muted" style="font-size:12px">global default is GE-Proton10-26</span>`, { help: 'Changing it upgrades the prefix. Quiver snapshots the prefix first.' }),
       frow('DirectX translation', `<span class="field" style="width:180px">DXVK 2.7.1<span class="grow"></span>${ic('chevron-down')}</span><span class="field" style="width:200px">VKD3D-Proton 2.14.1<span class="grow"></span>${ic('chevron-down')}</span>`, { inh: 'Proton' }),
       frow('Sync primitive', `<div class="seg"><span>NTSync</span><span class="on">fsync</span><span>esync</span><span>Off</span></div><span class="muted" style="font-size:12px">NTSync crashed at startup in r12</span>`, { help: 'Global default is NTSync' }),
       frow('Upscaling', `<div class="seg"><span class="on">Off</span><span>FSR 1 (gamescope)</span><span>FSR 4 (Proton)</span></div>`, { inh: 'Global' }),
@@ -54,7 +54,7 @@ function scrLaunch() {
       frow('Pre-launch hook', `<span class="field mono grow"><span class="muted">~/bin/fan-curve performance</span></span>`, { help: 'Run on host before and after the session' }),
     ].join(''))}
     <div class="card" style="padding:12px 16px">
-      <div class="row" style="margin-bottom:8px"><span style="font-weight:650">Resolved command</span><span class="muted" style="font-size:12px">what ubid will run</span><span class="grow"></span><span class="btn sm">${ic('copy', 'sm')}Copy</span><span class="btn sm">${ic('square-terminal', 'sm')}Copy as ubi command</span></div>
+      <div class="row" style="margin-bottom:8px"><span style="font-weight:650">Resolved command</span><span class="muted" style="font-size:12px">what quiverd will run</span><span class="grow"></span><span class="btn sm">${ic('copy', 'sm')}Copy</span><span class="btn sm">${ic('square-terminal', 'sm')}Copy as quiver command</span></div>
       <div class="code"><span class="k">DXVK_HDR</span>=<span class="s">1</span> <span class="k">ENABLE_HDR_WSI</span>=<span class="s">1</span> <span class="k">PROTON_ENABLE_WAYLAND</span>=<span class="s">0</span> <span class="k">WINEPREFIX</span>=<span class="s">~/Games/ubi-prefixes/3539</span> <span class="k">UPLAY_ARGUMENTS</span>=<span class="s">"-upc_uplay_id 3539 …"</span>
 gamemoderun gamescope -W 3440 -H 1440 -r 144 --hdr-enabled -f -- mangohud \\
   <span class="v">~/.local/share/Steam/compatibilitytools.d/GE-Proton10-25/proton</span> run ACOrigins.exe /appid:3539</div>
@@ -77,15 +77,15 @@ gamemoderun gamescope -W 3440 -H 1440 -r 144 --hdr-enabled -f -- mangohud \\
     <div style="padding:${h.sel ? '10px 12px' : '0'};${h.sel ? 'background:var(--ink-3);border:1px solid var(--acc-line);border-radius:10px;margin-top:-6px' : ''}">
       <div class="row" style="gap:6px"><span class="mono" style="font-weight:600;color:${h.cur ? 'var(--acc-hi)' : 'var(--tx-1)'}">${h.r}</span>${h.cur ? '<span class="pill acc">Current</span>' : ''}${h.tag ? `<span class="pill ok">${ic('pin', 'xs')}${h.tag}</span>` : ''}<span class="grow"></span><span class="muted" style="font-size:11.5px">${h.when}</span></div>
       <div style="font-size:12.5px;margin-top:2px">${h.t}</div>
-      ${h.who || h.res || h.snap ? `<div class="row" style="gap:6px;margin-top:5px;flex-wrap:wrap">${h.who}${h.res ? `<span class="row" style="gap:4px;font-size:11.5px;color:${h.res[0] === 'ok' ? 'var(--tx-3)' : '#ff8b97'}">${ic(h.res[0] === 'ok' ? 'play' : 'circle-x', 'xs')}${h.res[1]}</span>` : ''}${h.snap ? `<span class="row muted" style="gap:4px;font-size:11.5px">${ic('hard-drive', 'xs')}${h.snap}</span>` : ''}</div>` : ''}
+      ${h.who || h.res || h.snap ? `<div class="row" style="gap:6px;margin-top:5px;flex-wrap:wrap">${h.who}${h.res ? `<span class="row" style="gap:4px;font-size:11.5px;color:${h.res[0] === 'ok' ? 'var(--tx-3)' : 'var(--bad)'}">${ic(h.res[0] === 'ok' ? 'play' : 'circle-x', 'xs')}${h.res[1]}</span>` : ''}${h.snap ? `<span class="row muted" style="gap:4px;font-size:11.5px">${ic('hard-drive', 'xs')}${h.snap}</span>` : ''}</div>` : ''}
       ${h.sel ? `<div style="margin-top:10px" class="col">
-        <div class="muted" style="font-size:11.5px;margin-bottom:6px">“r12 crashed at startup. Pin 10-25 and go back to fsync.” · <span class="mono">ubi config set</span> via token claude-code</div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:6px">“r12 crashed at startup. Pin 10-25 and go back to fsync.” · <span class="mono">quiver config set</span> via token claude-code</div>
         <div class="diff"><div class="h">r13 → current (r14 + unsaved)</div><div class="r">- wrappers.gamescope.enabled = false</div><div class="a">+ wrappers.gamescope.enabled = true</div><div class="a">+ wrappers.gamescope.args = "-W 3440 -H 1440 -r 144 --hdr-enabled -f"</div><div class="a">+ env.DXVK_HDR = "1"</div><div class="a">+ env.ENABLE_HDR_WSI = "1"</div></div>
         <div class="row" style="gap:6px;margin-top:10px"><span class="btn sm pri">${ic('rotate-ccw', 'sm')}Restore r13</span><span class="btn sm">${ic('play', 'sm')}Launch once</span><span class="iconbtn" style="width:26px;height:26px">${ic('copy', 'sm')}</span></div>
       </div>` : ''}
     </div></div>`).join('');
 
-  const hist = `<aside style="width:380px;flex:none;border-left:1px solid var(--line-1);background:rgba(10,12,16,.5);display:flex;flex-direction:column;min-height:0">
+  const hist = `<aside style="width:380px;flex:none;border-left:1px solid var(--line-1);background:color-mix(in srgb, var(--ink-0) 55%, transparent);display:flex;flex-direction:column;min-height:0">
     <div class="row" style="padding:14px 18px 10px;gap:8px">${ic('history')}<span style="font-weight:650">History</span><span class="badge">14 revisions</span><span class="grow"></span><div class="seg"><span class="on">All</span><span>${ic('pin', 'xs')}</span></div></div>
     <div class="row" style="padding:0 18px 12px;gap:6px"><span class="btn sm" style="flex:1">${ic('git-compare', 'sm')}Compare…</span><span class="btn sm" style="flex:1">${ic('rotate-ccw', 'sm')}Last known good</span></div>
     <div class="scroll" style="padding:4px 18px 18px;flex:1"><div class="tl-list">${H}</div></div>
@@ -105,7 +105,21 @@ function scrMods() {
   ].map(([n, s, sv, on, i]) => `<div style="flex:1;padding:12px 14px;border-radius:12px;border:1px solid ${on ? 'var(--acc-line)' : 'var(--line-2)'};background:${on ? 'var(--acc-soft)' : 'var(--ink-2)'};display:flex;gap:12px;align-items:center">
       <div style="width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:${on ? 'var(--acc)' : 'var(--ink-4)'};color:${on ? 'var(--acc-ink)' : 'var(--tx-2)'}">${ic(i, 'sm')}</div>
       <div class="col grow" style="gap:2px"><div class="row" style="gap:6px;font-weight:650">${n}${n === 'Vanilla' ? '<span class="pill mut">Default</span>' : ''}</div><div class="muted" style="font-size:11.5px">${s}</div></div>
-      <span class="row muted" style="gap:4px;font-size:11px">${ic(sv === 'Cloud saves' ? 'cloud' : 'hard-drive', 'xs')}${sv}</span></div>`).join('');
+      ${on ? '' : `<span class="row muted" style="gap:4px;font-size:11px">${ic(sv === 'Cloud saves' ? 'cloud' : 'hard-drive', 'xs')}${sv}</span>`}${on ? `<span class="muted">${ic('pin', 'xs')}</span><span class="iconbtn" style="width:26px;height:26px;background:var(--ink-4);color:var(--tx-1)">${ic('ellipsis', 'sm')}</span>` : ''}</div>`).join('');
+  const st = (cls, t) => `<span class="pill ${cls}">${t}</span>`;
+  const menu = `<div class="menu" style="left:calc(33.3% + 120px);top:62px">
+      <div class="row" style="padding:6px 10px 8px;gap:8px"><span style="font-weight:650">Visual overhaul</span><span class="mono muted" style="font-size:11px">id p7f3k2q</span></div>
+      <div class="sep"></div>
+      <div class="mi">${ic('pin', 'sm')}<span class="grow">Pin to Library</span>${st('ok', 'Pinned')}</div>
+      <div class="mi">${ic('app-window', 'sm')}<span class="grow col" style="gap:1px"><span>Create .desktop entry</span><span class="mono muted" style="font-size:10.5px">quiver-5059-p7f3k2q.desktop</span></span>${st('ok', 'Created')}</div>
+      <div class="mi on">${ic('gamepad-2', 'sm')}<span class="grow col" style="gap:1px"><span>Add to Steam</span><span class="muted" style="font-size:11px">Steam shows it after a restart</span></span>${st('warn', 'Restart Steam')}</div>
+      <div class="sep"></div>
+      <div class="mi">${ic('image', 'sm')}<span class="grow">Change art…</span><span class="muted" style="font-size:11px">custom</span></div>
+      <div class="mi">${ic('pencil', 'sm')}<span class="grow">Rename…</span></div>
+      <div class="mi">${ic('copy', 'sm')}<span class="grow">Duplicate</span></div>
+      <div class="sep"></div>
+      <div class="mi" style="color:var(--bad)">${ic('trash-2', 'sm')}<span class="grow">Delete profile…</span></div>
+    </div>`;
 
   const L = [
     { c: '#c38bff', n: 'ReShade 6.3.3 + “Aegean Light” preset', m: '41 files · 84 MB · archive', on: 1, note: `${ic('wand-sparkles', 'xs')}Adds <span class="mono">WINEDLLOVERRIDES=dxgi=n,b</span> to this profile` },
@@ -153,7 +167,7 @@ function scrMods() {
       </div></div>`;
 
   const inner = `<div class="body scroll col" style="gap:18px;padding-top:18px">
-    <div class="row" style="gap:12px">${prof}<div style="width:120px;align-self:stretch;border-radius:12px;border:1px dashed var(--line-2);display:grid;place-items:center;color:var(--tx-3)" class="col"><span class="row" style="gap:6px">${ic('plus', 'sm')}New profile</span></div></div>
+    <div class="row" style="gap:12px;position:relative;z-index:5">${prof}${menu}<div style="width:120px;align-self:stretch;border-radius:12px;border:1px dashed var(--line-2);display:grid;place-items:center;color:var(--tx-3)" class="col"><span class="row" style="gap:6px">${ic('plus', 'sm')}New profile</span></div></div>
     <div style="display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:20px">
       ${stack}
       <div class="col" style="gap:14px">${insp}
@@ -161,8 +175,9 @@ function scrMods() {
           <div class="row"><span style="font-weight:650">Profile settings</span></div>
           <div class="row" style="font-size:12.5px;gap:10px"><span class="dim grow">Saves</span><div class="seg"><span>Shared</span><span class="on">Own saves</span></div></div>
           <div class="row" style="font-size:12.5px;gap:10px"><span class="dim grow">Launch options</span><span class="muted">r14 + 1 override</span></div>
-          <div class="row" style="font-size:12.5px;gap:10px"><span class="dim grow">Cloud sync</span><span class="muted">Off for modded saves</span></div>
-          <div class="cli"><span class="p">$</span><span class="t">ubi play 5059 --profile "visual-overhaul"</span>${ic('copy', 'xs')}</div>
+          <div class="row" style="font-size:12.5px;gap:10px"><span class="dim grow">Sync these saves to the cloud</span><span class="toggle"></span></div>
+          <div class="muted" style="font-size:11.5px;margin-top:-4px">Off by default for modded profiles, so a broken mod can't overwrite your cloud saves.</div>
+          <div class="cli"><span class="p">$</span><span class="t">quiver play 5059 --profile "visual-overhaul"</span>${ic('copy', 'xs')}</div>
         </div>
       </div>
     </div></div>`;
@@ -174,10 +189,10 @@ function barsSvg(vals, w = 330, h = 96) {
   const max = 8, bw = (w - 24) / vals.length;
   const bars = vals.map((v, i) => {
     const bh = (v / max) * (h - 22);
-    return `<rect x="${24 + i * bw + 3}" y="${h - 16 - bh}" width="${bw - 6}" height="${Math.max(bh, 1.5)}" rx="2" fill="${i === vals.length - 1 ? '#7b93ff' : '#3a4566'}"/>`;
+    return `<rect x="${24 + i * bw + 3}" y="${h - 16 - bh}" width="${bw - 6}" height="${Math.max(bh, 1.5)}" rx="2" style="fill:${i === vals.length - 1 ? 'var(--acc)' : 'color-mix(in srgb, var(--acc) 35%, var(--ink-4))'}"/>`;
   }).join('');
-  const grid = [0, 4, 8].map((t) => { const y = h - 16 - (t / max) * (h - 22); return `<line x1="24" x2="${w}" y1="${y}" y2="${y}" stroke="#222836" stroke-width="1"/><text x="0" y="${y + 3.5}" fill="#727a8d" font-size="9.5" font-family="Geist, sans-serif">${t} h</text>`; }).join('');
-  const labels = `<text x="27" y="${h - 2}" fill="#727a8d" font-size="9.5" font-family="Geist, sans-serif">Aug 24</text><text x="${w}" y="${h - 2}" text-anchor="end" fill="#a8afbf" font-size="9.5" font-family="Geist, sans-serif">This week</text>`;
+  const grid = [0, 4, 8].map((t) => { const y = h - 16 - (t / max) * (h - 22); return `<line x1="24" x2="${w}" y1="${y}" y2="${y}" style="stroke:var(--line-1)" stroke-width="1"/><text x="0" y="${y + 3.5}" style="fill:var(--tx-3)" font-size="9.5" font-family="Geist, sans-serif">${t} h</text>`; }).join('');
+  const labels = `<text x="27" y="${h - 2}" style="fill:var(--tx-3)" font-size="9.5" font-family="Geist, sans-serif">Aug 24</text><text x="${w}" y="${h - 2}" text-anchor="end" style="fill:var(--tx-2)" font-size="9.5" font-family="Geist, sans-serif">This week</text>`;
   return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="display:block;height:auto">${grid}${bars}${labels}</svg>`;
 }
 
@@ -212,15 +227,15 @@ function scrSaves() {
   const inner = `<div class="body scroll col" style="gap:18px;padding-top:18px">
     <div style="display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:16px">
       <div class="card card-b col" style="gap:8px">
-        <div class="row"><span class="cap">Play time</span><span class="grow"></span><span class="pill future">Ubisoft history not wired</span></div>
-        <div class="row" style="gap:10px;align-items:baseline"><span style="font-size:24px;font-weight:700" class="num">87 h 12 m</span><span class="muted">· 6 h 05 m this week</span></div>
+        <div class="row"><span class="cap">Play time</span><span class="grow"></span><span class="pill future">Ubisoft total, not wired yet</span></div>
+        <div class="row" style="gap:10px;align-items:baseline"><span style="font-size:24px;font-weight:700" class="num">86 h</span><span class="muted">Ubisoft total · local 87 h 12 m in 41 sessions</span></div>
         ${barsSvg([2.1, 0, 3.4, 5.2, 0, 1.6, 6.8, 4.1, 0, 3.9, 7.4, 6.1])}
-        <div class="muted" style="font-size:11.5px">Weekly, from local session tracking</div>
+        <div class="muted" style="font-size:11.5px">Weekly detail from local sessions · 6 h 05 m this week</div>
       </div>
       <div class="card card-b col" style="gap:10px">
         <div class="row"><span class="cap">Achievements</span><span class="grow"></span><span class="pill future">UbiServices, later</span></div>
         <div class="row" style="gap:14px">
-          <svg width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="27" fill="none" stroke="#222836" stroke-width="7"/><circle cx="32" cy="32" r="27" fill="none" stroke="#7b93ff" stroke-width="7" stroke-linecap="round" stroke-dasharray="${(2 * Math.PI * 27 * 0.66).toFixed(1)} 400" transform="rotate(-90 32 32)"/><text x="32" y="37" text-anchor="middle" fill="#eceff5" font-size="14" font-weight="700" font-family="Geist, sans-serif">66%</text></svg>
+          <svg width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="27" fill="none" style="stroke:var(--ink-4)" stroke-width="7"/><circle cx="32" cy="32" r="27" fill="none" style="stroke:var(--acc)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${(2 * Math.PI * 27 * 0.66).toFixed(1)} 400" transform="rotate(-90 32 32)"/><text x="32" y="37" text-anchor="middle" style="fill:var(--tx-1)" font-size="14" font-weight="700" font-family="Geist, sans-serif">66%</text></svg>
           <div class="col" style="gap:2px"><span style="font-size:18px;font-weight:700" class="num">41 of 62</span><span class="muted" style="font-size:12px">Latest: Nov 14, 21:30</span></div>
         </div>
         <div class="row" style="gap:6px">${achTile('pyramid', 38)}${achTile('eye', 200)}${achTile('swords', 4)}${achTile('ship', 190)}${achTile('', 0, 1)}</div>

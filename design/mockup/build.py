@@ -37,9 +37,10 @@ for g in meta:
             a[kind] = data_uri(p)
     art[pid] = a
 
-js = '\n'.join(read(os.path.join(SRC, f)) for f in ['app1.js', 'app2.js', 'app3.js', 'page.js'])
+js = '\n'.join(read(os.path.join(SRC, f)) for f in ['app1.js', 'app2.js', 'app3.js', 'theme.js', 'page.js'])
 data = ('const GAMES = ' + json.dumps(games, ensure_ascii=False) + ';\n'
         'const ART = ' + json.dumps(art) + ';\n'
+        'const THEMES_TOML = ' + json.dumps({fn[:-5]: read(os.path.join(DESIGN, 'data', 'themes', fn)) for fn in sorted(os.listdir(os.path.join(DESIGN, 'data', 'themes'))) if fn.endswith('.toml')}, ensure_ascii=False) + ';\n'
         'const PROPOSAL_MD = ' + json.dumps(read(os.path.join(DESIGN, 'PROPOSAL.md')), ensure_ascii=False) + ';\n')
 
 page = read(os.path.join(SRC, 'page.html'))

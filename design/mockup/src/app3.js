@@ -8,20 +8,20 @@ function areaSvg(w = 930, h = 130) {
   }
   const max = 260, X = (i) => 34 + (i / (n - 1)) * (w - 34), Y = (v) => h - 16 - (v / max) * (h - 26);
   const line = (a) => a.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
-  const grid = [0, 100, 200].map((t) => `<line x1="34" x2="${w}" y1="${Y(t)}" y2="${Y(t)}" stroke="#222836"/><text x="0" y="${Y(t) + 3.5}" fill="#727a8d" font-size="9.5" font-family="Geist, sans-serif">${t}</text>`).join('');
+  const grid = [0, 100, 200].map((t) => `<line x1="34" x2="${w}" y1="${Y(t)}" y2="${Y(t)}" style="stroke:var(--line-1)"/><text x="0" y="${Y(t) + 3.5}" style="fill:var(--tx-3)" font-size="9.5" font-family="Geist, sans-serif">${t}</text>`).join('');
   return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="display:block;height:auto">
     <defs><linearGradient id="gA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7b93ff" stop-opacity=".45"/><stop offset="1" stop-color="#7b93ff" stop-opacity="0"/></linearGradient></defs>
     ${grid}<path d="${line(net)}L${X(n - 1)},${Y(0)}L${X(0)},${Y(0)}Z" fill="url(#gA)"/><path d="${line(net)}" fill="none" stroke="#7b93ff" stroke-width="1.6"/>
     <path d="${line(disk)}" fill="none" stroke="#4cc9c0" stroke-width="1.3" stroke-dasharray="3 3"/>
     <circle cx="${X(n - 1)}" cy="${Y(net[n - 1])}" r="3.5" fill="#7b93ff" stroke="#0f1218" stroke-width="2"/>
-    <text x="36" y="${h - 2}" fill="#727a8d" font-size="9.5" font-family="Geist, sans-serif">5 min ago</text><text x="${w}" y="${h - 2}" text-anchor="end" fill="#727a8d" font-size="9.5" font-family="Geist, sans-serif">now</text></svg>`;
+    <text x="36" y="${h - 2}" style="fill:var(--tx-3)" font-size="9.5" font-family="Geist, sans-serif">5 min ago</text><text x="${w}" y="${h - 2}" text-anchor="end" style="fill:var(--tx-3)" font-size="9.5" font-family="Geist, sans-serif">now</text></svg>`;
 }
 
 function scrDownloads() {
   const q = [
     [5059, 'Update 1.5.6 → 1.6.1', '4.1 GB', '<span class="who sys">' + ic('cog', 'xs') + 'Auto-update</span>', 'Waits for 02:00 window'],
     [5595, 'Install', '6.2 GB', '<span class="who agent">' + ic('bot', 'xs') + 'claude-code</span>', '“install Trackmania for tonight”'],
-    [2688, 'Verify files', '47.6 GB to read', '<span class="who term">' + ic('square-terminal', 'xs') + 'You · CLI</span>', 'ubi verify 2688'],
+    [2688, 'Verify files', '47.6 GB to read', '<span class="who term">' + ic('square-terminal', 'xs') + 'You · CLI</span>', 'quiver verify 2688'],
   ].map(([id, what, size, who, note], i) => `<div class="row" style="gap:14px;padding:12px 16px;border-top:1px solid var(--line-1)">
       <span class="muted">${ic('grip-vertical', 'sm')}</span><span class="mono muted" style="width:14px">${i + 1}</span>
       <img src="${A(id, 'thumb')}" alt="" style="width:38px;height:44px;border-radius:6px;object-fit:cover">
@@ -47,7 +47,7 @@ function scrDownloads() {
       <div class="row" style="height:10px;border-radius:5px;overflow:hidden;background:var(--ink-4);gap:1px">${segs.map(([, gb, c]) => `<i style="display:block;height:100%;width:${(gb / total) * 100}%;background:${c}"></i>`).join('')}</div></div>
     <div class="col" style="gap:5px;font-size:12px">${segs.map(([id, gb, c]) => `<div class="row" style="gap:8px"><i style="width:8px;height:8px;border-radius:2px;background:${c};display:block"></i><span class="dim grow">${id ? sn(id) : '3 others + prefixes'}</span><span class="num muted">${gb} GB</span></div>`).join('')}</div>
     <div class="sep"></div>
-    <div class="row" style="font-size:12px"><span class="mono dim">/mnt/hdd/ubi</span><span class="muted">· sda1</span><span class="grow"></span><span class="num muted">3.1 TB free</span></div>
+    <div class="row" style="font-size:12px"><span class="mono dim">/mnt/hdd/games</span><span class="muted">· sda1</span><span class="grow"></span><span class="num muted">3.1 TB free</span></div>
     <div class="bar thick"><i style="width:22%;background:var(--tx-4)"></i></div>
   </div>`;
 
@@ -56,8 +56,9 @@ function scrDownloads() {
     <div class="row"><span class="dim grow">Speed limit</span><span class="field" style="height:28px;width:120px">Unlimited${ic('chevron-down')}</span></div>
     <div class="row"><span class="dim grow">Pause while a game runs</span><span class="toggle on"></span></div>
     <div class="row"><span class="dim grow">Updates install</span><span class="field" style="height:28px;width:140px;white-space:nowrap">02:00 – 07:00${ic('chevron-down')}</span></div>
-    <div class="row"><span class="dim grow">Snapshot prefix before updates</span><span class="toggle on"></span></div>
-    <div class="cli" style="margin-top:4px"><span class="p">$</span><span class="t">ubi jobs --watch</span>${ic('copy', 'xs')}</div>
+    <div class="row"><span class="dim grow">Snapshot prefix first</span><span class="muted" style="font-size:11.5px;margin-right:8px">btrfs/xfs: auto</span><span class="toggle on"></span></div>
+    <div class="row"><span class="dim grow">Offer Steam shortcut on install</span><span class="toggle on"></span></div>
+    <div class="cli" style="margin-top:4px"><span class="p">$</span><span class="t">quiver jobs --watch</span>${ic('copy', 'xs')}</div>
   </div>`;
 
   return `<div class="app">${topbar('dl')}<div class="scroll" style="flex:1;padding:24px 32px">
@@ -66,7 +67,7 @@ function scrDownloads() {
       <div class="col" style="gap:20px">
         <div class="card" style="overflow:hidden;position:relative">
           <img src="${A(6100, 'hero')}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:60% 30%;opacity:.38">
-          <div style="position:absolute;inset:0;background:linear-gradient(90deg,var(--ink-2) 30%,rgba(20,24,33,.55))"></div>
+          <div style="position:absolute;inset:0;background:linear-gradient(90deg,var(--ink-2) 30%,color-mix(in srgb, var(--ink-2) 55%, transparent))"></div>
           <div style="position:relative;padding:20px 22px;display:flex;flex-direction:column;gap:14px">
             <div class="row" style="gap:16px">
               <img src="${A(6100, 'logo')}" alt="Assassin's Creed Mirage" style="height:64px;max-width:200px;object-fit:contain;object-position:left">
@@ -75,10 +76,17 @@ function scrDownloads() {
               <span class="btn">${ic('pause', 'sm')}Pause</span><span class="iconbtn bd">${ic('x', 'sm')}</span>
             </div>
             <div class="bar thick" style="height:8px"><i style="width:64%;background:linear-gradient(90deg,#6f88ff,#a6b5ff)"></i></div>
-            <div class="row" style="gap:6px;font-size:11.5px">${[['Manifest', 'ok'], ['Download slices · 2,317 of 3,604', 'cur'], ['Verify', ''], ['Register and create prefix', '']].map(([s, st], i) => `${i ? `<span class="muted">${ic('chevron-right', 'xs')}</span>` : ''}<span class="row" style="gap:5px;color:${st === 'ok' ? 'var(--ok)' : st === 'cur' ? 'var(--acc-hi)' : 'var(--tx-3)'}">${ic(st === 'ok' ? 'circle-check' : st === 'cur' ? 'loader' : 'circle', 'xs')}${s}</span>`).join('')}</div>
-            <div style="background:rgba(10,12,16,.55);border:1px solid var(--line-1);border-radius:10px;padding:10px 12px 6px">
+            <div class="row" style="gap:6px;font-size:11.5px">${[['Manifest', 'ok'], ['Download slices · 2,317 of 3,604', 'cur'], ['Verify', ''], ['Register, create prefix, add shortcuts', '']].map(([s, st], i) => `${i ? `<span class="muted">${ic('chevron-right', 'xs')}</span>` : ''}<span class="row" style="gap:5px;color:${st === 'ok' ? 'var(--ok)' : st === 'cur' ? 'var(--acc-hi)' : 'var(--tx-3)'}">${ic(st === 'ok' ? 'circle-check' : st === 'cur' ? 'loader' : 'circle', 'xs')}${s}</span>`).join('')}</div>
+            <div style="background:color-mix(in srgb, var(--ink-0) 60%, transparent);border:1px solid var(--line-1);border-radius:10px;padding:10px 12px 6px">
               <div class="row" style="gap:14px;font-size:11.5px;margin-bottom:4px"><span class="cap">Throughput, MB/s</span><span class="grow"></span><span class="row" style="gap:5px"><i style="width:12px;height:2px;background:#7b93ff;display:block"></i>Network</span><span class="row" style="gap:5px"><i style="width:12px;height:0;border-top:2px dashed #4cc9c0;display:block"></i>Disk write</span></div>
               ${areaSvg()}
+            </div>
+            <div class="row" style="gap:16px;font-size:12.5px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb, var(--ink-0) 60%, transparent);border:1px solid var(--line-1)">
+              <span class="cap">When it finishes</span>
+              <span class="row" style="gap:8px"><span class="check on">${ic('check')}</span>Add to Steam</span>
+              <span class="row" style="gap:8px"><span class="check on">${ic('check')}</span>Create .desktop entry</span>
+              <span class="row" style="gap:8px"><span class="check">${''}</span>Start the game</span>
+              <span class="grow"></span><span class="muted" style="font-size:11.5px">Steam lists new shortcuts after it restarts</span>
             </div>
           </div>
         </div>
@@ -91,11 +99,13 @@ function scrDownloads() {
 
 /* ---------- Global settings ---------- */
 function setNav(on) {
-  const items = [['user', 'Account'], ['hard-drive', 'Library and storage'], ['download', 'Downloads'], ['cpu', 'Compatibility'], ['sliders-horizontal', 'Launch defaults'], ['cloud', 'Cloud saves'], ['layers', 'Mods'], ['palette', 'Appearance'], ['bell', 'Notifications'], ['keyboard', 'Keyboard and controller'], ['bot', 'Automation and CLI'], ['stethoscope', 'Diagnostics'], ['info', 'About']];
+  const items = [['users', 'Accounts'], ['hard-drive', 'Library and storage'], ['download', 'Downloads'], ['cpu', 'Compatibility'], ['sliders-horizontal', 'Launch defaults'], ['cloud', 'Cloud saves'], ['layers', 'Mods'], ['palette', 'Appearance'], ['bell', 'Notifications'], ['keyboard', 'Keyboard and controller'], ['bot', 'Automation and CLI'], ['stethoscope', 'Diagnostics'], ['info', 'About']];
   return `<aside class="side" style="width:250px;padding:18px 10px">
     <div style="font-family:var(--f-disp);font-stretch:110%;font-weight:700;font-size:20px;padding:0 10px 12px">Settings</div>
     <div class="field" style="margin:0 6px 10px">${ic('search')}<span class="muted">Find a setting</span></div>
     ${items.map(([i, t]) => `<div class="gl${t === on ? ' on' : ''}" style="height:32px">${ic(i, 'sm')}<span class="n">${t}</span></div>`).join('')}
+    <div class="grow"></div>
+    <div class="muted" style="font-size:11px;line-height:1.45;padding:12px 10px 0">Quiver 0.9 · a third-party launcher for your Ubisoft library. Not affiliated with or endorsed by Ubisoft.</div>
   </aside>`;
 }
 
@@ -103,7 +113,7 @@ function scrSettings(section = 'Compatibility') {
   let body = '';
   if (section === 'Compatibility') {
     const rt = [
-      ['GE-Proton10-26', 'Managed by ubi', 'Nov 13', '2 games', '612 MB', 'new'],
+      ['GE-Proton10-26', 'Managed by Quiver', 'Nov 13', '2 games', '612 MB', 'new'],
       ['GE-Proton10-25', 'Steam compatibilitytools.d', 'Oct 28', '7 games', '598 MB', ''],
       ['Proton 10.0-3', 'Steam', 'Oct 2', '0 games', '1.1 GB', ''],
       ['Proton Experimental', 'Steam', 'Nov 12', '1 game', '1.2 GB', ''],
@@ -115,22 +125,22 @@ function scrSettings(section = 'Compatibility') {
       ${section_('Defaults for games', '', [
         frow('Default build', `<span class="field" style="width:260px">Newest GE-Proton<span class="grow"></span>${ic('chevron-down')}</span><span class="muted" style="font-size:12px">7 games follow this, 3 are pinned</span>`),
         frow('When a newer build appears', `<div class="seg"><span>Switch games that follow newest</span><span class="on">Ask me</span><span>Do nothing</span></div>`),
-        frow('Before switching builds', `<span class="check on">${ic('check')}</span><span class="dim">Snapshot the prefix (reflink copy, near-zero space on btrfs/xfs)</span>`),
+        frow('Before switching builds', `<span class="check on">${ic('check')}</span><span class="dim">Snapshot the prefix</span><span class="pill ok">Automatic · /mnt/hdd is btrfs</span><span class="muted" style="font-size:12px">ext4 folders: off</span><span class="btn sm ghost">Turn on for ext4</span>`, { help: 'Reflink copies cost almost nothing on btrfs and xfs; on ext4 each is a 1–3 GB copy' }),
         frow('New prefixes', `<div class="seg"><span class="on">Fresh per game</span><span>Clone a template</span></div><span class="muted" style="font-size:12px">~/Games/ubi-prefixes/&lt;product id&gt;</span>`),
       ].join(''))}
       <div class="card"><div class="card-h"><h4>Tools found on this system</h4><span class="muted" style="font-size:12px">Used by launch options; missing ones are greyed out there</span></div>
         <table class="tbl"><tbody>${[['gamescope', '3.16.4', '/usr/bin/gamescope', 1], ['MangoHud', '0.8.1', '/usr/bin/mangohud', 1], ['GameMode', '1.8.2', '/usr/bin/gamemoderun', 1], ['NTSync', 'kernel 7.2', '/dev/ntsync', 1], ['fuse-overlayfs', 'not installed', 'kernel overlayfs in user namespace is used instead', 0]].map(([n, v, p, ok]) => `<tr><td style="width:180px"><span class="row" style="gap:8px"><span class="dot ${ok ? '' : 'off'}"></span><b style="font-weight:600">${n}</b></span></td><td class="dim num" style="width:140px">${v}</td><td class="mono muted">${p}</td></tr>`).join('')}</tbody></table></div>
     </div>`;
   } else if (section === 'Automation and CLI') {
-    const pol = [['Read library and status', 'Allow', 'Allow'], ['Change launch options', 'Allow', 'Allow'], ['Launch and stop games', 'Allow', 'Allow'], ['Install and update', 'Allow', 'Allow'], ['Restore saves or settings', 'Allow', 'Ask'], ['Uninstall, delete prefixes or saves', 'Allow', 'Ask'], ['Sign out, change account', 'Ask', 'Deny']];
-    const sel = (v) => `<span class="field" style="height:26px;width:96px;color:${v === 'Ask' ? 'var(--warn)' : v === 'Deny' ? '#ff8b97' : 'var(--tx-1)'}">${v}<span class="grow"></span>${ic('chevron-down')}</span>`;
+    const pol = [['Read library and status', 'Allow', 'Allow'], ['Change launch options, mod profiles, exports', 'Allow', 'Allow'], ['Launch and stop games', 'Allow', 'Allow'], ['Install and update', 'Allow', 'Allow'], ['Restore saves or settings', 'Allow', 'Ask'], ['Uninstall, delete prefixes, profiles or saves', 'Allow', 'Ask'], ['Sign in, sign out, add or remove accounts', 'Ask', 'Deny']];
+    const sel = (v) => `<span class="field" style="height:26px;width:96px;color:${v === 'Ask' ? 'var(--warn)' : v === 'Deny' ? 'var(--bad)' : 'var(--tx-1)'}">${v}<span class="grow"></span>${ic('chevron-down')}</span>`;
     body = `<div class="col" style="gap:18px;max-width:900px">
-      <div><div style="font-size:20px;font-weight:700">Automation and CLI</div><div class="muted">The app, the <span class="mono">ubi</span> command and agents all talk to the same background service.</div></div>
+      <div><div style="font-size:20px;font-weight:700">Automation and CLI</div><div class="muted">The app, the <span class="mono">quiver</span> command and agents all talk to the same background service.</div></div>
       <div class="card card-b col" style="gap:10px">
-        <div class="row" style="gap:10px"><span class="dot"></span><span style="font-weight:650">ubid is running</span><span class="muted mono" style="font-size:11.5px">pid 4121 · v0.9.0 · up 3 days</span><span class="grow"></span><span class="btn sm">Restart</span></div>
-        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">Socket</span><span class="mono dim">$XDG_RUNTIME_DIR/ubi/ubid.sock</span></div>
-        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">Start at login</span><span class="toggle on"></span><span class="muted mono" style="font-size:11.5px">systemd --user ubid.service</span></div>
-        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">MCP server for agents</span><span class="toggle on"></span><span class="muted mono" style="font-size:11.5px">ubi mcp</span></div>
+        <div class="row" style="gap:10px"><span class="dot"></span><span style="font-weight:650">quiverd is running</span><span class="muted mono" style="font-size:11.5px">pid 4121 · v0.9.0 · up 3 days</span><span class="grow"></span><span class="btn sm">Restart</span></div>
+        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">Socket</span><span class="mono dim">$XDG_RUNTIME_DIR/quiver/quiverd.sock</span></div>
+        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">Start at login</span><span class="toggle on"></span><span class="muted mono" style="font-size:11.5px">systemd --user quiverd.service</span></div>
+        <div class="row" style="gap:10px;font-size:12.5px"><span class="dim" style="width:180px">MCP server for agents</span><span class="toggle on"></span><span class="muted mono" style="font-size:11.5px">quiver mcp</span></div>
       </div>
       <div class="card"><div class="card-h"><h4>Access tokens</h4><span class="grow"></span><span class="btn sm">${ic('plus', 'sm')}New token</span></div>
         <table class="tbl"><tbody>
@@ -138,7 +148,41 @@ function scrSettings(section = 'Compatibility') {
           <tr><td><span class="who sys">${ic('house', 'xs')}home-assistant</span></td><td class="dim">Read only</td><td class="dim">Used yesterday</td><td style="text-align:right"><span class="btn sm ghost">Revoke</span></td></tr>
         </tbody></table></div>
       <div class="card"><div class="card-h"><h4>What each client may do</h4><span class="muted" style="font-size:12px">The app always may; it asks you directly</span></div>
-        <table class="tbl"><thead><tr><th>Action</th><th>ubi CLI (you)</th><th>Agents (tokens)</th></tr></thead><tbody>${pol.map(([a, c, g]) => `<tr><td>${a}</td><td>${sel(c)}</td><td>${sel(g)}</td></tr>`).join('')}</tbody></table></div>
+        <table class="tbl"><thead><tr><th>Action</th><th>quiver CLI (you)</th><th>Agents (tokens)</th></tr></thead><tbody>${pol.map(([a, c, g]) => `<tr><td>${a}</td><td>${sel(c)}</td><td>${sel(g)}</td></tr>`).join('')}</tbody></table></div>
+    </div>`;
+  } else if (section === 'Accounts') {
+    const acct = (av, grad, name, mail, games, status, dot, extra) => `<div class="card card-b row" style="gap:14px;align-items:flex-start">
+        <div class="avatar" style="width:40px;height:40px;font-size:14px;background:${grad}">${av}</div>
+        <div class="col grow" style="gap:4px"><div class="row" style="gap:8px"><span style="font-weight:650;font-size:14px">${name}</span>${extra}</div><span class="muted" style="font-size:12px">${mail} · ${games}</span>
+          <span class="row" style="gap:7px;font-size:12px;margin-top:4px"><span class="dot ${dot}"></span><span class="dim">${status}</span></span></div>
+        <span class="btn sm ghost">Sign out</span></div>`;
+    body = `<div class="col" style="gap:18px;max-width:900px">
+      <div class="row"><div class="col grow"><div style="font-size:20px;font-weight:700">Accounts</div><div class="muted">Games from every signed-in account show up in one library.</div></div><span class="btn">${ic('plus', 'sm')}Add account</span></div>
+      ${acct('AG', 'linear-gradient(135deg,#3b4a7a,#6a5aa8)', 'ajg', 'a•••@g•••.com', '23 games', 'Live session in quiverd · ticket refreshes in 41 min', '', '<span class="pill acc">Default</span>')}
+      ${acct('F', 'linear-gradient(135deg,#2f6b5e,#4a9a83)', 'Family', 'f•••@g•••.com', '6 games, 2 only on this account', 'Signed in · connects when one of its games starts', 'off', '')}
+      <div class="row" style="gap:10px;padding:12px 14px;border-radius:10px;background:var(--warn-soft);font-size:12.5px;align-items:flex-start">${ic('triangle-alert', 'sm')}<span style="color:var(--warn)">Ubisoft allows one live session per account. Signing in to Ubisoft Connect elsewhere with the same account ends Quiver's session for it, and its games won't start here until you sign in again.</span></div>
+      <div class="card"><div class="card-h"><h4>Who owns what</h4><span class="muted" style="font-size:12px">Showing the 3 games that involve Family</span></div>
+        <table class="tbl"><thead><tr><th>Game</th><th>Owned by</th><th>Launch with</th></tr></thead><tbody>
+          ${[[3539, 'ajg, Family', 'ajg (default)'], [5408, 'Family', 'Family'], [5277, 'Family', 'Family']].map(([id, o, l]) => `<tr><td><span class="row" style="gap:10px"><img src="${A(id, 'thumb')}" alt="" style="width:22px;height:26px;border-radius:4px;object-fit:cover">${nm(id)}</span></td><td class="dim">${o}</td><td><span class="field" style="height:26px;width:150px">${l}<span class="grow"></span>${ic('chevron-down')}</span></td></tr>`).join('')}
+        </tbody></table></div>
+    </div>`;
+  } else if (section === 'Appearance') {
+    const om = ['#0a1713', '#142620', '#203b31', '#8bcbb1', '#dfede5', '#d88d91', '#c5cc91'];
+    body = `<div class="col" style="gap:18px;max-width:900px">
+      <div><div style="font-size:20px;font-weight:700">Appearance</div><div class="muted">Colors, density, art and button hints.</div></div>
+      ${section_('Theme', '', [
+        frow('Colors', `<div class="seg"><span class="on">Follow Omarchy</span><span>Quiver dark</span><span>Quiver light</span></div>`),
+        frow('Current Omarchy theme', `<span class="row" style="gap:0;border-radius:6px;overflow:hidden">${om.map((c) => `<i style="width:18px;height:22px;background:${c};display:block"></i>`).join('')}</span><span style="font-weight:600">jade-horse</span><span class="pill mut">dark</span>`, { help: 'Restyles when theme.generation changes' }),
+        frow('Density', `<div class="seg"><span class="on">Comfortable</span><span>Compact</span></div>`),
+      ].join(''))}
+      ${section_('Art', 'Ubisoft art is the default', [
+        frow('Sources', `<span class="check on">${ic('check')}</span>Ubisoft<span class="check on" style="margin-left:12px">${ic('check')}</span>SteamGridDB<span class="pill ok">API key set</span><span class="check on" style="margin-left:12px">${ic('check')}</span>My own images`),
+        frow('Custom art', `<span class="dim">2 games, 1 pinned profile</span><span class="btn sm ghost">Reset all to Ubisoft</span>`),
+      ].join(''))}
+      ${section_('Controller', '', [
+        frow('Button hints', `<div class="seg"><span class="on">When I use a gamepad</span><span>Always</span><span>Never</span></div>`),
+        frow('Guide button', `<span class="dim">Not used by Quiver. hyprpad owns guide chords.</span><span class="pill ok">hyprpad detected</span>`),
+      ].join(''))}
     </div>`;
   } else {
     body = `<div class="col" style="gap:18px;max-width:900px">
@@ -146,12 +190,12 @@ function scrSettings(section = 'Compatibility') {
       <div class="card"><div class="card-h"><h4>Library folders</h4><span class="grow"></span><span class="btn sm">${ic('plus', 'sm')}Add folder</span></div>
         <table class="tbl"><tbody>
           <tr><td><div class="row" style="gap:8px"><span class="mono" style="font-weight:600">~/Games/ubi-library</span><span class="pill acc">Default</span></div><div class="muted" style="font-size:11.5px">nvme0 · ext4 · reflink: no</div></td><td style="width:260px"><div class="bar thick"><i style="width:39%"></i></div><div class="muted num" style="font-size:11.5px;margin-top:4px">790 GB used · 1.21 TB free</div></td><td class="dim">9 games</td></tr>
-          <tr><td><div class="mono" style="font-weight:600">/mnt/hdd/ubi</div><div class="muted" style="font-size:11.5px">sda1 · btrfs · reflink: yes</div></td><td><div class="bar thick"><i style="width:22%;background:var(--tx-3)"></i></div><div class="muted num" style="font-size:11.5px;margin-top:4px">880 GB used · 3.1 TB free</div></td><td class="dim">1 game</td></tr>
+          <tr><td><div class="mono" style="font-weight:600">/mnt/hdd/games</div><div class="muted" style="font-size:11.5px">sda1 · btrfs · reflink: yes</div></td><td><div class="bar thick"><i style="width:22%;background:var(--tx-3)"></i></div><div class="muted num" style="font-size:11.5px;margin-top:4px">880 GB used · 3.1 TB free</div></td><td class="dim">1 game</td></tr>
         </tbody></table></div>
       ${section_('Other locations', '', [
         frow('Prefixes', `<span class="field mono grow">~/Games/ubi-prefixes</span><span class="btn sm">Move…</span>`),
         frow('Save backups', `<span class="field mono grow">~/.local/share/ubisoft-linux/backups</span><span class="muted num">412 MB</span>`),
-        frow('Art cache', `<span class="field mono grow">~/.cache/ubi/art</span><span class="muted num">58 MB</span><span class="btn sm ghost">Clear</span>`),
+        frow('Art cache', `<span class="field mono grow">~/.cache/quiver/art</span><span class="muted num">58 MB</span><span class="btn sm ghost">Clear</span>`),
         frow('Ubisoft SDK files', `<span class="field mono grow">Fetched from Ubisoft · uplay_r1 4.2, upc_r2 1.1</span>`),
       ].join(''))}
     </div>`;
@@ -162,15 +206,15 @@ const section_ = (t, s, r) => section(t, s, r);
 
 /* ---------- Sign in with 2FA ---------- */
 function scrSignin() {
-  const mosaic = ORDER.concat(ORDER).slice(0, 40).map((id) => `<img src="${A(id, 'thumb')}" alt="" style="width:100%;aspect-ratio:240/280;object-fit:cover;border-radius:10px">`).join('');
+  const mosaic = ORDER.filter((x) => typeof x === 'number').concat(ORDER.filter((x) => typeof x === 'number')).slice(0, 40).map((id) => `<img src="${A(id, 'thumb')}" alt="" style="width:100%;aspect-ratio:240/280;object-fit:cover;border-radius:10px">`).join('');
   const digit = (d, cur) => `<div style="width:52px;height:62px;border-radius:10px;display:grid;place-items:center;font-size:26px;font-weight:650;font-family:var(--f-mono);background:var(--ink-1);border:1px solid ${cur ? 'var(--acc)' : 'var(--line-2)'};${cur ? 'box-shadow:0 0 0 4px var(--acc-soft)' : ''}">${d}${cur ? '<span style="width:2px;height:28px;background:var(--acc);display:block"></span>' : ''}</div>`;
   return `<div class="app" style="background:var(--ink-0)">
     <div style="position:absolute;inset:-40px;display:grid;grid-template-columns:repeat(10,1fr);gap:14px;opacity:.5">${mosaic}</div>
-    <div style="position:absolute;inset:0;background:radial-gradient(ellipse 60% 70% at 50% 50%,rgba(10,12,16,.82),rgba(10,12,16,.96) 70%)"></div>
+    <div style="position:absolute;inset:0;background:radial-gradient(ellipse 60% 70% at 50% 50%,color-mix(in srgb, var(--ink-0) 84%, transparent),color-mix(in srgb, var(--ink-0) 96%, transparent) 70%)"></div>
     <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:480px;display:flex;flex-direction:column;gap:18px">
-      <div class="row" style="gap:12px;justify-content:center"><div class="mark" style="transform:scale(1.3)"><i></i><i></i><i></i></div><span style="font-family:var(--f-disp);font-stretch:115%;font-weight:800;font-size:22px">ubi</span></div>
-      <div class="row" style="gap:10px;padding:10px 14px;border-radius:10px;background:var(--warn-soft);border:1px solid rgba(240,180,76,.3);font-size:12.5px;color:var(--warn)">${ic('clock-alert', 'sm')}<span>Your Ubisoft session expired. Downloads are paused until you sign in.</span></div>
-      <div class="card" style="padding:28px 30px;display:flex;flex-direction:column;gap:20px;background:rgba(20,24,33,.92);box-shadow:0 30px 80px rgba(0,0,0,.6)">
+      <div class="row" style="gap:12px;justify-content:center"><div class="mark" style="transform:scale(1.3)"><i></i><i></i><i></i></div><span style="font-family:var(--f-disp);font-stretch:115%;font-weight:800;font-size:22px">Quiver</span></div>
+      <div class="row" style="gap:10px;padding:10px 14px;border-radius:10px;background:var(--warn-soft);border:1px solid rgba(240,180,76,.3);font-size:12.5px;color:var(--warn)">${ic('clock-alert', 'sm')}<span>The Ubisoft session for ajg expired. Its downloads are paused; Family is still signed in.</span></div>
+      <div class="card" style="padding:28px 30px;display:flex;flex-direction:column;gap:20px;background:color-mix(in srgb, var(--ink-2) 94%, transparent);box-shadow:0 30px 80px rgba(0,0,0,.6)">
         <div class="row" style="gap:8px;font-size:12px">
           <span class="row" style="gap:6px;color:var(--ok)">${ic('circle-check', 'sm')}Account</span><span class="grow" style="height:1px;background:var(--line-2)"></span>
           <span class="row" style="gap:6px;color:var(--acc-hi);font-weight:600"><span style="width:16px;height:16px;border-radius:50%;background:var(--acc);color:var(--acc-ink);display:grid;place-items:center;font-size:10px;font-weight:800">2</span>Two-step verification</span><span class="grow" style="height:1px;background:var(--line-2)"></span>
@@ -183,7 +227,8 @@ function scrSignin() {
         <div class="row" style="gap:16px;font-size:12.5px;justify-content:center;color:var(--acc-hi)"><span>Email me a code instead</span><span class="muted">·</span><span>Use a backup code</span></div>
       </div>
       <div class="row" style="gap:10px;justify-content:center;font-size:12px" class="muted"><span class="muted">${ic('key-round', 'xs')}</span><span class="muted">Session ticket goes to the system keyring. Your password is never stored.</span></div>
-      <div class="cli" style="align-self:center;width:300px"><span class="p">$</span><span class="t">ubi login</span><span class="muted" style="font-size:11px">same service</span></div>
+      <div class="muted" style="text-align:center;font-size:11.5px">Quiver is a third-party launcher for your Ubisoft library. Not affiliated with or endorsed by Ubisoft.</div>
+      <div class="cli" style="align-self:center;width:300px"><span class="p">$</span><span class="t">quiver login</span><span class="muted" style="font-size:11px">same service</span></div>
     </div>
   </div>`;
 }
@@ -214,14 +259,14 @@ function scrActivity() {
         <div class="dim" style="font-size:12.5px">Reason given: “r12 crashed at startup. Pin 10-25 and go back to fsync.”</div>
         <div class="diff" style="max-width:560px"><div class="r">- runtime.proton = "newest"</div><div class="a">+ runtime.proton = "GE-Proton10-25"</div><div class="r">- runtime.sync = "ntsync"</div><div class="a">+ runtime.sync = "fsync"</div></div>
         <div class="code" style="max-width:560px"><span class="c"># ran via token claude-code · pid 88213 · kitty</span>
-ubi config set 3539 runtime.proton=GE-Proton10-25 runtime.sync=fsync \\
+quiver config set 3539 runtime.proton=GE-Proton10-25 runtime.sync=fsync \\
   --reason <span class="s">"r12 crashed at startup. Pin 10-25 and go back to fsync."</span></div></div>`, true, `<span class="btn sm">${ic('undo-2', 'sm')}Undo</span>` + copy)
-    + ev('22:40', W.cli, `Pulled cloud saves for <b>AC Origins</b> · 5 slots`, 3539, `<div class="mono muted" style="font-size:11.5px">ubi saves pull 3539</div>`, false, copy)
+    + ev('22:40', W.cli, `Pulled cloud saves for <b>AC Origins</b> · 5 slots`, 3539, `<div class="mono muted" style="font-size:11.5px">quiver saves pull 3539</div>`, false, copy)
     + ev('02:00', W.sys, `Checked 9 installed games for updates · 1 found`, 0, '', false, '');
 
   const clients = [
-    ['gui', 'ubi app', 'This window', 'dot'],
-    ['cli', 'ubi jobs --watch', 'kitty · pid 90112', 'dot'],
+    ['gui', 'Quiver app', 'This window', 'dot'],
+    ['cli', 'quiver jobs --watch', 'kitty · pid 90112', 'dot'],
     ['agent', 'claude-code', 'MCP · idle 6 min', 'dot'],
   ].map(([w, n, s]) => `<div class="row" style="gap:10px;padding:8px 0"><span class="dot" style="background:var(--who-${w})"></span><div class="col grow" style="gap:1px"><span class="${w === 'cli' ? 'mono' : ''}" style="font-weight:600;font-size:12.5px">${n}</span><span class="muted" style="font-size:11.5px">${s}</span></div></div>`).join('');
 
@@ -250,7 +295,7 @@ ubi config set 3539 runtime.proton=GE-Proton10-25 runtime.sync=fsync \\
       </div>
       <div class="sep"></div>
       <div class="col" style="gap:8px;font-size:12px"><span class="cap">Undo works for</span><span class="dim">Launch options, mod profiles, collections, cloud-save choices and settings. Installs and uninstalls are not undoable; agents need your approval for those.</span></div>
-      <div class="cli"><span class="p">$</span><span class="t">ubi activity --actor agent</span>${ic('copy', 'xs')}</div>
+      <div class="cli"><span class="p">$</span><span class="t">quiver activity --actor agent</span>${ic('copy', 'xs')}</div>
     </aside></div></div>`;
 }
 
@@ -299,7 +344,7 @@ function scrImport() {
       </div>
       <div class="row" style="padding:14px 40px;border-top:1px solid var(--line-1);gap:12px;background:var(--ink-0)">
         <span class="dim">4 games · 2 in place, 1 moved (47.6 GB), 1 copied (40.1 GB) · then verify</span><span class="grow"></span>
-        <span class="cli" style="width:300px"><span class="p">$</span><span class="t">ubi import --from lutris --dry-run</span></span>
+        <span class="cli" style="width:300px"><span class="p">$</span><span class="t">quiver import --from lutris --dry-run</span></span>
         <span class="btn">Back</span><span class="btn pri">Import 4 games</span></div>
     </div></div>`;
 }
@@ -341,17 +386,17 @@ function scrPalette() {
     <div class="row" style="gap:10px;padding:14px 16px;border-bottom:1px solid var(--line-1)">${ic('search')}<span style="font-size:15px">origins proton<span style="display:inline-block;width:2px;height:18px;background:var(--acc);vertical-align:-3px;margin-left:1px"></span></span><span class="grow"></span><span class="pill mut">AC Origins</span></div>
     <div style="padding:8px 0">
       <div class="cap" style="padding:6px 20px">Assassin's Creed Origins</div>
-      ${item('cpu', 'Set Proton build…', 'Now GE-Proton10-25 (pinned)', 'ubi config set 3539 runtime.proton=…', 1, '<span class="kbd">↵</span>')}
-      ${item('rotate-ccw', 'Restore launch options to r13', 'Known good · Nov 12', 'ubi config restore 3539 r13', 0)}
-      ${item('git-compare', 'Compare launch options r12 and r14', '', 'ubi config diff 3539 r12 r14', 0)}
-      ${item('flask-conical', 'Launch once with GE-Proton10-26', 'Does not save a revision', 'ubi play 3539 --with runtime.proton=GE-Proton10-26', 0)}
-      ${item('camera', 'Snapshot prefix', '~/Games/ubi-prefixes/3539', 'ubi prefix snapshot 3539', 0)}
+      ${item('cpu', 'Set Proton build…', 'Now GE-Proton10-25 (pinned)', 'quiver config set 3539 runtime.proton=…', 1, '<span class="kbd">↵</span>')}
+      ${item('rotate-ccw', 'Restore launch options to r13', 'Known good · Nov 12', 'quiver config restore 3539 r13', 0)}
+      ${item('git-compare', 'Compare launch options r12 and r14', '', 'quiver config diff 3539 r12 r14', 0)}
+      ${item('flask-conical', 'Launch once with GE-Proton10-26', 'Does not save a revision', 'quiver play 3539 --with runtime.proton=GE-Proton10-26', 0)}
+      ${item('camera', 'Snapshot prefix', '~/Games/ubi-prefixes/3539', 'quiver prefix snapshot 3539', 0)}
       <div class="cap" style="padding:10px 20px 6px">Everywhere</div>
-      ${item('download', 'Install GE-Proton10-26', 'Latest release, Nov 13', 'ubi runtime install GE-Proton10-26', 0)}
+      ${item('download', 'Install GE-Proton10-26', 'Latest release, Nov 13', 'quiver runtime install GE-Proton10-26', 0)}
       ${item('settings', 'Open Settings › Compatibility', '', '', 0, '<span class="kbd">Ctrl ,</span>')}
     </div>
     <div class="row" style="gap:16px;padding:10px 16px;border-top:1px solid var(--line-1);font-size:11.5px;background:var(--ink-1)" class="muted">
-      <span class="row muted" style="gap:6px"><span class="kbd">↑↓</span>Move</span><span class="row muted" style="gap:6px"><span class="kbd">↵</span>Run</span><span class="row muted" style="gap:6px"><span class="kbd">Tab</span>Fill arguments</span><span class="row muted" style="gap:6px"><span class="kbd">Ctrl C</span>Copy as ubi command</span><span class="grow"></span><span class="muted">Every entry is a daemon call</span></div>
+      <span class="row muted" style="gap:6px"><span class="kbd">↑↓</span>Move</span><span class="row muted" style="gap:6px"><span class="kbd">↵</span>Run</span><span class="row muted" style="gap:6px"><span class="kbd">Tab</span>Fill arguments</span><span class="row muted" style="gap:6px"><span class="kbd">Ctrl C</span>Copy as quiver command</span><span class="grow"></span><span class="muted">Every entry is a daemon call</span></div>
   </div>`;
   const html = scrGame();
   return html.replace(/<\/div>$/, overlay + '</div>');

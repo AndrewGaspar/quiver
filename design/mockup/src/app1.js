@@ -29,48 +29,63 @@ const ST = {
   5595: { queued: 1, size: '6.2 GB', fav: 1 },
   5183: { size: '38.5 GB' }, 1847: { size: '3.1 GB' }, 1848: { size: '3.3 GB' }, 1875: { size: '47.2 GB' },
   5100: { size: '24.0 GB' }, 5404: { size: '29.6 GB' }, 420: { size: '40.1 GB' }, 5405: { size: '33.8 GB' },
-  5408: { size: '1.2 GB' }, 5277: { size: '27.5 GB' }, 11784: { size: '0.9 GB' }, 3600: { size: '19.7 GB' }, 3353: { size: '71.4 GB' },
+  5408: { size: '1.2 GB', acct: 'Family' }, 5277: { size: '27.5 GB', acct: 'Family' }, 11784: { size: '0.9 GB' }, 3600: { size: '19.7 GB' }, 3353: { size: '71.4 GB' },
 };
-const RECENT = [3539, 1651, 5059, 13504, 720, 1803, 2688, 277, 6100, 5595];
+const RECENT = [3539, 1651, 5059, 'p5059', 13504, 720, 1803, 2688, 277, 6100, 5595];
 const REST = [5183, 1847, 1848, 1875, 5100, 5404, 420, 5405, 5408, 5277, 11784, 3600, 3353];
 const ORDER = RECENT.concat(REST);
+
+let PAD = false; // render controller glyphs (last input was a gamepad)
+const gp = (b, cls = '') => (PAD ? `<span class="glyph${b.length > 1 || b === '≡' ? ' sq' : ''}${cls ? ' ' + cls : ''}">${b}</span>` : '');
+const PIN = { id: 'p5059', game: 5059, name: 'Visual overhaul' };
 
 function topbar(active) {
   const a = (k) => (active === k ? 'on' : '');
   return `<div class="topbar">
-    <div class="brand"><div class="mark"><i></i><i></i><i></i></div>ubi</div>
-    <nav class="nav">
+    <div class="brand"><div class="mark"><i></i><i></i><i></i></div>Quiver</div>
+    ${gp('LB', 'ghost')}<nav class="nav">
       <a class="${a('lib')}">${ic('library-big')}Library</a>
       <a class="${a('dl')}">${ic('download')}Downloads <span class="badge acc num">64%</span></a>
       <a class="${a('act')}">${ic('activity')}Activity <span class="badge agent">1</span></a>
-    </nav>
-    <div class="search">${ic('search')}<span class="grow">Search games, settings, commands</span><span class="kbd">Ctrl K</span></div>
-    <div class="daemon" title="Background service"><span class="dot"></span>ubid · 3 jobs</div>
+    </nav>${gp('RB', 'ghost')}
+    <div class="search">${ic('search')}<span class="grow">Search games, settings, commands</span>${PAD ? gp('≡') : '<span class="kbd">Ctrl K</span>'}</div>
+    <div class="daemon" title="Background service"><span class="dot"></span>quiverd · 3 jobs</div>
     <div class="iconbtn">${ic('bell')}<span class="pip"></span></div>
     <div class="iconbtn">${ic('settings')}</div>
-    <div class="avatar">AG</div>
+    <div class="row" style="gap:0" title="Accounts"><div class="avatar" style="box-shadow:0 0 0 2px var(--ink-0);position:relative;z-index:1">AG</div><div class="avatar" style="margin-left:-9px;background:linear-gradient(135deg,#2f6b5e,#4a9a83);box-shadow:0 0 0 2px var(--ink-0)">F</div><span class="muted" style="margin-left:4px">${ic('chevron-down', 'sm')}</span></div>
   </div>`;
 }
 
+function pinTile() {
+  return `<div class="tile">
+    <div class="boxart"><img alt="" src="${A(5059, 'hero')}" style="object-position:30% 50%">
+      <div class="tr"><span class="tag">${ic('pin', 'xs')}</span></div>
+      <div class="bl" style="padding-top:40px"><img src="${A(5059, 'logo')}" alt="" style="height:30px;width:auto;max-width:100%;object-fit:contain;object-position:left;margin-bottom:6px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.7))"><div class="row" style="gap:5px;font-size:11px;font-weight:700;color:#f3f5f9"><span style="color:#a6b5ff">${ic('layers', 'xs')}</span>Visual overhaul</div></div>
+    </div>
+    <div class="nm">AC Odyssey · Visual overhaul</div><div class="mt">Pinned profile · 3 layers · own art</div></div>`;
+}
+
 function tile(id, opts = {}) {
+  if (id === PIN.id) return pinTile();
   const s = ST[id] || {};
   const off = !s.inst && !s.dl;
   let tl = '', tr = '', bl = '', meta;
   if (s.upd) tl += `<span class="tag acc">${ic('arrow-down-to-line', 'xs')}Update</span>`;
   if (s.conflict) tl += `<span class="tag warn">${ic('cloud-alert', 'xs')}Conflict</span>`;
   if (s.queued) tl += `<span class="tag agent">${ic('bot', 'xs')}Queued</span>`;
+  if (s.acct) tl += `<span class="tag" style="background:#2f6b5e;color:#eafff7">${ic('user', 'xs')}${s.acct}</span>`;
   if (s.mods) tr += `<span class="tag">${ic('layers', 'xs')}${s.mods}</span>`;
   if (s.fav) tr += `<span class="tag">${ic('star', 'xs')}</span>`;
   if (s.dl) bl = `<div class="bl"><div class="row" style="justify-content:space-between;font-size:11px;font-weight:600;margin-bottom:5px"><span>Installing</span><span class="num">${s.dl}%</span></div><div class="bar"><i style="width:${s.dl}%"></i></div></div>`;
   if (s.inst) meta = `${s.play} played · ${s.last}`;
   else if (s.dl) meta = `31.2 of 48.7 GB · 3 min left`;
   else if (s.queued) meta = `Queued · ${s.size}`;
-  else meta = `Not installed · ${s.size}`;
+  else meta = `Not installed · ${s.size}${s.acct ? ' · ' + s.acct : ''}`;
   if (s.upd) meta = `Update ${s.upd} · ${s.play} played`;
   if (s.conflict) meta = `Save conflict in slot 2`;
   const hp = opts.hover ? `<div class="hoverplay"><span>${ic('play')}</span></div>` : '';
-  return `<div class="tile${opts.hover ? ' hover' : ''}">
-    <div class="boxart${off ? ' off' : ''}"><img alt="" src="${A(id, 'thumb')}">${hp}<div class="tl">${tl}</div><div class="tr">${tr}</div>${bl}</div>
+  return `<div class="tile${opts.hover ? ' hover' : ''}${opts.focus ? ' pf' : ''}">
+    <div class="boxart${off ? ' off' : ''}${opts.focus ? ' padfocus' : ''}"><img alt="" src="${A(id, 'thumb')}">${hp}<div class="tl">${tl}</div><div class="tr">${tr}</div>${bl}</div>
     <div class="nm">${nm(id)}</div><div class="mt">${meta}</div></div>`;
 }
 
@@ -87,13 +102,13 @@ function scrLibrary() {
 
   return `<div class="app">${topbar('lib')}
   <div class="scroll" style="flex:1">
-    <section style="position:relative;height:396px;overflow:hidden">
+    <section class="onart" style="position:relative;height:396px;overflow:hidden">
       <img src="${A(3539, 'hero')}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 35%">
       <div style="position:absolute;inset:0;background:linear-gradient(90deg,rgba(10,12,16,.92) 0%,rgba(10,12,16,.55) 34%,rgba(10,12,16,0) 58%),linear-gradient(180deg,rgba(15,18,24,0) 55%,var(--ink-1) 100%)"></div>
       <div style="position:absolute;left:40px;bottom:44px;width:520px;display:flex;flex-direction:column;gap:14px">
         <div class="cap" style="color:var(--acc-hi)">Continue playing</div>
         <div style="font-family:var(--f-disp);font-stretch:112%;font-weight:800;font-size:40px;line-height:1.02;letter-spacing:-.005em">Assassin's Creed Origins</div>
-        <div class="dim" style="font-size:13.5px">Last session yesterday, 19:33 to 21:47 · 87 h 12 m total</div>
+        <div class="dim" style="font-size:13.5px">Last session yesterday, 19:33 to 21:47 · 86 h played</div>
         <div class="row" style="gap:6px">
           <span class="chip">${ic('layers', 'xs')}Vanilla</span>
           <span class="chip">${ic('cpu', 'xs')}GE-Proton10-25</span>
@@ -123,6 +138,8 @@ function scrLibrary() {
         <span class="chip">Installed <span class="n">10</span></span>
         <span class="chip">${ic('star', 'xs')}Favorites <span class="n">3</span></span>
         <span class="chip">${ic('layers', 'xs')}Modded <span class="n">2</span></span>
+        <span class="chip">${ic('pin', 'xs')}Pinned profiles <span class="n">1</span></span>
+        <span class="chip">${ic('users', 'xs')}All accounts${ic('chevron-down', 'xs')}</span>
         <span style="width:1px;height:18px;background:var(--line-2);margin:0 6px"></span>
         <span class="chip">Assassin's Creed <span class="n">12</span></span>
         <span class="chip">Far Cry <span class="n">2</span></span>
@@ -140,6 +157,7 @@ function scrLibrary() {
 /* ---------- list + detail shell ---------- */
 function sideList(sel) {
   const row = (id) => {
+    if (id === PIN.id) return `<div class="gl${id === sel ? ' on' : ''}" style="padding-left:22px"><span class="muted">${ic('corner-down-right', 'xs')}</span><span class="n">${PIN.name}</span><span class="r">${ic('pin', 'xs')}</span></div>`;
     const s = ST[id] || {};
     let r = '';
     if (s.dl) r = `<span class="num" style="color:var(--acc-hi)">${s.dl}%</span>`;
@@ -172,12 +190,12 @@ function sideList(sel) {
 const TABS = ['Overview', 'Launch options', 'Mods', 'Saves & progress', 'Add-ons', 'Files', 'Logs'];
 function tabs(on, id) {
   const extra = { 'Add-ons': `<span class="badge">${G[id].dlc_count}</span>`, Mods: id === 5059 ? `<span class="badge">3</span>` : '' };
-  return `<div class="tabs">${TABS.map((t) => `<a class="${t === on ? 'on' : ''}">${t}${extra[t] || ''}</a>`).join('')}</div>`;
+  return `<div class="tabs" style="align-items:center">${gp('LT', 'ghost')}${TABS.map((t) => `<a class="${t === on ? 'on' : ''}">${t}${extra[t] || ''}</a>`).join('')}${gp('RT', 'ghost')}</div>`;
 }
 
 function miniHero(id, right = '') {
   const baked = id === 3539;
-  return `<div class="mini-hero"><img class="bg" alt="" src="${A(id, 'hero')}"${baked ? ' style="object-position:50% 92%"' : ''}><div class="shade"></div>
+  return `<div class="mini-hero onart"><img class="bg" alt="" src="${A(id, 'hero')}"${baked ? ' style="object-position:50% 92%"' : ''}><div class="shade"></div>
     ${baked ? `<div style="font-family:var(--f-disp);font-stretch:112%;font-weight:800;font-size:24px">${nm(id)}</div>` : `<img class="lg" alt="${nm(id)}" src="${A(id, 'logo')}">`}
     <span class="grow"></span>${right}
     <div class="play sm"><div class="main">${ic('play')}Play</div><div class="more">${ic('chevron-down', 'sm')}</div></div>
@@ -190,6 +208,7 @@ function detailShell(id, tab, inner, opts = {}) {
       ${opts.full || miniHero(id, opts.heroRight || '')}
       ${opts.full ? '' : tabs(tab, id)}
       ${inner}
+      ${opts.hint || ''}
     </main></div>${opts.overlay || ''}</div>`;
 }
 
@@ -200,7 +219,8 @@ function achTile(icon, hue, locked) {
     : `background:linear-gradient(145deg,hsl(${hue} 60% 46%),hsl(${hue} 55% 28%));color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.25)`}">${ic(locked ? 'lock' : icon, 'sm')}</div>`;
 }
 
-function scrGame() {
+function scrGame(pad = false) {
+  PAD = pad;
   const id = 3539;
   const sess = [
     ['Yesterday', '19:33 – 21:47', '2 h 14 m', 'r14', 'ok', 'Exited normally · 3 saves uploaded'],
@@ -212,7 +232,7 @@ function scrGame() {
       <td class="num" style="font-weight:600">${dur}</td>
       <td><span class="chip" style="height:22px">${ic('layers', 'xs')}Vanilla</span></td>
       <td><span class="mono dim">${r}</span></td>
-      <td><span class="row" style="gap:6px;color:${st === 'ok' ? 'var(--tx-2)' : '#ff8b97'}">${ic(st === 'ok' ? 'circle-check' : 'circle-x', 'sm')}${msg}</span></td>
+      <td><span class="row" style="gap:6px;color:${st === 'ok' ? 'var(--tx-2)' : 'var(--bad)'}">${ic(st === 'ok' ? 'circle-check' : 'circle-x', 'sm')}${msg}</span></td>
       <td style="text-align:right">${st === 'bad' ? `<span class="btn sm ghost">View log</span>` : ''}</td></tr>`).join('');
 
   const inner = `<div class="body scroll" style="padding-top:4px">
@@ -232,6 +252,12 @@ function scrGame() {
             </div>
           </div>
         </div>
+        <div class="card">
+          <div class="card-h"><h4>Add-ons</h4><span class="muted">4 owned · 39 more available</span><span class="grow"></span><span class="seg"><span class="on">All</span><span>Owned</span></span></div>
+          <table class="tbl"><tbody>
+            ${[['The Hidden Ones', 1], ['The Curse of the Pharaohs', 1], ['Season Pass', 1], ['Deluxe Pack', 1], ['Roman Centurion Pack', 0], ['Horus Pack', 0]].map(([n, own]) => `<tr><td style="width:28px"><span style="color:${own ? 'var(--ok)' : 'var(--tx-4)'}">${ic(own ? 'circle-check' : 'circle', 'sm')}</span></td><td style="${own ? '' : 'color:var(--tx-2)'}">${n}</td><td class="muted">${own ? 'Owned · installed' : 'Not owned'}</td><td style="text-align:right">${own ? '' : `<span class="btn sm ghost">View in Ubisoft Store${ic('external-link', 'xs')}</span>`}</td></tr>`).join('')}
+          </tbody></table>
+        </div>
       </div>
       <div class="col" style="gap:20px">
         <div class="card"><div class="card-h"><h4>This install</h4><span class="grow"></span><span class="btn sm ghost">${ic('shield-check', 'sm')}Verify</span></div>
@@ -239,36 +265,42 @@ function scrGame() {
             <dt>Version</dt><dd>1.6.0 <span class="muted mono">· manifest 3B9C…E4A1</span></dd>
             <dt>Size</dt><dd class="num">61.8 GB on nvme0 (ext4)</dd>
             <dt>Executable</dt><dd class="mono">ACOrigins.exe</dd>
-            <dt>DRM</dt><dd>Denuvo, activated by ubid</dd>
+            <dt>DRM</dt><dd>Denuvo, activated by quiverd</dd>
             <dt>Cloud saves</dt><dd>On · pull before, push after</dd>
             <dt>Game settings</dt><dd>Animus Control Panel <span class="muted mono">ACP.ini</span></dd>
             <dt>Add-ons</dt><dd>4 of 43 owned · all installed</dd>
+            <dt>Owned by</dt><dd>ajg <span class="muted">· also owned by Family</span></dd>
+            <dt>Steam</dt><dd><span style="color:var(--ok)">Shortcut added</span> <span class="muted">· Nov 4</span></dd>
+            <dt>Desktop entry</dt><dd>Created <span class="muted mono">quiver-3539.desktop</span></dd>
           </dl></div></div>
         <div class="card"><div class="card-h"><h4>Locations</h4></div>
           <div class="card-b col" style="gap:8px">
-            ${[['Game', '~/Games/ubi-library/Assassin\'s Creed Origins'], ['Prefix', '~/Games/ubi-prefixes/3539'], ['Saves', '…/savegames/&lt;user&gt;/3539'], ['Logs', '~/.local/state/ubi/logs/3539']].map(([k, v]) => `<div class="row" style="gap:10px;font-size:12px"><span class="muted" style="width:46px">${k}</span><span class="mono dim grow" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${v}</span><span class="dim">${ic('folder-open', 'sm')}</span></div>`).join('')}
+            ${[['Game', '~/Games/ubi-library/Assassin\'s Creed Origins'], ['Prefix', '~/Games/ubi-prefixes/3539'], ['Saves', '…/savegames/&lt;user&gt;/3539'], ['Logs', '~/.local/state/quiver/logs/3539']].map(([k, v]) => `<div class="row" style="gap:10px;font-size:12px"><span class="muted" style="width:46px">${k}</span><span class="mono dim grow" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${v}</span><span class="dim">${ic('folder-open', 'sm')}</span></div>`).join('')}
           </div></div>
         <div class="card"><div class="card-h"><h4>Links</h4></div>
           <div class="card-b row" style="gap:6px;flex-wrap:wrap">
             <span class="chip">${ic('globe', 'xs')}Homepage</span><span class="chip">${ic('life-buoy', 'xs')}Support</span><span class="chip">${ic('messages-square', 'xs')}Forums</span><span class="chip">${ic('book-open', 'xs')}ProtonDB</span><span class="chip">${ic('book-open', 'xs')}PCGamingWiki</span>
           </div></div>
-        <div class="cli"><span class="p">$</span><span class="t">ubi play 3539 --profile vanilla</span><span class="iconbtn" style="width:24px;height:24px">${ic('copy', 'xs')}</span></div>
+        <div class="cli"><span class="p">$</span><span class="t">quiver play 3539 --profile vanilla</span><span class="iconbtn" style="width:24px;height:24px">${ic('copy', 'xs')}</span></div>
       </div>
     </div></div>`;
 
   const full = `<div class="hero"><img class="bg" alt="" src="${A(id, 'hero')}" style="object-position:50% 30%"><div class="shade"></div>
-      <div class="row" style="position:absolute;right:24px;top:20px;gap:6px"><span class="iconbtn glass" style="border-radius:8px">${ic('star', 'sm')}</span><span class="iconbtn glass" style="border-radius:8px">${ic('image', 'sm')}</span></div></div>
+      <div class="row" style="position:absolute;right:24px;top:20px;gap:6px"><span class="iconbtn glass" style="border-radius:8px">${ic('star', 'sm')}</span><span class="chip glass" style="height:32px;color:#f3f5f9">${ic('image', 'xs')}Art: Ubisoft${ic('chevron-down', 'xs')}</span></div></div>
     <div class="actionbar">
-      <div class="play"><div class="main">${ic('play')}Play</div><div class="more">${ic('chevron-down')}</div></div>
-      <span class="btn" style="height:36px">${ic('layers', 'sm')}Vanilla${ic('chevron-down', 'sm')}</span>
+      <div class="play${pad ? ' padfocus' : ''}"><div class="main">${pad ? gp('A') : ic('play')}Play</div><div class="more">${ic('chevron-down')}</div></div>
+      <span class="btn" style="height:36px">${gp('X')}${ic('layers', 'sm')}Vanilla${ic('chevron-down', 'sm')}</span>
       <span class="chip" style="height:30px">${ic('cpu', 'xs')}GE-Proton10-25 · r14</span>
       <span class="chip" style="height:30px;color:var(--ok)">${ic('cloud', 'xs')}Saves synced</span>
       <span class="grow"></span>
-      <span class="iconbtn bd">${ic('folder-open')}</span><span class="iconbtn bd">${ic('sliders-horizontal')}</span><span class="iconbtn bd">${ic('ellipsis')}</span>
+      <span class="btn" style="height:32px">${ic('gamepad-2', 'sm')}Add to Steam</span><span class="iconbtn bd">${ic('folder-open')}</span><span class="iconbtn bd">${ic('sliders-horizontal')}</span>${pad ? `<span class="btn" style="height:32px;padding:0 8px">${gp('Y')}${ic('ellipsis')}</span>` : `<span class="iconbtn bd">${ic('ellipsis')}</span>`}
     </div>
     <div class="stats">
-      ${[['Last played', 'Yesterday'], ['Play time', '87 h 12 m'], ['Achievements', '41 / 62'], ['Installed', '61.8 GB'], ['Version', '1.6.0'], ['Add-ons', '4 of 43 owned']].map(([k, v]) => `<div class="stat"><span class="cap">${k}</span><b>${v}</b></div>`).join('')}
+      ${[['Last played', 'Yesterday'], ['Play time', '86 h'], ['Achievements', '41 / 62'], ['Installed', '61.8 GB'], ['Version', '1.6.0'], ['Owned by', 'ajg']].map(([k, v]) => `<div class="stat"><span class="cap">${k}</span><b>${v}</b></div>`).join('')}
     </div>
     ${tabs('Overview', id)}`;
-  return detailShell(id, 'Overview', inner, { full });
+  const hint = pad ? `<div class="hintbar"><span class="h">${gp('A')}Play</span><span class="h">${gp('X')}Play options</span><span class="h">${gp('Y')}Menu</span><span class="h">${gp('B')}Back to library</span><span class="h">${gp('LB')}${gp('RB')}Library · Downloads · Activity</span><span class="h">${gp('LT')}${gp('RT')}Tabs</span><span class="grow"></span><span class="h">${gp('≡')}Commands</span></div>` : '';
+  const out = detailShell(id, 'Overview', inner, { full, hint });
+  PAD = false;
+  return out;
 }
