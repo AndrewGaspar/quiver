@@ -136,6 +136,11 @@ pub enum GlobalCmd {
     ActivityFrom(SourceFilter),
     /// The now-playing card.
     NowPlaying,
+    /// Open Activity for one game.
+    ActivityGame(u32),
+    /// Add a game to Steam (staged while Steam runs) or to the app launcher.
+    ExportSteam(u32),
+    ExportDesktop(u32),
 }
 
 /// The connection to `quiverd` once the app is up.
@@ -269,10 +274,10 @@ impl Quiver {
 
     /// After every `Status` the app gets on (re)connecting.
     pub fn global_status(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.conn, Conn::Ready) {
+            self.ui.login_adding = false;
+        }
         if let Some(s) = &self.status {
-            if !s.accounts.is_empty() || s.signed_in.is_some() {
-                self.ui.login_adding = false;
-            }
             // A sign-in started elsewhere (the CLI) is waiting for its code.
             if s.awaiting_2fa {
                 if let Conn::Login(form) = &mut self.conn {
@@ -594,6 +599,37 @@ impl Quiver {
                 self.ui.activity_game = None;
             }
             GlobalCmd::NowPlaying => self.ui.now_playing_open = !self.ui.sessions.is_empty(),
+            GlobalCmd::ActivityGame(id) => {
+                self.nav.open_section(Section::Activity);
+                self.set_activity_source(SourceFilter::All);
+                self.ui.activity_game = Some(id);
+            }
+            GlobalCmd::ExportSteam(id) => {
+                let name = self.game_name(id);
+                let req = Request::ExportSteam { product_id: id, remove: false, steam_user: None };
+                self.call::<ubi_api::exports::SteamExportResult, _>(req, cx, move |this, r, cx| {
+                    match r {
+                        Ok(r) if r.staged => this.show_toast(
+                            format!("{name} is staged for Steam: it shows after Steam restarts (quiver steam restart asks first)"),
+                            cx,
+                        ),
+                        Ok(_) => this.show_toast(format!("Added {name} to Steam"), cx),
+                        Err(e) => this.show_toast(err_text(&e), cx),
+                    }
+                    this.load_exports(cx);
+                });
+            }
+            GlobalCmd::ExportDesktop(id) => {
+                let name = self.game_name(id);
+                let req = Request::ExportDesktop { product_id: id, remove: false };
+                self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
+                    match r {
+                        Ok(_) => this.show_toast(format!("Added {name} to the app launcher"), cx),
+                        Err(e) => this.show_toast(err_text(&e), cx),
+                    }
+                    this.load_exports(cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -641,18 +677,9 @@ impl Quiver {
             if let Ok(s) = r {
                 // Keep job progress from events; the daemon's list is as fresh.
                 this.status = Some(s);
-                this.global_status_light(cx);
+                this.global_status(cx);
             }
         });
-    }
-
-    fn global_status_light(&mut self, cx: &mut Context<Self>) {
-        let _ = cx;
-        if let Some(s) = &self.status {
-            if !s.accounts.is_empty() && !matches!(self.conn, Conn::Login(_)) {
-                self.ui.login_adding = false;
-            }
-        }
     }
 
     pub fn load_sessions(&mut self, cx: &mut Context<Self>) {
@@ -858,10 +885,23 @@ impl Quiver {
                 this.close_confirm(false, cx);
                 cx.notify();
             }));
-        let ok = button("confirm-ok", th, Kind::Primary, Size::Medium, Some(Icon::CircleX), c.confirm.clone())
-            .bg(th.bad)
-            .text_color(rgba(0xffffff, 1.0))
-            .hover(|s| s.opacity(0.9))
+        let (bad, white) = (th.bad, rgba(0xffffff, 1.0));
+        let ok = div()
+            .id("confirm-ok")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(7.))
+            .h(px(32.))
+            .px(px(13.))
+            .rounded(px(8.))
+            .bg(bad)
+            .text_color(white)
+            .font_weight(SEMIBOLD)
+            .cursor_pointer()
+            .hover(move |s| s.bg(bad.opacity(0.85)))
+            .child(icon(if matches!(c.action, ConfirmAction::SignOut { .. }) { Icon::LogOut } else { Icon::Trash }, 15., white))
+            .child(c.confirm.clone())
             .focus_ring(keys && c.selected == 1, th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.close_confirm(true, cx)));
         div()
@@ -941,7 +981,7 @@ impl Quiver {
                     .gap(px(8.))
                     .text_size(px(12.))
                     .child(div().w(px(92.)).flex_none().text_color(th.tx3).child(label.to_owned()))
-                    .child(value)
+                    .child(div().flex_1().min_w_0().child(value))
             };
             cards.push(
                 div()
@@ -1020,8 +1060,8 @@ impl Quiver {
                     .id("now-playing")
                     .absolute()
                     .top(px(58.))
-                    .right(px(150.))
-                    .w(px(400.))
+                    .right(px(588.))
+                    .w(px(420.))
                     .flex()
                     .flex_col()
                     .rounded(px(14.))

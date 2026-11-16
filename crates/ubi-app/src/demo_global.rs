@@ -159,7 +159,12 @@ fn owners(g: &Global, id: u32) -> Vec<String> {
     let mut v: Vec<String> = g
         .accounts
         .iter()
-        .filter(|a| if a.user_id == FAMILY { SHARED.contains(&id) || FAMILY_ONLY.contains(&id) } else { !FAMILY_ONLY.contains(&id) })
+        .filter(|a| match a.user_id.as_str() {
+            "demo" => !FAMILY_ONLY.contains(&id),
+            FAMILY => SHARED.contains(&id) || FAMILY_ONLY.contains(&id),
+            // Accounts added in the demo own a few games too.
+            _ => [3539, 420, 3353].contains(&id),
+        })
         .map(|a| a.user_id.clone())
         .collect();
     v.sort_by_key(|u| Some(u) != default.as_ref());

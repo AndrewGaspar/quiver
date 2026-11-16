@@ -7,6 +7,8 @@
 //!   connects to or starts `quiverd`.
 //! - `QUIVER_DEMO_INPUT="pad down a"`: demo mode only, replays inputs once the library is
 //!   on screen (for screenshots without a device).
+//! - `QUIVER_DEMO_GLOBAL="settings=accounts,playing"`: demo mode only, opens a global screen
+//!   or sets up a state for screenshots (see `ui/global.rs` and `demo_global.rs`).
 //! - `QUIVER_THEME=builtin`: ignore Omarchy and use "Quiver dark".
 //! - `QUIVER_OMARCHY_STATE=DIR`: read the theme from DIR instead of
 //!   `~/.local/state/omarchy/current` (tests, screenshots).

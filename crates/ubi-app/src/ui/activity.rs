@@ -297,10 +297,14 @@ impl Quiver {
             None => div().w(px(20.)).flex().justify_center().child(icon(Icon::Cog, 13., th.tx4)).into_any_element(),
         };
         // The action, with the game's name in it set in bold.
-        let text = sentence(&clean_name(&a.action));
+        let mut text = sentence(&clean_name(&a.action));
         let mut highlights = vec![];
         if let Some(g) = &g {
             let full = clean_name(&g.entry.name);
+            // "issued launch context for 3539": name the game instead of its id.
+            if !text.contains(&full) {
+                text = replace_word(&text, &g.id().to_string(), &full);
+            }
             if let Some(pos) = text.find(&full) {
                 highlights.push((pos..pos + full.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), color: Some(th.tx1), ..Default::default() }));
             }
@@ -361,7 +365,9 @@ impl Quiver {
                     .gap(px(10.))
                     .child(thumb)
                     .child(div().min_w_0().truncate().text_color(th.tx2).child(action))
-                    .when_some(game_suffix, |d, n| d.child(div().flex_none().font_weight(SEMIBOLD).child(n))),
+                    .when_some(game_suffix, |d, n| {
+                        d.child(div().flex_none().text_color(th.tx4).child("·")).child(div().flex_none().font_weight(SEMIBOLD).child(n))
+                    }),
             )
             .child(mono(11., th.tx4).flex_none().child(ago_short(a.at)))
             .when(open, |d| d.child(icon(Icon::ChevronRight, 14., if focused { th.tx2 } else { th.tx4 })))
@@ -386,13 +392,7 @@ impl Quiver {
             *agents.entry(a.source.as_str()).or_default() += 1;
         }
         let since = self.activity.last().map(|a| crate::model::day(a.at)).unwrap_or_default();
-        let cli = {
-            let mut c = "quiver activity -n 100".to_owned();
-            if self.ui.source_filter() == SourceFilter::Agent {
-                c = "quiver --json activity | jq …".to_owned();
-            }
-            c
-        };
+        let cli = "quiver activity -n 100";
         div()
             .flex()
             .flex_col()
@@ -565,6 +565,22 @@ impl Quiver {
     }
 }
 
+/// `text` with `word` (a whole word) replaced by `with`.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find(word) {
+        let before = rest[..pos].chars().last();
+        let after = rest[pos + word.len()..].chars().next();
+        let whole = !before.is_some_and(|c| c.is_alphanumeric()) && !after.is_some_and(|c| c.is_alphanumeric());
+        out.push_str(&rest[..pos]);
+        out.push_str(if whole { with } else { word });
+        rest = &rest[pos + word.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// "4m", "3h", "2d" for the row's right edge.
 fn ago_short(t: DateTime<Utc>) -> String {
     let m = (Utc::now() - t).num_minutes().max(0);
@@ -595,6 +611,8 @@ mod tests {
         assert!((2..=3).contains(&headings));
         assert_eq!(it.iter().filter(|i| matches!(i, Item::Row(_))).count(), 4);
         assert_eq!(sentence("install started"), "Install started");
+        assert_eq!(replace_word("context for 3539 as x", "3539", "AC Origins"), "context for AC Origins as x");
+        assert_eq!(replace_word("r35390 3539", "3539", "Y"), "r35390 Y");
         assert_eq!(ago_short(Utc::now() - Duration::minutes(90)), "1h");
     }
 }

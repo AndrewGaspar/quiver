@@ -38,7 +38,7 @@ impl Quiver {
                         .gap(px(10.))
                         .text_size(px(12.5))
                         .child(div().w(px(70.)).flex_none().text_color(th.tx3).child(k.to_owned()))
-                        .child(mono(12., th.tx2).truncate().child(v))
+                        .child(mono(12., th.tx2).flex_1().min_w_0().truncate().child(v))
                 };
                 super::card(th)
                     .w(px(520.))
@@ -55,6 +55,7 @@ impl Quiver {
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .flex_none()
                                     .size(px(38.))
                                     .rounded(px(10.))
                                     .bg(th.bad_soft)
@@ -64,6 +65,8 @@ impl Quiver {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
                                     .gap(px(2.))
                                     .child(div().text_size(px(17.)).font_weight(BOLD).child("Can't reach quiverd"))
                                     .child(div().text_size(px(12.5)).text_color(th.tx3).child(

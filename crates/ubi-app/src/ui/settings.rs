@@ -177,7 +177,8 @@ impl Quiver {
                     .px(px(36.))
                     .pt(px(28.))
                     .pb(px(48.))
-                    .child(div().flex().flex_col().gap(px(18.)).max_w(px(920.)).children(body)),
+                    // A definite width, so wrapped text is measured at the width it is drawn at.
+                    .child(div().flex().flex_col().gap(px(18.)).w(px((self.viewport.0 - 250. - 72.).clamp(480., 920.))).children(body)),
             )
     }
 
@@ -369,11 +370,11 @@ impl Quiver {
             );
         }
         out.push(
+            // Block layout (icon placed absolutely) so the wrapped text is measured at its width.
             div()
-                .flex()
-                .items_start()
-                .gap(px(10.))
-                .px(px(14.))
+                .relative()
+                .pl(px(38.))
+                .pr(px(14.))
                 .py(px(12.))
                 .rounded(px(10.))
                 .bg(th.warn_soft)
@@ -381,8 +382,8 @@ impl Quiver {
                 .border_color(th.warn.opacity(0.25))
                 .text_size(px(12.5))
                 .line_height(px(18.))
-                .child(div().pt(px(1.)).child(icon(Icon::TriangleAlert, 14., th.warn)))
-                .child(div().flex_1().min_w_0().text_color(th.warn).child(
+                .child(div().absolute().left(px(14.)).top(px(14.)).child(icon(Icon::TriangleAlert, 14., th.warn)))
+                .child(div().text_color(th.warn).child(
                     "Ubisoft allows one live session per account. Signing in to Ubisoft Connect elsewhere with the same account ends Quiver's session for it, and its games won't start here until you sign in again.",
                 ))
                 .into_any_element(),
@@ -826,10 +827,17 @@ impl Quiver {
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.))
-                                .child(div().text_size(px(12.5)).line_height(px(18.)).text_color(th.tx2).child(
-                                    "Steam rewrites its shortcut file when it exits, so Quiver waits. Restart Steam when it suits you and the shortcuts appear; to have Quiver do it, run this in a terminal (it asks first).",
+                                .child(div().text_size(px(12.5)).text_color(th.tx2).child(
+                                    "Steam rewrites its shortcut file when it exits, so Quiver waits. Restart Steam when it suits you.",
                                 ))
-                                .child(command_line(th, "quiver steam restart").max_w(px(320.))),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.))
+                                        .child(command_line(th, "quiver steam restart").w(px(260.)).flex_none())
+                                        .child(div().text_size(px(12.)).text_color(th.tx3).child("restarts it for you, after asking in the terminal")),
+                                ),
                         );
                     } else {
                         banner = banner.child(

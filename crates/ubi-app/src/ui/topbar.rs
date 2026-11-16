@@ -94,7 +94,7 @@ impl Quiver {
             .items_center()
             .gap(px(8.))
             .h(px(32.))
-            .w(px(if self.ui.sessions.is_empty() { 320. } else { 260. }))
+            .w(px(if self.ui.sessions.is_empty() { 320. } else { 262. }))
             .px(px(10.))
             .rounded(px(8.))
             .bg(th.ink2)
@@ -105,7 +105,7 @@ impl Quiver {
             .hover(|s| s.border_color(th.line2))
             .on_click(cx.listener(|this, _, _, cx| this.input(Input::Palette, InputMode::Pointer, cx)))
             .child(icon(Icon::Search, 16., th.tx3))
-            .child(div().flex_1().text_size(px(13.)).child("Search games, settings, commands"))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(if self.ui.sessions.is_empty() { "Search games, settings, commands" } else { "Search games, commands" }))
             .child(if pad { glyph(th, "≡", false) } else { kbd(th, "Ctrl K") });
 
         let (dot, label) = if self.link == Link::Reconnecting {

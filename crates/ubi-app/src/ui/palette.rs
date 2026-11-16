@@ -212,6 +212,12 @@ impl Quiver {
         }
         add(cmd(Icon::Cpu, "Rescan Proton builds", None, Some("quiver protons".into()), Cmd::Global(GlobalCmd::RescanProtons)), "proton runtime compatibility");
         if let Some(Ok(steam)) = &self.ui.steam {
+            if !steam.staged.is_empty() && steam.running {
+                add(
+                    cmd(Icon::Gamepad, "Restart Steam to show staged shortcuts…", Some("Quiver never restarts Steam itself; the terminal command asks first".into()), Some("quiver steam restart".into()), Cmd::Settings(SettingsSection::Steam)),
+                    "steam shortcuts restart staged",
+                );
+            }
             if !steam.staged.is_empty() && !steam.running {
                 add(
                     cmd(Icon::Gamepad, "Write staged Steam shortcuts", Some(format!("{} waiting; Steam is closed", steam.staged.len())), Some("quiver steam apply".into()), Cmd::Global(GlobalCmd::SteamApply)),
@@ -225,6 +231,30 @@ impl Quiver {
             if s.holders.iter().any(|h| h == "launcher") {
                 add(cmd(Icon::Square, format!("Stop {name}"), None, Some(format!("quiver stop {}", s.product_id)), Cmd::Global(GlobalCmd::Stop(s.product_id))), "quit kill end running");
             }
+        }
+        // Per game: found by the game's name plus what they do ("origins proton").
+        for g in &self.games {
+            let id = g.id();
+            let name = short_name(&g.entry.name);
+            let words = format!("{} {name} {id}", clean_name(&g.entry.name));
+            if g.installed() {
+                add(
+                    cmd(Icon::SlidersHorizontal, format!("{name}: launch options and history"), Some("Proton, wrappers, environment, revisions".into()), Some(format!("quiver history {id}")), Cmd::Tab(id, Tab::LaunchOptions)),
+                    &format!("{words} proton settings config wrappers env dll args revisions restore"),
+                );
+                add(
+                    cmd(Icon::Gamepad, format!("Add {name} to Steam"), Some("A non-Steam shortcut with its art; staged while Steam runs".into()), Some(format!("quiver export steam {id}")), Cmd::Global(GlobalCmd::ExportSteam(id))),
+                    &format!("{words} steam shortcut export"),
+                );
+                add(
+                    cmd(Icon::Monitor, format!("Add {name} to the app launcher"), Some(".desktop entry".into()), Some(format!("quiver export desktop {id}")), Cmd::Global(GlobalCmd::ExportDesktop(id))),
+                    &format!("{words} desktop entry launcher shortcut export"),
+                );
+            }
+            add(
+                cmd(Icon::Activity, format!("Activity for {name}"), None, Some("quiver activity".into()), Cmd::Global(GlobalCmd::ActivityGame(id))),
+                &format!("{words} activity log history who changed"),
+            );
         }
         v
     }
@@ -240,8 +270,30 @@ impl Quiver {
             })
             .collect();
         games.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.entry.name.cmp(&b.1.entry.name)));
-        let mut commands: Vec<(u32, Command)> =
-            self.palette_catalog().into_iter().filter_map(|(c, hay)| score(query, &hay).map(|s| (s, c))).collect();
+        // Per-game commands only for the games the query names best, by any of its words
+        // ("origins proton": AC Origins, then its launch options).
+        let mut named: Vec<(usize, &GameRow)> = self
+            .games
+            .iter()
+            .filter_map(|g| {
+                let hay = format!("{} {} {}", clean_name(&g.entry.name), short_name(&g.entry.name), g.id()).to_lowercase();
+                let n = query.split_whitespace().filter(|w| w.len() >= 2 && hay.contains(w)).count();
+                (n > 0).then_some((n, g))
+            })
+            .collect();
+        named.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.installed().cmp(&a.1.installed())));
+        let top: Vec<u32> = named.iter().take(2).map(|(_, g)| g.id()).collect();
+        let per_game = |c: &Command| match c.action {
+            Cmd::Tab(id, _) => Some(id),
+            Cmd::Global(GlobalCmd::ExportSteam(id) | GlobalCmd::ExportDesktop(id) | GlobalCmd::ActivityGame(id)) => Some(id),
+            _ => None,
+        };
+        let mut commands: Vec<(u32, Command)> = self
+            .palette_catalog()
+            .into_iter()
+            .filter(|(c, _)| per_game(c).is_none_or(|id| top.contains(&id)))
+            .filter_map(|(c, hay)| score(query, &hay).map(|s| (s, c)))
+            .collect();
         commands.sort_by(|a, b| b.0.cmp(&a.0));
 
         let mut game_entries = vec![];
@@ -333,7 +385,7 @@ impl Quiver {
             .child(icon(Icon::Search, 16., th.tx3))
             .child(field)
             .when_some(context.filter(|_| query_empty), |d, c| d.child(pill(th, PillKind::Muted, None, c)))
-            .when(!query_empty, |d| d.child(div().text_size(px(11.5)).text_color(th.tx3).child(format!("{} results", entries.len()))));
+            .when(!query_empty, |d| d.child(div().text_size(px(11.5)).text_color(th.tx3).child(format!("{} result{}", entries.len(), if entries.len() == 1 { "" } else { "s" }))));
 
         let hint = |k: AnyElement, label: &str| div().flex().items_center().gap(px(6.)).child(k).child(label.to_owned());
         let footer = div()

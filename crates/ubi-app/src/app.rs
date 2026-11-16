@@ -1202,6 +1202,6 @@ impl Quiver {
     }
 
     pub fn focused(&self, t: Target) -> bool {
-        self.mode != InputMode::Pointer && self.nav.overlay.is_none() && self.nav.is_focused(&self.layout, t)
+        self.mode != InputMode::Pointer && self.nav.overlay.is_none() && self.ui.confirm.is_none() && self.nav.is_focused(&self.layout, t)
     }
 }
