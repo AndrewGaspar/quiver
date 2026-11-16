@@ -6330,6 +6330,7 @@ dependencies = [
  "gilrs",
  "gpui",
  "image",
+ "libc",
  "notify",
  "reqwest",
  "rust-embed",

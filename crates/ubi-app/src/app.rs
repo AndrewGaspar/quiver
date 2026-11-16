@@ -164,6 +164,8 @@ pub struct Quiver {
     /// What's on screen, as of the last render. Input is resolved against it.
     pub layout: Layout,
     pub viewport: (f32, f32),
+    /// Relaunch on update (`selfupdate.rs`).
+    pub relaunch: crate::selfupdate::Relaunch,
 }
 
 impl Quiver {
@@ -196,6 +198,7 @@ impl Quiver {
             lib_filter: crate::ui::library::LibFilter::All,
             layout: Layout::default(),
             viewport: (1440., 900.),
+            relaunch: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
@@ -1203,7 +1206,10 @@ impl Render for Quiver {
             Link::Reconnecting => Some("Reconnecting to quiverd…"),
             Link::Reconnected => Some("Reconnected to quiverd"),
         };
-        screen.when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into())))
+        let update = self.render_update_notice(&th, cx);
+        screen
+            .when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into())))
+            .when_some(update, |d, n| d.child(n))
     }
 }
 
