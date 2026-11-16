@@ -37,6 +37,9 @@ rpassword = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
+crc32fast = "1"
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
+tempfile = "3"
 
 [patch.crates-io]
 # gpui -> zed-async-tar -> xattr 0.2.3, which references libc::ENOATTR (removed on Linux).

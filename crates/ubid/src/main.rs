@@ -253,6 +253,7 @@ impl Daemon {
                                 thumb: c.art("thumb_image"),
                                 background: c.art("background_image"),
                                 logo: c.art("logo_image"),
+                                icon: c.art("icon_image"),
                             })
                             .unwrap_or_default();
                         seen.insert(p.product_id, out.len());

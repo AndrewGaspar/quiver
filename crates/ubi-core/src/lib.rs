@@ -6,6 +6,7 @@ pub mod broker;
 pub mod cloudsave;
 pub mod demux;
 pub mod download;
+pub mod exports;
 pub mod install;
 pub mod launch;
 pub mod launcher;
