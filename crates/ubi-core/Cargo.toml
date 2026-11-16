@@ -23,3 +23,4 @@ keyring.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 ubi-ipc.workspace = true
+md5.workspace = true

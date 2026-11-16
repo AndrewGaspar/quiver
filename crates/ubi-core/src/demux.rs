@@ -281,6 +281,7 @@ macro_rules! service {
 
 service!(Ownership, "ownership_service", ownership, push);
 service!(Denuvo, "denuvo_service", denuvo_service);
+service!(Cloudsave, "cloudsave_service", cloudsave_service);
 
 pub struct ServiceConnection<S: Service> {
     demux: Demux,

@@ -8,10 +8,15 @@
 #                                            environment: UBI_GAME_ENV="K=V K2=V2". Wine trace of
 #                                            the game (kept inside the container): UBI_TRACE=+file
 #   instance.sh trace-grep <name> <regex>    search that trace
+#   instance.sh wait <name>                  block until the game exits, then upload changed saves
 #   instance.sh shot <name> [file]           screenshot the container's display
 #   instance.sh keys <name> <xdotool args>   send input
 #   instance.sh logs <name>                  tail bridge and game logs
-#   instance.sh stop <name>
+#   instance.sh stop <name> [--no-push]      stop the game, then upload changed saves
+#
+# Cloud saves: `run` pulls the game's cloud saves into the prefix first (slots with unsynced
+# local changes are kept; overwritten files go to $INST_ROOT/save-backups). Uploading happens
+# on `wait`/`stop` and covers only slots the game wrote (<slot>.save.upload markers).
 #
 # Live requests from the game (Denuvo tokens) go from ubi-bridge to `ubi broker` on the host,
 # which holds the Ubisoft session; the container shares the host network to reach it.
@@ -71,6 +76,9 @@ cmd_run() {
   [[ -f $host_dir/uplay_install.manifest ]] || die "no uplay_install.manifest in $host_dir"
   ( umask 077; "$ROOT/target/debug/ubi" launch-context "$id" --broker "$BROKER" --install-dir "$host_dir" -o "$dst/out/context.json" )
   user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
+  echo "$id" > "$dst/uplay_id"
+  local saves="$dst/prefix/$UPC_REL/savegames/$user_id/$id"
+  "$ROOT/target/debug/ubi" saves pull "$id" "$saves" --backup-dir "$INST_ROOT/save-backups"
   # Same layout Connect uses: savegames\<user id>\<uplay id>
   python3 -I - "$dst/out/context.json" "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\savegames\\$user_id\\$id" <<'EOF'
 import json, sys
@@ -141,11 +149,20 @@ cmd_shot() {
 cmd_trace_grep() { podman exec "$(ctr "$1")" grep -a -E "$2" /tmp/gamelog/steam-0.log | cut -c1-300 | awk '!s[$0]++'; }
 cmd_keys() { local name=$1; shift; podman exec "$(ctr "$name")" xdotool "$@"; }
 cmd_logs() { local d; d=$(dir "$1")/out; tail -60 "$d/bridge-ipc.log"; echo "--- run.log"; tail -20 "$d/run.log"; }
-cmd_stop() { podman rm -f -t 5 "$(ctr "$1")" >/dev/null; }
+push_saves() {
+  local dst id user_id; dst=$(dir "$1"); id=$(cat "$dst/uplay_id" 2>/dev/null) || return 0
+  user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
+  "$ROOT/target/debug/ubi" saves push "$id" "$dst/prefix/$UPC_REL/savegames/$user_id/$id"
+}
+cmd_wait() { podman wait "$(ctr "$1")" >/dev/null 2>&1 || true; push_saves "$1"; }
+cmd_stop() {
+  podman rm -f -t 5 "$(ctr "$1")" >/dev/null
+  [[ ${2:-} == --no-push ]] || push_saves "$1"
+}
 
 cmd=${1:-}; shift || true
 case $cmd in
-  create|run|shot|keys|logs|stop) "cmd_$cmd" "$@";;
+  create|run|shot|keys|logs|stop|wait) "cmd_$cmd" "$@";;
   trace-grep) cmd_trace_grep "$@";;
   *) sed -n '2,13p' "$0"; exit 2;;
 esac

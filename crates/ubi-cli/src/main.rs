@@ -55,6 +55,13 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:47810")]
         listen: String,
     },
+    /// Sync a game's local save folder with the cloud.
+    Saves {
+        #[command(subcommand)]
+        action: SavesAction,
+    },
+    /// Download raw cloud save blobs (<slot>.savegame, zlib) as a backup.
+    CloudPull { uplay_id: u32, dir: PathBuf, #[arg(long, default_value_t = 10)] max_slot: u32 },
     /// Check demux connectivity (no login needed).
     Ping,
     /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
@@ -64,6 +71,21 @@ enum Cmd {
         #[arg(long)]
         files: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum SavesAction {
+    /// Cloud -> local (slots with unsynced local changes are kept).
+    Pull {
+        uplay_id: u32,
+        /// Local folder holding <slot>.save files.
+        dir: PathBuf,
+        /// Where overwritten local saves are copied first.
+        #[arg(long)]
+        backup_dir: PathBuf,
+    },
+    /// Local -> cloud for slots the game marked with <slot>.save.upload.
+    Push { uplay_id: u32, dir: PathBuf },
 }
 
 fn prompt(label: &str) -> Result<String> {
@@ -193,6 +215,42 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             eprintln!("broker listening on {listen}");
             ubi_core::broker::Broker::new(auth).serve(listener).await?;
+        }
+        Cmd::Saves { action } => {
+            let (_, demux) = ubi_core::connect(&auth).await?;
+            let mut lib = Library::fetch(&demux).await?;
+            let mut cloud = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
+            let report = match action {
+                SavesAction::Pull { uplay_id, dir, backup_dir } => {
+                    ubi_core::savesync::pull(&mut cloud, &mut lib, uplay_id, &dir, &backup_dir).await?
+                }
+                SavesAction::Push { uplay_id, dir } => ubi_core::savesync::push(&mut cloud, &mut lib, uplay_id, &dir).await?,
+            };
+            println!(
+                "downloaded {:?} unchanged {:?} kept-local {:?} uploaded {:?}",
+                report.downloaded, report.unchanged, report.kept_local, report.uploaded
+            );
+            if let Some(b) = report.backup_dir {
+                println!("previous local copies backed up to {}", b.display());
+            }
+        }
+        Cmd::CloudPull { uplay_id, dir, max_slot } => {
+            let (_, demux) = ubi_core::connect(&auth).await?;
+            let mut lib = Library::fetch(&demux).await?;
+            let mut cloud = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
+            std::fs::create_dir_all(&dir)?;
+            let names: Vec<String> = (1..=max_slot).map(|s| s.to_string()).collect();
+            let items: Vec<(u32, &str)> = (1..=max_slot).zip(names.iter().map(String::as_str)).collect();
+            let reqs = cloud.get_requests_v2(&mut lib, uplay_id, &items).await?;
+            for ((slot, _), req) in items.iter().zip(&reqs) {
+                let (status, body) = cloud.execute(req, None).await?;
+                if status == 200 {
+                    std::fs::write(dir.join(format!("{slot}.savegame")), &body)?;
+                    println!("slot {slot}: {} bytes", body.len());
+                } else {
+                    println!("slot {slot}: HTTP {status}");
+                }
+            }
         }
         Cmd::Ping => {
             let demux = ubi_core::demux::Demux::connect().await?;

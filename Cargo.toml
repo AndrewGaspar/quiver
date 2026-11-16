@@ -25,6 +25,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 flate2 = "1"
 base64 = "0.22"
+md5 = "0.7"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"

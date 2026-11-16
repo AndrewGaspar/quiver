@@ -3,10 +3,12 @@
 
 pub mod auth;
 pub mod broker;
+pub mod cloudsave;
 pub mod demux;
 pub mod launch;
 pub mod library;
 pub mod manifest;
+pub mod savesync;
 pub mod store;
 
 pub use ubi_proto as proto;
