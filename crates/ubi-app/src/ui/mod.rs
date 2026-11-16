@@ -11,6 +11,7 @@ pub mod downloads;
 pub mod palette;
 pub mod settings;
 pub mod signin;
+pub mod steamgames;
 pub mod topbar;
 pub mod welcome;
 

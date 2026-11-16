@@ -782,13 +782,14 @@ impl Quiver {
         });
     }
 
-    /// "Restart Steam" in the confirmation dialog: the person asked for it just now.
-    fn restart_steam(&mut self, cx: &mut Context<Self>) {
+    /// "Restart Steam" in a confirmation dialog: the person asked for it just now.
+    pub fn restart_steam(&mut self, cx: &mut Context<Self>) {
         match self.source.clone() {
             Some(Source::Demo(d)) => {
                 let n = d.restart_steam();
-                self.show_toast(format!("Steam restarted; {n} shortcut change(s) written (demo)"), cx);
+                self.show_toast(format!("Steam restarted; {n} staged change(s) written (demo)"), cx);
                 self.load_exports(cx);
+                self.load_global_exports(cx);
             }
             Some(Source::Daemon(_)) => {
                 self.show_toast("Closing Steam…", cx);
@@ -812,6 +813,7 @@ impl Quiver {
                         };
                         this.show_toast(msg, cx);
                         this.load_exports(cx);
+                        this.load_global_exports(cx);
                     })
                     .ok();
                 })

@@ -352,7 +352,7 @@ impl Quiver {
             Event::LibraryChanged => self.load_library(false, cx),
             Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
             Event::ModsChanged { product_id } => self.load_page(product_id, cx),
-            Event::SessionsChanged { .. } => {}
+            Event::SessionsChanged { .. } | Event::SteamGamesChanged { .. } => {}
             Event::Disconnected => {
                 self.link = Link::Reconnecting;
                 self.link_gen += 1;
@@ -1174,7 +1174,9 @@ impl Render for Quiver {
             Link::Reconnected => Some("Reconnected to quiverd"),
         };
         let update = self.render_update_notice(&th, cx);
+        let offer = if ready { self.render_steam_offer(&th, update.is_some(), cx) } else { None };
         screen
+            .when_some(offer, |d, n| d.child(n))
             .when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into())))
             .when_some(update, |d, n| d.child(n))
     }

@@ -196,7 +196,8 @@ enum Cmd {
         #[command(subcommand)]
         action: exports::ExportAction,
     },
-    /// Steam users, staged shortcut changes and restarting Steam.
+    /// Steam users, Ubisoft games installed through Steam (start them through Quiver),
+    /// staged changes and restarting Steam.
     Steam {
         #[command(subcommand)]
         action: exports::SteamAction,

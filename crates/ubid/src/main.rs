@@ -8,6 +8,7 @@ mod exports;
 mod mods;
 mod info;
 mod setup;
+mod steamgames;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -496,6 +497,11 @@ impl Daemon {
             | Request::VerifyResult { .. }
             | Request::DownloadSettings { .. }) => downloads::handle(self, source, r).await?,
             r @ (Request::Setup { .. } | Request::ScanInstalls) => setup::handle(self, source, r).await?,
+            r @ (Request::SteamGames { .. }
+            | Request::SteamPatch { .. }
+            | Request::SteamUnpatch { .. }
+            | Request::SteamDismissOffer { .. }
+            | Request::SteamOffers { .. }) => steamgames::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {
@@ -812,6 +818,7 @@ async fn main() -> Result<()> {
         sessions,
     });
     downloads::start(&daemon);
+    steamgames::start(&daemon);
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;

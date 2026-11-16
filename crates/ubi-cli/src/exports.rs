@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use ubi_api::exports::{ExportRecord, ExportState, ExportStatus, SteamExportResult, SteamUsers};
+use ubi_api::exports::{
+    ExportRecord, ExportState, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUsers,
+};
 use ubi_api::{Client, Request};
 use ubi_core::exports::{Paths, steam};
 
@@ -50,8 +52,100 @@ pub enum SteamAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Write staged shortcut changes now (only while Steam is closed).
+    /// Write staged changes now (only while Steam is closed).
     Apply,
+    /// Ubisoft games installed through Steam, and whether each starts through Quiver
+    /// instead of Ubisoft Connect.
+    Games {
+        /// Read this Steam user's launch options (default: whoever installed each game).
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a Steam game start through Quiver instead of Ubisoft Connect: its launch
+    /// options get `quiver … steam-run` in front of `%command%`, keeping your own. Nothing
+    /// in the game's prefix changes; `unpatch` undoes it.
+    Patch {
+        /// Steam app id, the game's name (or part of it), its Ubisoft product id, or `all`.
+        game: String,
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Make a Steam game start through Ubisoft Connect again: its launch options go back to
+    /// what they were.
+    Unpatch {
+        /// Steam app id, the game's name (or part of it), its Ubisoft product id, or `all`.
+        game: String,
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Whether quiverd offers the switch when a Ubisoft game is newly installed in Steam.
+    Offers {
+        /// `on` or `off`; without it, show the setting.
+        state: Option<String>,
+    },
+}
+
+/// Steam games matching `q` (app id, product id, `all`, or part of the name).
+fn pick_games<'a>(games: &'a [SteamGame], q: &str) -> Result<Vec<&'a SteamGame>> {
+    if q.eq_ignore_ascii_case("all") {
+        return Ok(games.iter().collect());
+    }
+    if let Ok(n) = q.parse::<u32>() {
+        let hits: Vec<&SteamGame> = games.iter().filter(|g| g.app_id == n || g.product_id == Some(n)).collect();
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+    }
+    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect::<String>();
+    let hits: Vec<&SteamGame> = games.iter().filter(|g| norm(&g.name).contains(&norm(q))).collect();
+    let list = || games.iter().map(|g| format!("{} ({})", g.name, g.app_id)).collect::<Vec<_>>().join(", ");
+    match hits.len() {
+        0 if games.is_empty() => bail!("no Ubisoft games installed through Steam"),
+        0 => bail!("no Ubisoft game in Steam matches '{q}' (installed: {})", list()),
+        1 => Ok(hits),
+        _ => bail!("'{q}' matches several Steam games; use the app id ({})", hits.iter().map(|g| format!("{} {}", g.app_id, g.name)).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+async fn patch(client: &Client, game: &str, user: Option<String>, undo: bool) -> Result<()> {
+    let info: SteamGames = client.call(Request::SteamGames { steam_user: user.clone() }).await?;
+    if info.root.is_none() {
+        bail!("Steam not found");
+    }
+    let all = game.eq_ignore_ascii_case("all");
+    let mut staged = false;
+    for g in pick_games(&info.games, game)? {
+        if all && (undo != g.state.uses_quiver() || (!undo && !g.patchable)) {
+            continue;
+        }
+        let req = if undo {
+            Request::SteamUnpatch { app_id: g.app_id, steam_user: user.clone() }
+        } else {
+            Request::SteamPatch { app_id: g.app_id, steam_user: user.clone() }
+        };
+        let r: SteamPatchResult = match client.call(req).await {
+            Ok(r) => r,
+            Err(e) if all => {
+                eprintln!("{}: {e:#}", g.name);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        staged |= r.staged;
+        let what = if undo { "starts through Ubisoft Connect" } else { "starts through Quiver" };
+        match (r.unchanged, r.staged) {
+            (true, _) => println!("{} already {what}", r.name),
+            (false, false) => println!("{} now {what}", r.name),
+            (false, true) => println!("{} {what} once Steam restarts", r.name),
+        }
+        println!("  launch options: {}", if r.launch_options.is_empty() { "(none)" } else { &r.launch_options });
+    }
+    if staged {
+        println!("{}", restart_hint());
+    }
+    Ok(())
 }
 
 /// A game by name or id. Removing works by id even when the library can't be fetched.
@@ -66,7 +160,7 @@ async fn product(client: &Client, game: &str) -> Result<(u32, String)> {
 }
 
 pub(crate) fn restart_hint() -> &'static str {
-    "Steam is running, so it will show this after it restarts. Run `quiver steam restart` to restart it now (it asks first), or it applies the next time Steam is closed."
+    "Steam is running, so this takes effect after it restarts. Run `quiver steam restart` to restart it now (it asks first), or it applies the next time Steam is closed."
 }
 
 /// Without `--user`, with several Steam users and none chosen yet: ask in a terminal.
@@ -182,6 +276,59 @@ pub async fn steam(client: &Client, action: SteamAction) -> Result<()> {
             let v: serde_json::Value = client.call(Request::SteamApplyStaged).await?;
             println!("wrote {} staged change(s)", v["applied"]);
         }
+        SteamAction::Games { user, json } => {
+            let info: SteamGames = client.call(Request::SteamGames { steam_user: user }).await?;
+            if json {
+                return print_json(&info);
+            }
+            if info.root.is_none() {
+                println!("Steam not found");
+                return Ok(());
+            }
+            if info.games.is_empty() {
+                println!("no Ubisoft games installed through Steam");
+            }
+            for g in &info.games {
+                let state = match g.state {
+                    PatchState::On => "quiver",
+                    PatchState::ByHand => "quiver (set by hand)",
+                    PatchState::Waiting => "quiver after Steam restarts",
+                    PatchState::WaitingUndo => "connect after Steam restarts",
+                    PatchState::Off => "ubisoft connect",
+                    PatchState::Unknown | PatchState::Other => "?",
+                };
+                let product = g.product_id.map(|p| format!("product {p}")).unwrap_or_else(|| "product ?".into());
+                println!("{:<9} {:<28} {}  ({product}, Steam user {})", g.app_id, state, g.name, g.steam_user.as_deref().unwrap_or("?"));
+                if !g.launch_options.is_empty() {
+                    println!("          launch options: {}", g.launch_options);
+                }
+                if let Some(n) = &g.note {
+                    println!("          {n}");
+                }
+            }
+            if info.games.iter().any(|g| matches!(g.state, PatchState::Waiting | PatchState::WaitingUndo)) {
+                println!("{}", restart_hint());
+            }
+            if !info.offers {
+                println!("(offers for new installs are off: quiver steam offers on)");
+            }
+        }
+        SteamAction::Patch { game, user } => patch(client, &game, user, false).await?,
+        SteamAction::Unpatch { game, user } => patch(client, &game, user, true).await?,
+        SteamAction::Offers { state } => {
+            let enabled = match state.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                None => None,
+                Some("on" | "yes" | "true") => Some(true),
+                Some("off" | "no" | "false") => Some(false),
+                Some(s) => bail!("expected on or off, got '{s}'"),
+            };
+            let v: serde_json::Value = client.call(Request::SteamOffers { enabled }).await?;
+            if v["enabled"].as_bool().unwrap_or(true) {
+                println!("On: when a Ubisoft game is installed through Steam, Quiver offers to start it instead of Ubisoft Connect");
+            } else {
+                println!("Off: Quiver doesn't offer anything for new Steam installs (quiver steam patch still works)");
+            }
+        }
         SteamAction::Restart { .. } => unreachable!("handled before connecting to the daemon"),
     }
     Ok(())
@@ -192,7 +339,7 @@ pub async fn steam(client: &Client, action: SteamAction) -> Result<()> {
 pub fn steam_restart(yes: bool, source: &str) -> Result<()> {
     let paths = Paths::from_env();
     let Some(st) = steam::Steam::find(&paths.home) else { bail!("Steam not found") };
-    let pending = steam::staged(&paths);
+    let pending = steam::staged_descriptions(&paths);
     if !steam::is_running() {
         let n = steam::apply_staged(&paths, false)?;
         println!("Steam isn't running; wrote {n} staged change(s). Steam shows them when it next starts.");
@@ -209,11 +356,11 @@ pub fn steam_restart(yes: bool, source: &str) -> Result<()> {
             bail!("restarting Steam needs your confirmation: run this in a terminal (or pass --yes yourself)");
         }
         if pending.is_empty() {
-            eprintln!("No shortcut changes are waiting for Steam.");
+            eprintln!("No changes are waiting for Steam.");
         } else {
             eprintln!("Waiting for a Steam restart:");
             for s in &pending {
-                eprintln!("  {}", s.describe());
+                eprintln!("  {s}");
             }
         }
         let answer = dev::prompt("Restart Steam now? [y/N] ")?;
@@ -224,6 +371,6 @@ pub fn steam_restart(yes: bool, source: &str) -> Result<()> {
     }
     eprintln!("Closing Steam…");
     let r = steam::restart_steam(&paths, &st, Duration::from_secs(90))?;
-    println!("Steam restarted; wrote {} shortcut change(s).", r.applied);
+    println!("Steam restarted; wrote {} staged change(s).", r.applied);
     Ok(())
 }

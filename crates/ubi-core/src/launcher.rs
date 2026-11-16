@@ -68,6 +68,10 @@ pub struct Config {
     /// First-run setup, once done or skipped (every front end's welcome flow checks it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_run: Option<ubi_api::setup::FirstRun>,
+    /// Offer to start a Ubisoft game newly installed in Steam through Quiver instead of
+    /// Ubisoft Connect (`exports::steamgames`).
+    #[serde(default = "yes")]
+    pub steam_offers: bool,
 }
 
 fn yes() -> bool {
@@ -194,6 +198,7 @@ impl Config {
             downloads: Default::default(),
             fixes_on_vanilla: None,
             first_run: None,
+            steam_offers: true,
         };
         cfg.save()?;
         Ok(cfg)

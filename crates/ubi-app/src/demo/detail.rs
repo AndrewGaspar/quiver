@@ -14,7 +14,10 @@ use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Duration as Span, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use ubi_api::exports::{ExportKind, ExportRecord, ExportState, ExportStatus, SteamExportResult, SteamUser, SteamUsers};
+use ubi_api::exports::{
+    ExportKind, ExportRecord, ExportState, ExportStatus, PatchState, SteamExportResult, SteamGame, SteamGames, SteamPatchResult, SteamUser,
+    SteamUsers,
+};
 use ubi_api::info::{
     Achievement, Achievements, AddOn, CloudRecord, CloudSlot, ConnectProfile, Features, GameInfo, InstallInfo, Link,
     ProductKind, Progress, RecordSlot, RestoreResult, Reward, SaveBackup, SaveSlot, SavesReport, SlotFile, SlotState, Stat,
@@ -52,6 +55,9 @@ struct Detail {
     slots: BTreeMap<u32, Vec<SaveSlot>>,
     exports: Vec<ExportStatus>,
     steam_running: bool,
+    /// Ubisoft games installed through Steam, and the offers setting.
+    steam_games: Vec<SteamGame>,
+    steam_offers: bool,
     next: u32,
     /// Games started from the demo: the profile they run and when they started.
     running: HashMap<u32, (Option<String>, DateTime<Utc>)>,
@@ -132,6 +138,54 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             v
         }
         Request::ExportList => json!(d.exports),
+        Request::SteamGames { .. } => json!(SteamGames {
+            root: Some(home().join(".local/share/Steam")),
+            running: d.steam_running,
+            games: d.steam_games.clone(),
+            offers: d.steam_offers,
+            command: steam_command(),
+        }),
+        Request::SteamPatch { app_id, .. } | Request::SteamUnpatch { app_id, .. } => {
+            let undo = matches!(req, Request::SteamUnpatch { .. });
+            let running = d.steam_running;
+            let g = d.steam_games.iter_mut().find(|g| g.app_id == app_id).ok_or_else(|| anyhow!("Steam app {app_id} isn't an installed Ubisoft game"))?;
+            if !undo && !g.patchable {
+                bail!("{}", g.note.clone().unwrap_or_else(|| "can't switch this game".into()));
+            }
+            let before = g.state;
+            g.offer = false;
+            g.state = match (undo, before) {
+                (false, PatchState::Off) => if running { PatchState::Waiting } else { PatchState::On },
+                (false, PatchState::WaitingUndo) => PatchState::On,
+                (true, PatchState::On | PatchState::ByHand) => if running { PatchState::WaitingUndo } else { PatchState::Off },
+                (true, PatchState::Waiting) => PatchState::Off,
+                (_, s) => s,
+            };
+            let unchanged = g.state == before || matches!((before, g.state), (PatchState::WaitingUndo, PatchState::On) | (PatchState::Waiting, PatchState::Off));
+            let staged = matches!(g.state, PatchState::Waiting | PatchState::WaitingUndo);
+            let shown = if g.state.uses_quiver() { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            if !staged {
+                g.launch_options = shown.clone();
+            }
+            events.push(Event::SteamGamesChanged { offer: vec![] });
+            json!(SteamPatchResult { app_id, name: g.name.clone(), steam_user: "84211337".into(), launch_options: shown, staged, unchanged })
+        }
+        Request::SteamDismissOffer { app_id } => {
+            if let Some(g) = d.steam_games.iter_mut().find(|g| g.app_id == app_id) {
+                g.offer = false;
+            }
+            events.push(Event::SteamGamesChanged { offer: vec![] });
+            Value::Null
+        }
+        Request::SteamOffers { enabled } => {
+            if let Some(on) = enabled {
+                d.steam_offers = on;
+                if !on {
+                    d.steam_games.iter_mut().for_each(|g| g.offer = false);
+                }
+            }
+            json!({ "enabled": d.steam_offers })
+        }
         Request::SteamUsers => json!(SteamUsers {
             root: Some(home().join(".local/share/Steam")),
             users: vec![SteamUser {
@@ -143,7 +197,17 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }],
             selected: Some("84211337".into()),
             running: d.steam_running,
-            staged: d.exports.iter().filter(|e| e.state == ExportState::WaitingForSteam).map(|e| e.record.name.clone()).collect(),
+            staged: d
+                .exports
+                .iter()
+                .filter(|e| e.state == ExportState::WaitingForSteam)
+                .map(|e| format!("add/update \"{}\" for Steam user 84211337", e.record.name))
+                .chain(d.steam_games.iter().filter_map(|g| match g.state {
+                    PatchState::Waiting => Some(format!("start through Quiver: \"{}\" (Steam app {}) for Steam user 84211337", g.name, g.app_id)),
+                    PatchState::WaitingUndo => Some(format!("start through Ubisoft Connect again: \"{}\" (Steam app {}) for Steam user 84211337", g.name, g.app_id)),
+                    _ => None,
+                }))
+                .collect(),
         }),
         Request::ExportDesktop { product_id, remove } => {
             let key = format!("quiver:{product_id}");
@@ -592,7 +656,17 @@ fn progress(st: &State, id: u32) -> Result<Progress> {
 
 impl Detail {
     fn new(entries: &[LibraryEntry]) -> Self {
-        let mut d = Detail { mods: BTreeMap::new(), backups: BTreeMap::new(), slots: BTreeMap::new(), exports: vec![], steam_running: true, next: 1, running: HashMap::new() };
+        let mut d = Detail {
+            mods: BTreeMap::new(),
+            backups: BTreeMap::new(),
+            slots: BTreeMap::new(),
+            exports: vec![],
+            steam_running: crate::ui::global::demo_flag("steam-closed").is_none(),
+            steam_games: steam_games(),
+            steam_offers: crate::ui::global::demo_flag("steam-offers-off").is_none(),
+            next: 1,
+            running: HashMap::new(),
+        };
         let name = |id: u32| entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
         // Exports: Origins is in Steam and the app launcher; Odyssey waits for a Steam restart.
         d.exports.push(ExportStatus { record: record(ExportKind::Steam, 3539, &name(3539), steam_vdf(), at(12, 21, 4), false), state: ExportState::Ok });
@@ -753,8 +827,75 @@ impl Detail {
                 n += 1;
             }
         }
+        for g in &mut self.steam_games {
+            let next = match g.state {
+                PatchState::Waiting => PatchState::On,
+                PatchState::WaitingUndo => PatchState::Off,
+                _ => continue,
+            };
+            g.launch_options = if next == PatchState::On { demo_patched(&g.launch_options) } else { demo_unpatched(&g.launch_options) };
+            g.state = next;
+            n += 1;
+        }
         n
     }
+}
+
+fn steam_command() -> String {
+    format!("{} --source steam steam-run", home().join(".local/bin/quiver").display())
+}
+
+fn demo_patched(opts: &str) -> String {
+    if opts.contains("steam-run") {
+        return opts.to_owned();
+    }
+    match opts.find("%command%") {
+        Some(i) => format!("{}{} {}", &opts[..i], steam_command(), &opts[i..]),
+        None if opts.trim().is_empty() => format!("{} %command%", steam_command()),
+        None => format!("{} %command% {}", steam_command(), opts.trim()),
+    }
+}
+
+fn demo_unpatched(opts: &str) -> String {
+    let out = opts.replace(&format!("{} ", steam_command()), "");
+    if out.trim() == "%command%" { String::new() } else { out }
+}
+
+/// Ubisoft games installed through Steam (`QUIVER_DEMO_GLOBAL`: `steam-games=none` for
+/// none, `steam-offer` for a new install being offered, `steam-closed` for Steam closed).
+fn steam_games() -> Vec<SteamGame> {
+    if crate::ui::global::demo_flag("steam-games").is_some_and(|v| v == "none") {
+        return vec![];
+    }
+    let running = crate::ui::global::demo_flag("steam-closed").is_none();
+    let g = |app_id: u32, name: &str, dir: &str, product: Option<u32>, opts: &str, state: PatchState| SteamGame {
+        app_id,
+        name: name.into(),
+        install_dir: home().join(".local/share/Steam/steamapps/common").join(dir),
+        product_id: product,
+        product_from: product.map(|_| "install_script".into()),
+        owned: product.map(|_| true),
+        steam_user: Some("84211337".into()),
+        launch_options: opts.into(),
+        state,
+        patchable: product.is_some(),
+        offer: false,
+        note: product.is_none().then(|| "Quiver can't tell which Ubisoft game this is".into()),
+    };
+    let mut v = vec![
+        g(3751950, "Assassin's Creed Black Flag Resynced", "Assassin's Creed Black Flag Resynced", Some(66088), &demo_patched(""), PatchState::On),
+        g(368500, "Assassin's Creed Syndicate", "Assassin's Creed Syndicate", Some(1875), "", PatchState::Off),
+        g(298110, "Far Cry 4", "Far Cry 4", Some(420), "-skipintro", PatchState::Off),
+        g(2239550, "Watch Dogs: Legion", "Watch Dogs Legion", Some(3353), "PROTON_ENABLE_NVAPI=1 %command%", if running { PatchState::Waiting } else { PatchState::On }),
+        g(916440, "Anno 1800", "Anno 1800", None, "", PatchState::Off),
+    ];
+    if !running {
+        v[3].launch_options = demo_patched(&v[3].launch_options);
+    }
+    if crate::ui::global::demo_flag("steam-offer").is_some() {
+        v[1].offer = true;
+    }
+    v
 }
 
 fn steam_vdf() -> PathBuf {
