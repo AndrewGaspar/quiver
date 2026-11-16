@@ -1,0 +1,15 @@
+id = "acc-india-skip-intro"
+name = "Skip intro videos"
+version = "1"
+kind = "fix"
+description = "Removes the startup movies from the engine settings, so the game goes straight to the menu (the same edit as for Chronicles China)."
+source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Chronicles:_India#Skip_intro_videos"
+audited = "2026-11-16: from PCGamingWiki and the Chronicles China recipe (same engine and config layout). Not yet checked against a file the game wrote on this machine; the patch shows as pending until the game has run once. Settings only."
+save_compatible = true
+products = [1847]
+
+[[patch]]
+file = "drive_c/users/steamuser/Documents/My Games/ACIndia/ACCGame/Config/PCConsole-ACCEngine.ini"
+format = "ini"
+section = "FullScreenMovie"
+delete = ["StartupMovies"]

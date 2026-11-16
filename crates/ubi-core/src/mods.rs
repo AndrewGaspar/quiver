@@ -1,13 +1,25 @@
-//! Mod layers and profiles on disk (see `ubi_api::mods` for the model).
+//! Mods, layers and profiles on disk (see `ubi_api::mods` for the model).
 //!
 //! ```text
-//! <data>/mods/<product>/layers/<layer-id>/        the layer's files, as overlaid on the install
-//! <data>/mods/<product>/layers/<layer-id>.json    its metadata (ubi_api::mods::Layer)
-//! <data>/mods/<product>/profiles/<id>/upper/      what the game wrote while running the profile
+//! <data>/mods/<product>/layers/<mod-id>/          the mod's install files, as overlaid on the install
+//! <data>/mods/<product>/layers/<mod-id>.json      its metadata and manifest (ubi_api::mods::Layer)
+//! <data>/mods/<product>/profiles/<id>/upper/      what the game wrote to the install folder in the profile
 //! <data>/mods/<product>/profiles/<id>/work/       overlayfs scratch space
+//! <data>/mods/<product>/profiles/<id>/prefix/<dir>  the profile's own copy of a prefix folder
+//! <data>/mods/<product>/profiles/vanilla/upper/   the same for vanilla, when fixes with files apply to it
+//! <data>/mods/<product>/patches.json              config keys Quiver changed and their own values
 //! <data>/games/<product>/profiles/<id>.jsonl      the profile's history; the last line is current
-//! <data>/games/<product>/layers/<layer-id>.jsonl  the history of the layer's deletions
+//! <data>/games/<product>/layers/<mod-id>.jsonl    the history of the mod's deletions and metadata
 //! ```
+//!
+//! **Mods v2.** An installed mod is a layer with a manifest (launch settings, config
+//! patches, metadata); a layer from before Mods v2 is a file-only mod and needs no
+//! migration: same id, same folder, same history. A profile's `layers` are its mod stack
+//! and its `settings` its own overrides, so v1 profiles read as v2 profiles unchanged. The
+//! one behaviour that changes is saves: v1 forked every profile's saves, v2 forks only for
+//! mods that aren't save-compatible. A profile that already has its own saves folder keeps
+//! it ([`ModStore::saves_plan`] checks the prefix, and [`ModStore::migrate`] records
+//! `separate_saves=on` for such profiles), so no saves move or vanish.
 //!
 //! Profile history lives next to the game's settings history (`games/<product>/`) and uses
 //! the same JSON-lines revisions, but per profile: each profile is its own scope with its
@@ -31,8 +43,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 pub use ubi_api::mods::{Conflict, Layer, LayerChange, LayerRevision, ModsState, Profile, ProfileInfo, ProfileRevision, VANILLA};
-use ubi_api::SettingOp;
+use ubi_api::mods::{
+    AppliedKey, CatalogEntry, ConfigDir, LaunchPlan, MigrationReport, ModDetail, ModKind, ModManifest, Mount, PatchState,
+    PatchStatus, PatchedFile, SavesPlan, SettingConflict, ValueFrom,
+};
+use ubi_api::{Game, GameSettings, SettingOp};
 
+use crate::confpatch::{self, View, Wanted};
 use crate::overlay::OverlaySpec;
 use crate::settings::{append_jsonl, read_jsonl};
 
@@ -44,11 +61,51 @@ pub struct ProfileLaunch {
     pub overlay: OverlaySpec,
 }
 
+/// Everything a launch needs (Mods v2): what the API shows ([`LaunchPlan`]) and the
+/// mounts and config patches to apply.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub api: LaunchPlan,
+    /// Mounts for the launch's namespace (none: vanilla without file fixes).
+    pub overlays: Vec<OverlaySpec>,
+    /// Config patches the stack wants, in stack order.
+    pub patches: Vec<Wanted>,
+    /// The prefix as the launch sees it.
+    pub view: View,
+    /// The record of changed config keys (`patches.json`).
+    pub record: PathBuf,
+    /// Profile id whose own saves folder the launch uses (`None`: vanilla's).
+    pub saves_profile: Option<String>,
+}
+
+impl Plan {
+    /// Bring the config files this launch sees in line with its stack (see
+    /// [`confpatch::reconcile`]). Call before mounting the namespace.
+    pub fn apply_patches(&self) -> Result<Vec<PatchStatus>> {
+        confpatch::reconcile(&self.record, &self.view, &self.patches)
+    }
+}
+
+/// How a mod to install is given.
+#[derive(Debug, Clone)]
+pub enum Package {
+    /// From Quiver's catalog, by id.
+    Builtin(String),
+    /// A folder: a package with a manifest, or a plain folder of files (named `name` or
+    /// after the folder).
+    Dir { path: PathBuf, name: Option<String> },
+}
+
 /// One game's layers and profiles under a data directory.
 #[derive(Debug, Clone)]
 pub struct ModStore {
     data: PathBuf,
     product_id: u32,
+    /// The game, for what needs its prefix or install folder (saves, per-profile folders,
+    /// config patches, builds).
+    game: Option<Game>,
+    /// The app-level `fixes_on_vanilla` setting.
+    fixes_on_vanilla: Option<bool>,
 }
 
 /// A fresh random id: `prefix` and 6 base-36 characters.
@@ -360,14 +417,79 @@ pub fn match_case(layer: &Path, install: &Path) -> Result<usize> {
     Ok(renamed)
 }
 
+/// The mods a launch applies (bottom to top) and what was found about them.
+struct Stack {
+    mods: Vec<Layer>,
+    problems: Vec<String>,
+    warnings: Vec<String>,
+    setting_conflicts: Vec<SettingConflict>,
+    settings: GameSettings,
+    file_conflicts: Vec<Conflict>,
+}
+
+/// Config keys that mods in a stack set differently (or one sets and another deletes).
+fn patch_conflicts(mods: &[Layer]) -> Vec<SettingConflict> {
+    let mut seen: BTreeMap<String, (String, Vec<ValueFrom>)> = BTreeMap::new();
+    for m in mods {
+        for p in m.patches() {
+            let ops = p.set.iter().map(|(k, v)| (k, Some(v.clone()))).chain(p.delete.iter().map(|k| (k, None)));
+            for (k, value) in ops {
+                let (label, norm) = match p.format {
+                    ubi_api::mods::PatchFormat::Ini => {
+                        (format!("{} [{}] {k}", p.file, p.section), format!("ini|{}|{}|{}", p.file, p.section.to_lowercase(), k.to_lowercase()))
+                    }
+                    ubi_api::mods::PatchFormat::Xml => (format!("{} {}@{k}", p.file, p.element), format!("xml|{}|{}|{k}", p.file, p.element)),
+                };
+                seen.entry(norm).or_insert_with(|| (label, Vec::new())).1.push(ValueFrom { from: m.id.clone(), value });
+            }
+        }
+    }
+    seen.into_values()
+        .filter(|(_, by)| by.iter().any(|b| b.value != by[0].value))
+        .map(|(key, by)| SettingConflict { key, by })
+        .collect()
+}
+
+/// A short stable name for a path (FNV-1a), for overlayfs work folders.
+fn short_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 impl ModStore {
     pub fn new(data: &Path, product_id: u32) -> Self {
-        Self { data: data.to_owned(), product_id }
+        Self { data: data.to_owned(), product_id, game: None, fixes_on_vanilla: None }
     }
 
     /// The store under Quiver's data directory.
     pub fn open(product_id: u32) -> Self {
         Self::new(&crate::launcher::data_dir(), product_id)
+    }
+
+    /// With the installed game (its prefix and install folder) and the app-level
+    /// `fixes_on_vanilla` setting.
+    pub fn with_game(mut self, game: &Game, fixes_on_vanilla: Option<bool>) -> Self {
+        self.game = Some(game.clone());
+        self.fixes_on_vanilla = fixes_on_vanilla;
+        self
+    }
+
+    fn record_path(&self) -> PathBuf {
+        self.mods_dir().join("patches.json")
+    }
+
+    /// Where a profile's own copies of prefix folders live (laid out like the prefix).
+    pub fn profile_prefix(&self, id: &str) -> PathBuf {
+        self.profile_dir(id).join("prefix")
+    }
+
+    /// The game's current settings (revision 0: defaults).
+    fn game_settings(&self) -> GameSettings {
+        let path = self.data.join("games").join(self.product_id.to_string()).join("history.jsonl");
+        read_jsonl::<ubi_api::Revision>(&path).ok().and_then(|h| h.last().map(|r| r.settings.clone())).unwrap_or_default()
     }
 
     fn mods_dir(&self) -> PathBuf {
@@ -434,7 +556,10 @@ impl ModStore {
         if let Some(l) = layers.iter().find(|l| l.id == query) {
             return Ok(l.clone());
         }
-        let found: Vec<&Layer> = layers.iter().filter(|l| same_name(&l.name, query)).collect();
+        let mut found: Vec<&Layer> = layers.iter().filter(|l| l.mod_id().is_some_and(|m| same_name(m, query))).collect();
+        if found.is_empty() {
+            found = layers.iter().filter(|l| same_name(&l.name, query)).collect();
+        }
         match found.as_slice() {
             [l] => Ok((*l).clone()),
             [] => bail!(
@@ -485,6 +610,22 @@ impl ModStore {
         install: Option<&Path>,
         source: &str,
     ) -> Result<LayerChange> {
+        self.add_mod(name, src, deletes, install, source, None, false)
+    }
+
+    /// [`Self::add_layer_with`] with a manifest (Mods v2): a mod with a manifest may have no
+    /// files at all (only launch settings or config patches).
+    #[allow(clippy::too_many_arguments)]
+    fn add_mod(
+        &self,
+        name: &str,
+        src: Option<&Path>,
+        deletes: &[String],
+        install: Option<&Path>,
+        source: &str,
+        manifest: Option<ModManifest>,
+        builtin: bool,
+    ) -> Result<LayerChange> {
         let name = name.trim();
         if name.is_empty() {
             bail!("a layer needs a name");
@@ -506,11 +647,11 @@ impl ModStore {
             None => None,
         };
         let (deletes, mut warnings) = self.resolve_deletions(deletes, install)?;
-        if src.is_none() && deletes.is_empty() {
+        if src.is_none() && deletes.is_empty() && manifest.is_none() {
             bail!("a layer needs a folder of files, files to delete, or both");
         }
         let id = loop {
-            let id = new_id('l')?;
+            let id = new_id(if manifest.is_some() { 'm' } else { 'l' })?;
             if !self.layer_dir(&id).exists() {
                 break id;
             }
@@ -561,10 +702,13 @@ impl ModStore {
             files: files.len() as u64,
             bytes: files.iter().map(|f| f.1).sum(),
             deletes,
+            manifest,
+            builtin,
+            disabled: false,
         };
         self.write_layer_meta(&layer)?;
         let _ = std::fs::remove_file(self.layer_history_path(&id));
-        let rev = self.append_layer_revision(&layer.id, &layer.deletes, layer.added, source, Some("added".into()))?;
+        let rev = self.append_layer_revision(&layer.id, &layer.deletes, layer.added, source, Some("added".into()), Vec::new())?;
         Ok(LayerChange { layer, revision: rev.revision, warnings })
     }
 
@@ -586,10 +730,11 @@ impl ModStore {
         at: chrono::DateTime<chrono::Utc>,
         source: &str,
         message: Option<String>,
+        changes: Vec<String>,
     ) -> Result<LayerRevision> {
         let path = self.layer_history_path(id);
         let revision = read_jsonl::<LayerRevision>(&path)?.last().map_or(0, |r| r.revision) + 1;
-        let rev = LayerRevision { revision, at, source: source.to_owned(), message, deletes: deletes.to_vec() };
+        let rev = LayerRevision { revision, at, source: source.to_owned(), message, deletes: deletes.to_vec(), changes };
         append_jsonl(&path, &rev)?;
         Ok(rev)
     }
@@ -598,32 +743,49 @@ impl ModStore {
     /// its metadata, then a revision. No change, no revision.
     fn set_deletions(
         &self,
-        mut layer: Layer,
+        layer: Layer,
         list: Vec<String>,
         source: &str,
         message: Option<String>,
         warnings: Vec<String>,
     ) -> Result<LayerChange> {
-        let hist = self.layer_history(&layer.id)?;
-        if list == layer.deletes {
-            return Ok(LayerChange { revision: hist.last().map_or(0, |r| r.revision), layer, warnings });
+        let updated = Layer { deletes: list, ..layer.clone() };
+        self.commit(layer, updated, Vec::new(), source, message, warnings)
+    }
+
+    /// Make `old` (as stored) into `new`: whiteouts first (undone again if one fails), then
+    /// the metadata, then a revision recording the deletions and `changes`. No change, no
+    /// revision.
+    fn commit(
+        &self,
+        old: Layer,
+        new: Layer,
+        changes: Vec<String>,
+        source: &str,
+        message: Option<String>,
+        warnings: Vec<String>,
+    ) -> Result<LayerChange> {
+        let hist = self.layer_history(&old.id)?;
+        if new == old {
+            return Ok(LayerChange { revision: hist.last().map_or(0, |r| r.revision), layer: old, warnings });
         }
-        let dir = self.layer_dir(&layer.id);
-        if !dir.is_dir() {
-            bail!("layer '{}' has lost its folder ({}); remove it and add it again", layer.name, dir.display());
-        }
-        if let Err(e) = sync_deletions(&dir, &layer.deletes, &list) {
-            let _ = sync_deletions(&dir, &list, &layer.deletes);
-            return Err(e);
+        let dir = self.layer_dir(&old.id);
+        if new.deletes != old.deletes {
+            if !dir.is_dir() {
+                bail!("layer '{}' has lost its folder ({}); remove it and add it again", old.name, dir.display());
+            }
+            if let Err(e) = sync_deletions(&dir, &old.deletes, &new.deletes) {
+                let _ = sync_deletions(&dir, &new.deletes, &old.deletes);
+                return Err(e);
+            }
         }
         if hist.is_empty() {
             // A layer from before deletions had a history: record how it was added first.
-            self.append_layer_revision(&layer.id, &layer.deletes, layer.added, &layer.added_by, Some("added".into()))?;
+            self.append_layer_revision(&old.id, &old.deletes, old.added, &old.added_by, Some("added".into()), Vec::new())?;
         }
-        layer.deletes = list;
-        self.write_layer_meta(&layer)?;
-        let rev = self.append_layer_revision(&layer.id, &layer.deletes, chrono::Utc::now(), source, message)?;
-        Ok(LayerChange { layer, revision: rev.revision, warnings })
+        self.write_layer_meta(&new)?;
+        let rev = self.append_layer_revision(&new.id, &new.deletes, chrono::Utc::now(), source, message, changes)?;
+        Ok(LayerChange { layer: new, revision: rev.revision, warnings })
     }
 
     /// Add deletions (`delete`) to a layer or take them back (`keep`); paths are relative
@@ -721,6 +883,191 @@ impl ModStore {
                 layers: by.into_iter().map(|b| b.0).collect(),
             })
             .collect()
+    }
+
+    // -- Mods v2: packages ---------------------------------------------------------------
+
+    fn install_dir(&self) -> Option<&Path> {
+        self.game.as_ref().map(|g| g.install_dir.as_path())
+    }
+
+    fn prefix(&self) -> Option<&Path> {
+        self.game.as_ref().map(|g| g.prefix.as_path())
+    }
+
+    /// The catalog's mods for this game, with whether each is installed.
+    pub fn catalog(&self) -> Result<Vec<CatalogEntry>> {
+        let installed = self.layers()?;
+        Ok(crate::modpkg::catalog(self.product_id)?
+            .into_iter()
+            .map(|manifest| {
+                let have = installed.iter().find(|l| l.builtin && l.mod_id() == Some(manifest.id.as_str()));
+                CatalogEntry {
+                    installed: have.map(|l| l.id.clone()),
+                    update: have.is_some_and(|l| l.manifest.as_ref() != Some(&manifest)),
+                    manifest,
+                }
+            })
+            .collect())
+    }
+
+    /// Install a mod package (see [`Package`]). A built-in mod that's already installed is
+    /// updated to the catalog's manifest (its deletions too, as a revision).
+    pub fn install(&self, pkg: &Package, source: &str) -> Result<LayerChange> {
+        let install = self.install_dir();
+        let (manifest, files, builtin, name) = match pkg {
+            Package::Builtin(id) => (crate::modpkg::builtin(self.product_id, id)?, None, true, None),
+            Package::Dir { path, name } => {
+                let path = path.canonicalize().with_context(|| format!("{} not found", path.display()))?;
+                match crate::modpkg::read_package(&path)? {
+                    Some((m, files)) => (m, files, false, name.clone()),
+                    None => {
+                        // A plain folder of files: a file-only mod, as layers always were.
+                        let name = name.clone().unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                        return self.add_mod(&name, Some(&path), &[], install, source, None, false);
+                    }
+                }
+            }
+        };
+        if !manifest.products.is_empty() && !manifest.products.contains(&self.product_id) {
+            bail!("{} is for product {:?}, not {}", manifest.id, manifest.products, self.product_id);
+        }
+        if let Some(old) = self.layers()?.into_iter().find(|l| l.mod_id() == Some(manifest.id.as_str())) {
+            if !(builtin && old.builtin) {
+                bail!("{} is already installed (as {}); uninstall it first", manifest.id, old.id);
+            }
+            if old.manifest.as_ref() == Some(&manifest) {
+                let revision = self.layer_history(&old.id)?.last().map_or(0, |r| r.revision);
+                return Ok(LayerChange { layer: old, revision, warnings: vec!["already installed and up to date".into()] });
+            }
+            let (deletes, mut warnings) = self.resolve_deletions(&manifest.files.delete, install)?;
+            let (list, notes) = plan_deletions(&[], &deletes, &[])?;
+            warnings.extend(notes);
+            let from = old.manifest.as_ref().and_then(|m| m.version.clone()).unwrap_or_else(|| "?".into());
+            let to = manifest.version.clone().unwrap_or_else(|| "?".into());
+            let new = Layer { name: old.name.clone(), deletes: list, manifest: Some(manifest), ..old.clone() };
+            return self.commit(old, new, vec![format!("manifest {from} -> {to}")], source, Some("updated from the catalog".into()), warnings);
+        }
+        let name = name.unwrap_or_else(|| manifest.name.clone());
+        let taken = self.layers()?.iter().any(|l| same_name(&l.name, &name));
+        let name = if taken { format!("{name} ({})", manifest.id) } else { name };
+        let deletes = manifest.files.delete.clone();
+        self.add_mod(&name, files.as_deref(), &deletes, install, source, Some(manifest), builtin)
+    }
+
+    /// The real file behind a recorded config key.
+    fn physical(&self, scope: &str, rel: &str) -> Option<PathBuf> {
+        match scope.strip_prefix("profile:") {
+            Some(id) => Some(self.profile_prefix(id).join(rel)),
+            None => self.prefix().map(|p| p.join(rel)),
+        }
+    }
+
+    /// Put back the files' own values for config keys Quiver changed: for one mod (by id or
+    /// name), or all.
+    pub fn undo_patches(&self, query: Option<&str>) -> Result<Vec<PatchStatus>> {
+        let id = query.map(|q| self.layer(q).map(|l| l.id)).transpose()?;
+        confpatch::undo(&self.record_path(), id.as_deref(), |scope, rel| self.physical(scope, rel))
+    }
+
+    /// Config keys a mod has changed right now.
+    pub fn applied_by(&self, id: &str) -> Result<Vec<AppliedKey>> {
+        Ok(confpatch::applied(&self.record_path())?.into_iter().filter(|k| k.mods.iter().any(|m| m == id)).collect())
+    }
+
+    /// Remove an installed mod: refused while a profile stacks it; the config values it
+    /// changed go back to the files' own first.
+    pub fn uninstall(&self, query: &str) -> Result<(Layer, Vec<PatchStatus>)> {
+        let layer = self.layer(query)?;
+        let users: Vec<String> =
+            self.profiles()?.into_iter().filter(|(p, _)| p.layers.contains(&layer.id)).map(|(p, _)| p.name).collect();
+        if !users.is_empty() {
+            bail!("mod '{}' is used by {}; take it out of those profiles first", layer.name, users.join(", "));
+        }
+        let undone = self.undo_patches(Some(&layer.id))?;
+        Ok((self.remove_layer(&layer.id)?, undone))
+    }
+
+    /// Change an installed mod: `enabled=on|off`, `save_compatible=on|off|unknown`,
+    /// `kind=fix|mod`, `name=…`. A layer from before Mods v2 gets a manifest of its own for
+    /// these. Recorded as a revision in the mod's history.
+    pub fn set_mod(&self, query: &str, ops: &[SettingOp], source: &str, message: Option<String>) -> Result<LayerChange> {
+        let old = self.layer(query)?;
+        let mut new = old.clone();
+        let mut changes = Vec::new();
+        for op in ops {
+            let (key, value) = match op {
+                SettingOp::Set { key, value } => (key.as_str(), Some(value.trim())),
+                SettingOp::Unset { key } => (key.as_str(), None),
+            };
+            let bool_of = |v: Option<&str>| match v.map(str::to_ascii_lowercase).as_deref() {
+                Some("on" | "true" | "yes" | "1") => Ok(Some(true)),
+                Some("off" | "false" | "no" | "0") => Ok(Some(false)),
+                None | Some("unknown" | "auto") => Ok(None),
+                Some(o) => Err(anyhow::anyhow!("{key}: expected on or off, got '{o}'")),
+            };
+            fn manifest(l: &mut Layer) -> &mut ModManifest {
+                let (id, name) = (l.id.clone(), l.name.clone());
+                l.manifest.get_or_insert_with(|| ModManifest { id, name, ..Default::default() })
+            }
+            match key {
+                "enabled" => new.disabled = bool_of(value)? == Some(false),
+                "save_compatible" => manifest(&mut new).save_compatible = bool_of(value)?,
+                "kind" => {
+                    manifest(&mut new).kind = match value {
+                        Some("fix") => ModKind::Fix,
+                        Some("mod") | None => ModKind::Mod,
+                        Some(o) => bail!("kind: fix or mod, not '{o}'"),
+                    }
+                }
+                "name" => {
+                    let name = value.filter(|v| !v.is_empty()).context("a mod needs a name")?;
+                    if self.layers()?.iter().any(|l| l.id != old.id && same_name(&l.name, name)) {
+                        bail!("there is already a mod named '{name}'");
+                    }
+                    new.name = name.to_owned();
+                }
+                k => bail!("unknown mod setting '{k}' (enabled, save_compatible, kind, name)"),
+            }
+            changes.push(match value {
+                Some(v) => format!("{key}={v}"),
+                None => format!("{key}="),
+            });
+        }
+        if let Some(m) = &new.manifest {
+            crate::modpkg::validate(m)?;
+        }
+        self.commit(old, new, changes, source, message, Vec::new())
+    }
+
+    /// An installed mod in detail.
+    pub fn detail(&self, query: &str) -> Result<ModDetail> {
+        let layer = self.layer(query)?;
+        let used_by = self.profiles()?.into_iter().filter(|(p, _)| p.layers.contains(&layer.id)).map(|(p, _)| p.name).collect();
+        let catalog_update = if layer.builtin {
+            crate::modpkg::catalog(self.product_id)?
+                .into_iter()
+                .find(|m| Some(m.id.as_str()) == layer.mod_id())
+                .filter(|m| Some(m) != layer.manifest.as_ref())
+        } else {
+            None
+        };
+        Ok(ModDetail {
+            on_vanilla: self.vanilla_fixes()?.iter().any(|l| l.id == layer.id),
+            applied: self.applied_by(&layer.id)?,
+            used_by,
+            catalog_update,
+            layer,
+        })
+    }
+
+    /// Enabled `fix` mods that apply to vanilla (none unless `fixes_on_vanilla` is on), in
+    /// the order they were installed.
+    pub fn vanilla_fixes(&self) -> Result<Vec<Layer>> {
+        if self.fixes_on_vanilla != Some(true) {
+            return Ok(Vec::new());
+        }
+        Ok(self.layers()?.into_iter().filter(|l| l.enabled() && l.kind() == ModKind::Fix && l.save_compatible()).collect())
     }
 
     // -- profiles -------------------------------------------------------------------------
@@ -831,9 +1178,13 @@ impl ModStore {
         let mut p = current.profile.clone();
         for op in ops {
             let op = match op {
-                SettingOp::Set { key, value } if key == "layers" => {
+                SettingOp::Set { key, value } if key == "layers" || key == "mods" => {
                     let ids = self.resolve_layers(&ubi_api::mods::split_list(value))?;
                     SettingOp::Set { key: key.clone(), value: ids.join(",") }
+                }
+                SettingOp::Set { key, value } if key == "profile_config" => {
+                    let dirs = self.check_config_dirs(&ubi_api::mods::split_list(value))?;
+                    SettingOp::Set { key: key.clone(), value: dirs.join(",") }
                 }
                 op => op.clone(),
             };
@@ -871,8 +1222,15 @@ impl ModStore {
 
     fn info(&self, r: ProfileRevision) -> ProfileInfo {
         let missing_layers = r.profile.layers.iter().filter(|id| !self.layer_meta(id).exists()).cloned().collect();
-        let conflicts = self.conflicts(&r.profile.layers);
-        ProfileInfo { profile: r.profile, revision: r.revision, missing_layers, conflicts }
+        let (conflicts, setting_conflicts, problems, warnings, saves) = match self.stack(Some(&r.profile)) {
+            Ok(st) => {
+                let saves = self.saves_plan(Some(&r.profile), &st.mods);
+                (st.file_conflicts, st.setting_conflicts, st.problems, st.warnings, Some(saves))
+            }
+            Err(e) => (self.conflicts(&r.profile.layers), Vec::new(), vec![format!("{e:#}")], Vec::new(), None),
+        };
+        let config_dirs = self.config_dirs(&r.profile);
+        ProfileInfo { profile: r.profile, revision: r.revision, missing_layers, conflicts, setting_conflicts, problems, warnings, saves, config_dirs }
     }
 
     pub fn state(&self) -> Result<ModsState> {
@@ -882,7 +1240,277 @@ impl ModStore {
             layers: self.layers()?,
             profiles: live.into_iter().map(|r| self.info(r)).collect(),
             deleted: deleted.into_iter().map(|r| self.info(r)).collect(),
+            fixes_on_vanilla: self.fixes_on_vanilla,
+            vanilla_fixes: self.vanilla_fixes()?.into_iter().map(|l| l.id).collect(),
         })
+    }
+
+    // -- Mods v2: stacks, saves, per-profile folders, launch plans --------------------------
+
+    /// The installed build's manifest hash.
+    fn install_hash(&self) -> Option<String> {
+        let raw = std::fs::read(self.install_dir()?.join("uplay_install.manifest")).ok()?;
+        crate::manifest::manifest_hash(&raw).ok()
+    }
+
+    /// The mods a launch of `profile` (`None`: vanilla) applies and what's wrong with them.
+    fn stack(&self, profile: Option<&Profile>) -> Result<Stack> {
+        let all = self.layers()?;
+        let (mut mods, mut problems, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
+        match profile {
+            None => mods = self.vanilla_fixes()?,
+            Some(p) => {
+                for id in &p.layers {
+                    match all.iter().find(|l| &l.id == id) {
+                        None => problems.push(format!("mod {id} is no longer installed; take it out of the profile")),
+                        Some(l) if !l.enabled() => warnings.push(format!("{} is turned off, so it's skipped", l.name)),
+                        Some(l) => mods.push(l.clone()),
+                    }
+                }
+            }
+        }
+        for m in &mods {
+            let Some(man) = &m.manifest else { continue };
+            for r in &man.requires {
+                if !mods.iter().any(|o| o.id != m.id && o.is(r)) {
+                    problems.push(format!("{} needs {r}, which isn't in the stack (or is turned off)", m.name));
+                }
+            }
+            for c in &man.conflicts {
+                if let Some(o) = mods.iter().find(|o| o.id != m.id && o.is(c)) {
+                    problems.push(format!("{} and {} don't work together ({} says so)", m.name, o.name, m.name));
+                }
+            }
+        }
+        if mods.iter().any(|m| m.manifest.as_ref().is_some_and(|x| !x.builds.is_empty()))
+            && let Some(hash) = self.install_hash()
+        {
+            for m in &mods {
+                if let Some(man) = &m.manifest
+                    && !man.builds.is_empty()
+                    && !man.builds.iter().any(|b| b.eq_ignore_ascii_case(&hash))
+                {
+                    warnings.push(format!("{} was checked against other builds of the game (installed: {hash})", m.name));
+                }
+            }
+        }
+        let launches: Vec<(String, ubi_api::mods::ModLaunch)> = mods.iter().map(|m| (m.id.clone(), m.launch())).collect();
+        let empty = GameSettings::default();
+        let (settings, mut setting_conflicts) =
+            ubi_api::mods::resolve_settings(&self.game_settings(), &launches, profile.map_or(&empty, |p| &p.settings));
+        setting_conflicts.extend(patch_conflicts(&mods));
+        let ids: Vec<String> = mods.iter().map(|m| m.id.clone()).collect();
+        let file_conflicts = self.conflicts(&ids);
+        Ok(Stack { mods, problems, warnings, setting_conflicts, settings, file_conflicts })
+    }
+
+    /// The saves folder a profile made before Mods v2 (relative to the prefix), if any.
+    fn legacy_saves(&self, id: &str) -> Option<String> {
+        let saves = self.prefix()?.join(crate::launcher::UPC_REL).join("savegames");
+        let name = format!("{}-{id}", self.product_id);
+        let mut users: Vec<String> = std::fs::read_dir(&saves).ok()?.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        users.sort();
+        users.into_iter().find(|u| saves.join(u).join(&name).is_dir()).map(|u| format!("{}/savegames/{u}/{name}", crate::launcher::UPC_REL))
+    }
+
+    /// Whose saves a launch uses: vanilla's, unless the profile says otherwise, a mod in
+    /// the stack isn't save-compatible, or the profile already has a saves folder of its own
+    /// (from before Mods v2, when every profile had one).
+    pub fn saves_plan(&self, profile: Option<&Profile>, mods: &[Layer]) -> SavesPlan {
+        let pid = self.product_id;
+        let Some(p) = profile else {
+            return SavesPlan {
+                separate: false,
+                reason: "vanilla uses the game's own saves".into(),
+                folder: format!("savegames/<user>/{pid}"),
+                cloud: true,
+            };
+        };
+        let (separate, reason) = match p.separate_saves {
+            Some(true) => (true, "separate_saves is on for this profile".to_owned()),
+            Some(false) => (false, "separate_saves is off: the profile shares vanilla's saves".to_owned()),
+            None => match mods.iter().find(|m| !m.save_compatible()) {
+                Some(m) => (true, format!("{} isn't marked save-compatible", m.name)),
+                None => match self.legacy_saves(&p.id) {
+                    Some(f) => (true, format!("the profile has its own saves folder from before Mods v2 ({f})")),
+                    None => (false, "every mod in the stack is save-compatible: the profile shares vanilla's saves".to_owned()),
+                },
+            },
+        };
+        let (folder, cloud, reason) = if separate {
+            let cloud = if p.cloud_saves { "synced with the cloud (cloud_saves=on)" } else { "kept local (cloud_saves=off)" };
+            (format!("savegames/<user>/{pid}-{}", p.id), p.cloud_saves, format!("{reason}; {cloud}"))
+        } else {
+            (format!("savegames/<user>/{pid}"), true, format!("{reason}; synced with the cloud like vanilla"))
+        };
+        SavesPlan { separate, reason, folder, cloud }
+    }
+
+    /// Prefix folders as given (prefix-relative or absolute inside the prefix), normalized
+    /// and checked: not the prefix's own machinery (Windows, the Connect folder with the
+    /// saves, the bridge), not one inside another.
+    pub fn check_config_dirs(&self, dirs: &[String]) -> Result<Vec<String>> {
+        let protected = [crate::launcher::UPC_REL, "drive_c/windows", "drive_c/ubi", "dosdevices", "pfx", "drive_c/users/Public"];
+        let mut out: Vec<String> = Vec::new();
+        for d in dirs {
+            let rel = normalize_path(d, self.prefix()).map_err(|e| anyhow::anyhow!(format!("{e:#}").replace("install folder", "prefix")))?;
+            let rel = match self.prefix() {
+                Some(prefix) => match_install_case(prefix, &rel).0,
+                None => rel,
+            };
+            for p in protected {
+                if same_path(&rel, p) || is_under(&rel, p) || is_under(p, &rel) {
+                    bail!("{rel}: the prefix's own {p} can't be per-profile");
+                }
+            }
+            if rel.split('/').count() < 2 {
+                bail!("{rel}: name a folder inside the prefix's drive, e.g. drive_c/users/steamuser/Documents/My Games/<game>");
+            }
+            if let Some(o) = out.iter().find(|o| same_path(o, &rel) || is_under(&rel, o) || is_under(o, &rel)) {
+                bail!("{rel} and {o} overlap; give one of them");
+            }
+            if let (Some(prefix), Some(install)) = (self.prefix(), self.install_dir())
+                && install.starts_with(prefix.join(&rel))
+            {
+                bail!("{rel} holds the game's install folder; pick a folder inside it");
+            }
+            out.push(rel);
+        }
+        Ok(out)
+    }
+
+    /// A profile's own prefix folders and where their files live.
+    pub fn config_dirs(&self, p: &Profile) -> Vec<ConfigDir> {
+        p.profile_config
+            .iter()
+            .map(|d| {
+                let upper = self.profile_prefix(&p.id).join(d);
+                ConfigDir {
+                    dir: d.clone(),
+                    prefix_path: self.prefix().map(|x| x.join(d)),
+                    files: walk(&upper).unwrap_or_default().into_iter().map(|f| f.0).collect(),
+                    upper,
+                }
+            })
+            .collect()
+    }
+
+    /// Everything a launch of `query` (a profile; `None` or `vanilla`: the unmodded game,
+    /// with fixes if `fixes_on_vanilla` is on) uses. Needs [`Self::with_game`].
+    pub fn plan(&self, query: Option<&str>) -> Result<Plan> {
+        let game = self.game.as_ref().context("a launch plan needs the installed game")?;
+        let (profile, revision) = match query.filter(|q| !same_name(q, VANILLA)) {
+            Some(q) => {
+                let (p, r) = self.profile(q)?;
+                (Some(p), r)
+            }
+            None => (None, 0),
+        };
+        let mut st = self.stack(profile.as_ref())?;
+        let saves = self.saves_plan(profile.as_ref(), &st.mods);
+        let mut overlays = Vec::new();
+        let file_mods: Vec<&Layer> = st.mods.iter().filter(|m| m.has_files()).collect();
+        for m in &file_mods {
+            if !self.layer_dir(&m.id).is_dir() {
+                st.problems.push(format!("{} has lost its folder ({}); uninstall and install it again", m.name, self.layer_dir(&m.id).display()));
+            }
+        }
+        // A profile always runs over its own writable layer (as in v1); vanilla only when
+        // fixes change install files.
+        let state = match &profile {
+            Some(p) => Some(self.profile_dir(&p.id)),
+            None if !file_mods.is_empty() => Some(self.profile_dir(VANILLA)),
+            None => None,
+        };
+        if let Some(state) = state {
+            let lower = file_mods.iter().rev().map(|m| self.layer_dir(&m.id)).collect();
+            overlays.push(OverlaySpec { target: game.install_dir.clone(), lower, upper: state.join("upper"), work: state.join("work") });
+        }
+        let mut config_dirs = Vec::new();
+        if let Some(p) = &profile {
+            if let Err(e) = self.check_config_dirs(&p.profile_config) {
+                st.problems.push(format!("profile_config: {e:#}"));
+            }
+            for (d, info) in p.profile_config.iter().zip(self.config_dirs(p)) {
+                overlays.push(OverlaySpec {
+                    target: game.prefix.join(d),
+                    lower: Vec::new(),
+                    upper: info.upper.clone(),
+                    work: self.profile_dir(&p.id).join("prefix-work").join(short_hash(d)),
+                });
+                config_dirs.push(info);
+            }
+        }
+        let view = View {
+            prefix: game.prefix.clone(),
+            profile: profile
+                .as_ref()
+                .filter(|p| !p.profile_config.is_empty())
+                .map(|p| (p.id.clone(), self.profile_prefix(&p.id), p.profile_config.clone())),
+        };
+        let patches: Vec<Wanted> =
+            st.mods.iter().flat_map(|m| m.patches().iter().map(|p| Wanted { mod_id: m.id.clone(), patch: p.clone() })).collect();
+        // What the patches would touch (they're applied at launch).
+        let preview = patches
+            .iter()
+            .map(|w| {
+                let files: Vec<PatchedFile> = view
+                    .glob(&w.patch.file)
+                    .into_iter()
+                    .map(|rel| PatchedFile { path: view.write_path(&rel), scope: view.scope(&rel), rel })
+                    .collect();
+                PatchStatus {
+                    mod_id: w.mod_id.clone(),
+                    file: w.patch.file.clone(),
+                    target: w.patch.target().to_owned(),
+                    state: if files.is_empty() { PatchState::Pending } else { PatchState::Unknown },
+                    detail: if files.is_empty() { "pending until first run: the game hasn't written this file yet".into() } else { String::new() },
+                    files,
+                }
+            })
+            .collect();
+        let api = LaunchPlan {
+            product_id: self.product_id,
+            profile: profile.clone(),
+            revision,
+            mods: st.mods.iter().map(|m| m.id.clone()).collect(),
+            settings: st.settings,
+            setting_conflicts: st.setting_conflicts,
+            file_conflicts: st.file_conflicts,
+            problems: st.problems,
+            warnings: st.warnings,
+            saves: saves.clone(),
+            mounts: overlays.iter().map(|o| Mount { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone() }).collect(),
+            config_dirs,
+            patches: preview,
+        };
+        let saves_profile = profile.as_ref().filter(|_| saves.separate).map(|p| p.id.clone());
+        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_profile })
+    }
+
+    /// Make v1 data explicit for Mods v2: live profiles that already have their own saves
+    /// folder and no `separate_saves` setting get `separate_saves=on` (a revision), so they
+    /// keep that folder whatever their mods say. Layers need nothing (they're file-only
+    /// mods as they are). Idempotent.
+    pub fn migrate(&self, dry_run: bool, source: &str) -> Result<MigrationReport> {
+        let mut report = MigrationReport { product_id: self.product_id, dry_run, ..Default::default() };
+        report.file_only_mods = self.layers()?.into_iter().filter(|l| l.manifest.is_none()).map(|l| l.id).collect();
+        if self.prefix().is_none() {
+            report.notes.push("no game prefix given; profiles' saves folders weren't checked".into());
+        }
+        for (p, _) in self.profiles()? {
+            if p.separate_saves.is_some() {
+                continue;
+            }
+            let Some(folder) = self.legacy_saves(&p.id) else { continue };
+            if !dry_run {
+                let ops = [SettingOp::Set { key: "separate_saves".into(), value: "on".into() }];
+                self.set_profile(&p.id, &ops, source, Some(format!("Mods v2: keeps its own saves folder ({folder})")))?;
+            }
+            report.notes.push(format!("profile '{}' keeps its own saves ({folder}); separate_saves=on", p.name));
+            report.kept_separate_saves.push((p.id, folder));
+        }
+        Ok(report)
     }
 
     /// What a launch of `query` needs; `None` for vanilla.

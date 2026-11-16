@@ -1,0 +1,15 @@
+id = "acc-china-skip-intro"
+name = "Skip intro videos"
+version = "1"
+kind = "fix"
+description = "Removes the startup movies (Ubisoft, Climax and Unreal Engine logos, and the menu movie) from the engine settings, so the game goes straight to the menu."
+source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Chronicles:_China#Skip_intro_videos"
+audited = "2026-11-16: from PCGamingWiki; checked against the PCConsole-ACCEngine.ini the game wrote ([FullScreenMovie] has four StartupMovies lines). Deleting those keys is the wiki's edit. Settings only."
+save_compatible = true
+products = [1651]
+
+[[patch]]
+file = "drive_c/users/steamuser/Documents/My Games/UnrealEngine3/ACCGame/ACCGame/Config/PCConsole-ACCEngine.ini"
+format = "ini"
+section = "FullScreenMovie"
+delete = ["StartupMovies"]

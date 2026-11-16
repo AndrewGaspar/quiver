@@ -1,0 +1,17 @@
+id = "aco-skip-intros"
+name = "Skip intro videos"
+version = "1"
+kind = "fix"
+description = "Hides the Ubisoft logo, epilepsy warning, autosave notice and disclaimer videos, so the game starts at the title screen. The install is never changed: the videos are hidden inside the launch's own mount."
+source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Origins#Skip_intro_videos"
+audited = "2026-11-16: file list from PCGamingWiki, checked against the installed game (all four files exist). Same deletions as the hand-made 'Skip intros' layer. Saves are unaffected."
+save_compatible = true
+products = [3539]
+
+[files]
+delete = [
+    "videos/UbisoftLogo.bk2",
+    "videos/en/Epilepsy.bk2",
+    "videos/en/pc_WarningSaving.bk2",
+    "videos/en/warning_disclaimer.bk2",
+]

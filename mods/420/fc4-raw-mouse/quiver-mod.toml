@@ -1,0 +1,15 @@
+id = "fc4-raw-mouse"
+name = "Raw mouse input"
+version = "1"
+kind = "fix"
+description = "Turns off mouse acceleration and smoothing (also when aiming down sights) in the game's profile file, GamerProfile.xml. The game keeps that file in a folder per Ubisoft account; every account's folder is patched."
+source = "https://www.pcgamingwiki.com/wiki/Far_Cry_4#Mouse_acceleration"
+audited = "2026-11-16: attributes from PCGamingWiki, checked against a GamerProfile.xml the game wrote (its ProfileSpecificGameProfile element has MouseAcceleration, Smoothness and Smoothness_Ironsight). Settings only; saves are unaffected."
+save_compatible = true
+products = [420]
+
+[[patch]]
+file = "drive_c/users/steamuser/Documents/My Games/Far Cry 4/*/GamerProfile.xml"
+format = "xml"
+element = "GamerProfile/ProfileSpecificGameProfile"
+set = { MouseAcceleration = "0", Smoothness = "0", Smoothness_Ironsight = "0" }
