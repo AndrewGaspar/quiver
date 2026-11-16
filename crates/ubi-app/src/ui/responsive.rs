@@ -2,13 +2,18 @@
 //! adapts to the width it gets. [`Bp`] is computed from a width once per frame: the
 //! window's (top bar, pages) or a pane's (the game page beside its side list).
 //!
-//! | Bp      | width       | what changes                                                   |
-//! |---------|-------------|----------------------------------------------------------------|
-//! | Wide    | ≥ 1360      | the full design                                                |
-//! | Large   | 1140–1360   | top bar: quiverd as a dot, now playing as icon + clock         |
-//! | Medium  | 900–1140    | top bar: icon-only sections; game page: side list as a rail    |
-//! | Compact | 600–900     | top bar: search as a button, logo mark only; page headers stack|
-//! | Narrow  | < 600       | two-row top bar, 16 px gutters, game list in a drawer, one column |
+//! | Bp      | width       | what changes                                                         |
+//! |---------|-------------|----------------------------------------------------------------------|
+//! | Wide    | ≥ 1360      | the full design                                                      |
+//! | Large   | 1140–1360   | top bar: quiverd as a dot                                            |
+//! | Medium  | 900–1140    | top bar: icon-only sections, now playing as icon + clock; game page: |
+//! |         |             | side list as a rail of box art                                       |
+//! | Compact | 600–900     | top bar: search as a button, logo mark only; two-column layouts      |
+//! |         |             | stack (pages, game tabs); Settings sections as chips; welcome rail   |
+//! |         |             | becomes a "Step N of 7" header                                       |
+//! | Narrow  | < 600       | two-row top bar, 16 px gutters, game list in a drawer                |
+//!
+//! The game page's tabs use the pane's width ([`Quiver::pane_bp`]), not the window's.
 
 use gpui::{AnyView, App, AppContext, Div, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, px};
 
