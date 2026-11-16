@@ -1,0 +1,35 @@
+# Meta Braille Light: white ground, the braille mark in brand blue, and an ANSI
+# palette dark enough to read on white. AgentTerm draws only in ANSI-16 (cyan =
+# accent/prompt, magenta = Agent:, green/red/yellow = ok/err/warn, blue = code
+# keywords + vim Normal), so these hues are what color it.
+mode = "light"
+
+accent = "#1281fb"
+selection = "#d6e6ff"
+muted = "#6e6e6e"
+
+background = "#ffffff"
+dark_background = "#f5f5f5"
+darker_background = "#ebebeb"
+lighter_background = "#d9d9d9"
+
+foreground = "#111111"
+dark_foreground = "#c0c0c0"
+light_foreground = "#000000"
+bright_foreground = "#000000"
+
+red = "#d7263d"
+yellow = "#9a6200"
+orange = "#d9600b"
+green = "#0b8048"
+cyan = "#0077a8"
+blue = "#0064e0"
+magenta = "#8a3ffc"
+brown = "#7a4a1e"
+
+bright_red = "#e8455a"
+bright_yellow = "#c08400"
+bright_green = "#1aa463"
+bright_cyan = "#0a90c8"
+bright_blue = "#1281fb"
+bright_magenta = "#a259ff"

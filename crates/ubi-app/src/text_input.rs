@@ -1,6 +1,6 @@
 //! Single-line text input, adapted from GPUI's `examples/input.rs` (Apache-2.0,
 //! Copyright Zed Industries). Changes: public constructor/accessors, a masked mode for
-//! passwords, dark styling, Linux key bindings.
+//! passwords, theme colors, Linux key bindings (scoped to the field).
 #![allow(dead_code)]
 use std::ops::Range;
 
@@ -8,8 +8,8 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point,
+    prelude::*, px, relative, size,
 };
 use unicode_segmentation::*;
 
@@ -466,7 +466,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 1., 0.3))
+            (input.placeholder.clone(), crate::theme::theme(cx).tx4)
         } else if input.masked {
             (SharedString::from("*".repeat(content.len())), style.color)
         } else {
@@ -538,7 +538,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x3311ff30),
+                    crate::theme::theme(cx).acc_soft,
                 )),
                 None,
             )
@@ -587,7 +587,9 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = crate::theme::theme(cx).clone();
+        let focused = self.focus_handle.is_focused(window);
         div()
             .flex()
             .key_context("TextInput")
@@ -610,19 +612,19 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(24.))
-            .text_size(px(16.))
-            .text_color(rgb(0xe8e8ee))
+            .line_height(px(20.))
+            .text_size(px(13.5))
+            .text_color(th.tx1)
             .child(
                 div()
-                    .h(px(24. + 8. * 2.))
+                    .h(px(36.))
                     .w_full()
                     .px(px(10.))
                     .py(px(8.))
-                    .rounded_md()
-                    .bg(rgb(0x1c1c24))
+                    .rounded(px(8.))
+                    .bg(th.ink1)
                     .border_1()
-                    .border_color(rgb(0x3a3a48))
+                    .border_color(if focused { th.acc } else { th.line2 })
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -638,17 +640,17 @@ impl Focusable for TextInput {
 /// Key bindings for every `TextInput`.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, None),
-        KeyBinding::new("delete", Delete, None),
-        KeyBinding::new("left", Left, None),
-        KeyBinding::new("right", Right, None),
-        KeyBinding::new("shift-left", SelectLeft, None),
-        KeyBinding::new("shift-right", SelectRight, None),
-        KeyBinding::new("ctrl-a", SelectAll, None),
-        KeyBinding::new("ctrl-v", Paste, None),
-        KeyBinding::new("ctrl-c", Copy, None),
-        KeyBinding::new("ctrl-x", Cut, None),
-        KeyBinding::new("home", Home, None),
-        KeyBinding::new("end", End, None),
+        KeyBinding::new("backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("delete", Delete, Some("TextInput")),
+        KeyBinding::new("left", Left, Some("TextInput")),
+        KeyBinding::new("right", Right, Some("TextInput")),
+        KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
+        KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
+        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
+        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
+        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
+        KeyBinding::new("home", Home, Some("TextInput")),
+        KeyBinding::new("end", End, Some("TextInput")),
     ]);
 }
