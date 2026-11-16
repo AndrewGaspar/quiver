@@ -8,6 +8,7 @@ mod exports;
 mod mods;
 mod info;
 mod setup;
+mod steamrun;
 
 use std::io::Write;
 
@@ -257,6 +258,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: dev::DevCmd,
     },
+    /// Run a Steam copy of a Ubisoft game against Quiver instead of Ubisoft Connect. Set it
+    /// as the game's Steam launch options: `quiver steam-run %command%`.
+    SteamRun(steamrun::SteamRunArgs),
 }
 
 #[derive(Subcommand)]
@@ -439,9 +443,15 @@ async fn main() -> Result<()> {
     if let Cmd::Steam { action: exports::SteamAction::Restart { yes } } = cli.cmd {
         return exports::steam_restart(yes, &cli.source);
     }
+    // Connects (and execs Steam's command) on its own; --dry-run needs no daemon.
+    if let Cmd::SteamRun(args) = cli.cmd {
+        return steamrun::run(&cli.source, args).await;
+    }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::Steam { action: exports::SteamAction::Restart { .. } } => unreachable!(),
+        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } => {
+            unreachable!()
+        }
         Cmd::Export { action } => exports::export(&client, action).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
         Cmd::Status => {
