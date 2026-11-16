@@ -90,7 +90,33 @@ quiver export list                             # exports and whether they're sti
 quiver steam users                             # Steam users; which one gets shortcuts
 quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
 quiver dev …                                   # low-level tools that bypass the daemon
+
+quiver mods odyssey layer add ReShade ~/mods/reshade   # copy a folder laid out like the install
+quiver mods odyssey profile create "Visual overhaul" --layers hd-textures,ReShade
+quiver mods odyssey profile set "Visual overhaul" dll.dxgi=n,b cloud_saves=on
+quiver mods odyssey list                       # layers, profiles, file conflicts between layers
+quiver play odyssey --profile "Visual overhaul"  # or --profile-id p7f3k2q; vanilla by default
+quiver mods odyssey profile history "Visual overhaul"
+quiver mods odyssey profile delete "Visual overhaul"   # restorable; saves are kept
 ```
+
+## Mods
+
+A **layer** is a folder of files laid out like the install folder; `layer add` copies it into
+`~/.local/share/quiver/mods/<product>/layers/<id>/` (reflinks on btrfs/xfs) and matches file
+names to the install's case. A **profile** stacks layers bottom to top, can override launch
+settings (`proton`, `env.*`, `dll.*`, `args`, `wrappers`) and has its own saves
+(`savegames/<user>/<product>-<profile id>` in the prefix), synced with the cloud only with
+`cloud_saves=on`. Vanilla is implicit and never mounted.
+
+A modded launch never changes the install folder. `quiverd` starts a holder process that calls
+`unshare(CLONE_NEWUSER | CLONE_NEWNS)`, maps your uid and gid to themselves and mounts
+overlayfs over the install path (lower: the layers, then the install; upper:
+`mods/<product>/profiles/<id>/upper`, where everything the game writes lands). The bridge,
+Proton, its wineserver and the game join that namespace with `setns`; the daemon never does.
+Profile changes are revisions in `games/<product>/profiles/<id>.jsonl` (`profile history`,
+`profile restore`), and deleting a profile is a revision too. Agents (`--source` other than
+`cli`/`gui`) need a person's confirmation to delete or restore profiles and remove layers.
 
 Settings keys: `proton`, `language`, `account`, `args`, `wrappers`, `env.NAME`, `dll.NAME`
 (`key=` unsets). A game launches (and installs, syncs cloud saves, reports play time) with its

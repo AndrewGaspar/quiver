@@ -304,7 +304,7 @@ impl ModStore {
                 out.push(last);
             }
         }
-        out.sort_by(|a, b| a.profile.name.to_lowercase().cmp(&b.profile.name.to_lowercase()));
+        out.sort_by_key(|r| r.profile.name.to_lowercase());
         Ok(out)
     }
 

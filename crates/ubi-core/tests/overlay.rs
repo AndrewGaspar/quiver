@@ -186,3 +186,70 @@ fn wine_through_overlay() {
     assert!(read(&t.join("upper/w.txt")).starts_with("written"));
     assert_eq!(read(&install.join("a.txt")), "vanilla");
 }
+
+/// Like [`wine_through_overlay`], through the `proton` script with the launcher's
+/// environment. Uses `runinprefix`: `run` adds Proton's steam.exe wrapper, which needs
+/// the Steam client library from the real HOME, which this test keeps away from.
+/// Opt-in like the Wine test.
+#[test]
+#[ignore]
+fn proton_run_through_overlay() {
+    let Some(proton) = std::env::var_os("QUIVER_TEST_PROTON").map(std::path::PathBuf::from) else {
+        panic!("set QUIVER_TEST_PROTON to a Proton build directory");
+    };
+    assert!(available());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    // No spaces: the command line goes through cmd as one argument.
+    let install = t.join("game");
+    let layer = t.join("layer");
+    write(&install.join("data/a.txt"), "vanilla");
+    write(&layer.join("data/a.txt"), "from the layer");
+    let spec = OverlaySpec { target: install.clone(), lower: vec![layer], upper: t.join("upper"), work: t.join("work") };
+    let ns = Namespace::create(&spec).unwrap();
+    let prefix = t.join("pfx");
+    std::fs::create_dir_all(&prefix).unwrap();
+    std::os::unix::fs::symlink(".", prefix.join("pfx")).unwrap();
+    std::fs::create_dir_all(t.join("home")).unwrap();
+    std::fs::create_dir_all(t.join("steam")).unwrap();
+    let win = |p: &Path| format!("Z:{}", p.display()).replace('/', "\\");
+    let mut cmd = Command::new("python3");
+    cmd.arg(proton.join("proton"))
+        .args([
+            "runinprefix",
+            "cmd",
+            "/c",
+            &format!(
+                "copy {} {} & echo written> {}",
+                win(&install.join("data/a.txt")),
+                win(&install.join("seen.txt")),
+                win(&install.join("w.txt"))
+            ),
+        ])
+        .env("STEAM_COMPAT_DATA_PATH", &prefix)
+        .env("WINEPREFIX", &prefix)
+        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", t.join("steam"))
+        .env("STEAM_COMPAT_APP_ID", "0")
+        .env("SteamAppId", "0")
+        .env("SteamGameId", "0")
+        .env("HOME", t.join("home"))
+        .env("XDG_DATA_HOME", t.join("home/.local/share"))
+        .env("XDG_CONFIG_HOME", t.join("home/.config"))
+        .env("XDG_CACHE_HOME", t.join("home/.cache"))
+        .env("WINEDEBUG", "-all")
+        .env("WINEDLLOVERRIDES", "winemenubuilder.exe=d;mscoree,mshtml=")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY");
+    ns.enter(&mut cmd, Some(&install)).unwrap();
+    let out = cmd.output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let mut kill = Command::new(proton.join("files/bin/wineserver"));
+    kill.arg("-w").env("WINEPREFIX", &prefix);
+    let _ = kill.status();
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    // The copy shows what cmd read.
+    assert_eq!(read(&t.join("upper/seen.txt")), "from the layer", "{stdout}\n{stderr}");
+    assert!(!install.join("w.txt").exists() && !install.join("seen.txt").exists());
+    assert!(read(&t.join("upper/w.txt")).starts_with("written"));
+    assert_eq!(read(&install.join("data/a.txt")), "vanilla");
+}
