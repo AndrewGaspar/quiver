@@ -118,6 +118,7 @@ quiver export steam origins [--user NAME]      # non-Steam shortcut with Ubisoft
 quiver export list                             # exports and whether they're still as written
 quiver steam users                             # Steam users; which one gets shortcuts
 quiver steam restart                           # asks first; writes staged shortcuts while Steam is closed
+quiver steam-run %command%                     # as a Steam game's launch options: Steam copies of Ubisoft games use Quiver, not Connect
 quiver info origins [--all]                    # publisher, links, size, languages, add-ons (store links for unowned)
 quiver progress origins                        # Ubisoft play time, stats, rewards, achievements, Connect level/units
 quiver saves origins [--local]                 # local vs cloud slots (sizes, times, which is newer), backups
