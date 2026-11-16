@@ -1,5 +1,5 @@
-//! Top bar: brand, Library · Downloads · Activity, search (opens the palette), daemon
-//! status, account.
+//! Top bar: brand, Library · Downloads · Activity, now playing, search (opens the palette),
+//! daemon status, settings, accounts.
 
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
@@ -7,13 +7,14 @@ use super::{FocusExt, Icon, avatar, badge, glyph, icon, icon_button, kbd};
 use crate::app::{InputMode, Link, Quiver};
 use crate::assets::DISPLAY_FONT;
 use crate::model::{initials, job_fraction};
-use crate::nav::{Input, Section, Target};
-use crate::theme::{Theme, rgba};
+use crate::nav::{Input, Page, Section, SettingsSection, Target};
+use crate::theme::Theme;
 
 impl Quiver {
     pub fn render_topbar(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let pad = self.mode == InputMode::Pad;
-        let current = self.nav.page.section();
+        // Settings isn't one of the three sections: nothing is underlined there.
+        let current = (self.nav.page != Page::Settings).then(|| self.nav.page.section());
         let installing: Vec<f32> = self.games.iter().filter_map(|g| g.installing()).collect();
         let jobs = self.status.as_ref().map(|s| s.jobs.iter().filter(|j| !j.done).count()).unwrap_or(0);
         let overall = self
@@ -23,7 +24,7 @@ impl Quiver {
             .map(job_fraction);
 
         let nav = div().flex().h_full().gap(px(2.)).children(Section::ALL.iter().map(|&s| {
-            let on = s == current;
+            let on = Some(s) == current;
             let focused = self.focused(Target::Section(s));
             let fg = if on { th.tx1 } else { th.tx2 };
             let i = match s {
@@ -93,7 +94,7 @@ impl Quiver {
             .items_center()
             .gap(px(8.))
             .h(px(32.))
-            .w(px(340.))
+            .w(px(if self.ui.sessions.is_empty() { 320. } else { 262. }))
             .px(px(10.))
             .rounded(px(8.))
             .bg(th.ink2)
@@ -104,7 +105,7 @@ impl Quiver {
             .hover(|s| s.border_color(th.line2))
             .on_click(cx.listener(|this, _, _, cx| this.input(Input::Palette, InputMode::Pointer, cx)))
             .child(icon(Icon::Search, 16., th.tx3))
-            .child(div().flex_1().text_size(px(13.)).child("Search games, settings, commands"))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(if self.ui.sessions.is_empty() { "Search games, settings, commands" } else { "Search games, commands" }))
             .child(if pad { glyph(th, "≡", false) } else { kbd(th, "Ctrl K") });
 
         let (dot, label) = if self.link == Link::Reconnecting {
@@ -134,14 +135,44 @@ impl Quiver {
             .child(div().size(px(7.)).rounded_full().bg(dot))
             .child(label);
 
-        let account = self.status.as_ref().and_then(|s| s.signed_in.clone()).unwrap_or_default();
+        // One avatar per signed-in account (default first), overlapping.
+        let mut names: Vec<(usize, String)> = self
+            .status
+            .as_ref()
+            .map(|s| s.accounts.iter().enumerate().map(|(i, a)| (i, a.name.clone())).collect())
+            .unwrap_or_default();
+        if let Some(d) = self.status.as_ref().and_then(|s| s.accounts.iter().position(|a| a.default)) {
+            names.sort_by_key(|(i, _)| *i != d);
+        }
+        if names.is_empty() {
+            let account = self.status.as_ref().and_then(|s| s.signed_in.clone()).unwrap_or_default();
+            names.push((0, account));
+        }
+        let n = names.len();
         let accounts = div()
+            .id("accounts")
             .flex()
             .flex_none()
             .items_center()
             .gap(px(4.))
-            .child(avatar(&initials(&account), rgba(0x3b4a7a, 1.), rgba(0x6a5aa8, 1.), th.ink0))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.nav.open_settings(SettingsSection::Accounts);
+                cx.notify();
+            }))
+            .child(
+                // Overlapping by 9 px, drawn absolutely in a box of the stack's width.
+                div().relative().flex_none().h(px(30.)).w(px(30. + 21. * (n.min(3) - 1) as f32)).children(
+                    names.into_iter().take(3).enumerate().map(|(k, (i, name))| {
+                        let (from, to) = super::settings::account_colors(i);
+                        avatar(&initials(&name), from, to, th.ink0).absolute().top_0().left(px(21. * k as f32))
+                    }),
+                ),
+            )
+            .when(n > 3, |d| d.child(div().text_size(px(11.)).text_color(th.tx3).child(format!("+{}", n - 3))))
             .child(icon(Icon::ChevronDown, 14., th.tx3));
+        let playing = self.render_now_playing_pill(th, cx);
+        let on_settings = self.nav.page == Page::Settings;
 
         div()
             .flex()
@@ -165,6 +196,7 @@ impl Quiver {
                     .when(pad, |d| d.child(glyph(th, "RB", true))),
             )
             .child(div().flex_1())
+            .when_some(playing, |d, p| d.child(p))
             .child(search)
             .child(daemon)
             .child(
@@ -178,7 +210,11 @@ impl Quiver {
                     )
                     .child(
                         icon_button("settings", th, Icon::Settings, false)
-                            .on_click(cx.listener(|this, _, _, cx| this.show_toast("Settings: coming with the next screens", cx))),
+                            .when(on_settings, |d| d.bg(th.ink3))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.nav.open_settings(this.nav.settings);
+                                cx.notify();
+                            })),
                     ),
             )
             .child(accounts)

@@ -1,11 +1,16 @@
 //! Components shared by the screens. They take the resolved [`Theme`] and never mix colors
 //! themselves (PROPOSAL.md, "Design system for GPUI").
 
+pub mod activity;
 pub mod game;
+pub mod global;
 pub mod hero;
 pub mod library;
 pub mod overlay;
 pub mod pages;
+pub mod palette;
+pub mod settings;
+pub mod signin;
 pub mod topbar;
 
 use gpui::{
@@ -39,6 +44,7 @@ icons! {
     ArchiveRestore => "archive-restore",
     ArrowDownToLine => "arrow-down-to-line",
     ArrowDownUp => "arrow-down-up",
+    ArrowLeft => "arrow-left",
     ArrowRight => "arrow-right",
     Award => "award",
     Bell => "bell",
@@ -52,6 +58,7 @@ icons! {
     CircleDot => "circle-dot",
     CircleX => "circle-x",
     Clock => "clock",
+    ClockAlert => "clock-alert",
     Cloud => "cloud",
     CloudDownload => "cloud-download",
     CloudUpload => "cloud-upload",
@@ -70,25 +77,30 @@ icons! {
     FolderPlus => "folder-plus",
     Gamepad => "gamepad-2",
     GitCompare => "git-compare",
-    HardDrive => "hard-drive",
     Globe => "globe",
+    HardDrive => "hard-drive",
     GripVertical => "grip-vertical",
     History => "history",
     Image => "image",
     ImageOff => "image-off",
     Info => "info",
     Keyboard => "keyboard",
+    KeyRound => "key-round",
     Layers => "layers",
     LayoutGrid => "layout-grid",
     LibraryBig => "library-big",
     LifeBuoy => "life-buoy",
     List => "list",
     ListFilter => "list-filter",
+    LoaderCircle => "loader-circle",
     Lock => "lock",
     MessagesSquare => "messages-square",
     Minus => "minus",
+    LogOut => "log-out",
+    Monitor => "monitor",
     MousePointer => "mouse-pointer-2",
     Package => "package",
+    Palette => "palette",
     Pause => "pause",
     Pencil => "pencil",
     Pin => "pin",
@@ -100,6 +112,7 @@ icons! {
     RotateCcw => "rotate-ccw",
     ScrollText => "scroll-text",
     Search => "search",
+    SearchX => "search-x",
     Settings => "settings",
     ShieldCheck => "shield-check",
     SlidersHorizontal => "sliders-horizontal",
@@ -107,8 +120,8 @@ icons! {
     SquareTerminal => "square-terminal",
     Star => "star",
     Sparkles => "sparkles",
-    TriangleAlert => "triangle-alert",
     Trash => "trash-2",
+    TriangleAlert => "triangle-alert",
     Trophy => "trophy",
     Undo => "undo-2",
     User => "user",

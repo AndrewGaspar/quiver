@@ -32,12 +32,59 @@ pub enum Page {
     Game(u32),
     Downloads,
     Activity,
+    /// Global settings; the section is [`Nav::settings`].
+    Settings,
+}
+
+/// The sections of the Settings page, in the order of its side list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SettingsSection {
+    Accounts,
+    Library,
+    Compatibility,
+    Steam,
+    Appearance,
+    Automation,
+    About,
+}
+
+impl SettingsSection {
+    pub const ALL: [SettingsSection; 7] = [
+        SettingsSection::Accounts,
+        SettingsSection::Library,
+        SettingsSection::Compatibility,
+        SettingsSection::Steam,
+        SettingsSection::Appearance,
+        SettingsSection::Automation,
+        SettingsSection::About,
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Accounts => "Accounts",
+            SettingsSection::Library => "Library and storage",
+            SettingsSection::Compatibility => "Compatibility",
+            SettingsSection::Steam => "Steam and shortcuts",
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Automation => "Automation and CLI",
+            SettingsSection::About => "About",
+        }
+    }
+
+    pub fn step(self, delta: isize) -> SettingsSection {
+        let i = (self.index() as isize + delta).clamp(0, Self::ALL.len() as isize - 1);
+        Self::ALL[i as usize]
+    }
 }
 
 impl Page {
     pub fn section(self) -> Section {
         match self {
-            Page::Library | Page::Game(_) => Section::Library,
+            Page::Library | Page::Game(_) | Page::Settings => Section::Library,
             Page::Downloads => Section::Downloads,
             Page::Activity => Section::Activity,
         }
@@ -97,7 +144,7 @@ pub enum Zone {
     Hero,
     /// The library grid.
     Grid,
-    /// The game list on the left of a game page.
+    /// The game list on the left of a game page, or the section list of Settings.
     Side,
     /// The game page's action bar (Play, ...).
     Actions,
@@ -169,6 +216,8 @@ pub enum Target {
     Action(usize),
     Tab(Tab),
     Body(usize),
+    /// A section in the Settings side list.
+    SettingsNav(SettingsSection),
     PaletteItem(usize),
     MenuItem(usize),
 }
@@ -202,6 +251,8 @@ pub struct Nav {
     pub tab: Tab,
     pub zone: Zone,
     pub overlay: Option<Overlay>,
+    /// The Settings page's section (kept while elsewhere, like a remembered tab).
+    pub settings: SettingsSection,
     top: usize,
     hero: usize,
     grid: usize,
@@ -222,6 +273,7 @@ impl Nav {
             tab: Tab::Overview,
             zone: Zone::Grid,
             overlay: None,
+            settings: SettingsSection::Accounts,
             top: 0,
             hero: 0,
             grid: 0,
@@ -253,6 +305,7 @@ impl Nav {
             Zone::Grid => l.grid.get(self.grid.min(l.grid.len().saturating_sub(1))).map(|id| Target::Tile(*id)),
             Zone::Side => match self.page {
                 Page::Game(id) => Some(Target::SideRow(id)),
+                Page::Settings => Some(Target::SettingsNav(self.settings)),
                 _ => None,
             },
             Zone::Actions if l.actions > 0 => Some(Target::Action(self.action.min(l.actions - 1))),
@@ -300,6 +353,15 @@ impl Nav {
         self.body = 0;
     }
 
+    /// Open Settings at a section, with focus on the section list.
+    pub fn open_settings(&mut self, s: SettingsSection) {
+        self.overlay = None;
+        self.page = Page::Settings;
+        self.settings = s;
+        self.zone = Zone::Side;
+        self.body = 0;
+    }
+
     pub fn select_tab(&mut self, t: Tab) {
         self.tab = t;
         self.body = 0;
@@ -338,6 +400,14 @@ impl Nav {
                 self.zone = Zone::Body;
                 self.body = i;
             }
+            Target::SettingsNav(s) => {
+                if self.page != Page::Settings || self.settings != s {
+                    self.body = 0;
+                }
+                self.page = Page::Settings;
+                self.settings = s;
+                self.zone = Zone::Side;
+            }
             Target::PaletteItem(i) => {
                 if let Some(Overlay::Palette { selected }) = &mut self.overlay {
                     *selected = i;
@@ -371,6 +441,7 @@ impl Nav {
             },
             Page::Game(_) => Zone::Actions,
             Page::Downloads | Page::Activity => Zone::Body,
+            Page::Settings => Zone::Side,
         }
     }
 
@@ -411,6 +482,19 @@ impl Nav {
                     self.select_tab(t);
                     if self.zone == Zone::Body {
                         self.zone = Zone::Tabs;
+                    }
+                    Effect::Moved
+                }
+                // LT / RT step through the Settings sections.
+                Page::Settings => {
+                    let s = self.settings.step(if input == Input::NextTab { 1 } else { -1 });
+                    if s == self.settings {
+                        return Effect::None;
+                    }
+                    self.settings = s;
+                    self.body = 0;
+                    if self.zone == Zone::Body {
+                        self.zone = Zone::Side;
                     }
                     Effect::Moved
                 }
@@ -479,7 +563,11 @@ impl Nav {
                 self.zone = Zone::Grid;
                 Effect::Moved
             }
-            Page::Downloads | Page::Activity => {
+            Page::Settings if self.zone == Zone::Body => {
+                self.zone = Zone::Side;
+                Effect::Moved
+            }
+            Page::Downloads | Page::Activity | Page::Settings => {
                 self.open_section(Section::Library);
                 self.zone = self.main_zone_for(Page::Library, Some(l));
                 Effect::Moved
@@ -524,13 +612,22 @@ impl Nav {
                 }
             }
             Some(Target::Body(i)) => Effect::Body(i),
+            Some(Target::SettingsNav(_)) => {
+                if l.body > 0 {
+                    self.zone = Zone::Body;
+                    self.body = 0;
+                    Effect::Moved
+                } else {
+                    Effect::None
+                }
+            }
             Some(Target::PaletteItem(_)) | Some(Target::MenuItem(_)) => Effect::None,
         }
     }
 
     fn step(&mut self, dir: Input, l: &Layout) -> Effect {
         use Input::*;
-        let before = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab);
+        let before = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings);
         match (self.page, self.zone, dir) {
             // Top bar: a row of three; down enters the page.
             (_, Zone::TopBar, Left) => self.top = self.top.saturating_sub(1),
@@ -625,6 +722,29 @@ impl Nav {
                 }
             }
 
+            // Settings: the section list on the left, the section's controls on the right.
+            (Page::Settings, Zone::Side, Up) => match self.settings.index() {
+                0 => self.zone = Zone::TopBar,
+                _ => {
+                    self.settings = self.settings.step(-1);
+                    self.body = 0;
+                }
+            },
+            (Page::Settings, Zone::Side, Down) => {
+                let s = self.settings.step(1);
+                if s != self.settings {
+                    self.settings = s;
+                    self.body = 0;
+                }
+            }
+            (Page::Settings, Zone::Side, Right) => {
+                if l.body > 0 {
+                    self.zone = Zone::Body;
+                }
+            }
+            (Page::Settings, Zone::Side, Left) => {}
+            (Page::Settings, Zone::Body, Left) => self.zone = Zone::Side,
+
             (page, Zone::Body, Up) => {
                 if self.body > 0 {
                     self.body -= 1;
@@ -641,7 +761,7 @@ impl Nav {
             // Zones that don't belong to the page (stale state): go to its main zone.
             (page, _, _) => self.zone = self.main_zone_for(page, Some(l)),
         }
-        let after = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab);
+        let after = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings);
         if before == after { Effect::None } else { Effect::Moved }
     }
 
@@ -650,7 +770,7 @@ impl Nav {
             Zone::TopBar | Zone::Tabs => true,
             Zone::Hero => l.hero_buttons > 0,
             Zone::Grid => !l.grid.is_empty(),
-            Zone::Side => !l.side.is_empty(),
+            Zone::Side => self.page == Page::Settings || !l.side.is_empty(),
             Zone::Actions => l.actions > 0,
             Zone::Body => l.body > 0,
         }
@@ -667,6 +787,7 @@ impl Nav {
             (Page::Library, Zone::Hero) => l.hero_buttons > 0,
             (Page::Library, Zone::Grid) => true,
             (Page::Game(_), Zone::Side | Zone::Actions | Zone::Tabs) => true,
+            (Page::Settings, Zone::Side) => true,
             (_, Zone::Body) => !matches!(self.page, Page::Library),
             _ => false,
         };
@@ -866,6 +987,42 @@ mod tests {
         // Start toggles the palette.
         run(&mut n, &l, &[Palette, Palette]);
         assert!(n.overlay.is_none());
+    }
+
+    #[test]
+    fn settings_side_list_and_body() {
+        let l = Layout { body: 3, ..lib_layout() };
+        let mut n = Nav::new();
+        n.open_settings(SettingsSection::Accounts);
+        assert_eq!(n.focused(&l), Some(Target::SettingsNav(SettingsSection::Accounts)));
+        run(&mut n, &l, &[Down, Down]);
+        assert_eq!(n.settings, SettingsSection::Compatibility);
+        // Right (or A) enters the section's controls; Left and B come back.
+        run(&mut n, &l, &[Right, Down]);
+        assert_eq!(n.focused(&l), Some(Target::Body(1)));
+        assert_eq!(n.apply(Activate, &l), Effect::Body(1));
+        run(&mut n, &l, &[Left]);
+        assert_eq!(n.zone, Zone::Side);
+        run(&mut n, &l, &[Activate]);
+        assert_eq!(n.focused(&l), Some(Target::Body(0)));
+        assert_eq!(n.apply(Back, &l), Effect::Moved);
+        assert_eq!(n.zone, Zone::Side);
+        // LT / RT switch sections; the first section's Up reaches the top bar.
+        run(&mut n, &l, &[NextTab]);
+        assert_eq!(n.settings, SettingsSection::Steam);
+        run(&mut n, &l, &[PrevTab, PrevTab, PrevTab, Up]);
+        assert_eq!(n.zone, Zone::TopBar);
+        run(&mut n, &l, &[Down]);
+        assert_eq!(n.focused(&l), Some(Target::SettingsNav(SettingsSection::Accounts)));
+        // No controls in a section: A stays on the list. B leaves Settings.
+        let empty = Layout { body: 0, ..lib_layout() };
+        assert_eq!(n.apply(Activate, &empty), Effect::None);
+        assert_eq!(n.apply(Back, &empty), Effect::Moved);
+        assert_eq!(n.page, Page::Library);
+        // Clicking a section focuses it.
+        n.focus(&l, Target::SettingsNav(SettingsSection::About));
+        assert_eq!(n.page, Page::Settings);
+        assert_eq!(n.settings, SettingsSection::About);
     }
 
     #[test]

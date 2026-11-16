@@ -1,15 +1,12 @@
-//! Full-width pages (Downloads, Activity) and the screens before the library (connecting,
-//! sign in).
+//! The Downloads page. (Activity is in `activity.rs`; connecting and sign-in in
+//! `signin.rs`.)
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
-use super::{
-    BOLD, FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, art_fill, button, caption, card, display, icon, pill,
-    progress,
-};
-use crate::app::{Conn, Quiver};
+use super::{FocusExt, Icon, PillKind, SEMIBOLD, art_fill, card, display, icon, pill, progress};
+use crate::app::Quiver;
 use crate::art::{ArtSlot, Variant};
-use crate::model::{Actor, actor, actor_label, ago, gb, job_fraction};
+use crate::model::{gb, job_fraction};
 use crate::nav::Target;
 use crate::theme::Theme;
 
@@ -110,146 +107,5 @@ impl Quiver {
         }
         let sub = if active > 0 { format!("{active} active or queued") } else { "Idle".into() };
         self.page_shell(th, "Downloads", sub, rows)
-    }
-
-    pub fn render_activity(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let entries = self.activity.clone();
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (i, a) in entries.iter().enumerate() {
-            let focused = self.focused(Target::Body(i));
-            let (color, i_) = match actor(&a.source) {
-                Actor::App => (th.who_gui, Icon::MousePointer),
-                Actor::Cli => (th.who_cli, Icon::SquareTerminal),
-                Actor::Agent => (th.who_agent, Icon::Bot),
-                Actor::System => (th.who_sys, Icon::Cog),
-            };
-            let game = a.product_id.and_then(|id| self.game(id)).map(|g| g.entry.name.clone());
-            let pid = a.product_id;
-            rows.push(
-                div()
-                    .id(("act", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .px(px(14.))
-                    .py(px(11.))
-                    .rounded(px(10.))
-                    .border_b_1()
-                    .border_color(th.line1)
-                    .when(focused, |d| d.bg(th.ink3)).focus_ring(focused, th, 10.)
-                    .hover(|s| s.bg(th.ink2))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(id) = pid {
-                            this.open_game(id, cx);
-                            cx.notify();
-                        }
-                    }))
-                    .child(div().w(px(96.)).flex_none().text_size(px(12.)).text_color(th.tx3).child(ago(a.at)))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .w(px(140.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .px(px(6.))
-                                    .py(px(2.))
-                                    .rounded(px(6.))
-                                    .bg(color.opacity(0.13))
-                                    .text_size(px(11.5))
-                                    .font_weight(SEMIBOLD)
-                                    .text_color(color)
-                                    .child(icon(i_, 12., color))
-                                    .child(actor_label(&a.source)),
-                            ),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(a.action.clone()))
-                    .when_some(game, |d, g| d.child(div().text_color(th.tx2).text_size(px(12.5)).child(g)))
-                    .into_any_element(),
-            );
-        }
-        if rows.is_empty() {
-            rows.push(div().text_color(th.tx3).child("No activity yet.").into_any_element());
-        }
-        self.page_shell(th, "Activity", "What the app, the CLI, agents and the daemon did".into(), rows)
-    }
-
-    pub fn render_splash(&mut self, th: &Theme, error: Option<String>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(14.))
-            .child(display(28., FontWeight::EXTRA_BOLD, th.tx1).child("Quiver"))
-            .child(match &error {
-                None => div()
-                    .text_color(th.tx3)
-                    .child(if self.demo { "Loading demo data…" } else { "Connecting to quiverd…" })
-                    .into_any_element(),
-                Some(e) => div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(12.))
-                    .max_w(px(520.))
-                    .child(div().text_color(th.bad).text_center().child(format!("Could not reach quiverd: {e}")))
-                    .child(
-                        button("retry", th, Kind::Primary, Size::Medium, Some(Icon::RefreshCw), "Try again")
-                            .on_click(cx.listener(|this, _, _, cx| this.retry_connect(cx))),
-                    )
-                    .into_any_element(),
-            })
-    }
-
-    pub fn render_login(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let Conn::Login(form) = &self.conn else { return div() };
-        let two_factor = form.needs_code;
-        let label = match (form.busy, two_factor) {
-            (true, _) => "Signing in…",
-            (false, true) => "Verify",
-            (false, false) => "Sign in",
-        };
-        let field = |e: gpui::AnyView| div().child(e);
-        let mut col = card(th)
-            .w(px(380.))
-            .p(px(24.))
-            .gap(px(12.))
-            .child(display(22., FontWeight::BOLD, th.tx1).child("Sign in to Ubisoft"))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(th.tx3)
-                    .child("Quiver keeps the session in your keyring. It is not affiliated with Ubisoft."),
-            );
-        if two_factor {
-            col = col
-                .child(div().text_color(th.tx2).child("Enter the code from your authenticator app."))
-                .child(field(form.code.clone().into()));
-        } else {
-            col = col
-                .child(caption("Email", th.tx3))
-                .child(field(form.email.clone().into()))
-                .child(caption("Password", th.tx3))
-                .child(field(form.password.clone().into()));
-        }
-        if let Some(e) = &form.error {
-            col = col.child(div().text_color(th.bad).child(e.clone()));
-        }
-        let busy = form.busy;
-        col = col.child(
-            button("login", th, Kind::Primary, Size::Medium, None, label)
-                .w_full()
-                .font_weight(BOLD)
-                .when(busy, |d| d.opacity(0.6))
-                .on_click(cx.listener(|this, _, _, cx| this.submit_login(cx))),
-        );
-        let _ = MEDIUM;
-        div().size_full().flex().items_center().justify_center().child(col)
     }
 }

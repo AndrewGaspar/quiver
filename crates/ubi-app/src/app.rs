@@ -141,6 +141,10 @@ pub enum Cmd {
     /// Game page: play with play-menu entry `i` (0: vanilla); Steam/.desktop exports.
     PlayWith(u32, usize),
     Export(u32, crate::ui::game::ExportAction),
+    /// Settings at a section.
+    Settings(crate::nav::SettingsSection),
+    /// Accounts, exports, sessions, Activity filters (`ui/global.rs`).
+    Global(crate::ui::global::GlobalCmd),
 }
 
 pub struct Quiver {
@@ -172,6 +176,8 @@ pub struct Quiver {
     pub relaunch: crate::selfupdate::Relaunch,
     /// The game page's own state (`ui::game`).
     pub gp: crate::ui::game::GamePage,
+    /// State of the global screens: Settings, palette, Activity, sign-in, now playing.
+    pub ui: crate::ui::global::GlobalUi,
 }
 
 impl Quiver {
@@ -180,7 +186,7 @@ impl Quiver {
         cx.observe(&art, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
-        let this = Self {
+        let mut this = Self {
             source: None,
             demo,
             conn: Conn::Connecting,
@@ -206,10 +212,12 @@ impl Quiver {
             viewport: (1440., 900.),
             relaunch: Default::default(),
             gp: Default::default(),
+            ui: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
         this.start_gamepad(window, cx);
+        this.start_global(window, cx);
         if demo {
             this.start_demo_script(window, cx);
         }
@@ -280,6 +288,7 @@ impl Quiver {
         } else {
             self.show_login(None, cx);
         }
+        self.global_status(cx);
     }
 
     /// Send a request; `done` runs on the UI thread with the result.
@@ -302,6 +311,7 @@ impl Quiver {
     }
 
     fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
+        self.global_event(&e, cx);
         match e {
             Event::Job(job) => self.apply_job(job),
             Event::GameStarted { product_id } | Event::GameStopped { product_id } => {
@@ -493,9 +503,9 @@ impl Quiver {
 
     pub fn show_login(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         self.conn = Conn::Login(LoginForm {
-            email: cx.new(|cx| TextInput::new(cx, "Email", false)),
+            email: cx.new(|cx| TextInput::new(cx, "name@example.com", false)),
             password: cx.new(|cx| TextInput::new(cx, "Password", true)),
-            code: cx.new(|cx| TextInput::new(cx, "Authenticator code", false)),
+            code: cx.new(|cx| TextInput::new(cx, "123456", false)),
             needs_code: false,
             busy: false,
             error,
@@ -613,7 +623,8 @@ impl Quiver {
         let hero_buttons = if self.hero_game().is_some() { 2 + self.attention().len() } else { 0 };
         let body = match self.nav.page {
             Page::Downloads => self.download_jobs().len(),
-            Page::Activity => self.activity.len(),
+            Page::Activity => self.activity_rows().len(),
+            Page::Settings => self.settings_actions().len(),
             Page::Game(id) => self.page_body_len(id, self.nav.tab),
             Page::Library => 0,
         };
@@ -647,59 +658,7 @@ impl Quiver {
     // Commands
 
     pub fn palette_commands(&self) -> Vec<Command> {
-        let mut v = vec![];
-        let focused = self.nav.focused_game(&self.layout).and_then(|id| self.game(id));
-        if let Some(g) = focused {
-            v.push(self.primary_command(g));
-            if !matches!(self.nav.page, Page::Game(_)) {
-                v.push(Command {
-                    icon: crate::ui::Icon::Info,
-                    label: format!("Open {}", g.entry.name).into(),
-                    detail: None,
-                    cli: Some(format!("quiver show {}", g.id()).into()),
-                    action: Cmd::Open(g.id()),
-                    future: false,
-                });
-            }
-            v.push(Command {
-                icon: crate::ui::Icon::SlidersHorizontal,
-                label: "Launch options and history".into(),
-                detail: Some(g.entry.name.clone().into()),
-                cli: Some(format!("quiver history {}", g.id()).into()),
-                action: Cmd::Tab(g.id(), Tab::LaunchOptions),
-                future: false,
-            });
-        }
-        for s in Section::ALL {
-            v.push(Command {
-                icon: match s {
-                    Section::Library => crate::ui::Icon::LibraryBig,
-                    Section::Downloads => crate::ui::Icon::Download,
-                    Section::Activity => crate::ui::Icon::Activity,
-                },
-                label: format!("Go to {}", s.label()).into(),
-                detail: None,
-                cli: Some(
-                    match s {
-                        Section::Library => "quiver library",
-                        Section::Downloads => "quiver jobs",
-                        Section::Activity => "quiver activity",
-                    }
-                    .into(),
-                ),
-                action: Cmd::Go(s),
-                future: false,
-            });
-        }
-        v.push(Command {
-            icon: crate::ui::Icon::RefreshCw,
-            label: "Refresh library".into(),
-            detail: Some("Ask Ubisoft for ownership and updates again".into()),
-            cli: Some("quiver library --refresh".into()),
-            action: Cmd::Refresh,
-            future: false,
-        });
-        v
+        self.global_palette_commands()
     }
 
     fn primary_command(&self, g: &GameRow) -> Command {
@@ -778,6 +737,8 @@ impl Quiver {
             Cmd::NotYet => self.show_toast(format!("{}: not wired yet", cmd.label), cx),
             Cmd::PlayWith(id, i) => self.play_with(id, i, cx),
             Cmd::Export(id, a) => self.run_export(id, a, cx),
+            Cmd::Settings(s) => self.nav.open_settings(s),
+            Cmd::Global(g) => self.run_global(g, cx),
         }
     }
 
@@ -874,11 +835,8 @@ impl Quiver {
                         self.open_game(id, cx);
                     }
                 }
-                Page::Activity => {
-                    if let Some(id) = self.activity.get(i).and_then(|a| a.product_id) {
-                        self.open_game(id, cx);
-                    }
-                }
+                Page::Activity => self.activity_open(i, cx),
+                Page::Settings => self.settings_activate(i, cx),
                 Page::Game(id) => self.page_body_activate(id, i, cx),
                 _ => {}
             },
@@ -903,7 +861,7 @@ impl Quiver {
             return;
         }
         self.mode = mode;
-        if self.page_input(input, cx) {
+        if self.global_input(input, cx) || self.page_input(input, cx) {
             cx.notify();
             return;
         }
@@ -942,10 +900,11 @@ impl Quiver {
                     self.body_scroll.set_offset(gpui::point(px(0.), px(0.)));
                 }
             }
-            (Page::Downloads | Page::Activity, Zone::Body) => {
+            (Page::Downloads, Zone::Body) => {
                 // Children: title, then one per row.
                 self.body_scroll.scroll_to_item(1 + self.nav.body_index());
             }
+            (Page::Activity | Page::Settings, _) => self.scroll_global_focus(),
             _ => {}
         }
     }
@@ -1141,6 +1100,7 @@ impl Render for Quiver {
         tracing::trace!("render");
         let vp = window.viewport_size();
         self.viewport = (f32::from(vp.width), f32::from(vp.height));
+        self.sync_global_focus(window, cx);
         self.layout = self.compute_layout();
 
         let root = div()
@@ -1163,10 +1123,11 @@ impl Render for Quiver {
                 let e = e.clone();
                 root.child(self.render_splash(&th, Some(e), cx))
             }
-            Conn::Login(_) => root.key_context("QuiverLogin").child(self.render_login(&th, cx)),
+            Conn::Login(_) => root.key_context(crate::ui::global::LOGIN_CONTEXT).child(self.render_login(&th, cx)),
             Conn::Ready => root
                 .track_focus(&self.focus)
-                .key_context(NAV_CONTEXT)
+                .key_context(self.root_context())
+                .map(|d| self.global_actions(d, cx))
                 .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.key(Input::Up, cx)))
                 .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.key(Input::Down, cx)))
                 .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.key(Input::Left, cx)))
@@ -1207,9 +1168,11 @@ impl Render for Quiver {
                     }
                 }))
                 .child(self.render_topbar(&th, cx))
+                .when_some(self.render_link_banner(&th, cx), |d, b| d.child(b))
                 .child(self.render_page(&th, window, cx))
                 .when(self.mode == InputMode::Pad, |d| d.child(self.render_hintbar(&th)))
                 .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
+                .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t))),
         };
         // The top bar shows the daemon link; other screens get a notice instead.
@@ -1233,10 +1196,11 @@ impl Quiver {
             Page::Game(id) => self.render_game(th, id, window, cx).into_any_element(),
             Page::Downloads => self.render_downloads(th, cx).into_any_element(),
             Page::Activity => self.render_activity(th, cx).into_any_element(),
+            Page::Settings => self.render_settings(th, cx).into_any_element(),
         }
     }
 
     pub fn focused(&self, t: Target) -> bool {
-        self.mode != InputMode::Pointer && self.nav.overlay.is_none() && self.nav.is_focused(&self.layout, t)
+        self.mode != InputMode::Pointer && self.nav.overlay.is_none() && self.ui.confirm.is_none() && self.nav.is_focused(&self.layout, t)
     }
 }
