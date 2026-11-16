@@ -1,0 +1,92 @@
+version: 2.0
+root:
+  name: l1
+  sort_string: Assassin's Creed 05.3
+  background_image: e8db3e40fee368ca00bff5024e0251ac.jpg
+  thumb_image: l2
+  logo_image: a2c5269822b35d77991907ae85e0b71a.png
+  splash_image: 941fa1c7fdbc7ef6afe28ca47ae3e176.jpg
+  help_url: https://support.ubi.com
+  facebook_url: http://www.facebook.com/assassinscreed
+  homepage_url: https://assassinscreed.ubisoft.com/game/en-gb/home
+  forum_url: https://discord.gg/ubisoftofficial
+  overlay_virtual_control_enabled: no
+  overlay_notifications: []
+  icon_image: b2e6a3fb1654ed11016bc6c5068cbddc.ico
+  start_game:
+    online:
+      overlay_required: no
+      overlay_shop_enabled: yes
+      overlay_shop_sigma: yes
+      overlay_browser_home_url: https://assassinscreed.ubisoft.com/game
+      overlay_product_activation_enabled: yes
+      overlay_supported: yes
+      executables:
+      - shortcut_name: Assassin's Creed III Remastered
+        path:
+          relative: ACIII.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\5183\InstallDir
+      - shortcut_name: Assassin's Creed Liberation Remastered
+        path:
+          relative: ACLiberation.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\5183\InstallDir
+    offline:
+      executables:
+      - shortcut_name: Assassin's Creed III Remastered
+        path:
+          relative: ACIII.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\5183\InstallDir
+      - shortcut_name: Assassin's Creed Liberation Remastered
+        path:
+          relative: ACLiberation.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\5183\InstallDir
+  overlay_injection_method: default
+  upn_enabled: true
+  installer:
+    game_identifier: Assassin's Creed III Remastered
+    publisher: Ubisoft
+    help_url: http://support.ubisoft.com
+  digital_distribution:
+    version: 1
+  cloud_saves: yes
+  uplay:
+    achievements: f2755537390ce22d32d8720adfa79dd1
+    achievements_sync_id: 5183
+  club:
+    enabled: yes
+  news:
+    thread: AC3RM
+  game_page_modules:
+    player_stats:
+      size: 2
+    friends:
+      size: 1
+    friends_suggestions:
+      enabled: yes
+    streams:
+      size: 1
+  player_stats:
+    items:
+    - id: TimePlayed.GamePlayed.AC3
+    - id: TotalKills.GamePlayed.AC3
+    - id: DistanceTraveled.GamePlayed.AC3
+    - id: TimePlayed.GamePlayed.ACL
+    - id: TotalKills.GamePlayed.ACL
+    - id: DistanceTraveled.GamePlayed.ACL
+  app_id: e8d2050f-8907-4138-9bbd-2cc7b706d3f8
+  space_id: cef8b16c-9250-45e8-8867-09f8b6f13489
+  show_properties: yes
+localizations:
+  default:
+    l1: Assassin's Creed® III - Remastered
+    l2: 50922c7ffc97b2be2ccdf04342242e6d.jpg
+  zh-CN:
+    l1: 刺客信条3 - 高清重制版
+    l2: c51376419a2cabe2d272ed9b3e932743.jpg
+  ru-RU:
+    l2: bb5567b6f9956ef0afba0062b334515f.jpg
+

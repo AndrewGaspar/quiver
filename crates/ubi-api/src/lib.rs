@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod client;
 pub mod exports;
+pub mod info;
 pub use client::Client;
 
 // ---------------------------------------------------------------------------------------
@@ -322,6 +323,40 @@ pub enum Request {
     SteamUsers,
     /// Write staged shortcut changes now (fails while Steam is running). Never restarts Steam.
     SteamApplyStaged,
+    /// A game's detail (`info::GameInfo`): product-config facts, add-ons owned or not (with
+    /// store links), install size and languages. `refresh` re-reads ownership from Ubisoft.
+    GameInfo {
+        product_id: u32,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// A game's Ubisoft progression and the account's Ubisoft Connect level and units
+    /// (`info::Progress`), for the game's launch account. Cached for a few minutes.
+    GameProgress {
+        product_id: u32,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// A game's save slots, local and cloud side by side, and its local backups
+    /// (`info::SavesReport`). `cloud: false` lists only what's on this machine.
+    Saves {
+        product_id: u32,
+        #[serde(default = "yes")]
+        cloud: bool,
+    },
+    /// Make a save backup current (`info::RestoreResult`); the saves there now are backed
+    /// up first. `backup` is a backup id, a unique part of one, or `latest`. Agents need a
+    /// human's approval: only a front end that asked the person sets `confirmed`.
+    SavesRestore {
+        product_id: u32,
+        backup: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,313 @@
+version: 2.0
+root:
+  name: l1
+  background_image: 160159cf6a4487f5605078896c68e294.jpg
+  thumb_image: l2
+  logo_image: 8ed50864d177441829e82c7afb003f39.png
+  splash_image: cb9e4b7fd09fc1f80654acefc10d8e31.jpg
+  help_url: https://support.ubisoft.com/games/4568?platform=9
+  facebook_url: https://www.facebook.com/watchdogsgame
+  homepage_url: http://watchdogs.ubisoft.com
+  forum_url: https://discord.gg/ubisoftofficial
+  overlay_virtual_control_enabled: no
+  overlay_notifications:
+  - id: 0
+    text: l3
+    permanent: no
+  - id: 1
+    text: l4
+    permanent: yes
+  - id: 2
+    text: l5
+    permanent: yes
+  - id: 4
+    text: l6
+    permanent: yes
+  icon_image: 1dfa256ba4370c1212f01a1251268216.ico
+  start_game:
+    online:
+      overlay_required: yes
+      overlay_shop_enabled: yes
+      overlay_shop_default_enabled: yes
+      overlay_shop_sigma: yes
+      overlay_product_activation_enabled: yes
+      overlay_supported: yes
+      executables:
+      - shortcut_name: WATCH_DOGS® 2
+        description: WATCH_DOGS® 2
+        path:
+          relative: '\bin\WatchDogs2.exe'
+        trial:
+          relative: '\bin_plus\WatchDogs2.exe'
+          arguments: -eac_launcher_settings settings_plus.json
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\WatchDogs2\InstallDir
+          append: ''
+        denuvo: yes
+    offline:
+      executables:
+      - shortcut_name: WATCH_DOGS® 2
+        description: WATCH_DOGS® 2
+        path:
+          relative: '\bin\WatchDogs2.exe'
+        trial:
+          relative: '\bin_plus\WatchDogs2.exe'
+          arguments: -eac_launcher_settings settings_plus.json
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\WatchDogs2\InstallDir
+          append: ''
+        denuvo: yes
+  overlay_injection_method: sdk
+  upn_enabled: true
+  installer:
+    game_identifier: WATCH_DOGS2
+    publisher: Ubisoft
+    help_url: https://support.ubi.com
+    about_url: http://www.ubisoft.com/
+  digital_distribution:
+    version: 1
+  change_language_enabled: yes
+  party:
+    party_enabled: yes
+    max_party_size: 2
+  game_invites_enabled: yes
+  cloud_saves: yes
+  uplay:
+    achievements: 28b7907fb6ca8b6f746701e8568bde60
+    achievements_sync_id: WD2
+  club:
+    enabled: yes
+    challenges_enabled: yes
+  news:
+    thread: WatchDogs2
+  game_page_modules:
+    player_stats:
+      size: 2
+    friends:
+      size: 1
+    friends_suggestions:
+      enabled: yes
+    streams:
+      size: 1
+  player_stats:
+    items:
+    - id: PlayTime
+    - id: GameProgression
+    - id: NumberOfFollowers
+    - id: NumberOfHackersNeutralized
+    - id: NumberOfHackingSuccesses
+  crash_reporting:
+    space_id: 8c8d9b22-498c-45e6-80da-7cd22787c9b3
+    app_id: 35c5c607-2717-47d9-9323-7df47c6e1c4d
+  app_id: 35c5c607-2717-47d9-9323-7df47c6e1c4d
+  space_id: 8c8d9b22-498c-45e6-80da-7cd22787c9b3
+  addons:
+  - id: 3367
+    is_visible: no
+  - id: 3368
+    is_visible: no
+  - id: 3373
+    is_visible: no
+  - id: 3374
+    is_visible: no
+  - id: 3375
+    is_visible: no
+  - id: 3376
+    is_visible: no
+  - id: 3377
+    is_visible: no
+  - id: 3378
+    is_visible: no
+  - id: 3379
+    is_visible: no
+  - id: 3380
+    is_visible: no
+  - id: 3381
+    is_visible: no
+  - id: 3382
+    is_visible: no
+  - id: 3383
+    is_visible: no
+  - id: 3400
+    is_visible: no
+  - id: 3401
+    is_visible: no
+  - id: 3402
+    is_visible: no
+  - id: 3403
+    is_visible: no
+  - id: 3404
+    is_visible: no
+  - id: 3405
+    is_visible: no
+  - id: 3406
+    is_visible: no
+  - id: 3407
+    is_visible: no
+  - id: 3408
+    is_visible: no
+  - id: 3409
+    is_visible: no
+  - id: 3410
+    is_visible: no
+  - id: 3411
+    is_visible: no
+  - id: 3412
+    is_visible: no
+  - id: 3413
+    is_visible: no
+  - id: 3414
+    is_visible: no
+  - id: 3415
+    is_visible: no
+  - id: 3416
+    is_visible: no
+  - id: 3417
+    is_visible: no
+  - id: 3418
+    is_visible: no
+  - id: 3611
+    is_visible: no
+  - id: 3612
+    is_visible: no
+  - id: 3671
+    is_visible: no
+  - id: 3672
+    is_visible: no
+  - id: 3673
+    is_visible: no
+  - id: 3691
+    is_visible: no
+  - id: 3962
+    is_visible: yes
+    name: High-Rez Texture Pack
+    description: test
+    optional_addon_enabled_by_default: no
+  show_properties: yes
+localizations:
+  default:
+    l1: WATCH_DOGS® 2
+    l2: 0f946fb03f8bdf913969d1c22df1625e.jpg
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  zh-CN:
+    l1: 看门狗2
+    l2: 361d4ac8f27b8da4871863d4b837f9e1.jpg
+    l3: 已成功连接新的控制器。
+    l4: 系统使用的显卡驱动程序太旧，为提供最佳游戏体验，请至显卡制造商网站下载最新驱动程序并更新。
+    l5: 没有足够的内存可以提供稳定的显示张数。如果遇到性能方面的问题，请关闭所有的背景应用程序 / 处理程序或降低绘图品质试试看。
+    l6: 你的 GPU 规格未达到最低需求（NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) 以上）。GPU 未达最低需求或许可以运行游戏，但并不推荐使用。
+  en-CA:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  en-UK:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  cs-CZ:
+    l3: Připojení nového ovladače proběhlo úspěšně.
+    l4: Zvolený grafický adaptér používá zastaralou verzi ovladače. Chcete-li si hru vychutnat na maximum, stáhněte si nejnovější software ze stránek výrobce své grafické karty.
+    l5: Nedostatek paměti pro stabilní běh hry. Pokud budete mít problémy s výkonem, zkuste zavřít všechny aplikace/procesy na pozadí nebo snižte kvalitu grafiky.
+    l6: Vaše grafická karta je pod minimálními požadavky (NVIDIA GeForce GTX 660 (2 GB) | AMD Radeon HD 7870 (2 GB) nebo lepší). Grafické karty pod minimálními požadavky mohou fungovat, ale nejsou oficiálně podporovány.
+  da-DK:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  de-DE:
+    l3: Der neue Controller wurde erfolgreich angeschlossen.
+    l4: Die Treiberversion deiner aktivierten Grafikkarte ist veraltet. Suche auf der Hersteller-Website deiner Grafikkarte die aktuellste Software für eine optimales Spielerlebnis.
+    l5: Nicht genug Arbeitsspeicher für eine stabile Bildfrequenz. Falls Leistungsprobleme auftreten, solltest du versuchen, alle Hintergrundanwendungen/-prozesse zu schließen oder die Grafikqualität herabzusetzen.
+    l6: Deine Grafikkarte erfüllt nicht die Mindestanforderungen (NVIDIA GeForce GTX 660 (2 GB) | AMD Radeon HD 7870 (2 GB) oder besser). Grafikkarten unterhalb der Mindestanforderungen können funktionieren, werden aber offiziell nicht unterstützt.
+  es-ES:
+    l3: El nuevo mando se ha conectado satisfactoriamente.
+    l4: La versión de los controladores de tu adaptador de vídeo no está actualizada. Para obtener una experiencia de juego perfecta, pásate por el sitio web del fabricante de la tarjeta de vídeo para obtener el software actualizado.
+    l5: No hay RAM disponible para mostrar una tasa de fotogramas estable. Si se dan problemas de rendimiento, intenta cerrar todas las aplicaciones y procesos en segundo plano o disminuir la calidad de los gráficos.
+    l6: Tu CPU está por debajo de los requisitos mínimos (NVIDIA GeForce GTX 660 de 2GB | AMD Radeon HD 7870 de 2GB o superior). Los CPU inferiores a los requisitos mínimos pueden funcionar, pero no es compatible oficialmente.
+  es-MX:
+    l3: El nuevo control se conectó satisfactoriamente.
+    l4: La versión de los controladores de tu adaptador de video no está actualizada. Para obtener una experiencia de juego perfecta, visita el sitio web del fabricante de la tarjeta de video para obtener el software actualizado.
+    l5: No hay RAM disponible para mostrar una tasa de fotogramas estable. Si se dan problemas de rendimiento, intenta cerrar todas las aplicaciones y procesos en segundo plano o disminuir la calidad de los gráficos.
+    l6: Tu CPU está por debajo de los requisitos mínimos (NVIDIA GeForce GTX 660 de 2GB | AMD Radeon HD 7870 de 2GB o superior). Los CPU con requisitos mínimos por debajo de los recomendados pueden funcionar, pero no son compatibles oficialmente.
+  fi-FI:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  fr-FR:
+    l3: La nouvelle manette a été connectée avec succès.
+    l4: Le pilote de la carte graphique activée n’est pas à jour. Pour profiter d’une expérience de jeu optimale, téléchargez la dernière version du logiciel sur le site du fabricant de votre matériel.
+    l5: Pas assez de RAM disponible pour obtenir une fréquence d'affichage stable. En cas de problèmes de rendement, essayez de fermer toutes les applications en arrière-plan ou de diminuer la qualité des graphismes.
+    l6: Les caractéristiques de votre processeur graphique sont inférieures à la configuration minimale requise (NVIDIA GeForce GTX 660 (2 Go) | AMD Radeon HD 7870 (2 Go) ou supérieur). Les processeurs graphiques présentant de telles caractéristiques sont susceptibles de faire fonctionner le jeu, mais ne sont pas pris en charge officiellement.
+  fr-CA:
+    l3: La nouvelle manette a été connectée avec succès.
+    l4: Le pilote de la carte graphique activée n’est pas à jour. Pour profiter d’une expérience de jeu optimale, téléchargez la dernière version du logiciel sur le site du fabricant de votre matériel.
+  hu-HU:
+    l3: Az új kontroller sikeresen csatlakoztatva.
+    l4: A grafikuskártya illesztőprogramja elavult verziójú. A legjobb játékélmény érdekében keresd meg a videókártya gyártójának honlapján a legfrissebb szoftvert.
+    l5: Nincs elég szabad RAM a stabil képfrissítéshez. Teljesítményproblémák esetén próbáld bezárni a háttérben futó alkalmazásokat/folyamatokat vagy csökkentsd a grafika minőségét.
+    l6: A GPU nem éri el a minimális követelményeket (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) vagy jobb). A minimális követelményeket el nem érő GPU működhet, de hivatalosan nem támogatott.
+  it-IT:
+    l3: Il nuovo controller è stato collegato con successo.
+    l4: I driver della scheda grafica selezionata non sono aggiornati. Per la miglior esperienza di gioco possibile, controlla il sito del produttore per trovare l'ultima versione.
+    l5: RAM insufficiente per un framerate stabile. Se hai problemi di prestazioni, prova a chiudere tutte le applicazioni e i processi o a diminuire la qualità grafica.
+    l6: La tua GPU non soddisfa i requisiti minimi (NVIDIA GeForce GTX 660 (2 GB) | AMD Radeon HD 7870 (2 GB) o superiori. Le GPU che non soddisfano i requisiti potrebbero funzionare, ma non sono supportate ufficialmente.
+  ja-JP:
+    l3: 新しいコントローラーの接続に成功しました
+    l4: 使用可能なグラフィックスアダプターのドライバーバージョンは使用期限が切れています。最高のゲーム体験のためには、ビデオカード製造者のウェブサイトを確認して最新ソフトウェアを入手してください
+    l5: 安定したフレームレートに必要なメモリが不足しています。パフォーマンスに問題が生じた場合は、他のアプリ/プロセスを全て閉じるか、グラフィック品質を下げてください
+    l6: ご使用のCPUは必要動作環境(NVIDIA GeForce GTX 660、2 GB / AMD Radeon HD 7870、2 GB)を満たしていません。必要動作環境を満たしていないCPUでも動作しますが、公式にはサポートしていません
+  ko-KO:
+    l3: 새 컨트롤러를 성공적으로 연결했습니다.
+    l4: 그래픽 어댑터가 가능한 드라이버가 구 버전입니다. 게임의 성능을 최대한 즐기시려면 비디오 카드 제조업체의 웹사이트에서 최신 소프트웨어를 다운로드받으십시오.
+    l5: 사용 가능한 RAM이 부족해 프레임 안정화를 진행할 수 없습니다. 게임 실행에 문제가 발생하면 다른 백그라운드 응용 프로그램과 프로세스를 닫거나 그래픽 설정을 낮추기를 바랍니다.
+    l6: GPU가 최소 사양인 NVIDIA GeForce GTX 660(2GB) 또는 AMD Radeon HD 7870(2GB) 이하 모델입니다. 최소 사양 이하의 GPU에서 게임이 구동될 수도 있지만 공식적으로 지원하지 않습니다.
+  nb-NO:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  nl-NL:
+    l3: Nieuwe controller verbinden gelukt.
+    l4: Het stuurbestand van je actieve grafische adapter is verouderd. Kijk voor de beste spelbeleving op de website van de videokaartfabrikant voor de meest recente software.
+    l5: Niet genoeg vrij RAM voor een stabiele framesnelheid. Als je problemen met de performance ervaart, kun je proberen alle programma's / processen op de achtergrond te sluiten of de kwaliteit van de graphics te verlagen.
+    l6: Je GPU (videokaart) voldoet niet aan de minimum vereisten(NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) of beter). Videokaarten die niet voldoen aan de minimum vereisten kunnen wel werken, maar worden niet officieel ondersteund.
+  pl-PL:
+    l3: Nowy kontroler został podłączony.
+    l4: Sterownik wybranej karty graficznej jest nieaktualny. Aby uzyskać jak najlepsze wrażenia z gry, odwiedź stronę producenta karty i pobierz najnowsze sterowniki.
+    l5: Za mało pamięci RAM dla stabilnej częstotliwości odświeżania. W przypadku problemów z wydajnością, należy zamknąć wszystkie aplikacje/procesy działające w tle lub obniżyć jakość grafiki.
+    l6: Twoja karta graficzna nie spełnia minimalnych wymagań (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) lub lepsza). Gra może działać z kartami graficznymi, które nie spełniają minimalnych wymagań, ale nie są one oficjalnie obsługiwane.
+  pt-BR:
+    l3: Um novo controle foi conectado com sucesso.
+    l4: A versão de driver do seu adaptador de vídeo ativado está desatualizada. Para uma melhor experiência de jogo, verifique o site do fabricante da placa de vídeo para obter o software mais recente.
+    l5: Não há RAM suficiente para manter uma taxa de quadros estável. Caso ocorram problemas de desempenho, experimente fechar todos os aplicativos/processos em segundo plano ou diminua a qualidade dos gráficos.
+    l6: A sua GPU está abaixo dos requisitos mínimos (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) ou superior). GPUs abaixo dos requisitos mínimos podem funcionar, mas não são compatíveis oficialmente.
+  pt-PT:
+    l3: Um novo controle foi conectado com sucesso.
+    l4: A versão de driver do seu adaptador de vídeo ativado está desatualizada. Para uma melhor experiência de jogo, verifique o site do fabricante da placa de vídeo para obter o software mais recente.
+    l5: Não há RAM suficiente para manter uma taxa de quadros estável. Caso ocorram problemas de desempenho, experimente fechar todos os aplicativos/processos em segundo plano ou diminua a qualidade dos gráficos.
+    l6: A sua GPU está abaixo dos requisitos mínimos (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) ou superior). GPUs abaixo dos requisitos mínimos podem funcionar, mas não são compatíveis oficialmente.
+  ru-RU:
+    l3: Подключен новый контроллер.
+    l4: Версия драйвера видеокарты устарела. Чтобы в полной мере насладиться возможностями игры, посетите сайт изготовителя видеокарты и установите новейшее ПО.
+    l5: Недостаточно оперативной памяти для поддержания стабильной частоты кадров. При возникновении проблем с производительностью попробуйте закрыть фоновые процессы и приложения либо понизить настройки графики.
+    l6: Ваша видеокарта не соответствует минимальным системным требованиям (NVIDIA GeForce GTX 660 (2ГБ) | AMD Radeon HD 7870 (2ГБ) или лучше). Не соответствующие системным требованиям видеокарты могут работать, но официально не поддерживаются.
+  sv-SE:
+    l3: New controller has been successfully connected.
+    l4: The driver version of your enabled graphics adapter is out of date. For the best gaming experience, check the video card manufacturer’s website for the latest software.
+    l5: Not enough free RAM for stable frame rate. In case of performance issues, try to close all the background applications/processes or decrease the graphics quality.
+    l6: Your GPU is below the minimum requirements (NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) or better). GPUs below the minimum requirements might work, but not officially supported.
+  zh-TW:
+    l3: 已成功連接新的控制器。
+    l4: 系統使用的顯示卡驅動程式太舊，為提供最佳遊戲體驗，請至顯示卡製造商網站下載最新驅動程式並更新。
+    l5: 沒有足夠的記憶體可以提供穩定的顯示張數。如果遇到效能方面的問題，請關閉所有的背景應用程式 / 處理程序或降低繪圖品質試試看。
+    l6: 你的 GPU 規格未達到最低需求（NVIDIA GeForce GTX 660 (2GB) | AMD Radeon HD 7870 (2GB) 以上）。GPU 未達最低需求或許可以執行遊戲，但並不推薦使用。
+  fr-cA:
+    l5: Pas assez de RAM disponible pour obtenir une fréquence d'affichage stable. En cas de problèmes de rendement, essayez de fermer toutes les applications en arrière-plan ou de diminuer la qualité des graphismes.
+    l6: Les caractéristiques de votre processeur graphique sont inférieures à la configuration minimale requise (NVIDIA GeForce GTX 660 (2 Go) | AMD Radeon HD 7870 (2 Go) ou supérieur). Les processeurs graphiques présentant de telles caractéristiques sont susceptibles de faire fonctionner le jeu, mais ne sont pas pris en charge officiellement.
+

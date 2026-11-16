@@ -40,6 +40,14 @@ fn parse_headers(block: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// An HTTP date (`Sun, 16 Nov 2026 06:09:31 GMT`).
+pub fn parse_http_date(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let s = s.trim();
+    // Ignore the weekday: a wrong one shouldn't lose the date.
+    let s = s.split_once(", ").map_or(s, |(_, rest)| rest);
+    chrono::DateTime::parse_from_rfc2822(s).ok().map(|d| d.with_timezone(&chrono::Utc))
+}
+
 pub struct CloudSaves {
     conn: ServiceConnection<Cloudsave>,
     http: reqwest::Client,
@@ -113,6 +121,23 @@ impl CloudSaves {
             bail!("asked to sign {} uploads, got {}", items.len(), r.http_reqs.len());
         }
         Ok(r.http_reqs.iter().map(|h| SignedRequest::from_parts(&h.method, &h.host, &h.path, &h.header)).collect())
+    }
+
+    /// Perform a signed GET and return status, `Last-Modified` and body.
+    pub async fn fetch(&self, req: &SignedRequest) -> Result<(u16, Option<chrono::DateTime<chrono::Utc>>, Vec<u8>)> {
+        let method = reqwest::Method::from_bytes(req.method.as_bytes()).context("bad method")?;
+        let mut r = self.http.request(method, &req.url);
+        for (k, v) in &req.headers {
+            r = r.header(k, v);
+        }
+        let resp = r.send().await.context("cloud save HTTP request failed")?;
+        let status = resp.status().as_u16();
+        let modified = resp
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date);
+        Ok((status, modified, resp.bytes().await?.to_vec()))
     }
 
     /// Perform a signed request and return status and body.

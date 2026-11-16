@@ -1,0 +1,159 @@
+version: 2.0
+root:
+  name: l1
+  sort_string: Assassin's Creed 16
+  background_image: 2d21948937872f3a4e488d1a58b765db.jpg
+  thumb_image: l2
+  logo_image: 173bca0f8923c59a731b6f43a9810970.png
+  splash_image: 4b6c0b2a9ad5dc22b720f7c349e54951.jpg
+  help_url: https://support.ubisoft.com/games/3839?platform=9
+  facebook_url: https://www.facebook.com/ubisoft/
+  homepage_url: http://assassinscreed.ubi.com/
+  forum_url: https://discord.gg/ubisoftofficial
+  overlay_virtual_control_enabled: no
+  game_options:
+    name: Animus Control Panel
+    filename: ACP.ini
+    model: 4446eed9bc6caee120fb0f4b01f99870
+    icon: aco-logo
+    forum_url: https://forums.ubi.com/forumdisplay.php/1827
+  overlay_notifications:
+  - id: 0
+    text: l3
+    permanent: yes
+  - id: 2
+    text: New controller device has been connected
+    permanent: no
+  - id: 3
+    text: Your controller device has been disconnected
+    permanent: no
+  - id: 4
+    text: l4
+    permanent: no
+  icon_image: 3095113d1c9698957e4fb4e2ce087e0d.ico
+  start_game:
+    online:
+      overlay_required: yes
+      overlay_shop_enabled: yes
+      overlay_shop_default_enabled: yes
+      overlay_shop_url: https://payments.ubi.com/ACO/index
+      overlay_shop_sigma: yes
+      overlay_browser_home_url: https://assassinscreed.ubi.com/
+      overlay_product_activation_enabled: yes
+      overlay_supported: yes
+      executables:
+      - shortcut_name: Assassin's Creed Origins
+        description: Final Executable protected with Denuvo
+        path:
+          relative: ACOrigins.exe
+        trial:
+          relative: ACOrigins_plus.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\3539\InstallDir
+        arguments: /appid:{AppId}
+        play_arguments: /appid:{AppId}
+        denuvo: yes
+    offline:
+      executables:
+      - shortcut_name: Assassin's Creed Origins
+        description: Final Executable protected with Denuvo
+        path:
+          relative: ACOrigins.exe
+        trial:
+          relative: ACOrigins_plus.exe
+        working_directory:
+          register: HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Launcher\Installs\3539\InstallDir
+        arguments: /appid:{AppId}
+        play_arguments: /appid:{AppId}
+        denuvo: yes
+  upn_enabled: true
+  installer:
+    game_identifier: Assassin's Creed Origins
+    publisher: Ubisoft
+    help_url: https://support.ubi.com
+    about_url: http://assassinscreed.ubi.com/
+  digital_distribution:
+    version: 1
+  change_language_enabled: yes
+  cloud_saves: yes
+  uplay:
+    achievements: 3483afa6b8475717dabfe0f88025a465
+    achievements_sync_id: ACE
+  club:
+    enabled: yes
+  news:
+    thread: ACOrigins
+  game_page_modules:
+    player_stats:
+      size: 2
+    friends:
+      size: 1
+    streams:
+      size: 1
+  player_stats:
+    items:
+    - id: TimePlayed
+    - id: TotalProgression
+    - id: PlayerLevel
+    - id: TotalKills
+    - id: DistanceTravelled
+  game_streaming_enabled: yes
+  crash_reporting:
+    space_id: bfd34091-6af6-4029-873b-ba7e036464fa
+    app_id: ba09e96a-9f80-42c1-ab6c-4abbc91e9d38
+  app_id: ba09e96a-9f80-42c1-ab6c-4abbc91e9d38
+  space_id: bfd34091-6af6-4029-873b-ba7e036464fa
+  show_properties: yes
+localizations:
+  default:
+    l1: Assassin's Creed® Origins
+    l2: 1be065304226cdb56a5818dd9808c3e0.jpg
+    l3: 'Warning: You are running an unsupported video driver, please update your driver for optimal performance.'
+    l4: Animus Control Panel settings have been applied
+  zh-CN:
+    l1: 刺客信条：起源
+    l2: 1c270c04e1deae8c84646cde19af6fe7.jpg
+    l3: 警告：你所使用的显卡驱动程序游戏并未支持，请升级你的驱动程序才能有最佳的性能表现。
+    l4: 已应用 Animus 控制面板调整设置
+  da-DK:
+    l3: 'Advarsel: Spillet understøtter ikke den grafikdriver, du bruger. Du bør opdatere den for at få den optimale ydelse.'
+  nl-NL:
+    l3: 'Waarschuwing: je gebruikt een grafisch stuurprogramma dat niet wordt ondersteund. Werk je stuurprogramma bij voor optimale prestaties.'
+    l4: Instellingen Animus-bedieningspaneel zijn toegepast
+  fi-FI:
+    l3: 'Varoitus: Käyttämäsi näytönohjain ei ole tuettu. Päivitä ajurisi, niin saat parhaan mahdollisen kokemuksen.'
+  fr-FR:
+    l3: 'Avertissement : Ton pilote vidéo n’est pas pris en charge. Mets à jour ton pilote pour de meilleures performances.'
+    l4: Les paramètres du panneau de contrôle de l'Animus ont été appliqués
+  de-DE:
+    l3: 'Warnung: Du benutzt einen nicht unterstützen Grafikkarten-Treiber. Bitte aktualisiere deinen Treiber für das optimale Spielerlebnis.'
+    l4: Die Einstellungen der Animus-Systemsteuerung wurden übernommen
+  it-IT:
+    l3: 'Attenzione: stai utilizzando dei driver video non supportati, aggiornali per ottenere dei risultati migliori.'
+    l4: Sono state applicate le impostazioni del pannello di controllo dell'Animus
+  ja-JP:
+    l3: '警告: サポートされていないビデオドライバを実行しています。最適なパフォーマンスのために、ドライバを更新してください。'
+    l4: アニムス操作パネルが適用されました
+  nb-NO:
+    l3: 'Advarsel: Du kjører en grafikkdriver som ikke støttes. Oppdater driveren for å få optimale ytelser.'
+  pl-PL:
+    l3: 'Uwaga: używasz nieobsługiwanego sterownika graficznego. Zaktualizuj swój sterownik, by zapewnić sobie optymalną wydajność.'
+    l4: Zastosowano ustawienia panelu kontrolnego Animusa
+  pt-BR:
+    l3: 'Aviso: você está usando um driver de vídeo que não é suportado. Por favor, atualize o seu driver para obter o desempenho adequado.'
+    l4: As configurações do painel de controle do Animus foram aplicadas
+  ru-RU:
+    l3: 'Внимание: игра не поддерживает видеодрайвер. Обнови его, чтобы добиться наилучшей производительности.'
+    l4: Параметры панели управления Анимуса успешно изменены
+  es-ES:
+    l3: 'Advertencia: Estás usando un controlador de vídeo no soportado; actualiza tu controlador para asegurar un rendimiento óptimo.'
+    l4: Se ha aplicado la configuración del Panel de control del Animus
+  sv-SE:
+    l3: Varning! Du använder en grafikkortsdrivrutin som inte stöds. Uppdatera drivrutinen för att optimera prestandan.
+  zh-TW:
+    l3: 警告：你所使用的顯示卡驅動程式遊戲並未支援，請升級你的驅動程式才能有最佳的效能表現。
+  cs-CZ:
+    l4: Nastavení Ovládacího panelu Animu se použilo
+  ko-KO:
+    l4: 애니머스 제어판 설정이 적용되었습니다
+

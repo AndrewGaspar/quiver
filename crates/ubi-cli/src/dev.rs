@@ -83,6 +83,12 @@ pub enum DevCmd {
     Ping,
     /// Report a play session step to Ubisoft directly: start, update or end.
     Playsession { step: String, product_id: u32 },
+    /// GET a UbiServices REST path with the stored session and print the JSON (read-only;
+    /// `{userId}` and `{profileId}` are replaced with the default account's ids).
+    RestGet {
+        /// e.g. /v1/profiles/{userId}/global/ubiconnect/economy/api/units
+        path: String,
+    },
     /// Summarize a .manifest file (e.g. a game's uplay_install.manifest).
     Manifest {
         path: PathBuf,
@@ -416,6 +422,16 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
             let info = demux.patch_info().await?;
             println!("demux ok: latest client {} (we send {})", info.latest_version, ubi_core::demux::CLIENT_VERSION);
             println!("patch base url: {}", info.patch_base_url);
+        }
+        DevCmd::RestGet { path } => {
+            let session = store::current(&auth, None).await?;
+            let path = ubi_core::ubiservices::expand(&path, &session);
+            let (status, body) = ubi_core::ubiservices::get_raw(&auth, &session, &path).await?;
+            eprintln!("HTTP {status}");
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+                Err(_) => println!("{body}"),
+            }
         }
         DevCmd::Manifest { path, files } => {
             let m = manifest::load_manifest(&path)?;
