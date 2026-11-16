@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod run;
+
 /// Everything the bridge needs to answer a game's SDK `InitReq` like Connect would.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LaunchContext {
@@ -71,4 +73,54 @@ pub enum BrokerResponse {
     GameToken { game_token: Vec<u8> },
     Ok,
     Error { message: String },
+}
+
+/// Top-level field numbers in a protobuf message, in order, for logging requests the
+/// bridge's protocol doesn't know (prost drops unknown fields silently). `None` if the
+/// bytes aren't a well-formed message.
+pub fn field_numbers(mut b: &[u8]) -> Option<Vec<u32>> {
+    fn varint(b: &mut &[u8]) -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&x, rest) = b.split_first()?;
+            *b = rest;
+            v |= u64::from(x & 0x7f) << shift;
+            if x < 0x80 {
+                return Some(v);
+            }
+        }
+        None
+    }
+    let mut out = Vec::new();
+    while !b.is_empty() {
+        let tag = varint(&mut b)?;
+        let skip = match tag & 7 {
+            0 => {
+                varint(&mut b)?;
+                0
+            }
+            1 => 8,
+            2 => usize::try_from(varint(&mut b)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        b = b.get(skip..)?;
+        out.push(u32::try_from(tag >> 3).ok()?);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn field_numbers() {
+        // Field 4 (the old partyReq) holding an empty InitPartyReq (field 1).
+        assert_eq!(super::field_numbers(&[0x22, 0x02, 0x0a, 0x00]), Some(vec![4]));
+        // varint field 1, fixed32 field 2, fixed64 field 3, then a length-delimited 300.
+        let mut b = vec![0x08, 0x96, 0x01, 0x15, 1, 2, 3, 4, 0x19, 0, 0, 0, 0, 0, 0, 0, 0, 0xe2, 0x12, 0x01, 0x00];
+        assert_eq!(super::field_numbers(&b), Some(vec![1, 2, 3, 300]));
+        b.pop();
+        assert_eq!(super::field_numbers(&b), None);
+        assert_eq!(super::field_numbers(&[]), Some(vec![]));
+    }
 }

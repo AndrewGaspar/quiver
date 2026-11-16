@@ -36,7 +36,12 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
                     write_frame(&mut pipe, &rsp).await?;
                 }
                 Reply::None => {}
-                Reply::Unhandled => log!("[conn {n}]    (unhandled, no reply)"),
+                Reply::Unhandled => log!(
+                    "[conn {n}]    (unhandled, no reply; Req fields {:?}, {} bytes: {})",
+                    ubi_ipc::field_numbers(&body).unwrap_or_default(),
+                    body.len(),
+                    hex(&body[..body.len().min(64)])
+                ),
             }
         }
     }
@@ -153,6 +158,41 @@ fn respond(req: &u::Req) -> Reply {
             })
         });
     }
+    // Newer (R2) requests. Cross-boot is how a game starts another one (AC game pickers):
+    // not wired to quiverd yet, so refuse it rather than leave the game waiting.
+    if let Some(r) = &req.cross_boot_allowed_req {
+        log!("    cross-boot to {} asked: not allowed yet", r.product_id);
+        let request_id = r.request_id;
+        return rsp(|x| x.cross_boot_allowed_rsp = Some(u::CrossBootAllowedRsp { request_id, is_allowed: false }));
+    }
+    if let Some(r) = &req.cross_boot_status_req {
+        let request_id = r.request_id;
+        let status = r
+            .product_ids
+            .iter()
+            .map(|&id| u::cross_boot_status_rsp::Status { product_id: Some(id), is_allowed: Some(false) })
+            .collect();
+        return rsp(|x| x.cross_boot_status_rsp = Some(u::CrossBootStatusRsp { request_id, status }));
+    }
+    if let Some(r) = &req.launch_app_req {
+        let params: Vec<String> = r.params.iter().map(|p| format!("{}={}", p.name, p.value)).collect();
+        log!("    LaunchApp {} {params:?}: not supported yet", r.product_id);
+        return rsp(|x| x.launch_app_rsp = Some(u::LaunchAppRsp { result: u::GameLaunchResult::Unavailable as i32 }));
+    }
+    if let Some(s) = &req.streaming_req {
+        // Not cloud/remote streaming: say so for the type, "unavailable" for the rest.
+        let request_id = s.request_id;
+        let streaming_type = s.get_streaming_type_req.is_some();
+        return rsp(|x| {
+            x.streaming_rsp = Some(u::StreamingRsp {
+                request_id,
+                result: if streaming_type { OK } else { UNAVAILABLE },
+                get_streaming_type_rsp: streaming_type
+                    .then(|| u::GetStreamingTypeRsp { streaming_type: Some(u::StreamingType::None as i32) }),
+                ..Default::default()
+            })
+        });
+    }
     if req.set_game_session_req.is_some()
         || req.clear_game_session_req.is_some()
         || req.metadata_req.is_some()
@@ -239,6 +279,8 @@ fn subsystems() -> u::InitRsp {
         }),
         multiplayer_init: Some(u::MultiplayerInit { session: None, is_available: Some(false) }),
         user_init: Some(u::UserInit { blacklisted_list: vec![], is_available: Some(true) }),
+        // Launch parameters another game passed when it cross-booted this one: none.
+        cross_boot_init: Some(u::CrossBootInit { launch_params: vec![] }),
         ..Default::default()
     }
 }
