@@ -306,11 +306,13 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 None => None,
                 Some(q) if q.eq_ignore_ascii_case("vanilla") => None,
                 Some(q) => {
-                    let (p, _) = ubi_core::mods::ModStore::open(product_id).profile(q)?;
-                    if !p.cloud_saves {
+                    // Mods v2: a profile may share vanilla's saves (then those are synced).
+                    let plan = ubi_core::mods::ModStore::open(product_id).with_game(&game, None).plan(Some(q))?;
+                    let p = plan.api.profile.as_ref().context("profile")?;
+                    if !plan.api.saves.cloud {
                         bail!("profile '{}' keeps its saves local (cloud_saves is off)", p.name);
                     }
-                    Some(p.id)
+                    plan.saves_profile.clone()
                 }
             };
             let online = daemon.account_for(product_id, None).await?;

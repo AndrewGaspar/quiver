@@ -1,0 +1,4 @@
+{"revision":1,"at":"2026-11-16T07:53:01.313649167Z","source":"aco-dlss","message":null,"profile":{"id":"ptkzxpv","name":"DLSS","layers":["l9uv5ua"],"cloud_saves":false,"pinned":false}}
+{"revision":2,"at":"2026-11-16T07:53:01.321794407Z","source":"aco-dlss","message":null,"profile":{"id":"ptkzxpv","name":"DLSS","layers":["l9uv5ua"],"settings":{"dll_overrides":{"d3d11":"n,b"}},"cloud_saves":false,"pinned":false}}
+{"revision":3,"at":"2026-11-16T08:14:32.424889057Z","source":"cli","message":"share progress with vanilla via the cloud","profile":{"id":"ptkzxpv","name":"DLSS","layers":["l9uv5ua"],"settings":{"dll_overrides":{"d3d11":"n,b"}},"cloud_saves":true,"pinned":false}}
+{"revision":4,"at":"2026-11-16T08:59:58.210770021Z","source":"agent","message":"PCGamingWiki: skip intro videos (layer deletes 4 .bk2 files)","profile":{"id":"ptkzxpv","name":"DLSS","layers":["l9uv5ua","lzrticn"],"settings":{"dll_overrides":{"d3d11":"n,b"}},"cloud_saves":true,"pinned":false}}

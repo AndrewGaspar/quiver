@@ -1,0 +1,15 @@
+id = "acc-china-anisotropy-16"
+name = "16x anisotropic filtering"
+version = "1"
+kind = "mod"
+description = "Sharper textures seen at an angle: MaxAnisotropy=16 instead of the game's 4. Optional; costs a little GPU time."
+source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Chronicles:_China#Anisotropic_filtering_.28AF.29"
+audited = "2026-11-16: from PCGamingWiki; checked against the PCConsole-ACCSystemSettings.ini the game wrote ([SystemSettings] MaxAnisotropy=4). Rendering only."
+save_compatible = true
+products = [1651]
+
+[[patch]]
+file = "drive_c/users/steamuser/Documents/My Games/UnrealEngine3/ACCGame/ACCGame/Config/PCConsole-ACCSystemSettings.ini"
+format = "ini"
+section = "SystemSettings"
+set = { MaxAnisotropy = "16" }

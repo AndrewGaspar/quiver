@@ -199,12 +199,15 @@ enum Cmd {
         #[command(subcommand)]
         action: exports::SteamAction,
     },
-    /// Mod layers and profiles: `quiver mods <game> list | layer … | profile …`.
+    /// Mods and profiles: `quiver mods <game> list | catalog | install … | profile … | plan …`.
     Mods {
         game: String,
         #[command(subcommand)]
         action: mods::ModsAction,
     },
+    /// Apply installed built-in fixes (kind = fix) to unmodded launches too: on or off.
+    /// Without a value, shows the setting.
+    FixesOnVanilla { value: Option<String> },
     /// A game's details: publisher, links, features, install size and languages, add-ons
     /// (owned or not, with store links for the rest).
     Info {
@@ -669,6 +672,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mods { game, action } => mods::run(&client, &cli.source, &game, action).await?,
+        Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
         Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,
         Cmd::Saves { game, json, local, action: None } => info::saves(&client, &game, json, local).await?,

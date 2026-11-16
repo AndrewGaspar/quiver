@@ -41,6 +41,7 @@ crc32fast = "1"
 image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
 libc = "0.2"
 tempfile = "3"
+toml = "1"
 
 [patch.crates-io]
 # gpui -> zed-async-tar -> xattr 0.2.3, which references libc::ENOATTR (removed on Linux).

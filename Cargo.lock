@@ -6397,6 +6397,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "ubi-api",
  "ubi-ipc",

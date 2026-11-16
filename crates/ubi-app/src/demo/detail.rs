@@ -800,6 +800,7 @@ fn layer(id: &str, name: &str, days: i64, by: &str, origin: &str, files: u64, by
         files,
         bytes,
         deletes: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -890,7 +891,7 @@ impl Mods {
                 conflicts.push(Conflict { path: f.into(), layers: order, deleted_by: Vec::new() });
             }
         }
-        ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts }
+        ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts, ..Default::default() }
     }
 
     fn state(&self, id: u32) -> ModsState {
@@ -900,6 +901,7 @@ impl Mods {
             layers: self.layers.clone(),
             profiles: live.into_iter().map(|r| self.info(r)).collect(),
             deleted: deleted.into_iter().map(|r| self.info(r)).collect(),
+            ..Default::default()
         }
     }
 }
@@ -931,8 +933,20 @@ impl Detail {
             | ModsRequest::ProfileRestore { product_id, .. }
             | ModsRequest::LayerDeletes { product_id, .. }
             | ModsRequest::LayerHistory { product_id, .. }
-            | ModsRequest::LayerRestore { product_id, .. } => Some(*product_id),
+            | ModsRequest::LayerRestore { product_id, .. }
+            | ModsRequest::Catalog { product_id }
+            | ModsRequest::Install { product_id, .. }
+            | ModsRequest::Uninstall { product_id, .. }
+            | ModsRequest::Show { product_id, .. }
+            | ModsRequest::ModSet { product_id, .. }
+            | ModsRequest::Plan { product_id, .. }
+            | ModsRequest::PatchesUndo { product_id, .. }
+            | ModsRequest::Migrate { product_id, .. } => Some(*product_id),
+            ModsRequest::Prefs { .. } => None,
         };
+        if let ModsRequest::Prefs { .. } = req {
+            return Ok((json!(ubi_api::mods::ModPrefs::default()), None));
+        }
         if let ModsRequest::Games = req {
             let list: Vec<Value> = st
                 .entries
@@ -958,6 +972,15 @@ impl Detail {
             ModsRequest::LayerDeletes { .. } | ModsRequest::LayerHistory { .. } | ModsRequest::LayerRestore { .. } => {
                 bail!("layer deletions aren't simulated in demo mode")
             }
+            ModsRequest::Catalog { .. } => (json!(Vec::<ubi_api::mods::CatalogEntry>::new()), None),
+            ModsRequest::Prefs { .. }
+            | ModsRequest::Install { .. }
+            | ModsRequest::Uninstall { .. }
+            | ModsRequest::Show { .. }
+            | ModsRequest::ModSet { .. }
+            | ModsRequest::Plan { .. }
+            | ModsRequest::PatchesUndo { .. }
+            | ModsRequest::Migrate { .. } => bail!("Mods v2 requests aren't simulated in demo mode yet"),
             ModsRequest::LayerAdd { name, path, .. } => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
@@ -967,7 +990,7 @@ impl Detail {
                     bail!("{}: use an absolute path", path.display());
                 }
                 let files = 3 + (name.len() as u64 * 7) % 40;
-                let l = Layer { id: random_id('l', n), name, added: now, added_by: src.into(), origin: Some(path), files, bytes: files * 1_350_000, deletes: Vec::new() };
+                let l = Layer { id: random_id('l', n), name, added: now, added_by: src.into(), origin: Some(path), files, bytes: files * 1_350_000, deletes: Vec::new(), ..Default::default() };
                 m.layers.push(l.clone());
                 (json!(l), Some(id))
             }

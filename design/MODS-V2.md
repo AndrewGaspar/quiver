@@ -1,6 +1,7 @@
 # Mods v2: one model for files, settings and config (design notes)
 
-Status: agreed direction (2026-11-16), not built yet.
+Status: agreed direction (2026-11-16); backend built on `feat/mods-v2` (core, daemon, API,
+CLI). The app's UI is still to come. See "As built" at the end and README "Mods v2".
 
 ## Problem
 
@@ -68,3 +69,44 @@ settings don't fork saves. The profile shows which way it goes, and the user can
 - Game settings history stays as the base.
 - Hand-made `.quiver-backup-*` config edits from the PCGamingWiki pass become config-patch
   mods.
+
+## As built (2026-11-16)
+
+- **Format:** `quiver-mod.toml` (TOML, `deny_unknown_fields` so typos fail loudly;
+  `quiver-mod.json` with the same fields is read too). Types: `ubi_api::mods::ModManifest`.
+- **Store:** an installed mod is a layer record with a `manifest` (same folders, same ids,
+  same history file; new ids start with `m`). v1 layers are file-only mods as they are,
+  with unknown save compatibility (counted as not compatible). `quiver mods <game> set MOD
+  save_compatible=on kind=fix` gives one a manifest of its own, recorded in its history.
+- **Profiles:** `Profile::layers` is the mod stack and `Profile::settings` the person's
+  overrides, so v1 histories read unchanged. New fields: `separate_saves` (`None` = auto)
+  and `profile_config` (prefix folders the profile has its own copy of).
+- **Saves migration:** a profile that already has a `savegames/<user>/<product>-<id>` folder
+  keeps it. The rule checks for the folder even before migration, and `ModStore::migrate`
+  (run by every profile launch, and by `quiver mods <game> migrate`) records
+  `separate_saves=on` as a revision, so the choice is visible and reversible. Nothing is moved;
+  only an explicit `separate_saves=off` makes such a profile share vanilla's saves.
+- **Shared saves sync with the cloud** like vanilla's (a profile's `cloud_saves` only
+  matters for its own saves).
+- **Config patches:** applied by the daemon before the namespace is mounted (never under a
+  live overlay), to the file the launch will see: the prefix's, or the profile's copy in
+  `profiles/<id>/prefix/<dir>` (copied up first, as overlayfs would). Record:
+  `mods/<product>/patches.json` (file's own values, where a deleted key stood, the applied
+  value, who wants it). Every launch reconciles the files it sees; a key changed since
+  Quiver set it is left alone when undoing. `*` in a path component matches any one name
+  (Far Cry 4 keeps `GamerProfile.xml` in a per-account folder).
+- **Vanilla with fixes:** fixes with install files mount over the install for vanilla too,
+  with `profiles/vanilla/upper` as the writable layer.
+- **Built-ins:** `mods/<product>/<id>/quiver-mod.toml`, compiled in by `ubi-core/build.rs`;
+  a unit test checks every entry parses, links PCGamingWiki, has an `audited` note and names
+  its product.
+
+### Known limits
+
+- A profile without its own copy of a folder shares that folder's files with every other
+  launch, so its config patches there are undone by the next launch that doesn't want them.
+  Use `profile_config` to give a profile settings of its own.
+- A profile's own copy starts as the prefix's file at the time it was copied up, including
+  any patch vanilla had applied then; undoing in the copy restores the prefix's pre-Quiver
+  value (recorded in the prefix's entry).
+- `profile_config` folders are comma-separated, so a folder name with a comma can't be given.

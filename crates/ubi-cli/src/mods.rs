@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use ubi_api::mods::{GameProfiles, Layer, LayerChange, LayerRevision, ModsState, ProfileInfo, ProfileRevision, is_human_source};
+use ubi_api::mods::{
+    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModsState,
+    PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, is_human_source,
+};
 use ubi_api::{Client, ModsRequest, Request, SettingOp};
 
 #[derive(Subcommand)]
@@ -21,10 +24,66 @@ pub enum ModsAction {
         #[command(subcommand)]
         action: LayerAction,
     },
-    /// Mod profiles: named stacks of layers with their own saves.
+    /// Mod profiles: named stacks of mods plus your own overrides.
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
+    },
+    /// Quiver's built-in mods for this game (audited recipes; `install ID` to use one).
+    Catalog {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a mod: a built-in one by id, or a package folder (with a quiver-mod.toml;
+    /// a plain folder of files installs as a file-only mod). Installing a built-in again
+    /// updates it to the catalog's version.
+    Install {
+        /// Built-in mod id, or a folder.
+        what: String,
+        /// Name for a plain folder (default: the folder's name).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Remove an installed mod; config values it changed go back to the files' own.
+    Uninstall {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+    },
+    /// An installed mod in detail: what it declares, where it's used, what it changed.
+    Show {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change an installed mod: enabled=on|off  save_compatible=on|off|unknown  kind=fix|mod
+    /// name=…
+    Set {
+        #[arg(value_name = "MOD")]
+        mod_id: String,
+        #[arg(required = true)]
+        changes: Vec<String>,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// What a launch would use: mods, resolved settings, conflicts, saves, mounts,
+    /// per-profile folders (and where their files are), config patches.
+    Plan {
+        /// Profile name or id (default: vanilla).
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put config values Quiver changed back to the files' own now (all mods, or one).
+    UndoPatches {
+        #[arg(value_name = "MOD")]
+        mod_id: Option<String>,
+    },
+    /// Make Mods v1 data explicit: profiles that have their own saves folder get
+    /// separate_saves=on. Launches do this on their own; `--dry-run` shows what it would do.
+    Migrate {
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -79,8 +138,10 @@ pub enum ProfileAction {
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Change a profile: layers=a,b  cloud_saves=on|off  pinned=on|off  name=…, or a
-    /// launch-setting override (proton=…, env.NAME=…, dll.NAME=…, args=…, wrappers=…).
+    /// Change a profile: mods=a,b (bottom to top; also layers=)  cloud_saves=on|off
+    /// pinned=on|off  separate_saves=on|off|auto  profile_config=DIR,… (prefix folders the
+    /// profile keeps its own copy of)  name=…, or a launch-setting override (proton=…,
+    /// env.NAME=…, dll.NAME=…, args=…, wrappers=…).
     Set {
         profile: String,
         #[arg(required = true)]
@@ -182,12 +243,37 @@ fn print_layer(l: &Layer) {
     }
 }
 
+/// What a mod declares besides files, in a few words.
+fn mod_flags(l: &Layer) -> String {
+    let mut f = Vec::new();
+    f.push(l.kind().as_str().to_owned());
+    if l.builtin {
+        f.push("built-in".into());
+    }
+    match l.manifest.as_ref().and_then(|m| m.save_compatible) {
+        Some(true) => f.push("save-compatible".into()),
+        Some(false) => f.push("not save-compatible".into()),
+        None => f.push("save compatibility unknown".into()),
+    }
+    let launch = l.launch();
+    if !launch.is_empty() {
+        f.push("launch settings".into());
+    }
+    if !l.patches().is_empty() {
+        f.push(format!("{} config patch(es)", l.patches().len()));
+    }
+    if !l.enabled() {
+        f.push("TURNED OFF".into());
+    }
+    f.join(", ")
+}
+
 fn print_state(name: &str, s: &ModsState) {
     let layer_name = |id: &String| s.layers.iter().find(|l| &l.id == id).map_or(format!("{id} (missing)"), |l| l.name.clone());
     println!("{name} ({})", s.product_id);
-    println!("layers:");
+    println!("mods:");
     if s.layers.is_empty() {
-        println!("  (none; quiver mods {} layer add NAME DIR)", s.product_id);
+        println!("  (none; quiver mods {} catalog, install ID|DIR, or layer add NAME DIR)", s.product_id);
     }
     for l in &s.layers {
         println!(
@@ -200,9 +286,16 @@ fn print_state(name: &str, s: &ModsState) {
             l.added_by,
             deletes_note(l).map(|d| format!("; {d}")).unwrap_or_default()
         );
+        println!("           {}{}", mod_flags(l), l.mod_id().map(|m| format!(" [{m}]")).unwrap_or_default());
     }
     println!("profiles:");
-    println!("  {:<7}  {:<24} the game as installed", ubi_api::mods::VANILLA, "Vanilla");
+    let fixes = match s.fixes_on_vanilla {
+        None => "fixes on unmodded games: not decided (quiver fixes-on-vanilla on|off)".to_owned(),
+        Some(false) => "fixes on unmodded games: off".to_owned(),
+        Some(true) if s.vanilla_fixes.is_empty() => "fixes on: no fix installed".to_owned(),
+        Some(true) => format!("with fixes: {}", s.vanilla_fixes.iter().map(layer_name).collect::<Vec<_>>().join(" < ")),
+    };
+    println!("  {:<7}  {:<24} the game as installed; {fixes}", ubi_api::mods::VANILLA, "Vanilla");
     let print_profile = |i: &ProfileInfo| {
         let p = &i.profile;
         let layers = if p.layers.is_empty() { "no layers".into() } else { p.layers.iter().map(layer_name).collect::<Vec<_>>().join(" < ") };
@@ -214,6 +307,21 @@ fn print_state(name: &str, s: &ModsState) {
         let overrides = serde_json::to_value(&p.settings).unwrap_or_default();
         if overrides.as_object().is_some_and(|o| !o.is_empty()) {
             println!("           overrides: {overrides}");
+        }
+        if let Some(saves) = &i.saves {
+            println!("           saves: {} ({})", saves.folder, saves.reason);
+        }
+        for d in &i.config_dirs {
+            println!("           own folder: {} (files live in {})", d.dir, d.upper.display());
+        }
+        for c in &i.setting_conflicts {
+            println!("           conflict: {}", conflict_line(c, &layer_name));
+        }
+        for pr in &i.problems {
+            println!("           won't launch: {pr}");
+        }
+        for w in &i.warnings {
+            println!("           note: {w}");
         }
         for c in &i.conflicts {
             let by = c
@@ -230,6 +338,151 @@ fn print_state(name: &str, s: &ModsState) {
         println!("deleted (quiver mods {} profile restore ID REVISION):", s.product_id);
         s.deleted.iter().for_each(print_profile);
     }
+}
+
+fn conflict_line(c: &SettingConflict, name: &dyn Fn(&String) -> String) -> String {
+    let by: Vec<String> = c
+        .by
+        .iter()
+        .map(|b| {
+            let who = if b.from == "game" || b.from == "profile" { b.from.clone() } else { name(&b.from) };
+            format!("{who}: {}", b.value.as_deref().unwrap_or("(deleted)"))
+        })
+        .collect();
+    format!("{} set by {} (the last wins)", c.key, by.join(", "))
+}
+
+fn patch_state(s: PatchState) -> &'static str {
+    match s {
+        PatchState::Applied => "applied",
+        PatchState::Unchanged => "already set",
+        PatchState::Pending => "pending until first run",
+        PatchState::Undone => "undone",
+        PatchState::Failed => "FAILED",
+        PatchState::Unknown => "applied at launch",
+    }
+}
+
+fn print_patches(list: &[PatchStatus], name: &dyn Fn(&String) -> String) {
+    for s in list {
+        println!("  {} [{}] from {}: {}", s.file, s.target, name(&s.mod_id), patch_state(s.state));
+        for f in &s.files {
+            let whose = if f.scope == "prefix" { "the prefix's" } else { "the profile's own copy" };
+            println!("      {} ({whose}: {})", f.rel, f.path.display());
+        }
+        if !s.detail.is_empty() && s.state != PatchState::Pending {
+            println!("      {}", s.detail);
+        }
+    }
+}
+
+fn print_plan(game: &str, p: &LaunchPlan, mods: &[Layer]) {
+    let name = |id: &String| mods.iter().find(|l| &l.id == id).map_or(id.clone(), |l| format!("{} ({id})", l.name));
+    match &p.profile {
+        Some(pr) => println!("{game}: profile '{}' ({}) r{}", pr.name, pr.id, p.revision),
+        None => println!("{game}: vanilla"),
+    }
+    println!("mods (bottom to top): {}", if p.mods.is_empty() { "none".into() } else { p.mods.iter().map(name).collect::<Vec<_>>().join(" < ") });
+    println!("settings: {}", serde_json::to_string(&p.settings).unwrap_or_default());
+    println!("saves: {} ({})", p.saves.folder, p.saves.reason);
+    for m in &p.mounts {
+        let lower: Vec<String> = m.lower.iter().map(|l| l.display().to_string()).collect();
+        println!("mount: {} <- [{}] writes to {}", m.target.display(), lower.join(", "), m.upper.display());
+    }
+    if p.config_dirs.is_empty() && p.profile.is_some() {
+        println!("per-profile prefix folders: none (the profile sees the prefix's own settings)");
+    }
+    for d in &p.config_dirs {
+        println!("per-profile folder: {}", d.dir);
+        if let Some(pp) = &d.prefix_path {
+            println!("    the game sees {} with this profile's changes on top", pp.display());
+        }
+        println!("    this profile's files: {} ({} file(s))", d.upper.display(), d.files.len());
+        for f in &d.files {
+            println!("      {f}");
+        }
+    }
+    if !p.patches.is_empty() {
+        println!("config patches:");
+        print_patches(&p.patches, &name);
+    }
+    for c in &p.setting_conflicts {
+        println!("conflict: {}", conflict_line(c, &name));
+    }
+    for c in &p.file_conflicts {
+        println!("file conflict: {} from {} (the top one wins)", c.path, c.layers.iter().map(name).collect::<Vec<_>>().join(" < "));
+    }
+    for w in &p.warnings {
+        println!("note: {w}");
+    }
+    for pr in &p.problems {
+        println!("WON'T LAUNCH: {pr}");
+    }
+}
+
+fn print_detail(d: &ModDetail) {
+    let l = &d.layer;
+    print_layer(l);
+    println!("  {}", mod_flags(l));
+    if let Some(m) = &l.manifest {
+        if let Some(v) = &m.version {
+            println!("  version {v}");
+        }
+        if let Some(desc) = &m.description {
+            println!("  {desc}");
+        }
+        if let Some(s) = &m.source {
+            println!("  source: {s}");
+        }
+        if let Some(a) = &m.audited {
+            println!("  audited: {a}");
+        }
+        if !m.builds.is_empty() {
+            println!("  known-good builds: {}", m.builds.join(", "));
+        }
+        if !m.requires.is_empty() {
+            println!("  requires: {}", m.requires.join(", "));
+        }
+        if !m.conflicts.is_empty() {
+            println!("  conflicts with: {}", m.conflicts.join(", "));
+        }
+        if !m.launch.is_empty() {
+            println!("  launch settings: {}", serde_json::to_string(&m.launch).unwrap_or_default());
+        }
+        for p in &m.patches {
+            let set: Vec<String> = p.set.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let del: Vec<String> = p.delete.iter().map(|k| format!("-{k}")).collect();
+            println!("  patch {} [{}]: {}", p.file, p.target(), set.into_iter().chain(del).collect::<Vec<_>>().join(" "));
+        }
+    }
+    println!("  used by {}{}", if d.used_by.is_empty() { "no profile".into() } else { d.used_by.join(", ") }, if d.on_vanilla { "; vanilla (fixes on)" } else { "" });
+    for k in &d.applied {
+        println!(
+            "  changed now: {} [{}] {} = {} (the file's own: {}) in {}",
+            k.file,
+            k.target,
+            k.key,
+            k.applied.as_deref().unwrap_or("(deleted)"),
+            if k.original.is_empty() { "(not set)".into() } else { k.original.join(", ") },
+            k.scope
+        );
+    }
+    if let Some(u) = &d.catalog_update {
+        println!("  update available: version {} (quiver mods <game> install {})", u.version.as_deref().unwrap_or("?"), u.id);
+    }
+}
+
+/// Parse the reply to a profile change, printing the daemon's notes about the stack.
+fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
+    if let Some(notes) = v.get("warnings").and_then(|w| w.as_array()) {
+        for n in notes.iter().filter_map(|n| n.as_str()) {
+            eprintln!("note: {n}");
+        }
+    }
+    if let Some(s) = v.get("saves").and_then(|s| serde_json::from_value::<ubi_api::mods::SavesPlan>(s.clone()).ok()) {
+        eprintln!("saves: {} ({})", s.folder, s.reason);
+    }
+    Ok(serde_json::from_value(v)?)
 }
 
 pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) -> Result<()> {
@@ -311,11 +564,11 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         ModsAction::Profile { action } => {
             let rev: ProfileRevision = match action {
                 ProfileAction::Create { name, layers, message } => {
-                    serde_json::from_value(call(ModsRequest::ProfileCreate { product_id, name, layers, message }).await?)?
+                    profile_reply(call(ModsRequest::ProfileCreate { product_id, name, layers, message }).await?)?
                 }
                 ProfileAction::Set { profile, changes, message } => {
                     let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
-                    serde_json::from_value(call(ModsRequest::ProfileSet { product_id, profile, ops, message }).await?)?
+                    profile_reply(call(ModsRequest::ProfileSet { product_id, profile, ops, message }).await?)?
                 }
                 pin @ (ProfileAction::Pin { .. } | ProfileAction::Unpin { .. }) => {
                     let (profile, on) = match pin {
@@ -369,16 +622,134 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 .map(|id| state.layers.iter().find(|l| &l.id == id).map_or(id.clone(), |l| l.name.clone()))
                 .collect();
             println!(
-                "{}: profile {} '{}' revision {} (layers: {}; cloud saves {}{})",
+                "{}: profile {} '{}' revision {} (mods: {}; cloud saves {}{}{}{})",
                 g.name,
                 p.id,
                 p.name,
                 rev.revision,
                 if names.is_empty() { "none".into() } else { names.join(" < ") },
                 if p.cloud_saves { "on" } else { "off" },
+                match p.separate_saves {
+                    Some(true) => "; separate saves",
+                    Some(false) => "; shares vanilla's saves",
+                    None => "",
+                },
+                if p.profile_config.is_empty() { String::new() } else { format!("; own folders: {}", p.profile_config.join(", ")) },
                 if p.pinned { "; pinned" } else { "" }
             );
         }
+        ModsAction::Catalog { json } => {
+            let list: Vec<CatalogEntry> = client.call(Request::Mods(ModsRequest::Catalog { product_id })).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            if list.is_empty() {
+                println!("{}: no built-in mods yet", g.name);
+            }
+            for e in &list {
+                let m = &e.manifest;
+                let state = match (&e.installed, e.update) {
+                    (Some(id), true) => format!("installed as {id}; update available"),
+                    (Some(id), false) => format!("installed as {id}"),
+                    (None, _) => "not installed".into(),
+                };
+                println!("{:<26} {} ({}; {state})", m.id, m.name, m.kind.as_str());
+                if let Some(d) = &m.description {
+                    println!("    {d}");
+                }
+                if let Some(s) = &m.source {
+                    println!("    source: {s}");
+                }
+            }
+        }
+        ModsAction::Install { what, name } => {
+            let as_dir = what.contains('/') || std::path::Path::new(&what).is_dir();
+            let req = if as_dir {
+                let path = PathBuf::from(&what).canonicalize().with_context(|| format!("{what} not found"))?;
+                ModsRequest::Install { product_id, builtin: None, path: Some(path), name }
+            } else {
+                ModsRequest::Install { product_id, builtin: Some(what), path: None, name }
+            };
+            let c: LayerChange = client.call(Request::Mods(req)).await?;
+            print_change(&g.name, "installed", &c);
+            println!("  {}", mod_flags(&c.layer));
+            println!("  add it to a profile: quiver mods {product_id} profile set PROFILE mods=…,{}", c.layer.mod_id().unwrap_or(&c.layer.id));
+        }
+        ModsAction::Uninstall { mod_id } => {
+            let confirmed = confirm(source, &format!("uninstall mod '{mod_id}' of {} (its files, and config values it changed go back)", g.name))?;
+            let v: serde_json::Value = call(ModsRequest::Uninstall { product_id, mod_id, confirmed }).await?;
+            let l: Layer = serde_json::from_value(v["mod"].clone())?;
+            let undone: Vec<PatchStatus> = serde_json::from_value(v["undone"].clone()).unwrap_or_default();
+            println!("{}: uninstalled '{}' ({})", g.name, l.name, l.id);
+            print_patches(&undone, &|id| id.clone());
+        }
+        ModsAction::Show { mod_id, json } => {
+            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { product_id, mod_id })).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&d)?);
+            } else {
+                print_detail(&d);
+            }
+        }
+        ModsAction::Set { mod_id, changes, message } => {
+            let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
+            let c: LayerChange = client.call(Request::Mods(ModsRequest::ModSet { product_id, mod_id, ops, message })).await?;
+            print_change(&g.name, "changed", &c);
+            println!("  {}", mod_flags(&c.layer));
+        }
+        ModsAction::Plan { profile, json } => {
+            let plan: LaunchPlan = client.call(Request::Mods(ModsRequest::Plan { product_id, profile })).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+                print_plan(&g.name, &plan, &state.layers);
+            }
+        }
+        ModsAction::UndoPatches { mod_id } => {
+            let what = match &mod_id {
+                Some(m) => format!("put back the config values mod '{m}' of {} changed", g.name),
+                None => format!("put back every config value Quiver changed for {}", g.name),
+            };
+            let confirmed = confirm(source, &what)?;
+            let undone: Vec<PatchStatus> = client.call(Request::Mods(ModsRequest::PatchesUndo { product_id, mod_id, confirmed })).await?;
+            if undone.is_empty() {
+                println!("{}: nothing to undo", g.name);
+            }
+            print_patches(&undone, &|id| id.clone());
+        }
+        ModsAction::Migrate { dry_run } => {
+            let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { product_id, dry_run })).await?;
+            println!("{}: {}", g.name, if dry_run { "would migrate (dry run)" } else { "migrated" });
+            println!("  file-only mods (no change needed): {}", if r.file_only_mods.is_empty() { "none".into() } else { r.file_only_mods.join(", ") });
+            if r.kept_separate_saves.is_empty() {
+                println!("  no profile needed separate_saves set");
+            }
+            for n in &r.notes {
+                println!("  {n}");
+            }
+        }
     }
+    Ok(())
+}
+
+/// `quiver fixes-on-vanilla [on|off]`: the app-level Mods v2 setting.
+pub async fn fixes_on_vanilla(client: &Client, value: Option<String>) -> Result<()> {
+    let set = match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None => None,
+        Some("on" | "true" | "yes") => Some(true),
+        Some("off" | "false" | "no") => Some(false),
+        Some(o) => bail!("expected on or off, got '{o}'"),
+    };
+    let p: ModPrefs = client.call(Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: set })).await?;
+    println!(
+        "fixes on unmodded games: {}",
+        match p.fixes_on_vanilla {
+            None => "not decided yet (quiver fixes-on-vanilla on|off)",
+            Some(true) => "on (installed, enabled built-in fixes also apply to vanilla launches)",
+            Some(false) => "off (vanilla launches run the game as installed)",
+        }
+    );
     Ok(())
 }

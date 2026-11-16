@@ -97,16 +97,28 @@ pub struct Namespace {
 impl Namespace {
     /// Create the namespace and mount `spec` in it. The calling process stays where it is.
     pub fn create(spec: &OverlaySpec) -> Result<Namespace> {
-        spec.check()?;
+        Self::create_many(std::slice::from_ref(spec))
+    }
+
+    /// Create the namespace with every overlay in `specs` mounted, in order (e.g. the
+    /// install folder and a profile's own prefix folders). One mount failing fails all.
+    pub fn create_many(specs: &[OverlaySpec]) -> Result<Namespace> {
+        if specs.is_empty() {
+            bail!("no overlay to mount");
+        }
+        for spec in specs {
+            spec.check()?;
+        }
         // SAFETY: getuid/getgid can't fail.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         // Everything the child touches is prepared here: after fork it may only make
         // async-signal-safe calls (no allocation).
         let uid_map = format!("{uid} {uid} 1\n");
         let gid_map = format!("{gid} {gid} 1\n");
-        let target = cstr(&spec.target)?;
-        let options = spec.options()?;
-        let data = CString::new(options.clone())?;
+        let options: Vec<String> = specs.iter().map(|s| s.options()).collect::<Result<_>>()?;
+        let mounts: Vec<(CString, CString)> =
+            specs.iter().zip(&options).map(|(s, o)| Ok((cstr(&s.target)?, CString::new(o.clone())?))).collect::<Result<_>>()?;
+        let options = options.join(" | ");
         let (mut err_r, err_w) = io::pipe()?;
         let err_fd = err_w.as_raw_fd();
 
@@ -147,8 +159,14 @@ impl Namespace {
                 {
                     return fail(b"making / a slave mount");
                 }
-                if libc::mount(c"overlay".as_ptr(), target.as_ptr(), c"overlay".as_ptr(), 0, data.as_ptr().cast()) != 0 {
-                    return fail(b"mount(overlay)");
+                for (target, data) in &mounts {
+                    if libc::mount(c"overlay".as_ptr(), target.as_ptr(), c"overlay".as_ptr(), 0, data.as_ptr().cast()) != 0 {
+                        let e = io::Error::last_os_error();
+                        let step = b"mount(overlay) on ";
+                        libc::write(err_fd, step.as_ptr().cast(), step.len());
+                        libc::write(err_fd, target.as_ptr().cast(), target.as_bytes().len());
+                        return Err(e);
+                    }
                 }
                 Ok(())
             });

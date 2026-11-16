@@ -1,0 +1,12 @@
+id = "fc4-skip-intro"
+name = "Skip intro videos"
+version = "1"
+kind = "fix"
+description = "Starts the game with -skipintro, which skips the logo and intro videos. ProtonDB reports say it also avoids launch crashes on some setups."
+source = "https://www.pcgamingwiki.com/wiki/Far_Cry_4#Skip_intro_videos"
+audited = "2026-11-16: launch argument from PCGamingWiki; used on this game by hand (game settings revision 2) before it became a built-in mod. Touches no files."
+save_compatible = true
+products = [420]
+
+[launch]
+args = ["-skipintro"]
