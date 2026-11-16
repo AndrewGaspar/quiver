@@ -223,9 +223,15 @@ owned_roots="$libdir:$docdir:$HOME/.local/state/quiver"
 
 if ((uninstall)); then
     manage uninstall "$manifest" "$owned_roots"
-    if pgrep -u "$(id -u)" -x quiverd >/dev/null 2>&1; then
-        echo "A quiverd is still running; it keeps running until stopped (quiver daemon stop, or kill it)."
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$datadir/applications" >/dev/null 2>&1 || true
     fi
+    for pid in $(pgrep -u "$(id -u)" -x quiverd 2>/dev/null); do
+        case $(readlink "/proc/$pid/exe" 2>/dev/null) in
+            "$bindir/quiverd" | "$bindir/quiverd (deleted)")
+                echo "quiverd (pid $pid) from this install is still running; stop it when no game is running (kill $pid)." ;;
+        esac
+    done
     exit 0
 fi
 
