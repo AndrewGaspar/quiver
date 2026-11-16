@@ -5,7 +5,7 @@
 //! never lost and every change records who made it (gui/cli/agent…).
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 pub use ubi_api::{GameSettings, Revision, SettingOp};
@@ -16,12 +16,26 @@ fn history_path(product_id: u32) -> PathBuf {
     data_dir().join("games").join(product_id.to_string()).join("history.jsonl")
 }
 
-pub fn history(product_id: u32) -> Result<Vec<Revision>> {
-    let Ok(text) = std::fs::read_to_string(history_path(product_id)) else { return Ok(Vec::new()) };
+/// Every entry of a JSON-lines history file (empty if it doesn't exist yet). Shared by
+/// game settings and mod profiles (`mods`).
+pub(crate) fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(Vec::new()) };
     text.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).context("corrupt settings history"))
+        .map(|l| serde_json::from_str(l).with_context(|| format!("corrupt history {}", path.display())))
         .collect()
+}
+
+/// Append one entry to a JSON-lines history file.
+pub(crate) fn append_jsonl<T: serde::Serialize>(path: &Path, entry: &T) -> Result<()> {
+    std::fs::create_dir_all(path.parent().context("history path")?)?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{}", serde_json::to_string(entry)?)?;
+    Ok(())
+}
+
+pub fn history(product_id: u32) -> Result<Vec<Revision>> {
+    read_jsonl(&history_path(product_id))
 }
 
 /// Current settings and their revision (0 = defaults, never changed).
@@ -33,12 +47,9 @@ pub fn current(product_id: u32) -> Result<(GameSettings, u32)> {
 }
 
 fn append(product_id: u32, settings: GameSettings, source: &str, message: Option<String>) -> Result<Revision> {
-    let path = history_path(product_id);
-    std::fs::create_dir_all(path.parent().unwrap())?;
     let revision = current(product_id)?.1 + 1;
     let rev = Revision { revision, at: chrono::Utc::now(), source: source.to_owned(), message, settings };
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-    writeln!(f, "{}", serde_json::to_string(&rev)?)?;
+    append_jsonl(&history_path(product_id), &rev)?;
     Ok(rev)
 }
 

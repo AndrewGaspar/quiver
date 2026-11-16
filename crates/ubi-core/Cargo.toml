@@ -31,6 +31,7 @@ futures.workspace = true
 ubi-api.workspace = true
 crc32fast.workspace = true
 image.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

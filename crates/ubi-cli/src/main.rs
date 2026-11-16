@@ -4,6 +4,7 @@
 
 mod dev;
 mod exports;
+mod mods;
 
 use std::io::Write;
 
@@ -74,6 +75,15 @@ enum Cmd {
     /// Launch a game (follows it until it exits unless --detach).
     Play {
         game: String,
+        /// Mod profile (name or id); default: vanilla.
+        #[arg(long, conflicts_with = "vanilla")]
+        profile: Option<String>,
+        /// Mod profile by its stable id (what .desktop entries and Steam shortcuts use).
+        #[arg(long, conflicts_with_all = ["profile", "vanilla"])]
+        profile_id: Option<String>,
+        /// The game as installed, without mods (the default).
+        #[arg(long)]
+        vanilla: bool,
         #[arg(long)]
         detach: bool,
     },
@@ -149,6 +159,12 @@ enum Cmd {
     Steam {
         #[command(subcommand)]
         action: exports::SteamAction,
+    },
+    /// Mod layers and profiles: `quiver mods <game> list | layer … | profile …`.
+    Mods {
+        game: String,
+        #[command(subcommand)]
+        action: mods::ModsAction,
     },
     /// Low-level tools that bypass the daemon.
     Dev {
@@ -427,11 +443,15 @@ async fn main() -> Result<()> {
             let () = client.call(Request::Uninstall { product_id: e.product_id, remove_prefix: prefix }).await?;
             println!("uninstalled {}", e.name);
         }
-        Cmd::Play { game, detach } => {
+        Cmd::Play { game, profile, profile_id, vanilla: _, detach } => {
             let e = resolve(&client, &game).await?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Play { product_id: e.product_id }).await?;
-            eprintln!("launching {} (job {id})", e.name);
+            let profile = profile.or(profile_id);
+            let id: u64 = client.call(Request::Play { product_id: e.product_id, profile: profile.clone() }).await?;
+            match profile {
+                Some(p) => eprintln!("launching {} with profile {p} (job {id})", e.name),
+                None => eprintln!("launching {} (job {id})", e.name),
+            }
             if !detach {
                 follow(&client, events, id).await?;
             }
@@ -559,6 +579,7 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&e)?);
             }
         }
+        Cmd::Mods { game, action } => mods::run(&client, &cli.source, &game, action).await?,
         Cmd::Daemon { action: DaemonAction::Stop } => {
             let () = client.call(Request::Shutdown).await?;
             println!("quiverd stopping");

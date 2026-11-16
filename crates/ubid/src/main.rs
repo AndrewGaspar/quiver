@@ -4,6 +4,7 @@
 //! `ubi-api` for the protocol.
 
 mod exports;
+mod mods;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -363,9 +364,9 @@ impl Daemon {
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_install(source, product_id, name, language, online))
             }
-            Request::Play { product_id } => {
+            Request::Play { product_id, profile } => {
                 let online = self.account_for(product_id, None).await?;
-                json!(self.start_play(source, product_id, online)?)
+                json!(self.start_play(source, product_id, profile, online)?)
             }
             Request::Import { product_id, path, language } => {
                 let online = self.account_for(product_id, None).await?;
@@ -509,6 +510,7 @@ impl Daemon {
                 });
                 Value::Null
             }
+            Request::Mods(req) => self.handle_mods(source, req).await?,
         })
     }
 
@@ -654,14 +656,23 @@ impl Daemon {
         id
     }
 
-    fn start_play(self: &Arc<Self>, source: &str, product_id: u32, online: Arc<Online>) -> Result<u64> {
+    fn start_play(self: &Arc<Self>, source: &str, product_id: u32, profile: Option<String>, online: Arc<Online>) -> Result<u64> {
         let game = Games::load()?.get(product_id).cloned().context("not installed")?;
+        // A mod profile: its layers, own saves and setting overrides (None: vanilla).
+        let modded = ubi_core::mods::ModStore::open(product_id).launch(profile.as_deref(), &game.install_dir)?;
+        let (mut s, rev) = settings::current(product_id)?;
+        if let Some(m) = &modded {
+            s = s.merged(&m.profile.settings);
+        }
         if !self.running.lock().unwrap().insert(product_id) {
             bail!("{} is already running", game.name);
         }
-        let (s, rev) = settings::current(product_id)?;
         let id = self.new_job(JobKind::Play, product_id, game.name.clone());
-        self.log_activity(source, format!("play {}{} (settings r{rev})", game.name, self.as_account(&online)), Some(product_id));
+        let with = match &modded {
+            Some(m) => format!(", profile '{}' ({}) r{}", m.profile.name, m.profile.id, m.revision),
+            None => String::new(),
+        };
+        self.log_activity(source, format!("play {}{} (settings r{rev}{with})", game.name, self.as_account(&online)), Some(product_id));
         let this = self.clone();
         tokio::spawn(async move {
             let (cfg, broker) = (this.cfg.clone(), this.broker.clone());
@@ -670,8 +681,9 @@ impl Daemon {
             let g = game.clone();
             let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
             let started = started_at.clone();
+            let (profile_id, profile_revision) = (modded.as_ref().map(|m| m.profile.id.clone()), modded.as_ref().map(|m| m.revision));
             let result = run_local(move || async move {
-                launcher::play(&cfg, &online, &g, &s, &broker, &sessions, |e| match e {
+                launcher::play(&cfg, &online, &g, &s, modded.as_ref(), &broker, &sessions, |e| match e {
                     LaunchEvent::Status(msg) => ev_this.update_job(id, |j| j.status = msg),
                     LaunchEvent::Running => {
                         *started.lock().unwrap() = Some(chrono::Utc::now());
@@ -691,6 +703,8 @@ impl Daemon {
                     ended: end,
                     seconds: (end - start).num_seconds().max(0) as u64,
                     settings_revision: rev,
+                    profile: profile_id.clone(),
+                    profile_revision,
                 };
                 if let Err(e) = settings::record_session(product_id, &session) {
                     tracing::warn!("recording play session: {e:#}");

@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 crc32fast = "1"
 image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
+libc = "0.2"
 tempfile = "3"
 
 [patch.crates-io]

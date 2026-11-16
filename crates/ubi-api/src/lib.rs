@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod client;
 pub mod exports;
+pub mod mods;
 pub use client::Client;
+pub use mods::{ModsRequest, Profile};
 
 // ---------------------------------------------------------------------------------------
 // Model
@@ -99,6 +101,29 @@ impl GameSettings {
             }
         }
         Ok(())
+    }
+
+    /// These settings with `over` (a mod profile's overrides) on top: values `over` sets
+    /// win, `args` are appended, `env` and `dll` entries are merged, and non-empty
+    /// `wrappers` replace the game's.
+    pub fn merged(&self, over: &GameSettings) -> GameSettings {
+        let mut out = self.clone();
+        if over.proton.is_some() {
+            out.proton = over.proton.clone();
+        }
+        if over.language.is_some() {
+            out.language = over.language.clone();
+        }
+        if over.account.is_some() {
+            out.account = over.account.clone();
+        }
+        out.args.extend(over.args.iter().cloned());
+        if !over.wrappers.is_empty() {
+            out.wrappers = over.wrappers.clone();
+        }
+        out.env.extend(over.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.dll_overrides.extend(over.dll_overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out
     }
 }
 
@@ -237,6 +262,11 @@ pub struct PlaySession {
     pub seconds: u64,
     #[serde(default)]
     pub settings_revision: u32,
+    /// Mod profile id (`None`: vanilla) and its revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_revision: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -277,7 +307,12 @@ pub enum Request {
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
     Import { product_id: u32, path: PathBuf, language: Option<String> },
     Uninstall { product_id: u32, remove_prefix: bool },
-    Play { product_id: u32 },
+    /// Launch a game; `profile` (mod profile name or id; `None` or `vanilla`: unmodded).
+    Play {
+        product_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
     Stop { product_id: u32 },
     /// Cancel a job. Installs stop and can be resumed by installing again; `discard`
     /// also deletes the partial files (only for games that weren't installed before).
@@ -322,6 +357,8 @@ pub enum Request {
     SteamUsers,
     /// Write staged shortcut changes now (fails while Steam is running). Never restarts Steam.
     SteamApplyStaged,
+    /// Mod layers and profiles (see [`mods`]).
+    Mods(ModsRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,6 +389,8 @@ pub enum Event {
     LibraryChanged,
     /// The set of games being played changed (see `Request::Sessions`).
     SessionsChanged { sessions: Vec<ActiveSession> },
+    /// A game's mod layers or profiles changed.
+    ModsChanged { product_id: u32 },
 }
 
 /// Socket path for the current user.
@@ -385,6 +424,31 @@ mod tests {
         // Older revisions have no account key.
         let old: GameSettings = serde_json::from_str(r#"{"proton":"GE"}"#).unwrap();
         assert_eq!(old.account, None);
+    }
+
+    #[test]
+    fn merged_settings() {
+        let mut game = GameSettings::default();
+        for op in ["proton=GE-1", "args=-a", "env.A=1", "env.B=2", "dll.d3d11=n", "wrappers=gamemoderun"] {
+            apply(&mut game, op).unwrap();
+        }
+        assert_eq!(game.merged(&GameSettings::default()), game);
+        let mut over = GameSettings::default();
+        for op in ["args=-b", "env.B=3", "dll.dxgi=n,b"] {
+            apply(&mut over, op).unwrap();
+        }
+        let m = game.merged(&over);
+        assert_eq!(m.proton.as_deref(), Some("GE-1"));
+        assert_eq!(m.args, ["-a", "-b"]);
+        assert_eq!(m.env["A"], "1");
+        assert_eq!(m.env["B"], "3");
+        assert_eq!(m.dll_overrides.len(), 2);
+        assert_eq!(m.wrappers, ["gamemoderun"]);
+        apply(&mut over, "proton=GE-2").unwrap();
+        apply(&mut over, "wrappers=mangohud").unwrap();
+        let m = game.merged(&over);
+        assert_eq!(m.proton.as_deref(), Some("GE-2"));
+        assert_eq!(m.wrappers, ["mangohud"]);
     }
 
     #[test]

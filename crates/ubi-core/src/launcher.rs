@@ -590,12 +590,27 @@ async fn wait_for_bridge(log: &Path, bridge: &mut Child) -> Result<()> {
     bail!("ubi-bridge did not start; see {}", log.display())
 }
 
+/// Where a profile's SDK saves live, relative to the Connect directory in the prefix.
+/// Vanilla uses Connect's own `savegames/<user>/<product>`; a mod profile gets a sibling
+/// folder of its own, so its saves never mix with vanilla's.
+pub fn saves_rel(user_id: &str, product_id: u32, profile: Option<&str>) -> String {
+    match profile {
+        None => format!("savegames/{user_id}/{product_id}"),
+        Some(id) => format!("savegames/{user_id}/{product_id}-{id}"),
+    }
+}
+
 /// Launch a game and wait for it to exit. `broker` is the address of a running broker.
+/// With a mod `profile`, the bridge and the game run in a user + mount namespace where the
+/// profile's layers are mounted over the install folder (see [`crate::overlay`]); the
+/// profile has its own saves, synced with the cloud only if it opts in.
+#[allow(clippy::too_many_arguments)]
 pub async fn play(
     cfg: &Config,
     online: &Online,
     game: &Game,
     settings: &GameSettings,
+    profile: Option<&crate::mods::ProfileLaunch>,
     broker: &str,
     sessions: &PlaySessions,
     events: impl Fn(LaunchEvent),
@@ -617,7 +632,8 @@ pub async fn play(
     let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
     let mut ctx = launch::build(&online.auth, &session, &mut lib, game.product_id).await?;
-    let saves_rel = format!("savegames/{}/{}", session.user_id, game.product_id);
+    let saves_rel = saves_rel(&session.user_id, game.product_id, profile.map(|p| p.profile.id.as_str()));
+    let cloud_sync = profile.is_none_or(|p| p.profile.cloud_saves);
     let saves_dir = game.prefix.join(UPC_REL).join(&saves_rel);
     ctx.savegame_path = Some(format!(r"{UPC_WIN}\{}", saves_rel.replace('/', "\\")));
     ctx.broker = Some(broker.to_owned());
@@ -630,20 +646,46 @@ pub async fn play(
         std::io::Write::write_all(&mut f, &serde_json::to_vec(&ctx)?)?;
     }
 
-    events(LaunchEvent::Status("Syncing cloud saves…".into()));
-    let mut cloud = CloudSaves::open(&demux).await?;
-    let pulled = savesync::pull(&mut cloud, &mut lib, game.product_id, &saves_dir, &cfg.save_backups).await?;
-    tracing::info!(?pulled.downloaded, ?pulled.kept_local, "saves pulled");
+    let mut cloud = if cloud_sync {
+        events(LaunchEvent::Status("Syncing cloud saves…".into()));
+        let mut cloud = CloudSaves::open(&demux).await?;
+        let pulled = savesync::pull(&mut cloud, &mut lib, game.product_id, &saves_dir, &cfg.save_backups).await?;
+        tracing::info!(?pulled.downloaded, ?pulled.kept_local, "saves pulled");
+        Some(cloud)
+    } else {
+        tracing::info!(saves = %saves_dir.display(), "cloud saves off for this profile");
+        None
+    };
+
+    // A wineserver left over from an earlier session would serve this one with its own
+    // view of the install folder (it opens files for its clients), so start clean, using
+    // the build that started it (wineservers only talk to their own version).
+    let previous = Proton { cfg, prefix: &game.prefix, build: session_build(game).unwrap_or_else(|| build.clone()) };
+    let _ = previous.wineserver().arg("-k").status().await;
+    let _ = previous.wineserver().arg("-w").status().await;
+    record_session_build(game, &build)?;
+    let proton = Proton { cfg, prefix: &game.prefix, build };
+    let ns = match profile {
+        Some(p) => {
+            events(LaunchEvent::Status(format!("Mounting mods ({})…", p.profile.name)));
+            tracing::info!(profile = %p.profile.id, layers = ?p.overlay.lower, "mounting overlay");
+            Some(crate::overlay::Namespace::create(&p.overlay)?)
+        }
+        None => None,
+    };
 
     events(LaunchEvent::Status("Starting…".into()));
-    let proton = Proton { cfg, prefix: &game.prefix, build };
     let bridge_dst = game.prefix.join("drive_c/ubi/ubi-bridge.exe");
     std::fs::create_dir_all(bridge_dst.parent().unwrap())?;
     std::fs::copy(&cfg.bridge_exe, &bridge_dst)?;
     let bridge_log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&bridge_log);
-    let mut bridge = proton
-        .command(&[r"C:\ubi\ubi-bridge.exe", &win_path(&ctx_path)])
+    let mut bridge = proton.command(&[r"C:\ubi\ubi-bridge.exe", &win_path(&ctx_path)]);
+    if let Some(ns) = &ns {
+        // First into the namespace: its wineserver must start in there.
+        ns.enter(bridge.as_std_mut(), None)?;
+    }
+    let mut bridge = bridge
         .env("UBI_BRIDGE_LOG", win_path(&bridge_log))
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(run_dir.join("bridge-proton.log"))?)
@@ -666,8 +708,15 @@ pub async fn play(
         let overrides: Vec<String> = settings.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
         cmd.env("WINEDLLOVERRIDES", overrides.join(";"));
     }
+    let workdir = exe.parent().unwrap_or(&game.install_dir);
+    if let Some(ns) = &ns {
+        ns.enter(cmd.as_std_mut(), Some(workdir))?;
+    }
+    if let Some(p) = profile {
+        cmd.env("QUIVER_PROFILE", &p.profile.id);
+    }
     cmd.env("UPLAY_ARGUMENTS", uplay_arguments(game.product_id, &exe_win, &workdir_win))
-        .current_dir(exe.parent().unwrap_or(&game.install_dir))
+        .current_dir(workdir)
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(run_dir.join("game.log"))?);
     let mut child = cmd.spawn()?;
@@ -692,19 +741,47 @@ pub async fn play(
     let status = status.unwrap_or_default();
     events(LaunchEvent::Exited(status.code()));
 
+    drop(ns);
+    let Some(cloud) = cloud.as_mut() else {
+        events(LaunchEvent::Status("Done (cloud saves off for this profile)".into()));
+        return Ok(());
+    };
     events(LaunchEvent::Status("Uploading cloud saves…".into()));
-    let pushed = savesync::push(&mut cloud, &mut lib, game.product_id, &saves_dir).await?;
+    let pushed = savesync::push(cloud, &mut lib, game.product_id, &saves_dir).await?;
     tracing::info!(?pushed.uploaded, "saves pushed");
     events(LaunchEvent::Status(format!("Done ({} save slots uploaded)", pushed.uploaded.len())));
     Ok(())
 }
 
-/// Ask a running game to stop by shutting its prefix down.
+/// Where the Proton build of the game's latest session is recorded.
+fn session_build_path(game: &Game) -> PathBuf {
+    game.prefix.join("ubi-run").join("proton-build")
+}
+
+fn record_session_build(game: &Game, build: &Path) -> Result<()> {
+    let path = session_build_path(game);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(path, build.as_os_str().as_encoded_bytes())?;
+    Ok(())
+}
+
+/// The Proton build that started the game's latest session (a mod profile may override
+/// the game's), if it is still installed.
+fn session_build(game: &Game) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(session_build_path(game)).ok()?;
+    let build = PathBuf::from(text.trim());
+    build.join("files/bin/wineserver").is_file().then_some(build)
+}
+
+/// Ask a running game to stop by shutting its prefix down, with the wineserver of the
+/// Proton build that launched it.
 pub async fn stop(cfg: &Config, game: &Game) -> Result<()> {
-    let settings = crate::settings::current(game.product_id)?.0;
-    let build = match &settings.proton {
-        Some(name) => resolve_proton(name)?,
-        None => cfg.proton.clone(),
+    let build = match session_build(game) {
+        Some(b) => b,
+        None => match &crate::settings::current(game.product_id)?.0.proton {
+            Some(name) => resolve_proton(name)?,
+            None => cfg.proton.clone(),
+        },
     };
     let proton = Proton { cfg, prefix: &game.prefix, build };
     proton.wineserver().arg("-k").status().await?;
