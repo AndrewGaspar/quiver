@@ -210,7 +210,7 @@ impl Quiver {
                     .child(if owners > 1 { format!("{owners} accounts own it; this one's cloud saves are used") } else { "Also decides whose cloud saves are used".into() }),
             );
         section(th, "Runtime", "Proton build and the account that launches the game", None)
-            .child(form_row(th, "Compatibility tool", Some("Changing it upgrades the prefix; older builds may not run it again"), proton_changed, proton))
+            .child(form_row(th, "Compatibility tool", Some("Changing it upgrades the compatibility folder; older builds may not run it again"), proton_changed, proton))
             .child(form_row(th, "Launch account", Some("Who plays, reports play time and syncs saves"), account_changed, account))
     }
 

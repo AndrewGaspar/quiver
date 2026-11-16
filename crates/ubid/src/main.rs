@@ -374,7 +374,7 @@ impl Daemon {
                 *self.library.lock().await = None;
                 self.log_activity(
                     source,
-                    format!("uninstalled {}{}", game.name, if remove_prefix { " (and its prefix)" } else { "" }),
+                    format!("uninstalled {}{}", game.name, if remove_prefix { " (and its compatibility folder)" } else { "" }),
                     Some(product_id),
                 );
                 self.emit(Event::LibraryChanged);

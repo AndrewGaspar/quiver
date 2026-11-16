@@ -563,7 +563,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             let s = d.state(st);
             if library.is_some() || prefixes.is_some() {
                 if s.paths_locked {
-                    bail!("games are installed, queued or importing, so the library and prefix folders can't change now");
+                    bail!("games are installed, queued or importing, so the library and compatibility folders can't change now");
                 }
                 if let Some(p) = library {
                     d.library = p;

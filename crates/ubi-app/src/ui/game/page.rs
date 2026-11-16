@@ -1313,8 +1313,8 @@ impl Quiver {
         });
         vec![
             ("Install folder", game.install_dir.clone(), "The base install; mod profiles never change it"),
-            ("Prefix", game.prefix.clone(), "This game's own Wine prefix"),
-            ("Save folder", saves, "savegames/<user>/<product> in the prefix"),
+            ("Compatibility folder", game.prefix.clone(), "This game's own Windows setup (its Proton prefix)"),
+            ("Save folder", saves, "savegames/<user>/<product> in the compatibility folder"),
             ("Launch logs", game.prefix.join("ubi-run"), "bridge.log, game.log, bridge-proton.log"),
         ]
     }

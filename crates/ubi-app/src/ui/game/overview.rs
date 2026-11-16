@@ -418,7 +418,7 @@ impl Quiver {
                 )),
             ));
         } else {
-            kvs = kvs.child(div().text_color(th.tx3).child("Not installed. Install puts it in its own prefix; nothing is shared with other games."));
+            kvs = kvs.child(div().text_color(th.tx3).child("Not installed. Install puts it in its own compatibility folder; nothing is shared with other games."));
         }
         if let Some(i) = &info {
             if i.features.denuvo {
@@ -526,7 +526,7 @@ impl Quiver {
                     .items_center()
                     .gap(px(10.))
                     .text_size(px(12.))
-                    .child(div().w(px(52.)).flex_none().text_color(th.tx3).child(label.split(' ').next().unwrap_or(label).to_owned()))
+                    .child(div().w(px(84.)).flex_none().text_color(th.tx3).child(label.split(' ').next().unwrap_or(label).to_owned()))
                     .child(mono(12., th.tx2).flex_1().min_w_0().truncate().child(self.short_path(&path)))
                     .child(
                         icon_button(("ov-open", i), th, Icon::FolderOpen, false)
