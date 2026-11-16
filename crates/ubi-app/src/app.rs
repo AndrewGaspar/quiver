@@ -9,7 +9,7 @@ use gpui::{
     App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, ScrollHandle, SharedString,
     Window, actions, div, prelude::*, px,
 };
-use ubi_api::{ActivityEntry, Event, GameSettings, Job, JobKind, LibraryEntry, LoginResult, Playtime, Request, Revision, Status};
+use ubi_api::{ActivityEntry, Event, Job, JobKind, LibraryEntry, LoginResult, Playtime, Request, Revision, Status};
 
 use crate::art::{ArtSource, ArtState, ArtStore, CustomArt, Fetcher, Variant};
 use crate::assets::UI_FONT;
@@ -49,7 +49,8 @@ actions!(
 pub const NAV_CONTEXT: &str = "QuiverNav";
 
 pub fn bind_keys(cx: &mut App) {
-    let c = Some(NAV_CONTEXT);
+    // Not while typing in a field on a page (GPUI's `!` checks the whole context stack).
+    let c = Some("QuiverNav && !TextInput");
     cx.bind_keys([
         KeyBinding::new("up", MoveUp, c),
         KeyBinding::new("k", MoveUp, c),
@@ -126,6 +127,9 @@ pub enum Cmd {
     CopyCli(u32),
     Refresh,
     NotYet,
+    /// Game page: play with play-menu entry `i` (0: vanilla); Steam/.desktop exports.
+    PlayWith(u32, usize),
+    Export(u32, crate::ui::game::ExportAction),
 }
 
 pub struct Quiver {
@@ -151,6 +155,8 @@ pub struct Quiver {
     /// What's on screen, as of the last render. Input is resolved against it.
     pub layout: Layout,
     pub viewport: (f32, f32),
+    /// The game page's own state (`ui::game`).
+    pub gp: crate::ui::game::GamePage,
 }
 
 impl Quiver {
@@ -181,6 +187,7 @@ impl Quiver {
             lib_filter: crate::ui::library::LibFilter::All,
             layout: Layout::default(),
             viewport: (1440., 900.),
+            gp: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
@@ -306,7 +313,8 @@ impl Quiver {
             }
             Event::LibraryChanged => self.load_library(false, cx),
             Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
-            Event::SessionsChanged { .. } | Event::ModsChanged { .. } => {}
+            Event::ModsChanged { product_id } => self.load_page(product_id, cx),
+            Event::SessionsChanged { .. } => {}
         }
         cx.notify();
     }
@@ -386,15 +394,17 @@ impl Quiver {
     pub fn load_details(&mut self, id: u32, cx: &mut Context<Self>) {
         self.load_playtime(id, cx);
         self.load_settings(id, cx);
+        self.load_page(id, cx);
     }
 
     fn load_settings(&mut self, id: u32, cx: &mut Context<Self>) {
         if !self.game(id).is_some_and(|g| g.installed()) {
             return;
         }
-        self.call::<GameSettings, _>(Request::SettingsGet { product_id: id }, cx, move |this, r, _| {
-            if let (Ok(s), Some(g)) = (r, this.game_mut(id)) {
-                g.settings = Some(s);
+        // The daemon replies `{revision, settings}`.
+        self.call::<serde_json::Value, _>(Request::SettingsGet { product_id: id }, cx, move |this, r, _| {
+            if let (Ok(v), Some(g)) = (r, this.game_mut(id)) {
+                g.settings = Some(crate::ui::game::settings_from_reply(v).0);
             }
         });
         self.call::<Vec<Revision>, _>(Request::SettingsHistory { product_id: id }, cx, move |this, r, _| {
@@ -538,11 +548,7 @@ impl Quiver {
         let body = match self.nav.page {
             Page::Downloads => self.download_jobs().len(),
             Page::Activity => self.activity.len(),
-            Page::Game(id) => match self.nav.tab {
-                Tab::Overview => self.game(id).and_then(|g| g.playtime.as_ref()).map(|p| p.sessions.len().min(8)).unwrap_or(0),
-                Tab::LaunchOptions => self.game(id).and_then(|g| g.history.as_ref()).map(|h| h.len()).unwrap_or(0),
-                _ => 0,
-            },
+            Page::Game(id) => self.page_body_len(id, self.nav.tab),
             Page::Library => 0,
         };
         Layout {
@@ -651,6 +657,9 @@ impl Quiver {
     }
 
     pub fn menu_commands(&self, id: u32) -> Vec<Command> {
+        if let Some(v) = self.play_menu_commands(id) {
+            return v;
+        }
         let Some(g) = self.game(id) else { return vec![] };
         let mut v = vec![self.primary_command(g)];
         v.push(Command {
@@ -669,14 +678,7 @@ impl Quiver {
             action: Cmd::Tab(id, Tab::LaunchOptions),
             future: false,
         });
-        v.push(Command {
-            icon: crate::ui::Icon::Gamepad,
-            label: "Add to Steam".into(),
-            detail: Some("Exports come with the next daemon release".into()),
-            cli: None,
-            action: Cmd::NotYet,
-            future: true,
-        });
+        v.extend(self.export_commands(id));
         v.push(Command {
             icon: crate::ui::Icon::Copy,
             label: "Copy play command".into(),
@@ -708,6 +710,8 @@ impl Quiver {
                 self.show_toast("Refreshing the library…", cx);
             }
             Cmd::NotYet => self.show_toast(format!("{}: not wired yet", cmd.label), cx),
+            Cmd::PlayWith(id, i) => self.play_with(id, i, cx),
+            Cmd::Export(id, a) => self.run_export(id, a, cx),
         }
     }
 
@@ -740,7 +744,8 @@ impl Quiver {
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
         } else {
-            self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
+            let profile = self.gp.play_profile(id);
+            self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Starting {name}…"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
@@ -787,8 +792,11 @@ impl Quiver {
             }
             Effect::Action(id, i) => match i {
                 ACTION_PRIMARY => self.primary(id, cx),
-                ACTION_OPTIONS | ACTION_MORE => self.nav.open_menu(id),
-                ACTION_STEAM => self.show_toast("Add to Steam: not wired yet", cx),
+                ACTION_OPTIONS | ACTION_MORE => {
+                    self.gp.play_menu = i == ACTION_OPTIONS;
+                    self.nav.open_menu(id);
+                }
+                ACTION_STEAM => self.steam_button(id, cx),
                 ACTION_FILES => self.nav.select_tab(Tab::Files),
                 ACTION_LAUNCH => self.nav.select_tab(Tab::LaunchOptions),
                 _ => {}
@@ -805,6 +813,7 @@ impl Quiver {
                         self.open_game(id, cx);
                     }
                 }
+                Page::Game(id) => self.page_body_activate(id, i, cx),
                 _ => {}
             },
             Effect::Palette(i) => {
@@ -828,6 +837,10 @@ impl Quiver {
             return;
         }
         self.mode = mode;
+        if self.page_input(input, cx) {
+            cx.notify();
+            return;
+        }
         let page_before = self.nav.page;
         let effect = self.nav.apply(input, &self.layout);
         self.run_effect(effect, cx);

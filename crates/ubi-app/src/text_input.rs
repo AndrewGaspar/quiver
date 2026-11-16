@@ -43,6 +43,8 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     masked: bool,
+    /// Dense form style: 28 px tall, optionally in the mono font.
+    compact: Option<bool>,
 }
 
 impl TextInput {
@@ -58,11 +60,26 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             masked,
+            compact: None,
         }
     }
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// A 28 px field for dense forms (`mono`: Geist Mono, for keys, paths and commands).
+    pub fn compact(mut self, mono: bool) -> Self {
+        self.compact = Some(mono);
+        self
+    }
+
+    /// Replace the text (and put the cursor at its end).
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -612,15 +629,17 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(20.))
-            .text_size(px(13.5))
+            .line_height(px(if self.compact.is_some() { 18. } else { 20. }))
+            .text_size(px(if self.compact.is_some() { 12.5 } else { 13.5 }))
+            .when(self.compact == Some(true), |d| d.font_family(crate::assets::MONO_FONT).text_size(px(12.)))
             .text_color(th.tx1)
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(if self.compact.is_some() { 28. } else { 36. }))
                     .w_full()
-                    .px(px(10.))
-                    .py(px(8.))
+                    .px(px(if self.compact.is_some() { 9. } else { 10. }))
+                    .py(px(if self.compact.is_some() { 4. } else { 8. }))
+                    .overflow_hidden()
                     .rounded(px(8.))
                     .bg(th.ink1)
                     .border_1()

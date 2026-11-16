@@ -1,0 +1,68 @@
+
+01	First Steps	Complete the Prologue.
+02	I'm Just Getting Started	Complete Main Quest "Aya".
+03	The Sea	Complete Main Quest "Pompeius Magnus".
+04	The Scarab	Complete Main Quest "The Scarab's Lies".
+05	The Hyena	Complete Main Quest "The Hyena".
+06	The Crocodile	Complete Main Quest "The Crocodile's Jaws".
+07	The Lizard	Complete Main Quest "The Lizard's Face".
+08	The Siege	Complete Main Quest "The Aftermath".
+09	Wake Up!	Complete Main Quest Dream Sequence.
+10	Almost There	Complete Main Quest "The Final Weighing".
+11	The End	Complete the last Main Quest.
+12	I'm a Legend	Be equipped with only Legendary equipment.
+13	I'm Done Learning	Activate a Master ability.
+14	Overheating	Witness raining bugs in the desert.
+15	For Those About to Die…	Complete all arena events in the Krokodilopolis Arena.
+16	Fatality!	Finish an arena boss with an Overpower Attack.
+17	Ben-Hur	Win the first Hippodrome tournament.
+18	Road Rage	Destroy an opponent in a Hippodrome race.
+19	The Harder They Fall	Defeat the war elephants Qetesh & Resheph.
+20	Slasher	Kill 3 enemies with one hit.
+21	The Arrow Whisperer	Kill an enemy with the predator bow from more than 60 meters while controlling the arrow.
+22	Words of Wisdom	Complete all hermit locations.
+23	Circle of Life	Feed a predator with a corpse.
+24	Seven Farmers	Complete Side Quest "Seven Farmers".
+25	The Festival	Complete Side Quest "Lady of Slaughter".
+26	Shadow of Egypt	Kill 10 enemies in a row without being detected.
+27	Smash!	Destroy 100 breakable objects.
+28	I Know My Land	Defog the whole map.
+29	Raider of the Lost Tomb	Complete a tomb.
+30	I Can See My House From Here!	Reach the "Top of the World" in the Black Desert territory.
+31	Set-up Date	Bring a tamed lion to a crocodile.
+32	Where's My Black Flag?	Defeat 8 Ship Captains.
+33	Reporter	Take 1 photo in 5 different territories.
+34	Overdesign	Kill a poisoned level 35+ enemy with the torch in less than 30 seconds.
+35	Free as a Bird	Use the eagle for a total of 30 minutes.
+36	Triathlete	Swim for 1500m, ride for 40km and run for 10km.
+37	Archer of the Month	Headshot kill an enemy with the bow while in the air.
+38	BOOM!	Kill 30 enemies by shooting a fire arrow at oil jars.
+39	Rider's Licence	Use all types of vehicle at least once.
+40	Old Habits	Complete all locations.
+41	Run For Your Life!	Run away from 3 fights with a hippo.
+42	Elementary, My Dear Bayek	Solve a papyrus mystery.
+43	Reduce, Reuse, Recycle	Sell 100 trinkets at once.
+44	Namaste	Use Dawn & Dusk to make time speed forward 30 times.
+45	You still need 8880...	Reach level 20.
+46	Stargazer	Complete all 12 Stone Circles.
+47	Master Diver	Complete 15 underwater locations.
+48	Defy Authority	Defeat a Phylakes.
+49	Handy Man	Craft 20 items.
+50	Roooaaarrrrr!	Tame a lion.
+51	What Time is It?	Perform a leap of faith from Arsinoe's sundial obelisk between 10 am and noon (The Hidden Ones)
+52	Zip it Off	Perform 3 Assassinations from a zipline (The Hidden Ones)
+53	Prison Break	Free 20 Rebels (The Hidden Ones)
+54	Team Play	Kill an enemy with a headshot while they are being harassed by Senu (The Hidden Ones)
+55	Walls of the Ruler	Complete the Walls-of-the-Ruler citadel (The Hidden Ones)
+56	Surgical Strikes	Assasinate Tacito, Ptahmose and Ampelius (The Hidden Ones)
+57	New Recruits	Complete Side DLC Quests "Rise of Shaqilat" and "Shadows of the Scarab" (The Hidden Ones)
+58	The Greater Good	Complete Main DLC Quest "The Greater Good" (The Hidden Ones)
+59	First Visit	Complete one tour
+60	Archeologist	Complete all tours in the Daily Life category
+61	Polymorph	Complete tours with at least 5 different characters
+62	Lift the Curse	Defeat Tutankhamun in the Afterlife (The Curse of the Pharaohs)
+63	Higher Power	Reach level 55 (The Curse of the Pharaohs)
+64	Dark Horse	Acquire Eternal Maw for use outside the Afterlifes (The Curse of the Pharaohs)
+65	Sting in the Tale	Complete the 5 Serqet locations (The Curse of the Pharaohs)
+66	Project Comet	Craft an upgrade using Shards of a Star (The Curse of the Pharaohs)
+67	Pyromaniac	Kill a Mummy by setting it on fire (The Curse of the Pharaohs)
