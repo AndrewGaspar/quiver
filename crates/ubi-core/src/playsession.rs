@@ -9,11 +9,20 @@
 //!
 //! A session that stops receiving heartbeats expires on its own (`expiresAt` is six
 //! minutes out), so a crash costs at most a few minutes of reported time.
+//!
+//! [`PlaySessions`] is the daemon's single owner of these calls. Every launch path takes a
+//! [`Lease`] while its game runs (the launcher for games quiverd starts, the broker for any
+//! bridge, including containers); leases for the same game share one upstream session.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use chrono::Utc;
 use reqwest::Method;
+use tokio::sync::mpsc;
+pub use ubi_api::ActiveSession;
 
 use crate::online::Online;
 
@@ -61,53 +70,132 @@ pub async fn end(online: &Online, product_id: u32) -> Result<()> {
     call(online, Method::DELETE, product_id).await
 }
 
-/// Drives one session from the launcher's wait loop. Failures are logged, never fatal:
-/// reporting play time must not get in the way of playing.
-pub struct PlaySessionReporter<'a> {
-    online: &'a Online,
-    product_id: u32,
-    last: Option<Instant>,
+enum Cmd {
+    Begin { product_id: u32, holder: String },
+    End { product_id: u32, holder: String },
 }
 
-impl<'a> PlaySessionReporter<'a> {
-    pub fn new(online: &'a Online, product_id: u32) -> Self {
-        Self { online, product_id, last: None }
+struct Active {
+    started: chrono::DateTime<Utc>,
+    holders: Vec<String>,
+    reported: bool,
+    last_beat: Instant,
+}
+
+/// The daemon's play-session tracker.
+pub struct PlaySessions {
+    tx: mpsc::UnboundedSender<Cmd>,
+    snapshot: Arc<Mutex<Vec<ActiveSession>>>,
+}
+
+/// Holds a play session open; dropping it releases this holder's share.
+pub struct Lease {
+    tx: mpsc::UnboundedSender<Cmd>,
+    product_id: u32,
+    holder: String,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::End { product_id: self.product_id, holder: std::mem::take(&mut self.holder) });
+    }
+}
+
+impl PlaySessions {
+    /// Start the tracker. With `report` false, sessions are tracked (for `sessions` and the
+    /// UI) but nothing is sent to Ubisoft. `on_change` runs after every change.
+    pub fn new(online: Arc<Online>, report: bool, on_change: impl Fn() + Send + 'static) -> Arc<Self> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let snapshot = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(run(online, report, rx, snapshot.clone(), on_change));
+        Arc::new(Self { tx, snapshot })
     }
 
-    pub async fn start(&mut self) {
-        match start(self.online, self.product_id).await {
-            Ok(()) => tracing::info!(self.product_id, "play session started"),
-            Err(e) => tracing::warn!(self.product_id, "play session start failed: {e:#}"),
-        }
-        // Even after a failed start, heartbeats (PUT) retry on schedule; Connect does the same.
-        self.last = Some(Instant::now());
+    /// Hold a session open for `product_id` until the lease is dropped.
+    pub fn begin(&self, product_id: u32, holder: &str) -> Lease {
+        let _ = self.tx.send(Cmd::Begin { product_id, holder: holder.to_owned() });
+        Lease { tx: self.tx.clone(), product_id, holder: holder.to_owned() }
     }
 
-    /// Send a heartbeat if one is due.
-    pub async fn tick(&mut self) {
-        if self.last.is_some_and(|t| t.elapsed() < HEARTBEAT) {
-            return;
-        }
-        match heartbeat(self.online, self.product_id).await {
-            Ok(()) => tracing::info!(self.product_id, "play session updated"),
-            Err(e) => {
-                tracing::warn!(self.product_id, "play session update failed: {e:#}");
-                // The session may have expired (e.g. after a suspend): open a new one.
-                if start(self.online, self.product_id).await.is_ok() {
-                    tracing::info!(self.product_id, "play session restarted");
+    pub fn list(&self) -> Vec<ActiveSession> {
+        self.snapshot.lock().unwrap().clone()
+    }
+}
+
+async fn run(
+    online: Arc<Online>,
+    report: bool,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    snapshot: Arc<Mutex<Vec<ActiveSession>>>,
+    on_change: impl Fn(),
+) {
+    let mut active: HashMap<u32, Active> = HashMap::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        let mut changed = false;
+        tokio::select! {
+            cmd = rx.recv() => match cmd {
+                None => return,
+                Some(Cmd::Begin { product_id, holder }) => {
+                    changed = true;
+                    if let Some(a) = active.get_mut(&product_id) {
+                        a.holders.push(holder);
+                    } else {
+                        tracing::info!(product_id, %holder, "game started");
+                        let reported = report && match start(&online, product_id).await {
+                            Ok(()) => { tracing::info!(product_id, "play session started"); true }
+                            Err(e) => { tracing::warn!(product_id, "play session start failed: {e:#}"); false }
+                        };
+                        active.insert(product_id, Active { started: Utc::now(), holders: vec![holder], reported, last_beat: Instant::now() });
+                    }
+                }
+                Some(Cmd::End { product_id, holder }) => {
+                    let Some(a) = active.get_mut(&product_id) else { continue };
+                    if let Some(i) = a.holders.iter().position(|h| *h == holder) {
+                        a.holders.remove(i);
+                    }
+                    changed = true;
+                    if a.holders.is_empty() {
+                        let a = active.remove(&product_id).unwrap();
+                        tracing::info!(product_id, minutes = (Utc::now() - a.started).num_minutes(), "game stopped");
+                        if report {
+                            match end(&online, product_id).await {
+                                Ok(()) => tracing::info!(product_id, "play session ended"),
+                                Err(e) => tracing::warn!(product_id, "play session end failed: {e:#}"),
+                            }
+                        }
+                    }
+                }
+            },
+            _ = tick.tick() => {
+                if !report { continue }
+                for (&product_id, a) in active.iter_mut() {
+                    // Heartbeat on schedule; a failed start is retried on the same schedule.
+                    if a.last_beat.elapsed() < HEARTBEAT {
+                        continue;
+                    }
+                    a.last_beat = Instant::now();
+                    let was = a.reported;
+                    a.reported = match if was { heartbeat(&online, product_id).await } else { start(&online, product_id).await } {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(product_id, "play session update failed: {e:#}");
+                            // Expired (e.g. after a suspend)? Open a new one.
+                            start(&online, product_id).await.is_ok()
+                        }
+                    };
+                    changed |= a.reported != was;
                 }
             }
         }
-        self.last = Some(Instant::now());
-    }
-
-    pub async fn end(&mut self) {
-        if self.last.take().is_none() {
-            return;
-        }
-        match end(self.online, self.product_id).await {
-            Ok(()) => tracing::info!(self.product_id, "play session ended"),
-            Err(e) => tracing::warn!(self.product_id, "play session end failed: {e:#}"),
+        if changed {
+            let mut list: Vec<ActiveSession> = active
+                .iter()
+                .map(|(&product_id, a)| ActiveSession { product_id, started: a.started, holders: a.holders.clone(), reported: a.reported })
+                .collect();
+            list.sort_by_key(|s| s.started);
+            *snapshot.lock().unwrap() = list;
+            on_change();
         }
     }
 }

@@ -13,6 +13,7 @@ use ubi_proto::denuvo_service;
 use crate::demux::{Demux, Denuvo, ServiceConnection};
 use crate::library::Library;
 use crate::online::Online;
+use crate::playsession::PlaySessions;
 
 struct Conns {
     demux: Demux,
@@ -23,11 +24,13 @@ struct Conns {
 pub struct Broker {
     shared: Arc<Online>,
     online: Mutex<Option<Conns>>,
+    sessions: Option<Arc<PlaySessions>>,
 }
 
 impl Broker {
-    pub fn new(shared: Arc<Online>) -> Arc<Self> {
-        Arc::new(Self { shared, online: Mutex::new(None) })
+    /// `sessions`: where bridges' play sessions are tracked (none: answered but not tracked).
+    pub fn new(shared: Arc<Online>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
+        Arc::new(Self { shared, online: Mutex::new(None), sessions })
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
@@ -46,8 +49,15 @@ impl Broker {
     async fn handle_conn(&self, stream: TcpStream) -> Result<()> {
         let (r, mut w) = stream.into_split();
         let mut lines = BufReader::new(r).lines();
+        // A play-session lease, held until the bridge closes this connection.
+        let mut _lease = None;
         while let Some(line) = lines.next_line().await? {
             let rsp = match serde_json::from_str::<BrokerRequest>(&line) {
+                Ok(BrokerRequest::PlaySession { uplay_id }) => {
+                    tracing::info!(uplay_id, "bridge reports game running");
+                    _lease = self.sessions.as_ref().map(|s| s.begin(uplay_id, "bridge"));
+                    BrokerResponse::Ok
+                }
                 Ok(req) => self.handle(req).await.unwrap_or_else(|e| {
                     tracing::warn!("request failed: {e:#}");
                     BrokerResponse::Error { message: format!("{e:#}") }
@@ -93,6 +103,7 @@ impl Broker {
 
     async fn handle_online(online: &mut Conns, req: &BrokerRequest) -> Result<BrokerResponse> {
         match req {
+            BrokerRequest::PlaySession { .. } => unreachable!("handled per connection"),
             BrokerRequest::DenuvoGameToken { uplay_id, request_token } => {
                 tracing::info!(uplay_id, len = request_token.len(), "denuvo game token requested");
                 let ownership_token = online.library.ownership_token(*uplay_id).await?;

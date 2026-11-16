@@ -187,6 +187,18 @@ pub enum LoginResult {
     TwoFactorRequired,
 }
 
+/// A game currently being played, as tracked by the daemon (from any launch path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveSession {
+    pub product_id: u32,
+    pub started: DateTime<Utc>,
+    /// Who holds the session open: `launcher` (games quiverd started) and/or `bridge`
+    /// (any game talking to a Quiver bridge, e.g. containers).
+    pub holders: Vec<String>,
+    /// Whether Ubisoft accepted the session (play time is being recorded upstream).
+    pub reported: bool,
+}
+
 /// One play session recorded by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaySession {
@@ -249,6 +261,8 @@ pub enum Request {
     /// Ubisoft's own play-time record for a game (read-only).
     RemotePlaytime { product_id: u32 },
     Activity { limit: usize },
+    /// Games being played right now, from every launch path.
+    Sessions,
     Subscribe,
     Shutdown,
 }
@@ -278,6 +292,8 @@ pub enum Event {
     SettingsChanged { product_id: u32, revision: u32, source: String },
     SessionChanged { signed_in: Option<String> },
     LibraryChanged,
+    /// The set of games being played changed (see `Request::Sessions`).
+    SessionsChanged { sessions: Vec<ActiveSession> },
 }
 
 /// Socket path for the current user.

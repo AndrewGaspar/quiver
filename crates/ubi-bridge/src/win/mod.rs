@@ -141,6 +141,24 @@ pub async fn broker(req: BrokerRequest) -> Result<BrokerResponse> {
     Ok(serde_json::from_str(&rsp)?)
 }
 
+/// Tell the broker the game is running. The returned connection is the lease: the broker
+/// keeps the play session open until it closes.
+pub async fn play_session_lease() -> Result<tokio::net::TcpStream> {
+    let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
+    let addr = ctx.broker.clone().ok_or_else(|| anyhow!("no broker in launch context"))?;
+    let mut stream = tokio::net::TcpStream::connect(&addr).await?;
+    let mut line = serde_json::to_vec(&BrokerRequest::PlaySession { uplay_id: ctx.uplay_id })?;
+    line.push(b'\n');
+    stream.write_all(&line).await?;
+    let mut rsp = String::new();
+    tokio::io::BufReader::new(&mut stream).read_line(&mut rsp).await?;
+    match serde_json::from_str::<BrokerResponse>(&rsp)? {
+        BrokerResponse::Ok => Ok(stream),
+        BrokerResponse::Error { message } => Err(anyhow!("broker: {message}")),
+        other => Err(anyhow!("unexpected broker reply {other:?}")),
+    }
+}
+
 #[allow(dead_code)]
 fn flush_stdout() {
     let _ = std::io::stdout().flush();

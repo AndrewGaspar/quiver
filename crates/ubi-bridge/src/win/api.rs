@@ -14,6 +14,8 @@ const OK: i32 = OperationResult::Ok as i32;
 const UNAVAILABLE: i32 = OperationResult::Unavailable as i32;
 
 pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
+    // Play-session lease, opened at the game's SDK init and dropped with this connection.
+    let mut lease = None;
     let result: Result<()> = async {
         loop {
             let body = read_frame(&mut pipe).await?;
@@ -25,6 +27,15 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
                 }
             };
             log!("[conn {n}] <- {}", describe(&req));
+            if req.init_req.is_some() && lease.is_none() {
+                match super::play_session_lease().await {
+                    Ok(s) => {
+                        log!("[conn {n}]    play session lease open");
+                        lease = Some(s);
+                    }
+                    Err(e) => log!("[conn {n}]    play session lease failed: {e:#}"),
+                }
+            }
             match respond(&req) {
                 Reply::Rsp(rsp) => {
                     log!("[conn {n}] -> {}", summarize(&rsp));
@@ -36,6 +47,7 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
         }
     }
     .await;
+    drop(lease);
     log!("[conn {n}] closed: {result:?}");
 }
 

@@ -22,6 +22,7 @@ use ubi_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
 use ubi_core::install::Progress;
 use ubi_core::launcher::{self, Config, Games, LaunchEvent};
 use ubi_core::online::Online;
+use ubi_core::playsession::PlaySessions;
 use ubi_core::library::{Library, ProductConfig};
 use ubi_core::{settings, store};
 
@@ -43,6 +44,8 @@ struct Daemon {
     library: tokio::sync::Mutex<Option<Vec<LibraryEntry>>>,
     activity: Mutex<VecDeque<ActivityEntry>>,
     events: broadcast::Sender<Event>,
+    /// Games being played, from any launch path; reports play time to Ubisoft.
+    sessions: Arc<PlaySessions>,
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -323,6 +326,7 @@ impl Daemon {
                 let a = self.activity.lock().unwrap();
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
             }
+            Request::Sessions => json!(self.sessions.list()),
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
                 if !self.running.lock().unwrap().is_empty() {
@@ -470,12 +474,13 @@ impl Daemon {
         let this = self.clone();
         tokio::spawn(async move {
             let (cfg, online, broker) = (this.cfg.clone(), this.online.clone(), this.broker.clone());
+            let sessions = this.sessions.clone();
             let ev_this = this.clone();
             let g = game.clone();
             let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();
             let started = started_at.clone();
             let result = run_local(move || async move {
-                launcher::play(&cfg, &online, &g, &s, &broker, |e| match e {
+                launcher::play(&cfg, &online, &g, &s, &broker, &sessions, |e| match e {
                     LaunchEvent::Status(msg) => ev_this.update_job(id, |j| j.status = msg),
                     LaunchEvent::Running => {
                         *started.lock().unwrap() = Some(chrono::Utc::now());
@@ -599,7 +604,20 @@ async fn main() -> Result<()> {
         }
     };
     let broker = broker_listener.local_addr()?.to_string();
-    tokio::spawn(ubi_core::broker::Broker::new(online.clone()).serve(broker_listener));
+    let (events, _) = broadcast::channel(256);
+    let sessions = {
+        let events = events.clone();
+        let list: Arc<Mutex<Option<Arc<PlaySessions>>>> = Arc::default();
+        let l = list.clone();
+        let s = PlaySessions::new(online.clone(), cfg.report_playtime, move || {
+            if let Some(s) = &*l.lock().unwrap() {
+                let _ = events.send(Event::SessionsChanged { sessions: s.list() });
+            }
+        });
+        *list.lock().unwrap() = Some(s.clone());
+        s
+    };
+    tokio::spawn(ubi_core::broker::Broker::new(online.clone(), Some(sessions.clone())).serve(broker_listener));
 
     let signed_in = match online.session().await {
         Ok(s) => Some(s.name),
@@ -618,7 +636,6 @@ async fn main() -> Result<()> {
         .take(ACTIVITY_KEEP)
         .rev()
         .collect();
-    let (events, _) = broadcast::channel(256);
     let daemon = Arc::new(Daemon {
         online,
         cfg,
@@ -632,6 +649,7 @@ async fn main() -> Result<()> {
         library: tokio::sync::Mutex::new(None),
         activity: Mutex::new(activity),
         events,
+        sessions,
     });
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {

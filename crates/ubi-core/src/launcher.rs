@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
-use crate::playsession::PlaySessionReporter;
+use crate::playsession::PlaySessions;
 use crate::online::Online;
 use crate::cloudsave::CloudSaves;
 use crate::library::{Library, ProductConfig};
@@ -592,6 +592,7 @@ pub async fn play(
     game: &Game,
     settings: &GameSettings,
     broker: &str,
+    sessions: &PlaySessions,
     events: impl Fn(LaunchEvent),
 ) -> Result<()> {
     let build = match &settings.proton {
@@ -671,19 +672,10 @@ pub async fn play(
     let started = wait_for_game_start(&proton, &mut child).await;
     events(LaunchEvent::Running);
     if started {
-        // Report the session to Ubisoft the way Connect does: start, heartbeat, end.
-        let mut report = cfg.report_playtime.then(|| PlaySessionReporter::new(online, game.product_id));
-        if let Some(r) = &mut report {
-            r.start().await;
-        }
+        // The bridge holds a lease too once the SDK initializes; both share one session.
+        let _lease = sessions.begin(game.product_id, "launcher");
         while !game_processes(&proton).is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Some(r) = &mut report {
-                r.tick().await;
-            }
-        }
-        if let Some(r) = &mut report {
-            r.end().await;
         }
     }
     let status = child.try_wait().ok().flatten();

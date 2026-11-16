@@ -42,18 +42,23 @@ pub struct CdKey {
     pub key: String,
 }
 
-/// Requests from `ubi-bridge` to the native broker (`ubi broker`), one JSON object per line
+/// Requests from `ubi-bridge` to the native broker (in `quiverd`), one JSON object per line
 /// over TCP. The broker holds the Ubisoft session; the bridge never sees account credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerRequest {
     /// Denuvo activation: relay the game's request token, get a game token back.
     DenuvoGameToken { uplay_id: u32, request_token: Vec<u8> },
+    /// The game started (SDK initialized). The broker answers `Ok` and keeps a play session
+    /// open for `uplay_id` until this connection closes, so the bridge holds the connection
+    /// for as long as the game's SDK connection lives.
+    PlaySession { uplay_id: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerResponse {
     GameToken { game_token: Vec<u8> },
+    Ok,
     Error { message: String },
 }

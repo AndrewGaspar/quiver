@@ -114,6 +114,11 @@ enum Cmd {
         #[arg(short, default_value_t = 30)]
         n: usize,
     },
+    /// Games being played right now (from any launcher, including bridges in containers).
+    Sessions {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print daemon events as they happen.
     Watch,
     /// Control the daemon.
@@ -406,6 +411,25 @@ async fn main() -> Result<()> {
             let list: Vec<ActivityEntry> = client.call(Request::Activity { limit: n }).await?;
             for a in list.into_iter().rev() {
                 println!("{}  {:<8} {}", a.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"), a.source, a.action);
+            }
+        }
+        Cmd::Sessions { json } => {
+            let list: Vec<ubi_api::ActiveSession> = client.call(Request::Sessions).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+            } else if list.is_empty() {
+                println!("nothing running");
+            } else {
+                for s in list {
+                    let mins = (chrono::Utc::now() - s.started).num_minutes();
+                    println!(
+                        "{:<6} {:>4} min  via {:<16} {}",
+                        s.product_id,
+                        mins,
+                        s.holders.join("+"),
+                        if s.reported { "reported to Ubisoft" } else { "not reported" }
+                    );
+                }
             }
         }
         Cmd::Watch => {

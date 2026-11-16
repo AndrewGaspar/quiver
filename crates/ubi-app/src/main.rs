@@ -154,7 +154,7 @@ impl Launcher {
                 self.show_login(None, cx);
             }
             Event::LibraryChanged => self.load_library(false, cx),
-            Event::SettingsChanged { .. } => {}
+            Event::SettingsChanged { .. } | Event::SessionsChanged { .. } => {}
         }
         cx.notify();
     }

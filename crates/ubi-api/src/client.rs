@@ -47,7 +47,7 @@ impl Client {
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                stream.ok_or_else(|| anyhow!("ubid did not start ({last:?}); see {}", daemon_log().display()))?
+                stream.ok_or_else(|| anyhow!("quiverd did not start ({last:?}); see {}", daemon_log().display()))?
             }
         };
         let (r, w) = stream.into_split();
@@ -96,7 +96,7 @@ impl Client {
         self.pending.lock().unwrap().insert(id, tx);
         let mut line = serde_json::to_vec(&Envelope { id, source: self.source.clone(), request })?;
         line.push(b'\n');
-        self.writer.lock().await.write_all(&line).await.context("ubid connection lost")?;
+        self.writer.lock().await.write_all(&line).await.context("quiverd connection lost")?;
         let value = rx.await.map_err(|_| anyhow!("quiverd connection lost"))?.map_err(|e| anyhow!(e))?;
         serde_json::from_value(value).context("unexpected reply from quiverd")
     }
