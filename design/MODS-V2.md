@@ -100,6 +100,12 @@ settings don't fork saves. The profile shows which way it goes, and the user can
 - **Built-ins:** `mods/<product>/<id>/quiver-mod.toml`, compiled in by `ubi-core/build.rs`;
   a unit test checks every entry parses, links PCGamingWiki, has an `audited` note and names
   its product.
+- **Default profile:** the game setting `profile` (`GameSettings::profile`, a profile id; the
+  daemon resolves names), so changes are settings revisions. `Request::Play` with
+  `profile: None` (what old clients send) runs it; `Some("vanilla")` forces vanilla. A
+  default that was deleted runs vanilla with a warning (`ModStore::launch_profile`); the id
+  is kept, so restoring the profile brings it back. `ModsState::default_profile` reports it.
+  CLI: `quiver mods <game> default PROFILE|vanilla`; app: the profile chip next to Play.
 
 ### Known limits
 

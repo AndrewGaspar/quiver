@@ -19,6 +19,16 @@ pub enum ModsAction {
         #[arg(long)]
         json: bool,
     },
+    /// The profile Play uses when none is named (the app's Play button, `quiver play`,
+    /// .desktop entries, Steam shortcuts): a profile's name or id, or `vanilla`. Without a
+    /// value, shows it. Recorded as the game's `profile` setting (`quiver history`).
+    Default {
+        /// Profile name or id, or `vanilla`.
+        profile: Option<String>,
+        /// Note recorded with this settings revision.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// Mod layers: folders of files laid over the install folder.
     Layer {
         #[command(subcommand)]
@@ -69,7 +79,7 @@ pub enum ModsAction {
     /// What a launch would use: mods, resolved settings, conflicts, saves, mounts,
     /// per-profile folders (and where their files are), config patches.
     Plan {
-        /// Profile name or id (default: vanilla).
+        /// Profile name or id, or `vanilla` (default: the game's default profile, as Play).
         profile: Option<String>,
         #[arg(long)]
         json: bool,
@@ -268,6 +278,19 @@ fn mod_flags(l: &Layer) -> String {
     f.join(", ")
 }
 
+/// The profile Play uses when none is named: "DLSS (ptkzxpv)", "vanilla", or a deleted
+/// default ("vanilla: the default 'DLSS' (ptkzxpv) was deleted").
+pub fn default_label(s: &ModsState) -> String {
+    let Some(id) = s.default_profile.as_deref() else { return "vanilla".into() };
+    if let Some(i) = s.profiles.iter().find(|i| i.profile.id == id) {
+        return format!("{} ({id})", i.profile.name);
+    }
+    match s.deleted.iter().find(|i| i.profile.id == id) {
+        Some(i) => format!("vanilla: the default '{}' ({id}) was deleted", i.profile.name),
+        None => format!("vanilla: the default {id} doesn't exist"),
+    }
+}
+
 fn print_state(name: &str, s: &ModsState) {
     let layer_name = |id: &String| s.layers.iter().find(|l| &l.id == id).map_or(format!("{id} (missing)"), |l| l.name.clone());
     println!("{name} ({})", s.product_id);
@@ -288,18 +311,27 @@ fn print_state(name: &str, s: &ModsState) {
         );
         println!("           {}{}", mod_flags(l), l.mod_id().map(|m| format!(" [{m}]")).unwrap_or_default());
     }
-    println!("profiles:");
+    println!("profiles (Play uses {}; change it: quiver mods {} default PROFILE|vanilla):", default_label(s), s.product_id);
     let fixes = match s.fixes_on_vanilla {
         None => "fixes on unmodded games: not decided (quiver fixes-on-vanilla on|off)".to_owned(),
         Some(false) => "fixes on unmodded games: off".to_owned(),
         Some(true) if s.vanilla_fixes.is_empty() => "fixes on: no fix installed".to_owned(),
         Some(true) => format!("with fixes: {}", s.vanilla_fixes.iter().map(layer_name).collect::<Vec<_>>().join(" < ")),
     };
-    println!("  {:<7}  {:<24} the game as installed; {fixes}", ubi_api::mods::VANILLA, "Vanilla");
+    let live_default = s.default_profile.as_deref().filter(|d| s.profiles.iter().any(|i| i.profile.id == *d));
+    println!(
+        "  {:<7}  {:<24} the game as installed; {fixes}{}",
+        ubi_api::mods::VANILLA,
+        "Vanilla",
+        if live_default.is_none() { "  [default]" } else { "" }
+    );
     let print_profile = |i: &ProfileInfo| {
         let p = &i.profile;
         let layers = if p.layers.is_empty() { "no layers".into() } else { p.layers.iter().map(layer_name).collect::<Vec<_>>().join(" < ") };
         let mut flags = vec![format!("r{}", i.revision), format!("cloud saves {}", if p.cloud_saves { "on" } else { "off" })];
+        if s.default_profile.as_deref() == Some(p.id.as_str()) {
+            flags.insert(0, "default".into());
+        }
         if p.pinned {
             flags.push("pinned".into());
         }
@@ -498,6 +530,15 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 print_state(&g.name, &state);
             }
         }
+        ModsAction::Default { profile, message } => {
+            if let Some(p) = profile {
+                let ops = vec![SettingOp::Set { key: "profile".into(), value: p }];
+                let rev: ubi_api::Revision = client.call(Request::SettingsSet { product_id, ops, message }).await?;
+                eprintln!("{}: settings revision {} (quiver history {product_id} lists every change)", g.name, rev.revision);
+            }
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            println!("{}: Play uses {}", g.name, default_label(&state));
+        }
         ModsAction::Layer { action: LayerAction::Add { name, dir, delete } } => {
             if dir.is_none() && delete.is_empty() {
                 bail!("give a folder to copy, --delete PATH, or both");
@@ -581,8 +622,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 }
                 ProfileAction::Delete { profile } => {
                     let confirmed = confirm(source, &format!("delete mod profile '{profile}' of {}", g.name))?;
-                    let rev: ProfileRevision =
-                        serde_json::from_value(call(ModsRequest::ProfileDelete { product_id, profile, confirmed }).await?)?;
+                    let rev = profile_reply(call(ModsRequest::ProfileDelete { product_id, profile, confirmed }).await?)?;
                     println!(
                         "{}: deleted profile '{}' ({}); its saves are kept. Undo: quiver mods {product_id} profile restore {} {}",
                         g.name,

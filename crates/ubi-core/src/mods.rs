@@ -1134,6 +1134,26 @@ impl ModStore {
         Ok((r.profile, r.revision))
     }
 
+    /// Which profile a launch runs. `requested`: what the launch asked for (a profile's
+    /// name or id; `vanilla`: the unmodded game; `None`: the game's default). `default`: the
+    /// game's `profile` setting (a profile id). Returns the profile to plan (`None`:
+    /// vanilla) and, when the default can't be used (deleted, or gone), a warning to show:
+    /// such a launch runs vanilla rather than failing.
+    pub fn launch_profile(&self, requested: Option<&str>, default: Option<&str>) -> (Option<String>, Option<String>) {
+        if let Some(q) = requested {
+            return ((!same_name(q, VANILLA)).then(|| q.to_owned()), None);
+        }
+        let Some(id) = default.filter(|d| !d.trim().is_empty() && !same_name(d, VANILLA)) else { return (None, None) };
+        if let Ok((p, _)) = self.profile(id) {
+            return (Some(p.id), None);
+        }
+        let what = match self.find(id, true) {
+            Ok(r) => format!("'{}' ({id}) was deleted", r.profile.name),
+            Err(_) => format!("{id} doesn't exist"),
+        };
+        (None, Some(format!("the default profile {what}; playing vanilla (restore it, or pick another default)")))
+    }
+
     fn check_name(&self, name: &str, id: &str) -> Result<()> {
         if same_name(name, VANILLA) {
             bail!("'vanilla' is reserved for the unmodded game");
@@ -1242,6 +1262,8 @@ impl ModStore {
             deleted: deleted.into_iter().map(|r| self.info(r)).collect(),
             fixes_on_vanilla: self.fixes_on_vanilla,
             vanilla_fixes: self.vanilla_fixes()?.into_iter().map(|l| l.id).collect(),
+            // A game setting; the daemon fills it in.
+            default_profile: None,
         })
     }
 
@@ -1598,6 +1620,30 @@ mod tests {
         // Nothing left behind but the profile.
         assert!(std::fs::read_dir(t.join("data/mods/42/layers")).unwrap().next().is_none());
         assert_eq!(store.profile(&p.profile.id).unwrap().1, 2);
+    }
+
+    #[test]
+    fn launch_profile_follows_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ModStore::new(&tmp.path().join("data"), 3539);
+        let dlss = store.create_profile("DLSS", &[], "cli", None).unwrap().profile;
+        let id = dlss.id.as_str();
+        // Named launches win; `vanilla` forces vanilla whatever the default.
+        assert_eq!(store.launch_profile(Some("other"), Some(id)), (Some("other".into()), None));
+        assert_eq!(store.launch_profile(Some("Vanilla"), Some(id)), (None, None));
+        // No profile named: the default, or vanilla without one.
+        assert_eq!(store.launch_profile(None, Some(id)), (Some(dlss.id.clone()), None));
+        assert_eq!(store.launch_profile(None, None), (None, None));
+        assert_eq!(store.launch_profile(None, Some("vanilla")), (None, None));
+        // A deleted default runs vanilla, with a warning naming it; restoring brings it back.
+        store.delete_profile(id, "cli").unwrap();
+        let (p, warn) = store.launch_profile(None, Some(id));
+        assert_eq!(p, None);
+        assert!(warn.unwrap().contains("'DLSS'"));
+        store.restore_profile(id, 1, "cli").unwrap();
+        assert_eq!(store.launch_profile(None, Some(id)).0.as_deref(), Some(id));
+        let (p, warn) = store.launch_profile(None, Some("pgone00"));
+        assert!(p.is_none() && warn.unwrap().contains("pgone00"));
     }
 
     #[test]
