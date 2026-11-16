@@ -25,26 +25,133 @@ use crate::model::{GameRow, day, gb, hours, short_name};
 use crate::nav::{Tab, Target};
 use crate::theme::{Theme, on_art, rgba};
 use super::hero::{HeroTitle, TitleBox, title_element};
+use super::responsive::{Bp, RAIL_WIDTH, SideMode, tip};
 
 pub const SIDE_WIDTH: f32 = 288.;
 pub const HERO: f32 = 312.;
+/// Windows shorter than this scroll the whole game page, not just the tab's content.
+const SHORT: f32 = 720.;
 
 
 impl Quiver {
     pub fn render_game(&mut self, th: &Theme, id: u32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let _ = window;
+        let row = div().flex().flex_1().min_h_0().relative();
+        match self.side_mode() {
+            SideMode::Full => row.child(self.render_side(th, id, SIDE_WIDTH, cx)).child(self.render_pane(th, id, cx)),
+            SideMode::Rail => row.child(self.render_rail(th, id, cx)).child(self.render_pane(th, id, cx)),
+            SideMode::Drawer => {
+                // The list slides over the page: from the Games button, or when keyboard
+                // or controller focus moves into it.
+                let open = self.gp.side_open || (self.mode != InputMode::Pointer && self.nav.zone == crate::nav::Zone::Side);
+                let w = (self.viewport.0 - 48.).min(SIDE_WIDTH + 24.);
+                row.child(self.render_pane(th, id, cx)).when(open, |d| {
+                    d.child(
+                        div()
+                            .id("side-scrim")
+                            .absolute()
+                            .inset_0()
+                            .bg(th.scrim)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.gp.side_open = false;
+                                if this.nav.zone == crate::nav::Zone::Side {
+                                    this.nav.zone = crate::nav::Zone::Actions;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .shadow(vec![soft_shadow(rgba(0x000000, 0.6), 0., 40.)])
+                            .child(self.render_side(th, id, w, cx)),
+                    )
+                })
+            }
+        }
+    }
+
+    /// Narrow windows: the game list as a row of box art down the left edge.
+    fn render_rail(&mut self, th: &Theme, selected: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let games: Vec<GameRow> = self.side_games().into_iter().cloned().collect();
+        // Children line up with the full list's (`side_child_index`): an empty first
+        // child where its header is, the divider where "Not installed" is.
+        let mut rows: Vec<AnyElement> = vec![div().into_any_element()];
+        let mut rest = false;
+        for g in &games {
+            let id = g.id();
+            let active = g.installed() || g.install_job().is_some();
+            if !active && !rest {
+                rest = true;
+                rows.push(div().mx(px(10.)).my(px(6.)).h(px(1.)).bg(th.line1).into_any_element());
+            }
+            let on = id == selected;
+            let art = self.art_for(g, ArtSlot::Tile, if active { Variant::Tile } else { Variant::TileDimmed }, cx);
+            let focused = self.focused(Target::SideRow(id));
+            let dot = if g.running() {
+                Some(th.ok)
+            } else if g.installing().is_some() || (g.installed() && g.entry.update_available) {
+                Some(th.acc)
+            } else if g.failed().is_some() {
+                Some(th.warn)
+            } else {
+                None
+            };
+            let hover = th.ink3;
+            rows.push(
+                div()
+                    .id(("rail", id as usize))
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .h(px(46.))
+                    .mx(px(6.))
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(th.sel))
+                    .when(!on, |d| d.hover(move |s| s.bg(hover)))
+                    .focus_ring(focused, th, 7.)
+                    .when(on, |d| d.child(div().absolute().left(px(-6.)).top(px(10.)).bottom(px(10.)).w(px(3.)).rounded(px(2.)).bg(th.acc)))
+                    .child(div().w(px(30.)).h(px(36.)).child(art_fill(th, &art, "", 4., false)))
+                    .when_some(dot, |d, c| {
+                        d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(8.)).rounded_full().border_1().border_color(th.ink0).bg(c))
+                    })
+                    .tooltip(tip(th, g.entry.name.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.nav.focus(&this.layout, Target::SideRow(id));
+                        this.load_details(id, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
         div()
+            .id("side-rail")
             .flex()
-            .flex_1()
+            .flex_col()
+            .flex_none()
+            .gap(px(2.))
+            .w(px(RAIL_WIDTH))
             .min_h_0()
-            .child(self.render_side(th, id, cx))
-            .child(self.render_pane(th, id, cx))
+            .py(px(8.))
+            .overflow_y_scroll()
+            .track_scroll(&self.side_scroll)
+            .bg(th.ink0)
+            .border_r_1()
+            .border_color(th.line1)
+            .children(rows)
     }
 
     // -----------------------------------------------------------------------------------------
     // Side list
 
-    fn render_side(&mut self, th: &Theme, selected: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_side(&mut self, th: &Theme, selected: u32, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let games: Vec<GameRow> = self.side_games().into_iter().cloned().collect();
         let active = |g: &GameRow| g.on_disk() || g.install_job().is_some();
         let n_active = games.iter().filter(|g| active(g)).count();
@@ -82,7 +189,7 @@ impl Quiver {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(SIDE_WIDTH))
+            .w(px(width))
             .min_h_0()
             .bg(th.ink0)
             .border_r_1()
@@ -109,7 +216,7 @@ impl Quiver {
                             .text_color(th.tx3)
                             .text_size(px(12.5))
                             .child(icon(Icon::Search, 16., th.tx3))
-                            .child(div().flex_1().child(format!("Filter {} games", self.games.len())))
+                            .child(div().flex_1().min_w_0().truncate().child(format!("Filter {} games", self.games.len())))
                             .child(super::kbd(th, "/")),
                     )
                     .child(
@@ -207,6 +314,7 @@ impl Quiver {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.nav.focus(&this.layout, Target::SideRow(id));
                 this.load_details(id, cx);
+                this.gp.side_open = false;
                 cx.notify();
             }))
             .into_any_element()
@@ -221,8 +329,9 @@ impl Quiver {
         };
         let tab = self.nav.tab;
         let slim = tab != Tab::Overview;
-        let pane_w = (self.viewport.0 - SIDE_WIDTH - 1.).max(400.);
+        let pane_w = self.pane_width();
         let pane_h = (self.viewport.1 - 52.).max(300.);
+        let pad = self.pane_bp().pad();
         let amb = self.art_for(&g, ArtSlot::Hero, Variant::Ambient, cx);
 
         // Ambient tint from a blurred copy of the hero (no backdrop blur in GPUI).
@@ -275,28 +384,28 @@ impl Quiver {
             .min_h_0()
             .overflow_hidden()
             .child(ambient);
-        if slim {
-            pane = pane.child(self.render_slim_hero(th, &g, pane_w, cx));
-        } else {
-            pane = pane
-                .child(self.render_hero(th, &g, pane_w, cx))
-                .child(self.render_actionbar(th, &g, false, cx))
-                .child(self.render_stats(th, &g));
+        if self.side_mode() == SideMode::Drawer {
+            pane = pane.child(self.render_drawer_bar(th, &g, cx));
         }
-        pane.child(self.render_tabs(th, &g, cx))
-            .child(
-                div()
-                    .id(("body", id as usize))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.body_scroll)
-                    .px(px(28.))
-                    .pt(px(20.))
-                    .pb(px(28.))
-                    .child(body),
-            )
-            .children(pending)
+        let mut head: Vec<AnyElement> = Vec::new();
+        if slim {
+            head.push(self.render_slim_hero(th, &g, pane_w, cx).into_any_element());
+        } else {
+            head.push(self.render_hero(th, &g, pane_w, cx).into_any_element());
+            head.push(self.render_actionbar(th, &g, false, cx).into_any_element());
+            head.push(self.render_stats(th, &g).into_any_element());
+        }
+        head.push(self.render_tabs(th, &g, cx).into_any_element());
+        let scroll = div().id(("body", id as usize)).flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.body_scroll);
+        let body = div().px(px(pad)).pt(px(20.)).pb(px(28.)).child(body);
+        // Short or narrow windows: the hero and tabs scroll away with the tab's content,
+        // which would otherwise get a sliver of the window.
+        let pane = if self.viewport.1 < SHORT || self.pane_bp().narrow() {
+            pane.child(scroll.flex().flex_col().children(head).child(body))
+        } else {
+            pane.children(head).child(scroll.child(body))
+        };
+        pane.children(pending)
             .when_some(self.render_dialog(th, cx), |d, dlg| d.child(dlg))
             .into_any_element()
     }
@@ -305,9 +414,13 @@ impl Quiver {
         let id = g.id();
         let hero = self.art_for(g, ArtSlot::Hero, Variant::Original, cx);
         let title = self.hero_title(g, cx);
-        let mut hero_el = div().relative().h(px(HERO)).flex_none().overflow_hidden();
+        let pb = self.pane_bp();
+        let pad = pb.pad();
+        // Shorter windows get a shorter hero, so the tab content keeps some room.
+        let hero_h = (self.viewport.1 * 0.36).clamp(200., HERO);
+        let mut hero_el = div().relative().h(px(hero_h)).flex_none().overflow_hidden();
         hero_el = match &hero {
-            ArtState::Ready(a) => hero_el.child(cover(a, pane_w, HERO, (0.5, 0.3))),
+            ArtState::Ready(a) => hero_el.child(cover(a, pane_w, hero_h, (0.5, 0.3))),
             other => hero_el.child(super::art_placeholder(th, other, "", px(0.))),
         };
         hero_el = hero_el
@@ -320,16 +433,22 @@ impl Quiver {
                 gpui::linear_gradient(180., gpui::linear_color_stop(th.ink1.opacity(0.), 0.), gpui::linear_color_stop(th.ink1, 1.)),
             ));
         // The logo fits inside 300×120, anchored top-left.
-        let tb = TitleBox { max_w: 300., max_h: 120., max_scale: 1.5, text: 30., text_w: 520. };
+        let tb = if pb.narrow() {
+            // Under the art chip, which takes the top right.
+            TitleBox { max_w: (pane_w - 2. * pad).min(260.), max_h: 100., max_scale: 1.3, text: 26., text_w: pane_w - 2. * pad }
+        } else {
+            TitleBox { max_w: 300., max_h: 120., max_scale: 1.5, text: 30., text_w: 520f32.min(pane_w - 2. * pad - 220.) }
+        };
         if let Some(t) = title_element(&title, &g.entry.name, tb) {
-            hero_el = hero_el.child(div().absolute().left(px(28.)).top(px(28.)).child(t));
+            let top = if pb.narrow() { 64. } else { 28. };
+            hero_el = hero_el.child(div().absolute().left(px(pad)).top(px(top)).child(t));
         }
         let custom = self.custom_art.get(&id).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
         hero_el.child(
             div()
                 .absolute()
-                .right(px(24.))
-                .top(px(20.))
+                .right(px(pad.min(24.)))
+                .top(px(if pb.narrow() { 14. } else { 20. }))
                 .flex()
                 .gap(px(6.))
                 .child(
@@ -354,14 +473,17 @@ impl Quiver {
 
     /// The 112 px banner over the dense tabs: logo or name, then the action bar.
     fn render_slim_hero(&mut self, th: &Theme, g: &GameRow, pane_w: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        const SLIM: f32 = 112.;
+        // Below Medium the title and the action bar stack.
+        let stacked = !self.pane_bp().two_columns();
+        let pad = self.pane_bp().pad();
+        let slim_h: f32 = if stacked { 124. } else { 112. };
         let hero = self.art_for(g, ArtSlot::Hero, Variant::Original, cx);
         let title = self.hero_title(g, cx);
         let baked = title == HeroTitle::Baked;
-        let mut el = div().relative().h(px(SLIM)).flex_none().overflow_hidden();
+        let mut el = div().relative().h(px(slim_h)).flex_none().overflow_hidden();
         el = match &hero {
             // Skip logos painted into the art.
-            ArtState::Ready(a) => el.child(cover(a, pane_w, SLIM, (0.5, if baked { 0.92 } else { 0.32 }))),
+            ArtState::Ready(a) => el.child(cover(a, pane_w, slim_h, (0.5, if baked { 0.92 } else { 0.32 }))),
             other => el.child(super::art_placeholder(th, other, "", px(0.))),
         };
         el = el
@@ -377,8 +499,27 @@ impl Quiver {
             )));
         // The crop above hides a painted-in logo, so baked art gets the name here.
         let title = if baked { HeroTitle::Text } else { title };
-        let tb = TitleBox { max_w: 230., max_h: 60., max_scale: 1.2, text: 24., text_w: 420. };
+        let tb = if stacked {
+            TitleBox { max_w: 180., max_h: 36., max_scale: 1.2, text: 18., text_w: pane_w - 2. * pad }
+        } else {
+            TitleBox { max_w: 230., max_h: 60., max_scale: 1.2, text: 24., text_w: 420. }
+        };
         let title: AnyElement = title_element(&title, &g.entry.name, tb).unwrap_or_else(|| div().into_any_element());
+        let bar = self.render_actionbar(th, g, true, cx);
+        if stacked {
+            return el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(12.))
+                    .px(px(pad))
+                    .child(div().h(px(36.)).flex().items_center().overflow_hidden().child(title))
+                    .child(bar),
+            );
+        }
         el.child(
             div()
                 .absolute()
@@ -389,7 +530,7 @@ impl Quiver {
                 .px(px(28.))
                 .child(title)
                 .child(div().flex_1())
-                .child(self.render_actionbar(th, g, true, cx)),
+                .child(bar),
         )
     }
 
@@ -492,8 +633,13 @@ impl Quiver {
             _ => (steam_label, steam_icon, steam_tone),
         };
         let dim_steam = !g.installed() && !g.steam_only();
-        let steam = if slim {
-            icon_button("act-steam", th, steam_icon, true).bg(th.ink2).when_some(steam_tone, |d, c| d.child(div().absolute().top(px(5.)).right(px(5.)).size(px(6.)).rounded_full().bg(c)))
+        let steam_tip = tip(th, steam_label);
+        let steam = if slim || !self.pane_bp().two_columns() {
+            icon_button("act-steam", th, steam_icon, true)
+                .bg(th.ink2)
+                .relative()
+                .tooltip(steam_tip)
+                .when_some(steam_tone, |d, c| d.child(div().absolute().top(px(5.)).right(px(5.)).size(px(6.)).rounded_full().bg(c)))
         } else {
             let b = button("act-steam", th, Kind::Secondary, Size::Medium, None, "");
             let fg = steam_tone.unwrap_or(th.tx1);
@@ -504,10 +650,12 @@ impl Quiver {
         .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_STEAM), cx)));
         let files = icon_button("act-files", th, Icon::FolderOpen, true)
             .bg(th.ink2)
+            .tooltip(tip(th, "Files"))
             .focus_ring(f(ACTION_FILES), th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_FILES), cx)));
         let launch = icon_button("act-launch", th, Icon::SlidersHorizontal, true)
             .bg(th.ink2)
+            .tooltip(tip(th, "Launch options"))
             .focus_ring(f(ACTION_LAUNCH), th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_LAUNCH), cx)));
         let more_btn = if pad {
@@ -521,6 +669,22 @@ impl Quiver {
             this.click(Target::Action(ACTION_MORE), cx)
         }));
 
+        let pb = self.pane_bp();
+        if slim && !pb.two_columns() {
+            // Stacked slim banner: Play and the buttons; the chips are on the tabs themselves.
+            return div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .child(play)
+                .when(!pb.narrow(), |d| d.children(profile_chip))
+                .child(div().flex_1())
+                .child(steam)
+                .child(files)
+                .child(launch)
+                .child(more_btn);
+        }
         if slim {
             return div()
                 .flex()
@@ -536,6 +700,42 @@ impl Quiver {
                 .child(files)
                 .child(launch)
                 .child(more_btn);
+        }
+        if !pb.two_columns() {
+            // Two rows: Play and the buttons, then the chips (wrapping).
+            let pad = pb.pad();
+            let (top_profile, chip_profile) = if pb.narrow() { (None, profile_chip) } else { (profile_chip, None) };
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap(px(10.))
+                .px(px(pad))
+                .mt(px(-58.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(play)
+                        .children(top_profile)
+                        .child(div().flex_1())
+                        .child(steam)
+                        .child(files)
+                        .child(launch)
+                        .child(more_btn),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .children(chip_profile)
+                        .when(!g.steam_only(), |d| d.when_some(proton_chip, |d, p| d.child(chip(th, Some(Icon::Cpu), p, false).h(px(30.)))))
+                        .when_some(status, |d, (k, i, s)| d.child(pill(th, k, Some(i), s).py(px(5.))))
+                        .children(steam_owned),
+                );
         }
         div()
             .flex()
@@ -554,6 +754,31 @@ impl Quiver {
             .child(files)
             .child(launch)
             .child(more_btn)
+    }
+
+    /// Narrow windows: a bar over the game with the button that opens the game list.
+    fn render_drawer_bar(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let n = self.games.len();
+        div()
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(10.))
+            .h(px(44.))
+            .px(px(10.))
+            .bg(th.ink0)
+            .border_b_1()
+            .border_color(th.line1)
+            .child(
+                button("side-open", th, Kind::Secondary, Size::Small, Some(Icon::List), format!("Games {n}"))
+                    .child(icon(Icon::ChevronDown, 12., th.tx2))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.gp.side_open = !this.gp.side_open;
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1().min_w_0().truncate().font_weight(SEMIBOLD).child(g.entry.name.clone()))
     }
 
     fn render_stats(&self, th: &Theme, g: &GameRow) -> impl IntoElement + use<> {
@@ -602,12 +827,38 @@ impl Quiver {
             ("Account", format!("{account} · {}", if override_ { "this game" } else { "default" })),
         ];
         let n = stats.len();
+        let pb = self.pane_bp();
+        if !pb.two_columns() {
+            // Below Medium, a grid: three columns (two when narrow), no separators.
+            let pad = pb.pad();
+            let cols = if pb.narrow() { 2 } else { 3 };
+            let cell = ((self.pane_width() - 2. * pad - 16. * (cols - 1) as f32) / cols as f32).floor();
+            return div()
+                .flex()
+                .flex_wrap()
+                .flex_none()
+                .gap_x(px(16.))
+                .gap_y(px(10.))
+                .px(px(pad))
+                .pt(px(14.))
+                .pb(px(16.))
+                .children(stats.into_iter().map(|(k, v)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .w(px(cell))
+                        .child(caption(k, th.tx3))
+                        .child(div().text_size(px(14.)).font_weight(SEMIBOLD).truncate().child(v))
+                }));
+        }
+        let sp = if pb >= Bp::Large { 26. } else { 16. };
         div().flex().flex_none().px(px(28.)).pt(px(14.)).pb(px(16.)).children(stats.into_iter().enumerate().map(|(i, (k, v))| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .when(i + 1 < n, |d| d.pr(px(26.)).mr(px(26.)).border_r_1().border_color(th.line1))
+                .when(i + 1 < n, |d| d.pr(px(sp)).mr(px(sp)).border_r_1().border_color(th.line1))
                 .child(caption(k, th.tx3))
                 .child(div().text_size(px(14.)).font_weight(SEMIBOLD).child(v))
         }))
@@ -619,12 +870,14 @@ impl Quiver {
         let id = g.id();
         let mods_n = if self.gp.id == id { self.gp.mods.ready().map(|m| m.profiles.len()) } else { None };
         let addons_n = if self.gp.id == id { self.gp.info.ready().map(|i| i.addons.iter().filter(|a| a.visible || a.owned).count()) } else { None };
+        let side = self.pane_bp().pad();
         div()
             .flex()
+            .flex_wrap()
             .flex_none()
             .items_center()
             .gap(px(2.))
-            .px(px(28.))
+            .px(px(if side >= 28. { 28. } else { side - 8. }))
             .border_b_1()
             .border_color(th.line1)
             .when(pad, |d| d.child(glyph(th, "LT", true).mr(px(6.))))

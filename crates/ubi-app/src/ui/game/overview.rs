@@ -112,11 +112,12 @@ impl Quiver {
             .child(self.render_playtime_card(th, g, cx))
             .child(self.render_sessions(th, g))
             .child(self.render_progress_summary(th, g, cx));
+        // Side by side from Medium up; one column below.
+        let two = self.pane_bp().two_columns();
         let right = div()
             .flex()
             .flex_col()
-            .w(px(360.))
-            .flex_none()
+            .when(two, |d| d.w(px(360.)).flex_none())
             .gap(px(20.))
             .child(self.render_install_card(th, g, cx))
             .when(g.installed(), |d| d.child(self.render_locations(th, g, cx)))
@@ -126,7 +127,7 @@ impl Quiver {
                 let cmd = if g.installed() || g.steam_only() { format!("quiver play {id}") } else { format!("quiver install {id}") };
                 self.cli_line("ov-cli", th, cmd, cx)
             });
-        div().flex().gap(px(20.)).child(left).child(right).into_any_element()
+        div().flex().when(!two, |d| d.flex_col()).gap(px(20.)).child(left).child(right).into_any_element()
     }
 
     fn render_playtime_card(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -173,6 +174,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_end()
                     .gap(px(14.))
                     .child(div().text_size(px(30.)).line_height(px(32.)).font_weight(BOLD).child(headline))
@@ -180,6 +182,8 @@ impl Quiver {
                         div()
                             .flex()
                             .flex_col()
+                            .min_w(px(160.))
+                            .flex_1()
                             .pb(px(3.))
                             .child(div().text_size(px(12.)).text_color(th.tx2).child(source))
                             .child(div().text_size(px(12.)).text_color(th.tx3).child(local)),
@@ -218,8 +222,10 @@ impl Quiver {
                 let modded = s.profile.is_some();
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(14.))
+                    .gap_x(px(14.))
+                    .gap_y(px(6.))
                     .px(px(16.))
                     .py(px(10.))
                     .when(i > 0, |d| d.border_t_1().border_color(th.line1))
@@ -236,7 +242,7 @@ impl Quiver {
                     .child(chip(th, Some(Icon::Layers), prof, modded).h(px(22.)))
                     .child(div().flex_1())
                     .child(
-                        mono(11.5, th.tx3).child(match (s.profile_revision, s.settings_revision) {
+                        mono(11.5, th.tx3).min_w_0().truncate().child(match (s.profile_revision, s.settings_revision) {
                             (Some(pr), r) => format!("launch options r{} · profile r{pr}", r.max(1)),
                             (None, r) => format!("launch options r{}", r.max(1)),
                         }),
@@ -248,7 +254,7 @@ impl Quiver {
         card(th)
             .child(
                 card_header(th, "Sessions")
-                    .child(div().text_color(th.tx3).text_size(px(12.)).child(match since {
+                    .child(div().flex_1().min_w_0().truncate().text_color(th.tx3).text_size(px(12.)).child(match since {
                         Some(t) => format!("Tracked on this PC since {}", day(t)),
                         None => "Tracked on this PC".into(),
                     }))
@@ -336,6 +342,7 @@ impl Quiver {
             body = body.child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .child(
@@ -351,10 +358,10 @@ impl Quiver {
             );
         }
         if !p.stats.is_empty() {
-            body = body.child(div().flex().gap(px(10.)).children(p.stats.iter().filter(|s| s.id != "TimePlayed").take(4).map(|s| {
+            body = body.child(div().flex().flex_wrap().gap(px(10.)).children(p.stats.iter().filter(|s| s.id != "TimePlayed").take(4).map(|s| {
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(130.))
                     .flex()
                     .flex_col()
                     .gap(px(3.))
