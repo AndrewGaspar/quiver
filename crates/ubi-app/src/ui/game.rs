@@ -9,6 +9,7 @@ mod mods;
 mod overview;
 mod page;
 mod saves;
+mod stores;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 

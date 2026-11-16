@@ -100,6 +100,9 @@ impl Quiver {
             }
         };
         let mut col = div().flex().flex_col().gap(px(18.)).child(top).child(slots);
+        if g.installed() {
+            col = col.child(self.render_stores_card(th, g, cx));
+        }
         match &progress {
             Some(p) => {
                 col = col.child(div().flex().gap(px(16.)).items_start().child(self.stats_card(th, p).flex_1()).child(self.rewards_card(th, p).flex_1()));
@@ -251,7 +254,11 @@ impl Quiver {
         };
         let dir = s.dir.clone().map(|d| d.to_string_lossy().into_owned());
         let account = s.account.clone().map(|a| self.account_name(&a));
-        let header = card_header(th, "Save slots")
+        let title = match &s.store {
+            Some(n) => format!("Save slots · {n}"),
+            None => "Save slots".to_owned(),
+        };
+        let header = card_header(th, title)
             .child(source)
             .when_some(account, |d, a| d.child(div().text_size(px(12.)).text_color(th.tx3).child(format!("saves of {a}"))))
             .child(div().flex_1())
