@@ -96,7 +96,7 @@ There is no separate big-picture mode. The normal app works with a controller, a
 | Game | Executables, arguments, working directory, Denuvo flag, cloud-save flag, game options tool, links | Platform | product config |
 | Game | Installed version, manifest, size | Local | install record and manifest |
 | Game | Add-on names | Platform | each add-on’s own product config; not fetched in this dump |
-| Game | Store links for add-ons you don’t own | Platform | Ubisoft web store; no per-product URL in configs yet, so a search link for now |
+| Game | Store links for add-ons you don’t own | Platform | a Ubisoft Store search for the add-on’s name (decided), until a direct link source turns up |
 | Game | Developer, release date, description | Not yet | not in product configs; left out |
 | Game | Sessions and crash codes | Local | `quiverd` |
 | Game | Steam shortcut and .desktop state | Local | `shortcuts.vdf`, `~/.local/share/applications` |
@@ -145,7 +145,8 @@ There is no separate big-picture mode. The normal app works with a controller, a
 - Every profile gets an id when it is created, for example `p7f3k2q`. It is random, never derived from the name, and never changes. Vanilla has the fixed id `vanilla`.
 - Every export is keyed by `quiver:<product id>/<profile id>`, for example `quiver:5059/p7f3k2q`, or `quiver:5059` for the game itself.
 - **.desktop entry:** `~/.local/share/applications/quiver-5059-p7f3k2q.desktop`, with `Exec=quiver play 5059 --profile-id p7f3k2q`, `Name=AC Odyssey · Visual overhaul`, the game’s `icon_image` as the icon, and `X-Quiver-Id=quiver:5059/p7f3k2q`.
-- **Steam shortcut:** an entry in `shortcuts.vdf` for the most recent Steam user, launching `quiver play … --profile-id …` with no compatibility tool (Quiver runs Proton itself). Quiver writes an explicit `appid` derived from the export key, `crc32("quiver:5059/p7f3k2q") | 0x80000000`, instead of letting it follow the name. Steam’s artwork for the shortcut is the current art of the game or profile (custom if set, otherwise Ubisoft’s), copied into Steam’s `grid/` folder under that appid and refreshed when that art changes.
+- **Steam shortcut:** an entry in `shortcuts.vdf` for the chosen Steam user (below), launching `quiver play … --profile-id …` with no compatibility tool (Quiver runs Proton itself). Quiver writes an explicit `appid` derived from the export key, `crc32("quiver:5059/p7f3k2q") | 0x80000000`, instead of letting it follow the name. Steam’s artwork for the shortcut is the current art of the game or profile (custom if set, otherwise Ubisoft’s), copied into Steam’s `grid/` folder under that appid and refreshed when that art changes.
+- **Steam user (decided).** With one Steam user on the machine (one entry under `~/.local/share/Steam/userdata/`), Quiver uses it without asking. With more than one, the first Steam export asks which user gets the shortcut and remembers the choice. The choice is editable in Settings › Appearance › Steam user (`quiver config set global steam.user=<id>`). Changing it later offers to move existing shortcuts to the new user.
 - **Renames** rewrite the name in both exports. File names, appids and Steam artwork stay the same.
 - Quiver records each export (target, path, appid, time written, content hash). If one is deleted or edited outside Quiver, the profile menu shows it as missing or changed and offers to recreate it.
 
@@ -530,6 +531,8 @@ Each decision is written into the sections above; this list is the record.
 - **Controller-friendly:** everywhere, without the Guide button, alongside hyprpad. See [Controller and hyprpad](#controller-and-hyprpad).
 - **Custom art:** your own image files per game or profile; Ubisoft art stays the default. SteamGridDB is dropped (no API key to manage). Exported Steam shortcuts use the current art.
 - **Signed in elsewhere:** a notification with a “Sign in again” action; Quiver never reconnects automatically.
+- **Store links:** a Ubisoft Store search for the add-on’s name is good enough until a direct link source turns up.
+- **Steam user:** with several Steam users, Quiver asks which one gets shortcuts on the first export, remembers it, and lets you change it in Settings; with one user it doesn’t ask.
 - **Icons:** unchanged from the original proposal (box-art thumbnails in lists; the game's
   `icon_image` for desktop entries).
 - **Multiple Ubisoft accounts:** supported now. See [Accounts](#accounts).
@@ -541,5 +544,4 @@ Each decision is written into the sections above; this list is the record.
 
 ## Open questions
 
-1. **Store links.** Product configs have no store URL, so the first version opens a store search for the add-on’s name. Is that good enough until a better source turns up?
-2. **Steam user.** On a machine with several Steam users, Quiver writes shortcuts for the most recent one. Should it ask instead?
+None right now; new questions are added here as they come up.

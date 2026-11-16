@@ -179,6 +179,7 @@ function scrSettings(section = 'Compatibility') {
         frow('Default', `<span class="dim">Ubisoft art from each game’s product config</span>`),
         frow('Custom art', `<span class="dim">Your own images on 2 games and 1 pinned profile</span><span class="btn sm ghost">Reset all to Ubisoft</span>`, { help: 'Set per game or profile from its Art menu' }),
         frow('Steam shortcuts', `<span class="dim">Use each game’s or profile’s current art</span>`),
+        frow('Steam user', `<span class="field" style="height:28px;width:200px">ajg<span class="muted mono" style="font-size:11px">· 1180…4417</span><span class="grow"></span>${ic('chevron-down')}</span><span class="muted" style="font-size:12px">2 Steam users on this machine · chosen on the first export</span>`, { help: 'Which Steam user gets Quiver’s shortcuts' }),
       ].join(''))}
       ${section_('Controller', '', [
         frow('Button hints', `<div class="seg"><span class="on">When I use a gamepad</span><span>Always</span><span>Never</span></div>`),

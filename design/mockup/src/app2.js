@@ -121,7 +121,7 @@ function scrMods() {
       <div class="sep"></div>
       <div class="mi">${ic('pin', 'sm')}<span class="grow">Pin to Library</span>${st('ok', 'Pinned')}</div>
       <div class="mi">${ic('app-window', 'sm')}<span class="grow col" style="gap:1px"><span>Create .desktop entry</span><span class="mono muted" style="font-size:10.5px">quiver-5059-p7f3k2q.desktop</span></span>${st('ok', 'Created')}</div>
-      <div class="mi on">${ic('gamepad-2', 'sm')}<span class="grow col" style="gap:1px"><span>Add to Steam</span><span class="muted" style="font-size:11px">Staged · shows after Steam restarts</span></span>${st('warn', 'Waiting for Steam')}</div>
+      <div class="mi on">${ic('gamepad-2', 'sm')}<span class="grow col" style="gap:1px"><span>Add to Steam</span><span class="muted" style="font-size:11px">Steam user ajg · staged until Steam restarts</span></span>${st('warn', 'Waiting for Steam')}</div>
       <div class="sep"></div>
       <div class="mi">${ic('image', 'sm')}<span class="grow">Change art…</span><span class="muted" style="font-size:11px">custom</span></div>
       <div class="mi">${ic('pencil', 'sm')}<span class="grow">Rename…</span></div>

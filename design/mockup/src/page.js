@@ -16,7 +16,7 @@ const SCREENS = [
       '<b>List</b>: recent and installed first, then not installed. Pinned profiles sit indented under their game. The right edge carries status (progress, update, conflict, mods).',
       '<b>Play is a split button.</b> The arrow picks a mod profile or one-off options like “launch once with GE-Proton10-26”.',
       '<b>Add to Steam</b> is always one click away, for the game and for each pinned profile. It is also offered when an install finishes.',
-      '<b>Add-ons</b> lists everything associated with the game. Ones you don’t own get a “View in Ubisoft Store” link; there is no store inside Quiver.',
+      '<b>Add-ons</b> lists everything associated with the game. Ones you don’t own get a “View in Ubisoft Store” link, which opens a store search for the add-on’s name; there is no store inside Quiver.',
       '<b>Launch account</b>: a game owned by more than one account launches with the default account unless you override it here. The launch account also decides whose cloud saves the game uses.',
       '<b>Art</b> menu on the hero switches between Ubisoft art and your own image file, per slot (tile, hero, logo).',
     ],
@@ -64,7 +64,7 @@ const SCREENS = [
     notes: [
       '<b>Every setting is a <code>quiver config</code> key.</b> Hovering a row shows the key and a copy-as-CLI button.',
       '<b>Accounts</b>: several Ubisoft accounts, one merged library. Each account keeps its own single live session, because Ubisoft allows only one per account. Games owned by more than one account launch with the default account, with a per-game override that also picks whose cloud saves are used.',
-      '<b>Appearance</b>: follow Omarchy (default), custom art, controller input and the markers on launched games.',
+      '<b>Appearance</b>: follow Omarchy (default), custom art, the Steam user that gets shortcuts (asked once when the machine has several), controller input and the markers on launched games.',
       '<b>Compatibility</b>: Proton builds with usage counts, the newest-GE-Proton policy, and prefix snapshots (automatic on btrfs/xfs, opt-in on ext4).',
       '<b>Automation and CLI</b>: daemon status, agent tokens, the MCP server, and the confirmed approval policy.',
       '<b>About</b> carries the line “a third-party launcher for your Ubisoft library, not affiliated with or endorsed by Ubisoft”, also shown at the foot of this sidebar.',
