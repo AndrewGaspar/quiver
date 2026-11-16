@@ -1,0 +1,10 @@
+[package]
+name = "ubi-ipc"
+description = "Types shared between the native client and ubi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

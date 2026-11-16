@@ -1,0 +1,25 @@
+[package]
+name = "ubi-core"
+description = "Native Ubisoft Connect client core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ubi-proto.workspace = true
+anyhow.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+flate2.workspace = true
+base64.workspace = true
+keyring.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ubi-ipc.workspace = true

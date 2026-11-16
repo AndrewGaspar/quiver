@@ -1,0 +1,21 @@
+[package]
+name = "ubi-cli"
+description = "Command-line front end for ubi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ubi"
+path = "src/main.rs"
+
+[dependencies]
+ubi-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
