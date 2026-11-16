@@ -46,6 +46,14 @@ pub(crate) fn needs_approval(source: &str) -> bool {
     source.to_ascii_lowercase().starts_with("agent")
 }
 
+/// `$XDG_CACHE_HOME/quiver` (downloaded assets that can be fetched again).
+fn cache_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"))
+        .join("quiver")
+}
+
 fn user_id(online: &Online) -> Result<String> {
     online.user_id().map(str::to_owned).context("no account for this game")
 }
@@ -149,18 +157,22 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
     {
         return Ok(p.clone());
     }
-    // The space id is in the ownership data (and the game's config).
+    // The space id is in the ownership data (and the game's config), the achievement set in
+    // the config.
     let (owned, _) = ownership(&online, None, false).await?;
-    let space_id = owned.products.get(&product_id).and_then(|p| {
-        p.space_id.clone().filter(|s| !s.is_empty()).or_else(|| {
-            let cfg = ubi_core::library::ProductConfig::parse(p.configuration.as_deref()?).ok()?;
-            cfg.root()["space_id"].as_str().map(str::to_owned)
-        })
-    });
+    let product = owned.products.get(&product_id);
+    let cfg = product.and_then(|p| ubi_core::library::ProductConfig::parse(p.configuration.as_deref()?).ok());
+    let refs = progress::GameRefs {
+        space_id: product
+            .and_then(|p| p.space_id.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| cfg.as_ref()?.root()["space_id"].as_str().map(str::to_owned)),
+        achievements_asset: cfg.as_ref().and_then(|c| c.root()["uplay"]["achievements"].as_str().map(str::to_owned)),
+    };
     let o = online.clone();
     let mut p = run_local(move || async move {
         let session = o.session().await?;
-        let mut p = progress::fetch(&o.auth, &session, space_id.as_deref()).await;
+        let mut p = progress::fetch(&o.auth, &session, &refs, &cache_dir().join("achievements")).await;
         p.product_id = product_id;
         p.account = Some(session.user_id.clone());
         // Ubisoft's play-time record, the headline number (demux `playtime` service).
@@ -199,33 +211,46 @@ async fn saves_report(daemon: &Arc<Daemon>, product_id: u32, cloud: bool) -> Res
     let dir = game.as_ref().map(|g| saves::save_dir(g, &account));
     let mut report = SavesReport { product_id, account: Some(account.clone()), dir: dir.clone(), ..Default::default() };
     let max_local = dir.as_deref().and_then(|d| saves::local_slots(d).ok()).and_then(|m| m.keys().max().copied()).unwrap_or(0);
-    let cloud_items = if cloud {
+    let mut cloud_items = None;
+    if cloud {
+        // The cloud objects (demux cloudsave_service + signed downloads) and Connect's record
+        // of them (one REST GET), side by side.
         let o = online.clone();
-        let r = run_local(move || async move {
-            let demux = o.demux().await?;
-            let mut lib = Library::fetch(&demux).await?;
-            let mut cs = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
-            saves::cloud_slots(&mut cs, &mut lib, product_id, max_local).await
+        let (objects, record) = run_local(move || async move {
+            let objects = async {
+                let demux = o.demux().await?;
+                let mut lib = Library::fetch(&demux).await?;
+                let mut cs = ubi_core::cloudsave::CloudSaves::open(&demux).await?;
+                saves::cloud_slots(&mut cs, &mut lib, product_id, max_local).await
+            }
+            .await;
+            let record = async { saves::connect_record(&o.auth, &o.session().await?, product_id).await }.await;
+            Ok((objects, record))
         })
-        .await;
-        match r {
-            Ok(items) => {
-                report.cloud_checked = true;
-                Some(items)
-            }
-            Err(e) => {
-                report.cloud_error = Some(format!("{e:#}"));
-                None
-            }
+        .await?;
+        match objects {
+            Ok(items) => cloud_items = Some(items),
+            Err(e) => report.cloud_error = Some(format!("{e:#}")),
         }
-    } else {
-        None
+        match record {
+            Ok(r) => report.connect_record = r,
+            Err(e) => tracing::info!(product_id, "Connect's cloud-save record unavailable: {e:#}"),
+        }
+    }
+    let view = match (&cloud_items, &report.connect_record) {
+        (Some(items), _) => {
+            report.cloud_source = Some("cloudsave".into());
+            saves::CloudView::Objects(items)
+        }
+        (None, Some(rec)) => {
+            report.cloud_source = Some("connect_record".into());
+            saves::CloudView::Record(rec)
+        }
+        (None, None) => saves::CloudView::None,
     };
-    report.slots = match &dir {
-        Some(d) => saves::merge(d, cloud_items.as_ref())?,
-        // Not installed: only the cloud's slots.
-        None => saves::merge(std::path::Path::new("/nonexistent"), cloud_items.as_ref())?,
-    };
+    // Not installed: only the cloud's slots.
+    let local_dir = dir.clone().unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+    report.slots = saves::merge(&local_dir, view)?;
     report.backups = saves::list_backups(&daemon.cfg.save_backups, product_id)
         .into_iter()
         .filter(|b| b.account.as_deref().is_none_or(|a| a == account))

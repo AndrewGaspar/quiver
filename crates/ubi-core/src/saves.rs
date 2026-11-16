@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-pub use ubi_api::info::{CloudSlot, RestoreResult, SaveBackup, SaveSlot, SlotFile, SlotState};
+pub use ubi_api::info::{CloudRecord, CloudSlot, RecordSlot, RestoreResult, SaveBackup, SaveSlot, SlotFile, SlotState};
 use ubi_api::Game;
 
 use crate::cloudsave::CloudSaves;
@@ -93,13 +93,25 @@ pub fn slot_state(local: Option<&SlotFile>, cloud: Option<&CloudSlot>, pending_u
     }
 }
 
-/// Local and cloud slots side by side. With `cloud` `None`, only local slots are listed
+/// What we know about the cloud's slots.
+pub enum CloudView<'a> {
+    /// Not checked.
+    None,
+    /// The cloud objects themselves (compared byte for byte).
+    Objects(&'a BTreeMap<u32, CloudItem>),
+    /// Only Ubisoft Connect's record of its last upload (sizes and times).
+    Record(&'a CloudRecord),
+}
+
+/// Local and cloud slots side by side. Without a cloud view, only local slots are listed
 /// (state `Unknown`, or `LocalNewer` for pending uploads).
-pub fn merge(dir: &Path, cloud: Option<&BTreeMap<u32, CloudItem>>) -> Result<Vec<SaveSlot>> {
+pub fn merge(dir: &Path, cloud: CloudView) -> Result<Vec<SaveSlot>> {
     let local = local_slots(dir)?;
     let mut slots: Vec<u32> = local.keys().copied().collect();
-    if let Some(c) = cloud {
-        slots.extend(c.keys().copied());
+    match &cloud {
+        CloudView::None => {}
+        CloudView::Objects(c) => slots.extend(c.keys().copied()),
+        CloudView::Record(r) => slots.extend(r.slots.iter().map(|s| s.slot)),
     }
     slots.sort_unstable();
     slots.dedup();
@@ -109,23 +121,103 @@ pub fn merge(dir: &Path, cloud: Option<&BTreeMap<u32, CloudItem>>) -> Result<Vec
             Some((f, p)) => (Some(f.clone()), *p),
             None => (None, false),
         };
-        let item = cloud.and_then(|c| c.get(&slot));
-        let state = match cloud {
-            None if pending => SlotState::LocalNewer,
-            None => SlotState::Unknown,
-            Some(_) => {
-                let same = match (&file, item) {
-                    (Some(f), Some(c)) if c.data.len() as u64 == f.size => {
-                        std::fs::read(dir.join(format!("{slot}.save"))).map(|d| d == c.data).unwrap_or(false)
-                    }
-                    _ => false,
-                };
-                slot_state(file.as_ref(), item.map(|c| &c.info), pending, same)
-            }
+        let (info, same) = match &cloud {
+            CloudView::None => (None, false),
+            CloudView::Objects(c) => match c.get(&slot) {
+                Some(item) => {
+                    let same = file.as_ref().is_some_and(|f| item.data.len() as u64 == f.size)
+                        && std::fs::read(dir.join(format!("{slot}.save"))).is_ok_and(|d| d == item.data);
+                    (Some(item.info.clone()), same)
+                }
+                None => (None, false),
+            },
+            CloudView::Record(r) => match r.slots.iter().find(|s| s.slot == slot) {
+                Some(s) => {
+                    // Connect records the uploaded file's size and mtime; matching both is the
+                    // best equality test without the bytes.
+                    let same = file.as_ref().is_some_and(|f| {
+                        Some(f.size) == s.size
+                            && matches!((f.modified, s.modified), (Some(a), Some(b)) if (a - b).num_milliseconds().abs() < 2000)
+                    });
+                    (Some(CloudSlot { size: s.size, stored_size: None, modified: s.modified }), same)
+                }
+                None => (None, false),
+            },
         };
-        out.push(SaveSlot { slot, local: file, cloud: item.map(|c| c.info.clone()), pending_upload: pending, state });
+        let state = match cloud {
+            CloudView::None if pending => SlotState::LocalNewer,
+            CloudView::None => SlotState::Unknown,
+            _ => slot_state(file.as_ref(), info.as_ref(), pending, same),
+        };
+        out.push(SaveSlot { slot, local: file, cloud: info, pending_upload: pending, state });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// Ubisoft Connect's cloud-save record (UbiServices entity)
+
+#[derive(Debug, Default, Deserialize)]
+struct EntitiesResponse {
+    #[serde(default)]
+    entities: Vec<Entity>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Entity {
+    name: Option<String>,
+    last_modified: Option<DateTime<Utc>>,
+    obj: EntityObj,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EntityObj {
+    pc_name: Option<String>,
+    slots: Vec<EntitySlot>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct EntitySlot {
+    id: Option<u32>,
+    filename: Option<String>,
+    size: Option<u64>,
+    last_modified: Option<DateTime<Utc>>,
+}
+
+pub fn record_entity_name(uplay_id: u32) -> String {
+    format!("upcCloudSaveUplayId_{uplay_id}")
+}
+
+/// Parse `GET /v1/profiles/{userId}/entities?name=upcCloudSaveUplayId_<id>`.
+pub fn parse_record(body: &str, uplay_id: u32) -> Result<Option<CloudRecord>> {
+    let rsp: EntitiesResponse = serde_json::from_str(body).context("unexpected entities response")?;
+    let want = record_entity_name(uplay_id);
+    let Some(e) = rsp.entities.into_iter().find(|e| e.name.as_deref().is_none_or(|n| n == want)) else { return Ok(None) };
+    let mut slots: Vec<RecordSlot> = e
+        .obj
+        .slots
+        .into_iter()
+        .filter_map(|s| {
+            let slot = s.id.or_else(|| s.filename.as_deref()?.parse().ok())?;
+            Some(RecordSlot { slot, size: s.size, modified: s.last_modified })
+        })
+        .collect();
+    slots.sort_by_key(|s| s.slot);
+    Ok(Some(CloudRecord { machine: e.obj.pc_name.filter(|m| !m.is_empty()), modified: e.last_modified, slots }))
+}
+
+/// Ubisoft Connect's record of a game's cloud slots, over UbiServices REST (no demux).
+pub async fn connect_record(auth: &crate::auth::Auth, session: &crate::auth::Session, uplay_id: u32) -> Result<Option<CloudRecord>> {
+    let path = format!("/v1/profiles/{}/entities?name={}", session.user_id, record_entity_name(uplay_id));
+    let (status, body) = crate::ubiservices::get_raw(auth, session, &path).await?;
+    match status {
+        200..=299 => parse_record(&body, uplay_id),
+        404 => Ok(None),
+        s => bail!("GET entities returned {s}"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -301,7 +393,7 @@ mod tests {
         let far_future = 4_000_000_000;
         let cloud: BTreeMap<u32, CloudItem> =
             [(1, item(b"same", 0)), (2, item(b"cloud", far_future)), (4, item(b"cloud only", 0))].into_iter().collect();
-        let rows = merge(&dir, Some(&cloud)).unwrap();
+        let rows = merge(&dir, CloudView::Objects(&cloud)).unwrap();
         let states: Vec<(u32, SlotState)> = rows.iter().map(|r| (r.slot, r.state)).collect();
         assert_eq!(
             states,
@@ -311,8 +403,46 @@ mod tests {
         assert_eq!(rows[0].local.as_ref().unwrap().size, 4);
         assert_eq!(rows[3].cloud.as_ref().unwrap().stored_size, Some(9));
         // Without the cloud: local slots only.
-        let rows = merge(&dir, None).unwrap();
+        let rows = merge(&dir, CloudView::None).unwrap();
         assert_eq!(rows.iter().map(|r| r.state).collect::<Vec<_>>(), [SlotState::Unknown, SlotState::LocalNewer, SlotState::Unknown]);
+    }
+
+    fn record_fixture() -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ubiservices/cloudsave-entity.json")).unwrap()
+    }
+
+    #[test]
+    fn connect_record() {
+        let r = parse_record(&record_fixture(), 3539).unwrap().unwrap();
+        assert_eq!(r.machine.as_deref(), Some("MY-PC"));
+        assert_eq!(r.slots.len(), 6);
+        assert_eq!(r.slots[2], RecordSlot { slot: 3, size: Some(107699), modified: "2026-11-16T06:03:14.077Z".parse().ok() });
+        assert_eq!(r.modified, "2026-11-16T06:09:31.069Z".parse().ok());
+        assert!(parse_record(r#"{"entities":[]}"#, 3539).unwrap().is_none());
+        assert!(parse_record(r#"{"entities":[{"name":"upcCloudSaveUplayId_1","obj":{}}]}"#, 3539).unwrap().is_none());
+    }
+
+    #[test]
+    fn merge_with_connect_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("savegames/user-1/3539");
+        let record = parse_record(&record_fixture(), 3539).unwrap().unwrap();
+        let set_mtime = |name: &str, len: usize, at: &str| {
+            write(&dir, name, &vec![0u8; len]);
+            let t: DateTime<Utc> = at.parse().unwrap();
+            let f = std::fs::File::options().write(true).open(dir.join(name)).unwrap();
+            f.set_modified(t.into()).unwrap();
+        };
+        set_mtime("1.save", 2541, "2026-11-16T06:03:14.084Z"); // as Connect uploaded it
+        set_mtime("3.save", 107848, "2026-11-16T04:03:26Z"); // older, different
+        set_mtime("5.save", 40450, "2026-11-17T00:00:00Z"); // same size, newer here
+        let rows = merge(&dir, CloudView::Record(&record)).unwrap();
+        let state = |slot| rows.iter().find(|r| r.slot == slot).unwrap().state;
+        assert_eq!(state(1), SlotState::InSync);
+        assert_eq!(state(2), SlotState::CloudOnly);
+        assert_eq!(state(3), SlotState::CloudNewer);
+        assert_eq!(state(5), SlotState::LocalNewer);
+        assert_eq!(rows.len(), 6);
     }
 
     #[test]

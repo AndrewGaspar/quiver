@@ -1,0 +1,70 @@
+{
+  "rewards": [
+    {
+      "completedConditions": [],
+      "currentUnitsPrice": 40,
+      "limitReachedDetails": [
+        "PurchasedLimitReached"
+      ],
+      "lockedDetails": [],
+      "profileId": "00000000-0000-0000-0000-000000000001",
+      "purchaseQuantity": 1,
+      "purchasedAt": "2021-01-14T14:39:52.9053382Z",
+      "rewardId": "27b98c9d-23a5-9d0d-aed2-13e825e09082",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "status": "LimitReached",
+      "ubiPlusCooldownEndsAt": null,
+      "ubiPlusGracePeriodEndsAt": null
+    },
+    {
+      "completedConditions": [],
+      "currentUnitsPrice": 40,
+      "limitReachedDetails": [
+        "PurchasedLimitReached"
+      ],
+      "lockedDetails": [],
+      "profileId": "00000000-0000-0000-0000-000000000001",
+      "purchaseQuantity": 1,
+      "purchasedAt": "2021-01-14T14:39:52.8903598Z",
+      "rewardId": "6f6e7013-b82c-b1a5-251a-610812cfc609",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "status": "LimitReached",
+      "ubiPlusCooldownEndsAt": null,
+      "ubiPlusGracePeriodEndsAt": null
+    },
+    {
+      "completedConditions": [],
+      "currentUnitsPrice": 0,
+      "limitReachedDetails": [],
+      "lockedDetails": [],
+      "profileId": "00000000-0000-0000-0000-000000000001",
+      "purchaseQuantity": 0,
+      "purchasedAt": null,
+      "rewardId": "f835074f-ba5d-4cd1-b7b0-a76ac5606909",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "status": "Unlocked",
+      "ubiPlusCooldownEndsAt": null,
+      "ubiPlusGracePeriodEndsAt": null
+    },
+    {
+      "completedConditions": [],
+      "currentUnitsPrice": 0,
+      "limitReachedDetails": [
+        "PurchasedLimitReached"
+      ],
+      "lockedDetails": [],
+      "profileId": "00000000-0000-0000-0000-000000000001",
+      "purchaseQuantity": 1,
+      "purchasedAt": "2021-01-14T14:39:52.8911493Z",
+      "rewardId": "66dbc11e-9cd7-df02-bebd-df4a2e413cfd",
+      "source": "UbiConnect",
+      "spaceId": "bfd34091-6af6-4029-873b-ba7e036464fa",
+      "status": "LimitReached",
+      "ubiPlusCooldownEndsAt": null,
+      "ubiPlusGracePeriodEndsAt": null
+    }
+  ]
+}

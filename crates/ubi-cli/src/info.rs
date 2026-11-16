@@ -193,7 +193,15 @@ pub async fn saves(client: &Client, game: &str, json: bool, local: bool) -> Resu
         println!("  {}", d.display());
     }
     if let Some(err) = &r.cloud_error {
-        println!("  cloud unavailable: {err}");
+        println!("  cloud saves unreadable: {err}");
+    }
+    match r.cloud_source.as_deref() {
+        Some("connect_record") => println!("  cloud column: Ubisoft Connect's record of its last upload (sizes and times only)"),
+        None if !local => println!("  cloud: not available"),
+        _ => {}
+    }
+    if let Some(rec) = &r.connect_record {
+        println!("  last upload by Ubisoft Connect: {} from {}", when(rec.modified), rec.machine.as_deref().unwrap_or("?"));
     }
     if r.slots.is_empty() {
         println!("  no save slots");
@@ -203,7 +211,7 @@ pub async fn saves(client: &Client, game: &str, json: bool, local: bool) -> Resu
             let local = s.local.as_ref().map(|f| format!("{}  {}", when(f.modified), bytes(f.size))).unwrap_or("—".into());
             let cloud = match &s.cloud {
                 Some(c) => format!("{}  {}", when(c.modified), c.size.map(bytes).unwrap_or("?".into())),
-                None if r.cloud_checked => "—".into(),
+                None if r.cloud_source.is_some() => "—".into(),
                 None => "?".into(),
             };
             let state = match s.state {

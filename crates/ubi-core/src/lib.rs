@@ -21,6 +21,7 @@ pub mod savesync;
 pub mod settings;
 pub mod store;
 pub mod ubiservices;
+pub mod zipread;
 
 pub use ubi_proto as proto;
 

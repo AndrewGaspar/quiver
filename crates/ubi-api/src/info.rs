@@ -261,16 +261,30 @@ pub struct Reward {
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
-    /// Unlocked/redeemed by this account.
+    /// Redeemed by this account.
     #[serde(default)]
     pub owned: bool,
-    /// Price in Ubisoft Connect units.
+    #[serde(default)]
+    pub redeemed_at: Option<DateTime<Utc>>,
+    /// Price in Ubisoft Connect units (0: free).
     #[serde(default)]
     pub cost: Option<u64>,
+    /// `Legendary`, `Epic`, ...
+    #[serde(default)]
+    pub rarity: Option<String>,
+    /// Ubisoft's status for this account: `LimitReached` (redeemed), `Unlocked` (can be
+    /// redeemed), `Locked`, ...
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
+/// A game's achievements. Definitions (names, descriptions, icons) come from the asset the
+/// product config names; which ones this account unlocked has no known REST source yet, so
+/// `unlocked_known` is false and `unlocked` 0 until one is wired.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Achievements {
+    #[serde(default)]
+    pub unlocked_known: bool,
     #[serde(default)]
     pub unlocked: u32,
     #[serde(default)]
@@ -326,11 +340,19 @@ pub struct SavesReport {
     pub dir: Option<PathBuf>,
     #[serde(default)]
     pub slots: Vec<SaveSlot>,
-    /// `None` when the cloud wasn't asked (`cloud: false`) or couldn't be reached.
+    /// Where the slots' cloud columns come from: `cloudsave` (the cloud objects themselves,
+    /// compared byte for byte), `connect_record` (Ubisoft Connect's record of its last upload;
+    /// sizes and times only), or `None` (not checked).
     #[serde(default)]
-    pub cloud_checked: bool,
+    pub cloud_source: Option<String>,
+    /// Why the cloud objects couldn't be read, when they couldn't.
     #[serde(default)]
     pub cloud_error: Option<String>,
+    /// Ubisoft Connect's record of the cloud slots (UbiServices entity
+    /// `upcCloudSaveUplayId_<id>`), written by Connect after each upload. Quiver's own uploads
+    /// don't update it, so it can lag behind the cloud.
+    #[serde(default)]
+    pub connect_record: Option<CloudRecord>,
     #[serde(default)]
     pub backups: Vec<SaveBackup>,
 }
@@ -389,6 +411,28 @@ pub enum SlotState {
     #[default]
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CloudRecord {
+    /// Machine that last uploaded (`pc_name`).
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub modified: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub slots: Vec<RecordSlot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecordSlot {
+    pub slot: u32,
+    /// Inflated size, as the local file.
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// The local file's modification time when it was uploaded.
+    #[serde(default)]
+    pub modified: Option<DateTime<Utc>>,
 }
 
 /// A copy of a game's save folder that Quiver made before overwriting it.
