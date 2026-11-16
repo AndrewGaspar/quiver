@@ -61,6 +61,9 @@ struct Inner {
     next_serial: AtomicU64,
     timeout: Duration,
     closed: AtomicBool,
+    /// Serializes sessions of services that only answer their newest connection
+    /// (`ownership_service`): see [`Demux::exclusive`].
+    exclusive: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -69,6 +72,14 @@ pub struct Demux {
 }
 
 impl Demux {
+    /// Hold this while opening, initializing or using a connection of a service that only
+    /// answers the most recently opened connection on the socket (`ownership_service`).
+    /// Without it, a session opened by another task (a game launch's broker, a library
+    /// refresh) between a request and its answer silently swallows the answer.
+    pub async fn exclusive(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.exclusive.lock().await
+    }
+
     pub async fn connect() -> Result<Self> {
         Self::connect_to(DEFAULT_HOST, CLIENT_VERSION).await
     }
@@ -106,6 +117,7 @@ impl Demux {
             next_serial: AtomicU64::new(1),
             timeout,
             closed: AtomicBool::new(false),
+            exclusive: tokio::sync::Mutex::new(()),
         });
         tokio::spawn(read_loop(reader, Arc::downgrade(&inner)));
         let demux = Self { inner };

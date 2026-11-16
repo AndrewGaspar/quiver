@@ -78,7 +78,10 @@ pub struct Library {
 
 impl Library {
     pub async fn fetch(demux: &Demux) -> Result<Self> {
-        let (conn, products) = initialize(demux).await?;
+        let (conn, products) = {
+            let _one_at_a_time = demux.exclusive().await;
+            initialize(demux).await?
+        };
         Ok(Self { demux: demux.clone(), conn, opened: Instant::now(), products })
     }
 
@@ -95,8 +98,9 @@ impl Library {
         }
     }
 
-    /// Re-initialize the session (and refresh `products`) if it went stale.
-    pub async fn ensure_fresh(&mut self) -> Result<()> {
+    /// Re-initialize the session (and refresh `products`) if it went stale. The caller holds
+    /// [`Demux::exclusive`].
+    async fn ensure_fresh(&mut self) -> Result<()> {
         if let Some(reason) = self.stale_reason() {
             tracing::info!(connection = self.conn.id(), reason, "reinitializing ownership session");
             let (conn, products) = initialize(&self.demux).await?;
@@ -108,6 +112,8 @@ impl Library {
     }
 
     async fn request(&mut self, req: ownership::Req) -> Result<ownership::Rsp> {
+        let demux = self.demux.clone();
+        let _one_at_a_time = demux.exclusive().await;
         self.ensure_fresh().await?;
         self.conn.request(req).await
     }
