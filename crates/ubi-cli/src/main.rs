@@ -285,6 +285,10 @@ async fn follow(client: &Client, mut events: tokio::sync::mpsc::UnboundedReceive
             }
         };
         let Some(e) = e else { break };
+        if matches!(e, Event::Disconnected) {
+            eprintln!();
+            bail!("quiverd went away while following job {job_id}; jobs don't survive a restart (check `quiver status`)");
+        }
         let Event::Job(job) = e else { continue };
         if job.id != job_id {
             continue;

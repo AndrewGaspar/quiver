@@ -25,7 +25,9 @@ pub fn demo_requested() -> bool {
 
 impl Source {
     /// Connect and subscribe to events. In demo mode this never touches the daemon socket
-    /// and never spawns `quiverd`.
+    /// and never spawns `quiverd`. The daemon's event stream outlives daemon restarts: the
+    /// client reconnects by itself and reports it with `Event::Disconnected` and
+    /// `Event::Reconnected`.
     pub async fn connect(demo: bool) -> Result<(Source, Status, mpsc::UnboundedReceiver<Event>)> {
         if demo {
             let (demo, events) = Demo::start();
