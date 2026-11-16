@@ -19,6 +19,7 @@ use crate::nav::{Effect, Input, Layout, Nav, Page, Section, Tab, Target, Zone};
 use crate::source::Source;
 use crate::text_input::TextInput;
 use crate::theme::{self, Theme, theme};
+use crate::ui::game::PlayAfter;
 use crate::{err_text, on_tokio};
 
 actions!(
@@ -705,7 +706,7 @@ impl Quiver {
         (cols, w)
     }
 
-    pub fn compute_layout(&self) -> Layout {
+    pub fn compute_layout(&self, cx: &App) -> Layout {
         let grid: Vec<u32> = self.grid_games().iter().map(|g| g.id()).collect();
         let side: Vec<u32> = self.side_games().iter().map(|g| g.id()).collect();
         let hero_buttons = if self.hero_game().is_some() { 2 + self.attention().len() } else { 0 };
@@ -713,7 +714,7 @@ impl Quiver {
             Page::Downloads => self.downloads_body_len(),
             Page::Activity => self.activity_rows().len(),
             Page::Settings => self.settings_actions().len(),
-            Page::Game(id) => self.page_body_len(id, self.nav.tab),
+            Page::Game(id) => self.page_body_len(id, self.nav.tab, cx),
             Page::Library => 0,
         };
         Layout {
@@ -891,6 +892,10 @@ impl Quiver {
                 return self.show_toast(format!("{name} is running; quit it from the game"), cx);
             }
             let via_quiver = g.steam().is_some_and(|s| s.state.uses_quiver());
+            // Steam starts it through Quiver with the saved launch options.
+            if self.launch_guard(id, PlayAfter::Primary, cx) {
+                return;
+            }
             self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
@@ -901,6 +906,9 @@ impl Quiver {
         } else if g.entry.update_available {
             self.open_update_dialog(id, cx);
         } else {
+            if self.launch_guard(id, PlayAfter::Primary, cx) {
+                return;
+            }
             // No profile named: the daemon runs the game's default.
             let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
             self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
@@ -1226,7 +1234,7 @@ impl Render for Quiver {
         let vp = window.viewport_size();
         self.viewport = (f32::from(vp.width), f32::from(vp.height));
         self.sync_global_focus(window, cx);
-        self.layout = self.compute_layout();
+        self.layout = self.compute_layout(cx);
 
         let root = div()
             .id("quiver")

@@ -13,7 +13,7 @@ mod stores;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
-pub use page::{ExportAction, GamePage, checkbox, settings_from_reply, toggle};
+pub use page::{ExportAction, GamePage, LaunchDraft, PlayAfter, checkbox, settings_from_reply, toggle};
 
 use super::library::{play_button, primary_label};
 use super::{
@@ -988,6 +988,7 @@ impl Quiver {
         let mods_n = if self.gp.id == id { self.gp.mods.ready().map(|m| m.profiles.len()) } else { None };
         let addons_n = if self.gp.id == id { self.gp.info.ready().map(|i| i.addons.iter().filter(|a| a.visible || a.owned).count()) } else { None };
         let side = self.pane_bp().pad();
+        let unsaved = !self.launch_pending(id, cx).is_empty();
         div()
             .flex()
             .flex_wrap()
@@ -1032,7 +1033,9 @@ impl Quiver {
                             .text_color(if on { th.tx1 } else { th.tx2 })
                             .focus_ring(focused, th, 6.)
                             .child(t.label())
-                            .when_some(count, |d, n| d.child(badge(th, n.to_string(), false))),
+                            .when_some(count, |d, n| d.child(badge(th, n.to_string(), false)))
+                            // Unsaved launch-options edits (kept while elsewhere).
+                            .when(t == Tab::LaunchOptions && unsaved, |d| d.child(div().size(px(7.)).rounded_full().bg(th.warn))),
                     )
                     .when(on, |d| d.child(div().absolute().left(px(10.)).right(px(10.)).bottom(px(-1.)).h(px(2.)).rounded(px(2.)).bg(th.acc)))
             }))

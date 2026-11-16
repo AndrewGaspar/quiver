@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{Conn, InputMode, Quiver, SideFilter};
 use crate::nav::{Nav, Page, Tab};
 use crate::theme::{Theme, rgba};
+use crate::ui::game::LaunchDraft;
 use crate::ui::{Icon, Kind, MEDIUM, button, icon, soft_shadow};
 
 mod hypr;
@@ -392,6 +393,15 @@ pub struct Resume {
     pub theme: Option<String>,
     /// Where Hyprland had the window (Hyprland sessions only).
     pub hyprland: Option<hypr::Placement>,
+    /// Unsaved launch-options edits, per game; the new build puts them back in the form.
+    /// Decoded leniently: edits another build can't read are dropped, not the handover.
+    #[serde(deserialize_with = "lenient")]
+    pub launch_drafts: Vec<LaunchDraft>,
+}
+
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -618,6 +628,10 @@ impl Quiver {
                 // The theme follows Omarchy (and QUIVER_THEME), which the new build reads afresh.
                 tracing::info!("resume: theme was {t:?}, now {now:?}");
             }
+            if !r.launch_drafts.is_empty() {
+                tracing::info!("resume: {} game(s) with unsaved launch options", r.launch_drafts.len());
+            }
+            self.gp.launch_seeds = r.launch_drafts.into_iter().map(|d| (d.game, d)).collect();
             self.relaunch.restore = Some(Restoring { path, signaled: false, scroll: r.scroll, tries: 0 });
         }
 
@@ -665,6 +679,9 @@ impl Quiver {
     pub fn relaunch_blocker(&self, window: &Window, cx: &gpui::App) -> Option<&'static str> {
         if self.nav.overlay.is_some() {
             return Some("a menu is open");
+        }
+        if self.ui.confirm.is_some() {
+            return Some("a dialog is open");
         }
         match &self.conn {
             Conn::Login(f) if f.busy => return Some("signing in"),
@@ -768,6 +785,7 @@ impl Quiver {
             window: Some(WindowState::of(window.window_bounds())),
             theme: Some(crate::theme::theme(cx).name.to_string()),
             hyprland: hypr::capture(std::process::id()),
+            launch_drafts: self.launch_drafts_all(cx),
         }
     }
 
@@ -1099,10 +1117,16 @@ mod tests {
             mode: Some("pad".into()),
             scroll: ScrollState { library: -10., side: -20., body: -300. },
             window: Some(WindowState { kind: WindowKind::Maximized, x: 10., y: 20., w: 1200., h: 800. }),
+            launch_drafts: vec![LaunchDraft {
+                game: 4242,
+                ops: vec![ubi_api::SettingOp::Set { key: "wrappers".into(), value: "gamemoderun,mangohud".into() }],
+                message: "HUD".into(),
+            }],
             ..Default::default()
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: Resume = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.launch_drafts, r.launch_drafts, "unsaved launch options carry over");
         let n = back.nav();
         assert_eq!(n.page, Page::Game(4242));
         assert_eq!(n.tab, Tab::Saves);
@@ -1126,6 +1150,10 @@ mod tests {
         let r: Resume = serde_json::from_str(r#"{"nav": 5, "unknown": true}"#).unwrap();
         assert_eq!(r.nav().page, Page::Library);
         let r: Resume = serde_json::from_str(r#"{"nav": {"page": "Activity"}}"#).unwrap();
+        assert_eq!(r.nav().page, Page::Activity);
+        // Drafts in a shape this build doesn't know: dropped, the rest still resumes.
+        let r: Resume = serde_json::from_str(r#"{"nav": {"page": "Activity"}, "launch_drafts": [{"game": "x"}]}"#).unwrap();
+        assert!(r.launch_drafts.is_empty());
         assert_eq!(r.nav().page, Page::Activity);
         assert_eq!(WindowState { kind: WindowKind::Windowed, x: 0., y: 0., w: 0., h: 0. }.bounds(), None);
     }

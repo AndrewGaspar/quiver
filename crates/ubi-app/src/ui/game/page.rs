@@ -2,11 +2,11 @@
 //! exports, the launch-options form, dialogs and dropdowns. Rendering lives next to this
 //! file, one module per tab.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{AnyElement, AppContext, ClipboardItem, Context, Entity, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
+use gpui::{AnyElement, App, AppContext, ClipboardItem, Context, Entity, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 use serde::Deserialize;
 use ubi_api::exports::{ExportKind, ExportState, ExportStatus, RestartReport, SteamExportResult, SteamUser, SteamUsers};
 use ubi_api::info::{GameInfo, Progress, RestoreResult, SaveBackup, SavesReport};
@@ -104,6 +104,29 @@ pub struct LaunchForm {
     pub message: Entity<TextInput>,
 }
 
+/// Unsaved launch-options edits waiting for their form: carried over a self-update
+/// relaunch, or seeded by demo mode. Applied over the saved settings when the form is built.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LaunchDraft {
+    pub game: u32,
+    pub ops: Vec<SettingOp>,
+    pub message: String,
+}
+
+/// The unsaved-changes bar's buttons: the Launch options tab's first body rows.
+pub const LAUNCH_BAR_SAVE: usize = 0;
+pub const LAUNCH_BAR_DISCARD: usize = 1;
+
+/// What to start once unsaved launch options are dealt with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayAfter {
+    /// Play (or what stands in for it): the daemon's default profile.
+    Primary,
+    /// Play once with play-menu entry `i` (0: Vanilla).
+    With(usize),
+}
+
 pub enum Dialog {
     RestoreSettings { game: u32, revision: u32 },
     RestoreSaves { game: u32, backup: SaveBackup },
@@ -136,6 +159,12 @@ pub struct GamePage {
     pub exports: Load<Vec<ExportStatus>>,
     pub protons: Load<Vec<String>>,
     pub launch: Option<LaunchForm>,
+    /// Edited forms of other games, kept while the page shows another game.
+    pub launch_drafts: HashMap<u32, LaunchForm>,
+    /// Edits waiting for their form (see [`LaunchDraft`]).
+    pub launch_seeds: HashMap<u32, LaunchDraft>,
+    /// The next Play of this game skips the unsaved-edits question (already answered).
+    pub play_unguarded: Option<u32>,
     /// Selected revision in the launch-options history.
     pub rev_sel: Option<u32>,
     /// Selected profile on the Mods tab (`vanilla` or a profile id).
@@ -169,7 +198,13 @@ impl GamePage {
     fn reset(&mut self, id: u32) {
         let protons = std::mem::take(&mut self.protons);
         let exports = std::mem::take(&mut self.exports);
-        *self = GamePage { id, protons, exports, ..Default::default() };
+        // Unsaved launch options belong to their game and outlive the page.
+        let mut launch_drafts = std::mem::take(&mut self.launch_drafts);
+        if let Some(f) = self.launch.take() {
+            launch_drafts.insert(f.game, f);
+        }
+        let launch_seeds = std::mem::take(&mut self.launch_seeds);
+        *self = GamePage { id, protons, exports, launch_drafts, launch_seeds, ..Default::default() };
     }
 
     pub fn exports_for(&self, id: u32) -> Vec<ExportStatus> {
@@ -279,6 +314,38 @@ pub fn ops_between(base: &GameSettings, staged: &GameSettings) -> Vec<SettingOp>
         }
     }
     out
+}
+
+/// What a launch-options form would save: the saved settings with the form's fields.
+pub fn form_staged(f: &LaunchForm, cx: &App) -> GameSettings {
+    let mut s = f.base.clone();
+    s.proton = f.proton.clone();
+    s.account = f.account.clone();
+    s.wrappers = split_wrappers(f.wrappers.read(cx).text());
+    s.args = f.args.read(cx).text().split_whitespace().map(str::to_owned).collect();
+    let kv = |rows: &[KvRow]| -> BTreeMap<String, String> {
+        rows.iter()
+            .map(|r| (r.key.read(cx).text().trim().to_owned(), r.value.read(cx).text().to_owned()))
+            .filter(|(k, _)| !k.is_empty())
+            .collect()
+    };
+    s.env = kv(&f.env);
+    s.dll_overrides = kv(&f.dll);
+    s
+}
+
+/// A form's unsaved edits.
+pub fn form_ops(f: &LaunchForm, cx: &App) -> Vec<SettingOp> {
+    ops_between(&f.base, &form_staged(f, cx))
+}
+
+/// The keys edits touch, for a one-line summary: "wrappers, env.MANGOHUD".
+pub fn op_keys(ops: &[SettingOp]) -> Vec<String> {
+    ops.iter()
+        .map(|o| match o {
+            SettingOp::Set { key, .. } | SettingOp::Unset { key } => key.clone(),
+        })
+        .collect()
 }
 
 /// A profile in a menu line: "2 layers · Default saves, synced · pinned".
@@ -606,6 +673,9 @@ impl Quiver {
             self.show_toast(format!("{name} is already running"), cx);
             return;
         }
+        if self.launch_guard(id, PlayAfter::With(i), cx) {
+            return;
+        }
         // Named explicitly, so the daemon doesn't apply the default (`vanilla` forces it).
         let profile = Some(chosen.map(|p| p.id).unwrap_or_else(|| VANILLA.into()));
         self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
@@ -914,53 +984,106 @@ impl Quiver {
     }
 
     /// (Re)build the form when there's none, it's for another game, or the saved settings
-    /// changed under an unedited form.
+    /// changed under an unedited form. Another game's edited form is kept for later.
     pub fn ensure_launch_form(&mut self, id: u32, cx: &mut Context<Self>) {
         let Some(saved) = self.game(id).and_then(|g| g.settings.clone()) else { return };
+        if self.gp.launch.as_ref().is_some_and(|f| f.game != id)
+            && let Some(f) = self.gp.launch.take()
+        {
+            self.gp.launch_drafts.insert(f.game, f);
+        }
+        if self.gp.launch.is_none()
+            && let Some(f) = self.gp.launch_drafts.remove(&id)
+        {
+            self.gp.launch = Some(f);
+        }
         let rebuild = match &self.gp.launch {
             None => true,
-            Some(f) => f.game != id || (f.base != saved && self.launch_ops(cx).is_empty()),
+            Some(f) => f.base != saved && form_ops(f, cx).is_empty(),
         };
         if !rebuild {
             return;
         }
+        // Edits carried over a relaunch (or seeded by demo mode) go over the saved settings.
+        let seed = self.gp.launch_seeds.remove(&id);
+        let mut staged = saved.clone();
+        for op in seed.iter().flat_map(|d| &d.ops) {
+            let _ = staged.apply(op);
+        }
         let f = LaunchForm {
             game: id,
-            proton: saved.proton.clone(),
-            account: saved.account.clone(),
-            wrappers: self.text_input("gamemoderun, mangohud", &saved.wrappers.join(", "), true, cx),
-            args: self.text_input("Extra arguments", &saved.args.join(" "), true, cx),
-            env: self.kv_rows(&saved.env, "NAME", "value", cx),
-            dll: self.kv_rows(&saved.dll_overrides, "dll", "n,b", cx),
-            message: self.text_input("Why (optional), e.g. \"Turn on HDR\"", "", false, cx),
+            proton: staged.proton.clone(),
+            account: staged.account.clone(),
+            wrappers: self.text_input("gamemoderun, mangohud", &staged.wrappers.join(", "), true, cx),
+            args: self.text_input("Extra arguments", &staged.args.join(" "), true, cx),
+            env: self.kv_rows(&staged.env, "NAME", "value", cx),
+            dll: self.kv_rows(&staged.dll_overrides, "dll", "n,b", cx),
+            message: self.text_input("Why (optional), e.g. \"Turn on HDR\"", seed.as_ref().map(|d| d.message.as_str()).unwrap_or(""), false, cx),
             base: saved,
         };
         self.gp.launch = Some(f);
     }
 
-    pub fn launch_staged(&self, cx: &Context<Self>) -> Option<GameSettings> {
-        let f = self.gp.launch.as_ref()?;
-        let mut s = f.base.clone();
-        s.proton = f.proton.clone();
-        s.account = f.account.clone();
-        s.wrappers = split_wrappers(f.wrappers.read(cx).text());
-        s.args = f.args.read(cx).text().split_whitespace().map(str::to_owned).collect();
-        let kv = |rows: &[KvRow]| -> BTreeMap<String, String> {
-            rows.iter()
-                .map(|r| (r.key.read(cx).text().trim().to_owned(), r.value.read(cx).text().to_owned()))
-                .filter(|(k, _)| !k.is_empty())
-                .collect()
-        };
-        s.env = kv(&f.env);
-        s.dll_overrides = kv(&f.dll);
-        Some(s)
+    /// The form holding `id`'s launch options, if one was built (open, or kept for later).
+    pub fn launch_form(&self, id: u32) -> Option<&LaunchForm> {
+        self.gp.launch.as_ref().filter(|f| f.game == id).or_else(|| self.gp.launch_drafts.get(&id))
     }
 
-    pub fn launch_ops(&self, cx: &Context<Self>) -> Vec<SettingOp> {
-        match (self.gp.launch.as_ref(), self.launch_staged(cx)) {
-            (Some(f), Some(s)) => ops_between(&f.base, &s),
-            _ => vec![],
+    pub fn launch_staged(&self, cx: &App) -> Option<GameSettings> {
+        self.gp.launch.as_ref().map(|f| form_staged(f, cx))
+    }
+
+    pub fn launch_ops(&self, cx: &App) -> Vec<SettingOp> {
+        self.gp.launch.as_ref().map(|f| form_ops(f, cx)).unwrap_or_default()
+    }
+
+    /// Unsaved launch-options edits of game `id`, wherever they are: its form (open, or
+    /// kept while another game shows) or carried-over edits that have no form yet.
+    pub fn launch_pending(&self, id: u32, cx: &App) -> Vec<SettingOp> {
+        if let Some(f) = self.launch_form(id) {
+            return form_ops(f, cx);
         }
+        let Some(d) = self.gp.launch_seeds.get(&id) else { return vec![] };
+        match self.game(id).and_then(|g| g.settings.as_ref()) {
+            Some(saved) => {
+                let mut staged = saved.clone();
+                for op in &d.ops {
+                    let _ = staged.apply(op);
+                }
+                ops_between(saved, &staged)
+            }
+            None => d.ops.clone(),
+        }
+    }
+
+    /// Every game's unsaved launch-options edits, for a relaunch to carry over.
+    pub fn launch_drafts_all(&self, cx: &App) -> Vec<LaunchDraft> {
+        let mut games: Vec<u32> = self
+            .gp
+            .launch
+            .iter()
+            .map(|f| f.game)
+            .chain(self.gp.launch_drafts.keys().copied())
+            .chain(self.gp.launch_seeds.keys().copied())
+            .collect();
+        games.sort_unstable();
+        games.dedup();
+        games
+            .into_iter()
+            .filter_map(|game| {
+                let ops = self.launch_pending(game, cx);
+                let message = self.launch_message(game, cx).unwrap_or_default();
+                (!ops.is_empty()).then_some(LaunchDraft { game, ops, message })
+            })
+            .collect()
+    }
+
+    /// The "why" typed for game `id`'s unsaved edits.
+    fn launch_message(&self, id: u32, cx: &App) -> Option<String> {
+        self.launch_form(id)
+            .map(|f| f.message.read(cx).text().trim().to_owned())
+            .or_else(|| self.gp.launch_seeds.get(&id).map(|d| d.message.clone()))
+            .filter(|m| !m.is_empty())
     }
 
     pub fn launch_add_row(&mut self, dll: bool, cx: &mut Context<Self>) {
@@ -974,26 +1097,42 @@ impl Quiver {
         }
     }
 
-    pub fn launch_discard(&mut self) {
-        self.gp.launch = None;
+    /// Drop game `id`'s unsaved launch options.
+    pub fn launch_discard(&mut self, id: u32) {
+        if self.gp.launch.as_ref().is_some_and(|f| f.game == id) {
+            self.gp.launch = None;
+        }
+        self.gp.launch_drafts.remove(&id);
+        self.gp.launch_seeds.remove(&id);
     }
 
-    pub fn launch_save(&mut self, id: u32, cx: &mut Context<Self>) {
-        let ops = self.launch_ops(cx);
-        if ops.is_empty() || self.gp.busy {
+    /// Save game `id`'s edits as a new revision; then start it, if asked to.
+    pub fn launch_save(&mut self, id: u32, then: Option<PlayAfter>, cx: &mut Context<Self>) {
+        let ops = self.launch_pending(id, cx);
+        if self.gp.busy {
             return;
         }
-        let message = self.gp.launch.as_ref().map(|f| f.message.read(cx).text().trim().to_owned()).filter(|m| !m.is_empty());
+        if ops.is_empty() {
+            if let Some(p) = then {
+                self.play_after(id, p, cx);
+            }
+            return;
+        }
+        let message = self.launch_message(id, cx);
         self.gp.busy = true;
         self.call::<Revision, _>(Request::SettingsSet { product_id: id, ops, message }, cx, move |this, r, cx| {
             this.gp.busy = false;
             match r {
                 Ok(rev) => {
                     this.show_toast(format!("Saved launch options as r{}", rev.revision), cx);
-                    this.gp.launch = None;
+                    this.launch_discard(id);
                     this.gp.rev_sel = None;
                     this.load_details(id, cx);
+                    if let Some(p) = then {
+                        this.play_after(id, p, cx);
+                    }
                 }
+                // Not saved: don't start the game without them either.
                 Err(e) => this.show_toast(err_text(&e), cx),
             }
         });
@@ -1003,7 +1142,7 @@ impl Quiver {
         self.call::<Revision, _>(Request::SettingsRestore { product_id: id, revision }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Restored r{revision} as r{}", rev.revision), cx);
-                this.gp.launch = None;
+                this.launch_discard(id);
                 this.gp.rev_sel = Some(rev.revision);
                 this.load_details(id, cx);
             }
@@ -1310,11 +1449,19 @@ impl Quiver {
     // -----------------------------------------------------------------------------------
     // Controller rows in each tab's body
 
-    pub fn page_body_len(&self, id: u32, tab: Tab) -> usize {
+    /// Body rows the unsaved-changes bar adds in front of the history (Save, Discard).
+    pub fn launch_bar_rows(&self, id: u32, cx: &App) -> usize {
+        match self.launch_form(id) {
+            Some(f) if !form_ops(f, cx).is_empty() => 2,
+            _ => 0,
+        }
+    }
+
+    pub fn page_body_len(&self, id: u32, tab: Tab, cx: &App) -> usize {
         let Some(g) = self.game(id) else { return 0 };
         match tab {
             Tab::Overview => g.playtime.as_ref().map(|p| p.sessions.len().min(8)).unwrap_or(0),
-            Tab::LaunchOptions => g.history.as_ref().map(|h| h.len()).unwrap_or(0),
+            Tab::LaunchOptions => self.launch_bar_rows(id, cx) + g.history.as_ref().map(|h| h.len()).unwrap_or(0),
             Tab::Mods => {
                 if !g.installed() {
                     0
@@ -1345,6 +1492,15 @@ impl Quiver {
         match self.nav.tab {
             Tab::Overview => {}
             Tab::LaunchOptions => {
+                let bar = self.launch_bar_rows(id, cx);
+                if i < bar {
+                    match i {
+                        LAUNCH_BAR_SAVE => self.launch_save(id, None, cx),
+                        _ => self.launch_discard(id),
+                    }
+                    return;
+                }
+                let i = i - bar;
                 let mut revs: Vec<u32> = self.game(id).and_then(|g| g.history.as_ref()).map(|h| h.iter().map(|r| r.revision).collect()).unwrap_or_default();
                 revs.sort_unstable_by(|a, b| b.cmp(a));
                 if let Some(r) = revs.get(i).copied() {
@@ -1949,6 +2105,21 @@ mod tests {
         assert_eq!((g.proton.as_deref(), r), (Some("GE"), Some(4)));
         let (g, r) = settings_from_reply(serde_json::json!({ "proton": "GE" }));
         assert_eq!((g.proton.as_deref(), r), (Some("GE"), None));
+    }
+
+    #[test]
+    fn unsaved_summary_names_keys() {
+        let base = s(&["wrappers=gamemoderun"]);
+        let staged = s(&["wrappers=gamemoderun,mangohud", "env.MANGOHUD=1"]);
+        assert_eq!(op_keys(&ops_between(&base, &staged)), ["env.MANGOHUD", "wrappers"]);
+        // Carried-over edits applied to newer saved settings keep what changed elsewhere.
+        let newer = s(&["wrappers=gamemoderun", "proton=GE-2"]);
+        let mut again = newer.clone();
+        for op in ops_between(&base, &staged) {
+            again.apply(&op).unwrap();
+        }
+        assert_eq!(again.proton.as_deref(), Some("GE-2"));
+        assert_eq!(op_keys(&ops_between(&newer, &again)), ["env.MANGOHUD", "wrappers"]);
     }
 
     #[test]

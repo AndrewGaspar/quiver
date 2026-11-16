@@ -5,12 +5,16 @@
 use gpui::{AnyElement, Context, Entity, IntoElement, MouseDownEvent, ParentElement, SharedString, Styled, div, prelude::*, px};
 use ubi_api::{GameSettings, Revision, SettingOp};
 
-use super::page::{DiffLine, Dialog, Dropdown, KvRow, checkbox, diff, field_box, form_row, section, set_command, sh_quote, small, split_wrappers};
+use super::page::{
+    DiffLine, Dialog, Dropdown, KvRow, LAUNCH_BAR_DISCARD, LAUNCH_BAR_SAVE, LaunchDraft, PlayAfter, checkbox, diff, field_box, form_ops, form_row, op_keys,
+    section, set_command, sh_quote, small, split_wrappers,
+};
 use crate::app::{InputMode, Quiver};
-use crate::model::{Actor, GameRow, actor, actor_label, ago, tilde};
+use crate::model::{Actor, GameRow, actor, actor_label, ago, clean_name, tilde};
 use crate::nav::Target;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
+use crate::ui::global::{Confirm, ConfirmAction};
 use crate::ui::{FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, badge, button, card, card_header, icon, icon_button, mono, pill, soft_shadow};
 
 /// Wrappers offered as one-click toggles.
@@ -32,12 +36,7 @@ impl Quiver {
         self.ensure_launch_form(id, cx);
         let staged = self.launch_staged(cx).unwrap_or_default();
         let ops = self.launch_ops(cx);
-        let changed: Vec<String> = ops
-            .iter()
-            .map(|o| match o {
-                SettingOp::Set { key, .. } | SettingOp::Unset { key } => key.clone(),
-            })
-            .collect();
+        let changed = op_keys(&ops);
         let is_changed = |prefix: &str| changed.iter().any(|k| k == prefix || k.starts_with(&format!("{prefix}.")));
 
         let form = div()
@@ -46,7 +45,7 @@ impl Quiver {
             .flex_1()
             .min_w_0()
             .gap(px(14.))
-            .pb(px(if ops.is_empty() { 0. } else { 70. }))
+            .pb(px(if ops.is_empty() { 0. } else { 90. }))
             .child(self.render_runtime_section(th, g, &staged, is_changed("proton"), is_changed("account"), cx))
             .child(self.render_wrappers_section(th, g, &staged, is_changed("wrappers"), cx))
             .child(self.render_kv_section(th, false, is_changed("env"), cx))
@@ -455,27 +454,28 @@ impl Quiver {
             .child(self.cli_line("launch-cli", th, set, cx))
     }
 
-    /// The floating bar with unsaved changes (drawn over the pane's bottom edge).
+    /// The bar with unsaved changes, pinned over the pane's bottom edge so it stays in view
+    /// while the form scrolls. Save and Discard are the tab's first body rows, so keyboard
+    /// and controller reach them first from the tabs.
     pub(super) fn render_pending(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = g.id();
-        self.gp.launch.as_ref().filter(|f| f.game == id)?;
-        let ops = self.launch_ops(cx);
+        let f = self.launch_form(id)?;
+        let msg = f.message.clone();
+        let ops = form_ops(f, cx);
         if ops.is_empty() {
             return None;
         }
-        let keys: Vec<String> = ops
-            .iter()
-            .map(|o| match o {
-                SettingOp::Set { key, .. } | SettingOp::Unset { key } => key.clone(),
-            })
-            .collect();
+        let n = ops.len();
         let next = g.current_revision().unwrap_or(0) + 1;
-        let msg = self.gp.launch.as_ref().map(|f| f.message.clone())?;
         let busy = self.gp.busy;
         let pb = self.pane_bp();
         let inset = pb.pad().min(24.);
+        let save_focus = self.focused(Target::Body(LAUNCH_BAR_SAVE));
+        let discard_focus = self.focused(Target::Body(LAUNCH_BAR_DISCARD));
+        let save_label = if busy { "Saving…".to_string() } else { format!("Save as r{next}") };
         Some(
             div()
+                .id("launch-pending")
                 .absolute()
                 .left(px(inset))
                 .right(px(if pb.two_columns() { 424. } else { inset }))
@@ -490,24 +490,114 @@ impl Quiver {
                 .rounded(px(12.))
                 .bg(th.ink3)
                 .border_1()
-                .border_color(th.line2)
+                .border_color(th.warn.opacity(0.6))
                 .shadow(vec![soft_shadow(crate::theme::rgba(0x000000, 0.55), 14., 40.)])
-                .child(div().size(px(7.)).rounded_full().bg(th.warn))
-                .child(div().flex_none().font_weight(SEMIBOLD).child(format!("{} unsaved change{}", ops.len(), if ops.len() == 1 { "" } else { "s" })))
-                .child(mono(11.5, th.tx3).min_w_0().max_w(px(180.)).truncate().child(keys.join(", ")))
-                .child(div().flex_1().min_w(px(160.)).child(msg))
+                // Clicks on the bar don't reach the form under it.
+                .occlude()
                 .child(
-                    button("launch-discard", th, Kind::Ghost, Size::Small, None, "Discard").on_click(cx.listener(|this, _, _, cx| {
-                        this.launch_discard();
-                        cx.notify();
-                    })),
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w(px(150.))
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().flex_none().size(px(8.)).rounded_full().bg(th.warn))
+                        .child(div().flex_none().font_weight(SEMIBOLD).child(format!("{n} unsaved change{}", if n == 1 { "" } else { "s" })))
+                        .child(mono(11.5, th.tx3).min_w_0().truncate().child(op_keys(&ops).join(", "))),
+                )
+                .child(div().flex_1().min_w(px(140.)).max_w(px(260.)).child(msg))
+                .child(
+                    button("launch-discard", th, Kind::Ghost, Size::Small, Some(Icon::Undo), "Discard")
+                        .focus_ring(discard_focus, th, 6.)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.launch_discard(id);
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    button("launch-save", th, Kind::Primary, Size::Small, Some(Icon::Check), if busy { "Saving…".to_string() } else { format!("Save as r{next}") })
-                        .on_click(cx.listener(move |this, _, _, cx| this.launch_save(id, cx))),
+                    button("launch-save", th, Kind::Primary, Size::Small, Some(Icon::Check), save_label)
+                        .focus_ring(save_focus, th, 6.)
+                        .on_click(cx.listener(move |this, _, _, cx| this.launch_save(id, None, cx))),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Before starting game `id`: when it has unsaved launch-options edits, ask (Save and
+    /// play / Play without them / Cancel) and return true; the answer starts it later.
+    pub fn launch_guard(&mut self, id: u32, play: PlayAfter, cx: &mut Context<Self>) -> bool {
+        if self.gp.play_unguarded.take() == Some(id) {
+            return false;
+        }
+        let ops = self.launch_pending(id, cx);
+        if ops.is_empty() {
+            return false;
+        }
+        let Some(g) = self.game(id) else { return false };
+        let name = clean_name(&g.entry.name);
+        let rev = g.current_revision().map(|r| format!(" (r{r})")).unwrap_or_default();
+        let n = ops.len();
+        let message = self.launch_form(id).map(|f| f.message.read(cx).text().trim().to_owned()).filter(|m| !m.is_empty());
+        self.gp.play_menu = false;
+        self.gp.dropdown = None;
+        self.ui.confirm = Some(Confirm {
+            title: "Save your launch-option changes?".into(),
+            body: format!(
+                "{name} has {n} unsaved change{} to its launch options ({}). Save them and play, or play with the saved launch options{rev} and keep your edits for later.",
+                if n == 1 { "" } else { "s" },
+                op_keys(&ops).join(", ")
+            )
+            .into(),
+            confirm: "Save and play".into(),
+            alt: Some("Play without them".into()),
+            cli: Some(set_command(id, &ops, message.as_deref()).into()),
+            action: ConfirmAction::PlayUnsaved { game: id, play },
+            // Save and play.
+            selected: 2,
+        });
+        true
+    }
+
+    /// Start game `id` the way it was asked for, without asking about unsaved edits again.
+    pub fn play_after(&mut self, id: u32, play: PlayAfter, cx: &mut Context<Self>) {
+        self.gp.play_unguarded = Some(id);
+        match play {
+            PlayAfter::Primary => self.primary(id, cx),
+            PlayAfter::With(i) => self.play_with(id, i, cx),
+        }
+        self.gp.play_unguarded = None;
+    }
+
+    /// Demo mode (`QUIVER_DEMO_GLOBAL=unsaved=ID`): game `id` gets unsaved edits, as if the
+    /// MangoHud chip had been clicked and a variable added, once its settings are in.
+    pub fn demo_unsaved(&mut self, id: u32, cx: &mut Context<Self>) {
+        self.load_details(id, cx);
+        cx.spawn(async move |this, cx| {
+            for _ in 0..50 {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        let Some(saved) = this.game(id).and_then(|g| g.settings.clone()) else { return false };
+                        let mut wrappers = saved.wrappers.clone();
+                        match wrappers.iter().position(|w| w == "mangohud") {
+                            Some(i) => _ = wrappers.remove(i),
+                            None => wrappers.push("mangohud".into()),
+                        }
+                        let ops = vec![
+                            SettingOp::Set { key: "wrappers".into(), value: wrappers.join(",") },
+                            SettingOp::Set { key: "env.MANGOHUD_CONFIG".into(), value: "fps,frametime".into() },
+                        ];
+                        this.gp.launch_seeds.insert(id, LaunchDraft { game: id, ops, message: String::new() });
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn render_history(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> gpui::Div {
@@ -516,13 +606,14 @@ impl Quiver {
         history.sort_by(|a, b| b.revision.cmp(&a.revision));
         let latest = history.first().map(|r| r.revision);
         let sel = self.gp.rev_sel;
+        let off = self.launch_bar_rows(id, cx);
         let items: Vec<AnyElement> = history
             .iter()
             .enumerate()
             .map(|(i, r)| {
                 let is_cur = Some(r.revision) == latest;
                 let open = sel == Some(r.revision);
-                let focused = self.focused(Target::Body(i));
+                let focused = self.focused(Target::Body(off + i));
                 let who = actor(&r.source);
                 let who_color = match who {
                     Actor::App => th.who_gui,

@@ -21,6 +21,7 @@ use crate::art::{ArtSlot, Variant};
 use crate::model::{Actor, actor, clean_name, clock, short_name};
 use crate::nav::{Input, Overlay, Page, Section, SettingsSection};
 use crate::text_input::TextInput;
+use crate::ui::game::PlayAfter;
 use crate::theme::{Theme, rgba};
 use crate::err_text;
 
@@ -157,18 +158,55 @@ pub enum ConfirmAction {
     RemoveExport { kind: ExportKind, product_id: u32 },
     /// Close Steam, write staged changes, start it again (`quiver steam restart`).
     RestartSteam,
+    /// Start a game with unsaved launch-options edits: save them first (the action) or
+    /// play without them (the alternative), keeping them staged.
+    PlayUnsaved { game: u32, play: PlayAfter },
 }
 
-/// A yes/no question, drawn over everything (sign out, remove a shortcut).
+impl ConfirmAction {
+    /// Starts something rather than removing it: an accent button, not a red one.
+    fn constructive(&self) -> bool {
+        matches!(self, ConfirmAction::PlayUnsaved { .. })
+    }
+}
+
+/// A question drawn over everything (sign out, remove a shortcut, play with unsaved edits):
+/// Cancel, an optional alternative, and the action.
 #[derive(Clone, Debug)]
 pub struct Confirm {
     pub title: SharedString,
     pub body: SharedString,
     pub confirm: SharedString,
+    /// A second way through, between Cancel and the action.
+    pub alt: Option<SharedString>,
     pub cli: Option<SharedString>,
     pub action: ConfirmAction,
-    /// 0: Cancel, 1: the action. Starts on Cancel.
+    /// The focused button, left to right: 0 Cancel, then the alternative (if any), then
+    /// the action. Destructive questions start on Cancel.
     pub selected: usize,
+}
+
+/// A button of the confirmation dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmPick {
+    Cancel,
+    Alt,
+    Action,
+}
+
+impl Confirm {
+    pub fn buttons(&self) -> usize {
+        if self.alt.is_some() { 3 } else { 2 }
+    }
+
+    /// The button at position `i` (left to right).
+    pub fn pick(&self, i: usize) -> ConfirmPick {
+        match i {
+            0 => ConfirmPick::Cancel,
+            i if i + 1 >= self.buttons() => ConfirmPick::Action,
+            _ => ConfirmPick::Alt,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -341,11 +379,13 @@ impl Quiver {
     /// [`crate::nav::Nav`] sees it. Returns whether it was handled.
     pub fn global_input(&mut self, input: Input, cx: &mut Context<Self>) -> bool {
         if let Some(c) = &mut self.ui.confirm {
+            let n = c.buttons();
             match input {
-                Input::Left | Input::Right | Input::Up | Input::Down => c.selected = 1 - c.selected.min(1),
+                Input::Left | Input::Up => c.selected = (c.selected.min(n - 1) + n - 1) % n,
+                Input::Right | Input::Down => c.selected = (c.selected.min(n - 1) + 1) % n,
                 Input::Activate => {
-                    let run = c.selected == 1;
-                    self.close_confirm(run, cx);
+                    let pick = c.pick(c.selected.min(n - 1));
+                    self.confirm_pick(pick, cx);
                 }
                 Input::Back => self.ui.confirm = None,
                 _ => {}
@@ -432,6 +472,7 @@ impl Quiver {
                     confirm: "Sign out".into(),
                     cli: Some(format!("quiver logout {}", a.name).into()),
                     action: ConfirmAction::SignOut { user_id: a.user_id, name: a.name },
+                    alt: None,
                     selected: 0,
                 });
             }
@@ -474,6 +515,7 @@ impl Quiver {
                     confirm: "Remove".into(),
                     cli: Some(cli.into()),
                     action: ConfirmAction::RemoveExport { kind: r.kind, product_id: r.product_id },
+                    alt: None,
                     selected: 0,
                 });
             }
@@ -550,11 +592,27 @@ impl Quiver {
     }
 
     pub fn close_confirm(&mut self, run: bool, cx: &mut Context<Self>) {
+        self.confirm_pick(if run { ConfirmPick::Action } else { ConfirmPick::Cancel }, cx);
+    }
+
+    pub fn confirm_pick(&mut self, pick: ConfirmPick, cx: &mut Context<Self>) {
         let Some(c) = self.ui.confirm.take() else { return };
-        if !run {
+        if pick == ConfirmPick::Cancel {
+            return;
+        }
+        if let ConfirmAction::PlayUnsaved { game, play } = c.action {
+            match pick {
+                ConfirmPick::Action => self.launch_save(game, Some(play), cx),
+                _ => self.play_after(game, play, cx),
+            }
+            cx.notify();
+            return;
+        }
+        if pick == ConfirmPick::Alt {
             return;
         }
         match c.action {
+            ConfirmAction::PlayUnsaved { .. } => {}
             ConfirmAction::SignOut { user_id, name } => {
                 self.call::<(), _>(Request::Logout { account: Some(user_id) }, cx, move |this, r, cx| match r {
                     Ok(()) => {
@@ -794,7 +852,14 @@ impl Quiver {
                 this.close_confirm(false, cx);
                 cx.notify();
             }));
-        let (bad, white) = (th.bad, rgba(0xffffff, 1.0));
+        let alt = c.alt.clone().map(|label| {
+            button("confirm-alt", th, Kind::Secondary, Size::Medium, None, label)
+                .focus_ring(keys && c.selected == 1, th, 8.)
+                .on_click(cx.listener(|this, _, _, cx| this.confirm_pick(ConfirmPick::Alt, cx)))
+        });
+        let last = c.buttons() - 1;
+        let constructive = c.action.constructive();
+        let (bad, white) = if constructive { (th.acc, th.acc_ink) } else { (th.bad, rgba(0xffffff, 1.0)) };
         let ok = div()
             .id("confirm-ok")
             .flex()
@@ -814,12 +879,13 @@ impl Quiver {
                     ConfirmAction::SignOut { .. } => Icon::LogOut,
                     ConfirmAction::RestartSteam => Icon::RefreshCw,
                     ConfirmAction::RemoveExport { .. } => Icon::Trash,
+                    ConfirmAction::PlayUnsaved { .. } => Icon::Check,
                 },
                 15.,
                 white,
             ))
             .child(c.confirm.clone())
-            .focus_ring(keys && c.selected == 1, th, 8.)
+            .focus_ring(keys && c.selected == last, th, 8.)
             .on_click(cx.listener(|this, _, _, cx| this.close_confirm(true, cx)));
         div()
             .id("confirm-scrim")
@@ -859,14 +925,14 @@ impl Quiver {
                                     .justify_center()
                                     .size(px(34.))
                                     .rounded(px(10.))
-                                    .bg(th.bad_soft)
-                                    .child(icon(Icon::TriangleAlert, 16., th.bad)),
+                                    .bg(if constructive { th.warn_soft } else { th.bad_soft })
+                                    .child(icon(Icon::TriangleAlert, 16., if constructive { th.warn } else { th.bad })),
                             )
                             .child(div().text_size(px(16.)).font_weight(BOLD).child(c.title.clone())),
                     )
                     .child(div().text_color(th.tx2).text_size(px(12.5)).line_height(px(19.)).child(c.body.clone()))
                     .when_some(c.cli.clone(), |d, cli| d.child(super::command_line(th, cli)))
-                    .child(div().flex().justify_end().gap(px(8.)).child(cancel).child(ok)),
+                    .child(div().flex().flex_wrap().justify_end().gap(px(8.)).child(cancel).children(alt).child(ok)),
             )
             .into_any_element()
     }
@@ -1141,6 +1207,12 @@ impl Quiver {
                                 this.open_game(id, cx);
                             }
                         }
+                        // Unsaved launch-options edits on a game (`unsaved=3539`).
+                        "unsaved" => {
+                            if let Ok(id) = v.parse() {
+                                this.demo_unsaved(id, cx);
+                            }
+                        }
                         "palette" => this.nav.open_palette(),
                         "add-account" => this.start_add_account(cx),
                         "confirm-signout" => this.run_global(GlobalCmd::SignOut(1), cx),
@@ -1190,6 +1262,27 @@ mod tests {
         assert_eq!(elapsed(4 * 60 + 7), "4:07");
         assert_eq!(elapsed(3600 + 12 * 60 + 8), "1:12:08");
         assert_eq!(elapsed(-5), "0:00");
+    }
+
+    #[test]
+    fn confirm_buttons_left_to_right() {
+        let mut c = Confirm {
+            title: "t".into(),
+            body: "b".into(),
+            confirm: "Remove".into(),
+            alt: None,
+            cli: None,
+            action: ConfirmAction::RestartSteam,
+            selected: 0,
+        };
+        assert_eq!(c.buttons(), 2);
+        assert_eq!((c.pick(0), c.pick(1)), (ConfirmPick::Cancel, ConfirmPick::Action));
+        assert!(!c.action.constructive(), "destructive questions get the red button");
+        c.alt = Some("Play without them".into());
+        c.action = ConfirmAction::PlayUnsaved { game: 1, play: PlayAfter::Primary };
+        assert_eq!(c.buttons(), 3);
+        assert_eq!((c.pick(0), c.pick(1), c.pick(2)), (ConfirmPick::Cancel, ConfirmPick::Alt, ConfirmPick::Action));
+        assert!(c.action.constructive());
     }
 
     #[test]
