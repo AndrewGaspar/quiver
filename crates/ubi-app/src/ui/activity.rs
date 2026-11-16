@@ -8,6 +8,7 @@ use chrono::{DateTime, Local, Utc};
 use gpui::{AnyElement, Context, FontWeight, HighlightStyle, IntoElement, ParentElement, StyledText, Styled, div, prelude::*, px};
 use ubi_api::ActivityEntry;
 
+use super::responsive::tip;
 use super::global::SourceFilter;
 use super::{FocusExt, Icon, MEDIUM, PillKind, SEMIBOLD, art_fill, caption, card, command_line, display, glyph, icon, mono, pill};
 use crate::app::{InputMode, Quiver};
@@ -83,6 +84,7 @@ impl Quiver {
 
     pub fn render_activity(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let pad = self.mode == InputMode::Pad;
+        let bp = self.bp();
         let filter = self.ui.source_filter();
         let rows: Vec<ActivityEntry> = self.activity_rows().into_iter().cloned().collect();
         let row_refs: Vec<&ActivityEntry> = rows.iter().collect();
@@ -117,7 +119,7 @@ impl Quiver {
                     .cursor_pointer()
                     .when(on, |d| d.bg(th.ink5))
                     .when(!on, |d| d.hover(|s| s.bg(th.ink3)))
-                    .when_some(f.icon(), |d, i| d.child(icon(i, 12., fg)))
+                    .when_some(f.icon().filter(|_| !bp.narrow()), |d, i| d.child(icon(i, 12., fg)))
                     .child(f.label())
                     .child(div().text_color(if on { th.tx2 } else { th.tx4 }).child(n.to_string()))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -198,8 +200,10 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_end()
-                    .gap(px(14.))
+                    .gap_x(px(14.))
+                    .gap_y(px(4.))
                     .child(display(22., FontWeight::BOLD, th.tx1).child("Activity"))
                     .child(div().text_color(th.tx3).child("Everything that changed, and who changed it"))
                     .child(div().flex_1())
@@ -208,6 +212,7 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .child(seg)
@@ -259,6 +264,8 @@ impl Quiver {
             );
         }
 
+        // Below Medium the summary goes under the list, in the same scroll.
+        let two = bp.two_columns();
         let main = div()
             .id("page")
             .flex_1()
@@ -266,9 +273,10 @@ impl Quiver {
             .h_full()
             .overflow_y_scroll()
             .track_scroll(&self.body_scroll)
-            .px(px(28.))
+            .px(px(bp.pad()))
             .pb(px(28.))
-            .children(children);
+            .children(children)
+            .when(!two, |d| d.child(self.render_activity_side(th, true)));
 
         div()
             .relative()
@@ -276,7 +284,7 @@ impl Quiver {
             .flex_1()
             .min_h_0()
             .child(main)
-            .child(self.render_activity_side(th))
+            .when(two, |d| d.child(self.render_activity_side(th, false)))
             .when(self.ui.activity_games_open, |d| d.child(self.render_game_filter_menu(th, cx)))
     }
 
@@ -314,13 +322,14 @@ impl Quiver {
         let game_suffix = g.as_ref().filter(|_| !named).map(|g| short_name(&g.entry.name));
         let pid = a.product_id;
         let open = pid.is_some();
+        let narrow = self.bp().narrow();
         div()
             .id(("act", i))
             .relative()
             .flex()
             .items_center()
-            .gap(px(14.))
-            .px(px(18.))
+            .gap(px(if narrow { 10. } else { 14. }))
+            .px(px(if narrow { 12. } else { 18. }))
             .py(px(11.))
             .bg(if focused { th.ink3 } else { th.ink2 })
             .border_x_1()
@@ -339,7 +348,8 @@ impl Quiver {
             }))
             .child(mono(12., th.tx3).w(px(48.)).flex_none().child(clock(a.at)))
             .child(
-                div().w(px(150.)).flex_none().flex().child(
+                // Narrow: the source's icon only, its name as a tooltip.
+                div().id(("act-who", i)).w(px(if narrow { 24. } else { 150. })).flex_none().flex().when(narrow, |d| d.tooltip(tip(th, actor_label(&a.source)))).child(
                     div()
                         .flex()
                         .items_center()
@@ -353,7 +363,7 @@ impl Quiver {
                         .text_color(color)
                         .max_w(px(150.))
                         .child(icon(i_, 12., color))
-                        .child(div().truncate().child(actor_label(&a.source))),
+                        .when(!narrow, |d| d.child(div().truncate().child(actor_label(&a.source)))),
                 ),
             )
             .child(
@@ -374,7 +384,8 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn render_activity_side(&self, th: &Theme) -> impl IntoElement + use<> {
+    /// The summary column; `stacked`: as a card under the list.
+    fn render_activity_side(&self, th: &Theme, stacked: bool) -> impl IntoElement + use<> {
         // Counts per source in what's loaded.
         let mut by: BTreeMap<&'static str, (usize, gpui::Hsla)> = BTreeMap::new();
         for a in &self.activity {
@@ -397,13 +408,12 @@ impl Quiver {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(290.))
-            .h_full()
+            .when(!stacked, |d| d.w(px(290.)).h_full().border_l_1())
+            .when(stacked, |d| d.mt(px(20.)).rounded(px(12.)).border_1())
             .gap(px(18.))
             .px(px(20.))
             .pt(px(24.))
             .bg(th.ink0)
-            .border_l_1()
             .border_color(th.line1)
             .child(
                 div()
@@ -458,7 +468,7 @@ impl Quiver {
             )
             .child(div().h(px(1.)).bg(th.line1))
             .child(div().flex().flex_col().gap(px(8.)).child(caption("From a terminal", th.tx3)).child(command_line(th, cli)))
-            .child(div().flex_1())
+            .when(!stacked, |d| d.child(div().flex_1()))
             .child(
                 div()
                     .pb(px(16.))
@@ -546,9 +556,9 @@ impl Quiver {
                 div()
                     .id("gf-menu")
                     .absolute()
-                    .top(px(108.))
-                    .left(px(28. + 436.))
-                    .w(px(300.))
+                    .top(px(if self.bp().narrow() { 150. } else { 108. }))
+                    .left(px((28f32 + 436.).min(self.viewport.0 - 316.).max(16.)))
+                    .w(px(300f32.min(self.viewport.0 - 32.)))
                     .flex()
                     .flex_col()
                     .gap(px(1.))

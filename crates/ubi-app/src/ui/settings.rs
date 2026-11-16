@@ -174,6 +174,12 @@ impl Quiver {
             .into_any_element()
     }
 
+    /// Width of the section's column (tables drop columns to fit it).
+    fn settings_w(&self) -> f32 {
+        let bp = self.bp();
+        if bp.two_columns() { (self.viewport.0 - 250. - 72.).clamp(480., 920.) } else { self.viewport.0 - 2. * bp.pad() }
+    }
+
     pub fn render_settings(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let section = self.nav.settings;
         let actions = self.settings_actions();
@@ -191,27 +197,35 @@ impl Quiver {
             SettingsSection::Automation => self.settings_automation(th, &actions, cx),
             SettingsSection::About => self.settings_about(th, &actions, cx),
         };
+        // Below Medium the section list becomes a row of chips over the section.
+        let bp = self.bp();
+        let stacked = !bp.two_columns();
+        let pad = if stacked { bp.pad() } else { 36. };
+        let width = self.settings_w();
+        let nav = self.render_settings_nav(th, stacked, cx);
         div()
             .flex()
+            .when(stacked, |d| d.flex_col())
             .flex_1()
             .min_h_0()
-            .child(self.render_settings_nav(th, cx))
+            .child(nav)
             .child(
                 div()
                     .id("settings-pane")
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.body_scroll)
-                    .px(px(36.))
-                    .pt(px(28.))
+                    .px(px(pad))
+                    .pt(px(if stacked { 20. } else { 28. }))
                     .pb(px(48.))
                     // A definite width, so wrapped text is measured at the width it is drawn at.
-                    .child(div().flex().flex_col().gap(px(18.)).w(px((self.viewport.0 - 250. - 72.).clamp(480., 920.))).children(body)),
+                    .child(div().flex().flex_col().gap(px(18.)).w(px(width)).children(body)),
             )
     }
 
-    fn render_settings_nav(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_settings_nav(&mut self, th: &Theme, stacked: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
         let rows: Vec<AnyElement> = SettingsSection::ALL
             .iter()
@@ -238,19 +252,20 @@ impl Quiver {
                     .relative()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .h(px(34.))
+                    .gap(px(if stacked { 7. } else { 10. }))
+                    .h(px(if stacked { 30. } else { 34. }))
                     .px(px(10.))
                     .rounded(px(7.))
+                    .when(stacked, |d| d.border_1().border_color(if on { th.acc_line } else { th.line1 }))
                     .text_size(px(13.))
                     .text_color(fg)
                     .cursor_pointer()
                     .when(on, |d| d.bg(th.sel).font_weight(MEDIUM))
                     .when(!on, |d| d.hover(move |st| st.bg(hover).text_color(hover_fg)))
                     .focus_ring(focused, th, 7.)
-                    .when(on, |d| d.child(div().absolute().left(px(-8.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded(px(2.)).bg(th.acc)))
+                    .when(on && !stacked, |d| d.child(div().absolute().left(px(-8.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded(px(2.)).bg(th.acc)))
                     .child(icon(section_icon(s), 15., if on { th.acc_hi } else { th.tx3 }))
-                    .child(div().flex_1().child(s.label()))
+                    .child(div().when(!stacked, |d| d.flex_1()).whitespace_nowrap().child(s.label()))
                     .when_some(badge, |d, b| d.child(b))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.nav.focus(&this.layout, Target::SettingsNav(s));
@@ -260,6 +275,23 @@ impl Quiver {
                     .into_any_element()
             })
             .collect();
+        if stacked {
+            let pad = self.bp().pad();
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap(px(12.))
+                .px(px(pad))
+                .pt(px(18.))
+                .pb(px(14.))
+                .bg(th.ink0)
+                .border_b_1()
+                .border_color(th.line1)
+                .child(display(20., BOLD, th.tx1).child("Settings"))
+                .child(div().flex().flex_wrap().gap(px(6.)).children(rows))
+                .into_any_element();
+        }
         div()
             .flex()
             .flex_col()
@@ -286,6 +318,7 @@ impl Quiver {
                         "Quiver {version} · a third-party launcher for your Ubisoft library. Not affiliated with or endorsed by Ubisoft."
                     )),
             )
+            .into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------
@@ -377,6 +410,7 @@ impl Quiver {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(6.))
                                     .text_size(px(12.))
@@ -393,7 +427,7 @@ impl Quiver {
                                     .mt(px(4.))
                                     .text_size(px(12.))
                                     .child(div().size(px(7.)).rounded_full().bg(dot))
-                                    .child(div().text_color(th.tx2).child(status)),
+                                    .child(div().flex_1().min_w_0().text_color(th.tx2).child(status)),
                             ),
                     )
                     .child(buttons)
@@ -440,7 +474,20 @@ impl Quiver {
         } else {
             format!("All {total} games belong to {default_name}")
         };
-        let mut rows: Vec<AnyElement> = vec![table_head(th, &["Game", "Owned by", "Launch account", "Cloud saves from"], &[None, Some(170.), Some(240.), Some(150.)])];
+        // Narrower sections drop "Cloud saves from", then "Owned by".
+        let w = self.settings_w();
+        let (show_owned, show_cloud) = (w >= 640., w >= 820.);
+        let launch_w = if w >= 520. { 240. } else { 150. };
+        let mut cols = vec![("Game", None)];
+        if show_owned {
+            cols.push(("Owned by", Some(170.)));
+        }
+        cols.push(("Launch account", Some(launch_w)));
+        if show_cloud {
+            cols.push(("Cloud saves from", Some(150.)));
+        }
+        let (names, widths): (Vec<&str>, Vec<Option<f32>>) = cols.into_iter().unzip();
+        let mut rows: Vec<AnyElement> = vec![table_head(th, &names, &widths)];
         for g in &games {
             let art = self.art_for(g, ArtSlot::Tile, Variant::Tile, cx);
             let owners: Vec<String> = g.entry.owned_by.iter().map(|o| name_of(o)).collect();
@@ -482,28 +529,30 @@ impl Quiver {
                             .child(div().w(px(22.)).h(px(26.)).flex_none().child(art_fill(th, &art, "", 4., false)))
                             .child(div().truncate().child(clean_name(&g.entry.name))),
                     )
-                    .child(div().w(px(170.)).flex_none().text_color(th.tx2).truncate().child(owners.join(", ")))
+                    .when(show_owned, |d| d.child(div().w(px(170.)).flex_none().text_color(th.tx2).truncate().child(owners.join(", "))))
                     .child(
                         div()
-                            .w(px(240.))
+                            .w(px(launch_w))
                             .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().text_color(if g.entry.owned_by.len() > 1 { th.tx1 } else { th.tx3 }).child(launch))
+                            .child(div().min_w_0().truncate().text_color(if g.entry.owned_by.len() > 1 { th.tx1 } else { th.tx3 }).child(launch))
                             .when(over.is_some(), |d| d.child(pill(th, PillKind::Warn, None, "Override"))),
                     )
-                    .child(
-                        div()
-                            .w(px(150.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_color(th.tx2)
-                            .child(icon(Icon::Cloud, 12., th.tx3))
-                            .child(launch_id.as_deref().map(name_of).unwrap_or_default()),
-                    )
+                    .when(show_cloud, |d| {
+                        d.child(
+                            div()
+                                .w(px(150.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_color(th.tx2)
+                                .child(icon(Icon::Cloud, 12., th.tx3))
+                                .child(launch_id.as_deref().map(name_of).unwrap_or_default()),
+                        )
+                    })
                     .into_any_element(),
             );
         }
@@ -682,7 +731,15 @@ impl Quiver {
                 rows.push(note_row(th, "No Proton builds found in Steam's compatibilitytools.d. Install GE-Proton there, then Rescan."))
             }
             Some(Ok(list)) => {
-                rows.push(table_head(th, &["Build", "Found in", "Pinned by"], &[None, Some(220.), Some(260.)]));
+                // Narrower sections drop "Found in" (always Steam's folder), then narrow "Pinned by".
+                let w = self.settings_w();
+                let show_found = w >= 720.;
+                let pinned_w = if w >= 560. { 260. } else { 110. };
+                if show_found {
+                    rows.push(table_head(th, &["Build", "Found in", "Pinned by"], &[None, Some(220.), Some(pinned_w)]));
+                } else {
+                    rows.push(table_head(th, &["Build", "Pinned by"], &[None, Some(pinned_w)]));
+                }
                 // Newest first, like the daemon's pick.
                 for b in list.iter().rev() {
                     let is_default = default.as_deref() == Some(b.as_str());
@@ -705,10 +762,10 @@ impl Quiver {
                                     .child(mono(12.5, th.tx1).font_weight(SEMIBOLD).child(b.clone()))
                                     .when(is_default, |d| d.child(pill(th, PillKind::Accent, None, "Default"))),
                             )
-                            .child(div().w(px(220.)).flex_none().text_color(th.tx2).child("Steam compatibilitytools.d"))
+                            .when(show_found, |d| d.child(div().w(px(220.)).flex_none().text_color(th.tx2).child("Steam compatibilitytools.d")))
                             .child(
                                 div()
-                                    .w(px(260.))
+                                    .w(px(pinned_w))
                                     .flex_none()
                                     .truncate()
                                     .text_color(if by.is_empty() { th.tx4 } else { th.tx2 })
@@ -806,6 +863,7 @@ impl Quiver {
                     None,
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(10.))
                         .child(status)
@@ -822,6 +880,7 @@ impl Quiver {
                         let selected = steam.selected.as_deref() == Some(u.id.as_str());
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(icon(Icon::User, 13., if selected { th.acc_hi } else { th.tx3 }))
@@ -894,6 +953,7 @@ impl Quiver {
                                 .child(
                                     div()
                                         .flex()
+                                        .flex_wrap()
                                         .items_center()
                                         .gap(px(10.))
                                         .child(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::SteamRestart), Kind::Secondary, Some(Icon::RefreshCw), "Restart Steam…", cx))
@@ -905,6 +965,7 @@ impl Quiver {
                             div()
                                 .pl(px(26.))
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .gap(px(10.))
                                 .child(div().text_size(px(12.5)).text_color(th.tx2).child("Steam is closed, so they can be written now."))
@@ -925,7 +986,22 @@ impl Quiver {
                 "No shortcuts yet. Add a game to Steam or your app launcher from its page.",
             )),
             Some(Ok(list)) => {
-                rows.push(table_head(th, &["Game", "Where", "Written", "State", ""], &[None, Some(250.), Some(90.), Some(170.), Some(86.)]));
+                // Narrower sections drop "Where", then "Written"; Remove becomes an icon.
+                let w = self.settings_w();
+                let (show_where, show_written, wide_btn) = (w >= 860., w >= 700., w >= 560.);
+                let state_w = if w >= 560. { 170. } else { 130. };
+                let btn_w = if wide_btn { 86. } else { 32. };
+                let mut cols: Vec<(&str, Option<f32>)> = vec![("Game", None)];
+                if show_where {
+                    cols.push(("Where", Some(250.)));
+                }
+                if show_written {
+                    cols.push(("Written", Some(90.)));
+                }
+                cols.push(("State", Some(state_w)));
+                cols.push(("", Some(btn_w)));
+                let (names, widths): (Vec<&str>, Vec<Option<f32>>) = cols.into_iter().unzip();
+                rows.push(table_head(th, &names, &widths));
                 for (i, x) in list.clone().iter().enumerate() {
                     let r = &x.record;
                     let g = self.game(r.product_id).cloned();
@@ -971,17 +1047,17 @@ impl Quiver {
                                     .child(div().truncate().child(crate::model::short_name(&r.name)))
                                     .child(chip(th, Some(kind_icon), kind, false).h(px(22.)).text_size(px(11.))),
                             )
-                            .child(mono(11.5, th.tx3).w(px(250.)).flex_none().truncate().child(place))
-                            .child(div().w(px(90.)).flex_none().text_size(px(12.)).text_color(th.tx3).child(ago(r.written_at)))
-                            .child(div().w(px(170.)).flex_none().flex().child(state))
+                            .when(show_where, |d| d.child(mono(11.5, th.tx3).w(px(250.)).flex_none().truncate().child(place)))
+                            .when(show_written, |d| d.child(div().w(px(90.)).flex_none().text_size(px(12.)).text_color(th.tx3).child(ago(r.written_at))))
+                            .child(div().w(px(state_w)).flex_none().flex().overflow_hidden().child(state))
                             .child(
-                                div().w(px(86.)).flex_none().flex().justify_end().child(self.action_button(
+                                div().w(px(btn_w)).flex_none().flex().justify_end().child(self.action_button(
                                     th,
                                     actions,
                                     SettingsAction::Cmd(GlobalCmd::RemoveExport(i)),
                                     Kind::Ghost,
                                     Some(Icon::Trash),
-                                    "Remove",
+                                    if wide_btn { "Remove" } else { "" },
                                     cx,
                                 )),
                             )
@@ -1032,8 +1108,10 @@ impl Quiver {
                     rows.push(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(12.))
+                            .gap_x(px(12.))
+                            .gap_y(px(6.))
                             .px(px(16.))
                             .py(px(9.))
                             .border_t_1()
@@ -1045,7 +1123,7 @@ impl Quiver {
                                     .flex()
                                     .flex_col()
                                     .flex_1()
-                                    .min_w_0()
+                                    .min_w(px(160.))
                                     .gap(px(1.))
                                     .when(lib.is_some(), |d| d.cursor_pointer())
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1135,6 +1213,7 @@ impl Quiver {
         );
         let markers = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(6.))
             .children(["tag:quiver-game", "QUIVER_* env", "systemd scope", "sessions socket"].map(|t| {
@@ -1161,6 +1240,7 @@ impl Quiver {
                         None,
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(seg(&[("Follow Omarchy", !builtin), ("Quiver dark", builtin)]))
@@ -1177,6 +1257,7 @@ impl Quiver {
                         Some("Re-read whenever theme.generation changes"),
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(swatches)
@@ -1199,6 +1280,7 @@ impl Quiver {
                         Some("Read directly; never grabbed exclusively"),
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(match &self.pad {
@@ -1214,6 +1296,7 @@ impl Quiver {
                         Some("Forwards the pad to Quiver while its window has focus"),
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(if hyprpad {
@@ -1234,6 +1317,7 @@ impl Quiver {
                         None,
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(10.))
                             .child(seg(&[("When I use a gamepad", true), ("Always", false), ("Never", false)]))
@@ -1272,11 +1356,14 @@ impl Quiver {
                 .child(div().w(px(46.)).h(px(30.)).rounded(px(6.)).bg(c).border_1().border_color(th.line2))
                 .child(mono(10., th.tx3).child(l.to_owned()))
         };
+        // The ink swatches go under the sample below 640 px.
+        let stack = self.settings_w() < 640.;
         card(th)
             .child(card_head(th, "Preview", "How the current theme draws Quiver's parts", None))
             .child(
                 div()
                     .flex()
+                    .when(stack, |d| d.flex_col())
                     .gap(px(24.))
                     .p(px(16.))
                     .child(
@@ -1288,6 +1375,7 @@ impl Quiver {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(8.))
                                     .child(button("pv-play", th, Kind::Primary, Size::Medium, Some(Icon::Play), "Play"))
@@ -1302,6 +1390,7 @@ impl Quiver {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(6.))
                                     .child(chip(th, None, "Installed", true))
@@ -1323,6 +1412,7 @@ impl Quiver {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(12.))
                                     .child(div().text_color(th.tx1).child("Primary"))
@@ -1399,11 +1489,12 @@ impl Quiver {
         let kv = |k: &str, v: AnyElement| {
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(10.))
                 .text_size(px(12.5))
                 .child(div().w(px(170.)).flex_none().text_color(th.tx2).child(k.to_owned()))
-                .child(v)
+                .child(div().flex_1().min_w(px(160.)).child(v))
         };
         let copy = self.action_button(th, actions, SettingsAction::Copy(socket.clone()), Kind::Ghost, Some(Icon::Copy), "Copy", cx);
         let daemon = card(th)
@@ -1412,19 +1503,21 @@ impl Quiver {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(10.))
                     .child(div().size(px(8.)).rounded_full().bg(dot))
                     .child(div().font_weight(SEMIBOLD).child(state))
                     .child(mono(11.5, th.tx3).child(format!("v{version}"))),
             )
-            .child(kv("Socket", div().flex().items_center().gap(px(8.)).child(mono(12., th.tx2).child(socket_short)).child(copy).into_any_element()))
+            .child(kv("Socket", div().flex().flex_wrap().items_center().gap(px(8.)).child(mono(12., th.tx2).child(socket_short)).child(copy).into_any_element()))
             .child(kv("This window's source", mono(12., th.who_gui).child("gui").into_any_element()))
             .when_some(broker, |d, b| d.child(kv("Ticket broker for bridges", mono(12., th.tx2).child(b).into_any_element())))
             .child(kv(
                 "Protocol",
                 div().text_color(th.tx3).child("JSON lines; every request carries a source, kept in Activity").into_any_element(),
             ));
+        let cell_w = if self.settings_w() >= 560. { 150. } else { 80. };
         let policy_cell = |v: &str| {
             let (fg, bg) = match v {
                 "Ask" => (th.warn, th.warn_soft),
@@ -1432,11 +1525,11 @@ impl Quiver {
                 _ => (th.ok, th.ok_soft),
             };
             div()
-                .w(px(150.))
+                .w(px(cell_w))
                 .flex_none()
                 .child(div().flex_none().w(px(70.)).py(px(2.)).rounded(px(6.)).bg(bg).text_color(fg).text_size(px(12.)).font_weight(SEMIBOLD).flex().justify_center().child(v.to_owned()))
         };
-        let mut policy: Vec<AnyElement> = vec![table_head(th, &["Action", "quiver CLI (you)", "Agents"], &[None, Some(150.), Some(150.)])];
+        let mut policy: Vec<AnyElement> = vec![table_head(th, &["Action", if cell_w < 150. { "CLI" } else { "quiver CLI (you)" }, "Agents"], &[None, Some(cell_w), Some(cell_w)])];
         for (a, c, g) in POLICY {
             policy.push(
                 div()
@@ -1447,7 +1540,7 @@ impl Quiver {
                     .h(px(40.))
                     .border_t_1()
                     .border_color(th.line1)
-                    .child(div().flex_1().child(a))
+                    .child(div().flex_1().min_w_0().child(a))
                     .child(policy_cell(c))
                     .child(policy_cell(g))
                     .into_any_element(),
@@ -1489,9 +1582,10 @@ impl Quiver {
                     div().flex().flex_col().gap(px(8.)).p(px(16.)).children(cli.map(|(c, what)| {
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(12.))
-                            .child(command_line(th, c).w(px(470.)).flex_none())
+                            .child(command_line(th, c).w(px(470.)).max_w(gpui::relative(1.)))
                             .child(div().text_size(px(12.)).text_color(th.tx3).child(what))
                     })),
                 )
@@ -1527,6 +1621,7 @@ impl Quiver {
                         .flex_col()
                         .gap(px(4.))
                         .flex_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .flex()
@@ -1547,6 +1642,7 @@ impl Quiver {
                 "",
                 vec![div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(8.))
                     .py(px(10.))
                     .border_t_1()
@@ -1579,6 +1675,7 @@ fn short_id(id: &str) -> String {
 fn head_row(th: &Theme, title: &str, sub: &str, right: Option<AnyElement>) -> AnyElement {
     div()
         .flex()
+        .flex_wrap()
         .items_end()
         .gap(px(16.))
         .pb(px(2.))
@@ -1587,6 +1684,7 @@ fn head_row(th: &Theme, title: &str, sub: &str, right: Option<AnyElement>) -> An
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_w(px(220.))
                 .gap(px(3.))
                 .child(div().text_size(px(20.)).font_weight(BOLD).child(title.to_owned()))
                 .child(div().text_color(th.tx3).child(sub.to_owned())),
@@ -1604,8 +1702,10 @@ fn group(th: &Theme, title: &str, sub: &str, rows: Vec<AnyElement>) -> AnyElemen
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .gap(px(8.))
+                .gap_x(px(8.))
+                .gap_y(px(2.))
                 .pt(px(10.))
                 .pb(px(8.))
                 .child(div().font_weight(SEMIBOLD).text_size(px(13.5)).child(title.to_owned()))
@@ -1617,10 +1717,13 @@ fn group(th: &Theme, title: &str, sub: &str, rows: Vec<AnyElement>) -> AnyElemen
 
 /// One setting: label (and help) on the left, the value or control on the right.
 fn frow(th: &Theme, label: &str, help: Option<&str>, control: AnyElement) -> AnyElement {
+    // The control goes under the label when it would get narrower than 220 px.
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(16.))
+        .gap_x(px(16.))
+        .gap_y(px(8.))
         .py(px(10.))
         .border_t_1()
         .border_color(th.line1)
@@ -1634,19 +1737,21 @@ fn frow(th: &Theme, label: &str, help: Option<&str>, control: AnyElement) -> Any
                 .child(div().font_weight(MEDIUM).text_size(px(12.5)).child(label.to_owned()))
                 .when_some(help, |d, h| d.child(div().text_size(px(11.5)).line_height(px(15.)).text_color(th.tx3).child(h.to_owned()))),
         )
-        .child(div().flex_1().min_w_0().flex().flex_col().child(control))
+        .child(div().flex_1().min_w(px(220.)).flex().flex_col().child(control))
         .into_any_element()
 }
 
 fn card_head(th: &Theme, title: &str, sub: &str, right: Option<AnyElement>) -> Div {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(10.))
+        .gap_x(px(10.))
+        .gap_y(px(4.))
         .px(px(16.))
         .py(px(12.))
         .child(div().font_weight(SEMIBOLD).text_size(px(13.5)).child(title.to_owned()))
-        .when(!sub.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(sub.to_owned())))
+        .when(!sub.is_empty(), |d| d.child(div().min_w_0().text_size(px(12.)).text_color(th.tx3).truncate().child(sub.to_owned())))
         .child(div().flex_1())
         .when_some(right, |d, r| d.child(r))
 }
@@ -1679,13 +1784,14 @@ fn note_row(th: &Theme, text: &str) -> AnyElement {
 fn foot_cli(th: &Theme, cmd: &str, what: &str) -> AnyElement {
     div()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(10.))
         .px(px(16.))
         .py(px(10.))
         .border_t_1()
         .border_color(th.line1)
-        .child(command_line(th, cmd.to_owned()).w(px(360.)).flex_none())
+        .child(command_line(th, cmd.to_owned()).flex_1().min_w(px(200.)).max_w(px(360.)))
         .child(div().text_size(px(12.)).text_color(th.tx3).child(what.to_owned()))
         .into_any_element()
 }
