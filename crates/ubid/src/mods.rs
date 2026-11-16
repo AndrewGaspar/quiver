@@ -34,6 +34,11 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
     .await?
 }
 
+/// Store work that must not interleave with mod-store changes (save stores, merges).
+pub(crate) async fn with_store_lock<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    blocking(f).await
+}
+
 /// The "Ask" rule for agents.
 fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
     if is_human_source(source) || confirmed {
@@ -79,10 +84,9 @@ fn launch_profile(store: &ModStore, product_id: u32, requested: Option<&str>) ->
 }
 
 /// The launch plan for `profile` (`None`: the game's default profile, see
-/// [`launch_profile`]; `vanilla`: unmodded). A profile from before Mods v2 that has its own
-/// saves folder first gets `separate_saves=on` recorded (see `ModStore::migrate`). Also
-/// returns the warning when a deleted default profile made it vanilla (it's in the plan's
-/// warnings too).
+/// [`launch_profile`]; `vanilla`: unmodded). Profiles without a save store first get one
+/// recorded (see `ModStore::migrate`): their own folder, or Default. Also returns the
+/// warning when a deleted default profile made it vanilla (it's in the plan's warnings too).
 pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: &str) -> Result<(Plan, Option<String>)> {
     let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let store = store_for(game);
@@ -115,6 +119,9 @@ pub(crate) fn plan_lines(p: &LaunchPlan) -> Vec<String> {
         out.push(format!("mods: {}", p.mods.join(" < ")));
     }
     out.push(format!("saves: {} ({})", p.saves.folder, p.saves.reason));
+    if let Some(n) = &p.saves.cloud_note {
+        out.push(format!("note: {n}"));
+    }
     for c in &p.setting_conflicts {
         let by: Vec<String> = c.by.iter().map(|b| format!("{}={}", b.from, b.value.as_deref().unwrap_or("(deleted)"))).collect();
         out.push(format!("conflict: {} set by {} (the last wins)", c.key, by.join(", ")));
@@ -201,12 +208,13 @@ impl Daemon {
                 );
                 json!(layer)
             }
-            ModsRequest::ProfileCreate { product_id, name, layers, message } => {
+            ModsRequest::ProfileCreate { product_id, name, layers, message, saves } => {
                 let store = store(product_id)?;
-                let (rev, notes) = blocking(move || {
-                    let rev = store.create_profile(&name, &layers, &src, message)?;
+                let followed = saves.is_none();
+                let (rev, notes, advice) = blocking(move || {
+                    let (rev, advice) = store.create_profile_with(&name, &layers, saves.as_deref(), &src, message)?;
                     let notes = stack_notes(&store, &rev);
-                    Ok((rev, notes))
+                    Ok((rev, notes, advice))
                 })
                 .await?;
                 self.mods_changed(
@@ -214,7 +222,12 @@ impl Daemon {
                     product_id,
                     format!("created mod profile '{}' ({}) for {}", rev.profile.name, rev.profile.id, self.product_name(product_id)),
                 );
-                with_notes(json!(rev), notes)
+                let mut v = with_notes(json!(rev), notes);
+                // Why the store was picked, when the daemon picked it.
+                if let Some(o) = v.as_object_mut().filter(|_| followed) {
+                    o.insert("saves_advice".into(), json!(advice));
+                }
+                v
             }
             ModsRequest::ProfileSet { product_id, profile, ops, message } => {
                 let store = store(product_id)?;
@@ -426,7 +439,7 @@ impl Daemon {
             ModsRequest::Migrate { product_id, dry_run } => {
                 let store = store(product_id)?;
                 let report = blocking(move || store.migrate(dry_run, &src)).await?;
-                if !dry_run && !report.kept_separate_saves.is_empty() {
+                if !dry_run && !report.profile_stores.is_empty() {
                     self.mods_changed(
                         source,
                         product_id,

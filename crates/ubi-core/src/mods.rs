@@ -15,11 +15,10 @@
 //! **Mods v2.** An installed mod is a layer with a manifest (launch settings, config
 //! patches, metadata); a layer from before Mods v2 is a file-only mod and needs no
 //! migration: same id, same folder, same history. A profile's `layers` are its mod stack
-//! and its `settings` its own overrides, so v1 profiles read as v2 profiles unchanged. The
-//! one behaviour that changes is saves: v1 forked every profile's saves, v2 forks only for
-//! mods that aren't save-compatible. A profile that already has its own saves folder keeps
-//! it ([`ModStore::saves_plan`] checks the prefix, and [`ModStore::migrate`] records
-//! `separate_saves=on` for such profiles), so no saves move or vanish.
+//! and its `settings` its own overrides, so v1 profiles read as v2 profiles unchanged. Saves
+//! are separate from mods: each profile points at a save store ([`crate::savestores`]). A
+//! profile that already has its own saves folder keeps it ([`ModStore::migrate`] makes that
+//! folder a store), so no saves move or vanish.
 //!
 //! Profile history lives next to the game's settings history (`games/<product>/`) and uses
 //! the same JSON-lines revisions, but per profile: each profile is its own scope with its
@@ -74,8 +73,9 @@ pub struct Plan {
     pub view: View,
     /// The record of changed config keys (`patches.json`).
     pub record: PathBuf,
-    /// Profile id whose own saves folder the launch uses (`None`: vanilla's).
-    pub saves_profile: Option<String>,
+    /// The saves folder the launch uses, under `savegames/<user>/` (its save store's
+    /// folder: `<product>` for Default).
+    pub saves_folder: String,
 }
 
 impl Plan {
@@ -109,7 +109,7 @@ pub struct ModStore {
 }
 
 /// A fresh random id: `prefix` and 6 base-36 characters.
-fn new_id(prefix: char) -> Result<String> {
+pub(crate) fn new_id(prefix: char) -> Result<String> {
     let mut bytes = [0u8; 8];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let mut n = u64::from_le_bytes(bytes);
@@ -479,6 +479,19 @@ impl ModStore {
 
     fn record_path(&self) -> PathBuf {
         self.mods_dir().join("patches.json")
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data
+    }
+
+    pub fn product_id(&self) -> u32 {
+        self.product_id
+    }
+
+    /// The game's prefix, when the store knows the game ([`Self::with_game`]).
+    pub fn game_prefix(&self) -> Option<&Path> {
+        self.prefix()
     }
 
     /// Where a profile's own copies of prefix folders live (laid out like the prefix).
@@ -1166,7 +1179,7 @@ impl ModStore {
         Ok(())
     }
 
-    fn append(&self, profile: Profile, deleted: bool, source: &str, message: Option<String>) -> Result<ProfileRevision> {
+    pub(crate) fn append(&self, profile: Profile, deleted: bool, source: &str, message: Option<String>) -> Result<ProfileRevision> {
         let path = self.history_path(&profile.id);
         let revision = read_jsonl::<ProfileRevision>(&path)?.last().map_or(0, |r| r.revision) + 1;
         let rev = ProfileRevision { revision, at: chrono::Utc::now(), source: source.to_owned(), message, deleted, profile };
@@ -1174,8 +1187,23 @@ impl ModStore {
         Ok(rev)
     }
 
-    /// A new profile with `layers` (ids or names, bottom to top).
+    /// A new profile with `layers` (ids or names, bottom to top), with the save store the
+    /// advice picks (see [`Self::create_profile_with`]).
     pub fn create_profile(&self, name: &str, layers: &[String], source: &str, message: Option<String>) -> Result<ProfileRevision> {
+        self.create_profile_with(name, layers, None, source, message).map(|(r, _)| r)
+    }
+
+    /// A new profile. `saves` names its save store (`default`, `new`, a store's id or
+    /// name); `None` follows the advice: Default when every mod is save-compatible, else a
+    /// new store named after the profile. Returns the advice too, so callers can say why.
+    pub fn create_profile_with(
+        &self,
+        name: &str,
+        layers: &[String],
+        saves: Option<&str>,
+        source: &str,
+        message: Option<String>,
+    ) -> Result<(ProfileRevision, ubi_api::savestores::SavesAdvice)> {
         let name = name.trim();
         if name.is_empty() {
             bail!("a profile needs a name");
@@ -1188,7 +1216,11 @@ impl ModStore {
         };
         self.check_name(name, &id)?;
         let layers = self.resolve_layers(layers)?;
-        self.append(Profile { id, name: name.to_owned(), layers, ..Default::default() }, false, source, message)
+        let advice = self.saves_advice(&layers)?;
+        let wanted = saves.unwrap_or(if advice.share_default { crate::savestores::DEFAULT_STORE } else { crate::savestores::NEW_STORE });
+        let store = self.resolve_store(wanted, name, source)?;
+        let p = Profile { id, name: name.to_owned(), layers, saves: Some(store), ..Default::default() };
+        Ok((self.append(p, false, source, message)?, advice))
     }
 
     /// Edit a profile ([`Profile::apply`] keys; `layers` takes ids or names). No-op edits
@@ -1206,6 +1238,10 @@ impl ModStore {
                     let dirs = self.check_config_dirs(&ubi_api::mods::split_list(value))?;
                     SettingOp::Set { key: key.clone(), value: dirs.join(",") }
                 }
+                // `new` is made below, once the edit is known to go through.
+                SettingOp::Set { key, value } if key == "saves" && !value.trim().is_empty() && !same_name(value, crate::savestores::NEW_STORE) => {
+                    SettingOp::Set { key: key.clone(), value: self.resolve_store(value, &p.name, source)? }
+                }
                 op => op.clone(),
             };
             p.apply(&op).map_err(anyhow::Error::msg)?;
@@ -1214,6 +1250,9 @@ impl ModStore {
             return Ok(current);
         }
         self.check_name(&p.name, &p.id)?;
+        if p.saves.as_deref().is_some_and(|s| same_name(s, crate::savestores::NEW_STORE)) {
+            p.saves = Some(self.resolve_store(crate::savestores::NEW_STORE, &p.name, source)?);
+        }
         self.append(p, false, source, message)
     }
 
@@ -1264,6 +1303,8 @@ impl ModStore {
             vanilla_fixes: self.vanilla_fixes()?.into_iter().map(|l| l.id).collect(),
             // A game setting; the daemon fills it in.
             default_profile: None,
+            save_stores: self.save_stores().current()?.stores,
+            vanilla_saves: Some(self.saves_plan(None, &[])),
         })
     }
 
@@ -1334,11 +1375,14 @@ impl ModStore {
         setting_conflicts.extend(patch_conflicts(&mods));
         let ids: Vec<String> = mods.iter().map(|m| m.id.clone()).collect();
         let file_conflicts = self.conflicts(&ids);
+        if let Some(p) = profile {
+            self.store_notes(p, &mods, &mut problems, &mut warnings);
+        }
         Ok(Stack { mods, problems, warnings, setting_conflicts, settings, file_conflicts })
     }
 
     /// The saves folder a profile made before Mods v2 (relative to the prefix), if any.
-    fn legacy_saves(&self, id: &str) -> Option<String> {
+    pub(crate) fn legacy_saves(&self, id: &str) -> Option<String> {
         let saves = self.prefix()?.join(crate::launcher::UPC_REL).join("savegames");
         let name = format!("{}-{id}", self.product_id);
         let mut users: Vec<String> = std::fs::read_dir(&saves).ok()?.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
@@ -1346,37 +1390,11 @@ impl ModStore {
         users.into_iter().find(|u| saves.join(u).join(&name).is_dir()).map(|u| format!("{}/savegames/{u}/{name}", crate::launcher::UPC_REL))
     }
 
-    /// Whose saves a launch uses: vanilla's, unless the profile says otherwise, a mod in
-    /// the stack isn't save-compatible, or the profile already has a saves folder of its own
-    /// (from before Mods v2, when every profile had one).
+    /// Whose saves a launch uses: the save store the profile (or vanilla) points at, synced
+    /// with the cloud if that's the cloud store. A profile from before save stores (not
+    /// migrated yet) follows the old rule (see [`crate::savestores`]).
     pub fn saves_plan(&self, profile: Option<&Profile>, mods: &[Layer]) -> SavesPlan {
-        let pid = self.product_id;
-        let Some(p) = profile else {
-            return SavesPlan {
-                separate: false,
-                reason: "vanilla uses the game's own saves".into(),
-                folder: format!("savegames/<user>/{pid}"),
-                cloud: true,
-            };
-        };
-        let (separate, reason) = match p.separate_saves {
-            Some(true) => (true, "separate_saves is on for this profile".to_owned()),
-            Some(false) => (false, "separate_saves is off: the profile shares vanilla's saves".to_owned()),
-            None => match mods.iter().find(|m| !m.save_compatible()) {
-                Some(m) => (true, format!("{} isn't marked save-compatible", m.name)),
-                None => match self.legacy_saves(&p.id) {
-                    Some(f) => (true, format!("the profile has its own saves folder from before Mods v2 ({f})")),
-                    None => (false, "every mod in the stack is save-compatible: the profile shares vanilla's saves".to_owned()),
-                },
-            },
-        };
-        let (folder, cloud, reason) = if separate {
-            let cloud = if p.cloud_saves { "synced with the cloud (cloud_saves=on)" } else { "kept local (cloud_saves=off)" };
-            (format!("savegames/<user>/{pid}-{}", p.id), p.cloud_saves, format!("{reason}; {cloud}"))
-        } else {
-            (format!("savegames/<user>/{pid}"), true, format!("{reason}; synced with the cloud like vanilla"))
-        };
-        SavesPlan { separate, reason, folder, cloud }
+        self.store_saves_plan(profile, mods)
     }
 
     /// Prefix folders as given (prefix-relative or absolute inside the prefix), normalized
@@ -1517,32 +1535,20 @@ impl ModStore {
             config_dirs,
             patches: preview,
         };
-        let saves_profile = profile.as_ref().filter(|_| saves.separate).map(|p| p.id.clone());
-        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_profile })
+        let saves_folder = saves.folder.trim_start_matches("savegames/<user>/").to_owned();
+        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder })
     }
 
-    /// Make v1 data explicit for Mods v2: live profiles that already have their own saves
-    /// folder and no `separate_saves` setting get `separate_saves=on` (a revision), so they
-    /// keep that folder whatever their mods say. Layers need nothing (they're file-only
-    /// mods as they are). Idempotent.
+    /// Make older data explicit: every live profile without a save store gets one (see
+    /// [`Self::migrate_saves`]). Layers need nothing (they're file-only mods as they are).
+    /// Idempotent.
     pub fn migrate(&self, dry_run: bool, source: &str) -> Result<MigrationReport> {
         let mut report = MigrationReport { product_id: self.product_id, dry_run, ..Default::default() };
         report.file_only_mods = self.layers()?.into_iter().filter(|l| l.manifest.is_none()).map(|l| l.id).collect();
         if self.prefix().is_none() {
             report.notes.push("no game prefix given; profiles' saves folders weren't checked".into());
         }
-        for (p, _) in self.profiles()? {
-            if p.separate_saves.is_some() {
-                continue;
-            }
-            let Some(folder) = self.legacy_saves(&p.id) else { continue };
-            if !dry_run {
-                let ops = [SettingOp::Set { key: "separate_saves".into(), value: "on".into() }];
-                self.set_profile(&p.id, &ops, source, Some(format!("Mods v2: keeps its own saves folder ({folder})")))?;
-            }
-            report.notes.push(format!("profile '{}' keeps its own saves ({folder}); separate_saves=on", p.name));
-            report.kept_separate_saves.push((p.id, folder));
-        }
+        self.migrate_saves(dry_run, source, &mut report)?;
         Ok(report)
     }
 
@@ -1664,12 +1670,11 @@ mod tests {
         assert!(store.create_profile("x", &["nope".into()], "cli", None).is_err());
         assert!(store.create_profile("x", &["A".into(), "A".into()], "cli", None).is_err());
 
-        let r2 = store.set_profile("visual overhaul", &ops(&["layers=A,B", "cloud_saves=on"]), "agent", None).unwrap();
+        let r2 = store.set_profile("visual overhaul", &ops(&["layers=A,B"]), "agent", None).unwrap();
         assert_eq!(r2.revision, 2);
         assert_eq!(r2.profile.layers, [a.id.clone(), b.id.clone()]);
-        assert!(r2.profile.cloud_saves);
         // A no-op doesn't make a revision.
-        assert_eq!(store.set_profile(&id, &ops(&["cloud_saves=on"]), "cli", None).unwrap().revision, 2);
+        assert_eq!(store.set_profile(&id, &ops(&["layers=A,B"]), "cli", None).unwrap().revision, 2);
         let r3 = store.set_profile(&id, &ops(&["pinned=on", "env.DXVK_HUD=fps", "name=VO"]), "cli", None).unwrap();
         assert_eq!(r3.revision, 3);
         assert!(r3.profile.pinned);
@@ -1958,15 +1963,17 @@ mod tests {
         assert_eq!(plan.api.mods, ["l9uv5ua", "lzrticn"]);
         assert_eq!(plan.api.settings.dll_overrides["d3d11"], "n,b");
         assert!(plan.api.problems.is_empty(), "{:?}", plan.api.problems);
-        // Its saves stay where they are, synced as before (cloud_saves=on).
-        assert_eq!(plan.saves_profile.as_deref(), Some("ptkzxpv"));
-        assert!(plan.api.saves.separate && plan.api.saves.cloud);
+        // Its saves stay where they are, synced as before (cloud_saves=on) until it's
+        // migrated to a save store.
+        assert_eq!(plan.saves_folder, "3539-ptkzxpv");
+        assert!(plan.api.saves.separate && plan.api.saves.cloud && plan.api.saves.store.is_none());
         assert_eq!(plan.overlays.len(), 1);
         assert_eq!(plan.overlays[0].lower, [store.layer_dir("lzrticn"), store.layer_dir("l9uv5ua")], "topmost first");
         assert_eq!(plan.overlays[0].upper, store.profile_dir("ptkzxpv").join("upper"), "the same writable layer as v1");
         // Vanilla: nothing mounted, its own saves.
         let v = store.plan(None).unwrap();
-        assert!(v.overlays.is_empty() && v.api.mods.is_empty() && v.saves_profile.is_none());
+        assert!(v.overlays.is_empty() && v.api.mods.is_empty() && v.saves_folder == "3539");
+        assert_eq!(v.api.saves.store.as_deref(), Some("default"));
         assert!(g.install_dir.join("videos/UbisoftLogo.bk2").is_file());
     }
 
@@ -1982,38 +1989,140 @@ mod tests {
         assert_eq!(c.layer.manifest.as_ref().unwrap().id, "lzrticn");
         let info = store.state().unwrap().profiles.remove(0);
         let saves = info.saves.unwrap();
-        assert!(saves.separate && saves.reason.contains("before Mods v2"), "{saves:?}");
+        assert!(saves.separate && saves.reason.contains("before save stores"), "{saves:?}");
 
         let dry = store.migrate(true, "cli").unwrap();
         assert_eq!(dry.kept_separate_saves.len(), 1);
         assert!(dry.kept_separate_saves[0].1.ends_with(&format!("savegames/{USER}/3539-ptkzxpv")));
         assert_eq!(store.history("ptkzxpv").unwrap().len(), 4, "a dry run changes nothing");
+        assert!(store.save_stores().history().unwrap().is_empty());
         assert!(dry.file_only_mods.is_empty(), "both have a manifest of their own now");
 
         let r = store.migrate(false, "cli").unwrap();
         assert_eq!(r.kept_separate_saves.len(), 1);
+        assert_eq!(r.stores_created.len(), 1);
+        let sid = r.stores_created[0].clone();
+        assert_eq!(r.profile_stores, [("ptkzxpv".to_owned(), sid.clone())]);
+        assert!(r.notes.iter().any(|n| n.contains("cloud_saves=on") && n.contains("merge")), "{:?}", r.notes);
+        // The folder became a store (local only: Default keeps the cloud), as a revision.
+        let stores = store.save_stores().current().unwrap();
+        let s = stores.get(&sid).unwrap();
+        assert_eq!((s.name.as_str(), s.folder.as_str(), s.cloud), ("DLSS", "3539-ptkzxpv", false));
+        assert_eq!(stores.cloud_store().unwrap().id, "default");
         let hist = store.history("ptkzxpv").unwrap();
         assert_eq!(hist.len(), 5);
-        assert_eq!(hist[4].profile.separate_saves, Some(true));
-        assert!(hist[4].message.as_deref().unwrap().contains("own saves folder"));
+        assert_eq!(hist[4].profile.saves.as_deref(), Some(sid.as_str()));
+        assert_eq!((hist[4].profile.separate_saves, hist[4].profile.cloud_saves), (None, false));
+        assert!(hist[4].message.as_deref().unwrap().contains("nothing moved"));
         // Idempotent.
-        assert!(store.migrate(false, "cli").unwrap().kept_separate_saves.is_empty());
+        let again = store.migrate(false, "cli").unwrap();
+        assert!(again.kept_separate_saves.is_empty() && again.profile_stores.is_empty());
         assert_eq!(store.history("ptkzxpv").unwrap().len(), 5);
+        assert_eq!(store.save_stores().history().unwrap().len(), 1);
         let plan = store.plan(Some("DLSS")).unwrap();
-        assert_eq!(plan.saves_profile.as_deref(), Some("ptkzxpv"));
-        assert!(plan.api.saves.reason.contains("separate_saves is on"));
+        assert_eq!(plan.saves_folder, "3539-ptkzxpv");
+        assert!(!plan.api.saves.cloud && plan.api.saves.cloud_note.as_deref().unwrap().contains("'Default' is the store that syncs"));
         // Nothing moved.
         assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539-ptkzxpv").join("1.save")).unwrap(), "dlss");
         assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539").join("1.save")).unwrap(), "vanilla");
-        // Only the person's explicit choice shares vanilla's saves.
-        store.set_profile("DLSS", &ops(&["separate_saves=off"]), "cli", None).unwrap();
+        // Pointing it at Default is a plain setting; the old folder stays a store.
+        store.set_profile("DLSS", &ops(&["saves=default"]), "cli", None).unwrap();
         let plan = store.plan(Some("DLSS")).unwrap();
-        assert!(plan.saves_profile.is_none() && plan.api.saves.cloud);
+        assert!(plan.saves_folder == "3539" && plan.api.saves.cloud);
         assert!(saves_dir(&g, "3539-ptkzxpv").join("1.save").is_file(), "the old folder stays");
-        // `auto` with the old folder still there: still separate (never silently shared).
-        store.set_profile("DLSS", &ops(&["separate_saves=auto"]), "cli", None).unwrap();
-        assert_eq!(store.plan(Some("DLSS")).unwrap().saves_profile.as_deref(), Some("ptkzxpv"));
+        // And reversible.
+        store.restore_profile("DLSS", 5, "cli").unwrap();
+        assert_eq!(store.plan(Some("DLSS")).unwrap().saves_folder, "3539-ptkzxpv");
+        // Restoring a revision from before stores: the next migration finds the same store.
+        store.restore_profile("DLSS", 4, "cli").unwrap();
+        let r = store.migrate(false, "cli").unwrap();
+        assert_eq!(r.profile_stores, [("ptkzxpv".to_owned(), sid.clone())]);
+        assert!(r.stores_created.is_empty());
     }
+
+    const STORE_V2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mods-v2/store-v2");
+
+    /// The live store for Origins as Mods v2 left it (DLSS-v2 and the built-in intro skip,
+    /// `separate_saves=on` from the v1 migration, cloud saves on; personal paths replaced),
+    /// with both saves folders as they are: vanilla's six slots from the evening before, the
+    /// DLSS profile's six slots, newer.
+    fn v2_store(t: &Path) -> (ModStore, Game) {
+        let data = t.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let out = std::process::Command::new("cp").arg("-a").arg(format!("{STORE_V2}/.")).arg(&data).output().unwrap();
+        assert!(out.status.success());
+        let layers = data.join("mods/3539/layers");
+        for id in ["l9uv5ua", "lbi2b9z"] {
+            folder(&layers.join(id), &[("d3d11.dll", "x"), ("nvngx_dlss.dll", "y"), ("aco_dlss.ini", "z")]);
+        }
+        for id in ["lzrticn", "mevkhrc"] {
+            let l: Layer = serde_json::from_str(&std::fs::read_to_string(layers.join(format!("{id}.json"))).unwrap()).unwrap();
+            std::fs::create_dir_all(layers.join(id)).unwrap();
+            sync_deletions(&layers.join(id), &[], &l.deletes).unwrap();
+        }
+        let g = game(t, 3539);
+        folder(&g.install_dir, &[("ACOrigins.exe", "e"), ("videos/UbisoftLogo.bk2", "v")]);
+        let at = |s: &str| -> std::time::SystemTime { s.parse::<chrono::DateTime<chrono::Utc>>().unwrap().into() };
+        for (dir, when, tag) in [("3539", "2026-11-16T04:03:26Z", "vanilla"), ("3539-ptkzxpv", "2026-11-16T08:51:02Z", "dlss")] {
+            for slot in 1..=6 {
+                let p = saves_dir(&g, dir).join(format!("{slot}.save"));
+                folder(&saves_dir(&g, dir), &[(&format!("{slot}.save"), &format!("{tag} {slot}"))]);
+                std::fs::File::options().write(true).open(&p).unwrap().set_modified(at(when)).unwrap();
+            }
+        }
+        (ModStore::new(&data, 3539).with_game(&g, None), g)
+    }
+
+    #[test]
+    fn live_v2_store_migrates_to_save_stores_and_merges_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, g) = v2_store(tmp.path());
+        let (p, rev) = store.profile("DLSS").unwrap();
+        assert_eq!((rev, p.separate_saves, p.cloud_saves, p.saves.as_deref()), (7, Some(true), true, None));
+        assert_eq!(p.layers, ["lbi2b9z", "mevkhrc"]);
+        // Before migration: its own folder, synced (the old rule).
+        assert_eq!(store.plan(Some("DLSS")).unwrap().saves_folder, "3539-ptkzxpv");
+
+        let r = store.migrate(false, "agent").unwrap();
+        let sid = r.stores_created[0].clone();
+        assert_eq!(r.profile_stores, [("ptkzxpv".to_owned(), sid.clone())]);
+        assert!(r.notes[0].contains("separate_saves was on"), "{:?}", r.notes);
+        let (p, rev) = store.profile("DLSS").unwrap();
+        assert_eq!((rev, p.saves.as_deref()), (8, Some(sid.as_str())));
+        let report = store.stores_report(Some(USER)).unwrap();
+        assert_eq!(report.stores.len(), 2);
+        assert_eq!(report.cloud.as_deref(), Some("default"));
+        let (def, dlss) = (&report.stores[0], &report.stores[1]);
+        assert_eq!((def.store.name.as_str(), def.slots, def.used_by.len()), ("Default", 6, 1));
+        assert_eq!(def.used_by[0].id, VANILLA);
+        assert_eq!((dlss.store.name.as_str(), dlss.slots, dlss.used_by[0].name.as_str()), ("DLSS", 6, "DLSS"));
+        assert!(dlss.last_modified > def.last_modified);
+        // Both mods are save-compatible, so sharing Default draws no warning.
+        assert!(store.state().unwrap().profiles[0].warnings.iter().all(|w| !w.contains("could change saves")));
+
+        // The user's way back to one set: merge DLSS into Default (backups first), then
+        // point the profile at Default, then retire the DLSS store (its files stay).
+        let backups = tmp.path().join("save-backups");
+        let m = store.merge_stores("DLSS", Some("default"), &backups, "cli").unwrap();
+        assert!(m.slots.iter().all(|s| s.outcome == ubi_api::savestores::MergeOutcome::Replaced), "{:?}", m.slots);
+        assert_eq!(m.slots.len(), 6);
+        assert!(m.marked_for_upload, "Default syncs: the merged slots win over the cloud's at the next sync");
+        assert_eq!(m.backups.len(), 1);
+        assert_eq!(std::fs::read_to_string(m.backups[0].path.join("3.save")).unwrap(), "vanilla 3");
+        assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539").join("3.save")).unwrap(), "dlss 3");
+        assert!(saves_dir(&g, "3539").join("3.save.upload").is_file());
+        assert_eq!(std::fs::read_to_string(saves_dir(&g, "3539-ptkzxpv").join("3.save")).unwrap(), "dlss 3");
+        assert!(store.edit_stores(&SaveStoreOp::Retire { store: "DLSS".into() }, "cli", None).unwrap_err().to_string().contains("used by DLSS"));
+        store.set_profile("DLSS", &ops(&["saves=default"]), "cli", None).unwrap();
+        let plan = store.plan(Some("DLSS")).unwrap();
+        assert!(plan.saves_folder == "3539" && plan.api.saves.cloud && plan.api.saves.cloud_note.is_none());
+        store.edit_stores(&SaveStoreOp::Retire { store: "DLSS".into() }, "cli", None).unwrap();
+        let report = store.stores_report(Some(USER)).unwrap();
+        assert_eq!((report.stores.len(), report.retired.len(), report.retired[0].slots), (1, 1, 6));
+        assert_eq!(report.stores[0].used_by.len(), 2);
+    }
+
+    use crate::savestores::SaveStoreOp;
 
     #[test]
     fn save_fork_rules() {
@@ -2035,33 +2144,48 @@ mod tests {
         let unknown = pkg("unknown", None);
         assert!(safe.files == 0 && store.layer_dir(&safe.id).is_dir());
         let mk = |name: &str, mods: &[&Layer]| {
-            store.create_profile(name, &mods.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), "cli", None).unwrap();
-            store.plan(Some(name)).unwrap()
+            let (r, advice) = store.create_profile_with(name, &mods.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), None, "cli", None).unwrap();
+            assert!(r.profile.saves.is_some(), "a new profile always names its store");
+            (store.plan(Some(name)).unwrap(), advice)
         };
-        let p = mk("Empty", &[]);
-        assert!(!p.api.saves.separate, "no mods: vanilla's saves");
-        let p = mk("Safe", &[&safe]);
-        assert!(!p.api.saves.separate && p.api.saves.cloud && p.saves_profile.is_none());
+        let (p, a) = mk("Empty", &[]);
+        assert!(!p.api.saves.separate && a.share_default, "no mods: Default");
+        let (p, _) = mk("Safe", &[&safe]);
+        assert!(!p.api.saves.separate && p.api.saves.cloud && p.saves_folder == "7");
         assert_eq!(p.api.settings.args, ["-safe"]);
-        let p = mk("Gameplay", &[&safe, &gameplay]);
-        assert!(p.api.saves.separate && p.api.saves.reason.contains("gameplay"), "{:?}", p.api.saves);
-        assert!(!p.api.saves.cloud, "own saves stay local unless cloud_saves=on");
-        assert_eq!(p.api.saves.folder, format!("savegames/<user>/7-{}", p.api.profile.as_ref().unwrap().id));
-        let p = mk("Unknown", &[&unknown]);
-        assert!(p.api.saves.separate, "unknown counts as not save-compatible");
-        // The person's override wins both ways.
-        store.set_profile("Gameplay", &ops(&["separate_saves=off"]), "cli", None).unwrap();
-        assert!(!store.plan(Some("Gameplay")).unwrap().api.saves.separate);
-        store.set_profile("Safe", &ops(&["separate_saves=on", "cloud_saves=on"]), "cli", None).unwrap();
-        let p = store.plan(Some("Safe")).unwrap();
-        assert!(p.api.saves.separate && p.api.saves.cloud);
-        // A turned-off mod is skipped (and says so) and doesn't fork.
+        let (p, a) = mk("Gameplay", &[&safe, &gameplay]);
+        assert!(p.api.saves.separate && !a.share_default, "{:?}", p.api.saves);
+        assert_eq!(a.reason, "gameplay (not save-compatible) could change saves, so it gets a store of its own");
+        assert!(!p.api.saves.cloud && p.api.saves.cloud_note.is_some(), "only Default syncs");
+        assert_eq!(p.api.saves.store_name.as_deref(), Some("Gameplay"));
+        let sid = p.api.saves.store.clone().unwrap();
+        assert_eq!(p.api.saves.folder, format!("savegames/<user>/7-{sid}"));
+        let (p, a) = mk("Unknown", &[&unknown]);
+        assert!(p.api.saves.separate && a.reason.contains("unknown save compatibility"), "unknown counts as not save-compatible");
+        // Explicit choices win; sharing Default with a risky stack is allowed, with a warning.
+        let (r, _) = store.create_profile_with("Risky", std::slice::from_ref(&gameplay.id), Some("default"), "cli", None).unwrap();
+        assert_eq!(r.profile.saves.as_deref(), Some("default"));
+        let info = store.state().unwrap().profiles.into_iter().find(|i| i.profile.name == "Risky").unwrap();
+        assert!(info.warnings.iter().any(|w| w.contains("gameplay (not save-compatible) could change saves")), "{:?}", info.warnings);
+        assert!(store.create_profile_with("X", &[], Some("nope"), "cli", None).unwrap_err().to_string().contains("no save store"));
+        // Several profiles can share a store; a store is a plain setting.
+        store.set_profile("Unknown", &ops(&["saves=Gameplay"]), "cli", None).unwrap();
+        assert_eq!(store.plan(Some("Unknown")).unwrap().saves_folder, format!("7-{sid}"));
+        let r = store.set_profile("Safe", &ops(&["saves=new"]), "cli", None).unwrap();
+        let safe_store = r.profile.saves.clone().unwrap();
+        assert_ne!(safe_store, "default");
+        assert_eq!(store.save_stores().current().unwrap().get(&safe_store).unwrap().name, "Safe");
+        // Changing the mods later warns while sharing with vanilla, but doesn't move it.
+        store.set_profile("Empty", &ops(&[&format!("mods={}", unknown.id)]), "cli", None).unwrap();
+        let p = store.plan(Some("Empty")).unwrap();
+        assert!(p.saves_folder == "7" && p.api.warnings.iter().any(|w| w.contains("vanilla's saves")), "{:?}", p.api.warnings);
+        // Old keys point at the new ones.
+        assert!(store.set_profile("Safe", &ops(&["separate_saves=on"]), "cli", None).unwrap_err().to_string().contains("saves=new"));
+        // A turned-off mod is skipped (and says so) and draws no save warning.
         store.set_mod("gameplay", &ops(&["enabled=off"]), "cli", None).unwrap();
-        store.set_profile("Gameplay", &ops(&["separate_saves=auto"]), "cli", None).unwrap();
-        let p = store.plan(Some("Gameplay")).unwrap();
-        assert_eq!(p.api.mods, [safe.id.clone()]);
-        assert!(!p.api.saves.separate);
-        assert!(p.api.warnings[0].contains("turned off"));
+        let p = store.plan(Some("Risky")).unwrap();
+        assert!(p.api.mods.is_empty());
+        assert!(p.api.warnings[0].contains("turned off") && p.api.warnings.len() == 1, "{:?}", p.api.warnings);
     }
 
     #[test]
@@ -2150,7 +2274,7 @@ mod tests {
         let v = store.plan(None).unwrap();
         assert_eq!(v.api.mods, [l.id.clone()]);
         assert_eq!(v.overlays[0].upper, store.profile_dir(VANILLA).join("upper"));
-        assert!(v.saves_profile.is_none());
+        assert_eq!(v.saves_folder, "3539");
         assert_eq!(store.state().unwrap().vanilla_fixes, [l.id.clone()]);
         assert!(store.detail(&l.id).unwrap().on_vanilla);
         // Not decided, off, or the fix turned off: vanilla is the game as installed.

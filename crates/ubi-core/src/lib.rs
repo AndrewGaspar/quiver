@@ -22,6 +22,7 @@ pub mod overlay;
 pub mod playsession;
 pub mod progress;
 pub mod saves;
+pub mod savestores;
 pub mod savesync;
 pub mod settings;
 pub mod steamplan;

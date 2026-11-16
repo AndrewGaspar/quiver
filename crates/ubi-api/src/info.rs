@@ -359,6 +359,10 @@ pub struct SavesReport {
     pub connect_record: Option<CloudRecord>,
     #[serde(default)]
     pub backups: Vec<SaveBackup>,
+    /// The save store these slots are (the one that syncs with the cloud, else Default;
+    /// see [`crate::savestores`]), by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

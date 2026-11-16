@@ -7,6 +7,7 @@ mod downloads;
 mod exports;
 mod mods;
 mod info;
+mod savestores;
 mod setup;
 mod steamgames;
 mod steamlib;
@@ -521,6 +522,9 @@ impl Daemon {
                 Value::Null
             }
             Request::Mods(req) => self.handle_mods(source, req).await?,
+            r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
+                savestores::handle(self, source, r).await?
+            }
         })
     }
 
