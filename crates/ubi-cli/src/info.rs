@@ -226,7 +226,7 @@ pub async fn progress(client: &Client, game: &str, json: bool, refresh: bool) ->
 fn print_backups(list: &[SaveBackup]) {
     for b in list {
         let slots: Vec<String> = b.slots.iter().map(|(s, n)| format!("{s} ({})", bytes(*n))).collect();
-        println!("  {:<26} {}  slots {}  {}", b.id, when(b.created), slots.join(", "), b.reason.as_deref().unwrap_or(""));
+        println!("  {:<26} {}  slots {}  {}", b.id, when(b.created), slots.join(", "), b.reason.clone().or_else(|| b.name.as_ref().map(|_| "named backup (dated by its folder)".into())).unwrap_or_default());
     }
 }
 

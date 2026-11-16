@@ -2040,7 +2040,30 @@ mod tests {
         assert!(r.stores_created.is_empty());
     }
 
-    const STORE_V2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mods-v2/store-v2");
+    #[test]
+    fn migration_keeps_unused_folders_as_retired_stores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, g) = v1_store(tmp.path());
+        // A profile that shared vanilla's saves (separate_saves=off) but still has a folder.
+        let (mut p, _) = store.profile("DLSS").unwrap();
+        p.separate_saves = Some(false);
+        store.append(p, false, "cli", None).unwrap();
+        let r = store.migrate(false, "cli").unwrap();
+        assert_eq!(r.profile_stores, [("ptkzxpv".to_owned(), "default".to_owned())]);
+        assert_eq!(r.stores_created.len(), 1);
+        assert!(r.notes.iter().any(|n| n.contains("retired store 'DLSS'") && n.contains("merge")), "{:?}", r.notes);
+        let s = store.save_stores().current().unwrap();
+        let old = s.get(&r.stores_created[0]).unwrap();
+        assert!(old.retired && !old.cloud && old.folder == "3539-ptkzxpv");
+        // It can be merged from while retired.
+        let m = store.merge_stores("DLSS", None, &tmp.path().join("bk"), "cli").unwrap();
+        assert_eq!(m.slots.len(), 1);
+        assert!(saves_dir(&g, "3539-ptkzxpv").join("1.save").is_file());
+        // Idempotent.
+        assert!(store.migrate(false, "cli").unwrap().stores_created.is_empty());
+    }
+
+    const STORE_V2: &str =concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mods-v2/store-v2");
 
     /// The live store for Origins as Mods v2 left it (DLSS-v2 and the built-in intro skip,
     /// `separate_saves=on` from the v1 migration, cloud saves on; personal paths replaced),

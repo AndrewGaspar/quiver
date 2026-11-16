@@ -459,6 +459,10 @@ pub struct SaveBackup {
     /// User id the saves belong to, when recorded (older backups don't say).
     #[serde(default)]
     pub account: Option<String>,
+    /// For a backup folder named by hand (`<product>-<name>`, not `<product>-<date>`): the
+    /// name. Its `created` is the folder's modification time unless it records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

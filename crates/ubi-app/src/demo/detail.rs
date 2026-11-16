@@ -821,7 +821,7 @@ impl Detail {
         let root = home().join(".local/share/quiver/save-backups");
         let b = |t: DateTime<Utc>, reason: &str, slots: Vec<(u32, u64)>| {
             let bid = format!("{id}-{}", t.format("%Y%m%d-%H%M%S"));
-            SaveBackup { path: root.join(&bid), id: bid, created: Some(t), slots, reason: Some(reason.into()), account: Some(ACCOUNT.into()) }
+            SaveBackup { path: root.join(&bid), id: bid, created: Some(t), slots, reason: Some(reason.into()), account: Some(ACCOUNT.into()), name: None }
         };
         let s5 = vec![(1, 4_404_019), (2, 4_404_019), (3, 4_299_161), (5, 4_089_446), (6, 4_089_446)];
         if id == 3539 {
@@ -897,6 +897,7 @@ impl Detail {
             slots: previous_slots,
             reason: Some(format!("before restoring {}", chosen.id)),
             account: Some(ACCOUNT.into()),
+            name: None,
         };
         for (n, size) in &chosen.slots {
             match slots.iter_mut().find(|s| s.slot == *n) {

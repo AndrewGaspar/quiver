@@ -226,6 +226,36 @@ impl SaveStores {
         Ok((store, true))
     }
 
+    /// The store whose folder is `folder`, or a new retired one for it: a saves folder
+    /// nothing uses any more, kept so it can be merged or brought back. Returns the store and
+    /// whether it was made now.
+    pub fn keep_retired(&self, name: &str, folder: &str, note: String, source: &str, message: String) -> Result<(SaveStore, bool)> {
+        let cur = self.current()?;
+        if let Some(s) = cur.stores.iter().find(|s| s.folder == folder) {
+            return Ok((s.clone(), false));
+        }
+        let id = loop {
+            let id = crate::mods::new_id('s')?;
+            if cur.get(&id).is_none() {
+                break id;
+            }
+        };
+        let store = SaveStore {
+            id,
+            name: Self::free_name(&cur, name),
+            folder: folder.to_owned(),
+            created: Some(Utc::now()),
+            created_by: Some(source.to_owned()),
+            cloud: false,
+            retired: true,
+            note: Some(note),
+        };
+        let mut stores = cur.stores.clone();
+        stores.push(store.clone());
+        self.commit(&cur, stores, cur.vanilla.clone(), source, Some(message))?;
+        Ok((store, true))
+    }
+
     /// Apply an edit. `users` says which stores profiles use (store id, user), for refusing
     /// to retire a store in use.
     pub fn edit(&self, op: &SaveStoreOp, users: &[(String, StoreUser)], source: &str, message: Option<String>) -> Result<SaveStoresRevision> {
@@ -526,7 +556,27 @@ impl ModStore {
                 }
                 report.notes.push(format!("profile '{}' uses Default ({why})", p.name));
                 if let Some(f) = legacy {
-                    report.notes.push(format!("the old saves folder of profile '{}' stays where it was ({f}); nothing uses it", p.name));
+                    // Nothing uses it any more; keep it as a retired store, so it can be merged.
+                    let folder = format!("{pid}-{}", p.id);
+                    let name = if dry_run {
+                        cur.stores.iter().find(|s| s.folder == folder).map_or_else(|| SaveStores::free_name(&cur, &p.name), |s| s.name.clone())
+                    } else {
+                        let (s, made) = stores.keep_retired(
+                            &p.name,
+                            &folder,
+                            format!("the old saves of profile '{}', unused since separate_saves=off", p.name),
+                            source,
+                            format!("save stores: the unused saves folder of profile '{}' ({folder}) is kept as a retired store", p.name),
+                        )?;
+                        if made {
+                            report.stores_created.push(s.id.clone());
+                        }
+                        s.name
+                    };
+                    report.notes.push(format!(
+                        "the old saves folder of profile '{}' ({f}) stays where it was, as retired store '{name}'; to combine it: quiver saves {pid} merge '{name}' into default",
+                        p.name
+                    ));
                 }
             }
         }

@@ -128,7 +128,8 @@ steer by whether its mods can break saves.
   every live profile without `saves` one. Profiles the old rule gave their own folder
   (`separate_saves=on`, an existing folder, or an auto stack with a save-incompatible mod) get a
   store adopting that folder (named after the profile, not synced; an existing store with that
-  folder is reused, and unretired if needed); the rest get Default. Each is a stores revision
+  folder is reused, and unretired if needed); the rest get Default (an unused folder left by `separate_saves=off` becomes a retired
+  store, so it can be merged). Each is a stores revision
   plus a profile revision clearing `separate_saves`/`cloud_saves`, so restoring the earlier
   profile revision undoes it (and the next migration finds the same store). Until migrated, a
   profile's plan follows the old rule. A profile that had `cloud_saves=on` with its own folder
@@ -140,6 +141,9 @@ steer by whether its mods can break saves.
   "before merging save store A into B") before anything is replaced; slots taken into the cloud
   store get `.upload` markers. The daemon refuses while the game runs (its launches or any play
   session) and asks agents for confirmation.
+- **Named backups:** `quiver saves` and the Saves tab also list backup folders named by hand
+  (`save-backups/<product>-<name>`, e.g. `3539-ptkzxpv-fresh-playthrough-…`), dated by the
+  folder's mtime, restorable like the others.
 - **Not done:** Steam launches (`steam-run`) still use Default whatever vanilla's store is;
   restoring a backup into a store other than the cloud one needs a merge from a store instead.
 - **Config patches:** applied by the daemon before the namespace is mounted (never under a

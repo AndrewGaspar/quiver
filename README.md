@@ -351,6 +351,8 @@ Ubisoft's cloud keeps one set of slots per game and account, so **one store per 
 with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
 launches with any other store keep their saves on this PC and say so. `quiver saves <game>`
 shows the cloud store's slots against the cloud, and `restore` brings a backup back into it.
+Its backup list includes folders named by hand (`save-backups/<product>-<name>`), dated by the
+folder's modification time.
 
 ```
 quiver saves origins stores                      # stores, who uses each, cloud, slots, last change
@@ -371,7 +373,8 @@ files; `unretire` brings it back. Store changes are revisions in `games/<product
 Profiles from before save stores are given one by `quiver mods <game> migrate` (and by
 launching them): a profile with its own saves folder (`separate_saves=on`, or a v1 profile
 that was played) gets a store that *is* that folder, named after the profile and not synced
-(Default keeps the cloud); the others point at Default. Each step is a revision of the stores
+(Default keeps the cloud); the others point at Default (a folder one of them left behind, with
+`separate_saves=off`, becomes a retired store, so it can still be merged). Each step is a revision of the stores
 and of the profile, so it shows in their histories and can be undone; nothing moves.
 `cloud_saves` and `separate_saves` are no longer profile settings.
 

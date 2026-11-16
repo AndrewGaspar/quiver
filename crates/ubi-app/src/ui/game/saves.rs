@@ -411,7 +411,7 @@ impl Quiver {
                             .child(div().font_weight(MEDIUM).text_size(px(12.5)).child(when(b.created)))
                             .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(format!(
                                 "{} · {} slot{}",
-                                b.reason.clone().unwrap_or_else(|| "backup".into()),
+                                b.reason.clone().or_else(|| b.name.clone().map(|n| format!("named backup {n}"))).unwrap_or_else(|| "backup".into()),
                                 b.slots.len(),
                                 if b.slots.len() == 1 { "" } else { "s" }
                             ))),
