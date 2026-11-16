@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Ubisoft Library
-Comment=Install and play your Ubisoft games without Ubisoft Connect
-Exec=ubisoft-linux
-Icon=applications-games
-Categories=Game;
-StartupWMClass=ubisoft-linux

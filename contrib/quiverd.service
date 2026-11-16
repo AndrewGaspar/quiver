@@ -1,15 +1,15 @@
-# systemd user unit for the launcher daemon. Install with:
-#   cp ubid.service ~/.config/systemd/user/ && systemctl --user enable --now ubid
+# systemd user unit for the Quiver daemon. Install with:
+#   cp quiverd.service ~/.config/systemd/user/ && systemctl --user enable --now quiverd
 # Games inherit this service's environment, so the session's display variables must be
 # imported into the user manager (most compositors do; otherwise run
 # `systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP`).
 [Unit]
-Description=Ubisoft launcher daemon (ubid)
+Description=Quiver launcher daemon (quiverd)
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/ubid
+ExecStart=%h/.local/bin/quiverd
 Restart=on-failure
 
 [Install]

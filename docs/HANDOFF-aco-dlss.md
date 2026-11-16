@@ -1,10 +1,10 @@
 # Running AC Origins in containers without Ubisoft Connect (for the ac-dlss session)
 
 Problem: every Ubisoft Connect you start (in each container) is another live login on the
-account, and Ubisoft disconnects the others ("multiple login"). The ubisoft-linux daemon
-(`ubid`) on the host now holds the account's single login. Containers stop running Connect
+account, and Ubisoft disconnects the others ("multiple login"). The Quiver daemon
+(`quiverd`, formerly `ubid`) on the host now holds the account's single login. Containers stop running Connect
 entirely; a small stand-in (`ubi-bridge.exe`) answers the game's Ubisoft SDK, and Denuvo/ticket
-requests go to `ubid` on the host. One login, nothing to kick.
+requests go to `quiverd` on the host. One login, nothing to kick.
 
 Verified: Origins boots to its menus with DLC and saves in a podman container this way
 (`tools/instance.sh run` in this repo is a working reference).
@@ -13,7 +13,7 @@ Verified: Origins boots to its menus with DLC and saves in a podman container th
 
 ```sh
 export PATH=$HOME/code/ubisoft-linux/target/release:$PATH
-ubi status            # starts ubid if needed; shows "broker: 127.0.0.1:47810"
+ubi status            # (alias of quiver) starts quiverd if needed; shows "broker: 127.0.0.1:47810"
 ```
 
 Then, in each instance prefix, **never start Connect again**. To be sure the SDK can't fall
@@ -25,7 +25,7 @@ loads them.
 
 ## Per launch
 
-1. **Launch context** (fresh ticket, valid for a few hours; uses ubid's login, no new session):
+1. **Launch context** (fresh ticket, valid for a few hours; uses quiverd's login, no new session):
    ```sh
    ubi --source aco-dlss context origins -o <inst>/out/context.json \
      --install-dir "<host path of the instance's Assassin's Creed Origins folder>" \

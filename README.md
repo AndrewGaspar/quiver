@@ -1,4 +1,7 @@
-# ubisoft-linux
+# Quiver
+
+A third-party launcher for your Ubisoft library on Linux. Not affiliated with or endorsed by
+Ubisoft.
 
 A native Linux client for a Ubisoft library: login, library, install and one Proton prefix per game, without running `UbisoftConnect.exe`. For personal use.
 
@@ -43,11 +46,11 @@ from the Connect install directory, unmodified. They reach Connect through named
 ## Architecture
 
 ```
- ubisoft-linux (GPUI)   ubi (CLI)   scripts / agents
+ quiver-app (GPUI)   quiver (CLI)   scripts / agents
             \              |              /
-             +---- ubi-api: JSON lines over $XDG_RUNTIME_DIR/ubisoft-linux/ubid.sock
+             +---- ubi-api: JSON lines over $XDG_RUNTIME_DIR/quiver/quiverd.sock
                             |
-                          ubid  (daemon; started on demand by any client)
+                        quiverd  (daemon; started on demand by any client)
             session · library · installs · launches · settings history · activity log
                  · Denuvo token broker for every running game's ubi-bridge
                             |
@@ -55,7 +58,7 @@ from the Connect install directory, unmodified. They reach Connect through named
 ```
 
 Front ends hold no state. Every request carries a source label (`gui`, `cli`, or whatever
-`--source`/`UBI_SOURCE` says), so the activity log and each game's settings history show who
+`--source`/`QUIVER_SOURCE` says), so the activity log and each game's settings history show who
 changed what.
 
 ## Usage
@@ -66,23 +69,25 @@ cargo build --release -p ubi-bridge --target x86_64-pc-windows-gnu
 cargo build --release
 export PATH=$PWD/target/release:$PATH
 
-ubi login                                   # email, password, 2FA (or sign in from the app)
-ubisoft-linux                               # the app
-ubi library                                 # owned games and install state
-ubi install "chronicles china"              # by name or product id; shows progress
-ubi play rabbids                            # runs in its own prefix; syncs cloud saves
-ubi set origins proton=GE-Proton10-34 env.DXVK_HUD=fps -m "test HUD"
-ubi history origins                         # every revision, with who made it
-ubi restore origins 2                       # make revision 2 current again (0 = defaults)
-ubi --source agent set origins wrappers=gamemoderun,mangohud
-ubi activity                                # recent actions across GUI/CLI/agents
-ubi watch                                   # live daemon events (JSON)
-ubi dev …                                   # low-level tools that bypass the daemon
+quiver login                                   # email, password, 2FA (or sign in from the app)
+quiver-app                                  # the app
+quiver library                                 # owned games and install state
+quiver install "chronicles china"              # by name or product id; shows progress
+quiver play rabbids                            # runs in its own prefix; syncs cloud saves
+quiver set origins proton=GE-Proton10-34 env.DXVK_HUD=fps -m "test HUD"
+quiver history origins                         # every revision, with who made it
+quiver restore origins 2                       # make revision 2 current again (0 = defaults)
+quiver --source agent set origins wrappers=gamemoderun,mangohud
+quiver activity                                # recent actions across GUI/CLI/agents
+quiver watch                                   # live daemon events (JSON)
+quiver dev …                                   # low-level tools that bypass the daemon
 ```
 
 Settings keys: `proton`, `language`, `args`, `wrappers`, `env.NAME`, `dll.NAME` (`key=` unsets).
-State lives in `~/.local/share/ubisoft-linux/` (`config.json`, `games.json`,
-`games/<id>/history.jsonl`, `activity.jsonl`, save backups, `ubid.log`).
+State lives in `~/.local/share/quiver/` (`config.json`, `games.json`,
+`games/<id>/history.jsonl`, `activity.jsonl`, save backups, `quiverd.log`); a pre-Quiver
+`~/.local/share/ubisoft-linux/` and keyring entry are moved there automatically. `ubi` is kept
+as an alias for `quiver`.
 
 ## Roadmap
 

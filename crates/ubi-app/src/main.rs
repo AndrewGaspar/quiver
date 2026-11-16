@@ -450,8 +450,8 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("Ubisoft Library".into()), ..Default::default() }),
-                app_id: Some("ubisoft-linux".into()),
+                titlebar: Some(TitlebarOptions { title: Some("Quiver".into()), ..Default::default() }),
+                app_id: Some("quiver".into()),
                 ..Default::default()
             },
             |_, cx| cx.new(Launcher::new),

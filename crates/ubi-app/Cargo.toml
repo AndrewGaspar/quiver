@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "ubisoft-linux"
+name = "quiver-app"
 path = "src/main.rs"
 
 [dependencies]

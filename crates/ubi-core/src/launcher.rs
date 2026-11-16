@@ -58,10 +58,48 @@ fn yes() -> bool {
 }
 
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local/share"))
-        .join("ubisoft-linux")
+    static MIGRATE: std::sync::Once = std::sync::Once::new();
+    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/share"));
+    let dir = base.join("quiver");
+    MIGRATE.call_once(|| {
+        if let Err(e) = migrate_legacy_data(&base.join("ubisoft-linux"), &dir) {
+            tracing::warn!("migrating legacy data dir failed: {e:#}");
+        }
+    });
+    dir
+}
+
+/// One-time move of the pre-Quiver data directory (`ubisoft-linux`) into `quiver`, rewriting
+/// paths stored in config.json and games.json. Runs while `quiver` has no config.json yet
+/// (the client may already have created it for the daemon log); entries already present in
+/// `quiver` are kept and the old copies left behind.
+fn migrate_legacy_data(old: &Path, new: &Path) -> Result<()> {
+    if !old.is_dir() || new.join("config.json").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(new)?;
+    for entry in std::fs::read_dir(old)? {
+        let entry = entry?;
+        let name = match entry.file_name().to_str() {
+            Some("ubid.log") => "quiverd.log.old".to_owned(),
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+        let dst = new.join(&name);
+        if !dst.exists() {
+            std::fs::rename(entry.path(), dst)?;
+        }
+    }
+    let _ = std::fs::remove_dir(old); // only if everything moved
+    let (old_s, new_s) = (old.to_string_lossy(), new.to_string_lossy());
+    for name in ["config.json", "games.json"] {
+        let p = new.join(name);
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            std::fs::write(&p, text.replace(&*old_s, &new_s))?;
+        }
+    }
+    tracing::info!("moved {} to {}", old.display(), new.display());
+    Ok(())
 }
 
 fn home() -> PathBuf {

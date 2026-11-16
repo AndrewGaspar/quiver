@@ -1,6 +1,6 @@
 //! `ubi`: command-line front end. Everything except `ubi dev …` goes through the `ubid`
 //! daemon (started on demand), so the CLI, the GUI and agents share one runtime and one
-//! history of changes. Label automated callers with `--source agent` (or `UBI_SOURCE`).
+//! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
 mod dev;
 
@@ -11,10 +11,10 @@ use clap::{Parser, Subcommand};
 use ubi_api::{ActivityEntry, Client, Event, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status};
 
 #[derive(Parser)]
-#[command(name = "ubi", about = "Native Ubisoft launcher for Linux")]
+#[command(name = "quiver", about = "Quiver: a third-party launcher for your Ubisoft library")]
 struct Cli {
     /// Who is making changes (recorded in settings history and the activity log).
-    #[arg(long, global = true, env = "UBI_SOURCE", default_value = "cli")]
+    #[arg(long, global = true, env = "QUIVER_SOURCE", default_value = "cli")]
     source: String,
     #[command(subcommand)]
     cmd: Cmd,
@@ -237,11 +237,11 @@ async fn main() -> Result<()> {
         Cmd::Dev { .. } => unreachable!(),
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
-            println!("ubid {}", s.version);
+            println!("quiverd {}", s.version);
             match &s.signed_in {
                 Some(n) => println!("signed in as {n}"),
-                None if s.awaiting_2fa => println!("waiting for a 2FA code (ubi login)"),
-                None => println!("not signed in (ubi login)"),
+                None if s.awaiting_2fa => println!("waiting for a 2FA code (quiver login)"),
+                None => println!("not signed in (quiver login)"),
             }
             println!("default Proton: {}", s.proton_default.as_deref().unwrap_or("?"));
             println!("broker: {}", s.broker);
@@ -416,7 +416,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Daemon { action: DaemonAction::Stop } => {
             let () = client.call(Request::Shutdown).await?;
-            println!("ubid stopping");
+            println!("quiverd stopping");
         }
     }
     Ok(())

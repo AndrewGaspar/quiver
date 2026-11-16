@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "quiverd"
+path = "src/main.rs"
+
 [dependencies]
 ubi-core.workspace = true
 ubi-api.workspace = true

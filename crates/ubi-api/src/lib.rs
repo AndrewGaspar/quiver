@@ -1,6 +1,6 @@
 //! The `ubid` daemon's protocol and a client for it.
 //!
-//! Transport: a Unix socket at `$XDG_RUNTIME_DIR/ubisoft-linux/ubid.sock`, one JSON
+//! Transport: a Unix socket at `$XDG_RUNTIME_DIR/quiver/quiverd.sock`, one JSON
 //! object per line. Requests carry an `id`, the caller's `source` (gui/cli/agent/…, kept
 //! in the settings history and activity log) and a typed [`Request`]. The daemon answers
 //! each with a [`Reply`]; after [`Request::Subscribe`] the connection also receives
@@ -283,10 +283,10 @@ pub enum Event {
 /// Socket path for the current user.
 pub fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) => PathBuf::from(dir).join("ubisoft-linux").join("ubid.sock"),
+        Some(dir) => PathBuf::from(dir).join("quiver").join("quiverd.sock"),
         None => {
             let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-            std::env::temp_dir().join(format!("ubisoft-linux-{user}")).join("ubid.sock")
+            std::env::temp_dir().join(format!("quiver-{user}")).join("quiverd.sock")
         }
     }
 }

@@ -97,8 +97,8 @@ impl Client {
         let mut line = serde_json::to_vec(&Envelope { id, source: self.source.clone(), request })?;
         line.push(b'\n');
         self.writer.lock().await.write_all(&line).await.context("ubid connection lost")?;
-        let value = rx.await.map_err(|_| anyhow!("ubid connection lost"))?.map_err(|e| anyhow!(e))?;
-        serde_json::from_value(value).context("unexpected reply from ubid")
+        let value = rx.await.map_err(|_| anyhow!("quiverd connection lost"))?.map_err(|e| anyhow!(e))?;
+        serde_json::from_value(value).context("unexpected reply from quiverd")
     }
 
     /// Receive daemon events on this connection from now on.
@@ -114,16 +114,16 @@ pub fn daemon_log() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
-        .join("ubisoft-linux/ubid.log")
+        .join("quiver/quiverd.log")
 }
 
-/// Start `ubid` in the background: next to this executable, else from PATH.
+/// Start `quiverd` in the background: next to this executable, else from PATH.
 fn spawn_daemon() -> Result<()> {
     let exe = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("ubid")))
+        .and_then(|p| p.parent().map(|d| d.join("quiverd")))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("ubid"));
+        .unwrap_or_else(|| PathBuf::from("quiverd"));
     let log = daemon_log();
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;

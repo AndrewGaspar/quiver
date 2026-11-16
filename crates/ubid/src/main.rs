@@ -569,12 +569,12 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "ubid=info,ubi_core=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,ubid=info,ubi_core=info".into()),
         )
         .init();
     let path = ubi_api::socket_path();
     if UnixStream::connect(&path).await.is_ok() {
-        bail!("ubid is already running ({})", path.display());
+        bail!("quiverd is already running ({})", path.display());
     }
     let dir = path.parent().context("socket path")?;
     std::fs::create_dir_all(dir)?;
@@ -588,7 +588,9 @@ async fn main() -> Result<()> {
     let cfg = Arc::new(Config::load()?);
     let online = Online::new(Auth::default());
     // A fixed port lets external bridges (containers, Steam prefixes) find the broker.
-    let broker_addr = std::env::var("UBID_BROKER").unwrap_or_else(|_| "127.0.0.1:47810".into());
+    let broker_addr = std::env::var("QUIVER_BROKER")
+        .or_else(|_| std::env::var("UBID_BROKER"))
+        .unwrap_or_else(|_| "127.0.0.1:47810".into());
     let broker_listener = match tokio::net::TcpListener::bind(&broker_addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -631,7 +633,7 @@ async fn main() -> Result<()> {
         activity: Mutex::new(activity),
         events,
     });
-    tracing::info!("ubid listening on {} (broker {})", path.display(), daemon.broker);
+    tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;
         tokio::spawn(serve_conn(daemon.clone(), stream));
