@@ -63,6 +63,8 @@ pub fn err_text(e: &anyhow::Error) -> String {
 }
 
 fn main() {
+    // SAFETY: first thing in main; no other thread exists yet.
+    unsafe { selfupdate::forget_hyprland_tokens() };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,quiver_app=info".into()),
