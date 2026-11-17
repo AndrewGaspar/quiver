@@ -30,7 +30,7 @@ options = ["upscaler.backend", "upscaler.debug", "upscaler.jitter_x", "upscaler.
 [[page]]
 id = "latency"
 title = "Latency (Reflex)"
-options = ["reflex.mode", "reflex.fps_limit", "reflex.markers"]
+options = ["reflex.mode", "reflex.fps_limit", "reflex.limiter", "reflex.markers"]
 
 [[page.group]]
 title = "Experiments"
@@ -43,7 +43,8 @@ options = ["fg.mode", "fg.enabled", "fg.toggle_key", "fg.refresh_hz", "fg.hudles
 
 [[page.group]]
 title = "Pacing and presentation"
-options = ["fg.pacing", "fg.pace", "fg.pace_relax", "fg.present_thread", "fg.present_gate",
+options = ["fg.auto_cap", "fg.auto_cap_lag", "fg.auto_cap_min", "fg.auto_cap_max", "fg.sets",
+           "fg.pacing", "fg.pace", "fg.pace_relax", "fg.present_thread", "fg.present_gate",
            "fg.sync", "fg.frame_latency", "fg.buffers"]
 
 [[page.group]]
@@ -252,6 +253,17 @@ special = [{ value = 0, label = "No cap" }]
 level = "basic"
 apply = "live"
 
+[option."reflex.limiter"]
+type = "enum"
+label = "How the cap is enforced"
+help = "Applies to the frame rate cap and to frame generation's automatic cap."
+values = [
+  { value = "driver", label = "Reflex (driver)", help = "Reflex's minimum frame interval; needs Reflex on." },
+  { value = "cpu", label = "Mod (CPU wait)", help = "The mod waits on the render thread after Present; works with Reflex off too." },
+]
+level = "advanced"
+apply = "live"
+
 [option."reflex.markers"]
 type = "bool"
 label = "Latency markers"
@@ -364,6 +376,66 @@ help = "DLSS-G wants unjittered matrices."
 when = { "fg.mode" = "d3d12", "fg.camera" = "engine" }
 level = "debug"
 apply = "live"
+
+[option."fg.auto_cap"]
+type = "bool"
+label = "Automatic frame rate cap"
+help = "While frame generation runs, caps the real frame rate with headroom so the game's cadence stays steady and DLSS-G stays within a frame of the game's Present. An explicit frame rate cap wins."
+when = { "fg.mode" = "d3d12" }
+level = "basic"
+apply = "live"
+
+[option."fg.auto_cap_lag"]
+type = "float"
+label = "Automatic cap target"
+help = "How far DLSS-G may trail the game's Present, in frames."
+unit = "frames"
+min = 0.1
+max = 2.0
+step = 0.05
+precision = 2
+when = { "fg.mode" = "d3d12", "fg.auto_cap" = true }
+level = "advanced"
+apply = "live"
+
+[option."fg.auto_cap_min"]
+type = "float"
+label = "Automatic cap: lowest"
+help = "The automatic cap never goes below this."
+unit = "fps"
+min = 20
+max = 360
+step = 1
+special = [{ value = 0, label = "30 fps" }]
+when = { "fg.mode" = "d3d12", "fg.auto_cap" = true }
+level = "advanced"
+apply = "live"
+
+[option."fg.auto_cap_max"]
+type = "float"
+label = "Automatic cap: highest"
+help = "The automatic cap never goes above this."
+unit = "fps"
+min = 30
+max = 500
+step = 1
+special = [{ value = 0, label = "240 fps" }]
+when = { "fg.mode" = "d3d12", "fg.auto_cap" = true }
+level = "advanced"
+apply = "live"
+
+[option."fg.sets"]
+type = "enum"
+label = "Frames in flight"
+help = "Texture sets in flight: with 3, the present thread may run two frames behind before the game waits."
+values = [
+  { value = "2", label = "2" },
+  { value = "3", label = "3" },
+]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "at"
+at = "frame generation start"
 
 [option."fg.pacing"]
 type = "bool"
