@@ -2,6 +2,8 @@ mod dispatcher;
 mod display_connection;
 mod headless;
 mod keyboard;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod offscreen;
 mod platform;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod power;
@@ -20,6 +22,8 @@ pub use dispatcher::*;
 pub(crate) use display_connection::{Backend, DisplayConnection, select_backend};
 pub(crate) use headless::*;
 pub(crate) use keyboard::*;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(crate) use offscreen::OffscreenWindow;
 pub(crate) use platform::*;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) use text_system::*;

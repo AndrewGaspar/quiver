@@ -805,6 +805,24 @@ impl Platform for LinuxPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+        // Off-screen windows never touch the display connection, so they work in every mode
+        // and don't count as the connection's windows.
+        if options.offscreen.is_some() {
+            #[cfg(any(feature = "wayland", feature = "x11"))]
+            {
+                let (foreground, background) = self.with_common(|common| {
+                    (
+                        common.foreground_executor.clone(),
+                        common.background_executor.clone(),
+                    )
+                });
+                return Ok(Box::new(crate::linux::OffscreenWindow::new(
+                    options, foreground, background,
+                )?));
+            }
+            #[cfg(not(any(feature = "wayland", feature = "x11")))]
+            anyhow::bail!("off-screen windows need gpui_linux's wayland or x11 feature (wgpu)");
+        }
         self.connection.borrow().open_window(handle, options)
     }
 
