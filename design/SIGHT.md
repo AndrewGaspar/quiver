@@ -2,7 +2,9 @@
 
 Status: design only (2026-11-16). Nothing here is built. Companion to `design/MOD-CONFIG.md`
 (pluggable mod configuration, designed in parallel), which Sight consumes; see
-[Assumptions about MOD-CONFIG](#10-assumptions-about-mod-config).
+[Assumptions about MOD-CONFIG](#10-assumptions-about-mod-config). The pinned performance HUD and
+the metrics model are designed, with their steers decided, in [SIGHT-HUD.md](SIGHT-HUD.md); this
+document's own steers (section 13) are still open.
 
 **Name.** In this codebase "overlay" already means the overlayfs mod mounts
 (`crates/ubi-core/src/overlay.rs`, "mod overlays"). The in-game layer is called **Sight**: on a
@@ -12,10 +14,10 @@ used below:
 | Name | What it is |
 |---|---|
 | **Sight** | the feature as a whole: everything Quiver shows or does while a game is running |
-| `quiver-sight` | the UI process (GPUI), one per desktop session, a quiverd client |
+| `quiver-sight` | the UI process (GPUI), one per desktop session, a quiverd client; also renders the pinned HUD (SIGHT-HUD §2.9) |
 | **Sight panel** | the full, summoned UI (sections, forms, lists) |
 | **toast lane** | short notifications while playing |
-| **corner HUD** | optional always-on readouts (clock, session timer, battery, fps) |
+| **HUD** | the pinned, always-on performance readout over the game ([SIGHT-HUD.md](SIGHT-HUD.md)); the clock / session timer / battery strip once called the "corner HUD" is its `clock` layout |
 | **Sight layer** | `VK_LAYER_QUIVER_sight`, a Vulkan layer loaded into the game process |
 | **presenter** | a way Sight gets pixels on screen (compositor surface, Sight layer, XR HUD, desktop notification) |
 
@@ -136,7 +138,10 @@ and `proto/proto_overlay/overlay.proto`)
   (`io.github.andrewgaspar.hypxrhud`, `CreatePanel{slot: "toast", …}`), with Omarchy theming.
 - GPUI 0.2.2 (the app's version) has neither wlr-layer-shell nor offscreen rendering. Upstream
   Zed GPUI gained layer-shell windows (`WindowKind::LayerShell`, Zed PR #35610, after a reverted
-  first attempt #32651); a version bump or git dependency is needed.
+  first attempt #32651); a version bump or git dependency is needed. Upstream has also split
+  into crates, moved its Linux renderer from blade to wgpu, and has a headless wgpu renderer
+  behind test/bench features. A spike (SIGHT-HUD §2.10) patched 0.2.2 to render a window
+  off-screen and read it back in well under a millisecond; the HUD builds that onto the bump.
 - Prior art: MangoHud and vkBasalt (implicit Vulkan layers, env-enabled, ImGui drawn in-layer;
   MangoHud has a `control=` Unix socket); Steam's overlay on Proton (a Vulkan layer
   `VK_LAYER_VALVE_steam_overlay` plus `gameoverlayrenderer.so` preloaded for X11 input hooks;
@@ -165,7 +170,7 @@ independent of Sight.
 | Gamepad-first navigation in the panel | MVP | the app's `nav.rs` spatial focus + `gamepad.rs` (gilrs, read-only) | same A/B/X/Y/LB/RB semantics as the app |
 | Mouse and keyboard in the panel | MVP | compositor input to the Sight surface | |
 | Toast lane | MVP | quiverd events → `quiver-sight` | no focus change, click-through |
-| Corner HUD (clock, session timer, battery) | v2 | local clock, quiverd session, UPower | off by default |
+| Clock / session timer / battery strip | v2 | local clock, quiverd session, UPower | the HUD's `clock` layout (SIGHT-HUD §1.1); off by default |
 | Per-game enable/disable, per-capability toggles | MVP | game settings key `sight=on|off|toasts` | Steam copies too |
 | "Do not disturb while playing" | v2 | Sight queue policy; optional mako mode | steer #12 |
 | Theme follows Omarchy, live | MVP | the app's `theme.rs` (shared crate) | |
@@ -224,22 +229,23 @@ Sight can't be ahead of quiverd here; the panel sections ship when quiverd has t
 
 ### 3.5 Performance
 
-The pinned HUD, the metrics model (producers, descriptors, rings, subscriptions) and mod-provided
-metrics are designed in [SIGHT-HUD.md](SIGHT-HUD.md), which changes the HUD rows below (own HUD
-in the MVP, drawn by the Sight layer; MangoHud optional).
+The pinned HUD, the metrics model (producers, descriptors, rings, subscriptions) and
+mod-provided metrics are designed in [SIGHT-HUD.md](SIGHT-HUD.md), with its steers decided:
+Quiver's own HUD in the MVP, drawn in the game by the Sight layer from an image `quiver-sight`
+renders with GPUI, a layer-shell fallback, MangoHud optional per game. The rows below are what
+the panel and the rest of Sight get from it.
 
 | Capability | Priority | Source | Notes |
 |---|---|---|---|
-| FPS, frame time, 1% low in the panel | MVP | Sight layer present timestamps (shared-memory ring) | counts presents; FG doubles them (see below) |
-| Real vs generated frame rate when a mod does FG | v2 | mod-published status via MOD-CONFIG (layer can't tell them apart) | aco-dlss knows exactly |
-| Frame-time graph in the panel | MVP | same ring | |
-| CPU, GPU load, VRAM, temps, power, clocks | MVP (GPU via NVML, CPU via /proc + hwmon) | quiverd sensor collector | one collector, also usable by the app |
-| Always-on perf HUD in a corner | MVP via MangoHud | MangoHud (existing `wrappers=mangohud` / `MANGOHUD=1`) | Sight toggles MangoHud and its presets (steer #7) |
-| Own perf HUD (replace MangoHud) | later | Sight layer drawing | only if in-game drawing (phase 3) exists |
+| FPS, frame time, 1% low in the panel | MVP | SIGHT-HUD metrics (`PerfSubscribe`), from the Sight layer's present ring | quiverd computes every statistic (SIGHT-HUD §3.10) |
+| Real vs generated (base vs presented) frame rate when a mod does FG | MVP (mean) / v2 (lows, per-frame) | mod metrics filling the `frame.base` role (SIGHT-HUD §3.4) | the layer can't tell them apart; aco-dlss knows exactly |
+| Frame-time graph in the panel | MVP | `PerfStream` from the same ring | |
+| CPU, GPU load, VRAM, temps, power, clocks | MVP (GPU via NVML, CPU via /proc + hwmon) | quiverd's system producer (SIGHT-HUD §3.2) | one collector, also usable by the app |
+| Always-on perf HUD | MVP | Quiver's HUD (SIGHT-HUD), presets, toggled with Shift+F3 | MangoHud stays a per-game option that Sight can toggle |
 | FPS limiter | v2 | set `DXVK_FRAME_RATE` at launch (restart) / MangoHud `fps_limit` live via its control socket | Sight layer doesn't sleep in present: Reflex and FG pacing own that |
-| Reflex / latency info | v2 | mod status (aco-dlss: Reflex on/off, markers); `VK_NV_low_latency2` presence seen by the layer | display only |
-| VRR / refresh rate / tearing info | v2 | Hyprland IPC (`monitors`) | |
-| Perf logging to a file for a session | later | layer ring + sensors | MangoHud logging already exists |
+| Reflex / latency info | MVP (mean) / v2 (breakdown) | mod metrics filling `latency.frame` (SIGHT-HUD §3.4); `VK_NV_low_latency2` presence seen by the layer | display only |
+| VRR / refresh rate / tearing / scan-out info | MVP | quiverd's display producer (Hyprland IPC) | the Full preset's display-path line |
+| Perf recording for a session | v2 | SIGHT-HUD recordings (`quiver perf record`); a summary on every session | MangoHud-compatible CSV export |
 
 ### 3.6 Mods and configuration
 
@@ -250,7 +256,7 @@ in the MVP, drawn by the Sight layer; MangoHud optional).
 | Restart-required settings: edit, mark pending, "applies next launch" | MVP | MOD-CONFIG apply classes | |
 | Try-then-keep (session-only change, then "Keep" to persist into the profile) | v2 | MOD-CONFIG scope | steer via MOD-CONFIG |
 | Mod actions (momentary buttons, e.g. "reset history") | v2 | MOD-CONFIG actions | |
-| Mod status readouts (DLSS mode, internal res, FG on) | v2 | MOD-CONFIG status fields | |
+| Mod status readouts (DLSS mode, internal res, FG on) | v2 | the mod's `state` / `text` metrics (SIGHT-HUD §3.13, formerly MOD-CONFIG readouts) | |
 | Quick toggles (pin a few settings to a quick menu) | v2 | Sight preference over MOD-CONFIG keys | aco-dlss: FG, DLSS↔TAA |
 | Switch profile / mods | no (in-game) | needs a relaunch | offer "Relaunch with profile X…" as an action instead (later) |
 | Game launch settings (env, args) | no (in-game) | restart-only | link to the app |
@@ -260,13 +266,13 @@ in the MVP, drawn by the Sight layer; MangoHud optional).
 
 | Capability | Priority | Source | Notes |
 |---|---|---|---|
-| Screenshot (hotkey and panel button) | v2 | `grim -o <output>` / `grim -g <window geometry>` (compositor, includes Sight unless hidden first) or the Sight layer copying the swapchain image (game pixels only, exact, HDR-aware) | steer #11 |
+| Screenshot (hotkey and panel button) | v2 | `grim -o <output>` / `grim -g <window geometry>` (compositor, includes Sight unless hidden first) or the Sight layer copying the swapchain image (game pixels only, exact, HDR-aware) | steer #11. The layer's copy is offered with and without the HUD (SIGHT-HUD §2.12) |
 | Achievement auto-screenshot | v2 | achievement event → capture | delay 0.5 s, hide toast first |
 | Gallery per game | v2 | `~/Pictures/Quiver/<game>/` | browse in Sight and the app |
 | Instant replay ("save last 30 s") | v2 | `gpu-screen-recorder -r 30` (NVENC) per session, `SIGUSR1` to save | starts only if enabled; costs VRAM and some GPU |
 | Record clip start/stop | v2 | same tool | |
 | Clip trimming / sharing | later | | app-side |
-| Recording that excludes Sight | later | layer-side capture | compositor capture includes Sight surfaces |
+| Recording that excludes Sight | later | layer-side capture | compositor capture includes Sight surfaces. For the HUD, the "HUD in captures" setting (SIGHT-HUD §2.12) already covers OBS game capture and portal screen capture; Sight's own clips with and without the HUD need the layer-side frames |
 
 ### 3.8 Tools: guides, browser, notes
 
@@ -340,7 +346,7 @@ in the MVP, drawn by the Sight layer; MangoHud optional).
 | Agent posts a toast or a card in the panel (`quiver sight notify --title … --body …`) | MVP | new quiverd request, agent policy "Allow", rate-limited | attributed with the agent's actor colour |
 | Agent approval prompts in Sight | v2 | existing approval model | |
 | Ask an agent from Sight ("why is my fps low?") | later | a text box (OSK) that posts to the user's configured agent endpoint; replies arrive as cards | needs an agent transport outside Sight's scope |
-| Agent reads Sight state (what's on screen, perf ring) | v2 | `quiver sight status --json` | read-only |
+| Agent reads Sight state (what's on screen) | v2 | `quiver sight status --json` | read-only; performance data through `quiver perf` (SIGHT-HUD §3.12) |
 
 ### 3.16 Diagnostics and control
 
@@ -431,27 +437,34 @@ in-process hooks.
 ### 4.3 Recommendation
 
 **Compositor-first, one UI process, a telemetry-only Vulkan layer, in-game drawing later as a
-second presenter. No in-process Windows hooks.**
+second presenter. No in-process Windows hooks.** (The HUD decisions in SIGHT-HUD change item 3
+and narrow item 4: the layer composites the pinned HUD from the MVP. See steer 2.)
 
 1. **`quiver-sight` (GPUI, separate process) owns all UI and UI state.** It is a quiverd client
    like the app, sharing the app's theme, components, focus navigation and gamepad code (move
    them into a shared crate, e.g. `ubi-ui`). It never talks to Ubisoft and holds no tokens.
 2. **Presenter 1 (MVP): wlr-layer-shell surfaces on the game's monitor**, `overlay` layer
-   (drawn above fullscreen windows on Hyprland): a click-through toast/corner-HUD surface that
-   never takes focus, and the panel surface that takes exclusive keyboard focus while open.
-   Requires a GPUI version with layer-shell.
-3. **The Sight layer (MVP): `VK_LAYER_QUIVER_sight`, telemetry only.** Timestamps every
-   `vkQueuePresentKHR`, records swapchain extent/format/present mode and whether
-   `VK_NV_low_latency2` is in use, writes into a shared-memory ring that `quiver-sight` reads,
-   and listens for one command: "capture the next presented image" (screenshots of game pixels,
-   v2). No drawing, no sleeping, no allocations in the present path. Enabled per launch only
-   (`VK_ADD_LAYER_PATH` + `VK_INSTANCE_LAYERS`, or an implicit layer gated by `QUIVER_SIGHT=1`),
-   never globally for other apps.
+   (drawn above fullscreen windows on Hyprland): a click-through toast surface that never takes
+   focus, and the panel surface that takes exclusive keyboard focus while open. Requires a GPUI
+   version with layer-shell. The HUD uses a layer-shell surface only as its fallback
+   (SIGHT-HUD §2.6), because any overlay-layer surface on the game's monitor costs direct
+   scan-out and tearing, and its updates disturb VRR pacing.
+3. **The Sight layer (MVP): `VK_LAYER_QUIVER_sight`, telemetry and the HUD compositor.**
+   Timestamps every `vkQueuePresentKHR`, records swapchain extent/format/present mode and
+   whether `VK_NV_low_latency2` is in use, and writes a present ring into the session dir that
+   quiverd reads (SIGHT-HUD §3.6). Per SIGHT-HUD's decisions it also composites the pinned HUD:
+   a premultiplied RGBA image `quiver-sight` renders off-screen with GPUI, from shared memory,
+   plus a frame-time graph it draws itself (SIGHT-HUD §2.8). It draws no text and parses
+   nothing. Later it also takes one command, "capture the next presented image" (screenshots of
+   game pixels, with and without the HUD, v2). No sleeping and no allocations in the present
+   path. Enabled per launch only (`VK_ADD_LAYER_PATH` + `VK_INSTANCE_LAYERS`, or an implicit
+   layer gated by `QUIVER_SIGHT=1`), never globally for other apps.
 4. **Presenter 2 (phase 3): the Sight layer composites textures** that `quiver-sight` renders
-   offscreen and shares as dma-bufs (toasts and HUD first, panel last). For gamescope sessions,
+   offscreen and shares as dma-bufs (toasts first, panel last). For gamescope sessions,
    compositors without layer-shell, game-only recordings and cases where focus stealing is
-   unacceptable. Needs GPUI offscreen rendering (spike S5) and is only built if those cases
-   matter.
+   unacceptable. Only built if those cases matter. The HUD doesn't wait for it: its simpler
+   path (CPU readback into shared memory, re-uploaded only when it changes) suits a small image
+   that changes twice a second; presenter 2 could start from it before needing dma-bufs.
 5. **Input: the compositor and hyprpad.** Keyboard/mouse via the panel surface's focus;
    gamepad via a hyprpad mode that activates when the `quiver-sight` layer namespace is on
    screen (the game gets a neutral pad, Quiver reads the pad read-only). Summon via a Hyprland
@@ -465,7 +478,8 @@ Why not layer-first: on the user's actual setup (Hyprland, XWayland or Wine-Wayl
 gamescope) the compositor path already works for every game including Steam copies and native
 ones, reuses GPUI wholesale, has zero crash or anti-cheat exposure, and needs no cross-process GPU
 sharing. The layer is still worth having from day one, but for what only it can do: exact frame
-timing and game-pixel capture. Why not in-process hooks: the motivating mod owns the D3D11
+timing, game-pixel capture, and (SIGHT-HUD) a pinned HUD that doesn't cost VRR pacing or
+direct scan-out. Why not in-process hooks: the motivating mod owns the D3D11
 present path, and an injected DLL is the only option with real ban risk. If spike S1 shows that
 focus stealing breaks games, the fallback for input is the bridge's SDK-level
 `OverlayStateChangedPush` (games release input themselves) before considering hooks.
@@ -481,19 +495,21 @@ focus stealing breaks games, the fallback for input is the bridge's SDK-level
  quiver CLI ─┼── ubi-api (JSON lines, $XDG_RUNTIME_DIR/quiver/   or parent of the game)
  agents ─────┤    quiverd.sock)                                   │  SDK pipes ⇄ game's uplay_r1/r2
  quiver-sight┘        │                                           │
-   │  ▲               │                     broker (TCP 127.0.0.1:47810, JSON lines)
-   │  │            quiverd ◀──────────────────────────────────────┘  + new: SdkEvent, OverlayCall
-   │  │   (sessions, plans, MOD-CONFIG live apply, sensors, toasts queue, capture orchestration)
+   │  │               │                     broker (TCP 127.0.0.1:47810, JSON lines)
+   │  │  HUD model ◀──┤ quiverd ◀─────────────────────────────────┘  + new: SdkEvent, OverlayCall
+   │  │  (SIGHT-HUD)  │ (sessions, plans, MOD-CONFIG live apply, perf registry and sensors,
+   │  │               │  toasts queue, capture orchestration)
+   │  │               ├── MOD-CONFIG live channel ──▶ mod inside the game (aco-dlss)
    │  │               │
-   │  │               └── MOD-CONFIG live channel ──▶ mod inside the game (aco-dlss)
-   │  │
-   │  └── Sight layer ring (memfd via SCM_RIGHTS over an abstract Unix socket
-   │       @quiver-sight/<uid>; same-uid check with SO_PEERCRED)
-   │                                      ▲
-   │                                      │  VK_LAYER_QUIVER_sight inside the game process
-   │                                      │  (libquiver_sight_layer.so, host-side Linux code)
+   │  │               └── reads (mmap, read-only) ◀── session dir /dev/shm/quiver-<uid>/<s>/
+   │  │                                                 layer-<pid>.ring, mod rings
+   │  └── writes hud.image (GPUI off-screen) ──────▶    hud.image
+   │                                                        ▲ ring        │ HUD image
+   │                                                        │             ▼
+   │                                      VK_LAYER_QUIVER_sight inside the game process
+   │                                      (libquiver_sight_layer.so, host-side Linux code)
    ▼
- Wayland: layer-shell surfaces on the game's monitor (Hyprland)
+ Wayland: layer-shell surfaces on the game's monitor (Hyprland): toasts, panel, HUD fallback
  hyprpad: sees the `quiver-sight` namespace → game mode with no forwarding
  hypxrhud: D-Bus CreatePanel(slot=toast) when XR is active (v2)
 ```
@@ -502,17 +518,26 @@ focus stealing breaks games, the fallback for input is the bridge's SDK-level
 
 - **quiverd** stays the source of truth. New responsibilities: a session id per running game
   (link `ActiveSession` ⇄ launch plan ⇄ bridge ⇄ Sight layer), the toast queue and its policy
-  (priorities, dedupe, rate limits, DND), a sensor collector (NVML, hwmon, `/proc`, UPower,
-  statvfs) usable by the app too, capture orchestration (screenshot paths, the replay recorder
-  process), and the routing of MOD-CONFIG live values.
+  (priorities, dedupe, rate limits, DND), the perf registry with its sensor collector (NVML,
+  hwmon, `/proc`, UPower, statvfs; usable by the app too), aggregation and formatting, and the
+  HUD model it sends `quiver-sight` (SIGHT-HUD §2.7), capture orchestration (screenshot paths,
+  the replay recorder process), and the routing of MOD-CONFIG live values. It creates the
+  session dir and reads the layer's and mods' rings there.
 - **quiver-sight** is started by quiverd when a session starts (or socket-activated by
   `quiver sight toggle`), runs as a normal user process (a systemd user unit next to quiverd),
   and exits a little after the last session ends. One instance per desktop session, serving all
-  running games (normally one).
+  running games (normally one). Besides the panel and toasts it **renders the pinned HUD**: an
+  off-screen GPUI window per session with the HUD on, written into the session dir's
+  `hud.image` for the layer to composite, or a layer-shell surface when the HUD falls back to
+  the desktop (SIGHT-HUD §2.9). While the HUD is enabled it runs for the whole session, even if
+  Sight's panel and toasts are off for that game. Its Vulkan device costs about 100 MiB of RSS on
+  the iGPU, which is one reason the HUD renders here and not in quiverd.
 - **The Sight layer** knows only: its session id (from `QUIVER_SESSION` in the environment; for
-  Steam copies `steam-run` sets it), and how to reach `quiver-sight`. Without either it stays
-  inert (pure passthrough). It contains no UI code and no protocol beyond "here is a ring",
-  "capture next frame", "these are my swapchains".
+  Steam copies `steam-run` sets it) and the session dir (`QUIVER_PERF_DIR`). Without them it
+  stays inert (pure passthrough). It has no socket: it writes its present ring and status block
+  into the session dir and reads `hud.image` from it (SIGHT-HUD §3.6–3.8); capture requests
+  (v2) arrive the same way, as a command word it checks once per present. It contains no UI
+  code and no text rendering.
 - **ubi-bridge** gets new broker messages:
   - `SdkEvent { session, kind }` (fire-and-forget): `AchievementEarned { id }`,
     `RichPresence { presence_id, tokens }`, `GameSession` / `MultiplayerSession` changes,
@@ -539,9 +564,11 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
 
 - Nothing in the game process (layer, bridge) receives account tokens beyond what the bridge
   already has (the per-game ticket in the launch context). The layer has none.
-- The layer socket is abstract and per-uid; `quiver-sight` checks `SO_PEERCRED` uid and that the
-  pid belongs to a known session. The layer only ever sends timing data and receives fds for
-  capture buffers; a malicious game gains nothing from the channel it couldn't do already.
+- The layer talks only through the session dir (`/dev/shm/quiver-<uid>/<session>/`, 0700,
+  files 0600). quiverd maps the layer's ring read-only and validates every record; the layer
+  maps `hud.image` read-only and validates every descriptor (SIGHT-HUD §3.16). The layer only
+  ever sends timing data and receives rendered pixels; a malicious game gains nothing from the
+  channel it couldn't do already.
 - Sight's actions go through quiverd's normal permission model with source `sight`, which is
   treated as "you" (the user is physically present). Agent-posted cards are labelled with the
   agent and cannot trigger actions without the user pressing a button.
@@ -560,7 +587,8 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
   (`hyprctl keyword bind` / `unbind` on `activewindow` events; it already plans to watch Hyprland
   events for window tagging). Default chord: steer #4. Connect's Shift+F2 is the parity choice;
   aco-dlss uses F9/F10, MangoHud Shift+F12 and Shift+F1 (its `toggle_fps_limit`), Steam
-  Shift+Tab.
+  Shift+Tab. The HUD's keys, bound the same way, are Shift+F3 (toggle) and Ctrl+Shift+F3 (next
+  preset) (SIGHT-HUD §1.3).
 - Controller: a hyprpad binding, `h.bind("guide+start", "Quiver Sight", h.exec "quiver sight
   toggle")`, live in `game` mode. Quiver ships the snippet; the user owns their hyprpad config.
   Never bare Guide (hyprpad replays a bare tap to Steam) and never Start alone (games use it).
@@ -639,19 +667,19 @@ no embedded web pages (steer #8).
 
 | Other thing | Interaction | Plan |
 |---|---|---|
-| **MangoHud** | Its own implicit layer and ImGui HUD in the game image; Shift+F12 / Shift+F1 hotkeys; `control=` socket | Keep it as the always-on perf HUD (MVP). Sight's Performance section offers "Show MangoHud" (needs it in the launch: `MANGOHUD=1` at launch, toggled live via its control socket or `no_display`) and presets. The Sight layer's timing is independent; layer order doesn't matter for telemetry |
+| **MangoHud** | Its own implicit layer and ImGui HUD in the game image; Shift+F12 / Shift+F1 hotkeys; `control=` socket | Quiver's HUD is the default (SIGHT-HUD); MangoHud stays a per-game option. Sight's Performance section offers "Show MangoHud" (needs it in the launch: `MANGOHUD=1` at launch, toggled live via its control socket or `no_display`) and presets. When Quiver launches MangoHud it moves MangoHud's `toggle_logging` off Shift_L+F2. The Sight layer's timing is independent; layer order doesn't matter for telemetry |
 | **Steam overlay** (Steam copies) | Steam's Vulkan layer and preload inside the game; Shift+Tab; opened by hyprpad's guide tap | Both work: different hotkeys, Sight is outside the game. Don't summon Sight on Shift+Tab. If both are open, Sight is on top (compositor) |
 | **Steam Input** | Steam reads hyprpad's virtual pad for Steam copies | Unchanged; hyprpad's mode switch neutralizes the pad for the game while Sight is open |
 | **aco-dlss and similar mods** | Own `d3d11.dll` proxy, present thread, F9/F10 | Sight never touches D3D. Sight is the UI for their settings via MOD-CONFIG. Their hotkeys are declared to Sight (assumption M7) so Sight's chord avoids them and shows them in the session page |
 | **ReShade** (via `dxgi.dll`/`d3d11.dll` proxy under Proton) | In-process, Home key | No conflict with Sight (no hooks). It may conflict with mods that proxy the same DLL; that's MODS-V2's conflict detection |
-| **vkBasalt** | Implicit Vulkan layer post-processing at present | Telemetry: no conflict. Phase 3 in-game drawing must run *after* vkBasalt (closer to the driver) or the UI gets post-processed: use explicit layer ordering in `VK_INSTANCE_LAYERS` |
-| **OBS / gpu-screen-recorder / Omarchy screen recording** | Output captures include Sight surfaces; window captures don't | Hide toasts on the recorded output optionally (v2 setting "hide Sight in recordings" = suppress toasts while a known recorder runs) |
+| **vkBasalt**, lsfg-vk | Implicit Vulkan layers post-processing or generating frames at present | Telemetry: no conflict. The HUD compositor (MVP) and any later in-game drawing must run *after* them (closer to the driver) or the HUD gets post-processed or interpolated: explicit layer ordering in `VK_INSTANCE_LAYERS` (SIGHT-HUD §2.4) |
+| **OBS / gpu-screen-recorder / Omarchy screen recording** | Output captures include Sight surfaces; window captures don't. The in-layer HUD is part of the game's image, so both include it; obs-vkcapture (a Vulkan layer) sees it depending on layer order | Hide toasts on the recorded output optionally (v2 setting "hide Sight in recordings" = suppress toasts while a known recorder runs). For the HUD, the "HUD in captures: Shown / Hidden" setting (SIGHT-HUD §2.12): layer order for obs-vkcapture, and a switch to the layer-shell fallback with `no_screen_share` while Hyprland reports a screen share |
 | **Discord** | No in-game overlay on Linux; discover-overlay uses layer-shell | Coexists. Later: map the game's rich presence to Discord RPC (Connect ships `discord-rpc`) |
 | **Desktop notifications (mako)** | Appear over the game | Sight replaces Quiver's own desktop notifications while a game is focused, and optionally puts mako in a DND mode during play (steer #12) |
 | **hyprpad OSK / cheatsheet** | Layer-shell surfaces too | They stack above Sight (hyprpad's namespaces); hyprpad rules decide which mode wins; Sight's namespace is `quiver-sight` |
-| **gamescope** | Nested: a normal window; session compositor: no layer-shell | Nested works now; session use needs phase 3 |
+| **gamescope** | Nested: a normal window; session compositor: no layer-shell | Nested works now; the in-layer HUD works in both; the panel and toasts as session compositor need phase 3 |
 | **Connect itself** | Must not run (pipes) | Unchanged; the bridge's guards stay |
-| **Anti-cheat titles** | Ubisoft titles with kernel/user anti-cheat mostly don't run on Proton anyway | Sight layer off for games flagged with anti-cheat (game info / a curated list); the compositor panel is safe everywhere |
+| **Anti-cheat titles** | Ubisoft titles with kernel/user anti-cheat mostly don't run on Proton anyway | Sight layer off for games flagged with anti-cheat (game info / a curated list); the compositor panel is safe everywhere, and the HUD uses its layer-shell fallback there (SIGHT-HUD decision 16) |
 
 ---
 
@@ -673,11 +701,14 @@ At most three stacked, 4 s each (achievements 6 s), newest on top, fade only (re
 none). Same urgency levels as hypxrhud (info, success, warning, action). In XR the same toasts go
 to hypxrhud's `toast` slot.
 
-### Corner HUD (optional, top-left, tiny)
+### Clock strip (the HUD's `clock` layout, optional, top-left, tiny)
 
 ```
  21:47 · 1 h 12 m · ▮▮▮▯ 64%
 ```
+
+Drawn by the HUD like any other layout (SIGHT-HUD §1.1); the performance presets are sketched
+there.
 
 ### Panel (full output, game dimmed 55% behind, safe-area margins for TVs)
 
@@ -772,7 +803,8 @@ Sight consumes MOD-CONFIG; it doesn't define schemas or storage. What Sight need
   conflict checks with Sight's chord and for the session page.
 - **M8. Status fields (read-only).** Mods can publish live readouts (FG state, internal
   resolution, real vs generated fps, Reflex on). Sight polls or subscribes at ≤ 4 Hz while
-  visible and not at all while hidden.
+  visible and not at all while hidden. *Now provided by SIGHT-HUD's metrics model*: readouts are
+  `state` / `text` metrics, read with `PerfCatalog` / `PerfSubscribe` (SIGHT-HUD §3.13).
 - **M9. Actions.** Momentary commands ("reset DLSS history") with a result.
 - **M10. No Sight-specific code in mods.** Everything above goes through the MOD-CONFIG SDK; the
   same schema renders in the app's Mods tab and in Sight.
@@ -786,8 +818,9 @@ gains `session`, `profile`, `options_revision`, `pids`; `OptionsList` returns re
 `SurfaceState`), M2 → C2 + C8 (`overlay = false` hides settings Sight can't edit), M3 → `apply`
 / `at` on `OptionDef` (live, at a game event, restart, next launch), M4 → C3 per-op outcomes,
 M5 → C4 (in-game edits saved to the profile, coalesced per burst; `live: Only` and
-`OptionsRevertSession` for try/revert), M6 + M8 → C5 events (`OptionsLive`, `OptionsReadout`),
-M7 → C7 `OptionsKeys` (Sight registers its chord as a runtime surface), M9 → C6
+`OptionsRevertSession` for try/revert), M6 → C5 events (`OptionsLive`), M8 → SIGHT-HUD's
+metrics (`PerfSubscribe`, which replaced `OptionsReadout`), M7 → C7 `OptionsKeys` (Sight
+registers its chord, and the HUD its keys, as runtime surfaces), M9 → C6
 `OptionsInvoke`, M10 → C9. One gap: MOD-CONFIG has `danger` (shown read-only in game unless
 enabled) but no separate *save-affecting* flag; save compatibility stays a property of the mod
 version (MODS-V2), so Sight should warn from that rather than per option. Sight is a separate
@@ -802,10 +835,10 @@ reads the env.
 | # | Spike | Question | De-risks |
 |---|---|---|---|
 | S1 | **Focus steal** | A layer-shell surface with exclusive keyboard over AC Origins (DXVK; fullscreen and borderless), FC4, a Steam copy (Black Flag Resynced), on Hyprland 0.56 with XWayland and with `PROTON_ENABLE_WAYLAND=1`: does the game pause, mute, minimize, lose its mode? Does the pointer lock come back on close? Does frame pacing/VRR misbehave while the panel is up? | (c) as the input model; per-game fallbacks |
-| S2 | **GPUI layer-shell** | Bump GPUI (crates.io release or git) to one with `WindowKind::LayerShell`; transparent, click-through surface on the `overlay` layer of a chosen output; switch input region and keyboard interactivity at runtime; per-output scale. What else breaks in the app from the bump? | the UI process |
-| S3 | **Telemetry layer** | A minimal Rust Vulkan layer (ash-based dispatch, or a C++ vkroots shim) enabled only for Quiver launches via `VK_ADD_LAYER_PATH` + `VK_INSTANCE_LAYERS`; works under DXVK and vkd3d-proton, with aco-dlss FG on (two VkDevices, two presents per frame) and Reflex on (no DXVK frame-id warnings added, no fps change); loads inside pressure-vessel for a Steam copy (glibc floor, path translation of the manifest) | perf section, screenshots |
+| S2 | **GPUI layer-shell** | Bump GPUI (crates.io release or git) to one with `WindowKind::LayerShell`; transparent, click-through surface on the `overlay` layer of a chosen output; switch input region and keyboard interactivity at runtime; per-output scale. What else breaks in the app from the bump? The HUD needs the same bump for off-screen rendering (SIGHT-HUD H8), so it's required either way | the UI process, the HUD |
+| S3 | **Telemetry layer** | A minimal Rust Vulkan layer (ash-based dispatch, or a C++ vkroots shim) enabled only for Quiver launches via `VK_ADD_LAYER_PATH` + `VK_INSTANCE_LAYERS`; works under DXVK and vkd3d-proton, with aco-dlss FG on (two VkDevices, two presents per frame) and Reflex on (no DXVK frame-id warnings added, no fps change); loads inside pressure-vessel for a Steam copy (glibc floor, path translation of the manifest). The HUD compositor builds on it (SIGHT-HUD H2) | perf section, screenshots, the HUD |
 | S4 | **In-game compositing** (only if phase 3 is wanted) | Layer imports a dma-buf from another process (external memory + DRM modifiers + sync_file or timeline semaphore), blends it on real and generated frames on NVIDIA; cost per present; HDR swapchains | presenter 2 |
-| S5 | **GPUI offscreen** | Size of a patch that renders a GPUI window into an exportable image instead of a surface (blade renderer) | presenter 2 with GPUI |
+| S5 | **GPUI offscreen** | Size of a patch that renders a GPUI window into an exportable image instead of a surface (blade renderer). *Answered for CPU readback by the HUD spike* (SIGHT-HUD §2.10: +681/−26 in gpui 0.2.2, ~400 lines to port onto upstream's wgpu headless renderer, 0.2–0.7 ms per warm frame); exporting as a dma-buf for presenter 2 remains open | presenter 2 with GPUI |
 | S6 | **Pad routing** | hyprpad rule on `ctx.layers:has("quiver-sight")` neutralizes the game's pad without input leaks at the switch; Quiver reads the pad via gilrs at the same time | gamepad model |
 | S7 | **SDK overlay semantics** | In the recon prefix only, offline: answer `InitRsp.overlay` with `enabled:true` and methods `None`/`SDK`; trace (`WINEDEBUG=+loaddll`) whether `uplay_r164/r264` try to load `overlay64.dll` and through which pipe; whether games then call `OverlayShowReq`; whether pushing `OverlayStateChangedPush{Showing}` pauses Origins | parity, pause-without-focus |
 | S8 | **Overlay call catalog** | Run more games (BF Resynced, newer R2 titles) with the bridge and grep their logs for `overlay_req`, friends UI calls and micro-app names | priorities in section 7 |
@@ -817,10 +850,11 @@ reads the env.
 Other risks:
 
 - **GPUI churn.** A GPUI bump touches the whole app; layer-shell support was reverted once
-  upstream. Mitigation: S2 early; fork pin if needed.
-- **Layer ABI and stability.** A layer bug crashes games. Mitigation: telemetry-only scope,
-  no allocation in present, fuzz with validation layers, per-game kill switch, inert without a
-  session id.
+  upstream. The HUD adds an off-screen patch on top (SIGHT-HUD §4.3). Mitigation: S2 early;
+  fork pin if needed.
+- **Layer ABI and stability.** A layer bug crashes games. Mitigation: telemetry plus a HUD
+  compositor that draws no text and parses nothing (SIGHT-HUD §2.8), no allocation in present,
+  fuzz with validation layers, per-game kill switch, inert without a session id.
 - **Toast spam.** Origins re-earns achievements at every load (section 2). Mitigation: the
   local earned set in quiverd; toasts only for ids not earned before.
 - **Wine-Wayland vs XWayland differences** in focus and pointer lock (S1 covers both).
@@ -837,11 +871,13 @@ Other risks:
   (logged only).
 - quiverd: session ids and markers (S12), local earned-achievement set per account and game
   (also answers `GetAchievementsReq`).
-- Spikes S1, S2, S3, S6, S7 (in that order). Decide steers.
+- Spikes S1, S2, S3, S6, S7 (in that order), with SIGHT-HUD's phase 0 (H1–H5, H8). Decide
+  steers.
 
 **Phase 1: MVP.**
 
-- `quiver-sight` process with presenter 1 (layer-shell), started by quiverd per session.
+- `quiver-sight` process with presenter 1 (layer-shell), started by quiverd per session; it
+  also renders the pinned HUD (SIGHT-HUD phase 1, which has its own scope).
 - Summon: Hyprland bind installed while a Quiver game is focused; hyprpad snippet; CLI
   `quiver sight toggle|open <section>|notify|status`.
 - Toast lane: achievement unlocked (deduped), cloud-save pull/conflict, download/update done,
@@ -849,9 +885,9 @@ Other risks:
   notes.
 - Panel sections: **Session** (game, profile, mod versions, saves, play time, clock, battery,
   quit/force quit), **Mods** (live MOD-CONFIG forms, pending restart edits), **Achievements**
-  (definitions + earned set, spoiler masking), **Performance** (fps, frame-time graph from the
-  telemetry layer; CPU/GPU/VRAM/temps/power from quiverd; MangoHud on/off).
-- Telemetry layer (S3) for Quiver launches and Steam copies.
+  (definitions + earned set, spoiler masking), **Performance** (SIGHT-HUD metrics: fps,
+  frame-time graph, base vs presented, CPU/GPU/VRAM/temps/power; HUD preset; MangoHud on/off).
+- Sight layer (S3) for Quiver launches and Steam copies: telemetry and the HUD compositor.
 - Bridge: `OverlayShowReq` for `Home/Show/Achievements/GameOptions` opens Sight (reply `Ok`).
   `ShowBrowserUrl`/`Shop` produce link cards.
 - Steam copies supported; anti-cheat-flagged games get toasts and panel but no layer.
@@ -863,7 +899,8 @@ Other risks:
 - `OverlayStateChangedPush` and `InitRsp.overlay.enabled` (after S7).
 - Capture: screenshots (compositor and layer), achievement auto-capture, gallery, instant replay
   via gpu-screen-recorder.
-- Quick menu, corner HUD, try-then-keep for mod settings, mod status fields and actions.
+- Quick menu, the HUD's `clock` layout, try-then-keep for mod settings, mod status metrics and
+  actions.
 - Audio (game volume via PipeWire), MPRIS media controls, power profile.
 - XR: hypxrhud toasts.
 - Agent approvals in Sight; notes per game; session reminders; DND/mako integration.
@@ -872,12 +909,15 @@ Other risks:
 
 - Presenter 2: in-game compositing via the Sight layer (S4, S5) for gamescope sessions,
   non-layer-shell compositors, game-only recordings.
-- Own perf HUD, FPS limiter integration, colorblind filters (layer shaders), pinned windows,
-  chat, party, plugin panels beyond MOD-CONFIG, Discord rich presence, time limits.
+- FPS limiter integration, colorblind filters (layer shaders), pinned windows, chat, party,
+  plugin panels beyond MOD-CONFIG, Discord rich presence, time limits. (The own perf HUD moved
+  to the MVP, SIGHT-HUD.)
 
 ---
 
 ## 13. Steers wanted
+
+Still open. Where SIGHT-HUD's decisions change what an option means, the steer carries a note.
 
 1. **Name.** (a) Sight; (b) Nock; (c) Fletch; (d) plain "Quiver HUD".
    *Recommend (a): short, archery-themed, and unlike "overlay" or "HUD" it isn't already taken
@@ -887,15 +927,23 @@ Other risks:
    Windows hooks like Connect's `overlay64.dll`; (d) require gamescope.
    *Recommend (a): works on your Hyprland setup for every game with no injection risk, and keeps
    (b) open as a second presenter.*
+   *Affected by SIGHT-HUD:* the layer composites the pinned HUD from the MVP whichever option is
+   chosen, so the layer is no longer "telemetry-only" in (a); (a) now means the panel and toasts
+   stay on the compositor. (b) would extend the HUD's compositing path to toasts and the panel.
 3. **UI toolkit.** (a) GPUI in a separate process, sharing the app's components (needs a GPUI
    bump for layer-shell); (b) egui drawn inside the layer; (c) both (egui for toasts in-game,
    GPUI for the panel).
    *Recommend (a): one design system, crash isolation, and the panel is where the work is.*
+   *Affected by SIGHT-HUD:* the HUD is already rendered by GPUI in `quiver-sight` (off-screen),
+   and the GPUI bump is now required by the HUD for off-screen rendering whatever is chosen here.
+   (b) and (c) would put egui next to the HUD's GPUI rendering: two toolkits in game.
 4. **Summon chord.** (a) Shift+F2 (Connect parity), bound only while a Quiver game is focused;
    (b) a Super chord (e.g. Super+Grave), always bound; (c) no default, user sets one. Controller:
    hyprpad `guide+start` in all cases.
    *Recommend (a): muscle memory and in-game hints already say Shift+F2, and binding it only
    while a game is focused keeps it out of other apps.*
+   *Note:* the HUD's keys are decided as Shift+F3 / Ctrl+Shift+F3, bound the same way, chosen to
+   sit next to Shift+F2; with (b) or (c) they'd no longer be next to the panel's chord.
 5. **Gamepad while Sight is open.** (a) rely on hyprpad to neutralize the game's pad;
    (b) Quiver grabs the pad (EVIOCGRAB) while open, reversing PROPOSAL's "never grab";
    (c) accept that the game also sees the pad.
@@ -906,8 +954,9 @@ Other risks:
    hooks later; (c) per game, default (a), fallback "toasts only".
    *Recommend (c): S1 will find games that misbehave; the default stays simple.*
 7. **Superseded (2026-11-16) by [SIGHT-HUD.md](SIGHT-HUD.md):** the user chose Quiver's own
-   pinned HUD (drawn in the Sight layer by default, layer-shell fallback) with pluggable,
-   mod-provided metrics; MangoHud stays a per-game option. The original steer, for the record:
+   pinned HUD with pluggable, mod-provided metrics: drawn in the game by the Sight layer, which
+   composites an image `quiver-sight` renders off-screen with GPUI, with an automatic
+   layer-shell fallback; MangoHud stays a per-game option. The original steer, for the record:
    **Performance HUD.** (a) integrate MangoHud (Sight toggles it and its presets; Sight's panel
    shows its own numbers); (b) replace MangoHud with a Sight HUD; (c) Sight panel numbers only,
    MangoHud left as is.
@@ -928,6 +977,11 @@ Other risks:
     Omarchy's tools, Sight only shows the gallery.
     *Recommend (a): NVENC replay exists today; Sight adds the per-game folders and the
     achievement auto-shot.*
+    *Affected by SIGHT-HUD:* "HUD in captures: Shown / Hidden" is decided (SIGHT-HUD §2.12), and
+    Sight's own screenshots and clips always offer a version with and without the HUD. For
+    screenshots that's the layer's copy in (a). For clips, gpu-screen-recorder records the
+    output, where the in-layer HUD is already baked in, so "clip without HUD" needs frames from
+    the layer: part of (b), or a limit on (a) for clips.
 12. **Notifications while playing.** (a) Sight toasts replace Quiver's desktop notifications
     while a game is focused, and mako goes to a DND mode during play (opt-in); (b) both Sight
     toasts and desktop notifications; (c) desktop notifications only (no toast lane).
@@ -935,6 +989,8 @@ Other risks:
 13. **Anti-cheat games.** (a) no Sight layer for games flagged with anti-cheat, panel and toasts
     still on; (b) no Sight at all for them; (c) always on.
     *Recommend (a): the panel never touches the game process.*
+    *Note:* SIGHT-HUD decided the matching HUD behaviour: layer off for flagged games, HUD on the
+    layer-shell fallback. Under (b) those games would get no HUD either.
 14. **Agents in Sight.** (a) agents may post toasts/cards (Allow, rate-limited) and request
     approvals; asking an agent from Sight comes later; (b) also let agents open the panel on
     any section; (c) no agent surface in Sight.
@@ -948,3 +1004,7 @@ Other risks:
     (`quiver-app --sight`); (c) inside quiverd.
     *Recommend (a): separate lifecycle (per session, systemd user unit) without a second copy of
     the components.*
+    *Affected by SIGHT-HUD:* the HUD is rendered with `ubi-ui` components in `quiver-sight` and
+    needs that process for the whole session, so the `ubi-ui` extraction is needed in the HUD's
+    MVP. (c) is ruled out for the HUD: decision 18 keeps the Vulkan device (100–280 MiB RSS) out
+    of quiverd.

@@ -72,7 +72,7 @@ Surface   one set of options with a schema and a backend
           ├─ mod surface      shipped with a mod version ("DLSS": aco_dlss.ini)
           ├─ game surface     Quiver catalog, per product ("AC Origins": ACO.ini graphics)
           └─ runtime surface  Quiver catalog, per tool ("DXVK", "MangoHud": env / conf)
-Schema    the description: files, pages, option definitions, presets, readouts, actions
+Schema    the description: files, pages, option definitions, presets, metrics, actions
 Option    one typed value bound to one place (INI key, XML attribute, env var, arg, SDK key)
 Value     the person's choice for an option in one profile (absent = the default)
 Backend   how a value reaches the program: file adapter at launch, launch settings,
@@ -159,12 +159,13 @@ connected); otherwise a `live` option is saved and marked "applies when the mod 
 
 ### SDK-only entries
 
-- `[readout.<id>]`: a value the running mod reports (FG on/off right now, render
-  resolution, upscaler cost). Display only. **Proposed change (SIGHT-HUD.md §3.13):** readouts
-  become metrics, `[metric.<id>]` with a `kind` (`state`/`text` for what readouts were, plus
-  `gauge`, `counter`, `series`, `frame`, `event` for performance data such as aco-dlss's base
-  FPS and Reflex latency), delivered through the metrics model in
-  [SIGHT-HUD.md](SIGHT-HUD.md) instead of `OptionsReadout`.
+- `[metric.<id>]`: a value the running mod reports (FG on/off right now, render
+  resolution, upscaler cost, base FPS, Reflex latency). Display only. The descriptor fields
+  and kinds (`state` and `text` for status values; `gauge`, `counter`, `series`, `frame`,
+  `event` for performance data) are defined in [SIGHT-HUD.md](SIGHT-HUD.md) §3.3, and values
+  are delivered through its metrics model (decided 2026-11-16: readouts were folded into
+  metrics, SIGHT-HUD §3.13). A `[readout.<id>]` table from an older draft is still read, as
+  `[metric.<id>] kind = "text"`.
 - `[action.<id>]`: a button the mod handles (toggle FG, reload shaders), optionally
   `hotkey_option = "<key option>"` naming the mod's own binding for it.
 
@@ -408,8 +409,16 @@ label = "Busy cities"
 help = "About 2.6–3× Alexandria's crowds. Costs CPU."
 set = { "world.npc_density" = 5, "world.npc_distance" = 2 }
 
-[readout."fg.active"]          # needs the SDK (phase 2): F9 flips FG without touching the file
-label = "Frame Generation now"
+[metric."fg.state"]            # needs the SDK: F9 flips FG without touching the file
+kind = "state"
+label = "Frame Generation"
+short = "FG"
+values = [
+  { value = "off", label = "off", level = "dim" },
+  { value = "on", label = "on" },
+  { value = "failed", label = "failed", level = "bad" },
+]
+roles = ["fg.state"]           # the rest of aco-dlss's metrics: SIGHT-HUD §3.15
 
 [action."fg.toggle"]
 label = "Toggle Frame Generation"
@@ -595,7 +604,7 @@ Four ways a running program can get a new value, in order of preference:
 
 | Channel | How | Who it serves | Verdict |
 |---|---|---|---|
-| **SDK** | the mod links `quiver_mod.h`; values are pushed over a pipe the bridge owns | mods that opt in (aco-dlss next) | phase 2: instant, two-way, readouts, actions |
+| **SDK** | the mod links `quiver_mod.h`; values are pushed over a pipe the bridge owns | mods that opt in (aco-dlss next) | phase 2: instant, two-way, metrics, actions |
 | **File rewrite** | Quiver rewrites the file inside the running namespace; the mod re-reads it | mods that poll or watch their file (aco-dlss today, MangoHud) | **MVP**: works for aco-dlss with zero mod changes |
 | Key emulation | send the mod's hotkey | toggles only | rejected: Quiver can't know the resulting state, and focus/input races with the in-game overlay |
 | Memory poking | | | never |
@@ -619,7 +628,7 @@ rewrites `aco_dlss.ini`, the mod notices within a second and applies it within a
 
 One caveat aco-dlss already handles well: its F9/F10 flips are runtime state that a file
 change resets. The in-game overlay therefore can't show the true FG state without the SDK
-(`readout fg.active`); the file channel shows the configured state.
+(the `fg.state` metric); the file channel shows the configured state.
 
 ### SDK (phase 2)
 
@@ -633,7 +642,10 @@ session's profile. Mods never see account data, a token or a TCP port (steer 10)
 
 **Wire format.** 4-byte little-endian length, then a UTF-8 JSON object with a `t` field.
 Unknown `t` values and unknown fields are ignored both ways. `proto` is an integer that only
-grows; each side speaks `min(theirs, mine)`.
+grows; each side speaks `min(theirs, mine)`. The current protocol is **2**: it adds the metrics
+messages (`metrics`, `metrics_ok`, `m`, `mark`, `ring_req`, `ring`, `perf_ctl`, and `caps` /
+`perf` fields on `hello` / `welcome`), specified in [SIGHT-HUD.md](SIGHT-HUD.md) §3.6. The
+table below is the options part.
 
 | Direction | `t` | Fields | Meaning |
 |---|---|---|---|
@@ -642,7 +654,7 @@ grows; each side speaks `min(theirs, mine)`.
 | ← | `set` | `seq`, `values` {id: {text, json}} | person changed values; apply them |
 | mod → | `ack` | `seq`, `rejected` {id: reason}? | applied (or not: shown in the UI) |
 | mod → | `changed` | `values`, `persist` (bool) | the mod changed them itself (its own menu: `persist`; a hotkey flip: not) |
-| mod → | `readout` | `values` {id: text} | display values, rate-limited to 4/s by the SDK |
+| mod → | `readout` | `values` {id: text} | protocol 1 only: display values (≤ 4/s). quiverd maps each to a `text` metric's `m` sample; protocol-2 SDKs send `metrics` + `m` instead |
 | ← | `action` | `id`, `arg`? | run an action |
 | mod → | `log` | `level`, `text` | goes to the session log |
 | both | `bye` | | clean shutdown |
@@ -660,7 +672,7 @@ bridge), every SDK call is a cheap no-op and the mod keeps reading its file.
 0BSD-licensed so any mod can vendor it):
 
 ```c
-/* quiver_mod.h — Quiver mod options SDK, protocol 1.
+/* quiver_mod.h — Quiver mod options SDK, protocol 2 (options here; metrics: SIGHT-HUD §3.14).
  * In exactly one .c/.cpp file:  #define QUIVER_MOD_IMPLEMENTATION  before including.
  * All strings are UTF-8. No call blocks for more than a pipe write; none allocate per frame. */
 #ifndef QUIVER_MOD_H
@@ -669,7 +681,7 @@ bridge), every SDK call is a cheap no-op and the mod keeps reading its file.
 extern "C" {
 #endif
 
-#define QUIVER_MOD_PROTOCOL 1
+#define QUIVER_MOD_PROTOCOL 2
 
 typedef struct quiver_mod quiver_mod;          /* opaque */
 
@@ -707,7 +719,9 @@ int  quiver_get(quiver_mod *m, const char *id, char *buf, int buf_len);
  * persist=0: runtime state such as a hotkey flip (shown, not saved). */
 void quiver_changed(quiver_mod *m, const char *id, const char *text, int persist);
 
-/* Display-only values for the in-game overlay and the app (rate-limited internally). */
+/* Convenience: declares (once) a `text` metric named `id` and sets it. The full metrics API
+ * (quiver_metric_declare, quiver_gauge, quiver_state, quiver_frame_submit, ...) is part of this
+ * header; see SIGHT-HUD §3.14. */
 void quiver_readout(quiver_mod *m, const char *id, const char *text);
 void quiver_log(quiver_mod *m, int level, const char *text);
 
@@ -723,8 +737,8 @@ void quiver_close(quiver_mod *m);
 aco-dlss's integration would be about twenty lines: `quiver_open("aco-dlss", NULL,
 QUIVER_POLL)` in `DllMain`'s preinit, `quiver_poll` where it already calls `config_reload()`
 every 64 frames, a callback that feeds `text` into the same parser `load()` uses, and
-`quiver_changed("fg.enabled", on ? "1" : "0", 0)` plus `quiver_readout("fg.active", …)` in the
-F9 handler.
+`quiver_changed("fg.enabled", on ? "1" : "0", 0)` plus `quiver_state(q, fg_state, on ? "on" :
+"off")` in the F9 handler (its other metrics: SIGHT-HUD §3.15).
 
 The SDK also ships a tiny Linux-side test server (`quiver dev mod-channel GAME`) that speaks
 the protocol on a pipe-equivalent so authors can test without a game.
@@ -748,8 +762,9 @@ the protocol on a pipe-equivalent so authors can test without a game.
 
 Events (after `Subscribe`): `OptionsChanged { product_id, profile, revision, source, changes }`,
 `OptionsLive { session, surface, values, by }` (session-level changes, including unsaved and
-`changed persist=0`), `OptionsReadout { session, surface, values }` (only to subscribers that
-asked for readouts), `ModChannel { session, surface, connected }`.
+`changed persist=0`), `ModChannel { session, surface, connected }`. Values a running mod
+reports are metrics: listed with `PerfCatalog` and watched with `PerfSubscribe`
+(`ubi_api::perf`, SIGHT-HUD §3.11), which replaced the `OptionsReadout` event.
 
 `ActiveSession` gains `session` (id), `profile`, `options_revision` and `pids`, which the
 in-game overlay and the CLI need to address "the running game".
@@ -869,7 +884,7 @@ to one form (W3C `KeyboardEvent.code` names plus modifiers: `F9`, `Shift+Home`) 
 |---|---|
 | mod options (`key` type) | DLSS: F9 (Frame Generation), F10 (DLSS/TAA) |
 | known tools (runtime surfaces) | ReShade: Home (`KeyOverlay=36,0,0,0`); MangoHud: Shift_R+F12 (HUD), Shift_L+F4 (reload); Steam: Shift+Tab (overlay), F12 (screenshot) |
-| the in-game overlay | its own open/close binding (SIGHT.md) |
+| the in-game overlay | its own open/close binding (SIGHT.md); the HUD's Shift+F3 / Ctrl+Shift+F3 (SIGHT-HUD §1.3) |
 | the game | catalog entry per product, where known (`[keys]` in the game surface) |
 | desktop | Hyprland binds with no modifier other than Super never reach the game; listed as "taken by the desktop" if they overlap |
 
@@ -946,7 +961,8 @@ SurfaceState {
       dormant: Option<reason>,
   }},
   presets: [{ id, label, help }],
-  readouts: { id → { label } }, actions: { id → { label, hotkey } },
+  metrics: [metric id…],                    // the surface's metrics; resolve with PerfCatalog
+  actions: { id → { label, hotkey } },
 }
 ```
 
@@ -962,10 +978,11 @@ into one revision per in-game editing burst (closed page, 30 s idle, or session 
 overlay wants one; `OptionsRevertSession { session }` puts back the values the session
 launched with (live where possible).
 
-**C5. Watching.** After `Subscribe` (with `readouts: true` for the session), the overlay gets
-`OptionsLive` (values changed by anyone: the app, CLI, an agent, the mod's own menu, a hotkey
-flip with `persist=false`), `OptionsChanged` (new revisions), `OptionsReadout`
-(≤ 4/s per surface) and `ModChannel` (SDK connected/disconnected). It never polls files.
+**C5. Watching.** After `Subscribe`, the overlay gets `OptionsLive` (values changed by anyone:
+the app, CLI, an agent, the mod's own menu, a hotkey flip with `persist=false`),
+`OptionsChanged` (new revisions) and `ModChannel` (SDK connected/disconnected). For the mod's
+reported values it uses `PerfSubscribe { session, select: [the surface's metric ids] }`
+(SIGHT-HUD §3.11) while visible. It never polls files.
 
 **C6. Actions and presets.** `OptionsInvoke` runs an SDK action; `OptionOp::Preset` applies a
 preset as one change.
@@ -985,11 +1002,10 @@ they fit a compact in-game panel.
 value it didn't validate. The overlay doesn't need to know about files, formats, profiles'
 folders, the SDK or the bridge.
 
-**C10. Not provided.** Rendering, input, focus, text entry, screenshots; FPS/frametime
-metrics (MangoHud-like data is SIGHT.md's, though a mod's readouts are delivered here).
-*Proposed (SIGHT-HUD.md):* all mod-reported values, readouts included, and FPS/frame-time data
-move to SIGHT-HUD's metrics model; C2's `readouts` and C5's `OptionsReadout` are replaced by
-`PerfCatalog` / `PerfSubscribe`.
+**C10. Not provided.** Rendering, input, focus, text entry, screenshots; FPS/frame-time data
+and every mod-reported value, which are SIGHT-HUD's metrics model (decided 2026-11-16).
+MOD-CONFIG owns options, actions and keys; a surface's metrics share its id as namespace, so
+the overlay can show them next to the options.
 
 ## Prior art
 
@@ -1036,8 +1052,10 @@ move to SIGHT-HUD's metrics model; C2's `readouts` and C5's `OptionsReadout` are
 - The in-game overlay can be built against C1–C9 from here (file channel only).
 
 **Phase 2: two-way and wider.**
-- SDK (`quiver_mod.h`), bridge pipe, broker mod channel, readouts, actions, `changed`;
-  aco-dlss adopts it (FG state readout, F9 delegation).
+- SDK (`quiver_mod.h`), bridge pipe, broker mod channel, actions, `changed`; aco-dlss adopts
+  it (F9 delegation). The pipe, the broker mod channel, `hello`/`welcome` and the JSON metrics
+  messages are pulled forward into SIGHT-HUD's phase 1 (its HUD MVP shows aco-dlss's FG state
+  and base FPS), so this phase adds the options side on a transport that already exists.
 - Keys view, conflict detection, delegation.
 - Catalog schemas (b) with `[match]`, starting with the AC Origins game surface (`ACO.ini`
   graphics, so `render_scale` and the game's own setting are shown together) and DXVK/
@@ -1084,6 +1102,9 @@ move to SIGHT-HUD's metrics model; C2's `readouts` and C5's `OptionsReadout` are
     connect to quiverd over TCP with a session token from the environment; (c) shared memory
     plus an event. *Recommend (a): no new port or secret in the game's environment, and every
     launch path already has the bridge.*
+    *Note:* SIGHT-HUD decided (a)'s pipe for options and low-rate metrics, plus shared-memory
+    rings in the session dir, created by the bridge, for per-frame data. So part of (c) exists
+    either way; this steer is about the options messages.
 11. **SDK form.** (a) Single-header C99, 0BSD; (b) a `quiver_mod.dll` mods load; (c) a Rust
     crate with a C ABI. *Recommend (a): vendorable into any MinGW/MSVC mod, nothing to ship
     beside it.*
