@@ -28,6 +28,9 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
             if req.init_req.is_some() && lease.is_none() {
                 lease = Some(LeaseShare::take(n));
             }
+            if let Some(a) = &req.achievement_req {
+                achievements(n, a).await;
+            }
             match respond(&req) {
                 Reply::Rsp(rsp) => {
                     log!("[conn {n}] -> {}", summarize(&rsp));
@@ -46,6 +49,41 @@ pub async fn serve(n: u32, mut pipe: NamedPipeServer) {
     .await;
     drop(lease);
     log!("[conn {n}] closed: {result:?}");
+}
+
+/// The broker side of achievement requests, before [`respond`] answers them: load the
+/// list from quiverd for the first read, forward new earns (in the background; the game
+/// gets its answer at once).
+async fn achievements(n: u32, a: &u::AchievementReq) {
+    use std::time::Duration;
+    if let Some(get) = &a.get_req
+        && crate::achievements::should_load()
+    {
+        let language = get.language_country_code.clone().or_else(|| crate::context().and_then(|c| c.language.clone()));
+        match tokio::time::timeout(Duration::from_secs(20), super::load_achievements(language)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log!("[conn {n}]    achievements unavailable from quiverd: {e:#}");
+                crate::achievements::load_failed();
+            }
+            Err(_) => {
+                log!("[conn {n}]    achievements: no answer from quiverd in 20 s");
+                crate::achievements::load_failed();
+            }
+        }
+    }
+    if let Some(earn) = &a.earn_req
+        && crate::achievements::is_new(earn.id)
+    {
+        let id = earn.id;
+        tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_secs(30), super::achievement_earned(id)).await {
+                Ok(Ok(())) => log!("[conn {n}]    achievement {id} handed to quiverd"),
+                Ok(Err(e)) => log!("[conn {n}]    achievement {id} not handed to quiverd: {e:#}"),
+                Err(_) => log!("[conn {n}]    achievement {id}: no answer from quiverd in 30 s"),
+            }
+        });
+    }
 }
 
 /// How long the lease outlives the last SDK connection, so a game that reconnects (a

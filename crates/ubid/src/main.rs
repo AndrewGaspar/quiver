@@ -3,6 +3,7 @@
 //! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `ubi-api` for the protocol.
 
+mod achievements;
 mod downloads;
 mod exports;
 mod mods;
@@ -91,6 +92,8 @@ struct Daemon {
     /// Performance metrics and the HUD (design/SIGHT-HUD.md): per-session registry,
     /// producers, subscriptions, HUD models.
     perf: Arc<perf::PerfHub>,
+    /// Achievement unlock status and reports (shared with the broker).
+    achievements: Arc<ubi_core::achievements::Engine>,
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -538,6 +541,7 @@ impl Daemon {
             // The connection loop passes connection-bound perf requests (subscriptions, HUD
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
+            Request::Achievements(req) => achievements::handle(self, source, req).await?,
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
@@ -931,6 +935,8 @@ async fn main() -> Result<()> {
     let perf = perf::PerfHub::start(launcher::data_dir(), perf::shm_root());
     mod_sdk.set_metrics_sink(perf::mods::PerfModSink::new(&perf));
     broker_svc.set_mods(mod_sdk.clone());
+    let ach = achievements::engine(accounts.clone(), events.clone());
+    broker_svc.set_achievements(ach.clone());
     tokio::spawn(broker_svc.clone().serve(broker_listener));
 
     // Also moves a pre-multi-account keyring entry to its per-account one.
@@ -975,10 +981,12 @@ async fn main() -> Result<()> {
         options: options::Options::default(),
         mod_sdk,
         perf,
+        achievements: ach,
     });
     options::test_session(&daemon);
     downloads::start(&daemon);
     steamgames::start(&daemon);
+    achievements::start(&daemon);
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;

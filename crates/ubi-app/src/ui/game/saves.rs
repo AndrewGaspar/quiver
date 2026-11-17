@@ -239,7 +239,14 @@ impl Quiver {
                     .child(div().text_size(px(24.)).font_weight(BOLD).child(a.total.to_string()))
                     .child(div().text_color(th.tx3).text_size(px(12.)).child(if a.unlocked_known { format!("{} unlocked", a.unlocked) } else { "defined for this game".into() })),
             )
-            .child(div().flex().gap(px(6.)).children(a.items.iter().take(6).map(|x| ach_icon(th, x, 36.))))
+            // The most recently earned first, when unlock status is known.
+            .child(div().flex().gap(px(6.)).children({
+                let mut shown: Vec<&Achievement> = a.items.iter().collect();
+                if a.unlocked_known {
+                    shown.sort_by_key(|x| (!x.unlocked, std::cmp::Reverse(x.unlocked_at)));
+                }
+                shown.into_iter().take(6).map(|x| ach_icon(th, x, 36.)).collect::<Vec<_>>()
+            }))
             .child(
                 div()
                     .flex()
@@ -248,7 +255,7 @@ impl Quiver {
                     .text_size(px(11.5))
                     .text_color(th.tx3)
                     .child(icon(Icon::Info, 12., th.tx3))
-                    .child(div().flex_1().min_w_0().child(if a.unlocked_known { "From Ubisoft" } else { "Unlock status isn't available from Ubisoft yet" })),
+                    .child(div().flex_1().min_w_0().child(if a.unlocked_known { "From Ubisoft" } else { "Unlock status isn't available from Ubisoft right now" })),
             );
         c
     }
@@ -529,10 +536,21 @@ impl Quiver {
     }
 
     fn ach_grid(&self, th: &Theme, a: &ubi_api::info::Achievements) -> gpui::Div {
-        let items: Vec<AnyElement> = a
-            .items
-            .iter()
+        // Earned first, then the rest in set order.
+        let mut sorted: Vec<&ubi_api::info::Achievement> = a.items.iter().collect();
+        if a.unlocked_known {
+            sorted.sort_by_key(|x| !x.unlocked);
+        }
+        let items: Vec<AnyElement> = sorted
+            .into_iter()
             .map(|x| {
+                let locked = a.unlocked_known && !x.unlocked;
+                let earned = x.unlocked.then(|| match (x.unlocked_at, x.report) {
+                    (_, Some(ubi_api::achievements::ReportState::Pending)) => "Earned · sending to Ubisoft".to_owned(),
+                    (_, Some(s @ (ubi_api::achievements::ReportState::Off | ubi_api::achievements::ReportState::DryRun))) => format!("Earned · {}", s.label()),
+                    (Some(t), _) => format!("Earned {}", day(t)),
+                    (None, _) => "Earned".to_owned(),
+                });
                 div()
                     .w(px(300.))
                     .flex_grow_1()
@@ -543,7 +561,8 @@ impl Quiver {
                     .rounded(px(10.))
                     .bg(th.ink1)
                     .border_1()
-                    .border_color(th.line1)
+                    .border_color(if x.unlocked { th.ok.opacity(0.35) } else { th.line1 })
+                    .when(locked, |d| d.opacity(0.55))
                     .child(ach_icon(th, x, 40.))
                     .child(
                         div()
@@ -553,16 +572,35 @@ impl Quiver {
                             .flex_col()
                             .gap(px(1.))
                             .child(div().font_weight(SEMIBOLD).text_size(px(12.5)).truncate().child(x.name.clone().unwrap_or_else(|| x.id.clone())))
-                            .child(div().text_size(px(11.5)).text_color(th.tx3).line_height(px(15.)).line_clamp(2).child(x.description.clone().unwrap_or_default())),
+                            .child(div().text_size(px(11.5)).text_color(th.tx3).line_height(px(15.)).line_clamp(2).child(x.description.clone().unwrap_or_default()))
+                            .when_some(earned, |d, e| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .text_size(px(11.))
+                                        .text_color(th.ok)
+                                        .child(icon(Icon::Trophy, 11., th.ok))
+                                        .child(e),
+                                )
+                            }),
                     )
                     .into_any_element()
             })
             .collect();
+        let note = if a.unlocked_known {
+            format!("{} unlocked", a.unlocked)
+        } else if a.items.iter().any(|x| x.unlocked) {
+            format!("{} earned through Quiver; Ubisoft's unlock status isn't available right now", a.unlocked)
+        } else {
+            "Definitions from Ubisoft; unlock status isn't available right now, so none are marked".into()
+        };
         card(th)
             .child(
                 card_header(th, "Achievements")
                     .child(badge(th, a.total.to_string(), false))
-                    .child(div().text_size(px(12.)).text_color(th.tx3).child(if a.unlocked_known { format!("{} unlocked", a.unlocked) } else { "Definitions from Ubisoft; unlock status isn't available yet, so none are marked".into() })),
+                    .child(div().text_size(px(12.)).text_color(th.tx3).child(note)),
             )
             .child(div().flex().flex_wrap().gap(px(8.)).p(px(14.)).children(items))
     }

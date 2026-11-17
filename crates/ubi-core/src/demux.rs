@@ -384,6 +384,70 @@ impl Service for Playtime {
     }
 }
 
+/// `ach_frontend` (package `mg.protocol.uplay`): achievement reads and writes, as Connect
+/// speaks them. The vendored proto has no `Upstream`/`Downstream` envelope for this
+/// package (every other service has one), so the service frame is taken to be the bare
+/// `Req`/`Rsp`; [`AchFrontendWrapped`] is the alternative should the server want an
+/// envelope like the others (unverified: see `tools/recon/achievements-verify.md`).
+pub struct AchFrontend;
+impl Service for AchFrontend {
+    const NAME: &'static str = "ach_frontend";
+    type Up = ubi_proto::uplay::Req;
+    type Down = ubi_proto::uplay::Rsp;
+    type Req = ubi_proto::uplay::Req;
+    type Rsp = ubi_proto::uplay::Rsp;
+    type Push = ();
+    fn wrap(req: Self::Req) -> Self::Up {
+        req
+    }
+    fn set_request_id(req: &mut Self::Req, id: u32) {
+        req.request_id = id;
+    }
+    fn response_id(rsp: &Self::Rsp) -> u32 {
+        rsp.request_id
+    }
+    fn split(down: Self::Down) -> (Option<Self::Rsp>, Option<Self::Push>) {
+        (Some(down), None)
+    }
+}
+
+/// `Upstream { request = 1 }` around a `uplay.Req`, the shape every other service uses.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AchUpstream {
+    #[prost(message, optional, tag = "1")]
+    pub request: Option<ubi_proto::uplay::Req>,
+}
+
+/// `Downstream { response = 1 }` around a `uplay.Rsp`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AchDownstream {
+    #[prost(message, optional, tag = "1")]
+    pub response: Option<ubi_proto::uplay::Rsp>,
+}
+
+/// [`AchFrontend`] with the usual `Upstream`/`Downstream` envelope.
+pub struct AchFrontendWrapped;
+impl Service for AchFrontendWrapped {
+    const NAME: &'static str = "ach_frontend";
+    type Up = AchUpstream;
+    type Down = AchDownstream;
+    type Req = ubi_proto::uplay::Req;
+    type Rsp = ubi_proto::uplay::Rsp;
+    type Push = ();
+    fn wrap(req: Self::Req) -> Self::Up {
+        AchUpstream { request: Some(req) }
+    }
+    fn set_request_id(req: &mut Self::Req, id: u32) {
+        req.request_id = id;
+    }
+    fn response_id(rsp: &Self::Rsp) -> u32 {
+        rsp.request_id
+    }
+    fn split(down: Self::Down) -> (Option<Self::Rsp>, Option<Self::Push>) {
+        (down.response, None)
+    }
+}
+
 pub struct ServiceConnection<S: Service> {
     demux: Demux,
     id: u32,

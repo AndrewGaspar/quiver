@@ -24,6 +24,8 @@ pub mod mg {
         pub mod ownership_cache { include_proto!("mg.protocol.ownership_cache"); }
         pub mod cloudsave_service { include_proto!("mg.protocol.cloudsave_service"); }
         pub mod game_starter { include_proto!("mg.protocol.game_starter"); }
+        /// `ach_frontend` on the demux socket (Connect → Ubisoft): achievement reads/writes.
+        pub mod uplay { include_proto!("mg.protocol.uplay"); }
     }
 }
 

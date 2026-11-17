@@ -43,6 +43,8 @@ macro_rules! log {
 
 // Platform-independent parts, tested on the host; on Linux the binary itself does nothing.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod achievements;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod respond;
 #[cfg(windows)]
 mod win;

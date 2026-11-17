@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod achievements;
 pub mod art;
 pub mod client;
 pub mod downloads;
@@ -80,13 +81,19 @@ pub struct GameSettings {
     /// Display only; launches ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub art: Option<String>,
+    /// Reporting the achievements the game earns to Ubisoft (see [`achievements`]):
+    /// `None` (on, the default), `off` (journaled locally only) or `dry-run` (journaled,
+    /// and the write Quiver would send is logged instead of sent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achievements: Option<String>,
 }
 
 impl GameSettings {
     /// Apply one edit. Keys: `proton`, `language`, `account` (a user id; the daemon
     /// resolves names), `profile` (the default mod profile's id; `vanilla` or empty: none;
-    /// the daemon resolves names), `art` (`steam` or `ubisoft`), `args`
-    /// (whitespace-separated), `wrappers` (comma/space-separated), `env.NAME`, `dll.NAME`.
+    /// the daemon resolves names), `art` (`steam` or `ubisoft`), `achievements` (`on`,
+    /// `off` or `dry-run`), `args` (whitespace-separated), `wrappers` (comma/space-separated),
+    /// `env.NAME`, `dll.NAME`.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
         let (key, value) = match op {
             SettingOp::Set { key, value } => (key.as_str(), Some(value.as_str())),
@@ -106,6 +113,14 @@ impl GameSettings {
                     Some(v) => return Err(format!("art: expected steam or ubisoft, got '{v}'")),
                 }
             }
+            "achievements" => {
+                self.achievements = match opt(value).map(|v| v.trim().to_ascii_lowercase().replace('_', "-")) {
+                    None => None,
+                    Some(v) if v == "on" => None,
+                    Some(v) if v == "off" || v == "dry-run" => Some(v),
+                    Some(v) => return Err(format!("achievements: expected on, off or dry-run, got '{v}'")),
+                }
+            }
             "args" => self.args = value.map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             "wrappers" => {
                 self.wrappers = value
@@ -118,7 +133,7 @@ impl GameSettings {
                 } else if let Some(n) = k.strip_prefix("dll.") {
                     (&mut self.dll_overrides, n)
                 } else {
-                    return Err(format!("unknown setting '{k}' (proton, language, account, profile, art, args, wrappers, env.NAME, dll.NAME)"));
+                    return Err(format!("unknown setting '{k}' (proton, language, account, profile, art, achievements, args, wrappers, env.NAME, dll.NAME)"));
                 };
                 if name.is_empty() {
                     return Err(format!("missing name in '{k}'"));
@@ -615,6 +630,9 @@ pub enum Request {
     /// Perf catalog, subscriptions, the HUD's settings, toggle and renderer attachment
     /// (design/SIGHT-HUD.md §3.11).
     Perf(perf::PerfRequest),
+    // ---- Achievements (appended; build/achievements)
+    /// Unlock status, the report journal, manual resends (see [`achievements`]).
+    Achievements(achievements::AchievementsRequest),
 }
 
 fn yes() -> bool {
@@ -668,6 +686,24 @@ pub enum Event {
     SteamGamesChanged {
         #[serde(default)]
         offer: Vec<u32>,
+    },
+    // ---- appended (build/achievements)
+    /// A game earned an achievement this account hadn't (as far as Ubisoft and the journal
+    /// know); `report` is its journal state (`pending`, `reported`, `off`, `dry_run`, …).
+    /// Sight shows these as toasts.
+    AchievementUnlocked {
+        product_id: u32,
+        account: String,
+        achievement_id: u32,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        /// Icon file on this machine, if the set is cached.
+        #[serde(default)]
+        image: Option<String>,
+        unlocked_at: DateTime<Utc>,
+        report: achievements::ReportState,
     },
 }
 
