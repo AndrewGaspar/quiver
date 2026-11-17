@@ -159,6 +159,8 @@ pub struct Quiver {
     pub conn: Conn,
     pub status: Option<Status>,
     pub games: Vec<GameRow>,
+    /// The library has answered at least once (an empty library isn't "loading").
+    pub library_loaded: bool,
     pub activity: Vec<ActivityEntry>,
     pub nav: Nav,
     pub mode: InputMode,
@@ -205,6 +207,7 @@ impl Quiver {
             conn: Conn::Connecting,
             status: None,
             games: Vec::new(),
+            library_loaded: false,
             activity: Vec::new(),
             nav: Nav::new(),
             mode: InputMode::Pointer,
@@ -299,15 +302,12 @@ impl Quiver {
         cx.notify();
     }
 
+    /// Connected: the library opens whether or not a Ubisoft account is signed in (other
+    /// stores' games show either way; the library offers Ubisoft's sign-in).
     fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
-        let signed_in = status.signed_in.is_some();
         self.status = Some(status);
-        if signed_in {
-            self.conn = Conn::Ready;
-            self.load_library(false, cx);
-        } else {
-            self.show_login(None, cx);
-        }
+        self.conn = Conn::Ready;
+        self.load_library(false, cx);
         self.global_status(cx);
         self.downloads_status(cx);
     }
@@ -371,21 +371,21 @@ impl Quiver {
                 }
                 self.options_game_state(Gid::from(product_id), running, cx);
             }
+            // Signed in (here, from the CLI, or another account): its games join.
             Event::SessionChanged { signed_in: Some(name) } => {
                 if let Some(s) = &mut self.status {
                     s.signed_in = Some(name);
                 }
-                if !matches!(self.conn, Conn::Ready) {
-                    self.conn = Conn::Ready;
-                    self.load_library(false, cx);
-                }
+                self.conn = Conn::Ready;
+                self.load_library(false, cx);
             }
+            // Signed out of Ubisoft: its games leave the library, the rest stays. A sign-in
+            // form the person has open stays open.
             Event::SessionChanged { signed_in: None } => {
                 if let Some(s) = &mut self.status {
                     s.signed_in = None;
                 }
-                self.games.clear();
-                self.show_login(None, cx);
+                self.load_library(false, cx);
             }
             // Steam games change Steam copies in the library (installed, switched to Quiver).
             Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
@@ -447,17 +447,15 @@ impl Quiver {
                 g.job = None;
             }
             match (status.signed_in.is_some(), &this.conn) {
-                (true, _) => {
+                // Keep a half-filled sign-in form.
+                (false, Conn::Login(_)) => {
+                    this.status = Some(status);
+                    this.load_library(false, cx);
+                }
+                _ => {
                     this.status = Some(status);
                     this.conn = Conn::Ready;
                     this.load_library(false, cx);
-                }
-                // Keep a half-filled sign-in form.
-                (false, Conn::Login(_)) => this.status = Some(status),
-                (false, _) => {
-                    this.status = Some(status);
-                    this.games.clear();
-                    this.show_login(None, cx);
                 }
             }
         });
@@ -511,8 +509,27 @@ impl Quiver {
                     this.load_settings(id, cx);
                 }
                 if let Page::Game(id) = this.nav.page {
-                    this.load_details(id, cx);
+                    if this.game(id).is_none() && id.is_ubisoft() && !this.ubisoft_signed_in() {
+                        // Signed out of Ubisoft: its games left the library.
+                        this.nav.open_section(Section::Library);
+                    } else {
+                        this.load_details(id, cx);
+                    }
                 }
+                // A store filter whose store left (signed out of Ubisoft) would hide everything,
+                // with no chip left to clear it.
+                if let Some(s) = this.store_filter
+                    && !this.games.iter().any(|g| g.entry.stores().contains(&s))
+                {
+                    this.store_filter = None;
+                }
+                this.library_loaded = true;
+            }
+            // Signed out of Ubisoft with no other store's games, quiverd answers with
+            // Ubisoft's "not signed in": that's an empty library, not a failure.
+            Err(_) if !this.ubisoft_signed_in() => {
+                this.games.clear();
+                this.library_loaded = true;
             }
             Err(e) => this.show_toast(format!("Could not load the library: {}", err_text(&e)), cx),
         });
@@ -566,6 +583,11 @@ impl Quiver {
         });
     }
 
+    /// A Ubisoft account is signed in (the default one, as the daemon reports it).
+    pub fn ubisoft_signed_in(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.signed_in.is_some())
+    }
+
     pub fn game(&self, id: Gid) -> Option<&GameRow> {
         self.games.iter().find(|g| g.id() == id)
     }
@@ -608,8 +630,11 @@ impl Quiver {
             form.busy = false;
             match result {
                 Ok(LoginResult::SignedIn { name }) => {
+                    if !this.ui.login_adding {
+                        this.show_toast(format!("Signed in to Ubisoft as {name}. Its games are joining the library."), cx);
+                    }
                     if let Some(s) = &mut this.status {
-                        s.signed_in = Some(name);
+                        s.signed_in.get_or_insert(name);
                     }
                     this.conn = Conn::Ready;
                     this.load_library(false, cx);

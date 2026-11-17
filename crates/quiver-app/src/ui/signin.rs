@@ -424,21 +424,19 @@ impl Quiver {
         if let Some(m) = self.render_signin_mosaic(th, cx) {
             root = root.child(m);
         }
+        // Signing in is optional (the library works without Ubisoft), so there is always a
+        // way back.
         let root = root
             .child(center)
-            .when(adding, |d| {
-                d.child(
-                    div().absolute().top(px(18.)).left(px(18.)).child(
-                        button("signin-back", th, Kind::Secondary, Size::Medium, Some(Icon::ArrowLeft), "Back to Quiver")
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_add_account(cx))),
-                    ),
-                )
-            })
-            .when(adding, |d| {
-                d.child(div().absolute().top(px(26.)).right(px(24.)).flex().items_center().gap(px(6.)).child(super::kbd(th, "Esc")).child(
-                    div().text_size(px(12.)).text_color(th.tx3).child("Cancel"),
-                ))
-            });
+            .child(
+                div().absolute().top(px(18.)).left(px(18.)).child(
+                    button("signin-back", th, Kind::Secondary, Size::Medium, Some(Icon::ArrowLeft), "Back to Quiver")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_add_account(cx))),
+                ),
+            )
+            .child(div().absolute().top(px(26.)).right(px(24.)).flex().items_center().gap(px(6.)).child(super::kbd(th, "Esc")).child(
+                div().text_size(px(12.)).text_color(th.tx3).child("Cancel"),
+            ));
         div().size_full().child(root)
     }
 

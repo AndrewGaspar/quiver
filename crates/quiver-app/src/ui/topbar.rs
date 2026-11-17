@@ -204,6 +204,8 @@ impl Quiver {
         if let Some(d) = self.status.as_ref().and_then(|s| s.accounts.iter().position(|a| a.default)) {
             names.sort_by_key(|(i, _)| *i != d);
         }
+        // No Ubisoft account: a plain person icon (Settings › Accounts offers the sign-in).
+        let signed_out = names.is_empty() && !self.ubisoft_signed_in();
         if names.is_empty() {
             let account = self.status.as_ref().and_then(|s| s.signed_in.clone()).unwrap_or_default();
             names.push((0, account));
@@ -221,15 +223,32 @@ impl Quiver {
                 this.nav.open_settings(SettingsSection::Accounts);
                 cx.notify();
             }))
-            .child(
-                // Overlapping by 9 px, drawn absolutely in a box of the stack's width.
-                div().relative().flex_none().h(px(30.)).w(px(30. + 21. * (n.min(shown) - 1) as f32)).children(
-                    names.into_iter().take(shown).enumerate().map(|(k, (i, name))| {
-                        let (from, to) = super::settings::account_colors(i);
-                        avatar(&initials(&name), from, to, th.ink0).absolute().top_0().left(px(21. * k as f32))
-                    }),
-                ),
-            )
+            .when(signed_out, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(30.))
+                        .rounded_full()
+                        .bg(th.ink3)
+                        .border_1()
+                        .border_color(th.line2)
+                        .child(icon(Icon::User, 15., th.tx3)),
+                )
+            })
+            .when(!signed_out, |d| {
+                d.child(
+                    // Overlapping by 9 px, drawn absolutely in a box of the stack's width.
+                    div().relative().flex_none().h(px(30.)).w(px(30. + 21. * (n.min(shown) - 1) as f32)).children(
+                        names.into_iter().take(shown).enumerate().map(|(k, (i, name))| {
+                            let (from, to) = super::settings::account_colors(i);
+                            avatar(&initials(&name), from, to, th.ink0).absolute().top_0().left(px(21. * k as f32))
+                        }),
+                    ),
+                )
+            })
             .when(n > shown, |d| d.child(div().text_size(px(11.)).text_color(th.tx3).child(format!("+{}", n - shown))))
             .when(!two_rows, |d| d.child(icon(Icon::ChevronDown, 14., th.tx3)));
         let playing = self.render_now_playing_pill(th, bp <= Bp::Medium, cx);

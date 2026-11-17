@@ -85,6 +85,8 @@ struct State {
     activity: Vec<ActivityEntry>,
     sessions: Vec<ActiveSession>,
     next_job: u64,
+    /// Accounts and sign-in (`demo_global.rs`), made on first use.
+    global: Option<global::Global>,
 }
 
 pub struct Demo {
@@ -144,8 +146,18 @@ fn origins_history() -> (GameSettings, Vec<Revision>) {
 
 impl Demo {
     pub fn start() -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_with(build_state())
+    }
+
+    /// No Ubisoft account signed in (the `signed-out` flag, without the environment).
+    #[cfg(test)]
+    pub fn start_signed_out() -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_with(State { global: Some(global::init(true)), ..build_state() })
+    }
+
+    fn start_with(state: State) -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let demo = Arc::new(Demo { state: Mutex::new(build_state()), events: tx, perf: perf::DemoPerf::new() });
+        let demo = Arc::new(Demo { state: Mutex::new(state), events: tx, perf: perf::DemoPerf::new() });
         let weak = Arc::downgrade(&demo);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -439,6 +451,7 @@ fn build_state() -> State {
         activity,
         sessions: vec![],
         next_job: 100,
+        global: None,
     }
 }
 

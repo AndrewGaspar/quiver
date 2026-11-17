@@ -4,16 +4,15 @@
 //! Exports and Steam users come from `demo/detail.rs`, shared with the game page.
 //!
 //! `QUIVER_DEMO_GLOBAL` flags (comma-separated) for screenshots:
-//! - `signed-out`: no account yet (the sign-in screen; any email, any password except
-//!   `wrong`, then any 6 digits except `000000`);
+//! - `signed-out`: no Ubisoft account yet (the library with Steam's games and the sign-in
+//!   card; any email, any password except `wrong`, then any 6 digits except `000000`;
+//!   `autosignin=N` signs in from the card after N s, `add-account` opens the form);
 //! - `2fa`: like `signed-out`, with a sign-in already waiting for its code;
 //! - `unreachable`: every request fails as if quiverd weren't running;
 //! - `playing`: AC Origins is running in a container, reported to Ubisoft;
 //! - `one-account`: only the default account;
 //!
 //! The app side reads more flags (`settings=…`, `palette=…`, …; see `ui/global.rs`).
-
-use std::sync::Mutex;
 
 use quiver_api::{Account, LoginResult};
 
@@ -27,13 +26,12 @@ const FAMILY_ONLY: [u32; 2] = [5408, 5277];
 /// The Steam user in `demo/detail.rs`.
 const STEAM_USER: &str = "84211337";
 
-struct Global {
+/// Accounts and sign-in state, kept in the demo's [`State`] (one per [`Demo`]).
+pub(super) struct Global {
     accounts: Vec<Account>,
     pending_2fa: Option<String>,
     seeded: bool,
 }
-
-static GLOBAL: Mutex<Option<Global>> = Mutex::new(None);
 
 fn flag(name: &str) -> bool {
     crate::ui::global::demo_flag(name).is_some()
@@ -48,12 +46,13 @@ fn id_hash(key: &str) -> u32 {
     h | 0x8000_0000
 }
 
-fn init() -> Global {
+/// `signed_out`: no Ubisoft account to start with, as with the `signed-out` flag.
+pub(super) fn init(signed_out: bool) -> Global {
     let mut accounts = vec![Account { user_id: "demo".into(), name: "demo".into(), default: true }];
     if !flag("one-account") {
         accounts.push(Account { user_id: FAMILY.into(), name: "family".into(), default: false });
     }
-    if flag("signed-out") || flag("2fa") {
+    if signed_out || flag("signed-out") || flag("2fa") {
         accounts.clear();
     }
     Global { accounts, pending_2fa: flag("2fa").then(|| "player.one@example.com".to_owned()), seeded: false }
@@ -118,8 +117,21 @@ fn log(st: &mut State, action: String, id: Option<u32>) {
 
 /// Answer `req` if it's one of the global screens' requests; `None` lets `demo.rs` answer.
 pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Option<Value>> {
-    let mut guard = GLOBAL.lock().unwrap();
-    let g = guard.get_or_insert_with(init);
+    let mut g = st.global.take().unwrap_or_else(|| init(false));
+    let out = handle_with(demo, st, &mut g, req);
+    st.global = Some(g);
+    out
+}
+
+/// Whether the demo has a Ubisoft account signed in (the `Stores` answer says so).
+pub(super) fn signed_in(st: &State) -> bool {
+    match &st.global {
+        Some(g) => !g.accounts.is_empty(),
+        None => !(flag("signed-out") || flag("2fa")),
+    }
+}
+
+fn handle_with(demo: &Demo, st: &mut State, g: &mut Global, req: &Request) -> Result<Option<Value>> {
     if !g.seeded {
         g.seeded = true;
         seed_activity(st);
@@ -154,16 +166,18 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             broker: "127.0.0.1:47810".into(),
             accounts: g.accounts.clone(),
         }),
+        // Ubisoft games the signed-in accounts own, and other stores' games whatever
+        // Ubisoft's state (as quiverd: a store that fails doesn't hide the others).
         Request::Library { .. } => {
             let entries: Vec<LibraryEntry> = st
                 .entries
                 .iter()
                 .cloned()
-                .map(|mut e| {
-                    e.owned_by = owners(g, e.ubisoft_id().unwrap_or(0));
-                    e
+                .filter_map(|mut e| {
+                    let Some(id) = e.ubisoft_id() else { return Some(e) };
+                    e.owned_by = owners(g, id);
+                    (!e.owned_by.is_empty()).then_some(e)
                 })
-                .filter(|e| !e.owned_by.is_empty())
                 .collect();
             json!(entries)
         }
@@ -199,7 +213,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             }
             log(st, format!("{} {name}", if known { "signed in again as" } else { "added account" }), None);
             let signed_in = default_name(g);
-            drop(guard);
             demo.emit(Event::SessionChanged { signed_in });
             demo.emit(Event::LibraryChanged);
             json!(LoginResult::SignedIn { name })
@@ -221,7 +234,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             }
             log(st, format!("signed out {}", gone.name), None);
             let signed_in = default_name(g);
-            drop(guard);
             demo.emit(Event::SessionChanged { signed_in });
             demo.emit(Event::LibraryChanged);
             Value::Null
@@ -233,7 +245,6 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             }
             let name = default_name(g).unwrap_or_default();
             log(st, format!("default account is now {name}"), None);
-            drop(guard);
             demo.emit(Event::SessionChanged { signed_in: Some(name) });
             demo.emit(Event::LibraryChanged);
             Value::Null
@@ -269,5 +280,42 @@ mod tests {
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert!(status.accounts.iter().all(|a| a.name != "tester"));
         assert_eq!(status.signed_in.as_deref(), Some("demo"));
+    }
+
+    /// Signed out of Ubisoft, the library still answers with Steam's games; signing in
+    /// adds Ubisoft's and tells the app (SessionChanged, LibraryChanged).
+    #[tokio::test]
+    async fn signed_out_library_then_sign_in() {
+        let (demo, mut events) = Demo::start_signed_out();
+        let library = || -> Vec<LibraryEntry> {
+            serde_json::from_value(demo.handle(Request::Library { refresh: false, all_stores: true }).unwrap()).unwrap()
+        };
+        let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
+        assert_eq!((status.signed_in, status.accounts.len()), (None, 0));
+        let lib = library();
+        assert!(lib.iter().all(|e| !e.game.is_ubisoft()), "no Ubisoft games without an account");
+        assert_eq!(lib.iter().filter(|e| e.game.store == quiver_api::StoreId::Steam).count(), 6);
+        let stores: Vec<quiver_api::stores::StoreInfo> = serde_json::from_value(demo.handle(Request::Stores).unwrap()).unwrap();
+        assert_eq!(stores[0].account, quiver_api::stores::AccountState::NeedsSignIn);
+
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login { email: "player@example.com".into(), password: "pw".into() }).unwrap()).unwrap();
+        assert!(matches!(r, LoginResult::TwoFactorRequired));
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "123456".into() }).unwrap()).unwrap();
+        assert!(matches!(r, LoginResult::SignedIn { ref name } if name == "player"));
+        let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
+        assert_eq!(status.signed_in.as_deref(), Some("player"));
+        assert!(status.accounts[0].default, "the first account becomes the default");
+        let lib = library();
+        assert!(lib.iter().any(|e| e.ubisoft_id() == Some(3539)), "the new account's games join");
+        assert_eq!(lib.iter().filter(|e| e.game.store == quiver_api::StoreId::Steam).count(), 6);
+        let (mut session, mut changed) = (false, false);
+        while let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
+            session |= matches!(e, Event::SessionChanged { signed_in: Some(ref n) } if n == "player");
+            changed |= matches!(e, Event::LibraryChanged);
+            if session && changed {
+                break;
+            }
+        }
+        assert!(session && changed);
     }
 }
