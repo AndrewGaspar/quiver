@@ -1,0 +1,454 @@
+format = 1
+surface = "quiver"
+kind = "platform"
+title = "Quiver Tweaks"
+help = "Overrides Quiver applies to any game it launches: upscaling, frame generation, frame rate and latency. Every tweak starts at the game's choice; Quiver changes nothing until you set one."
+audited = "2026-11-17: variable and option names against GE-Proton11-12 (DXVK v3.1.1-174, vkd3d-proton 1.1-5687, dxvk-nvapi v0.9.3), Proton Experimental 11.0-20261112 and Proton 10.0-4b (strings and scripts), dxvk-nvapi's README and wiki, DXVK's dxvk.conf, the NVIDIA Linux driver README 615.78.08 (design/TWEAKS.md §2); log lines and value spellings from dxvk-nvapi v0.9.3, DXVK f8637768 and vkd3d-proton 8293130e sources and a scratch-prefix run (TWEAKS spikes, 2026-11-17)."
+
+# Every game: the platform surface is always present (it never matches a mod version).
+[match]
+
+# Phase 1: launch-time mechanisms only (env, dxvk, vkd3d, nvapi-drs, ngx). Bindings with
+# `phase = 2` (the Sight layer, gamescope) are described for later and ignored now.
+#
+# Evidence is automatic per mechanism: DXVK's "Effective configuration" lines for `dxvk`
+# entries, dxvk-nvapi's `<-NvAPI_DRS_GetSetting (… = …): OK` (the application asked for the
+# setting and got Quiver's value) for `nvapi-drs`; `confirm` adds a fixed line for others.
+#
+# Value text in `map` keys is the value as Quiver stores it: enum values, numbers as text
+# ("0"), bools as "true"/"false". `@unset` writes nothing (the game's choice), `@skip` means
+# "this binding can't do that value" (the next one is tried). `{v}` is the value as text,
+# `{<tweak id>}` another tweak's value.
+
+# ------------------------------------------------------------------------------------ pages
+
+[[page]]
+id = "frames"
+title = "Frame rate and sync"
+options = ["fps.cap", "sync.vsync", "sync.max_latency", "latency.mode"]
+
+[[page]]
+id = "dlss"
+title = "NVIDIA DLSS"
+options = ["dlss.sr.model", "dlss.sr.scale", "dlss.sr.ratio", "dlss.rr.model", "dlss.runtime", "dlss.indicator"]
+
+[[page]]
+id = "framegen"
+title = "Frame generation"
+options = ["dlss.fg.model", "dlss.fg.frames", "dlss.fg.target", "fg.smooth_motion"]
+
+[[page]]
+id = "textures"
+title = "Textures"
+options = ["tex.anisotropy", "tex.lod_bias"]
+
+[[page]]
+id = "display"
+title = "Display"
+options = ["hdr"]
+
+# ---------------------------------------------------------------------------- frame rate
+
+[option."fps.cap"]
+type = "float"
+label = "Max frame rate"
+help = "Caps the frame rate. With a VRR display, a few frames under the refresh rate keeps VRR engaged."
+unit = "fps"
+min = 20
+max = 500
+step = 1
+special = [{ value = 0, label = "No cap" }, { value = "vrr", label = "Refresh rate − 3" }]
+default = 0
+level = "basic"
+apply = "launch"
+via = [
+  # dxgi.maxFrameRate also sets vkd3d-proton's target frame rate through DXVK's dxgi
+  # (SetTargetFrameRate, read from the source; spike T2), so one entry caps D3D12 games too.
+  # DXVK_CONFIG wins over a dxvk.conf per key (spike T2, measured).
+  { mech = "dxvk", label = "D3D8–12", set = { "dxgi.maxFrameRate" = "{v}", "d3d9.maxFrameRate" = "{v}" },
+    map = { "0" = "@unset" },
+    requires = { api = ["dxvk", "d3d12", "unknown"] } },
+  { mech = "env", label = "D3D12", set = { VKD3D_FRAME_RATE = "{v}" }, map = { "0" = "@unset" },
+    requires = { api = ["d3d12"], dxgi = "not-dxvk" } },
+  # Native Vulkan games at launch, and every game for a change made while it runs (steer 4).
+  { mech = "layer", control = "limiter.fps", apply = "live", phase = 2,
+    requires = { layer = true, any = [{ api = ["vulkan"] }, { session = "running" }] } },
+]
+
+[option."sync.vsync"]
+type = "enum"
+label = "Vertical sync"
+help = "Overrides the game's VSync. With VRR, off plus a cap under the refresh rate is the usual best."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "on", label = "On" },
+  { value = "off", label = "Off" },
+  { value = "tearfree", label = "Off, without tearing", help = "Presents the newest frame without tearing (mailbox)." },
+]
+default = "app"
+level = "basic"
+apply = "launch"
+via = [
+  { mech = "dxvk", label = "D3D9–12", map = {
+      app = "@unset",
+      on = { "dxgi.syncInterval" = "1", "d3d9.presentInterval" = "1" },
+      off = { "dxgi.syncInterval" = "0", "d3d9.presentInterval" = "0" },
+      tearfree = { "dxgi.syncInterval" = "0", "d3d9.presentInterval" = "0", "dxvk.tearFree" = "True" } },
+    requires = { api = ["dxvk", "d3d12", "unknown"] } },
+  { mech = "vkd3d", label = "D3D12", map = {
+      app = "@unset",
+      on = { VKD3D_SWAPCHAIN_PRESENT_MODE = "FIFO" },
+      off = { VKD3D_SWAPCHAIN_PRESENT_MODE = "IMMEDIATE" },
+      tearfree = { VKD3D_SWAPCHAIN_PRESENT_MODE = "MAILBOX" } },
+    requires = { api = ["d3d12"], dxgi = "not-dxvk" } },
+  { mech = "layer", control = "present_mode", apply = "at", at = "swapchain creation", phase = 2,
+    requires = { layer = true, api = ["vulkan"] } },
+]
+
+[option."sync.max_latency"]
+type = "enum"
+label = "Max frames in flight"
+help = "How many frames the CPU may queue ahead of the GPU. 1 is the NVIDIA App's Low Latency Mode On; it can cost throughput in CPU-bound games."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "1", label = "1" },
+  { value = "2", label = "2" },
+  { value = "3", label = "3" },
+]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "dxvk", label = "D3D9–11", set = { "dxgi.maxFrameLatency" = "{v}", "d3d9.maxFrameLatency" = "{v}" },
+    map = { app = "@unset" }, requires = { api = ["dxvk", "d3d12", "unknown"] } },
+  { mech = "vkd3d", label = "D3D12", also = true, set = { VKD3D_SWAPCHAIN_LATENCY_FRAMES = "{v}" },
+    map = { app = "@unset" }, requires = { api = ["d3d12", "unknown"] } },
+]
+
+[option."latency.mode"]
+type = "enum"
+label = "Low latency"
+help = "Lets the CPU wait just before a frame starts so input is fresher. Games with their own Reflex switch decide themselves; this is for games without it."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "off", label = "Off" },
+  { value = "on", label = "On" },
+]
+default = "app"
+level = "basic"
+apply = "launch"
+via = [
+  # DXVK 2.6–3.1 only: master removed latencySleep on 2026-11-06, so the binding requires
+  # the option's name in the build, not a version.
+  { mech = "dxvk", label = "D3D9–11", map = {
+      app = "@unset",
+      on = { "dxvk.latencySleep" = "True" },
+      off = { "dxvk.latencySleep" = "False", "dxvk.disableNvLowLatency2" = "True" } },
+    requires = { api = ["dxvk", "unknown"], has = ["dxvk:dxvk.latencySleep", "dxvk:dxvk.disableNvLowLatency2"] } },
+  { mech = "dxvk", label = "D3D9–11", map = { app = "@unset", on = "@skip", off = { "dxvk.enableNvLowLatency2" = "False" } },
+    requires = { api = ["dxvk", "unknown"], has = ["dxvk:dxvk.enableNvLowLatency2"] } },
+  # AMD: games with Anti-Lag 2 reach VK_AMD_anti_lag through vkd3d-proton and Mesa's layer.
+  { mech = "env", label = "AMD D3D12", map = { app = "@unset", on = { ENABLE_LAYER_MESA_ANTI_LAG = "1" }, off = "@skip" },
+    requires = { vendor = "amd", api = ["d3d12"], anti_cheat = false } },
+]
+
+# ------------------------------------------------------------------------------------ DLSS
+
+[option."dlss.sr.model"]
+type = "enum"
+label = "DLSS Super Resolution model"
+help = "Overrides the DLSS preset the game asks for, as the NVIDIA App's DLSS Override does. Only presets in the DLSS version the game loads are available unless the updater is on."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "latest", label = "Recommended (latest)" },
+  { value = "K", label = "K: DLSS 4 transformer" },
+  { value = "L", label = "L: DLSS 4.5, ultra performance" },
+  { value = "M", label = "M: DLSS 4.5, performance" },
+]
+open = true
+default = "app"
+level = "basic"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "NVIDIA RTX", requires = { vendor = "nvidia", rtx = true, nvapi = ">=0.9.0" },
+    set = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION = "render_preset_{v}" },
+    map = { app = "@unset" } },
+  # Streamline games ask for their own override switch (dxvk-nvapi 0.9.3 knows it).
+  { mech = "nvapi-drs", also = true, set = { SL_DLSS_OVERRIDE = "on" }, map = { app = "@unset" },
+    requires = { vendor = "nvidia", rtx = true, has = ["nvapi:SL_DLSS_OVERRIDE"] } },
+]
+
+[option."dlss.sr.scale"]
+type = "enum"
+label = "DLSS render resolution"
+help = "Overrides the resolution DLSS renders at. Some games' UI doesn't expect a changed ratio."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "dlaa", label = "DLAA (native)" },
+  { value = "quality", label = "Quality" },
+  { value = "balanced", label = "Balanced" },
+  { value = "performance", label = "Performance" },
+  { value = "ultra_performance", label = "Ultra Performance" },
+  { value = "custom", label = "Custom" },
+]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "NVIDIA RTX", requires = { vendor = "nvidia", rtx = true, nvapi = ">=0.9.0" },
+    map = {
+      app = "@unset",
+      dlaa = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLAA_OVERRIDE = "dlaa_on" },
+      quality = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_MODE = "quality" },
+      balanced = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_MODE = "balanced" },
+      performance = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_MODE = "performance" },
+      ultra_performance = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_MODE = "ultra_performance" },
+      custom = { NGX_DLSS_SR_OVERRIDE = "on", NGX_DLSS_SR_MODE = "custom", NGX_DLSS_SR_OVERRIDE_SCALING_RATIO = "{dlss.sr.ratio}" } } },
+]
+
+[option."dlss.sr.ratio"]
+type = "int"
+label = "Custom render resolution"
+unit = "%"
+min = 33
+max = 100
+step = 1
+default = 67
+when = { "dlss.sr.scale" = "custom" }
+level = "advanced"
+apply = "launch"
+
+[option."dlss.rr.model"]
+type = "enum"
+label = "Ray Reconstruction model"
+help = "Overrides the Ray Reconstruction preset in games that use it."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "latest", label = "Recommended (latest)" },
+  { value = "D", label = "D: DLSS 4 transformer" },
+  { value = "E", label = "E" },
+]
+open = true
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "NVIDIA RTX", requires = { vendor = "nvidia", rtx = true, nvapi = ">=0.9.0" },
+    set = { NGX_DLSS_RR_OVERRIDE = "on", NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION = "render_preset_{v}" },
+    map = { app = "@unset" } },
+]
+
+[option."dlss.runtime"]
+type = "enum"
+label = "DLSS version"
+help = "With NVIDIA's updater, the driver downloads newer DLSS from NVIDIA into the game's prefix, as on Windows. It may take a launch to arrive."
+values = [
+  { value = "app", label = "The game's own" },
+  { value = "updater", label = "NVIDIA updater" },
+]
+default = "app"
+experimental = true
+level = "advanced"
+apply = "launch"
+via = [
+  # The updater binary comes from the person's own driver install (steer 6); Quiver never
+  # downloads DLSS itself.
+  { mech = "ngx", label = "NVIDIA RTX", copy_updater = true, set = { PROTON_ENABLE_NGX_UPDATER = "1" }, map = { app = "@unset" },
+    requires = { vendor = "nvidia", rtx = true, ngx = ["nvngx_update.exe"] } },
+]
+
+[option."dlss.indicator"]
+type = "bool"
+label = "DLSS indicator"
+help = "NVIDIA's on-screen text showing the DLSS version, preset and resolution NGX really uses. The way to check an override."
+default = false
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "ngx", label = "NVIDIA RTX", indicator = true, set = { DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS = "DLSSIndicator=1024,DLSSGIndicator=2" },
+    map = { "false" = "@unset" }, requires = { vendor = "nvidia", rtx = true, nvapi = ">=0.9.0" } },
+]
+
+# -------------------------------------------------------------------------- frame generation
+
+[option."dlss.fg.model"]
+type = "enum"
+label = "Frame Generation model"
+help = "Overrides the DLSS Frame Generation model in games that already have Frame Generation on."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "latest", label = "Latest" },
+  { value = "B", label = "B: enhanced" },
+  { value = "C", label = "C: performance (beta)" },
+]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "RTX 40 and 50", requires = { vendor = "nvidia", rtx_series = 40, nvapi = ">=0.9.3" },
+    set = { NGX_DLSS_FG_OVERRIDE = "on", NGX_DLSS_FG_OVERRIDE_RENDER_PRESET_SELECTION = "render_preset_{v}" },
+    map = { app = "@unset" } },
+]
+
+[option."dlss.fg.frames"]
+type = "enum"
+label = "Frame Generation mode"
+help = "How many frames DLSS generates per rendered frame, in games that already have Frame Generation on. More than 2× and Dynamic need an RTX 50."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "2x", label = "2×" },
+  { value = "3x", label = "3×" },
+  { value = "4x", label = "4×" },
+  { value = "5x", label = "5×" },
+  { value = "6x", label = "6×", help = "Needs a newer Frame Generation DLL in the game." },
+  { value = "dynamic", label = "Dynamic", help = "Picks the multiplier to reach a target; not with a frame rate cap or VSync." },
+]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "RTX 40 and 50", requires = { vendor = "nvidia", rtx_series = 40, nvapi = ">=0.9.0" },
+    map = { app = "@unset", "2x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "1" }, "3x" = "@skip", "4x" = "@skip", "5x" = "@skip", "6x" = "@skip", dynamic = "@skip" } },
+  { mech = "nvapi-drs", label = "RTX 50", requires = { vendor = "nvidia", rtx_series = 50, nvapi = ">=0.9.0" },
+    map = {
+      app = "@unset",
+      "2x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "1" }, "3x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "2" },
+      "4x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "3" }, "5x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "4" },
+      "6x" = { NGX_DLSSG_MULTI_FRAME_COUNT = "5" }, dynamic = "@skip" } },
+  { mech = "nvapi-drs", label = "RTX 50, Dynamic", requires = { vendor = "nvidia", rtx_series = 50, has = ["nvapi:NGX_DLSSG_MODE"] },
+    map = { app = "@unset", dynamic = { NGX_DLSSG_MODE = "dynamic" }, "2x" = "@skip", "3x" = "@skip", "4x" = "@skip", "5x" = "@skip", "6x" = "@skip" } },
+]
+
+[option."dlss.fg.target"]
+type = "float"
+label = "Dynamic target"
+unit = "fps"
+min = 30
+max = 500
+step = 1
+special = [{ value = 0, label = "Max refresh rate" }]
+default = 0
+when = { "dlss.fg.frames" = "dynamic" }
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "nvapi-drs", label = "RTX 50", requires = { vendor = "nvidia", rtx_series = 50, has = ["nvapi:NGX_DLSSG_DYNAMIC_TARGET_FRAME_RATE"] },
+    set = { NGX_DLSSG_DYNAMIC_TARGET_FRAME_RATE = "{v}" }, map = { "0" = "0x1000000" } },
+]
+
+[option."fg.smooth_motion"]
+type = "bool"
+label = "NVIDIA Smooth Motion"
+help = "The driver's own frame generation for any Vulkan, DXVK or vkd3d-proton game. Not together with DLSS Frame Generation; a frame rate cap caps the generated frames."
+default = false
+level = "basic"
+apply = "launch"
+via = [
+  # NVIDIA's present layer logs `Smooth Motion enabled [1]` at start (the log level that
+  # prints it is unverified, so the effect may stay unconfirmed).
+  { mech = "env", label = "RTX 50", set = { NVPRESENT_ENABLE_SMOOTH_MOTION = "1" }, map = { "false" = "@unset" },
+    requires = { vendor = "nvidia", rtx_series = 50, driver = ">=575.51" },
+    confirm = { log = "nvpresent", line = "Smooth Motion enabled", key = "[1]", says = "NVIDIA's present layer started with Smooth Motion on" } },
+  { mech = "env", label = "RTX 40", set = { NVPRESENT_ENABLE_SMOOTH_MOTION = "1" }, map = { "false" = "@unset" },
+    requires = { vendor = "nvidia", rtx_series = 40, driver = ">=580.82" },
+    confirm = { log = "nvpresent", line = "Smooth Motion enabled", key = "[1]", says = "NVIDIA's present layer started with Smooth Motion on" } },
+]
+
+# -------------------------------------------------------------------------------- textures
+
+[option."tex.anisotropy"]
+type = "enum"
+label = "Anisotropic filtering"
+help = "Forces texture filtering quality in D3D9–11 games (not D3D12)."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "2", label = "2×" },
+  { value = "4", label = "4×" },
+  { value = "8", label = "8×" },
+  { value = "16", label = "16×" },
+]
+default = "app"
+level = "basic"
+apply = "launch"
+via = [
+  { mech = "dxvk", label = "D3D9–11", set = { "d3d11.samplerAnisotropy" = "{v}", "d3d9.samplerAnisotropy" = "{v}" },
+    map = { app = "@unset" }, requires = { api = ["dxvk", "unknown"] } },
+]
+
+[option."tex.lod_bias"]
+type = "float"
+label = "Texture LOD bias"
+help = "Added to the game's own texture LOD bias (negative is sharper). \"No negative bias\" stops games from over-sharpening textures."
+min = -2.0
+max = 1.0
+step = 0.1
+precision = 1
+special = [{ value = "app", label = "Game's choice" }, { value = "clamp", label = "No negative bias" }]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "dxvk", label = "D3D9–11", set = { "d3d11.samplerLodBias" = "{v}", "d3d9.samplerLodBias" = "{v}" },
+    map = { app = "@unset", clamp = { "d3d11.clampNegativeLodBias" = "True", "d3d9.clampNegativeLodBias" = "True" } },
+    requires = { api = ["dxvk", "unknown"] } },
+]
+
+# --------------------------------------------------------------------------------- display
+
+[option."hdr"]
+type = "enum"
+label = "HDR output"
+help = "Lets games output HDR. Needs Wine-Wayland or gamescope with HDR on, on an HDR display."
+values = [
+  { value = "app", label = "Game's choice" },
+  { value = "on", label = "On" },
+  { value = "off", label = "Off" },
+]
+default = "app"
+level = "advanced"
+apply = "launch"
+via = [
+  { mech = "env", label = "GE-Proton", map = { app = "@unset", on = { PROTON_ENABLE_HDR = "1" }, off = { DXVK_NO_HDR = "1" } },
+    requires = { has = ["proton:PROTON_ENABLE_HDR"] },
+    confirm = { log = "dxvk", line = "Color space:", key = "HDR10_ST2084", says = "DXVK created an HDR10 swapchain" } },
+  { mech = "env", map = { app = "@unset", on = { DXVK_HDR = "1" }, off = { DXVK_NO_HDR = "1" } },
+    confirm = { log = "dxvk", line = "Color space:", key = "HDR10_ST2084", says = "DXVK created an HDR10 swapchain" } },
+]
+
+# ----------------------------------------------------------------------- built-in conflicts
+
+[[conflicts]]
+tweak = "fps.cap"
+when = { "dlss.fg.frames" = "dynamic" }
+reason = "Dynamic Frame Generation doesn't work with a frame rate cap (NVIDIA)."
+
+[[conflicts]]
+tweak = "fg.smooth_motion"
+when = { "dlss.fg.frames" = ["2x", "3x", "4x", "5x", "6x", "dynamic"] }
+reason = "NVIDIA says not to combine Smooth Motion with DLSS Frame Generation."
+
+# ------------------------------------------------------------------------------- presets
+
+[[preset]]
+id = "competitive"
+label = "Competitive"
+help = "Lowest latency: no cap, VSync off, low latency on, one frame in flight."
+set = { "fps.cap" = 0, "sync.vsync" = "off", "latency.mode" = "on", "sync.max_latency" = "1" }
+
+[[preset]]
+id = "vrr"
+label = "VRR display"
+help = "A cap just under the refresh rate with VSync off keeps variable refresh engaged without tearing."
+set = { "fps.cap" = "vrr", "sync.vsync" = "off" }
+
+[[preset]]
+id = "quiet"
+label = "Quiet laptop"
+help = "Caps at 60 fps to keep fans and power down."
+set = { "fps.cap" = 60 }
+
+[[preset]]
+id = "dlss-check"
+label = "Check DLSS"
+help = "Shows NVIDIA's DLSS indicator, so you can see what NGX really runs."
+set = { "dlss.indicator" = true }

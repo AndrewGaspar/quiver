@@ -564,6 +564,13 @@ impl Quiver {
                 meta.push(div().child("this session only, not saved").into_any_element());
             }
             ValueSource::ModPatch { mod_id } => meta.push(div().child(format!("set by {mod_id}'s config patch; yours overrides it")).into_any_element()),
+            ValueSource::Tweak { tweak, scope, revision } => {
+                meta.push(div().child(format!("from Quiver Tweaks ({}, r{revision}: {tweak}); yours overrides it", scope.label())).into_any_element())
+            }
+            ValueSource::Scope { scope, revision, source } => {
+                meta.push(who_badge(th, source).into_any_element());
+                meta.push(div().child(format!("{} · r{revision}", scope.label())).into_any_element());
+            }
             ValueSource::Default => {}
         }
         if let Some(o) = self.gp.opt.outcomes.get(&key) {

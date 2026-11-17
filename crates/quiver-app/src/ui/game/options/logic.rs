@@ -193,7 +193,7 @@ pub fn draft_value(st: &OptionState, edit: Option<&Edit>) -> Value {
 
 /// The profile changed it (or the session did), as opposed to the shipped default.
 pub fn is_changed(st: &OptionState) -> bool {
-    !matches!(st.from, ValueSource::Default)
+    !matches!(st.from, ValueSource::Default | ValueSource::Tweak { .. })
 }
 
 /// Staged edits as the daemon's ops, in a stable order. Rows of "Other keys" are keyed

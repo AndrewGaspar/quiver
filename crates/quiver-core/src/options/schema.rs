@@ -391,7 +391,8 @@ pub fn lint(schema: &Schema) -> Vec<LintFinding> {
     if schema.surface.is_empty() || !schema.surface.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
         top(Severity::Error, "surface", format!("{:?}: a stable id of lowercase letters, digits, - and _", schema.surface));
     }
-    if schema.files.is_empty() && !schema.options.is_empty() {
+    let platform = schema.kind == Some(quiver_api::options::SurfaceKind::Platform);
+    if schema.files.is_empty() && !schema.options.is_empty() && !platform {
         top(Severity::Error, "file", "the schema binds no files (`[file.<id>]`)".into());
     }
     for (fid, f) in &schema.files {
@@ -422,6 +423,7 @@ pub fn lint(schema: &Schema) -> Vec<LintFinding> {
             out.push(LintFinding { severity: Severity::Error, at: at.clone(), message: format!("file {f} isn't declared") });
         }
         match binding(schema, id, d) {
+            _ if platform => {}
             Ok(b) => {
                 if let Some(other) = bound.insert(b.clone(), id.clone()) {
                     out.push(LintFinding { severity: Severity::Error, at: at.clone(), message: format!("bound to the same key as {other} ({})", b.raw_key()) });
@@ -497,11 +499,104 @@ pub fn lint(schema: &Schema) -> Vec<LintFinding> {
     for m in schema.metrics.values() {
         lint_metric(m, &mut out);
     }
+    lint_tweaks(schema, platform, &mut out);
     if schema.matches.is_some() && schema.audited.is_none() {
         out.push(LintFinding { severity: Severity::Warning, at: "match".into(), message: "a catalog schema says who audited it (`audited`)".into() });
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.severity));
     out
+}
+
+/// Quiver Tweaks fields (design/TWEAKS.md §3.2, §7.1): `via` bindings on platform surfaces,
+/// `provides`/`conflicts`/`tweak_page` on mod and game surfaces.
+fn lint_tweaks(schema: &Schema, platform: bool, out: &mut Vec<LintFinding>) {
+    use crate::tweaks::compile::{BUILT, KNOWN, PHASE};
+    let mut f = |severity, at: String, message: String| out.push(LintFinding { severity, at, message });
+    for (id, d) in &schema.options {
+        let at = format!("option {id}");
+        if !d.via.is_empty() && !platform {
+            f(Severity::Warning, at.clone(), "`via` is only read on platform surfaces (kind = \"platform\")".into());
+        }
+        for (n, b) in d.via.iter().enumerate() {
+            let at = format!("{at} via[{n}]");
+            if !KNOWN.contains(&b.mech.as_str()) {
+                f(Severity::Error, at.clone(), format!("unknown mechanism {:?} (known: {})", b.mech, KNOWN.join(", ")));
+            } else if b.phase.unwrap_or(1) > PHASE || !BUILT.contains(&b.mech.as_str()) {
+                f(Severity::Note, at.clone(), format!("mechanism {} (phase {}) isn't built in this Quiver: ignored", b.mech, b.phase.unwrap_or(2)));
+            }
+            if b.mech == "mod" {
+                f(Severity::Error, at.clone(), "providers declare `[provides]` in their own schema; `mech = \"mod\"` isn't a binding".into());
+            }
+            for name in b.requires.has.iter().chain(&b.requires.lacks) {
+                if !matches!(name.split_once(':').map(|x| x.0), Some("dxvk" | "nvapi" | "vkd3d" | "proton")) {
+                    f(Severity::Error, at.clone(), format!("`has` names are component:name (dxvk:, nvapi:, vkd3d:, proton:), got {name:?}"));
+                }
+            }
+            if b.set.is_empty() && b.map.values().all(|v| matches!(v, quiver_api::options::ViaValue::Text(_))) && BUILT.contains(&b.mech.as_str()) && b.phase.unwrap_or(1) <= PHASE && b.flags.is_empty() {
+                f(Severity::Error, at.clone(), "the binding writes nothing (no `set`, no per-value tables)".into());
+            }
+            for (k, v) in &b.map {
+                if let quiver_api::options::ViaValue::Text(t) = v
+                    && t.starts_with('@')
+                    && t != "@unset"
+                    && t != "@skip"
+                {
+                    f(Severity::Error, at.clone(), format!("map {k} = {t}: only @unset and @skip are known"));
+                }
+                if d.ty == OptionType::Enum && !d.open && !d.values.iter().any(|e| scalar_text(&e.value).eq_ignore_ascii_case(k)) {
+                    f(Severity::Warning, at.clone(), format!("map key {k} isn't one of the tweak's values"));
+                }
+            }
+        }
+        if let Some(p) = &d.tweak_page
+            && !crate::tweaks::schema().pages.iter().any(|x| &x.id == p)
+        {
+            f(Severity::Warning, at.clone(), format!("tweak_page {p} isn't a Quiver Tweaks page"));
+        }
+    }
+    let tweaks = if platform { schema } else { crate::tweaks::schema() };
+    let mut whens = Vec::new();
+    for (tweak, p) in &schema.provides {
+        let at = format!("provides {tweak}");
+        if !tweaks.options.contains_key(tweak) {
+            f(Severity::Warning, at.clone(), format!("{tweak} isn't a tweak this Quiver knows (fine if a newer one adds it)"));
+        }
+        match schema.options.get(&p.option) {
+            None => f(Severity::Error, at.clone(), format!("option {} isn't an option of this surface", p.option)),
+            Some(def) => {
+                let off = p.off.iter().map(|o| ("off".to_owned(), o.clone()));
+                for (k, v) in p.map.iter().map(|(k, v)| (k.clone(), v.clone())).chain(off) {
+                    let skip = v.as_str().is_some_and(|s| s == "@keep" || s.starts_with('{'));
+                    if !skip && let Err(e) = def.normalize(&v) {
+                        f(Severity::Error, at.clone(), format!("{k} → {}: {e}", scalar_text(&v)));
+                    }
+                }
+            }
+        }
+        if let Some(w) = &p.when {
+            whens.push((w, at.clone()));
+        }
+    }
+    for (n, c) in schema.conflicts.iter().enumerate() {
+        let at = format!("conflicts[{n}]");
+        match (&c.tweak, &c.mech) {
+            (None, None) => f(Severity::Error, at.clone(), "name a `tweak` or a `mech`".into()),
+            (Some(t), _) if !tweaks.options.contains_key(t) => f(Severity::Warning, at.clone(), format!("{t} isn't a tweak this Quiver knows")),
+            (_, Some(m)) if !KNOWN.contains(&m.split(':').next().unwrap_or("")) => f(Severity::Error, at.clone(), format!("unknown mechanism in {m:?}")),
+            _ => {}
+        }
+        if c.reason.trim().is_empty() {
+            f(Severity::Error, at.clone(), "give the reason people see".into());
+        }
+        if let Some(w) = &c.when
+            && !platform
+        {
+            whens.push((w, at.clone()));
+        }
+    }
+    for (w, at) in whens {
+        lint_when(schema, w, &at, out);
+    }
 }
 
 /// The first error of a lint, as one message.

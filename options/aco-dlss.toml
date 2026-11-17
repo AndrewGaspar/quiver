@@ -380,6 +380,7 @@ apply = "live"
 [option."fg.auto_cap"]
 type = "bool"
 label = "Automatic frame rate cap"
+tweak_page = "frames"
 help = "While frame generation runs, caps the real frame rate with headroom so the game's cadence stays steady and DLSS-G stays within a frame of the game's Present. An explicit frame rate cap wins."
 when = { "fg.mode" = "d3d12" }
 level = "basic"
@@ -970,3 +971,54 @@ hotkey_option = "fg.toggle_key"
 [action."upscaler.toggle"]
 label = "Switch DLSS / game TAA"
 hotkey_option = "upscaler.toggle_key"
+
+# ---------------------------------------------------------------- Quiver Tweaks (design/TWEAKS.md §7)
+# What this mod implements itself: Quiver's own mechanism for these tweaks stands down (unless
+# the person prefers Quiver's, where `off` exists), and a tweak's value flows into the option
+# as a default layer under the profile's own DLSS value.
+
+[provides."fps.cap"]
+option = "reflex.fps_limit"
+off = 0
+
+[provides."latency.mode"]
+option = "reflex.mode"
+map = { off = "off", on = "on", app = "@keep" }
+off = "off"
+
+[provides."dlss.sr.model"]
+option = "upscaler.preset"
+map = { app = "@keep", latest = "default", K = "K", L = "L", M = "M" }
+
+[provides."dlss.sr.scale"]
+option = "upscaler.render_scale"
+map = { app = "@keep", dlaa = 1.0, quality = 0.667, balanced = 0.58, performance = 0.5, ultra_performance = 0.333, custom = "{percent / 100}" }
+
+[provides."tex.lod_bias"]
+option = "upscaler.mip_bias"
+mode = "own"
+
+[[conflicts]]
+tweak = "dlss.fg.frames"
+when = { "fg.mode" = "d3d12" }
+reason = "DLSS mod generates exactly one frame per game frame; a multi-frame override breaks its present thread."
+
+[[conflicts]]
+tweak = "dlss.fg.model"
+when = { "fg.mode" = "d3d12" }
+reason = "DLSS mod runs its own DLSS Frame Generation; a driver-side model override would disagree with it."
+
+[[conflicts]]
+tweak = "fg.smooth_motion"
+when = { "fg.mode" = "d3d12" }
+reason = "DLSS mod already generates frames; Smooth Motion would interpolate them again."
+
+[[conflicts]]
+mech = "dxvk:dxgi.maxFrameRate"
+when = { "fg.mode" = "d3d12" }
+reason = "Frame Generation presents two frames per game frame; DXVK's limiter would cap generated frames and halve the game's rate."
+
+[[conflicts]]
+mech = "layer:limiter"
+when = { "fg.mode" = "d3d12" }
+reason = "Frame Generation presents two frames per game frame; a present-time cap would cap generated frames."

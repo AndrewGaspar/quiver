@@ -410,6 +410,7 @@ fn state(s: &Resolved, hist: &[OptionsRevision], running: bool, session: Option<
                 pending,
                 dormant: None,
                 invalid: None,
+                tweak: None,
             };
             (id.clone(), st)
         })

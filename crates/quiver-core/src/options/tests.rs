@@ -394,3 +394,58 @@ fn imports_compare_with_the_version_the_copy_was_rendered_from() {
     assert!(r.changes[0].contains("doesn't fit"), "{:?}", r.changes);
     assert!(import_external(&ctx, None, "while the game ran").unwrap().is_none());
 }
+
+/// Set Quiver Tweaks values at the global scope (design/TWEAKS.md).
+fn tweak_global(f: &Fixture, ops: &[(&str, Value)]) {
+    let data = f.store.data_dir().to_owned();
+    let at = crate::tweaks::At::Global(&data);
+    let cur = at.current().unwrap();
+    let ops: Vec<OptionOp> = ops.iter().map(|(id, v)| OptionOp::Set { surface: "quiver".into(), id: (*id).into(), value: v.clone() }).collect();
+    let a = crate::tweaks::apply_ops(crate::tweaks::schema(), at.kind(), &cur, &Default::default(), &ops);
+    assert!(a.outcomes.iter().all(|o| o.1.is_none()), "{:?}", a.outcomes);
+    at.append(a.values, a.prefer, "cli", None, a.changes).unwrap();
+}
+
+#[test]
+fn quiver_tweaks_flow_into_a_provider_s_option_below_the_profile_s_value() {
+    use quiver_api::tweaks::{Planned, ScopeKind};
+    let f = aco();
+    tweak_global(&f, &[("fps.cap", json!(160)), ("dlss.sr.model", json!("latest")), ("dlss.fg.frames", json!("4x")), ("tex.anisotropy", json!("16"))]);
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    let s = &ctx.surfaces[0];
+    let rev = current(&f.store, &f.profile).unwrap();
+    let st = state(&ctx, s, &rev, &RunInfo::default(), None);
+    let cap = &st.options["reflex.fps_limit"];
+    assert_eq!(cap.value, json!(160.0));
+    assert!(matches!(&cap.from, ValueSource::Tweak { tweak, scope: ScopeKind::Global, revision: 1 } if tweak == "fps.cap"), "{:?}", cap.from);
+    assert_eq!(st.options["upscaler.preset"].value, json!("default"));
+    // The launch writes the bound values into the mod's file.
+    let mut plan = f.store.plan(Some(&f.profile)).unwrap();
+    prepare_launch(&ctx, &mut plan).unwrap();
+    let text = std::fs::read_to_string(f.store.profile_dir(&f.profile).join("upper/aco_dlss.ini")).unwrap();
+    assert!(text.contains("preset=default") && text.contains("fps_limit=160"), "{text}");
+    // Quiver's own mechanisms stand down; the mod's FG blocks multi-frame overrides; the rest applies.
+    let caps = quiver_api::tweaks::Capabilities {
+        gpu: Some(quiver_api::tweaks::Gpu { vendor: "nvidia".into(), name: "NVIDIA GeForce RTX 5070".into(), rtx_series: Some(50), arch: None }),
+        proton: Some(quiver_api::tweaks::ProtonCaps { nvapi: Some("v0.9.3".into()), dxvk: Some("v3.1.1".into()), ..Default::default() }),
+        route: "quiver".into(),
+        api: "unknown".into(),
+        ..Default::default()
+    };
+    let game = quiver_api::GameRef::ubisoft(3539);
+    let c = crate::tweaks::plan_for(f.store.data_dir(), &game, Some(&ctx), caps.clone(), &Default::default(), None).unwrap();
+    assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { by, .. } if by == "DLSS"));
+    assert!(matches!(&c.plan.entry("dlss.fg.frames").unwrap().planned, Planned::Blocked { reason } if reason.starts_with("DLSS: ")), "{:?}", c.plan.entry("dlss.fg.frames"));
+    assert!(matches!(&c.plan.entry("tex.anisotropy").unwrap().planned, Planned::Apply { mech, .. } if mech == "dxvk"));
+    assert_eq!(c.plan.env["DXVK_CONFIG"], "d3d11.samplerAnisotropy = 16; d3d9.samplerAnisotropy = 16");
+    assert_eq!(c.plan.revisions.global, 1);
+    // The profile's own DLSS value wins over the tweak.
+    set(&f, vec![op("reflex.fps_limit", json!(120))]);
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    let rev = current(&f.store, &f.profile).unwrap();
+    let st = state(&ctx, &ctx.surfaces[0], &rev, &RunInfo::default(), None);
+    assert_eq!(st.options["reflex.fps_limit"].value, json!(120.0));
+    assert_eq!(st.options["reflex.fps_limit"].default, json!(160.0), "the tweak is the default layer under it");
+    let c = crate::tweaks::plan_for(f.store.data_dir(), &game, Some(&ctx), caps, &Default::default(), None).unwrap();
+    assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { value: Some(v), .. } if v == &json!(120.0)));
+}

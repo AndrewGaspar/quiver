@@ -156,6 +156,8 @@ fn from_text(o: &OptionState) -> String {
         ValueSource::ModPatch { mod_id } => format!("set by mod {mod_id}"),
         ValueSource::Profile { revision, source } => format!("{}, r{revision} (default {})", who(source), o.def.display(&o.default)),
         ValueSource::Session { .. } => format!("this session only (saved: {})", o.def.display(&o.default)),
+        ValueSource::Tweak { tweak, scope, revision } => format!("Quiver Tweaks {} r{revision} ({tweak})", scope.label().to_lowercase()),
+        ValueSource::Scope { scope, revision, source } => format!("{}, {}, r{revision}", scope.label().to_lowercase(), who(source)),
     }
 }
 
@@ -178,7 +180,7 @@ fn apply_text(o: &OptionState) -> String {
 }
 
 fn changed(o: &OptionState) -> bool {
-    !matches!(o.from, ValueSource::Default | ValueSource::ModPatch { .. })
+    !matches!(o.from, ValueSource::Default | ValueSource::ModPatch { .. } | ValueSource::Tweak { .. })
 }
 
 fn print_surface(s: &SurfaceState, max: Level, raw: bool, only_changed: bool) {

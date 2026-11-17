@@ -25,6 +25,7 @@ pub mod perf;
 pub mod savestores;
 pub mod setup;
 pub mod steamlib;
+pub mod tweaks;
 pub mod stores;
 pub use client::Client;
 pub use game::{GameId, GameRef, StoreId};
@@ -414,6 +415,9 @@ pub struct PlaySession {
     /// The session's performance summary (also read with `PerfRequest::Summaries`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perf: Option<perf::PerfSummary>,
+    /// The Quiver Tweaks revisions (global, game, profile) the session launched with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweaks: Option<tweaks::TweakRevisions>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -732,6 +736,10 @@ pub enum Request {
         #[serde(default)]
         refresh: bool,
     },
+    // ---- Quiver Tweaks (appended; design/TWEAKS.md)
+    /// Platform-level overrides per scope (global, game, profile), the plan of the next
+    /// launch and sessions' effects (see [`tweaks`]).
+    Tweaks(tweaks::TweaksRequest),
 }
 
 fn yes() -> bool {
@@ -881,6 +889,22 @@ pub enum Event {
         ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<Box<perf::PerfSummary>>,
+    },
+    // ---- appended: Quiver Tweaks (design/TWEAKS.md §8.1)
+    /// A new revision of a tweak scope's values (global, a game, a profile).
+    TweaksChanged {
+        scope: tweaks::Scope,
+        revision: u32,
+        source: String,
+        #[serde(default)]
+        changes: Vec<String>,
+    },
+    /// A tweak's effect in a running session changed (confirmed by evidence, …).
+    TweaksEffect {
+        session: String,
+        #[serde(flatten, with = "game::wire")]
+        game: GameRef,
+        effect: tweaks::TweakEffect,
     },
 }
 
