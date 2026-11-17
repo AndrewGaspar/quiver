@@ -1,6 +1,7 @@
 //! Native Ubisoft Connect client core: authentication, demux protocol, library,
 //! and manifest handling.
 
+pub mod achievements;
 pub mod auth;
 pub mod broker;
 pub mod builds;

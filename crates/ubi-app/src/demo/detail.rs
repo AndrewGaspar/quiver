@@ -707,7 +707,7 @@ fn achievements(id: u32) -> Option<Achievements> {
             })
         })
         .collect();
-    Some(Achievements { unlocked_known: false, unlocked: 0, total: items.len() as u32, items })
+    Some(Achievements { unlocked_known: false, unlocked: 0, total: items.len() as u32, items, source: None })
 }
 
 fn progress(st: &State, id: u32) -> Result<Progress> {

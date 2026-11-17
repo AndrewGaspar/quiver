@@ -29,17 +29,25 @@ pub struct Broker {
     sessions: Option<Arc<PlaySessions>>,
     /// Where mod SDK channels go (none: refused).
     mods: std::sync::OnceLock<Arc<crate::modsdk::ModRegistry>>,
+    /// Achievement lists and earns from games (none: refused).
+    achievements: std::sync::OnceLock<Arc<crate::achievements::Engine>>,
 }
 
 impl Broker {
     /// `sessions`: where bridges' play sessions are tracked (none: answered but not tracked).
     pub fn new(accounts: Arc<Accounts>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
-        Arc::new(Self { accounts, conns: Mutex::new(HashMap::new()), sessions, mods: std::sync::OnceLock::new() })
+        Arc::new(Self { accounts, conns: Mutex::new(HashMap::new()), sessions, mods: std::sync::OnceLock::new(), achievements: std::sync::OnceLock::new() })
     }
 
     /// Accept mod SDK channels (`BrokerRequest::ModChannel`) into `registry`. Set once.
     pub fn set_mods(&self, registry: Arc<crate::modsdk::ModRegistry>) {
         let _ = self.mods.set(registry);
+    }
+
+    /// Answer games' achievement requests (`BrokerRequest::Achievements`,
+    /// `AchievementEarned`) with `engine`. Set once.
+    pub fn set_achievements(&self, engine: Arc<crate::achievements::Engine>) {
+        let _ = self.achievements.set(engine);
     }
 
     /// Drop an account's service connections (after it signs out or signs in again), so
@@ -88,6 +96,31 @@ impl Broker {
                     _lease = self.sessions.as_ref().map(|s| s.begin(account_id.as_deref(), uplay_id, "bridge"));
                     BrokerResponse::Ok
                 }
+                Ok(BrokerRequest::Achievements { uplay_id, account_id, language }) => match self.achievements.get() {
+                    None => BrokerResponse::Error { message: "this quiverd doesn't serve achievements".into() },
+                    Some(engine) => {
+                        let locale = language.filter(|l| !l.is_empty()).unwrap_or_else(|| "en-US".into());
+                        let list = engine.bridge_list(account_id.as_deref(), uplay_id, &locale);
+                        match tokio::time::timeout(std::time::Duration::from_secs(40), list).await {
+                            Ok(Ok((items, unlocked_known))) => BrokerResponse::Achievements { items, unlocked_known },
+                            Ok(Err(e)) => BrokerResponse::Error { message: format!("{e:#}") },
+                            Err(_) => BrokerResponse::Error { message: "achievements: no answer from Ubisoft in time".into() },
+                        }
+                    }
+                },
+                Ok(BrokerRequest::AchievementEarned { uplay_id, account_id, achievement_id }) => match self.achievements.get() {
+                    None => BrokerResponse::Error { message: "this quiverd doesn't take achievement reports".into() },
+                    Some(engine) => {
+                        tracing::info!(uplay_id, achievement_id, "bridge reports an earned achievement");
+                        let engine = engine.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = engine.earned(account_id.as_deref(), uplay_id, achievement_id).await {
+                                tracing::warn!(uplay_id, achievement_id, "recording an earned achievement: {e:#}");
+                            }
+                        });
+                        BrokerResponse::Ok
+                    }
+                },
                 Ok(req) => self.handle(req).await.unwrap_or_else(|e| {
                     tracing::warn!("request failed: {e:#}");
                     BrokerResponse::Error { message: format!("{e:#}") }
@@ -115,7 +148,9 @@ impl Broker {
         let account = match &req {
             BrokerRequest::DenuvoGameToken { account_id, .. }
             | BrokerRequest::PlaySession { account_id, .. }
-            | BrokerRequest::ModChannel { account_id, .. } => account_id.clone(),
+            | BrokerRequest::ModChannel { account_id, .. }
+            | BrokerRequest::Achievements { account_id, .. }
+            | BrokerRequest::AchievementEarned { account_id, .. } => account_id.clone(),
         };
         let online = self.accounts.get(account.as_deref())?;
         let user_id = online.session().await?.user_id;
@@ -151,7 +186,10 @@ impl Broker {
 
     async fn handle_online(online: &mut Conns, req: &BrokerRequest) -> Result<BrokerResponse> {
         match req {
-            BrokerRequest::PlaySession { .. } | BrokerRequest::ModChannel { .. } => unreachable!("handled per connection"),
+            BrokerRequest::PlaySession { .. }
+            | BrokerRequest::ModChannel { .. }
+            | BrokerRequest::Achievements { .. }
+            | BrokerRequest::AchievementEarned { .. } => unreachable!("handled per connection"),
             BrokerRequest::DenuvoGameToken { uplay_id, request_token, .. } => {
                 tracing::info!(uplay_id, len = request_token.len(), "denuvo game token requested");
                 let ownership_token = online.library.ownership_token(*uplay_id).await?;

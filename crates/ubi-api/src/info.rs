@@ -291,8 +291,9 @@ pub struct Reward {
 }
 
 /// A game's achievements. Definitions (names, descriptions, icons) come from the asset the
-/// product config names; which ones this account unlocked has no known REST source yet, so
-/// `unlocked_known` is false and `unlocked` 0 until one is wired.
+/// product config names; which ones this account unlocked from Ubisoft (demux
+/// `ach_frontend`, else REST `legacyPlayerAchievements`) and from Quiver's report journal.
+/// `unlocked_known` is false (and `unlocked` 0) when no unlock source answered.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Achievements {
     #[serde(default)]
@@ -303,6 +304,10 @@ pub struct Achievements {
     pub total: u32,
     #[serde(default)]
     pub items: Vec<Achievement>,
+    /// Where the unlock status came from: `ach_frontend`, `legacyPlayerAchievements`, both
+    /// joined with `+`; `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -318,6 +323,10 @@ pub struct Achievement {
     pub unlocked: bool,
     #[serde(default)]
     pub unlocked_at: Option<DateTime<Utc>>,
+    /// For achievements a game earned through Quiver: the report journal's state for it
+    /// (an unlock Ubisoft may not show yet while `pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<crate::achievements::ReportState>,
 }
 
 /// The account's Ubisoft Connect meta-progression.
