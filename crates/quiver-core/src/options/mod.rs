@@ -142,7 +142,7 @@ pub fn sessions(store: &ModStore) -> Vec<SessionOptions> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
         .collect();
-    out.sort_by(|a, b| b.started.cmp(&a.started));
+    out.sort_by_key(|s| std::cmp::Reverse(s.started));
     out
 }
 

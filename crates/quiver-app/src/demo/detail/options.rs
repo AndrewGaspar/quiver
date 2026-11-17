@@ -173,6 +173,7 @@ fn change_line(title: &str, id: &str, def: &quiver_api::options::OptionDef, a: &
     format!("{title} {id} {} → {}", def.display(a), def.display(b))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rev(revision: u32, days: i64, (h, m): (u32, u32), source: &str, session: Option<&str>, message: Option<&str>, changes: &[&str], values: Values) -> OptionsRevision {
     OptionsRevision {
         revision,
@@ -262,7 +263,7 @@ fn demo_sessions(dlss: &str) -> Vec<SessionOptions> {
 }
 
 impl OptDemo {
-    fn new() -> Self {
+    fn fixtures() -> Self {
         let dlss = super::ORIGINS_DEFAULT.to_owned();
         let mut history = BTreeMap::new();
         history.insert(dlss.clone(), dlss_history());
@@ -466,7 +467,7 @@ fn state(s: &Resolved, hist: &[OptionsRevision], running: bool, session: Option<
 /// Answer an options request (`detail.rs` hands them over). Events go into `events`.
 pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsRequest, events: &mut Vec<Event>) -> Result<Value> {
     let mut all = OPTS.lock().unwrap();
-    let o = all.entry(key).or_insert_with(OptDemo::new);
+    let o = all.entry(key).or_insert_with(OptDemo::fixtures);
     let profile_of = |product_id: u32, p: Option<&str>| -> Result<String> { Ok(launch_profile(d, st, product_id, p)?.unwrap_or_else(|| VANILLA.into())) };
     Ok(match req {
         OptionsRequest::List { product_id, profile, level } => {
@@ -851,7 +852,7 @@ pub fn file_text(mod_id: &str, file: &str) -> Option<&'static str> {
 /// burst: a revision from `in-game` and the live values.
 pub(super) fn simulate_in_game(key: usize, d: &Detail, st: &State, events: &mut Vec<Event>) -> Result<()> {
     let mut all = OPTS.lock().unwrap();
-    let o = all.entry(key).or_insert_with(OptDemo::new);
+    let o = all.entry(key).or_insert_with(OptDemo::fixtures);
     let Some((p, _)) = d.running.get(&ORIGINS).cloned() else { bail!("AC Origins isn't running") };
     let p = p.unwrap_or_else(|| VANILLA.into());
     let cur = o.current(&p).values.get(&dlss_key()).and_then(|m| m.get("world.npc_density")).and_then(|v| v.as_f64()).unwrap_or(1.0);
@@ -886,5 +887,45 @@ mod tests {
         let last = h.last().unwrap();
         assert_eq!(last.values[&dlss_key()]["fg.refresh_hz"], json!(165));
         assert_eq!(last.source, "game");
+    }
+
+    /// The demo answers like quiverd: truthful outcomes, live only while running, danger asks.
+    #[tokio::test]
+    async fn outcomes_follow_the_running_game() {
+        use quiver_api::Request;
+        use quiver_api::options::{Live, OptionsChange};
+        let (demo, _events) = crate::demo::Demo::start();
+        let ask = |r: OptionsRequest| demo.handle(Request::Options(r));
+        let list: Vec<SurfaceState> = serde_json::from_value(ask(OptionsRequest::List { product_id: ORIGINS, profile: None, level: None }).unwrap()).unwrap();
+        let dlss = list.iter().find(|s| s.key == dlss_key()).expect("the DLSS surface");
+        assert_eq!(dlss.schema_source, SchemaSource::Catalog);
+        assert!(matches!(&dlss.options["fg.refresh_hz"].from, ValueSource::Profile { revision: 13, source } if source == "gui"));
+        assert!(dlss.live.session.is_none());
+        let set = |id: &str, v: Value, confirmed: bool| -> Result<OptionsChange> {
+            let ops = vec![OptionOp::Set { surface: dlss_key(), id: id.into(), value: v }];
+            Ok(serde_json::from_value(ask(OptionsRequest::Set { product_id: ORIGINS, profile: None, ops, live: Live::IfRunning, message: None, confirmed })?)?)
+        };
+        let c = set("world.npc_density", json!(3), false).unwrap();
+        assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: false });
+        assert_eq!(c.revision, 16);
+        assert!(matches!(&set("world.npc_density", json!(9), false).unwrap().outcomes[0].outcome, Outcome::Rejected { reason } if reason.contains("above the maximum")));
+        let e = set("fg.hide_handle64", json!(true), false).unwrap_err();
+        assert!(e.to_string().contains("needs confirmation"), "{e}");
+        assert!(set("fg.hide_handle64", json!(true), true).is_ok());
+        // Running: live options apply live, the others say when.
+        demo.handle(Request::Play { product_id: ORIGINS, profile: None }).unwrap();
+        let c = set("world.npc_density", json!(4), false).unwrap();
+        assert!(matches!(c.outcomes[0].outcome, Outcome::AppliedLive { channel: LiveChannel::File, .. }));
+        let c = set("fg.present_thread", json!("0"), false).unwrap();
+        assert!(matches!(&c.outcomes[0].outcome, Outcome::SavedAt { at } if at == "swapchain creation"));
+        let c = set("fg.mode", json!("off"), false).unwrap();
+        assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: true });
+        // History has them, newest last, by the app.
+        let h: Vec<OptionsRevision> = serde_json::from_value(ask(OptionsRequest::History { product_id: ORIGINS, profile: None }).unwrap()).unwrap();
+        assert_eq!(h.last().unwrap().source, "gui");
+        // Keys: F9 and F10 from DLSS, and Sight's Shift+F2 against MangoHud's.
+        let k: KeysReport = serde_json::from_value(ask(OptionsRequest::Keys { product_id: ORIGINS, profile: None }).unwrap()).unwrap();
+        assert!(k.bindings.iter().any(|b| b.key == "F10" && b.kind == "option"));
+        assert_eq!(k.conflicts.len(), 1);
     }
 }

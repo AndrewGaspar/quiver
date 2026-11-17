@@ -71,6 +71,7 @@ pub(super) fn who_badge(th: &Theme, source: &str) -> gpui::Div {
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::BOLD)
         .whitespace_nowrap()
+        .gap(px(4.))
         .when(matches!(w, Who::Agent(_)), |d| d.child(icon(Icon::Bot, 11., c)))
         .child(w.badge())
 }
@@ -470,7 +471,7 @@ impl Quiver {
             }
             body.push(div().pt(px(10.)).text_size(px(12.)).text_color(th.tx3).child(parts.join(" · ")).into_any_element());
         }
-        body.push(self.cli_line("opt-cli", th, self.options_cli(id, &format!("--surface {}", s.surface)).to_string(), cx).mt(px(14.)).into_any_element());
+        body.push(self.cli_line("opt-cli", th, self.options_cli(id, match level { Level::Basic => "list", Level::Advanced => "list --advanced", Level::Debug => "list --all" }).to_string(), cx).mt(px(14.)).into_any_element());
         div().flex().flex_col().gap(px(8.)).children(body).into_any_element()
     }
 
@@ -1159,9 +1160,9 @@ impl Quiver {
                             .items_center()
                             .gap(px(6.))
                             .child(div().font_weight(SEMIBOLD).child(l.label))
-                            .child(div().text_color(th.tx2).child(format!("{} → {}", l.from, l.to)))
                             .when_some(l.pending, |d, p| d.child(tone_badge(th, p, Tone::Muted))),
                     )
+                    .child(div().min_w_0().text_color(th.tx2).child(format!("{} → {}", l.from, l.to)))
                     .child(
                         div()
                             .flex()

@@ -61,11 +61,12 @@ impl Quiver {
                 "The mod's own menu reported these changes; Quiver saved them to this profile. Undo puts back what you had.",
             ),
         };
+        let labels = self.option_labels();
         let lines: Vec<AnyElement> = last
             .changes
             .iter()
             .map(|c| {
-                let (what, ft) = logic::split_change(c);
+                let (what, ft) = pretty_parts(&labels, c);
                 match ft {
                     Some((from, to)) => div()
                         .flex()
@@ -174,6 +175,7 @@ impl Quiver {
         let cur = hist.last().map(|r| r.revision);
         let running_session = self.gp.opt.loaded_surfaces().iter().find_map(|s| s.live.session.clone());
         let confirm = self.gp.opt.confirm.clone();
+        let labels = self.option_labels();
         let rows: Vec<AnyElement> = hist
             .iter()
             .rev()
@@ -182,11 +184,13 @@ impl Quiver {
             .map(|(i, r)| {
                 let is_cur = Some(r.revision) == cur;
                 let w = logic::who(&r.source);
-                let title = r.message.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| r.changes.first().map(|c| logic::split_change(c).0).unwrap_or_else(|| "Changed".into()));
-                let changes: Vec<String> = r.changes.iter().map(|c| match logic::split_change(c) {
-                    (what, Some((from, to))) => format!("{} {from} → {to}", what.split(' ').next_back().unwrap_or(&what)),
-                    (what, None) => what,
-                }).collect();
+                let mut changes: Vec<String> = r.changes.iter().map(|c| pretty(&labels, c)).collect();
+                let title = match (r.message.clone().filter(|m| !m.is_empty()), changes.len()) {
+                    (Some(m), _) => m,
+                    (None, 1) => changes.remove(0),
+                    (None, 0) => "No changes".into(),
+                    (None, n) => format!("{n} changes"),
+                };
                 let rev = r.revision;
                 let session = r.session.clone().filter(|s| Some(s) != running_session.as_ref());
                 let asking = confirm == Some(Confirm::Restore(rev));
@@ -245,10 +249,11 @@ impl Quiver {
                             .flex()
                             .flex_col()
                             .gap(px(3.))
-                            .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).child(title)).child(who_badge(th, &r.source)))
+                            .child(div().font_weight(SEMIBOLD).child(title))
+                            .child(div().flex().child(who_badge(th, &r.source)))
                             .when(!changes.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(th.tx2).child(changes.join(" · "))))
                             .when_some(note, |d, n| d.child(div().text_size(px(11.5)).text_color(if matches!(w, Who::Agent(_)) { th.who_agent } else { th.tx3 }).child(n)))
-                            .child(div().text_size(px(11.)).text_color(th.tx3).child(format!("{when} · {}{}", ago(r.at), r.session.as_ref().map(|s| format!(" · session {s}")).unwrap_or_default()))),
+                            .child(div().text_size(px(11.)).text_color(th.tx3).child(format!("{when}{}{}", Some(ago(r.at)).filter(|a| a.contains("ago") || a == "just now").map(|a| format!(" · {a}")).unwrap_or_default(), r.session.as_ref().map(|s| format!(" · session {s}")).unwrap_or_default()))),
                     )
                     .child(div().flex().flex_col().items_end().gap(px(6.)).child(actions).children(revert))
                     .into_any_element()
@@ -311,5 +316,37 @@ impl Quiver {
             .children(crashes)
             .child(self.cli_line("hist-cli", th, self.options_cli(id, "history").to_string(), cx))
             .into_any_element()
+    }
+
+    pub(super) fn option_labels(&self) -> Labels {
+        let mut m = Labels::new();
+        for s in self.gp.opt.loaded_surfaces() {
+            for (id, o) in &s.options {
+                let label = o.def.label_or(id).to_owned();
+                let shown = if s.kind == quiver_api::options::SurfaceKind::Mod { label } else { format!("{}: {label}", s.title) };
+                m.insert((s.title.clone(), id.clone()), shown);
+            }
+        }
+        m
+    }
+}
+
+/// (surface title, option id) → how to name the option in a change line.
+pub(super) type Labels = std::collections::HashMap<(String, String), String>;
+
+/// A change line ("DLSS fg.refresh_hz 0 (Not set) → 165 Hz") with the option's label:
+/// ("Display refresh rate", ("0 (Not set)", "165 Hz")). Options of game and runtime
+/// surfaces keep their surface's title ("AC Origins: Field of view").
+fn pretty_parts(labels: &Labels, line: &str) -> (String, Option<(String, String)>) {
+    let (what, ft) = logic::split_change(line);
+    let id = what.rsplit(' ').next().unwrap_or(&what).to_owned();
+    let title = what.strip_suffix(id.as_str()).unwrap_or("").trim().to_owned();
+    (labels.get(&(title, id)).cloned().unwrap_or(what), ft)
+}
+
+pub(super) fn pretty(labels: &Labels, line: &str) -> String {
+    match pretty_parts(labels, line) {
+        (name, Some((from, to))) => format!("{name} {from} → {to}"),
+        (name, None) => name,
     }
 }

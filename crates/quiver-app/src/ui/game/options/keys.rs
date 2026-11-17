@@ -66,14 +66,15 @@ impl Quiver {
                             .text_size(px(11.))
                             .line_height(px(14.))
                             .text_color(if bad { th.bad } else { c })
-                            .child(format!("{}{}: {}", logic::chord_prefix(&b.key), b.owner, short_label(&b.label)))
+                            .child(format!("{}{}", logic::chord_prefix(&b.key), b.owner))
+                            .child(div().text_color(th.tx3).child(short_label(&b.label)))
                             .into_any_element()
                     })
                     .collect();
                 div()
                     .flex_1()
                     .min_w(px(64.))
-                    .h(px(84.))
+                    .min_h(px(84.))
                     .flex()
                     .flex_col()
                     .gap(px(4.))
@@ -197,7 +198,7 @@ impl Quiver {
                     .text_color(if bad { th.bad } else { th.tx1 })
                     .child(div().w(px(150.)).flex_none().child(chord(th, &b.key)))
                     .child(div().flex_1().min_w_0().font_weight(MEDIUM).child(b.label.clone()))
-                    .child(div().w(px(110.)).flex_none().child(div().px(px(6.)).h(px(18.)).flex().items_center().rounded(px(5.)).bg(c.opacity(0.16)).text_color(c).text_size(px(11.)).font_weight(gpui::FontWeight::BOLD).child(b.owner.clone())))
+                    .child(div().w(px(110.)).flex_none().flex().child(div().px(px(6.)).h(px(18.)).flex().items_center().rounded(px(5.)).bg(c.opacity(0.16)).text_color(c).text_size(px(11.)).font_weight(gpui::FontWeight::BOLD).child(b.owner.clone())))
                     .child(div().w(px(180.)).flex_none().text_color(th.tx2).child(read_by(b)))
                     .child(div().w(px(200.)).flex_none().child(change))
                     .into_any_element(),
@@ -216,8 +217,8 @@ impl Quiver {
 /// A binding's label for the narrow key boxes.
 fn short_label(l: &str) -> String {
     let l = l.trim_start_matches("Show or hide ").trim_start_matches("Toggle ");
-    let mut s: String = l.chars().take(22).collect();
-    if l.chars().count() > 22 {
+    let mut s: String = l.chars().take(18).collect();
+    if l.chars().count() > 18 {
         s.push('…');
     }
     s

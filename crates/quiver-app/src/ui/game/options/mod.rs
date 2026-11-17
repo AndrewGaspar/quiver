@@ -150,7 +150,25 @@ impl OptionsUi {
         let inputs = std::mem::take(&mut self.inputs);
         let dismissed = std::mem::take(&mut self.dismissed);
         let (view, level, search, changed_only) = (self.view, self.level, self.search.take(), self.changed_only);
-        *self = OptionsUi { view, level, search, changed_only, staged, inputs, dismissed, compare: "default".into(), ..Default::default() };
+        // The Source view is about a mod, not a profile.
+        let (source_mod, schema, files, guess, guess_error) =
+            (self.source_mod.take(), std::mem::take(&mut self.schema), std::mem::take(&mut self.files), std::mem::take(&mut self.guess), self.guess_error.take());
+        *self = OptionsUi {
+            view,
+            level,
+            search,
+            changed_only,
+            staged,
+            inputs,
+            dismissed,
+            source_mod,
+            schema,
+            files,
+            guess,
+            guess_error,
+            compare: "default".into(),
+            ..Default::default()
+        };
     }
 
     pub fn staged_for(&self, game: u32, profile: &str) -> BTreeMap<RowKey, Edit> {
@@ -586,7 +604,8 @@ impl Quiver {
                 if loaded.as_ref() == Some(&(*product_id, profile.clone())) {
                     if source != "gui" {
                         let who = logic::who(source);
-                        let what = changes.first().map(|c| format!(": {c}{}", if changes.len() > 1 { format!(" (+{} more)", changes.len() - 1) } else { String::new() })).unwrap_or_default();
+                        let labels = self.option_labels();
+                        let what = changes.first().map(|c| format!(": {}", changes::pretty(&labels, c))).map(|c| format!("{c}{}", if changes.len() > 1 { format!(" (+{} more)", changes.len() - 1) } else { String::new() })).unwrap_or_default();
                         self.gp.opt.notice = Some(format!("r{revision} from {}{what}", who.phrase()));
                     }
                     self.options_reload(cx);
@@ -610,11 +629,7 @@ impl Quiver {
                     self.load_option_records(*product_id, cx);
                 }
             }
-            Event::ModChannel { product_id, .. } => {
-                if loaded.as_ref().is_some_and(|(g, _)| g == product_id) {
-                    self.load_option_surfaces(*product_id, cx);
-                }
-            }
+            Event::ModChannel { product_id, .. } if loaded.as_ref().is_some_and(|(g, _)| g == product_id) => self.load_option_surfaces(*product_id, cx),
             _ => {}
         }
     }
@@ -686,6 +701,8 @@ impl Quiver {
         let surface = flags.iter().find_map(|f| f.strip_prefix("options-page=")).map(str::to_owned);
         let level = flags.iter().any(|f| f == "options-advanced");
         let staged = flags.iter().any(|f| f == "options-unsaved");
+        let save = flags.iter().any(|f| f == "options-save");
+        let scroll: Option<f32> = flags.iter().find_map(|f| f.strip_prefix("options-scroll=")).and_then(|v| v.parse().ok());
         cx.spawn_in(window, async move |this, cx| {
             for _ in 0..100 {
                 cx.background_executor().timer(Duration::from_millis(150)).await;
@@ -699,6 +716,8 @@ impl Quiver {
                 }
                 this.open_game(3539, cx);
                 this.nav.tab = Tab::Mods;
+                // The DLSS profile (the demo's default for Play).
+                this.select_profile(3539, Some("pd1s5xk".into()), cx);
                 this.gp.opt.view = match view.as_str() {
                     "changes" | "history" => ModsView::Changes,
                     "keys" => ModsView::Keys,
@@ -718,6 +737,9 @@ impl Quiver {
                 if let Some(p) = &surface {
                     this.gp.opt.page = Some(p.clone());
                 }
+                if let Some(y) = scroll {
+                    this.body_scroll.set_offset(gpui::point(px(0.), px(-y)));
+                }
                 if staged {
                     let key = (format!("{}/aco-dlss", "ld7s3vq"), "fg.refresh_hz".to_owned());
                     this.options_stage(key, Some(Edit::Set(serde_json::json!(144))), cx);
@@ -729,6 +751,15 @@ impl Quiver {
                 }
                 cx.notify();
             });
+            if save {
+                cx.background_executor().timer(Duration::from_millis(600)).await;
+                let _ = this.update(cx, |this, cx| {
+                    // A second edit that waits for a moment (Present thread: swapchain creation).
+                    let key = (format!("{}/aco-dlss", "ld7s3vq"), "fg.present_thread".to_owned());
+                    this.options_stage(key, Some(Edit::Set(serde_json::json!("0"))), cx);
+                    this.options_save(Live::IfRunning, false, cx);
+                });
+            }
             if in_game {
                 cx.background_executor().timer(Duration::from_millis(1500)).await;
                 let _ = this.update(cx, |this, _| {
