@@ -56,18 +56,29 @@ pub fn run_config(s: &SessionSummary, history: &[PlaySession], profiles: &[Profi
     RunConfig { profile, mods: versioned.join(", "), key }
 }
 
-/// Sessions to compare `sel` with when the user hasn't picked: the most recent session of
-/// each other configuration (at most two), else the session before.
+/// Sessions to compare `sel` with when the user hasn't picked (at most two): the latest
+/// run of the same profile on other mod versions, the latest vanilla run, then the latest
+/// of any other configuration; else the session before.
 pub fn auto_compare(configs: &[RunConfig], usable: &[bool], sel: usize) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::new();
-    let mut keys = vec![configs.get(sel).map(|c| c.key.clone()).unwrap_or_default()];
-    for (i, c) in configs.iter().enumerate() {
-        if i != sel && usable.get(i).copied().unwrap_or(false) && !keys.contains(&c.key) {
-            keys.push(c.key.clone());
+    let Some(me) = configs.get(sel) else { return out };
+    let ok = |i: usize| i != sel && usable.get(i).copied().unwrap_or(false) && configs[i].key != me.key;
+    let profile_of = |c: &RunConfig| c.key.split('|').next().unwrap_or_default().to_owned();
+    let candidates = [
+        (0..configs.len()).find(|&i| ok(i) && profile_of(&configs[i]) == profile_of(me)),
+        (0..configs.len()).find(|&i| ok(i) && profile_of(&configs[i]) == "vanilla"),
+    ];
+    for i in candidates.into_iter().flatten() {
+        if !out.iter().any(|&o| configs[o].key == configs[i].key) {
             out.push(i);
-            if out.len() == 2 {
-                break;
-            }
+        }
+    }
+    for i in 0..configs.len() {
+        if out.len() >= 2 {
+            break;
+        }
+        if ok(i) && !out.iter().any(|&o| configs[o].key == configs[i].key) {
+            out.push(i);
         }
     }
     if out.is_empty()
@@ -117,7 +128,7 @@ struct Metric {
 }
 
 const METRICS: &[Metric] = &[
-    Metric { label: "Shown FPS (avg / 1% low)", text: |p| p.fps.as_ref().map(fps_text), num: |p| p.fps.map(|f| f.mean), higher_better: true, missing: "no frame data" },
+    Metric { label: "Shown FPS (avg)", text: |p| p.fps.map(|f| format!("{:.0}", f.mean)), num: |p| p.fps.map(|f| f.mean), higher_better: true, missing: "no frame data" },
     Metric { label: "1% low", text: |p| p.fps.and_then(|f| f.p1low).map(|l| format!("{l:.0}")), num: |p| p.fps.and_then(|f| f.p1low), higher_better: true, missing: "no frame data" },
     Metric { label: "Base FPS", text: |p| p.fps_base.map(|f| format!("{:.0}", f.mean)), num: |p| p.fps_base.map(|f| f.mean), higher_better: true, missing: "no FG mod" },
     Metric { label: "Frame generation", text: |p| p.fg_ratio.map(|r| format!("{r:.1}×")), num: |_| None, higher_better: true, missing: "off" },
@@ -605,6 +616,87 @@ impl Quiver {
     // -----------------------------------------------------------------------------------
     // HUD
 
+    /// The preset where it will sit, over the game's art: placement, opacity and scale as
+    /// set. Values are the running game's (else `—`); rows a mod provides show only when
+    /// this game's numbers have them, as in game. The layer draws the graph itself.
+    fn render_hud_preview(&mut self, th: &Theme, g: &GameRow, c: &quiver_api::perf::HudConfig, cx: &mut Context<Self>) -> AnyElement {
+        use quiver_api::perf::Anchor;
+        let (w, h) = (300., 188.);
+        let art = self.art_for(g, crate::art::ArtSlot::Hero, crate::art::Variant::Original, cx);
+        let live = self.perf.live.as_ref().filter(|l| l.product == g.id()).and_then(|l| l.last.clone());
+        let latest = self.perf.summaries.ready().and_then(|v| v.first()).filter(|_| self.perf.summaries_for == g.id()).map(|s| s.perf.clone());
+        let provided = |metric: &str| match metric {
+            "fps.base" => live.as_ref().map(|u| u.values.contains_key("fps.base")).unwrap_or(latest.as_ref().is_some_and(|p| p.fps_base.is_some())),
+            "latency.render" => live.as_ref().map(|u| u.values.contains_key("latency.render")).unwrap_or(latest.as_ref().is_some_and(|p| p.latency_ms.is_some())),
+            _ => true,
+        };
+        let k = c.scale.clamp(0.75, 2.5);
+        let fs = 9.5 * k;
+        let label_c = th.tx3;
+        let value = |metric: &str| live.as_ref().and_then(|u| crate::ui::perf::live_value(u, metric)).map(|v| if v.unit == "fps" { v.text.clone() } else { v.display() }).unwrap_or_else(|| "—".into());
+        let rows: Vec<AnyElement> = preset_rows(&c.layout)
+            .into_iter()
+            .filter_map(|row| {
+                let cells: Vec<AnyElement> = row
+                    .into_iter()
+                    .filter(|cell| cell.is_none_or(|(_, m)| provided(m)))
+                    .map(|cell| match cell {
+                        None => div().w(px(110. * k)).h(px(14. * k)).flex().items_center().child(div().w_full().h(px(1.)).bg(th.tx3.opacity(0.5))).into_any_element(),
+                        Some((label, metric)) => {
+                            let color = if metric == "fps.base" { th.warn } else { th.tx1 };
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(3. * k))
+                                .child(mono(fs * if metric == "fps" { 1.35 } else { 1. }, color).font_weight(BOLD).child(value(metric)))
+                                .child(div().text_size(px(fs * 0.75)).font_weight(BOLD).text_color(label_c).child(label))
+                                .into_any_element()
+                        }
+                    })
+                    .collect();
+                (!cells.is_empty()).then(|| div().flex().items_baseline().gap(px(7. * k)).children(cells).into_any_element())
+            })
+            .collect();
+        let hud = div()
+            .absolute()
+            .flex()
+            .flex_col()
+            .gap(px(3. * k))
+            .px(px(6. * k))
+            .py(px(4. * k))
+            .rounded(px(5. * k))
+            .bg(gpui::black().opacity(c.background.clamp(0., 1.)))
+            .border_1()
+            .border_color(gpui::white().opacity(0.08))
+            .children(rows);
+        let m = 8.;
+        let hud = match c.anchor {
+            Anchor::TopLeft => hud.top(px(m)).left(px(m)),
+            Anchor::Top => hud.top(px(m)).left(px(w / 2. - 40.)),
+            Anchor::TopRight => hud.top(px(m)).right(px(m)),
+            Anchor::Left => hud.top(px(h / 2. - 12.)).left(px(m)),
+            Anchor::Right => hud.top(px(h / 2. - 12.)).right(px(m)),
+            Anchor::BottomLeft => hud.bottom(px(m)).left(px(m)),
+            Anchor::Bottom => hud.bottom(px(m)).left(px(w / 2. - 40.)),
+            Anchor::BottomRight => hud.bottom(px(m)).right(px(m)),
+        };
+        let bg: AnyElement = match &art {
+            crate::ui::ArtState::Ready(a) => crate::ui::cover(a, w, h, (0.5, 0.4)),
+            _ => div().absolute().inset_0().bg(th.ink3).into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(div().relative().w(px(w)).h(px(h)).rounded(px(8.)).overflow_hidden().border_1().border_color(th.line2).child(bg).child(hud))
+            .child(div().text_size(px(11.5)).text_color(th.tx3).child(if live.is_some() {
+                "This game's numbers right now."
+            } else {
+                "Numbers appear while the game runs; the line is the frame-time graph."
+            }))
+            .into_any_element()
+    }
+
     fn render_perf_hud(&mut self, th: &Theme, g: &GameRow, scope: &HudScopeRef, sessions: usize, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
         let base = sessions.min(PERF_ROWS);
@@ -668,6 +760,7 @@ impl Quiver {
         let form = self.render_hud_form(th, scope, Some(head), &is_focused, cx);
         let effective = self.hud_effective(scope).cloned();
         let status = self.render_hud_status(th, id, effective.as_ref());
+        let preview = effective.as_ref().map(|c| self.render_hud_preview(th, g, c, cx));
         let keys = self.render_hud_keys(th);
         let enabled = effective.as_ref().is_some_and(|c| c.enabled);
         let cli = match &pick {
@@ -714,6 +807,7 @@ impl Quiver {
                     .flex_wrap()
                     .gap(px(12.))
                     .pt(px(12.))
+                    .when_some(preview, |d, p| d.child(sub_card("Preview", p)))
                     .child(sub_card("Presenter", status))
                     .child(sub_card("Keys", keys)),
             )
@@ -723,6 +817,26 @@ impl Quiver {
 }
 
 use super::page::Load;
+
+/// Rows of a preset in the preview: (label, metric) cells; `None` is the frame-time graph.
+fn preset_rows(layout: &str) -> Vec<Vec<Option<(&'static str, &'static str)>>> {
+    let fps = Some(("FPS", "fps"));
+    let base = Some(("BASE", "fps.base"));
+    match layout {
+        "fps" => vec![vec![fps]],
+        "compact" => vec![vec![fps, base, Some(("MS", "frametime")), Some(("LAT", "latency.render")), Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))]],
+        "standard" => vec![vec![fps, base], vec![None], vec![Some(("LAT", "latency.render")), Some(("GPU", "gpu.load"))], vec![Some(("CPU", "cpu.load"))]],
+        "full" => vec![
+            vec![fps, Some(("1%", "fps.p1low")), base],
+            vec![None],
+            vec![Some(("LAT", "latency.render")), Some(("MS", "frametime"))],
+            vec![Some(("GPU", "gpu.load")), Some(("°", "gpu.temp")), Some(("W", "gpu.power"))],
+            vec![Some(("CPU", "cpu.load")), Some(("°", "cpu.temp"))],
+        ],
+        "clock" => vec![vec![Some(("TIME", "clock.time")), Some(("SESSION", "session.time"))]],
+        _ => vec![vec![fps], vec![None]],
+    }
+}
 
 fn group_digits(n: u64) -> String {
     let s = n.to_string();
@@ -774,7 +888,8 @@ mod tests {
         assert_eq!(c[0].key, c[1].key);
         assert_ne!(c[0].key, c[3].key, "another mod version is another configuration");
         let usable = vec![true; 4];
-        assert_eq!(auto_compare(&c, &usable, 0), [2, 3], "the latest of each other configuration");
+        assert_eq!(auto_compare(&c, &usable, 0), [3, 2], "the other mod version, then vanilla");
+        assert_eq!(auto_compare(&c, &usable, 2), [0, 3], "from vanilla: the latest of each other");
         let same: Vec<RunConfig> = vec![c[0].clone(), c[1].clone()];
         assert_eq!(auto_compare(&same, &[true, true], 0), [1], "else the session before");
         assert!(auto_compare(&same, &[true, false], 0).is_empty());

@@ -623,7 +623,7 @@ impl Quiver {
                 .text_color(th.acc_hi)
                 .cursor_pointer()
                 .hover(|s| s.underline())
-                .child(if scope.product_id.is_some() { "Reset" } else { "Default" })
+                .child("Reset")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.hud_apply(scope.clone(), HudScope::default(), vec![f.key().to_owned()], cx);
                     cx.notify();
@@ -662,7 +662,7 @@ impl Quiver {
                     )
                     .when(!help.is_empty(), |d| d.child(div().text_size(px(11.5)).line_height(px(15.)).text_color(th.tx3).child(help))),
             )
-            .child(div().flex_1().min_w(px(240.)).child(control))
+            .child(div().flex_1().min_w(px(240.)).flex().child(control))
             .child(
                 div()
                     .flex()
@@ -985,8 +985,6 @@ impl Quiver {
                 .py(px(3.))
                 .child(crate::ui::kbd(th, keys_label(&b.mods, &b.key)))
                 .child(div().text_size(px(12.5)).child(b.description.clone()))
-                .child(div().flex_1())
-                .child(mono(11., th.tx3).child(b.command.clone()))
         });
         let state = match (k.applied, k.game_focused) {
             (true, true) => "Bound now: a Quiver game has focus.",
@@ -1082,10 +1080,12 @@ impl Quiver {
     pub fn render_live_strip(&self, th: &Theme, id: u32) -> Option<AnyElement> {
         let info = self.perf_session(id)?;
         let live = self.perf.live.as_ref().filter(|l| l.product == id);
+        // FPS cells are labelled FPS already; other units stay with their numbers.
+        let shown = |v: &PerfValue| if v.unit == "fps" { v.text.clone() } else { v.display() };
         let cell = |label: &str, v: Option<&PerfValue>, big: bool| {
             let (text, color) = match v {
-                Some(v) if !v.stale => (v.display(), level_color(th, v.level)),
-                Some(v) => (v.display(), th.tx3),
+                Some(v) if !v.stale => (shown(v), level_color(th, v.level)),
+                Some(v) => (shown(v), th.tx3),
                 None => ("—".to_owned(), th.tx4),
             };
             div()
@@ -1103,7 +1103,7 @@ impl Quiver {
             cells.push(cell("BASE", get("fps.base"), true));
         }
         cells.push(cell("1% LOW", get("fps.p1low"), false));
-        cells.push(cell("MS", get("frametime"), false));
+        cells.push(cell("FRAME TIME", get("frametime"), false));
         if get("latency.render").is_some() {
             cells.push(cell("LATENCY", get("latency.render"), false));
         }

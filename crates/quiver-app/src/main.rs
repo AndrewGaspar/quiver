@@ -6,7 +6,7 @@
 //! - `QUIVER_DEMO=1`: built-in fixture data instead of the daemon (`demo.rs`); never
 //!   connects to or starts `quiverd`.
 //! - `QUIVER_DEMO_INPUT="pad down a"`: demo mode only, replays inputs once the library is
-//!   on screen (for screenshots without a device).
+//!   on screen (for screenshots without a device); `scroll` scrolls the page down 400 px.
 //! - `QUIVER_DEMO_GLOBAL="settings=accounts,playing"`: demo mode only, opens a global screen
 //!   or sets up a state for screenshots (see `ui/global.rs` and `demo_global.rs`).
 //! - `QUIVER_THEME=builtin`: ignore Omarchy and use "Quiver dark".

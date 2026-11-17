@@ -1168,6 +1168,15 @@ impl Quiver {
                         cx.background_executor().timer(Duration::from_millis(1000)).await;
                         None
                     }
+                    // The right stick: scroll the page down 400 px.
+                    "scroll" => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.scroll_by(400.);
+                            cx.notify();
+                        });
+                        cx.background_executor().timer(Duration::from_millis(250)).await;
+                        None
+                    }
                     "up" => Some(Input::Up),
                     "down" => Some(Input::Down),
                     "left" => Some(Input::Left),
