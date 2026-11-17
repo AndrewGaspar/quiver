@@ -43,6 +43,17 @@ pub use ffi::NegotiateLayerInterface;
 /// The layer's name, as in the manifest.
 pub const LAYER_NAME: &str = "VK_LAYER_QUIVER_sight";
 
+/// The installed manifest's template (`manifest/VK_LAYER_QUIVER_sight.json.in`).
+pub const MANIFEST_TEMPLATE: &str = include_str!("../manifest/VK_LAYER_QUIVER_sight.json.in");
+
+/// The layer manifest for a library at `library_path` (absolute), 64- or 32-bit. The loader
+/// skips a manifest whose `library_arch` doesn't match the process, so both can be installed
+/// side by side under the same layer name.
+pub fn manifest_json(library_path: &str, is_64bit: bool) -> String {
+    let escaped: String = library_path.chars().flat_map(|c| if c == '"' || c == '\\' { vec!['\\', c] } else { vec![c] }).collect();
+    MANIFEST_TEMPLATE.replace("@LIBRARY_PATH@", &escaped).replace("@LIBRARY_ARCH@", if is_64bit { "64" } else { "32" })
+}
+
 /// Environment the layer reads (the loader-level switch is `VK_INSTANCE_LAYERS`).
 pub mod env {
     /// The session dir (ubi-perf): without it the layer passes everything through.

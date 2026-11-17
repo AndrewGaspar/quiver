@@ -262,7 +262,21 @@ pub fn retarget() {
     let prev = TARGET.swap(target, Ordering::Relaxed);
     if let Some(t) = telemetry::get() {
         t.update_status(|st| {
-            *st = best.map_or(LayerStatus::ZERO, |(_, _, s)| s);
+            *st = match best {
+                Some((_, _, s)) => s,
+                // No swapchain: keep who we are (app, engine, device), clear the rest.
+                None => LayerStatus {
+                    vendor_id: st.vendor_id,
+                    device_id: st.device_id,
+                    driver_version: st.driver_version,
+                    api_version: st.api_version,
+                    engine_version: st.engine_version,
+                    engine_name: st.engine_name,
+                    app_name: st.app_name,
+                    device_name: st.device_name,
+                    ..LayerStatus::ZERO
+                },
+            };
             st.swapchain_count = count;
         });
         if prev != target {
