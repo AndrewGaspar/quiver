@@ -1,15 +1,18 @@
 format = 1
 surface = "aco-dlss"
-title = "DLSS"
+title = "Pharos"
 help = "DLSS 4.5 upscaling, NVIDIA Reflex and DLSS Frame Generation for AC Origins, plus crowd, draw distance and cloth tweaks."
 audited = "2026-11-16: every key of dist/aco_dlss.ini against src/core/config.cpp (the whole file is re-read every 64 frames) and each key's use in src/ for the moment it takes effect (DllMain, sampler, swapchain, NGX, D3D12 device, DLSS-G feature and texture creation); ranges and meanings from the ini comments, README.md and docs/ENGINE_NOTES.md."
 
 [match]
 products = [3539]
-files = ["aco_dlss.ini"]
+files = ["pharos.ini"]
 
+# The mod was "aco-dlss" until v12 renamed it Pharos (it reads pharos.ini, and falls back to
+# aco_dlss.ini only when there's no pharos.ini). v3-v11 ship aco_dlss.ini.
 [file.ini]
-path = "aco_dlss.ini"
+path = "pharos.ini"
+formerly = ["aco_dlss.ini"]
 format = "ini"
 owner = "quiver"
 reload = "poll"
@@ -520,7 +523,7 @@ at = "texture creation"
 [option."fg.ngx_log"]
 type = "enum"
 label = "NGX log"
-help = "Copies NGX's own log into aco_dlss.log."
+help = "Copies NGX's own log into the mod's log (pharos.log; aco_dlss.log before v12)."
 values = [
   { value = "0", label = "Off" },
   { value = "1", label = "On" },
@@ -1094,17 +1097,17 @@ mode = "own"
 [[conflicts]]
 tweak = "dlss.fg.frames"
 when = { "fg.mode" = "d3d12" }
-reason = "DLSS mod generates exactly one frame per game frame; a multi-frame override breaks its present thread."
+reason = "Pharos generates exactly one frame per game frame; a multi-frame override breaks its present thread."
 
 [[conflicts]]
 tweak = "dlss.fg.model"
 when = { "fg.mode" = "d3d12" }
-reason = "DLSS mod runs its own DLSS Frame Generation; a driver-side model override would disagree with it."
+reason = "Pharos runs its own DLSS Frame Generation; a driver-side model override would disagree with it."
 
 [[conflicts]]
 tweak = "fg.smooth_motion"
 when = { "fg.mode" = "d3d12" }
-reason = "DLSS mod already generates frames; Smooth Motion would interpolate them again."
+reason = "Pharos already generates frames; Smooth Motion would interpolate them again."
 
 [[conflicts]]
 mech = "dxvk:dxgi.maxFrameRate"

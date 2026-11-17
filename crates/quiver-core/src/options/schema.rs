@@ -397,8 +397,13 @@ pub fn lint(schema: &Schema) -> Vec<LintFinding> {
     }
     for (fid, f) in &schema.files {
         let at = format!("file {fid}");
-        if f.path.is_empty() || f.path.starts_with('/') || f.path.contains('\\') || f.path.split('/').any(|c| c.is_empty() || c == ".." || c == ".") {
-            top(Severity::Error, &at, format!("path {:?}: relative to its root, with '/' and no '..'", f.path));
+        for p in std::iter::once(&f.path).chain(&f.formerly) {
+            if p.is_empty() || p.starts_with('/') || p.contains('\\') || p.split('/').any(|c| c.is_empty() || c == ".." || c == ".") {
+                top(Severity::Error, &at, format!("path {p:?}: relative to its root, with '/' and no '..'"));
+            }
+        }
+        if !f.formerly.is_empty() && f.root != FileRoot::Install {
+            top(Severity::Warning, &at, "`formerly` is only used for install files".into());
         }
         if f.format != FileFormat::Ini {
             top(Severity::Warning, &at, format!("the {:?} adapter isn't built yet (phase 2); values for it are kept but not written", f.format));
@@ -762,6 +767,6 @@ mod tests {
         assert_eq!(undescribed, ["ini:upscaler/new_key"]);
         let msgs: Vec<String> = f.iter().map(|x| x.to_string()).collect();
         assert!(msgs.iter().any(|m| m.contains("fg.mode") && m.contains("doesn't fit")), "{msgs:#?}");
-        assert!(msgs.iter().any(|m| m.contains("isn't in aco_dlss.ini")), "{msgs:#?}");
+        assert!(msgs.iter().any(|m| m.contains("isn't in pharos.ini")), "{msgs:#?}");
     }
 }

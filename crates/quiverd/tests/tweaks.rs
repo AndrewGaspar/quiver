@@ -135,7 +135,7 @@ async fn tweaks_end_to_end() {
     let _: Value = cli.call(Request::Mods(ModsRequest::Install { product_id: 3539, builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
     let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { product_id: 3539, name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
     let p: TweaksPlan = tweaks(&cli, TweaksRequest::Plan { game, profile: Some("DLSS".into()) }).await.unwrap();
-    assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Provided { by, option, .. } if by == "DLSS" && option == "reflex.fps_limit"), "{:?}", p.entry("fps.cap"));
+    assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Provided { by, option, .. } if by == "Pharos" && option == "reflex.fps_limit"), "{:?}", p.entry("fps.cap"));
     assert!(!p.env["DXVK_CONFIG"].contains("maxFrameRate"));
     // The mod's option shows the bound value, from Quiver Tweaks (global).
     let list: Vec<SurfaceState> = cli.call(Request::Options(OptionsRequest::List { product_id: 3539, profile: Some("DLSS".into()), level: None })).await.unwrap();
@@ -166,7 +166,7 @@ async fn tweaks_end_to_end() {
     let c: OptionsChange = tweaks(&agent, TweaksRequest::Prefer { scope: Scope::Game { game }, id: "fps.cap".into(), prefer: Prefer::Quiver, message: None, confirmed: false }).await.unwrap();
     assert!(c.revision > 0);
     let p: TweaksPlan = tweaks(&cli, TweaksRequest::Plan { game, profile: Some("DLSS".into()) }).await.unwrap();
-    assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Unavailable { reason } if reason.contains("DLSS: Frame Generation presents two frames")), "{:?}", p.entry("fps.cap"));
+    assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Unavailable { reason } if reason.contains("Pharos: Frame Generation presents two frames")), "{:?}", p.entry("fps.cap"));
     assert!(p.bound.iter().any(|b| b.option == "reflex.fps_limit" && b.value == json!(0)));
 
     // History and restore (Ask for agents).

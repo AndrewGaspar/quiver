@@ -452,8 +452,8 @@ fn quiver_tweaks_flow_into_a_provider_s_option_below_the_profile_s_value() {
     };
     let game = quiver_api::GameRef::ubisoft(3539);
     let c = crate::tweaks::plan_for(f.store.data_dir(), &game, Some(&ctx), caps.clone(), &Default::default(), None).unwrap();
-    assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { by, .. } if by == "DLSS"));
-    assert!(matches!(&c.plan.entry("dlss.fg.frames").unwrap().planned, Planned::Blocked { reason } if reason.starts_with("DLSS mod generates")), "{:?}", c.plan.entry("dlss.fg.frames"));
+    assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { by, .. } if by == "Pharos"));
+    assert!(matches!(&c.plan.entry("dlss.fg.frames").unwrap().planned, Planned::Blocked { reason } if reason.starts_with("Pharos generates")), "{:?}", c.plan.entry("dlss.fg.frames"));
     assert!(matches!(&c.plan.entry("tex.anisotropy").unwrap().planned, Planned::Apply { mech, .. } if mech == "dxvk"));
     assert_eq!(c.plan.env["DXVK_CONFIG"], "d3d11.samplerAnisotropy = 16; d3d9.samplerAnisotropy = 16");
     assert_eq!(c.plan.revisions.global, 1);
@@ -466,4 +466,27 @@ fn quiver_tweaks_flow_into_a_provider_s_option_below_the_profile_s_value() {
     assert_eq!(st.options["reflex.fps_limit"].default, json!(160.0), "the tweak is the default layer under it");
     let c = crate::tweaks::plan_for(f.store.data_dir(), &game, Some(&ctx), caps, &Default::default(), None).unwrap();
     assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { value: Some(v), .. } if v == &json!(120.0)));
+}
+
+#[test]
+fn pharos_versions_render_pharos_ini_and_keep_the_values_of_older_versions() {
+    let f = aco();
+    set(&f, vec![op("world.npc_density", json!(4))]);
+    // v12: the mod became Pharos and reads pharos.ini.
+    let v12 = folder(&f.t.join("v12"), &[("pharos.ini", ACO_INI), ("d3d11.dll", "dll2")]);
+    f.store.add_version("DLSS", &NewVersion { path: Some(v12), ..Default::default() }, "cli").unwrap();
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    assert_eq!(ctx.surfaces.len(), 1, "{:?}", ctx.problems);
+    assert_eq!(ctx.surfaces[0].resolved.schema.files["ini"].path, "pharos.ini");
+    let mut plan = f.store.plan(Some(&f.profile)).unwrap();
+    prepare_launch(&ctx, &mut plan).unwrap();
+    let upper = f.store.profile_dir(&f.profile).join("upper");
+    let text = std::fs::read_to_string(upper.join("pharos.ini")).unwrap();
+    assert_eq!(text, ACO_INI.replace("npc_density=1", "npc_density=4"));
+    assert!(!upper.join("aco_dlss.ini").exists());
+    // An older version (aco_dlss.ini) still gets the same schema and its own file name.
+    let layers = f.store.layers().unwrap();
+    let old = layers.iter().find(|l| l.id == f.mod_id).unwrap();
+    let rec = f.store.find_mod("DLSS").unwrap();
+    assert_eq!(resolve_schema(&f.store, &rec, old).unwrap().unwrap().schema.files["ini"].path, "aco_dlss.ini");
 }

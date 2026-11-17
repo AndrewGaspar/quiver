@@ -356,6 +356,11 @@ pub enum Reload {
 pub struct FileDef {
     /// Relative to `root`, `/`-separated; `*` in a component matches any one name.
     pub path: String,
+    /// The file's earlier names, newest first (`aco_dlss.ini` before the mod became Pharos's
+    /// `pharos.ini`). A version that doesn't ship `path` but ships one of these uses the first
+    /// it has; a `[match] files` entry naming `path` is met by any of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formerly: Vec<String>,
     #[serde(default)]
     pub root: FileRoot,
     #[serde(default)]

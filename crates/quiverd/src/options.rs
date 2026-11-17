@@ -923,8 +923,9 @@ pub fn lint_folder(path: &std::path::Path) -> Result<LintReport> {
         _ => dir.clone(),
     };
     let text = std::fs::read_to_string(&file)?;
-    let schema = opt::schema::parse(&text, file.extension().is_some_and(|e| e == "json")).with_context(|| file.display().to_string())?;
+    let mut schema = opt::schema::parse(&text, file.extension().is_some_and(|e| e == "json")).with_context(|| file.display().to_string())?;
     let mut findings = opt::schema::lint(&schema);
+    opt::pin_file_names(&mut schema, &files_dir);
     let texts = schema
         .files
         .iter()

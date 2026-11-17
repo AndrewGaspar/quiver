@@ -121,7 +121,7 @@ async fn options_end_to_end() {
     let list: Vec<SurfaceState> = options(&cli, OptionsRequest::List { product_id: 3539, profile: Some("DLSS".into()), level: None }).await.unwrap();
     assert_eq!(list.len(), 2, "DLSS, then Quiver Tweaks");
     assert_eq!(list[1].key, "quiver/tweaks");
-    assert_eq!(list[0].title, "DLSS");
+    assert_eq!(list[0].title, "Pharos");
     assert_eq!(list[0].options["upscaler.preset"].value, json!("M"));
     assert_eq!(list[0].live.channel, LiveChannel::File);
     assert!(!list[0].live.connected);

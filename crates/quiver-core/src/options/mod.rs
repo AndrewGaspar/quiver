@@ -237,7 +237,8 @@ pub fn catalog_matches(s: &Schema, product_id: u32, layer: &Layer, dir: &Path) -
     if m.mods.is_empty() && m.files.is_empty() && m.sha256.is_empty() {
         return false;
     }
-    if !m.files.iter().all(|f| dir.join(f).is_file()) {
+    let ships = |f: &String| dir.join(f).is_file() || s.files.values().any(|d| d.path == *f && d.formerly.iter().any(|o| dir.join(o).is_file()));
+    if !m.files.iter().all(ships) {
         return false;
     }
     m.sha256.iter().all(|(f, hashes)| std::fs::read(dir.join(f)).is_ok_and(|b| hashes.iter().any(|h| h.eq_ignore_ascii_case(&sha256_hex(&b)))))
@@ -283,8 +284,35 @@ pub struct Resolved {
 }
 
 /// The schema for `layer` (a version of `rec`), if any source has one; `Err` for a schema
-/// that is there but broken (reported, never silently replaced by a lower source).
+/// that is there but broken (reported, never silently replaced by a lower source). Files
+/// with `formerly` names are pinned to the name this version ships.
 pub fn resolve_schema(store: &ModStore, rec: &ModRecord, layer: &Layer) -> Option<Result<Resolved>> {
+    let dir = store.layer_dir(&layer.id);
+    resolve_unpinned(store, rec, layer).map(|r| {
+        r.map(|mut r| {
+            pin_file_names(&mut r.schema, &dir);
+            r
+        })
+    })
+}
+
+/// Point each install file with earlier names at the one `dir` (a version) ships: `path`
+/// when it's there, else the first `formerly` name that is, else `path`.
+pub fn pin_file_names(schema: &mut Schema, dir: &Path) {
+    for f in schema.files.values_mut() {
+        if f.root != FileRoot::Install || f.formerly.is_empty() {
+            continue;
+        }
+        if !dir.join(&f.path).is_file()
+            && let Some(old) = f.formerly.iter().find(|o| dir.join(o).is_file())
+        {
+            f.path = old.clone();
+        }
+        f.formerly.clear();
+    }
+}
+
+fn resolve_unpinned(store: &ModStore, rec: &ModRecord, layer: &Layer) -> Option<Result<Resolved>> {
     let label = rec.label_of(&layer.id);
     if let Some((parsed, text)) = author_schema(store, &layer.id) {
         return Some(parsed.map(|schema| Resolved { schema, source: SchemaSource::Author, note: format!("schema shipped with {label}"), text: Some(text), revision: None }));
