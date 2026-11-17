@@ -14,3 +14,4 @@ tokio.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 regex = "1"
+ubi-perf.workspace = true
