@@ -140,10 +140,7 @@ impl SystemProducer {
 
     fn runtime_active(g: &Gpu) -> bool {
         // No runtime PM (a desktop): treat as awake.
-        match read(&g.dev.join("power/runtime_status")).as_deref() {
-            Some("suspended") | Some("suspending") => false,
-            _ => true,
-        }
+        !matches!(read(&g.dev.join("power/runtime_status")).as_deref(), Some("suspended" | "suspending"))
     }
 
     /// The GPU the metrics follow.
@@ -316,10 +313,10 @@ impl SystemProducer {
                 }
                 for i in 1..=16 {
                     let label = read(&d.join(format!("temp{i}_label")));
-                    if label.as_deref().is_some_and(|l| labels.contains(&l)) || (label.is_none() && i == 1) {
-                        if let Some(m) = read_f(&d.join(format!("temp{i}_input"))) {
-                            return Some(m / 1000.0);
-                        }
+                    if (label.as_deref().is_some_and(|l| labels.contains(&l)) || (label.is_none() && i == 1))
+                        && let Some(m) = read_f(&d.join(format!("temp{i}_input")))
+                    {
+                        return Some(m / 1000.0);
                     }
                 }
             }

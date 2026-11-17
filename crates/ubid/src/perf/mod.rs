@@ -428,6 +428,7 @@ impl PerfHub {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn subscribe(&self, c: &ConnCtx, session: Option<&str>, product_id: Option<u32>, select: Vec<String>, every_ms: u32, window_ms: u32, stats: Vec<Stat>) -> Result<u64> {
         self.connect(c);
         let id = self.next_sub.fetch_add(1, Ordering::Relaxed);
@@ -773,8 +774,11 @@ fn spawn_sensors(hub: Weak<PerfHub>) {
     });
 }
 
+/// A session's id, its environment markers and its game pids (to recognize its windows).
+type Markers = Vec<(String, Vec<String>, Vec<u32>)>;
+
 pub fn sense_once(h: &PerfHub, sys: &mut system::SystemProducer, sock: Option<&Path>) {
-    let (want, markers): (system::Want, Vec<(String, Vec<String>, Vec<u32>)>) = {
+    let (want, markers): (system::Want, Markers) = {
         let st = h.lock();
         if st.sessions.is_empty() {
             drop(st);

@@ -69,26 +69,26 @@ impl Nvml {
                 return None;
             }
             macro_rules! sym {
-                ($name:literal) => {{
+                ($name:literal, $t:ty) => {{
                     let p = libc::dlsym(lib, $name.as_ptr());
                     if p.is_null() {
                         libc::dlclose(lib);
                         return None;
                     }
-                    std::mem::transmute::<*mut c_void, _>(p)
+                    std::mem::transmute::<*mut c_void, $t>(p)
                 }};
             }
             let f = Fns {
-                init: sym!(c"nvmlInit_v2"),
-                shutdown: sym!(c"nvmlShutdown"),
-                count: sym!(c"nvmlDeviceGetCount_v2"),
-                handle: sym!(c"nvmlDeviceGetHandleByIndex_v2"),
-                util: sym!(c"nvmlDeviceGetUtilizationRates"),
-                temp: sym!(c"nvmlDeviceGetTemperature"),
-                power: sym!(c"nvmlDeviceGetPowerUsage"),
-                clock: sym!(c"nvmlDeviceGetClockInfo"),
-                memory: sym!(c"nvmlDeviceGetMemoryInfo"),
-                name: sym!(c"nvmlDeviceGetName"),
+                init: sym!(c"nvmlInit_v2", unsafe extern "C" fn() -> Ret),
+                shutdown: sym!(c"nvmlShutdown", unsafe extern "C" fn() -> Ret),
+                count: sym!(c"nvmlDeviceGetCount_v2", unsafe extern "C" fn(*mut c_uint) -> Ret),
+                handle: sym!(c"nvmlDeviceGetHandleByIndex_v2", unsafe extern "C" fn(c_uint, *mut Device) -> Ret),
+                util: sym!(c"nvmlDeviceGetUtilizationRates", unsafe extern "C" fn(Device, *mut Utilization) -> Ret),
+                temp: sym!(c"nvmlDeviceGetTemperature", unsafe extern "C" fn(Device, c_int, *mut c_uint) -> Ret),
+                power: sym!(c"nvmlDeviceGetPowerUsage", unsafe extern "C" fn(Device, *mut c_uint) -> Ret),
+                clock: sym!(c"nvmlDeviceGetClockInfo", unsafe extern "C" fn(Device, c_int, *mut c_uint) -> Ret),
+                memory: sym!(c"nvmlDeviceGetMemoryInfo", unsafe extern "C" fn(Device, *mut Memory) -> Ret),
+                name: sym!(c"nvmlDeviceGetName", unsafe extern "C" fn(Device, *mut c_char, c_uint) -> Ret),
             };
             Some(Nvml { lib, f, initialized: false })
         }
