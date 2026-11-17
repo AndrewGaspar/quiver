@@ -5,9 +5,12 @@
 //! Everything in it can be written by the game process (same uid), so openers check names,
 //! file types, owners and sizes, and the ring and image readers validate every byte.
 
+#[cfg(unix)]
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use crate::hud::{HudReader, HudWriter, hud_file_bytes, init_hud};
 use crate::layout::{HUD_MAX_BUFFER_BYTES, RING_MAX_SLOTS, RING_MIN_SLOTS};
@@ -24,6 +27,7 @@ pub const HUD_IMAGE_FILE: &str = "hud.image";
 const MAX_SESSION_ID: usize = 48;
 const MAX_SURFACE_ID: usize = 32;
 
+#[cfg(unix)]
 fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }

@@ -1,6 +1,7 @@
 //! Ring records: constructors for each kind and checked accessors for readers.
 
 use crate::layout::*;
+pub use crate::layout::{LayerStatus, Record};
 
 /// The layer's present record fields (`present.frame`, in this order).
 pub const PRESENT_F_ENTRY: usize = 0;
