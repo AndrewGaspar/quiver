@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod modrelay;
 pub mod run;
 
 /// Everything the bridge needs to answer a game's SDK `InitReq` like Connect would.
@@ -29,6 +30,18 @@ pub struct LaunchContext {
     /// Installed chunks from the game's `uplay_install.manifest` (for `UPLAY_INSTALLER_*`).
     #[serde(default)]
     pub chunks: Vec<Chunk>,
+    // -- Mod SDK (appended; older bridges ignore these) -----------------------------------
+    /// The launch's session id (`QUIVER_SESSION`), which also names the mod pipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The pipe the bridge creates for mods (`QUIVER_MODS_PIPE`, see
+    /// `ubi_proto::modsdk::pipe_name`). The launcher puts the same name in the game's
+    /// environment when it starts the game itself (the bridge is a sibling, not a parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mods_pipe: Option<String>,
+    /// The mod profile the launch runs (`QUIVER_PROFILE`), passed on with mod channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +77,24 @@ pub enum BrokerRequest {
         uplay_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
+    },
+    /// A mod inside the game connected to the bridge's mod pipe. The broker answers `Ok`,
+    /// then the connection carries the mod SDK's JSON messages, one per line, both ways
+    /// (`ubi_proto::modsdk`), until either side closes it. The mod's `hello` is the first.
+    ModChannel {
+        uplay_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        /// The bridge's connection number, for matching its log.
+        #[serde(default)]
+        conn: u32,
+        /// Windows pid of the process that opened the pipe, as Wine reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_pid: Option<u32>,
     },
 }
 

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use ubi_api::mods::{
-    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision,
+    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision, ModSdkConnection, ModSdkRequest,
     ModsState, PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, VersionChange, VersionMerge, is_human_source,
 };
 use ubi_api::{Client, ModsRequest, Request, SettingOp};
@@ -133,6 +133,21 @@ pub enum ModsAction {
     Migrate {
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Mods talking to Quiver through the mod SDK (quiver_mod.h) while the game runs.
+    Sdk {
+        #[command(subcommand)]
+        action: SdkAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SdkAction {
+    /// Connected mods: surface, SDK and protocol, capabilities, the options each applies
+    /// live, and its metrics with their latest values.
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -980,6 +995,14 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             }
             print_patches(&undone, &|id| id.clone());
         }
+        ModsAction::Sdk { action: SdkAction::Status { json } } => {
+            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: Some(product_id) })).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&conns)?);
+            } else {
+                print_sdk(&g.name, &conns);
+            }
+        }
         ModsAction::Migrate { dry_run } => {
             let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { product_id, dry_run })).await?;
             println!("{}: {}", g.name, if dry_run { "would migrate (dry run)" } else { "migrated" });
@@ -993,6 +1016,47 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
     }
     Ok(())
+}
+
+fn print_sdk(game: &str, conns: &[ModSdkConnection]) {
+    if conns.is_empty() {
+        println!("{game}: no mod is connected through the mod SDK (the game isn't running, or none of its mods uses quiver_mod.h)");
+        return;
+    }
+    println!("{game}: {} mod connection(s) through the mod SDK", conns.len());
+    for c in conns {
+        let since = c.connected.with_timezone(&chrono::Local).format("%H:%M:%S");
+        let mut who = vec![format!("{} protocol {}", if c.sdk.is_empty() { "SDK" } else { &c.sdk }, c.proto)];
+        if let Some(v) = &c.version {
+            who.push(format!("version {v}"));
+        }
+        if let Some(m) = &c.module {
+            who.push(m.clone());
+        }
+        if let Some(p) = c.pid.or(c.client_pid) {
+            who.push(format!("pid {p}"));
+        }
+        println!("  {} (#{}, since {since}): {}", c.surface, c.conn, who.join(", "));
+        println!("    capabilities: {}", if c.caps.is_empty() { "none".into() } else { c.caps.join(", ") });
+        if let Some(s) = &c.session {
+            println!("    session {s}{}", c.profile.as_deref().map(|p| format!(", profile {p}")).unwrap_or_default());
+        }
+        if !c.options.is_empty() {
+            println!("    applies live: {}", c.options.join(", "));
+        }
+        for m in &c.metrics {
+            let value = match &m.value {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => format!("{v}{}", if m.unit.is_empty() { String::new() } else { format!(" {}", m.unit) }),
+                None => "—".into(),
+            };
+            let marks = if m.marks > 0 { format!(" ({} marks)", m.marks) } else { String::new() };
+            println!("    {:<32} {:<8} {value}{marks}", m.id, m.kind);
+        }
+        if c.refused > 0 {
+            println!("    {} message(s) refused (malformed or over a rate limit)", c.refused);
+        }
+    }
 }
 
 fn print_version_change(game: &str, verb: &str, c: &VersionChange) {

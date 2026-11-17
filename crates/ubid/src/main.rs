@@ -85,6 +85,8 @@ struct Daemon {
     sessions: Arc<PlaySessions>,
     /// Mod options: running sessions as options see them, the SDK link, options events.
     options: options::Options,
+    /// Mods connected through the SDK pipe (`quiver_mod.h`), via bridges.
+    mod_sdk: Arc<ubi_core::modsdk::ModRegistry>,
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -528,6 +530,7 @@ impl Daemon {
             }
             Request::Mods(req) => self.handle_mods(source, req).await?,
             Request::Options(req) => self.handle_options(source, req).await?,
+            Request::ModSdk(ubi_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
@@ -879,6 +882,10 @@ async fn main() -> Result<()> {
         s
     };
     let broker_svc = Broker::new(accounts.clone(), Some(sessions.clone()));
+    // Stand-in sinks until the Options backend and the perf hub install theirs
+    // (`set_options_sink`, `set_metrics_sink`).
+    let mod_sdk = ubi_core::modsdk::ModRegistry::logging();
+    broker_svc.set_mods(mod_sdk.clone());
     tokio::spawn(broker_svc.clone().serve(broker_listener));
 
     // Also moves a pre-multi-account keyring entry to its per-account one.
@@ -921,6 +928,7 @@ async fn main() -> Result<()> {
         events,
         sessions,
         options: options::Options::default(),
+        mod_sdk,
     });
     options::test_session(&daemon);
     downloads::start(&daemon);

@@ -147,17 +147,7 @@ impl Options {
 
 /// A fresh session id (`s-` and 6 base-36 characters).
 pub fn new_session_id() -> String {
-    let mut bytes = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = std::io::Read::read_exact(&mut f, &mut bytes);
-    }
-    let mut n = u64::from_le_bytes(bytes) ^ (std::process::id() as u64) << 20;
-    let mut id = String::from("s-");
-    for _ in 0..6 {
-        id.push(char::from_digit((n % 36) as u32, 36).unwrap());
-        n /= 36;
-    }
-    id
+    ubi_core::modsdk::new_session_id()
 }
 
 fn game(product_id: u32) -> Result<ubi_core::launcher::Game> {

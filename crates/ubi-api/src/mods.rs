@@ -1363,6 +1363,91 @@ fn yes() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------------------
+// Mod SDK (build/mod-sdk)
+
+/// Requests about mods connected through the mod SDK (`Request::ModSdk`). Kept apart from
+/// [`ModsRequest`] (installed mods and profiles): these are about running games.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ModSdkRequest {
+    /// Mods connected right now, for one game or all, oldest first (`Vec<ModSdkConnection>`).
+    Status {
+        #[serde(default)]
+        product_id: Option<u32>,
+    },
+}
+
+/// A mod connected through the SDK pipe of a running game (`ModSdkRequest::Status`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModSdkConnection {
+    /// quiverd's id for this connection (unique while quiverd runs).
+    pub conn: u64,
+    pub product_id: u32,
+    /// The schema surface id it said `hello` with; also its metrics' namespace.
+    pub surface: String,
+    /// The SDK's version string, and the protocol agreed on.
+    pub sdk: String,
+    pub proto: u32,
+    /// Capabilities granted (`options`, `metrics`, `actions`, `log`).
+    pub caps: Vec<String>,
+    /// Windows pid the mod reported, and the one Wine reported for the pipe's client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// User id of the account playing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub connected: DateTime<Utc>,
+    /// Live options it applies itself (a `set` goes to it; others wait for a restart or the
+    /// file channel).
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub metrics: Vec<ModSdkMetric>,
+    /// It sent an inline schema in `hello`.
+    #[serde(default)]
+    pub inline_schema: bool,
+    /// Messages quiverd refused (malformed, over a rate limit, not its namespace).
+    #[serde(default)]
+    pub refused: u64,
+}
+
+/// One metric a connected mod declared, with its latest value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModSdkMetric {
+    pub index: u32,
+    /// Full id: `aco-dlss.fg.state`.
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Latest value: a number (gauge), a total (counter), a string (state, text), or an
+    /// event's latest label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<DateTime<Utc>>,
+    /// `event` metrics: marks received.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub marks: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,6 +1475,17 @@ mod tests {
         assert_eq!(p.name, "Visual overhaul");
         set(&mut p, "layers=").unwrap();
         assert!(p.layers.is_empty());
+    }
+
+    #[test]
+    fn mod_sdk_wire() {
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status","product_id":5}}"#).unwrap();
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: Some(5) })));
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status"}}"#).unwrap();
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: None })));
+        let c: ModSdkConnection =
+            serde_json::from_str(r#"{"conn":1,"product_id":5,"surface":"m","sdk":"s","proto":2,"caps":[],"connected":"2026-11-16T00:00:00Z"}"#).unwrap();
+        assert!(c.metrics.is_empty() && c.options.is_empty());
     }
 
     #[test]
