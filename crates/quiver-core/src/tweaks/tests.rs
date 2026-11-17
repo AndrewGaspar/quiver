@@ -427,3 +427,24 @@ fn templates_and_arithmetic() {
     assert_eq!(provider_value(&p, &json!("custom"), &t).unwrap(), Some(json!(0.58)));
     assert_eq!(provider_value(&p, &json!("app"), &t).unwrap(), None);
 }
+
+#[test]
+fn the_api_the_layer_saw_last_feeds_the_next_plan() {
+    assert_eq!((api_of_engine("DXVK"), api_of_engine("vkd3d"), api_of_engine("idTech"), api_of_engine("")), (Some("dxvk"), Some("d3d12"), Some("vulkan"), None));
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path();
+    let game = GameRef::ubisoft(1);
+    let at = At::Global(data);
+    let a = apply_ops(schema(), ScopeKind::Global, &OptionsRevision::default(), &BTreeMap::new(), &[OptionOp::Set { surface: "quiver".into(), id: "tex.anisotropy".into(), value: json!("16") }]);
+    at.append(a.values, a.prefer, "cli", None, a.changes).unwrap();
+    let plan = |data: &Path| plan_for(data, &game, None, nvidia(50), &BTreeMap::new(), None).unwrap().plan;
+    assert!(matches!(&plan(data).entry("tex.anisotropy").unwrap().planned, Planned::Apply { .. }));
+    save_api(data, &game, "d3d12").unwrap();
+    let p = plan(data);
+    assert_eq!(p.caps.api, "d3d12");
+    assert!(matches!(&p.entry("tex.anisotropy").unwrap().planned, Planned::Unavailable { reason } if reason.contains("this one is D3D12")), "{:?}", p.entry("tex.anisotropy"));
+    // The indicator state survives the API being recorded.
+    save_prefix_state(data, &game, &PrefixState { indicator_on: true, ..load_prefix_state(data, &game) }).unwrap();
+    save_api(data, &game, "dxvk").unwrap();
+    assert!(load_prefix_state(data, &game).indicator_on);
+}

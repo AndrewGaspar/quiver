@@ -364,8 +364,10 @@ impl Daemon {
                 Err(e) => lines.push(format!("tweaks: couldn't copy {} into the prefix: {e}", src.display())),
             }
         }
-        if c.indicator_on != tw::load_prefix_state(&d, &gref).indicator_on {
-            let _ = tw::save_prefix_state(&d, &gref, &tw::PrefixState { indicator_on: c.indicator_on });
+        let mut st = tw::load_prefix_state(&d, &gref);
+        if c.indicator_on != st.indicator_on {
+            st.indicator_on = c.indicator_on;
+            let _ = tw::save_prefix_state(&d, &gref, &st);
         }
         plan.api.settings.env.extend(c.plan.env.clone());
         for e in &c.plan.entries {
@@ -426,8 +428,17 @@ impl Daemon {
         });
     }
 
-    /// After a session: settle every effect (unconfirmed, with why) and record them.
-    pub(crate) fn tweaks_session_end(&self, session: &str) {
+    /// After a session (before its perf session ends): remember the API the Sight layer saw
+    /// (the next launch's `requires`), settle every effect (unconfirmed, with why) and record
+    /// them.
+    pub(crate) fn tweaks_session_end(&self, session: &str, product_id: u32) {
+        let now = quiver_perf::clock::mono_raw_ns();
+        let engine = self.perf.with_session(Some(session), product_id, |s| s.layer_info(now).map(|l| l.engine)).flatten();
+        if let Some(api) = engine.as_deref().and_then(tw::api_of_engine)
+            && let Err(e) = tw::save_api(&data(), &GameRef::ubisoft(product_id), api)
+        {
+            tracing::warn!("remembering the game's API: {e:#}");
+        }
         let Some(mut l) = self.tweaks.sessions.lock().unwrap().remove(session) else { return };
         let logs = tw::evidence::Logs::read(&l.dir);
         let before: Vec<Effect> = l.record.effects.iter().map(|e| e.effect.clone()).collect();

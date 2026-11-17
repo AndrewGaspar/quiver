@@ -743,6 +743,10 @@ pub fn plan_for(
     let (providers, mut conflicts) = ctx.map(providers).unwrap_or_default();
     conflicts.extend(builtin_conflicts(schema(), &effective(&resolved)));
     let state = load_prefix_state(data, game);
+    let mut caps = caps;
+    if caps.api.is_empty() || caps.api == "unknown" {
+        caps.api = state.api.clone().unwrap_or_else(|| "unknown".into());
+    }
     let mut c = compile::compile(&compile::Inputs {
         schema: schema(),
         resolved: &resolved,
@@ -768,6 +772,34 @@ pub struct PrefixState {
     /// The DLSS indicator was turned on (it persists in the prefix's registry).
     #[serde(default)]
     pub indicator_on: bool,
+    /// The game's API as the Sight layer last saw it (`dxvk`, `d3d12`, `vulkan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+}
+
+/// The game's API from the Sight layer's engine name (`DXVK` → `dxvk`, D3D8–11; `vkd3d` →
+/// `d3d12`; anything else a native Vulkan game).
+pub fn api_of_engine(engine: &str) -> Option<&'static str> {
+    let e = engine.trim().to_ascii_lowercase();
+    if e.is_empty() {
+        None
+    } else if e.starts_with("dxvk") {
+        Some("dxvk")
+    } else if e.starts_with("vkd3d") {
+        Some("d3d12")
+    } else {
+        Some("vulkan")
+    }
+}
+
+/// Remember the API the Sight layer saw this game use (for the next launch's `requires`).
+pub fn save_api(data: &Path, game: &GameRef, api: &str) -> Result<()> {
+    let mut s = load_prefix_state(data, game);
+    if s.api.as_deref() != Some(api) {
+        s.api = Some(api.to_owned());
+        save_prefix_state(data, game, &s)?;
+    }
+    Ok(())
 }
 
 fn state_path(data: &Path, game: &GameRef) -> PathBuf {

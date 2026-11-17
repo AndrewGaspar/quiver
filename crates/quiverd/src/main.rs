@@ -729,7 +729,7 @@ impl Daemon {
             this.running.lock().unwrap().remove(&product_id);
             let code = *exit_code.lock().unwrap();
             this.options_session_end(&session_id, code).await;
-            this.tweaks_session_end(&session_id);
+            this.tweaks_session_end(&session_id, product_id);
             let perf_summary = this.perf.end(&session_id);
             if let Some(start) = *started_at.lock().unwrap() {
                 let end = chrono::Utc::now();
