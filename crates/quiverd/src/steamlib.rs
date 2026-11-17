@@ -316,13 +316,19 @@ fn plan_from(product_id: u32, s: quiver_api::GameSettings, revision: u32) -> Ste
     if let Some(l) = &s.language {
         ignored.push(format!("language={l} (Steam's language setting decides)"));
     }
-    SteamLaunchPlan { product_id, revision, env: s.env, dll_overrides: s.dll_overrides, args: s.args, wrappers: s.wrappers, ignored }
+    SteamLaunchPlan { product_id, revision, env: s.env, dll_overrides: s.dll_overrides, args: s.args, wrappers: s.wrappers, ignored, ..Default::default() }
 }
 
 pub(crate) async fn handle(daemon: &Arc<Daemon>, _source: &str, req: Request) -> Result<Value> {
     Ok(match req {
         Request::Ownership { product_id, account } => json!(ownership(daemon, product_id, account).await?),
-        Request::SteamLaunchPlan { product_id } => json!(launch_plan(product_id)?),
+        Request::SteamLaunchPlan { product_id, perf } => {
+            let mut plan = launch_plan(product_id)?;
+            if perf {
+                daemon.perf_steam_launch(&mut plan);
+            }
+            json!(plan)
+        }
         other => anyhow::bail!("not a Steam library request: {other:?}"),
     })
 }
