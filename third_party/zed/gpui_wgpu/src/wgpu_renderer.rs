@@ -223,10 +223,7 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     depth_texture: Option<DepthTexture>,
     /// Read by the headless renderer to create its render target.
-    #[cfg(all(
-        not(target_family = "wasm"),
-        any(test, feature = "bench-support", feature = "test-support")
-    ))]
+    #[cfg(not(target_family = "wasm"))]
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
 }
@@ -1292,10 +1289,7 @@ impl WgpuRendererCore {
             transient_attachments: context.supports_transient_attachments(),
             adapter_info: context.adapter.get_info(),
             depth_texture: None,
-            #[cfg(all(
-                not(target_family = "wasm"),
-                any(test, feature = "bench-support", feature = "test-support")
-            ))]
+            #[cfg(not(target_family = "wasm"))]
             target_format,
             max_texture_size,
         }
@@ -2245,19 +2239,13 @@ impl WgpuRenderer {
     }
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
+#[cfg(not(target_family = "wasm"))]
 struct HeadlessRenderTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
+#[cfg(not(target_family = "wasm"))]
 impl HeadlessRenderTarget {
     fn size(&self) -> Size<DevicePixels> {
         Size {
@@ -2267,10 +2255,7 @@ impl HeadlessRenderTarget {
     }
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
+#[cfg(not(target_family = "wasm"))]
 pub struct WgpuHeadlessRenderer {
     context: WgpuContext,
     core: WgpuRendererCore,
@@ -2278,10 +2263,7 @@ pub struct WgpuHeadlessRenderer {
     observed_error_generation: u64,
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
+#[cfg(not(target_family = "wasm"))]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
         let (context, target_format) = WgpuContext::new_headless()?;
@@ -2377,6 +2359,7 @@ impl WgpuHeadlessRenderer {
 
     /// Copies the current render target back to the CPU. Dimensions come from the
     /// target texture itself, so the copy can never disagree with what was rendered.
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     fn read_image(&mut self) -> anyhow::Result<image::RgbaImage> {
         let target = self
             .render_target
