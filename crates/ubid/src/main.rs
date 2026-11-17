@@ -6,6 +6,7 @@
 mod downloads;
 mod exports;
 mod mods;
+mod perf;
 mod info;
 mod savestores;
 mod setup;
@@ -523,6 +524,9 @@ impl Daemon {
                 Value::Null
             }
             Request::Mods(req) => self.handle_mods(source, req).await?,
+            // Connection-bound perf requests (subscriptions, HUD attachment) are answered by
+            // the connection loop; the rest here.
+            Request::Perf(req) => self.perf.handle(self, source, None, req).await?,
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }

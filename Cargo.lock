@@ -6451,10 +6451,12 @@ dependencies = [
  "sha1",
  "tempfile",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "ubi-api",
  "ubi-core",
+ "ubi-perf",
 ]
 
 [[package]]
