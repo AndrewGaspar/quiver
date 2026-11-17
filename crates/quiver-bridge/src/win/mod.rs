@@ -175,6 +175,37 @@ pub async fn broker(req: BrokerRequest) -> Result<BrokerResponse> {
     Ok(serde_json::from_str(&rsp)?)
 }
 
+/// The game's achievements with the account's unlock status, from quiverd.
+pub async fn load_achievements(language: Option<String>) -> Result<()> {
+    let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
+    let req = BrokerRequest::Achievements { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()), language };
+    match broker(req).await? {
+        BrokerResponse::Achievements { items, unlocked_known } => {
+            let earned = items.iter().filter(|a| a.earned).count();
+            log!(
+                "achievements from quiverd: {} defined, {earned} earned{}",
+                items.len(),
+                if unlocked_known { "" } else { " (Ubisoft's unlock status unavailable)" }
+            );
+            crate::achievements::set_list(items);
+            Ok(())
+        }
+        BrokerResponse::Error { message } => Err(anyhow!("broker: {message}")),
+        other => Err(anyhow!("unexpected broker reply {other:?}")),
+    }
+}
+
+/// Hand an earned achievement to quiverd (it deduplicates and reports it).
+pub async fn achievement_earned(achievement_id: u32) -> Result<()> {
+    let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
+    let req = BrokerRequest::AchievementEarned { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()), achievement_id };
+    match broker(req).await? {
+        BrokerResponse::Ok => Ok(()),
+        BrokerResponse::Error { message } => Err(anyhow!("broker: {message}")),
+        other => Err(anyhow!("unexpected broker reply {other:?}")),
+    }
+}
+
 /// Tell the broker the game is running. The returned connection is the lease: the broker
 /// keeps the play session open until it closes.
 pub async fn play_session_lease() -> Result<tokio::net::TcpStream> {

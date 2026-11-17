@@ -96,6 +96,40 @@ pub enum BrokerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_pid: Option<u32>,
     },
+    // -- Achievements (appended; older brokers answer these with an error) ---------------
+    /// The game's achievements with this account's unlock status, for the SDK's
+    /// `GetAchievements`. Answered with `BrokerResponse::Achievements`.
+    Achievements {
+        uplay_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        /// The game's `languageCountryCode` (`en-US`), for names and descriptions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    /// The game earned an achievement (`EarnAchievement`). The broker answers `Ok` at once
+    /// and reports it upstream in the background (deduplicated; see quiverd's journal).
+    AchievementEarned {
+        uplay_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        achievement_id: u32,
+    },
+}
+
+/// One achievement as the bridge hands it to the game (`uplaydll.AchievementData`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BridgeAchievement {
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub earned: bool,
+    /// Unix seconds; 0 when unknown or not earned.
+    #[serde(default)]
+    pub earned_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +138,13 @@ pub enum BrokerResponse {
     GameToken { game_token: Vec<u8> },
     Ok,
     Error { message: String },
+    /// `BrokerRequest::Achievements`. `unlocked_known`: false when Ubisoft's unlock status
+    /// couldn't be read (the list then shows only what was earned through Quiver).
+    Achievements {
+        items: Vec<BridgeAchievement>,
+        #[serde(default)]
+        unlocked_known: bool,
+    },
 }
 
 /// Top-level field numbers in a protobuf message, in order, for logging requests the

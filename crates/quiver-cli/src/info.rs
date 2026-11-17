@@ -224,9 +224,13 @@ pub async fn progress(client: &Client, game: &str, json: bool, refresh: bool) ->
         }
     }
     if let Some(a) = &p.achievements {
-        println!("\nachievements: {}/{}", a.unlocked, a.total);
+        match a.unlocked_known {
+            true => println!("\nachievements: {}/{} unlocked", a.unlocked, a.total),
+            false => println!("\nachievements: {} (unlock status unavailable; quiver achievements {})", a.total, e.product_id),
+        }
         for x in &a.items {
-            println!("  {} {}", if x.unlocked { "✓" } else { " " }, x.name.as_deref().unwrap_or(&x.id));
+            let at = x.unlocked_at.map(|t| format!("  {}", when(Some(t)))).unwrap_or_default();
+            println!("  {} {}{at}", if x.unlocked { "✓" } else { " " }, x.name.as_deref().unwrap_or(&x.id));
         }
     }
     if !p.challenges.is_empty() {

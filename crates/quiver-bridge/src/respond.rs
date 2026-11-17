@@ -423,19 +423,20 @@ fn installer(i: &u::InstallerReq) -> Reply {
     Reply::Unhandled
 }
 
-// TODO: real achievements live in UbiServices; until then report none and log earned ones.
+/// The list and unlock status come from quiverd (`crate::achievements`; `win::api` loads it
+/// before the first read and forwards earns to quiverd, which reports them to Ubisoft).
 fn achievements(a: &u::AchievementReq) -> Reply {
     if let Some(get) = &a.get_req {
-        let request_id = get.request_id;
-        return rsp(|x| {
-            x.achievement_rsp = Some(u::AchievementRsp {
-                get_rsp: Some(u::GetAchievementsRsp { request_id, result: OK, data: vec![] }),
-                ..Default::default()
-            })
-        });
+        let get_rsp = crate::achievements::get_rsp(get);
+        log!("    achievements: {} listed, {} earned", get_rsp.data.len(), get_rsp.data.iter().filter(|d| d.is_earned).count());
+        return rsp(|x| x.achievement_rsp = Some(u::AchievementRsp { get_rsp: Some(get_rsp), ..Default::default() }));
     }
     if let Some(earn) = &a.earn_req {
-        log!("    achievement {} earned (not reported to Ubisoft yet)", earn.id);
+        if crate::achievements::earn(earn.id, crate::achievements::now_secs()) {
+            log!("    achievement {} earned (forwarded to quiverd)", earn.id);
+        } else {
+            log!("    achievement {} earned again (already earned)", earn.id);
+        }
         let request_id = earn.request_id;
         return rsp(|x| {
             x.achievement_rsp = Some(u::AchievementRsp {

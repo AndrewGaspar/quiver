@@ -305,7 +305,7 @@ pub fn read_achievements(dir: &std::path::Path, locale: &str) -> anyhow::Result<
         let icon = a.id.parse::<u32>().ok().map(|n| dir.join(format!("{n}.png"))).filter(|p| p.is_file());
         a.image = icon.map(|p| p.to_string_lossy().into_owned());
     }
-    Ok(Achievements { unlocked_known: false, unlocked: 0, total: items.len() as u32, items })
+    Ok(Achievements { unlocked_known: false, unlocked: 0, total: items.len() as u32, items, source: None })
 }
 
 /// The achievement set `asset` (a file name on the asset CDN), cached under `cache/<asset>/`.

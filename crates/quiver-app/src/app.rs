@@ -381,6 +381,12 @@ impl Quiver {
             Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
             Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
             Event::ModsChanged { product_id } => self.load_page(product_id, cx),
+            // The open page's achievements show it (Sight will toast it).
+            Event::AchievementUnlocked { product_id, .. } => {
+                if self.nav.page == Page::Game(product_id) && self.gp.id == product_id {
+                    self.load_progress(product_id, false, cx);
+                }
+            }
             // A Steam copy shows as running while Steam plays it (quiverd's library says so).
             Event::SessionsChanged { sessions } => {
                 let steam_now = sessions.iter().any(|s| self.game(s.product_id).is_some_and(|g| g.steam_only()));
