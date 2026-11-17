@@ -3,7 +3,8 @@
  * The ring (per-frame / per-event records from the Sight layer and from mods) and hud.image
  * (the HUD image quiver-sight renders and the layer composites) as C structs, plus a lock-free
  * ring writer for mods (quiver_mod.h builds on it). Single header, C99 or C++, GCC / Clang /
- * MinGW / MSVC, no dependencies. Little-endian x86-64 only.
+ * MinGW / MSVC, no dependencies. Little-endian x86 only (64-bit, and 32-bit for 32-bit
+ * games: the layouts are the same, every 64-bit field sits at a multiple of 8).
  *
  * This file mirrors crates/ubi-perf/src/layout.rs. Every size and offset is asserted below;
  * crates/ubi-perf/tests/header.rs checks those asserts and every #define against the Rust
@@ -335,9 +336,17 @@ QV_ASSERT_OFFSET(qv_hud_buffer, model_rev, 176);
 
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
+#if defined(_M_IX86)
+/* 32-bit: a plain 64-bit access is two 32-bit ones; go through the interlocked ops. */
+QV_INLINE uint64_t qv__load_relaxed(const volatile uint64_t *p)
+{ return (uint64_t)_InterlockedCompareExchange64((volatile __int64 *)p, 0, 0); }
+QV_INLINE void qv__store_relaxed(volatile uint64_t *p, uint64_t v) { _InterlockedExchange64((volatile __int64 *)p, (__int64)v); }
+QV_INLINE void qv__store_release(volatile uint64_t *p, uint64_t v) { _InterlockedExchange64((volatile __int64 *)p, (__int64)v); }
+#else
 QV_INLINE uint64_t qv__load_relaxed(const volatile uint64_t *p) { return *p; }
 QV_INLINE void qv__store_relaxed(volatile uint64_t *p, uint64_t v) { *p = v; }
 QV_INLINE void qv__store_release(volatile uint64_t *p, uint64_t v) { _ReadWriteBarrier(); *p = v; }
+#endif
 QV_INLINE void qv__fence_release(void) { _ReadWriteBarrier(); }
 QV_INLINE uint64_t qv__fetch_add(volatile uint64_t *p, uint64_t v)
 { return (uint64_t)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v); }

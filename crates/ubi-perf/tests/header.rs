@@ -127,6 +127,18 @@ fn header_compiles() {
         compile("x86_64-w64-mingw32-gcc", &["-std=c99", "-O2"], &check, &dir.path().join("check.exe"));
         ran.push("mingw");
     }
+    if have("i686-w64-mingw32-gcc") {
+        compile("i686-w64-mingw32-gcc", &["-std=c99", "-O2"], &check, &dir.path().join("check32.exe"));
+        ran.push("mingw32");
+    }
+    // 32-bit SysV aligns uint64_t to 4 in structs; the asserts show the layout still holds.
+    // (Needs multilib; skipped if -m32 can't build.)
+    let probe = dir.path().join("probe.c");
+    std::fs::write(&probe, "#include <stdint.h>\n#include <string.h>\nint main(void) { return 0; }\n").unwrap();
+    if have("cc") && Command::new("cc").args(["-m32", "-c", "-o"]).arg(dir.path().join("probe.o")).arg(&probe).status().is_ok_and(|s| s.success()) {
+        compile("cc", &["-m32", "-std=c99", "-c"], &check, &dir.path().join("check32.o"));
+        ran.push("cc -m32");
+    }
     if have("clang") {
         compile("clang", &["-std=c99", "-O2"], &check, &dir.path().join("checkclang"));
         ran.push("clang");
