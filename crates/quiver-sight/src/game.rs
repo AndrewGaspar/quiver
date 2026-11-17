@@ -13,16 +13,20 @@ use anyhow::{Context as _, Result};
 use gpui::{App, AppContext, Hsla, OffscreenWindowOptions, Rgba, WindowHandle, px, size};
 use quiver_api::perf::{HudModel, Presenter};
 use quiver_perf::hud::{HudWriter, rgba_premul};
-use quiver_perf::layout::{GRAPH_SERIES_PRESENTED, HUD_FORMAT_RGBA8_PREMUL_SRGB, HUD_MAX_GRAPHS, HUD_PIXELS_OFFSET};
+use quiver_perf::layout::{GRAPH_SERIES_PRESENTED, HUD_FORMAT_RGBA8_PREMUL_SRGB, HUD_MAX_DIM, HUD_MAX_GRAPHS, HUD_PIXELS_OFFSET};
 use quiver_perf::shm::Mapping;
 use quiver_perf::{HudBufferHeader, HudGraph};
 use quiver_ui::theme::Theme;
 
-use crate::hud_view::{BASE_TEXT, HudView, Measure, Mode, card_extent, card_size};
+use crate::hud_view::{BASE_TEXT, HudView, Measure, Mode, card_extent, model_size};
 use crate::place::place;
 
-/// The first window size, before the card has been measured (logical px).
-const FIRST_SIZE: (f32, f32) = (360.0, 96.0);
+/// The window for a model's card (logical px): its fixed size, plus a pixel for the
+/// border's anti-aliasing.
+pub fn window_size(m: &HudModel) -> (f32, f32) {
+    let (w, h) = model_size(m);
+    (w.ceil() + 1.0, h.ceil() + 1.0)
+}
 
 #[derive(Default)]
 struct Frame {
@@ -127,6 +131,23 @@ pub fn factor(m: &HudModel) -> f32 {
     if f.is_finite() { f.clamp(0.5, 8.0) } else { 1.0 }
 }
 
+/// [`factor`], reduced so the card's image stays within what the layer takes (2048 px a
+/// side) and what `hud.image`'s buffer holds (`buffer_bytes`; 0: unknown): a wide card at a
+/// high resolution or scale comes out a little smaller rather than cropped or refused.
+pub fn fit_factor(m: &HudModel, buffer_bytes: u32) -> f32 {
+    let f = factor(m);
+    let (w, h) = model_size(m);
+    // The image is the card rounded up plus a pixel.
+    let side = (HUD_MAX_DIM - 2) as f32;
+    let mut fit = f.min(side / w).min(side / h);
+    let px = buffer_bytes.saturating_sub(HUD_PIXELS_OFFSET as u32) as f32 / 4.0;
+    if px > 0.0 {
+        // Some slack for the row stride's alignment and the rounding.
+        fit = fit.min((px / ((w + 2.0) * (h + 2.0))).sqrt() * 0.97);
+    }
+    fit.max(0.25)
+}
+
 impl GameHud {
     pub fn heartbeat(&self, now_ns: i64) {
         if let Some((_, w)) = &self.writer {
@@ -167,7 +188,11 @@ impl GameHud {
             return Ok(());
         };
         let started = Instant::now();
-        let f = factor(m);
+        let cap = self.writer.as_ref().map(|(_, w)| w.info().buffer_bytes).unwrap_or(0);
+        let f = fit_factor(m, cap);
+        if f < factor(m) - 0.001 && self.window.as_ref().is_none_or(|w| (w.factor - f).abs() > 0.001) {
+            tracing::info!(asked = factor(m), fits = f, size = ?model_size(m), "HUD card too large for hud.image at this scale: drawn smaller");
+        }
         if self.window.as_ref().is_none_or(|w| (w.factor - f).abs() > 0.001) {
             self.open_window(m, f, cx)?;
         }
@@ -177,24 +202,24 @@ impl GameHud {
             v.model = model;
             cx.notify();
         })?;
-        cx.update_window(w.handle.into(), |_, win, cx| win.render_now(cx))?;
-        // Fit the window to the card, then render again at that size.
-        let measured = card_size(&w.measure.borrow());
-        tracing::debug!(card = ?w.measure.borrow().card, ?measured, window = ?w.size, "measured");
-        if let Some(want) = measured {
-            let want = (f32::from(want.width), f32::from(want.height));
-            if (want.0 - w.size.0).abs() > 0.5 || (want.1 - w.size.1).abs() > 0.5 {
-                w.size = want;
-                self.stats.resizes += 1;
-                cx.update_window(w.handle.into(), |_, win, cx| {
-                    win.resize(size(px(want.0), px(want.1)));
-                    // The platform's resize callback can't reach a window that is being
-                    // updated (this one): take the new size now.
-                    win.bounds_changed(cx);
-                    win.render_now(cx);
-                })?;
-            }
+        // The card's size is the layout's, not its contents': the window changes only with
+        // the layout (or the scale, which opens a new window).
+        let want = window_size(m);
+        let resize = (want.0 - w.size.0).abs() > 0.5 || (want.1 - w.size.1).abs() > 0.5;
+        if resize {
+            w.size = want;
+            self.stats.resizes += 1;
         }
+        cx.update_window(w.handle.into(), |_, win, cx| {
+            if resize {
+                win.resize(size(px(want.0), px(want.1)));
+                // The platform's resize callback can't reach a window that is being updated
+                // (this one): take the new size now.
+                win.bounds_changed(cx);
+            }
+            win.render_now(cx);
+        })?;
+        tracing::debug!(card = ?w.measure.borrow().card, window = ?w.size, "rendered");
         let render = started.elapsed();
         let th = cx.global::<Theme>().clone();
         let (desc, pixels) = self.image(m, extent, &th);
@@ -219,8 +244,15 @@ impl GameHud {
         let fr = w.frame.borrow();
         let measure = w.measure.borrow();
         let f = w.factor;
-        // The card's far edges, rounded up, plus a pixel for the border's anti-aliasing.
-        let card = card_extent(&measure).map(|(w, h)| ((w * f).ceil() as u32 + 1, (h * f).ceil() as u32 + 1)).unwrap_or((fr.width, fr.height));
+        // The card's fixed size, rounded up, plus a pixel for the border's anti-aliasing (the
+        // layout's size, never the contents': the measured card only checks it).
+        let (mw, mh) = model_size(m);
+        let card = ((mw * f).ceil() as u32 + 1, (mh * f).ceil() as u32 + 1);
+        if let Some((w, h)) = card_extent(&measure)
+            && ((w - mw).abs() > 0.5 || (h - mh).abs() > 0.5)
+        {
+            tracing::debug!(measured = ?(w, h), size = ?(mw, mh), "the card laid out at another size than the model's");
+        }
         let (cw, mut ch) = (card.0.clamp(1, fr.width.max(1)), card.1.clamp(1, fr.height.max(1)));
         // Within the buffer (4 MiB at most): crop rows rather than fail.
         let cap = self.writer.as_ref().map(|(_, w)| w.info().buffer_bytes).unwrap_or(0) as usize;
@@ -307,9 +339,10 @@ impl GameHud {
         let measure = view.measure.clone();
         let sink = frame.clone();
         let t = Instant::now();
+        let first = window_size(m);
         let handle = cx.open_offscreen_window(
             OffscreenWindowOptions {
-                size: size(px(FIRST_SIZE.0), px(FIRST_SIZE.1)),
+                size: size(px(first.0), px(first.1)),
                 scale_factor: f,
                 // Rendering stays off the game's (discrete) GPU and doesn't wake it.
                 prefer_low_power_gpu: true,
@@ -329,7 +362,7 @@ impl GameHud {
             tracing::info!(factor = f, took = ?t.elapsed(), "off-screen HUD window on {} ({})", gpu.device_name, gpu.driver_name);
         }
         self.stats.windows += 1;
-        self.window = Some(Offscreen { handle, factor: f, frame, measure, size: FIRST_SIZE });
+        self.window = Some(Offscreen { handle, factor: f, frame, measure, size: first });
         Ok(())
     }
 
@@ -374,5 +407,28 @@ mod tests {
         assert!((factor(&m) - 2.5 * 25.6 / 12.0).abs() < 1e-4);
         m.text_px = f32::NAN;
         assert_eq!(factor(&m), 1.0);
+    }
+
+    #[test]
+    fn a_large_card_is_drawn_smaller_rather_than_cropped() {
+        use crate::demo::sample_model;
+        let cap = quiver_perf::hud::buffer_bytes_for(1024, 1000).unwrap();
+        let image = |m: &HudModel, f: f32| {
+            let (w, h) = model_size(m);
+            ((w * f).ceil() as u32 + 1, (h * f).ceil() as u32 + 1)
+        };
+        // Standard at 1600p, scale 1: as asked.
+        let m = sample_model("standard", 0, Presenter::Game, Some([2560, 1600]));
+        assert_eq!(fit_factor(&m, cap), factor(&m));
+        // Compact at 4K is wider than the layer's 2048 px; Full at scale 2.5 more than the buffer.
+        let m = sample_model("compact", 0, Presenter::Game, Some([3840, 2160]));
+        let f = fit_factor(&m, cap);
+        assert!(f < factor(&m) && image(&m, f).0 <= HUD_MAX_DIM, "{f}");
+        let mut m = sample_model("full", 0, Presenter::Game, Some([2560, 1600]));
+        m.scale = 2.5;
+        let f = fit_factor(&m, cap);
+        let (w, h) = image(&m, f);
+        let stride = (w * 4).div_ceil(256) * 256;
+        assert!(f < factor(&m) && (stride * h) as usize + HUD_PIXELS_OFFSET <= cap as usize, "{f}: {w}x{h}");
     }
 }

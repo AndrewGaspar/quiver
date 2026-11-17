@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
-use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, Level, Orientation, PerfValue, Presenter};
+use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, Level, Orientation, PerfValue, Presenter, hud_card};
 
 use crate::Args;
 use crate::link::Msg;
@@ -34,7 +34,8 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
     let fps = (158 + w).to_string();
     let base = ((158 + w) / 2).to_string();
     let fg = |cells: &mut Vec<HudCell>| {
-        cells.push(value("fps.base", Some("FPS"), v(&base, "", Level::Normal)));
+        // FPS only has no label (quiverd's `fps_pair(None)`).
+        cells.push(value("fps.base", (layout != "fps").then_some("FPS"), v(&base, "", Level::Normal)));
         cells.push(HudCell::Text { text: "→".into(), level: Level::Dim });
         cells.push(value("fps", None, v(&fps, "", Level::Normal)));
     };
@@ -103,6 +104,10 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
         }
     };
     let text_px = extent.map(|[_, h]| h as f32 * 0.016).unwrap_or(17.0);
+    // As quiverd sizes the presets: their width, and the height of every row.
+    let width = hud_card::preset_width(layout).unwrap_or(hud_card::default_width(orientation));
+    let slots: Vec<f32> = rows.iter().map(|r| hud_card::row_slot(&r.cells)).collect();
+    let size = [width, hud_card::height(orientation, &slots, hud_card::panel(background))];
     HudModel {
         session: "s-demo".into(),
         product_id: 0,
@@ -127,8 +132,68 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
         color_space: Some(0),
         monitor: None,
         captures: Captures::Shown,
+        size,
         rows,
     }
+}
+
+/// Demo content variants (`--variant`), for checking that the card keeps its size whatever
+/// it holds: `long` stretches every value (4-digit fps, long text values and badges), `short`
+/// is what quiverd sends with FG and the upscaler off and no latency provider (gated cells
+/// and whole rows gone).
+pub const VARIANTS: [&str; 3] = ["base", "long", "short"];
+
+pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
+    let metric = |c: &HudCell| match c {
+        HudCell::Value { metric, .. } | HudCell::Badge { metric, .. } | HudCell::Bar { metric, .. } | HudCell::Sparkline { metric, .. } => Some(metric.clone()),
+        _ => None,
+    };
+    match variant {
+        "long" => {
+            for r in &mut m.rows {
+                for c in &mut r.cells {
+                    let id = metric(c).unwrap_or_default();
+                    let (HudCell::Value { value, .. } | HudCell::Badge { value, .. } | HudCell::Bar { value, .. } | HudCell::Sparkline { value, .. }) = c else { continue };
+                    let text = match id.as_str() {
+                        "fps" => "1234",
+                        "fps.base" => "617",
+                        "fps.p1low" => "1012",
+                        "frametime" | "frametime.base" => "112.7",
+                        "gpu.power" => "312",
+                        "gpu.temp" => "101",
+                        "upscaler" => "DLSS Ultra Performance K",
+                        "render.resolution" => "3840×2160",
+                        "output.resolution" => "7680×4320",
+                        "display.mode" => "7680×4320@240",
+                        "display.path" => "composited (blocked: overlays, a notification)",
+                        "latency.render" => "1021",
+                        _ => continue,
+                    };
+                    value.text = text.into();
+                    value.value = text.parse().ok();
+                }
+            }
+        }
+        "short" => {
+            let gone = ["fps.base", "frametime.base", "render.resolution", "output.resolution", "upscaler", "fg.ratio", "latency.render"];
+            for r in &mut m.rows {
+                r.cells.retain(|c| metric(c).is_none_or(|id| !gone.contains(&id.as_str())) && !matches!(c, HudCell::Text { .. }));
+                // The label of a dropped first cell moves to the next one (as quiverd does).
+                if let Some(HudCell::Value { metric, label, .. }) = r.cells.first_mut()
+                    && metric == "fps"
+                    && m.layout != "fps"
+                {
+                    *label = Some("FPS".into());
+                }
+                while matches!(r.cells.last(), Some(HudCell::Separator)) {
+                    r.cells.pop();
+                }
+            }
+            m.rows.retain(|r| r.cells.iter().any(|c| metric(c).is_some() || matches!(c, HudCell::Graph { .. })));
+        }
+        _ => {}
+    }
+    m
 }
 
 pub fn sample_toasts() -> Vec<ToastData> {
@@ -167,6 +232,7 @@ pub fn sample_toasts() -> Vec<ToastData> {
 pub fn feed(demo: &str, a: &Args, tx: UnboundedSender<Msg>) -> Result<()> {
     let seconds = a.seconds;
     let layout = a.layout.clone();
+    let variant = a.variant.clone();
     let extent = a.extent;
     let image = a.image.clone();
     if demo == "image" {
@@ -190,13 +256,13 @@ pub fn feed(demo: &str, a: &Args, tx: UnboundedSender<Msg>) -> Result<()> {
             "desktop" => {
                 let mut i = 0;
                 while start.elapsed().as_secs_f32() < seconds {
-                    send(Msg::Model(Box::new(sample_model(&layout, i, Presenter::Desktop, None))));
+                    send(Msg::Model(Box::new(vary(sample_model(&layout, i, Presenter::Desktop, None), &variant))));
                     i += 1;
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
             _ => {
-                let mut m = sample_model(&layout, 0, Presenter::Game, Some([extent.0, extent.1]));
+                let mut m = vary(sample_model(&layout, 0, Presenter::Game, Some([extent.0, extent.1])), &variant);
                 m.image = image;
                 send(Msg::Model(Box::new(m)));
                 // The session ends before the process does, as with quiverd.

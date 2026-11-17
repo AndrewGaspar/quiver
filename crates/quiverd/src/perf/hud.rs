@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, Level, MetricState, PerfValue, Presenter, PresenterSetting, Stat};
+use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, Level, MetricState, PerfValue, Presenter, PresenterSetting, Stat, hud_card};
 use quiver_perf::descriptor::{Display, MetricKind, Range, Unit};
 use quiver_perf::layout::{DRAW_ERR_DEVICE_LOST, DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_NONE, DRAW_ERR_QUEUE, DRAW_ERR_USAGE, LAYER_PANICKED};
 
@@ -266,6 +266,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
             rows.push(HudRow { cells: tidy });
         }
     }
+    let background = inp.layout.background.unwrap_or(inp.cfg.background);
     HudModel {
         session: inp.session.to_owned(),
         product_id: inp.product_id,
@@ -279,7 +280,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         offset: inp.cfg.offset,
         scale: inp.cfg.scale,
         text_px,
-        background: inp.layout.background.unwrap_or(inp.cfg.background),
+        background,
         text_opacity: inp.cfg.text_opacity,
         level_colors: inp.cfg.level_colors,
         orientation: inp.layout.orientation(),
@@ -290,6 +291,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         color_space: status.map(|s| s.color_space),
         monitor: inp.monitor.map(str::to_owned),
         captures: inp.cfg.captures,
+        size: inp.layout.size(hud_card::panel(background)),
         rows,
     }
 }
@@ -433,6 +435,33 @@ mod tests {
         // Not across a separator.
         s.push_num("gpu.load", now, 50.0);
         assert!(text_of(&model(&s, "compact", now)).contains("GPU 50%"));
+    }
+
+    #[test]
+    fn the_card_keeps_the_layouts_size_whatever_it_holds() {
+        let (plain, now) = session(false);
+        let (modded, now2) = session(true);
+        for id in ["fps", "compact", "standard", "full", "clock"] {
+            let a = model(&plain, id, now);
+            let b = model(&modded, id, now2);
+            // FG on and an upscaler (cells and a whole row appear) or not: the same card.
+            if id != "clock" {
+                assert_ne!(text_of(&a), text_of(&b), "{id}");
+            }
+            assert_eq!(a.size, b.size, "{id}");
+            assert_eq!(a.size[0], hud_card::preset_width(id).unwrap(), "{id}");
+            // Stale values (— everywhere) too.
+            assert_eq!(model(&modded, id, now2 + 5_000 * MS).size, b.size, "{id}");
+        }
+        // Standard: six lines and a two-row graph, in a panel.
+        let m = model(&modded, "standard", now2);
+        assert_eq!(m.size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0 + 2.0 * (6.0 + 1.0)]);
+        assert_eq!(model(&plain, "fps", now).size, [100.0, 20.0], "bare: no padding");
+        // Without a panel the padding goes, the slots stay.
+        let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
+        let l = builtin("standard").unwrap();
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None };
+        assert_eq!(build_model(&inp, &modded, now2).size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0]);
     }
 
     #[test]

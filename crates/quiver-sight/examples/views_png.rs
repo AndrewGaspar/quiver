@@ -62,7 +62,9 @@ fn main() {
         };
         let toasts = cx.open_offscreen_window(opts(380.0, 320.0), sink(&toast_shot), |_, cx| cx.new(|_| ToastView::new(sample_toasts()))).unwrap();
         let model = sample_model(&layout, 3, Presenter::Desktop, None);
-        let hud = cx.open_offscreen_window(opts(560.0, 260.0), sink(&hud_shot), move |_, cx| cx.new(|_| HudView::new(model, 1.0, Mode::Desktop))).unwrap();
+        // The card's fixed size, as the desktop presenter opens its surface.
+        let (w, h) = quiver_sight::game::window_size(&model);
+        let hud = cx.open_offscreen_window(opts(w, h), sink(&hud_shot), move |_, cx| cx.new(|_| HudView::new(model, 1.0, Mode::Desktop))).unwrap();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(100)).await;
             for w in [toasts.into(), hud.into()] {
