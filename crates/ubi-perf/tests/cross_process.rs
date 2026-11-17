@@ -3,6 +3,8 @@
 //! binary re-executes itself as the child (`child_entry`, which does nothing unless the
 //! parent set `UBI_PERF_CHILD`).
 
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -34,14 +36,14 @@ fn spawn(role: &str, dir: &Path, count: u64) -> Child {
 fn present(seq: u64) -> LayerPresent {
     LayerPresent {
         swapchain: (seq / 1000) as u32,
-        present_id: (seq % 2 == 0).then_some(seq + 7),
+        present_id: seq.is_multiple_of(2).then_some(seq + 7),
         seq,
         entry_ns: seq as i64 * 3,
         return_ns: seq as i64 * 3 + 1,
         image_index: (seq % 3) as u32,
         present_mode: 2,
         result: 0,
-        hud_drawn: seq % 5 == 0,
+        hud_drawn: seq.is_multiple_of(5),
         hud_ns: seq as i64 % 1000,
     }
 }
@@ -167,7 +169,7 @@ fn layer_ring_across_processes() {
         // Mostly a tight drain, sometimes a quiverd-like pause, so the writer laps the ring
         // and the overrun path runs too.
         polls += 1;
-        if polls % 16 == 0 {
+        if polls.is_multiple_of(16) {
             std::thread::sleep(Duration::from_millis(5));
         }
         let p = r.poll(usize::MAX, |i, rec| {

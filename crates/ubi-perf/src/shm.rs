@@ -34,7 +34,7 @@ impl RawRegion {
     /// As [`ShmRegion`]: `base` valid for `len` bytes while the value lives, 64-aligned
     /// (checked), and writable if `writable`.
     pub unsafe fn new(base: *mut u8, len: usize, writable: bool) -> Option<RawRegion> {
-        (!base.is_null() && (base as usize) % 64 == 0).then_some(RawRegion { base, len, writable })
+        (!base.is_null() && (base as usize).is_multiple_of(64)).then_some(RawRegion { base, len, writable })
     }
 }
 
@@ -78,18 +78,18 @@ unsafe impl<R: ShmRegion> ShmRegion for std::sync::Arc<R> {
 /// Typed atomic views at byte offsets. Offsets are crate constants, bounds-checked in debug.
 pub(crate) trait Atomics: ShmRegion {
     fn u64_at(&self, off: usize) -> &AtomicU64 {
-        debug_assert!(off % 8 == 0 && off + 8 <= self.len());
+        debug_assert!(off.is_multiple_of(8) && off + 8 <= self.len());
         // SAFETY: in bounds and aligned (base is 64-aligned, offsets are multiples of 8);
         // the memory is only accessed atomically.
         unsafe { &*self.base().add(off).cast::<AtomicU64>() }
     }
     fn u32_at(&self, off: usize) -> &AtomicU32 {
-        debug_assert!(off % 4 == 0 && off + 4 <= self.len());
+        debug_assert!(off.is_multiple_of(4) && off + 4 <= self.len());
         // SAFETY: as u64_at.
         unsafe { &*self.base().add(off).cast::<AtomicU32>() }
     }
     fn u16_at(&self, off: usize) -> &AtomicU16 {
-        debug_assert!(off % 2 == 0 && off + 2 <= self.len());
+        debug_assert!(off.is_multiple_of(2) && off + 2 <= self.len());
         // SAFETY: as u64_at.
         unsafe { &*self.base().add(off).cast::<AtomicU16>() }
     }

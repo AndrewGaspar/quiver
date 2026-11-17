@@ -113,7 +113,7 @@ impl HudBufferHeader {
         if self.width == 0 || self.height == 0 || self.width > HUD_MAX_DIM || self.height > HUD_MAX_DIM {
             return Err(inv("width/height"));
         }
-        if self.stride % 4 != 0 || (self.stride as u64) < self.width as u64 * 4 {
+        if !self.stride.is_multiple_of(4) || (self.stride as u64) < self.width as u64 * 4 {
             return Err(inv("stride"));
         }
         if self.stride as u64 * self.height as u64 + HUD_PIXELS_OFFSET as u64 > buffer_bytes as u64 {
@@ -188,7 +188,7 @@ pub fn init_hud<R: ShmRegion>(region: &R, buffer_bytes: u32) -> Result<HudInfo, 
     if !region.writable() {
         return Err(Error::ReadOnly);
     }
-    if buffer_bytes < 4096 || buffer_bytes % 4096 != 0 || buffer_bytes > HUD_MAX_BUFFER_BYTES {
+    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > HUD_MAX_BUFFER_BYTES {
         return Err(Error::Layout("buffer_bytes"));
     }
     let need = hud_file_bytes(buffer_bytes);
@@ -234,7 +234,7 @@ pub fn read_hud_header<R: ShmRegion>(region: &R) -> Result<HudInfo, Error> {
         return Err(Error::Layout("header_bytes"));
     }
     let buffer_bytes = region.u32_at(OFF_BUFFER_BYTES).load(Ordering::Relaxed);
-    if buffer_bytes < 4096 || buffer_bytes % 4096 != 0 || buffer_bytes > HUD_MAX_BUFFER_BYTES {
+    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > HUD_MAX_BUFFER_BYTES {
         return Err(Error::Layout("buffer_bytes"));
     }
     let need = hud_file_bytes(buffer_bytes);
@@ -334,6 +334,9 @@ impl<R: ShmRegion> HudWriter<R> {
 }
 
 /// What [`HudReader::poll`] found.
+// The image variant carries the 256-byte descriptor by value: the layer polls once per present
+// and copies it anyway; no allocation on that path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HudPoll {
     /// The publish counter hasn't moved since the last image taken (or rejected).
@@ -544,7 +547,8 @@ mod tests {
         let bb = buffer_bytes_for(284 * 2, 140 * 2).unwrap();
         let ok = desc(568, 280, 1);
         assert_eq!(ok.validate(bb, Some((2560, 1600))), Ok(()));
-        let cases: Vec<(&str, Box<dyn Fn(&mut HudBufferHeader)>)> = vec![
+        type Case = (&'static str, Box<dyn Fn(&mut HudBufferHeader)>);
+        let cases: Vec<Case> = vec![
             ("format", Box::new(|d| d.format = 2)),
             ("zero width", Box::new(|d| d.width = 0)),
             ("too wide", Box::new(|d| d.width = 4096)),
@@ -567,7 +571,7 @@ mod tests {
                 d.graph[0].max_ms = 5.0;
             })),
             ("series", Box::new(|d| d.graph[0].series = 0)),
-            ("huge stride", Box::new(|d| d.stride = u32::MAX & !3)),
+            ("huge stride", Box::new(|d| d.stride = !3)),
         ];
         for (name, f) in cases {
             let mut d = ok;

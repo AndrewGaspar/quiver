@@ -23,6 +23,7 @@ pub fn mono_ns() -> i64 {
 }
 
 #[cfg(all(feature = "std", unix))]
+#[allow(clippy::unnecessary_cast)] // the fields are i32 on 32-bit targets (a 32-bit layer)
 fn clock_ns(id: libc::clockid_t) -> i64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: valid pointer; these clocks always exist on Linux.
@@ -248,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn clocks_read() {
         let a = mono_raw_ns();
         let b = mono_raw_ns();

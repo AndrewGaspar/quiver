@@ -6,6 +6,8 @@
 //!   checks those asserts against the header's own structs;
 //! - a C program using the header's writer produces records the Rust reader accepts.
 
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

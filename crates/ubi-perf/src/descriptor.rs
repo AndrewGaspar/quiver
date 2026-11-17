@@ -927,7 +927,7 @@ pub fn check_sample(desc: &MetricDescriptor, v: &SampleValue) -> Result<CheckedV
         (MetricKind::Text, SampleValue::Text(s)) => Ok(CheckedValue::Text(sanitize_text(s, MAX_TEXT_BYTES))),
         (MetricKind::Histogram, SampleValue::Histogram(h)) => {
             let n = h.edges.len();
-            if n < 2 || n > MAX_HISTOGRAM_BUCKETS + 1 || h.counts.len() != n - 1 {
+            if !(2..=MAX_HISTOGRAM_BUCKETS + 1).contains(&n) || h.counts.len() != n - 1 {
                 return Err("histogram needs 2–65 edges and one count per bucket");
             }
             if !h.edges.iter().all(|e| e.is_finite()) || !h.edges.windows(2).all(|w| w[0] < w[1]) {
