@@ -84,6 +84,8 @@ struct Mods {
 /// Mod options (`Request::Options`).
 mod options;
 pub use options::file_text as options_file_text;
+/// Quiver Tweaks (`Request::Tweaks`).
+mod tweaks;
 
 static DETAILS: LazyLock<Mutex<HashMap<usize, Detail>>> = LazyLock::new(Mutex::default);
 
@@ -186,6 +188,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             json!(d.restore(st, product_id, &backup)?)
         }
         Request::Options(o) => options::handle(key, d, st, o, &mut events)?,
+        Request::Tweaks(t) => tweaks::handle(key, d, st, t, &mut events)?,
         Request::Mods(m) => {
             let (v, changed) = d.mods(st, m)?;
             if let Some(product_id) = changed {
