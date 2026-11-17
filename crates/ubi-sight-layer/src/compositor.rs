@@ -88,11 +88,17 @@ pub struct Compositor {
     pool: Option<(u32, vk::CommandPool)>,
     vertices: Buffer,
     desc_pool: vk::DescriptorPool,
-    desc_set: vk::DescriptorSet,
+    /// Two sets, so a grown texture gets a set no submission in flight uses.
+    desc_sets: [vk::DescriptorSet; 2],
+    /// The set bound to `texture`.
+    cur_set: usize,
     staging: Option<Buffer>,
     /// The slot whose submission last read the staging buffer.
     staging_reader: Option<usize>,
     texture: Option<Texture>,
+    /// A texture replaced by a bigger one, kept until the slots in flight when it was
+    /// replaced (a bit mask) are done with it.
+    retired: Option<(Texture, u64)>,
     /// An image in the staging buffer, not yet copied to the texture.
     pending: Option<HudBufferHeader>,
     /// The image in the texture.
@@ -125,10 +131,12 @@ impl Compositor {
             pool: None,
             vertices: Buffer { buf: vk::Buffer::null(), mem: vk::DeviceMemory::null(), ptr: NonNull::dangling(), size: 0 },
             desc_pool: vk::DescriptorPool::null(),
-            desc_set: vk::DescriptorSet::null(),
+            desc_sets: [vk::DescriptorSet::null(); 2],
+            cur_set: 0,
             staging: None,
             staging_reader: None,
             texture: None,
+            retired: None,
             pending: None,
             current: None,
             hud_generation: u64::MAX,
@@ -180,10 +188,11 @@ impl Compositor {
                 self.slots.push(Slot { cmd: vk::CommandBuffer::null(), fence });
             }
             self.vertices = make_buffer(d, (self.slots.len() * VB_SLOT_BYTES) as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
-            let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 1 }];
-            self.desc_pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None)?;
-            let layouts = [self.pipes.set_layout];
-            self.desc_set = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&layouts))?[0];
+            let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 }];
+            self.desc_pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(2).pool_sizes(&sizes), None)?;
+            let layouts = [self.pipes.set_layout; 2];
+            let sets = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&layouts))?;
+            self.desc_sets = [sets[0], sets[1]];
         }
         Ok(())
     }
@@ -259,32 +268,66 @@ impl Compositor {
         Ok(Some(()))
     }
 
-    /// Makes sure the texture can hold `w × h`; reallocates only when everything is idle.
+    /// Makes sure the texture can hold `w × h`. The first one is made right away; a bigger
+    /// one goes into the other descriptor set, and the old one is retired until the
+    /// submissions in flight now are done with it (never waiting for them). `false`: not now
+    /// (a previous retirement is still pending).
     unsafe fn ensure_texture(&mut self, d: &DeviceData, w: u32, h: u32) -> Result<bool, u32> {
         if self.texture.as_ref().is_some_and(|t| t.w >= w && t.h >= h) {
             return Ok(true);
         }
+        if self.retired.is_some() {
+            return Ok(false);
+        }
         let dev = &d.dev;
-        // SAFETY: our objects; idle checked before destroying the old texture.
+        let step = |v: u32| v.div_ceil(TEX_STEP).saturating_mul(TEX_STEP).clamp(TEX_STEP, HUD_MAX_DIM);
+        // SAFETY: our objects; the set written is one no pending submission uses (the other
+        // set when a texture exists, and when none exists nothing has drawn yet).
         unsafe {
-            if !self.all_idle(dev)? {
-                return Ok(false);
-            }
-            if let Some(t) = self.texture.take() {
-                destroy_texture(dev, &t);
-            }
-            let step = |v: u32| v.div_ceil(TEX_STEP).saturating_mul(TEX_STEP).clamp(TEX_STEP, HUD_MAX_DIM);
             let t = make_texture(d, self.enc.texture_format(), step(w), step(h)).map_err(|_| DRAW_ERR_INTERNAL)?;
+            let set = if self.texture.is_some() { 1 - self.cur_set } else { self.cur_set };
             let info = [vk::DescriptorImageInfo { sampler: self.pipes.sampler, image_view: t.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
             let write = [vk::WriteDescriptorSet::default()
-                .dst_set(self.desc_set)
+                .dst_set(self.desc_sets[set])
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&info)];
             dev.update_descriptor_sets(&write, &[]);
-            self.texture = Some(t);
+            if let Some(old) = self.texture.replace(t) {
+                let mut busy = 0u64;
+                for i in 0..self.slots.len().min(64) {
+                    if !self.idle(dev, i)? {
+                        busy |= 1 << i;
+                    }
+                }
+                if busy == 0 {
+                    destroy_texture(dev, &old);
+                } else {
+                    self.retired = Some((old, busy));
+                }
+            }
+            self.cur_set = set;
         }
         Ok(true)
+    }
+
+    /// Frees a retired texture once the slots that might use it have finished.
+    unsafe fn reap_retired(&mut self, dev: &ash::Device) -> Result<(), u32> {
+        let Some((_, mut busy)) = self.retired else { return Ok(()) };
+        for i in 0..self.slots.len().min(64) {
+            // SAFETY: our fences.
+            if busy & (1 << i) != 0 && unsafe { self.idle(dev, i)? } {
+                busy &= !(1 << i);
+            }
+        }
+        if busy == 0 {
+            let (old, _) = self.retired.take().unwrap();
+            // SAFETY: nothing in flight uses it any more.
+            unsafe { destroy_texture(dev, &old) };
+        } else if let Some(r) = self.retired.as_mut() {
+            r.1 = busy;
+        }
+        Ok(())
     }
 
     /// Step 2: picks up a new `hud.image` buffer into staging if one was published and staging
@@ -397,6 +440,7 @@ impl Compositor {
                 return Ok(Drawn::Skipped);
             };
 
+            self.reap_retired(dev)?;
             let fresh = self.poll_hud(d, queue, now)?;
             let mut copy = None;
             if let Some(p) = self.pending
@@ -525,7 +569,7 @@ impl Compositor {
             dev.cmd_set_viewport(cmd, 0, &[viewport]);
             dev.cmd_set_scissor(cmd, 0, &[scissor]);
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
-            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.desc_set], &[]);
+            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.desc_sets[self.cur_set]], &[]);
             dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
             dev.cmd_draw(cmd, 4, 1, 0, 0);
             if n > 0 {
@@ -579,7 +623,7 @@ impl Compositor {
             if let Some(s) = self.staging.take() {
                 destroy_buffer(dev, &s);
             }
-            if let Some(t) = self.texture.take() {
+            for t in self.texture.take().into_iter().chain(self.retired.take().map(|r| r.0)) {
                 destroy_texture(dev, &t);
             }
         }

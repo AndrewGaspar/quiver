@@ -250,6 +250,29 @@ fn composites_and_records() {
         assert_eq!((v[0].2, v[1].2), (Some(30), Some(10_030)));
     }
 
+    // 2c. A bigger image while frames are in flight: the texture is replaced (the old one
+    // retired, not waited for) and the new size is drawn.
+    let big = test_image(extent, pos, (700, 300), 5, opacity);
+    let r = run(Opts {
+        frames: 60,
+        fps: 1000.0,
+        debug_utils: validation.is_some(),
+        on_frame: Some(Box::new(|f, _, _| {
+            if f == 20 {
+                session.publish(&big);
+            }
+        })),
+        ..Opts::default()
+    });
+    assert!(r.messages.is_empty(), "{:#?}", r.messages);
+    let f = Frame { px: r.pixels.as_ref().unwrap(), w: extent.0 };
+    let dst = f.at(1200, 700);
+    close(f.at(pos.0 + 690, pos.1 + 20), expect(BG, opacity, dst, false), 3.0, "grown texture: right edge");
+    close(f.at(pos.0 + 699, pos.1 + 150), expect(BORDER, opacity, dst, false), 3.0, "grown texture: border");
+    let mut drawn = 0;
+    reader.poll(10_000, |_, rec| drawn += LayerPresent::from_record(rec).unwrap().hud_drawn as usize);
+    assert!(drawn >= 58, "drawn {drawn} of 60 across the growth");
+
     // 3. Another extent: the image is laid out for 1280×720, so nothing is drawn.
     let mid = std::cell::RefCell::new(None);
     let r = run(Opts {
