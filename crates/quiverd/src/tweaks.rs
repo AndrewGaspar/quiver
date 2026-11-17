@@ -98,7 +98,11 @@ fn resolve_scope(scope: &Scope) -> Result<Resolved> {
         Scope::Global => Ok(Resolved { kind: ScopeKind::Global, game: None, installed: None, profile: None, scopes: Scopes::load(&data, None, None)? }),
         Scope::Game { game } => {
             let installed = game.as_ubisoft().and_then(installed);
-            Ok(Resolved { kind: ScopeKind::Game, game: Some(*game), installed, profile: None, scopes: Scopes::load(&data, Some(game), None)? })
+            // The default profile is loaded too, so rows know when it overrides this scope.
+            let profile = installed.as_ref().and_then(|g| profile_id(g, None).ok());
+            let store = installed.as_ref().map(store_for);
+            let scopes = Scopes::load(&data, Some(game), store.as_ref().zip(profile.as_deref()))?;
+            Ok(Resolved { kind: ScopeKind::Game, game: Some(*game), installed, profile, scopes })
         }
         Scope::Profile { game, profile } => {
             let product = game.as_ubisoft().with_context(|| format!("{game} has no mod profiles: set its tweaks for the game (--game) or globally"))?;
@@ -166,11 +170,7 @@ impl Daemon {
                             _ => None,
                         };
                         let last = r.game.and_then(|g| tw::last_session(&data(), &g));
-                        let mut st = tw::state(tw::schema(), &r.scopes, r.kind, level, plan.as_ref(), last.as_ref());
-                        if r.kind == ScopeKind::Global {
-                            st.schema_note = format!("{} · {}", st.schema_note, tw::capabilities(&data(), Some(&cfg.proton), "quiver").summary());
-                        }
-                        Ok(st)
+                        Ok(tw::state(tw::schema(), &r.scopes, r.kind, level, plan.as_ref(), last.as_ref()))
                     })
                     .await?
                 )

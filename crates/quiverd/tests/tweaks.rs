@@ -160,7 +160,7 @@ async fn tweaks_end_to_end() {
     assert!(matches!(st.options["sync.vsync"].from, ValueSource::Scope { scope: ScopeKind::Game, .. }));
     // The game-scope view knows the profile overrides it.
     let st: SurfaceState = tweaks(&cli, TweaksRequest::List { scope: Scope::Game { game }, level: None }).await.unwrap();
-    assert_eq!(st.options["tex.anisotropy"].tweak.as_ref().unwrap().overridden_by, None, "the game view resolves its default profile");
+    assert_eq!(st.options["tex.anisotropy"].tweak.as_ref().unwrap().overridden_by, None, "the default profile (vanilla) doesn't set it");
 
     // Prefer Quiver's cap for this game: the mod's cap goes off, but its FG blocks DXVK's.
     let c: OptionsChange = tweaks(&agent, TweaksRequest::Prefer { scope: Scope::Game { game }, id: "fps.cap".into(), prefer: Prefer::Quiver, message: None, confirmed: false }).await.unwrap();

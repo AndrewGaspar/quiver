@@ -422,7 +422,7 @@ pub fn compile(i: &Inputs<'_>) -> Compiled {
         }
         // Conflicts on the tweak itself.
         if let Some(c) = i.conflicts.iter().find(|c| c.tweak.as_deref() == Some(id.as_str())) {
-            entry.planned = Planned::Blocked { reason: if c.by == "Quiver" { c.reason.clone() } else { format!("{}: {}", c.by, c.reason) } };
+            entry.planned = Planned::Blocked { reason: if c.by == "Quiver" || c.reason.starts_with(&c.by) { c.reason.clone() } else { format!("{}: {}", c.by, c.reason) } };
             plan.entries.push(entry);
             continue;
         }

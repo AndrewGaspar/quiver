@@ -435,7 +435,7 @@ fn quiver_tweaks_flow_into_a_provider_s_option_below_the_profile_s_value() {
     let game = quiver_api::GameRef::ubisoft(3539);
     let c = crate::tweaks::plan_for(f.store.data_dir(), &game, Some(&ctx), caps.clone(), &Default::default(), None).unwrap();
     assert!(matches!(&c.plan.entry("fps.cap").unwrap().planned, Planned::Provided { by, .. } if by == "DLSS"));
-    assert!(matches!(&c.plan.entry("dlss.fg.frames").unwrap().planned, Planned::Blocked { reason } if reason.starts_with("DLSS: ")), "{:?}", c.plan.entry("dlss.fg.frames"));
+    assert!(matches!(&c.plan.entry("dlss.fg.frames").unwrap().planned, Planned::Blocked { reason } if reason.starts_with("DLSS mod generates")), "{:?}", c.plan.entry("dlss.fg.frames"));
     assert!(matches!(&c.plan.entry("tex.anisotropy").unwrap().planned, Planned::Apply { mech, .. } if mech == "dxvk"));
     assert_eq!(c.plan.env["DXVK_CONFIG"], "d3d11.samplerAnisotropy = 16; d3d9.samplerAnisotropy = 16");
     assert_eq!(c.plan.revisions.global, 1);
