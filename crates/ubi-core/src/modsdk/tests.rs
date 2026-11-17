@@ -111,32 +111,34 @@ async fn handshake_metrics_and_status() {
     assert_eq!(w["session"], "s-test");
     assert_eq!(w["profile"], "p1");
     assert_eq!(w["values"]["fg.enabled"], json!({"text":"1","json":true}));
-    assert_eq!(w["perf"]["clock"], "qpc");
+    assert!(w.get("perf").is_none(), "no rings yet, so no session dir");
     assert_eq!(w["limits"]["metrics"], 64);
 
     m.send(json!({"t":"metrics","defs":[
-        {"name":"fg.state","kind":"state","values":[{"value":"off"},{"value":"on"}]},
-        {"name":"fps.base","kind":"gauge","unit":"fps","label":"Base FPS"},
-        {"name":"frames.real","kind":"counter"},
-        {"name":"upscaler","kind":"text"},
-        {"name":"bench","kind":"event"},
-        {"name":"frame","kind":"frame"},
-        {"name":"Bad Name","kind":"gauge"},
+        {"id":"aco-dlss.fg.state","kind":"state","values":[{"value":"off"},{"value":"on"}]},
+        {"id":"aco-dlss.fps.base","kind":"gauge","unit":"fps","label":"Base FPS"},
+        {"id":"aco-dlss.frames.real","kind":"counter"},
+        {"id":"aco-dlss.upscaler","kind":"text"},
+        {"id":"aco-dlss.bench","kind":"event"},
+        {"id":"aco-dlss.frame","kind":"frame"},
+        {"id":"Bad Name","kind":"gauge"},
+        {"id":"other-mod.x","kind":"gauge"},
         {"kind":"gauge"},
     ]}))
     .await;
     let ok = m.recv().await;
     assert_eq!(ok["t"], "metrics_ok");
-    assert_eq!(ok["ids"], json!({"fg.state":0,"fps.base":1,"frames.real":2,"upscaler":3,"bench":4}));
+    assert_eq!(ok["ids"], json!({"aco-dlss.fg.state":0,"aco-dlss.fps.base":1,"aco-dlss.frames.real":2,"aco-dlss.upscaler":3,"aco-dlss.bench":4}));
     let rejected = ok["rejected"].as_object().unwrap();
-    assert!(rejected["frame"].as_str().unwrap().contains("ring"));
-    assert!(rejected.contains_key("Bad Name") && rejected.contains_key("#7"), "{rejected:?}");
+    assert!(rejected["aco-dlss.frame"].as_str().unwrap().contains("ring"));
+    assert!(rejected["other-mod.x"].as_str().unwrap().contains("namespace"), "only its own namespace");
+    assert!(rejected.contains_key("Bad Name") && rejected.contains_key("#8"), "{rejected:?}");
 
-    m.send(json!({"t":"m","at":1000,"v":{"0":"on","1":79.5,"2":4211,"3":"DLSS K","9":1,"1x":2}})).await;
+    m.send(json!({"t":"m","ts":1000,"v":{"0":"on","1":79.5,"2":4211,"3":"DLSS K","9":1}})).await;
     // Wrong types are refused per value.
-    m.send(json!({"t":"m","at":1001,"v":{"0":"sideways","1":"fast"}})).await;
-    m.send(json!({"t":"mark","index":4,"at":1002,"label":"begin\u{202e}"})).await;
-    m.send(json!({"t":"mark","index":1,"at":1003})).await;
+    m.send(json!({"t":"m","ts":1001,"v":{"0":"sideways","1":"fast"}})).await;
+    m.send(json!({"t":"mark","index":4,"ts":1002,"label":"begin\u{202e}"})).await;
+    m.send(json!({"t":"mark","index":1,"ts":1003})).await;
     let st = until(|| reg.connections(Some(3539)).into_iter().next().filter(|c| c.metrics.iter().any(|m| m.marks > 0))).await;
     assert_eq!(st.surface, "aco-dlss");
     assert_eq!(st.module.as_deref(), Some("d3d11.dll"));
@@ -146,13 +148,13 @@ async fn handshake_metrics_and_status() {
     assert_eq!(st.metrics[1].value, Some(json!(79.5)));
     assert_eq!(st.metrics[2].value, Some(json!(4211)));
     assert_eq!(st.metrics[4].value, Some(json!("begin")));
-    assert!(st.refused >= 5, "{st:?}");
+    assert!(st.refused >= 4, "{st:?}");
     assert!(reg.connections(Some(1)).is_empty());
 
     let log = rec.take();
     assert_eq!(log[0], "snapshot aco-dlss");
     assert!(log[1].starts_with("declared [(0, \"aco-dlss.fg.state\")"), "{log:?}");
-    assert!(log[2].contains("at=1000") && log[2].contains("Number(79.5)") && log[2].contains("Total(4211)"), "{log:?}");
+    assert!(log[2].contains("at=1000") && log[2].contains("Gauge(79.5)") && log[2].contains("Counter(4211)") && log[2].contains("State(1)"), "{log:?}");
     assert_eq!(log[3], "mark aco-dlss.bench at=1002 dur=None label=Some(\"begin\")");
 
     m.send(json!({"t":"bye"})).await;
@@ -248,7 +250,7 @@ async fn refusals() {
     let w = m.recv().await;
     assert_eq!(w["caps"], json!(["options", "log"]));
     assert!(w.get("limits").is_none());
-    m.send(json!({"t":"metrics","defs":[{"name":"x","kind":"gauge"}]})).await;
+    m.send(json!({"t":"metrics","defs":[{"id":"old-mod.x","kind":"gauge"}]})).await;
     m.send(json!({"t":"readout","values":{"fg":"on","Bad":"x"}})).await;
     let st = until(|| reg.connections(Some(1)).into_iter().next().filter(|c| !c.metrics.is_empty())).await;
     assert_eq!(st.metrics.len(), 1);
@@ -265,21 +267,21 @@ async fn rates_are_enforced() {
     let (mut m, task) = connect(&reg, 1);
     m.send(json!({"t":"hello","proto":2,"mod":"m","caps":["metrics"]})).await;
     m.recv().await;
-    m.send(json!({"t":"metrics","defs":[{"name":"g","kind":"gauge"}]})).await;
+    m.send(json!({"t":"metrics","defs":[{"id":"m.g","kind":"gauge"}]})).await;
     m.recv().await;
     for i in 0..40 {
-        m.send(json!({"t":"m","at":i,"v":{"0":i}})).await;
+        m.send(json!({"t":"m","ts":i,"v":{"0":i}})).await;
     }
     let st = until(|| reg.connections(Some(1)).into_iter().next().filter(|c| c.refused > 0)).await;
     // 15 a second get through; the rest are refused.
     assert!(st.refused >= 20, "{st:?}");
     // Declarations: four a second (the first was above), then "retry in a second".
     for _ in 0..3 {
-        m.send(json!({"t":"metrics","defs":[{"name":"g","kind":"gauge"}]})).await;
+        m.send(json!({"t":"metrics","defs":[{"id":"m.g","kind":"gauge"}]})).await;
         assert!(m.recv().await["rejected"].as_object().is_none_or(|r| r.is_empty()));
     }
-    m.send(json!({"t":"metrics","defs":[{"name":"g","kind":"gauge"}]})).await;
-    assert!(m.recv().await["rejected"]["g"].as_str().unwrap().contains("retry"));
+    m.send(json!({"t":"metrics","defs":[{"id":"m.g","kind":"gauge"}]})).await;
+    assert!(m.recv().await["rejected"]["m.g"].as_str().unwrap().contains("retry"));
     drop(m);
     let _ = task.await;
 }

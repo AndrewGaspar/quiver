@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
     quiver_on_action_cb(Q, on_action, NULL);
     quiver_handle_option(Q, "test.mode");
     quiver_handle_option(Q, "test.level");
-    fps = quiver_metric_declare(Q, "fps.base", QUIVER_GAUGE, "{\"unit\":\"fps\",\"label\":\"Base FPS\",\"roles\":[\"frame.base\"]}");
+    fps = quiver_metric_declare(Q, "fps.base", QUIVER_GAUGE, "{\"unit\":\"fps\",\"label\":\"Base FPS\"}");
     frames = quiver_metric_declare(Q, "frames.real", QUIVER_COUNTER, NULL);
     fg = quiver_metric_declare(Q, "fg.state", QUIVER_STATE,
                                "{\"label\":\"Frame Generation\",\"short\":\"FG\",\"values\":[{\"value\":\"off\",\"level\":\"dim\"},{\"value\":\"on\"}]}");

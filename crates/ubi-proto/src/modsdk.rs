@@ -7,23 +7,27 @@
 //! per line, on a broker connection that began with `BrokerRequest::ModChannel`.
 //!
 //! Unknown `t` values and unknown fields are ignored both ways. `proto` only grows; each side
-//! speaks `min(theirs, mine)`. This is protocol [`PROTOCOL`] = 2: options (`welcome` values,
-//! `set`/`ack`, `changed`, `options`, `action`) plus JSON metrics (`metrics`/`metrics_ok`,
-//! `m`, `mark`). The ring messages (`ring_req`, `ring`, `perf_ctl`) are SIGHT-HUD phase 2 and
-//! not defined yet.
-//!
-//! Deviation from the design tables: the timestamp of `m` and `mark` is `at`, not `t`, since
-//! `t` is the message type.
+//! speaks `min(theirs, mine)`. This is protocol [`PROTOCOL`] = 2: the options messages here
+//! (`hello`/`welcome`, `options`, `set`/`ack`, `changed`, `readout`, `action`, `log`, `bye`)
+//! plus the perf messages, which are `ubi_perf::control::PerfMessage` (`metrics`,
+//! `metrics_ok`, `m`, `mark`; the ring ones are SIGHT-HUD phase 2). [`is_perf_message`] tells
+//! which enum a message belongs to.
 //!
 //! Everything a mod sends is untrusted: [`check_frame`] is the bridge's structural check, the
-//! typed messages here are what quiverd parses, and [`metrics`] validates descriptors.
+//! typed messages are what quiverd parses, and `ubi_perf::descriptor` validates metrics.
 #![warn(clippy::all)]
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use ubi_perf::control::PerfWelcome;
+use ubi_perf::descriptor::limits as perf_limits;
 
-pub mod metrics;
+/// Message types that parse as `ubi_perf::control::PerfMessage` rather than [`FromMod`] /
+/// [`ToMod`].
+pub fn is_perf_message(t: &str) -> bool {
+    matches!(t, "metrics" | "metrics_ok" | "m" | "mark" | "ring_req" | "ring" | "perf_ctl")
+}
 
 /// The protocol this side speaks.
 pub const PROTOCOL: u32 = 2;
@@ -157,27 +161,6 @@ pub enum FromMod {
         #[serde(default)]
         persist: bool,
     },
-    /// Declare or update metrics (runtime descriptors, [`metrics::MetricDef`] fields).
-    /// Parsed one by one so one bad descriptor doesn't sink the rest.
-    Metrics { defs: Vec<serde_json::Value> },
-    /// Low-rate values, coalesced by the SDK to at most 10 a second. `v` maps the indices
-    /// from `metrics_ok` to a number (gauge), an integer total (counter) or a string (state,
-    /// text).
-    M {
-        #[serde(default)]
-        at: i64,
-        v: BTreeMap<String, serde_json::Value>,
-    },
-    /// A low-rate event on an `event` metric.
-    Mark {
-        index: u32,
-        #[serde(default)]
-        at: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dur: Option<i64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
     /// Protocol 1: display values, mapped to `text` metrics named after their ids.
     Readout { values: BTreeMap<String, String> },
     Log {
@@ -254,13 +237,6 @@ pub enum ToMod {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arg: Option<String>,
     },
-    /// Answer to `metrics`: the index of each accepted name (used in `m` and `mark`), and why
-    /// the others were refused. Never half-applied: a descriptor is in one map or the other.
-    MetricsOk {
-        ids: BTreeMap<String, u32>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        rejected: BTreeMap<String, String>,
-    },
     Bye {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -285,23 +261,12 @@ pub struct Welcome {
     /// The capabilities granted: hello's `caps` that quiverd supports.
     #[serde(default)]
     pub caps: Vec<String>,
+    /// Where rings live and the clock (SIGHT-HUD §3.6). Absent while Quiver offers no rings
+    /// (phase 1): metrics then travel as JSON only, timestamps in QPC ticks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perf: Option<PerfInfo>,
+    pub perf: Option<PerfWelcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
-}
-
-/// Where per-frame data would go (SIGHT-HUD §3.7). Phase 1 has no rings: `session_dir_win`
-/// is absent and everything goes as JSON.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PerfInfo {
-    /// The time base of `at` fields: `qpc` (QueryPerformanceCounter ticks).
-    pub clock: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_dir_win: Option<String>,
-    /// Whether `ring_req` is available.
-    #[serde(default)]
-    pub rings: bool,
 }
 
 /// What quiverd enforces, so an SDK can stay under it.
@@ -317,10 +282,10 @@ pub struct Limits {
 impl Limits {
     pub fn current() -> Self {
         Self {
-            metrics: metrics::MAX_METRICS as u32,
-            m_per_s: metrics::M_PER_S,
-            marks_per_s: metrics::MARKS_PER_S,
-            text_bytes: metrics::MAX_TEXT as u32,
+            metrics: perf_limits::MAX_METRICS_PER_PRODUCER as u32,
+            m_per_s: perf_limits::MAX_JSON_HZ,
+            marks_per_s: perf_limits::MAX_MARKS_PER_SEC,
+            text_bytes: perf_limits::MAX_TEXT_BYTES as u32,
             frame_bytes: MAX_FRAME as u32,
         }
     }
@@ -370,8 +335,9 @@ mod tests {
         assert_eq!((h.proto, h.surface.as_str(), h.pid), (2, "aco-dlss", Some(42)));
         // Unknown messages from newer SDKs are ignored, not errors.
         assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"ring_req","bytes":1024})).unwrap(), FromMod::Unknown);
-        let m: FromMod = serde_json::from_value(json!({"t":"m","at":5,"v":{"0":1.5,"1":"on"}})).unwrap();
-        assert!(matches!(m, FromMod::M { at: 5, ref v } if v.len() == 2));
+        // Perf messages are ubi-perf's; this enum sees them as unknown.
+        assert!(is_perf_message("m") && is_perf_message("metrics") && !is_perf_message("hello"));
+        assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"m","ts":5,"v":{"0":1.5}})).unwrap(), FromMod::Unknown);
         let c: FromMod = serde_json::from_value(json!({"t":"changed","values":{"fg.enabled":"0","x":{"text":"1","json":true}},"persist":false})).unwrap();
         let FromMod::Changed { values, persist: false } = c else { panic!() };
         assert_eq!(values["fg.enabled"].text(), "0");

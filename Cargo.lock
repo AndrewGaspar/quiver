@@ -6402,6 +6402,7 @@ dependencies = [
  "tracing",
  "ubi-api",
  "ubi-ipc",
+ "ubi-perf",
  "ubi-proto",
  "webpki-roots",
  "zstd",
@@ -6437,6 +6438,7 @@ dependencies = [
  "prost-build",
  "serde",
  "serde_json",
+ "ubi-perf",
 ]
 
 [[package]]

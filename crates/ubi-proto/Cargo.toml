@@ -10,6 +10,7 @@ publish.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ubi-perf.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

@@ -27,7 +27,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Instant;
 use ubi_api::mods::{ModSdkConnection, ModSdkMetric};
 use ubi_ipc::modrelay::read_line_capped;
-use ubi_proto::modsdk::metrics::{self as pm, MetricDef, MetricKind, MetricValue};
+use ubi_perf::control::PerfMessage;
+use ubi_perf::descriptor::{self as pd, CheckedValue, MetricDescriptor, MetricKind, SampleValue, limits as pl};
 use ubi_proto::modsdk::{self as wire, FromMod, Hello, OptionValue, ToMod, Values};
 
 /// A fresh session id (`QUIVER_SESSION`, the mod pipe's suffix): `s-` and 10 base-36 digits.
@@ -71,6 +72,9 @@ pub trait ModOptionsSink: Send + Sync {
     }
     /// The live options a connection applies (`m.options`) were set or changed.
     fn handles(&self, _m: &ModSdkConnection) {}
+    /// The mod sent its schema inline in `hello` (TOML or JSON, at most a frame's size,
+    /// unvalidated). Called before [`snapshot`](Self::snapshot).
+    fn inline_schema(&self, _m: &ModSdkConnection, _schema: &str) {}
     /// The mod changed values itself: its own menu (`persist`) or runtime state such as a
     /// hotkey flip (not persisted). Ids are syntax-checked, texts sanitized; checking them
     /// against the schema is the sink's job.
@@ -82,19 +86,20 @@ pub trait ModOptionsSink: Send + Sync {
 /// A metric a mod declared, validated, under its full id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredMetric {
-    pub index: u32,
-    /// `<surface>.<name>`.
+    pub index: u16,
+    /// `<surface>.<name>` (= `def.id`).
     pub id: String,
-    pub def: MetricDef,
+    pub def: MetricDescriptor,
 }
 
-/// One validated value from an `m` message.
+/// One validated value from an `m` message (`ubi_perf::descriptor::check_sample`: a state
+/// is an index into `def.values`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
-    pub index: u32,
+    pub index: u16,
     pub id: String,
     pub kind: MetricKind,
-    pub value: MetricValue,
+    pub value: CheckedValue,
 }
 
 /// Where mod channels meet the perf hub (SIGHT-HUD §3.11).
@@ -210,8 +215,8 @@ struct Session {
     id: u64,
     surface: String,
     defs: Vec<DeclaredMetric>,
-    by_name: HashMap<String, u32>,
-    last_total: HashMap<u32, u64>,
+    by_id: HashMap<String, u16>,
+    last_total: HashMap<u16, u64>,
     m: Window,
     marks: Window,
     logs: Window,
@@ -418,14 +423,24 @@ impl ModRegistry {
         };
         let id = info.conn;
         let (tx, mut rx) = mpsc::channel(OUTBOX);
-        let values = if granted.iter().any(|c| c == "options") { self.options_sink().snapshot(&info) } else { Values::new() };
+        let values = if granted.iter().any(|c| c == "options") {
+            let sink = self.options_sink();
+            if let Some(schema) = &hello.schema {
+                sink.inline_schema(&info, schema);
+            }
+            sink.snapshot(&info)
+        } else {
+            Values::new()
+        };
         let welcome = ToMod::Welcome(wire::Welcome {
             proto: info.proto,
             session: info.session.clone(),
             profile: info.profile.clone(),
             values,
             caps: granted.clone(),
-            perf: granted.iter().any(|c| c == "metrics").then(|| wire::PerfInfo { clock: "qpc".into(), session_dir_win: None, rings: false }),
+            // No rings yet (SIGHT-HUD phase 2), so no session dir to name; metrics are JSON
+            // with QPC timestamps.
+            perf: None,
             limits: (info.proto >= 2).then(wire::Limits::current),
         });
         self.conns.lock().unwrap().insert(id, Conn { info: info.clone(), tx, next_seq: 0, pending: HashMap::new() });
@@ -445,11 +460,11 @@ impl ModRegistry {
             id,
             surface: info.surface.clone(),
             defs: Vec::new(),
-            by_name: HashMap::new(),
+            by_id: HashMap::new(),
             last_total: HashMap::new(),
             // A little slack over the SDK's own coalescing, for jitter.
-            m: Window::new(pm::M_PER_S + 5),
-            marks: Window::new(pm::MARKS_PER_S),
+            m: Window::new(pl::MAX_JSON_HZ + 5),
+            marks: Window::new(pl::MAX_MARKS_PER_SEC),
             logs: Window::new(10),
             declares: Window::new(4),
             refused: 0,
@@ -460,10 +475,15 @@ impl ModRegistry {
                 tokio::select! {
                     line = read_line_capped(&mut reader, wire::MAX_LINE) => {
                         let Some(line) = line? else { return Ok(()) };
-                        match serde_json::from_slice::<FromMod>(&line) {
-                            Ok(FromMod::Bye) => return Ok(()),
-                            Ok(msg) => {
+                        match parse(&line) {
+                            Ok(Incoming::Mod(FromMod::Bye)) => return Ok(()),
+                            Ok(Incoming::Mod(msg)) => {
                                 if let Some(reply) = self.handle(&mut s, msg) {
+                                    send(&mut writer, &reply).await?;
+                                }
+                            }
+                            Ok(Incoming::Perf(msg)) => {
+                                if let Some(reply) = self.handle_perf(&mut s, msg) {
                                     send(&mut writer, &reply).await?;
                                 }
                             }
@@ -546,18 +566,19 @@ impl ModRegistry {
         self.conns.lock().unwrap().get(&id).is_some_and(|c| c.info.caps.iter().any(|x| x == cap))
     }
 
-    /// Handle one message after `hello`; maybe a reply.
+    fn refuse(&self, s: &mut Session, why: &str) {
+        tracing::debug!(conn = s.id, "refused mod message: {why}");
+        s.refused += 1;
+        self.with_info(s.id, |i| i.refused = s.refused);
+    }
+
+    /// Handle one options message after `hello`; maybe a reply.
     fn handle(&self, s: &mut Session, msg: FromMod) -> Option<ToMod> {
-        let refused = |s: &mut Session, why: &str| {
-            tracing::debug!(conn = s.id, "refused mod message: {why}");
-            s.refused += 1;
-            self.with_info(s.id, |i| i.refused = s.refused);
-        };
         match msg {
-            FromMod::Hello(_) => refused(s, "second hello"),
+            FromMod::Hello(_) => self.refuse(s, "second hello"),
             FromMod::Options { ids } => {
                 if ids.len() > wire::MAX_OPTIONS || !ids.iter().all(|i| wire::is_option_id(i)) {
-                    refused(s, "bad option ids");
+                    self.refuse(s, "bad option ids");
                     return None;
                 }
                 let ids: BTreeSet<String> = ids.into_iter().collect();
@@ -578,7 +599,7 @@ impl ModRegistry {
             }
             FromMod::Changed { values, persist } => {
                 if values.len() > wire::MAX_OPTIONS || !values.keys().all(|k| wire::is_option_id(k)) {
-                    refused(s, "bad option ids in changed");
+                    self.refuse(s, "bad option ids in changed");
                     return None;
                 }
                 let values: ChangedValues = values.iter().map(|(k, v)| (k.clone(), wire::sanitize(v.text(), wire::MAX_OPTION_TEXT))).collect();
@@ -586,97 +607,33 @@ impl ModRegistry {
                     self.options_sink().changed(&info, &values, persist);
                 }
             }
-            FromMod::Metrics { defs } => {
-                if !self.has_cap(s.id, "metrics") {
-                    refused(s, "metrics without the capability");
-                    return None;
-                }
-                if !s.declares.take() {
-                    let rejected = defs.iter().enumerate().map(|(i, d)| (def_name(d, i), "too many declarations; retry in a second".to_owned())).collect();
-                    return Some(ToMod::MetricsOk { ids: BTreeMap::new(), rejected });
-                }
-                return Some(self.declare(s, defs));
-            }
             FromMod::Readout { values } => {
                 // Protocol 1: each id becomes a `text` metric (SIGHT-HUD §3.13).
                 if !s.m.take() {
-                    refused(s, "readouts over the rate");
+                    self.refuse(s, "readouts over the rate");
                     return None;
                 }
                 let mut samples = Vec::new();
                 let mut new = Vec::new();
-                for (name, text) in values.into_iter().take(pm::MAX_METRICS) {
-                    let index = match s.by_name.get(&name) {
+                for (name, text) in values.into_iter().take(pl::MAX_METRICS_PER_PRODUCER) {
+                    let id = pd::qualify(&s.surface, &name);
+                    let index = match s.by_id.get(&id) {
                         Some(&i) => i,
-                        None => {
-                            let def: MetricDef = match serde_json::from_value(serde_json::json!({ "name": name, "kind": "text" })) {
-                                Ok(d) => d,
-                                Err(_) => continue,
-                            };
-                            match self.add_metric(s, def) {
-                                Ok(d) => {
-                                    new.push(d.clone());
-                                    d.index
-                                }
-                                Err(_) => continue,
+                        None => match self.add_metric(s, MetricDescriptor::new(id.clone(), MetricKind::Text)) {
+                            Ok(d) => {
+                                new.push(d.clone());
+                                d.index
                             }
-                        }
+                            Err(_) => continue,
+                        },
                     };
                     let d = &s.defs[index as usize];
-                    if d.def.kind == MetricKind::Text {
-                        samples.push(Sample { index, id: d.id.clone(), kind: MetricKind::Text, value: MetricValue::Text(wire::sanitize(&text, pm::MAX_TEXT)) });
+                    if let Ok(value) = pd::check_sample(&d.def, &SampleValue::Text(text)) {
+                        samples.push(Sample { index, id: d.id.clone(), kind: d.def.kind, value });
                     }
                 }
                 self.publish_defs(s, &new);
                 self.deliver(s, 0, samples);
-            }
-            FromMod::M { at, v } => {
-                if !s.m.take() {
-                    refused(s, "m over the rate");
-                    return None;
-                }
-                let mut samples = Vec::with_capacity(v.len());
-                for (k, val) in v.iter().take(pm::MAX_METRICS) {
-                    let Some(d) = k.parse::<u32>().ok().and_then(|i| s.defs.get(i as usize)) else {
-                        s.refused += 1;
-                        continue;
-                    };
-                    let Some(value) = MetricValue::from_json(d.def.kind, val, &d.def.values) else {
-                        s.refused += 1;
-                        continue;
-                    };
-                    if let MetricValue::Total(t) = value {
-                        let last = s.last_total.insert(d.index, t);
-                        if last.is_some_and(|l| t < l) {
-                            tracing::debug!(metric = %d.id, "counter went backwards (the mod restarted it)");
-                        }
-                    }
-                    samples.push(Sample { index: d.index, id: d.id.clone(), kind: d.def.kind, value });
-                }
-                self.deliver(s, at, samples);
-            }
-            FromMod::Mark { index, at, dur, label } => {
-                if !s.marks.take() {
-                    refused(s, "marks over the rate");
-                    return None;
-                }
-                let Some(d) = s.defs.get(index as usize).filter(|d| d.def.kind == MetricKind::Event).cloned() else {
-                    refused(s, "mark on a metric that isn't an event");
-                    return None;
-                };
-                let label = label.map(|l| wire::sanitize(&l, pm::MAX_TEXT));
-                let dur = dur.filter(|d| *d >= 0);
-                if let Some(info) = self.with_info(s.id, |i| {
-                    if let Some(m) = i.metrics.iter_mut().find(|m| m.index == index) {
-                        m.marks += 1;
-                        m.updated = Some(Utc::now());
-                        if let Some(l) = &label {
-                            m.value = Some(serde_json::Value::String(l.clone()));
-                        }
-                    }
-                }) {
-                    self.metrics_sink().mark(&info, &d, at, dur, label.as_deref());
-                }
             }
             FromMod::Log { level, text } => {
                 if !s.logs.take() {
@@ -696,97 +653,205 @@ impl ModRegistry {
         None
     }
 
-    fn add_metric(&self, s: &mut Session, def: MetricDef) -> std::result::Result<DeclaredMetric, String> {
-        def.validate(&s.surface, true)?;
-        let def = def.sanitized();
-        if let Some(&i) = s.by_name.get(&def.name) {
+    /// Handle one perf message (`ubi_perf::control`); maybe a reply.
+    fn handle_perf(&self, s: &mut Session, msg: PerfMessage<serde_json::Value>) -> Option<PerfMessage<MetricDescriptor>> {
+        if !self.has_cap(s.id, "metrics") {
+            self.refuse(s, "metrics without the capability");
+            return None;
+        }
+        match msg {
+            PerfMessage::Metrics { defs } => {
+                if !s.declares.take() {
+                    let rejected = defs.iter().enumerate().map(|(i, d)| (def_key(d, i), "too many declarations; retry in a second".to_owned())).collect();
+                    return Some(PerfMessage::MetricsOk { ids: BTreeMap::new(), rejected });
+                }
+                return Some(self.declare(s, defs));
+            }
+            PerfMessage::M { ts, v } => {
+                if !s.m.take() {
+                    self.refuse(s, "m over the rate");
+                    return None;
+                }
+                let mut samples = Vec::with_capacity(v.len());
+                for (index, val) in v.iter().take(pl::MAX_METRICS_PER_PRODUCER) {
+                    let Some(d) = s.defs.get(*index as usize) else {
+                        s.refused += 1;
+                        continue;
+                    };
+                    let Ok(value) = pd::check_sample(&d.def, val) else {
+                        s.refused += 1;
+                        continue;
+                    };
+                    if let CheckedValue::Counter(t) = value {
+                        let last = s.last_total.insert(d.index, t);
+                        if last.is_some_and(|l| t < l) {
+                            tracing::debug!(metric = %d.id, "counter went backwards (the mod restarted it)");
+                        }
+                    }
+                    samples.push(Sample { index: d.index, id: d.id.clone(), kind: d.def.kind, value });
+                }
+                self.deliver(s, ts, samples);
+            }
+            PerfMessage::Mark { index, ts, dur, label } => {
+                if !s.marks.take() {
+                    self.refuse(s, "marks over the rate");
+                    return None;
+                }
+                let Some(d) = s.defs.get(index as usize).filter(|d| d.def.kind == MetricKind::Event).cloned() else {
+                    self.refuse(s, "mark on a metric that isn't an event");
+                    return None;
+                };
+                let label = label.map(|l| pd::sanitize_text(&l, pl::MAX_TEXT_BYTES));
+                let dur = dur.filter(|d| *d >= 0);
+                if let Some(info) = self.with_info(s.id, |i| {
+                    if let Some(m) = i.metrics.iter_mut().find(|m| m.index == u32::from(index)) {
+                        m.marks += 1;
+                        m.updated = Some(Utc::now());
+                        if let Some(l) = &label {
+                            m.value = Some(serde_json::Value::String(l.clone()));
+                        }
+                    }
+                }) {
+                    self.metrics_sink().mark(&info, &d, ts, dur, label.as_deref());
+                }
+            }
+            // Rings are SIGHT-HUD phase 2; the rest only ever go to the mod.
+            PerfMessage::RingReq { .. } => self.refuse(s, "no rings yet"),
+            PerfMessage::MetricsOk { .. } | PerfMessage::Ring { .. } | PerfMessage::PerfCtl { .. } => self.refuse(s, "not a mod's message"),
+        }
+        None
+    }
+
+    /// Validate and add (or update) one runtime declaration (`ubi_perf::descriptor`'s rules,
+    /// plus phase 1's: no ring kinds but events, which also travel as JSON marks).
+    fn add_metric(&self, s: &mut Session, mut def: MetricDescriptor) -> std::result::Result<DeclaredMetric, String> {
+        def.sanitize();
+        def.validate(Some(&s.surface)).map_err(|e| e.to_string())?;
+        if matches!(def.kind, MetricKind::Series | MetricKind::Frame) {
+            return Err(format!("{} metrics need a shared-memory ring, which this Quiver doesn't offer yet", kind_name(def.kind)));
+        }
+        if let Some(&i) = s.by_id.get(&def.id) {
             let old = &mut s.defs[i as usize];
             if old.def.kind != def.kind {
-                return Err(format!("already declared as {}", old.def.kind.as_str()));
+                return Err(format!("already declared as {}", kind_name(old.def.kind)));
             }
             old.def = def;
             return Ok(old.clone());
         }
-        if s.defs.len() >= pm::MAX_METRICS {
-            return Err(format!("at most {} metrics per connection", pm::MAX_METRICS));
+        if s.defs.len() >= pl::MAX_METRICS_PER_PRODUCER {
+            return Err(format!("more than {} metrics", pl::MAX_METRICS_PER_PRODUCER));
         }
-        let d = DeclaredMetric { index: s.defs.len() as u32, id: def.id(&s.surface), def };
-        s.by_name.insert(d.def.name.clone(), d.index);
+        let d = DeclaredMetric { index: s.defs.len() as u16, id: def.id.clone(), def };
+        s.by_id.insert(d.id.clone(), d.index);
         s.defs.push(d.clone());
         Ok(d)
     }
 
-    fn declare(&self, s: &mut Session, defs: Vec<serde_json::Value>) -> ToMod {
+    fn declare(&self, s: &mut Session, defs: Vec<serde_json::Value>) -> PerfMessage<MetricDescriptor> {
         let mut ids = BTreeMap::new();
         let mut rejected = BTreeMap::new();
         let mut accepted = Vec::new();
-        for (i, raw) in defs.into_iter().enumerate().take(pm::MAX_METRICS * 2) {
-            let name = def_name(&raw, i);
-            match serde_json::from_value::<MetricDef>(raw).map_err(|e| format!("malformed: {e}")).and_then(|d| self.add_metric(s, d)) {
+        for (i, raw) in defs.into_iter().enumerate().take(pl::MAX_METRICS_PER_PRODUCER * 2) {
+            let key = def_key(&raw, i);
+            match serde_json::from_value::<MetricDescriptor>(raw).map_err(|e| format!("malformed: {e}")).and_then(|d| self.add_metric(s, d)) {
                 Ok(d) => {
-                    ids.insert(d.def.name.clone(), d.index);
+                    ids.insert(d.id.clone(), d.index);
                     accepted.push(d);
                 }
                 Err(why) => {
-                    rejected.insert(name, why);
+                    rejected.insert(key, why);
                 }
             }
         }
         self.publish_defs(s, &accepted);
-        ToMod::MetricsOk { ids, rejected }
+        PerfMessage::MetricsOk { ids, rejected }
     }
 
     /// Show newly declared metrics in the status, and tell the metrics sink.
     fn publish_defs(&self, s: &Session, accepted: &[DeclaredMetric]) {
-        if !accepted.is_empty() {
-            let defs = &s.defs;
-            if let Some(info) = self.with_info(s.id, |i| {
-                for d in defs {
-                    let status = ModSdkMetric {
-                        index: d.index,
+        if accepted.is_empty() {
+            return;
+        }
+        let defs = &s.defs;
+        if let Some(info) = self.with_info(s.id, |i| {
+            for d in defs {
+                let unit = serde_json::to_value(d.def.unit).ok().and_then(|u| u.as_str().map(str::to_owned)).unwrap_or_default();
+                match i.metrics.iter_mut().find(|m| m.index == u32::from(d.index)) {
+                    Some(m) => {
+                        m.unit = unit;
+                        m.label = d.def.label.clone();
+                    }
+                    None => i.metrics.push(ModSdkMetric {
+                        index: d.index.into(),
                         id: d.id.clone(),
-                        kind: d.def.kind.as_str().into(),
-                        unit: d.def.unit.clone(),
+                        kind: kind_name(d.def.kind),
+                        unit,
                         label: d.def.label.clone(),
                         ..Default::default()
-                    };
-                    match i.metrics.iter_mut().find(|m| m.index == d.index) {
-                        Some(m) => {
-                            m.unit = status.unit;
-                            m.label = status.label;
-                        }
-                        None => i.metrics.push(status),
-                    }
+                    }),
                 }
-            }) {
-                self.metrics_sink().declared(&info, accepted);
             }
+        }) {
+            self.metrics_sink().declared(&info, accepted);
         }
     }
 
-    fn deliver(&self, s: &Session, at: i64, samples: Vec<Sample>) {
+    fn deliver(&self, s: &Session, ts: i64, samples: Vec<Sample>) {
         if samples.is_empty() {
             return;
         }
         let now = Utc::now();
+        let shown = |smp: &Sample| -> serde_json::Value {
+            match &smp.value {
+                CheckedValue::Gauge(x) => serde_json::json!(x),
+                CheckedValue::Counter(n) => serde_json::json!(n),
+                CheckedValue::State(i) => serde_json::json!(s.defs[smp.index as usize].def.values[*i].value),
+                CheckedValue::Text(t) => serde_json::json!(t),
+                CheckedValue::Histogram(h) => serde_json::json!({ "edges": h.edges, "counts": h.counts }),
+            }
+        };
         let Some(info) = self.with_info(s.id, |i| {
             i.refused = s.refused;
             for smp in &samples {
-                if let Some(m) = i.metrics.iter_mut().find(|m| m.index == smp.index) {
-                    m.value = serde_json::to_value(&smp.value).ok();
+                if let Some(m) = i.metrics.iter_mut().find(|m| m.index == u32::from(smp.index)) {
+                    m.value = Some(shown(smp));
                     m.updated = Some(now);
                 }
             }
         }) else {
             return;
         };
-        self.metrics_sink().samples(&info, at, &samples);
+        self.metrics_sink().samples(&info, ts, &samples);
     }
 }
 
-/// A descriptor's name for `metrics_ok.rejected`, even when it doesn't parse.
-fn def_name(raw: &serde_json::Value, i: usize) -> String {
-    raw.get("name").and_then(|n| n.as_str()).map(|n| wire::sanitize(n, pm::MAX_ID)).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("#{i}"))
+/// A message from a mod: the options protocol's, or a perf one (`ubi_perf::control`).
+enum Incoming {
+    Mod(FromMod),
+    Perf(PerfMessage<serde_json::Value>),
+}
+
+fn parse(line: &[u8]) -> serde_json::Result<Incoming> {
+    let v: serde_json::Value = serde_json::from_slice(line)?;
+    if v.get("t").and_then(|t| t.as_str()).is_some_and(wire::is_perf_message) {
+        Ok(Incoming::Perf(serde_json::from_value(v)?))
+    } else {
+        Ok(Incoming::Mod(serde_json::from_value(v)?))
+    }
+}
+
+/// `gauge`, `state`, … as on the wire.
+fn kind_name(k: MetricKind) -> String {
+    serde_json::to_value(k).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+/// A descriptor's id for `metrics_ok.rejected`, even when it doesn't parse.
+fn def_key(raw: &serde_json::Value, i: usize) -> String {
+    raw.get("id")
+        .and_then(|n| n.as_str())
+        .map(|n| pd::sanitize_text(n, pl::MAX_ID_LEN))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("#{i}"))
 }
 
 fn demote(out: &mut BTreeMap<String, LiveOutcome>, id: &str, to: LiveOutcome) {
@@ -797,7 +862,7 @@ fn demote(out: &mut BTreeMap<String, LiveOutcome>, id: &str, to: LiveOutcome) {
     }
 }
 
-async fn send<W: AsyncWrite + Unpin>(w: &mut W, msg: &ToMod) -> Result<()> {
+async fn send<W: AsyncWrite + Unpin>(w: &mut W, msg: &impl serde::Serialize) -> Result<()> {
     let mut line = serde_json::to_vec(msg)?;
     line.push(b'\n');
     w.write_all(&line).await?;

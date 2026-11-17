@@ -302,9 +302,9 @@ mod tests {
         write_frame(&mut game, b"not json").await.unwrap();
         write_frame(&mut game, br#"{"no_t":1}"#).await.unwrap();
         send(&mut game, &json!({"t":"hello","proto":2,"mod":"other"})).await;
-        send(&mut game, &json!({"t":"m","at":1,  "v":{"0":1.5}})).await;
+        send(&mut game, &json!({"t":"m","ts":1,  "v":{"0":1.5}})).await;
         let m = line(&mut quiverd).await;
-        assert_eq!(m, json!({"t":"m","at":1,"v":{"0":1.5}}));
+        assert_eq!(m, json!({"t":"m","ts":1,"v":{"0":1.5}}));
         // quiverd -> mod: framed.
         quiverd.get_mut().write_all(b"{\"t\":\"welcome\",\"proto\":2}\n").await.unwrap();
         assert_eq!(recv(&mut game).await["t"], "welcome");
@@ -349,7 +349,7 @@ mod tests {
         let task = tokio::spawn(async move { relay(pipe, || async { Ok(b_relay) }, &limits).await });
         send(&mut game, &json!({"t":"hello","proto":2,"mod":"m"})).await;
         for i in 0..20 {
-            send(&mut game, &json!({"t":"m","at":i,"v":{}})).await;
+            send(&mut game, &json!({"t":"m","ts":i,"v":{}})).await;
         }
         send(&mut game, &json!({"t":"bye"})).await;
         drop(game);

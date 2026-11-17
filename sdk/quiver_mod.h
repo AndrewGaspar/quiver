@@ -120,10 +120,12 @@ typedef enum quiver_kind {
 } quiver_kind;
 
 /* Declare (or look up) a metric. `name` is relative to the surface: "fg.state" becomes
- * "aco-dlss.fg.state". `descriptor_json` may be NULL when quiver-options.toml declares
- * [metric.<name>]; otherwise a JSON object with the other descriptor fields (unit, label,
- * short, help, values, roles, thresholds...; not name or kind). Call at init, not per
- * frame. Up to 64. Returns QUIVER_NO_METRIC on the no-op handle or a bad name. */
+ * "aco-dlss.fg.state" (at most 64 bytes in all). `descriptor_json` may be NULL when
+ * quiver-options.toml declares [metric.<name>]; otherwise a JSON object with the other
+ * descriptor fields (ubi_perf::descriptor::MetricDescriptor: unit, label, short, help,
+ * values, roles, thresholds...; not id, name or kind). A state metric needs its `values`.
+ * Call at init, not per frame. Up to 64. Returns QUIVER_NO_METRIC on the no-op handle or
+ * a bad name; Quiver's verdict comes later (quiver_metric_status). */
 quiver_metric quiver_metric_declare(quiver_mod *m, const char *name, quiver_kind kind, const char *descriptor_json);
 /* 1 accepted by Quiver, 0 not yet answered, -1 refused (or invalid). */
 int quiver_metric_status(const quiver_mod *m, quiver_metric h);
@@ -139,7 +141,8 @@ void quiver_text(quiver_mod *m, quiver_metric h, const char *utf8);   /* <= 48 b
 void quiver_mark(quiver_mod *m, quiver_metric h, int64_t t_qpc, int64_t dur_qpc, const char *label);
 int64_t quiver_now(void); /* QueryPerformanceCounter */
 
-/* Per-frame data (SIGHT-HUD phase 2: shared-memory rings). Declared so mods can be written
+/* Per-frame data (SIGHT-HUD phase 2: shared-memory rings, whose layout is ubi-perf's
+ * include/quiver_perf.h; this header will include it then). Declared so mods can be written
  * against them now; until Quiver offers rings they drop everything (counted), and
  * quiver_perf_wanted() returns 0. */
 enum {
@@ -847,6 +850,13 @@ static int qv_has_cap(const char *body, size_t n, const char *cap) {
     return 0;
 }
 
+/* `id` is slot i's full id, "<surface>.<name>". */
+static int qv_is_slot(const quiver_mod *m, int i, const char *id) {
+    const char *a = m->surface;
+    while (*a && *a == *id) { a++; id++; }
+    return !*a && *id == '.' && qv_streq(m->slots[i].name, id + 1);
+}
+
 static void qv_metrics_ok(quiver_mod *m, const char *body, size_t n) {
     const char *vs, *ve;
     qv_js j;
@@ -859,7 +869,7 @@ static void qv_metrics_ok(quiver_mod *m, const char *body, size_t n) {
             while ((r = qv_obj_next(&j, &first, name, sizeof name)) == 1) {
                 if (!qv_int(&j, &idx)) break;
                 for (i = 0; i < nslots; i++)
-                    if (qv_streq(m->slots[i].name, name) && idx >= 0 && idx < 0x7FFFFFFF) InterlockedExchange(&m->slots[i].remote, (LONG)idx);
+                    if (qv_is_slot(m, i, name) && idx >= 0 && idx < 0xFFFF) InterlockedExchange(&m->slots[i].remote, (LONG)idx);
             }
     }
     if (qv_member(body, n, "rejected", &vs, &ve)) {
@@ -872,7 +882,7 @@ static void qv_metrics_ok(quiver_mod *m, const char *body, size_t n) {
                 /* "too many declarations; retry in a second": send it again later */
                 retry = qv_contains(why, qv_strlen(why), "retry");
                 for (i = 0; i < nslots; i++)
-                    if (qv_streq(m->slots[i].name, name)) InterlockedExchange(&m->slots[i].remote, retry ? QV_UNSENT : QV_REFUSED);
+                    if (qv_is_slot(m, i, name)) InterlockedExchange(&m->slots[i].remote, retry ? QV_UNSENT : QV_REFUSED);
                 if (retry) InterlockedExchange(&m->decl_dirty, 1);
             }
     }
@@ -966,8 +976,12 @@ static int qv_flush(quiver_mod *m, qv_buf *b, int force_m) {
             if (s->remote != QV_UNSENT) continue;
             InterlockedExchange(&s->remote, QV_SENT);
             if (any++) qv_puts(b, ",");
-            qv_puts(b, "{\"name\":");
-            qv_put_str(b, s->name, QV_ID);
+            /* the full id: surface and name are plain identifiers, nothing to escape */
+            qv_puts(b, "{\"id\":\"");
+            qv_puts(b, m->surface);
+            qv_puts(b, ".");
+            qv_puts(b, s->name);
+            qv_puts(b, "\"");
             qv_puts(b, ",\"kind\":\"");
             qv_puts(b, kinds[s->kind]);
             qv_puts(b, "\"");
@@ -999,7 +1013,7 @@ static int qv_flush(quiver_mod *m, qv_buf *b, int force_m) {
             b->len = 0; b->over = 0;
             qv_puts(b, "{\"t\":\"mark\",\"index\":");
             qv_put_i64(b, r);
-            qv_puts(b, ",\"at\":");
+            qv_puts(b, ",\"ts\":");
             qv_put_i64(b, k->at);
             if (k->dur > 0) { qv_puts(b, ",\"dur\":"); qv_put_i64(b, k->dur); }
             if (k->has_label) { qv_puts(b, ",\"label\":"); qv_put_str(b, k->label, QV_TEXT); }
@@ -1016,7 +1030,7 @@ static int qv_flush(quiver_mod *m, qv_buf *b, int force_m) {
     QueryPerformanceCounter(&now);
     if (!force_m && (now.QuadPart - m->last_m.QuadPart) < m->freq.QuadPart / 10) return 1;
     b->len = 0; b->over = 0;
-    qv_puts(b, "{\"t\":\"m\",\"at\":");
+    qv_puts(b, "{\"t\":\"m\",\"ts\":");
     qv_put_i64(b, now.QuadPart);
     qv_puts(b, ",\"v\":{");
     any = 0;
@@ -1367,7 +1381,7 @@ void quiver_close(quiver_mod *m) {
 }
 
 /* The members of a descriptor object, without its braces, if it is one object and doesn't
- * set name or kind itself. */
+ * set id, name or kind itself. */
 static char *qv_desc_members(const char *json) {
     qv_js j;
     int first = 1, r;
@@ -1381,7 +1395,7 @@ static char *qv_desc_members(const char *json) {
     open = j.p;
     if (!qv_obj_begin(&j)) return 0;
     while ((r = qv_obj_next(&j, &first, key, sizeof key)) == 1) {
-        if (qv_streq(key, "name") || qv_streq(key, "kind")) return 0;
+        if (qv_streq(key, "id") || qv_streq(key, "name") || qv_streq(key, "kind")) return 0;
         if (!qv_skip(&j, 1)) return 0;
     }
     if (r < 0) return 0;
@@ -1402,6 +1416,8 @@ quiver_metric quiver_metric_declare(quiver_mod *m, const char *name, quiver_kind
     int i, found = -1;
     char *desc = 0;
     if (!QV_LIVE(m) || !qv_ident(name, QV_ID, 1) || (int)kind < QUIVER_GAUGE || (int)kind > QUIVER_EVENT) return QUIVER_NO_METRIC;
+    /* the full id (surface.name) is at most 64 bytes */
+    if (qv_strlen(m->surface) + 1 + qv_strlen(name) > QV_ID) return QUIVER_NO_METRIC;
     if (descriptor_json && !(desc = qv_desc_members(descriptor_json))) {
         /* an empty object is fine; anything else malformed is refused here */
         qv_js j;
