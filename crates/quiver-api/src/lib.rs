@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod achievements;
 pub mod art;
 pub mod client;
+pub mod daemon;
 pub mod downloads;
 pub mod exports;
 pub mod game;
@@ -732,6 +733,9 @@ pub enum Request {
         #[serde(default)]
         refresh: bool,
     },
+    // ---- The daemon's lifecycle (appended; build/daemon-auto-restart)
+    /// Build, staged update, what a restart waits on, holds (see [`daemon`]).
+    Daemon(daemon::DaemonRequest),
 }
 
 fn yes() -> bool {
@@ -750,7 +754,14 @@ pub struct Envelope {
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
     Ok { id: u64, result: serde_json::Value },
-    Err { id: u64, error: String },
+    /// `code`: [`daemon::RESTARTING`] when the request was refused, not run, because the
+    /// daemon is restarting (send it again); none otherwise (and from older daemons).
+    Err {
+        id: u64,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     Event(Event),
     /// Mod options events as daemons from before the fold into [`Event`] sent them
     /// (`{"options": {...}}`). Still read; quiverd now sends [`Event::OptionsChanged`] and its
@@ -759,6 +770,11 @@ pub enum Reply {
     /// Perf events as daemons from before the fold sent them (`{"perf": {...}}`). Still
     /// read; quiverd now sends [`Event::PerfUpdate`] and its siblings.
     Perf(perf::PerfEvent),
+    // ---- appended (build/daemon-auto-restart); older clients skip lines they can't read
+    /// The daemon's last message on a connection before it restarts onto a new build:
+    /// it answers nothing more on it, and requests it hasn't answered did not run (send
+    /// them again; the new daemon picks up new connections at once).
+    Closing { reason: String },
 }
 
 impl Reply {
@@ -881,6 +897,15 @@ pub enum Event {
         ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<Box<perf::PerfSummary>>,
+    },
+    // ---- appended (build/daemon-auto-restart)
+    /// quiverd is restarting onto a newly installed build (`to`: its version, when the
+    /// install manifest says). Subscribers see `Disconnected`, then `Reconnected` once the
+    /// new build is up.
+    DaemonRestarting {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
     },
 }
 

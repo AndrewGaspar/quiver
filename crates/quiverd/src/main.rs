@@ -9,6 +9,7 @@ mod exports;
 mod mods;
 mod perf;
 mod info;
+mod lifecycle;
 mod options;
 mod savestores;
 mod setup;
@@ -97,7 +98,17 @@ struct Daemon {
     achievements: Arc<quiver_core::achievements::Engine>,
     /// Providers of stores other than Ubisoft (see `stores`; Ubisoft's wraps the daemon).
     stores: Vec<Arc<dyn quiver_core::stores::StoreProvider>>,
+    /// Restarting onto new builds: what it waits on, holds, refusing work meanwhile.
+    lifecycle: Arc<lifecycle::Lifecycle>,
+    /// Open client connections (their reply channel, and a signal once a
+    /// `Reply::Closing` went out on it), to say goodbye before a restart.
+    conns: Mutex<HashMap<u64, ConnHandle>>,
+    /// When the pending 2FA challenge was issued (a restart waits a while for its code).
+    pending_2fa_at: Mutex<Option<std::time::Instant>>,
 }
+
+/// A client connection's reply channel, and a signal once a `Reply::Closing` went out on it.
+type ConnHandle = (mpsc::UnboundedSender<Reply>, Arc<tokio::sync::Notify>);
 
 /// The Ubisoft product a request names; other stores' games can't do what it asks (yet).
 fn ubisoft_only(game: GameRef) -> Result<u32> {
@@ -557,6 +568,8 @@ impl Daemon {
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
+            // The connection loop passes its connection (holds without a time limit).
+            Request::Daemon(req) => self.handle_daemon(source, None, req)?,
             Request::Stores => json!(self.store_list().await?),
             Request::GameDetail { game, refresh } => json!(self.game_detail(game, refresh).await?),
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
@@ -571,6 +584,7 @@ impl Daemon {
         match outcome {
             LoginOutcome::TwoFactor(c) => {
                 *self.pending_2fa.lock().unwrap() = Some(c);
+                *self.pending_2fa_at.lock().unwrap() = Some(std::time::Instant::now());
                 Ok(LoginResult::TwoFactorRequired)
             }
             LoginOutcome::Done(session) => {
@@ -787,19 +801,44 @@ fn record_bridge_session(f: &quiver_core::playsession::Finished, perf: Option<qu
     }
 }
 
-/// Connection ids, for per-connection perf state.
+/// Connection ids, for per-connection perf state and holds.
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+/// The method a request counts under while in flight (`None`: quick and read-only; it
+/// never holds up a restart and is answered during one).
+fn gated(req: &Request) -> Option<String> {
+    match req {
+        Request::Status
+        | Request::Subscribe
+        | Request::Sessions
+        | Request::Activity { .. }
+        | Request::Daemon(quiver_api::daemon::DaemonRequest::Status) => None,
+        r => Some(
+            serde_json::to_value(r)
+                .ok()
+                .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| "request".into()),
+        ),
+    }
+}
 
 async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
     let conn_id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (r, mut w) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
+    let closing_written = Arc::new(tokio::sync::Notify::new());
+    daemon.conns.lock().unwrap().insert(conn_id, (tx.clone(), closing_written.clone()));
     let writer = tokio::spawn(async move {
         while let Some(reply) = rx.recv().await {
+            let closing = matches!(reply, Reply::Closing { .. });
             // Options and perf events go out as `Event`s (clients read the older forms too).
             let mut line = serde_json::to_vec(&reply.folded()).unwrap_or_default();
             line.push(b'\n');
-            if w.write_all(&line).await.is_err() {
+            let ok = w.write_all(&line).await.is_ok() && w.flush().await.is_ok();
+            if closing {
+                closing_written.notify_one();
+            }
+            if !ok {
                 break;
             }
         }
@@ -809,7 +848,7 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
         let env: Envelope = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                let _ = tx.send(Reply::Err { id: 0, error: format!("bad request: {e}") });
+                let _ = tx.send(Reply::Err { id: 0, error: format!("bad request: {e}"), code: None });
                 continue;
             }
         };
@@ -860,22 +899,36 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
                 }
             });
         }
+        // While restarting onto a new build, requests are refused (not run) with a code
+        // that tells clients to send them again; the rest count as in flight until answered.
+        let pass = match daemon.lifecycle.enter(gated(&env.request).as_deref()) {
+            Ok(p) => p,
+            Err(error) => {
+                let _ = tx.send(Reply::Err { id: env.id, error, code: Some(quiver_api::daemon::RESTARTING.into()) });
+                continue;
+            }
+        };
         let daemon = daemon.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
+            let _pass = pass;
             let result = match env.request {
                 // Perf subscriptions and HUD attachments belong to this connection.
                 Request::Perf(req) => daemon.handle_perf(&env.source, Some(perf::ConnCtx { id: conn_id, tx: tx.clone() }), req).await,
+                // So do holds without a time limit.
+                Request::Daemon(req) => daemon.handle_daemon(&env.source, Some(conn_id), req),
                 req => daemon.handle(&env.source, req).await,
             };
             let reply = match result {
                 Ok(result) => Reply::Ok { id: env.id, result },
-                Err(e) => Reply::Err { id: env.id, error: format!("{e:#}") },
+                Err(e) => Reply::Err { id: env.id, error: format!("{e:#}"), code: None },
             };
             let _ = tx.send(reply);
         });
     }
     daemon.perf.disconnect(conn_id);
+    daemon.lifecycle_disconnect(conn_id);
+    daemon.conns.lock().unwrap().remove(&conn_id);
     drop(tx);
     let _ = writer.await;
 }
@@ -900,18 +953,34 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info".into()),
         )
         .init();
+    // After a restart onto a new build: the previous build's listening sockets.
+    let inherited = lifecycle::take_inherited();
+    let lifecycle = lifecycle::Lifecycle::from_env();
     let path = quiver_api::socket_path();
-    if UnixStream::connect(&path).await.is_ok() {
-        bail!("quiverd is already running ({})", path.display());
-    }
-    let dir = path.parent().context("socket path")?;
-    std::fs::create_dir_all(dir)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
+    let listener = match inherited.unix {
+        Some(l) => {
+            l.set_nonblocking(true)?;
+            tracing::info!(
+                "quiverd {} restarted onto this build (was {})",
+                lifecycle::build(),
+                lifecycle.restarted_from.as_deref().unwrap_or("?")
+            );
+            UnixListener::from_std(l)?
+        }
+        None => {
+            if UnixStream::connect(&path).await.is_ok() {
+                bail!("quiverd is already running ({})", path.display());
+            }
+            let dir = path.parent().context("socket path")?;
+            std::fs::create_dir_all(dir)?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let _ = std::fs::remove_file(&path);
+            UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?
+        }
+    };
 
     let cfg = Arc::new(Config::load()?);
     let accounts = Accounts::new();
@@ -919,12 +988,18 @@ async fn main() -> Result<()> {
     let broker_addr = std::env::var("QUIVER_BROKER")
         .or_else(|_| std::env::var("UBID_BROKER"))
         .unwrap_or_else(|_| "127.0.0.1:47810".into());
-    let broker_listener = match tokio::net::TcpListener::bind(&broker_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!("broker port {broker_addr} unavailable ({e}); using an ephemeral port");
-            tokio::net::TcpListener::bind("127.0.0.1:0").await?
+    let broker_listener = match inherited.broker {
+        Some(l) => {
+            l.set_nonblocking(true)?;
+            tokio::net::TcpListener::from_std(l)?
         }
+        None => match tokio::net::TcpListener::bind(&broker_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("broker port {broker_addr} unavailable ({e}); using an ephemeral port");
+                tokio::net::TcpListener::bind("127.0.0.1:0").await?
+            }
+        },
     };
     let broker = broker_listener.local_addr()?.to_string();
     let (events, _) = broadcast::channel(256);
@@ -962,7 +1037,6 @@ async fn main() -> Result<()> {
     broker_svc.set_mods(mod_sdk.clone());
     let ach = achievements::engine(accounts.clone(), events.clone());
     broker_svc.set_achievements(ach.clone());
-    tokio::spawn(broker_svc.clone().serve(broker_listener));
 
     // Also moves a pre-multi-account keyring entry to its per-account one.
     match store::accounts_and_default() {
@@ -1008,16 +1082,59 @@ async fn main() -> Result<()> {
         perf,
         achievements: ach,
         stores: vec![Arc::new(quiver_core::steamlocal::SteamLocal::new(&quiver_core::exports::Paths::from_env().home))],
+        lifecycle,
+        conns: Mutex::new(HashMap::new()),
+        pending_2fa_at: Mutex::new(None),
     });
     options::test_session(&daemon);
     downloads::start(&daemon);
     steamgames::start(&daemon);
     achievements::start(&daemon);
     daemon.start_perf_steam_sweep();
-    tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
+    let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
+    lifecycle::start_watch(&daemon, restart_tx);
+    tracing::info!("quiverd {} listening on {} (broker {})", lifecycle::build(), path.display(), daemon.broker);
+    // Clients and bridges are accepted here, so while a restart is being decided and
+    // carried out nobody is (they wait in the backlog for whichever build serves next).
     loop {
-        let (stream, _) = listener.accept().await?;
-        tokio::spawn(serve_conn(daemon.clone(), stream));
+        tokio::select! {
+            r = listener.accept() => {
+                let (stream, _) = r?;
+                tokio::spawn(serve_conn(daemon.clone(), stream));
+            }
+            r = broker_listener.accept() => match r {
+                Ok((stream, peer)) => {
+                    let pass = daemon.lifecycle.broker_conn();
+                    let broker = daemon.broker_svc.clone();
+                    tokio::spawn(async move {
+                        let _pass = pass;
+                        broker.serve_one(stream, peer).await;
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("broker accept: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+            Some(()) = restart_rx.recv() => {
+                let plan = match daemon.lifecycle.try_close(|| daemon.busy()) {
+                    Ok(plan) => plan,
+                    Err(why) => {
+                        tracing::debug!("not restarting yet: {}", why.join(", "));
+                        continue;
+                    }
+                };
+                daemon.announce_restart(&plan).await;
+                use std::os::fd::AsRawFd;
+                tracing::info!("restarting onto {} ({})", plan.to.as_deref().unwrap_or("a new build"), plan.exe.display());
+                let fds = [("unix", listener.as_raw_fd()), ("broker", broker_listener.as_raw_fd())];
+                let err = lifecycle::exec(&plan, &fds, daemon.lifecycle.restarts);
+                // Only back here if the exec failed: carry on with this build.
+                tracing::error!("restarting onto {}: {err}", plan.exe.display());
+                daemon.log_activity("system", format!("quiverd couldn't restart onto the new build ({err}); still running {}", lifecycle::build()), None);
+                daemon.lifecycle.reopen(&plan, &err.to_string());
+            }
+        }
     }
 }
 

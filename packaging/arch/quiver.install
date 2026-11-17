@@ -10,8 +10,7 @@ EOF
 
 post_upgrade() {
   cat <<'EOF'
-==> quiverd keeps running the previous build until restarted (games may be running).
-    Restart the daemon when no game is running: quiver daemon stop
-    (any quiver command starts the new one). quiver-app relaunches itself.
+==> quiverd restarts onto this build by itself once no game, job, perf subscription or
+    hold needs it (quiver daemon status says what it waits on). quiver-app relaunches itself.
 EOF
 }

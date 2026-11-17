@@ -6,6 +6,9 @@
 //! - If the connection drops after a request was sent but before its reply, the request
 //!   may have run, so it is not resent: the call fails with an error saying so, and the
 //!   next call reconnects.
+//! - Except when the daemon said it is restarting onto a new build: requests it refused
+//!   (`code: restarting`) or never answered before its [`Reply::Closing`] did not run, so
+//!   they are sent again on the new daemon for up to [`RESTART_RETRY`].
 //! - A subscription is renewed on every new connection. Subscribers see
 //!   [`Event::Disconnected`] when the daemon goes away and [`Event::Reconnected`] once
 //!   events flow again (anything that happened in between was missed; reload state).
@@ -25,7 +28,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{Envelope, Event, Reply, Request, socket_path};
 
-type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>;
+/// A request's error: the daemon's message, and its code (`daemon::RESTARTING`).
+struct Failure {
+    error: String,
+    code: Option<String>,
+}
+
+impl Failure {
+    fn restarting(&self) -> bool {
+        self.code.as_deref() == Some(crate::daemon::RESTARTING)
+    }
+}
+
+type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, Failure>>>>;
 type Subscriber = Arc<Mutex<Option<mpsc::UnboundedSender<Event>>>>;
 
 /// How long a reconnect waits for a restarting daemon before starting one itself.
@@ -33,6 +48,9 @@ const RESTART_GRACE: Duration = Duration::from_secs(3);
 /// Background reconnect backoff.
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// How long a call keeps retrying while the daemon restarts onto a new build.
+pub const RESTART_RETRY: Duration = Duration::from_secs(30);
+const RESTART_RETRY_EVERY: Duration = Duration::from_millis(200);
 
 #[derive(Clone)]
 pub struct Client {
@@ -63,6 +81,8 @@ struct Conn {
     closed: watch::Sender<bool>,
     /// `Subscribe` was sent on this connection.
     subscribed: AtomicBool,
+    /// The daemon sent [`Reply::Closing`]: what it hasn't answered won't run.
+    closing: AtomicBool,
 }
 
 impl Conn {
@@ -70,12 +90,17 @@ impl Conn {
         *self.closed.borrow()
     }
 
-    /// Mark closed and fail every request still waiting for a reply.
+    /// Mark closed and fail every request still waiting for a reply: as "may have run"
+    /// (dropped), or, after a [`Reply::Closing`], as refused, to be sent again.
     fn close(&self) {
         self.closed.send_replace(true);
-        self.pending.lock().unwrap().clear();
+        let pending: Vec<_> = self.pending.lock().unwrap().drain().collect();
+        if self.closing.load(Ordering::SeqCst) {
+            for (_, tx) in pending {
+                let _ = tx.send(Err(Failure { error: "quiverd restarted".into(), code: Some(crate::daemon::RESTARTING.into()) }));
+            }
+        }
     }
-
 }
 
 /// A request's method name (`install`, `status`, …) for messages.
@@ -100,6 +125,12 @@ impl Client {
         Self::connect_at(socket_path(), source, false).await
     }
 
+    /// [`Self::connect_running`] on the socket at `path` (another daemon's, such as a
+    /// scratch one in tests).
+    pub async fn connect_running_at(path: PathBuf, source: &str) -> Result<Self> {
+        Self::connect_at(path, source, false).await
+    }
+
     pub(crate) async fn connect_at(path: PathBuf, source: &str, autostart: bool) -> Result<Self> {
         let shared = Arc::new(Shared {
             path,
@@ -117,16 +148,23 @@ impl Client {
         Ok(Self { shared })
     }
 
-    /// Send a request and decode its result.
+    /// Send a request and decode its result. While the daemon restarts onto a new build,
+    /// the request is sent again until the new one answers (see the module docs).
     pub async fn call<T: DeserializeOwned>(&self, request: Request) -> Result<T> {
         let what = method(&request);
-        let (_conn, rx) = self.shared.send(request).await?;
-        let value = rx
-            .await
-            .map_err(|_| {
-                anyhow!("quiverd went away (restarted?) before answering '{what}'; it may have run, so check before retrying")
-            })?
-            .map_err(|e| anyhow!(e))?;
+        let deadline = Instant::now() + RESTART_RETRY;
+        let value = loop {
+            let (_conn, rx) = self.shared.send(&request).await?;
+            match rx.await {
+                Err(_) => bail!("quiverd went away (restarted?) before answering '{what}'; it may have run, so check before retrying"),
+                Ok(Ok(v)) => break v,
+                Ok(Err(f)) if f.restarting() && Instant::now() < deadline => {
+                    tracing::debug!("quiverd is restarting; sending '{what}' again");
+                    tokio::time::sleep(RESTART_RETRY_EVERY).await;
+                }
+                Ok(Err(f)) => return Err(anyhow!(f.error)),
+            }
+        };
         serde_json::from_value(value).context("unexpected reply from quiverd")
     }
 
@@ -166,7 +204,7 @@ impl Shared {
     /// The open connection, reconnecting (and starting the daemon if needed) if it closed.
     async fn connection(&self) -> Result<Arc<Conn>> {
         let mut slot = self.conn.lock().await;
-        if let Some(c) = slot.as_ref().filter(|c| !c.is_closed()) {
+        if let Some(c) = slot.as_ref().filter(|c| !c.is_closed() && !c.closing.load(Ordering::SeqCst)) {
             return Ok(c.clone());
         }
         let c = self.open(RESTART_GRACE).await?;
@@ -176,12 +214,9 @@ impl Shared {
 
     /// Write a request, reconnecting and writing it again once if the write fails (the
     /// daemon never saw it). Returns the connection it went out on and its reply channel.
-    async fn send(
-        &self,
-        request: Request,
-    ) -> Result<(Arc<Conn>, oneshot::Receiver<Result<serde_json::Value, String>>)> {
+    async fn send(&self, request: &Request) -> Result<(Arc<Conn>, oneshot::Receiver<Result<serde_json::Value, Failure>>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut line = serde_json::to_vec(&Envelope { id, source: self.source.clone(), request })?;
+        let mut line = serde_json::to_vec(&Envelope { id, source: self.source.clone(), request: request.clone() })?;
         line.push(b'\n');
         let mut attempt = 0;
         loop {
@@ -215,8 +250,8 @@ impl Shared {
         if conn.subscribed.load(Ordering::SeqCst) {
             return Ok(conn);
         }
-        let (conn, rx) = self.send(Request::Subscribe).await?;
-        rx.await.map_err(|_| anyhow!("quiverd went away while subscribing"))?.map_err(|e| anyhow!(e))?;
+        let (conn, rx) = self.send(&Request::Subscribe).await?;
+        rx.await.map_err(|_| anyhow!("quiverd went away while subscribing"))?.map_err(|f| anyhow!(f.error))?;
         conn.subscribed.store(true, Ordering::SeqCst);
         Ok(conn)
     }
@@ -309,6 +344,7 @@ impl Shared {
             pending: Mutex::default(),
             closed: watch::Sender::new(false),
             subscribed: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
         });
         // Weak: dropping the client drops the write half, the daemon hangs up, and this ends.
         let reader = Arc::downgrade(&conn);
@@ -325,10 +361,18 @@ impl Shared {
                             let _ = tx.send(Ok(result));
                         }
                     }
-                    Ok(Reply::Err { id, error }) => {
+                    Ok(Reply::Err { id, error, code }) => {
                         if let Some(tx) = reader.pending.lock().unwrap().remove(&id) {
-                            let _ = tx.send(Err(error));
+                            let _ = tx.send(Err(Failure { error, code }));
                         }
+                    }
+                    // The daemon is restarting onto a new build: new requests go to a new
+                    // connection (the new daemon accepts it), and what this one leaves
+                    // unanswered is sent again (`Conn::close`). Subscribers reconnect now.
+                    Ok(Reply::Closing { reason }) => {
+                        tracing::debug!("quiverd is closing this connection: {reason}");
+                        reader.closing.store(true, Ordering::SeqCst);
+                        reader.closed.send_replace(true);
                     }
                     // Only subscribed connections get events. Options and perf events come as
                     // `Event`s (or, from older daemons, as `Reply::Options`/`Reply::Perf`):
@@ -402,12 +446,21 @@ mod tests {
 
     /// A stand-in daemon on its own socket: answers every request with `{"method": …}`,
     /// except `shutdown`, which it reads and then hangs up on without replying (a request
-    /// that ran but whose reply was lost). `stop` + `start` is a restart.
+    /// that ran but whose reply was lost). `stop` + `start` is a restart. With
+    /// `restarting` set it refuses everything as a restarting daemon does; `goodbyes`
+    /// requests are answered with `Reply::Closing` and a hang-up instead.
     struct Fake {
         path: PathBuf,
         events: broadcast::Sender<Event>,
         received: Arc<Mutex<Vec<String>>>,
         tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+        mode: Arc<Mode>,
+    }
+
+    #[derive(Default)]
+    struct Mode {
+        restarting: AtomicBool,
+        goodbyes: AtomicU64,
     }
 
     impl Fake {
@@ -420,6 +473,7 @@ mod tests {
                 events: broadcast::channel(16).0,
                 received: Arc::default(),
                 tasks: Arc::default(),
+                mode: Arc::default(),
             };
             fake.start();
             fake
@@ -428,10 +482,10 @@ mod tests {
         fn start(&self) {
             let _ = std::fs::remove_file(&self.path);
             let listener = UnixListener::bind(&self.path).unwrap();
-            let (events, received, tasks) = (self.events.clone(), self.received.clone(), self.tasks.clone());
+            let (events, received, tasks, mode) = (self.events.clone(), self.received.clone(), self.tasks.clone(), self.mode.clone());
             let accept = tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    let conn = tokio::spawn(serve(stream, events.clone(), received.clone()));
+                    let conn = tokio::spawn(serve(stream, events.clone(), received.clone(), mode.clone()));
                     tasks.lock().unwrap().push(conn);
                 }
             });
@@ -453,7 +507,7 @@ mod tests {
         }
     }
 
-    async fn serve(stream: UnixStream, events: broadcast::Sender<Event>, received: Arc<Mutex<Vec<String>>>) {
+    async fn serve(stream: UnixStream, events: broadcast::Sender<Event>, received: Arc<Mutex<Vec<String>>>, mode: Arc<Mode>) {
         let (r, mut w) = stream.into_split();
         let mut lines = BufReader::new(r).lines();
         let mut sub: Option<broadcast::Receiver<Event>> = None;
@@ -464,6 +518,20 @@ mod tests {
                     let env: Envelope = serde_json::from_str(&line).unwrap();
                     let m = method(&env.request);
                     received.lock().unwrap().push(m.clone());
+                    if mode.goodbyes.load(Ordering::SeqCst) > 0 {
+                        mode.goodbyes.fetch_sub(1, Ordering::SeqCst);
+                        let mut line = serde_json::to_vec(&Reply::Closing { reason: "test".into() }).unwrap();
+                        line.push(b'\n');
+                        let _ = w.write_all(&line).await;
+                        return;
+                    }
+                    if mode.restarting.load(Ordering::SeqCst) {
+                        let reply = Reply::Err { id: env.id, error: "restarting".into(), code: Some(crate::daemon::RESTARTING.into()) };
+                        let mut line = serde_json::to_vec(&reply).unwrap();
+                        line.push(b'\n');
+                        let _ = w.write_all(&line).await;
+                        continue;
+                    }
                     match env.request {
                         Request::Shutdown => return,
                         Request::Subscribe => sub = Some(events.subscribe()),
@@ -514,6 +582,41 @@ mod tests {
         assert_eq!(status(&client).await.unwrap(), "status");
         assert_eq!(status(&client).await.unwrap(), "status");
         assert_eq!(fake.count("status"), 3, "nothing sent twice");
+    }
+
+    /// A restarting daemon refuses with `code: restarting`: the call is sent again until a
+    /// daemon answers.
+    #[tokio::test]
+    async fn refused_while_restarting_is_retried() {
+        let fake = Fake::new("refused");
+        let client = Client::connect_at(fake.path.clone(), "test", false).await.unwrap();
+        fake.mode.restarting.store(true, Ordering::SeqCst);
+        let call = tokio::spawn({
+            let client = client.clone();
+            async move { status(&client).await }
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        fake.mode.restarting.store(false, Ordering::SeqCst);
+        assert_eq!(call.await.unwrap().unwrap(), "status");
+        assert!(fake.count("status") >= 3, "refused, then sent again: {}", fake.count("status"));
+        // Other errors aren't retried.
+        assert_eq!(fake.count("status"), fake.received.lock().unwrap().len());
+    }
+
+    /// After `Reply::Closing`, what wasn't answered is sent again on a new connection; a
+    /// hang-up without one still isn't (see `a_lost_reply_is_not_resent`).
+    #[tokio::test]
+    async fn unanswered_before_closing_is_resent() {
+        let fake = Fake::new("closing");
+        let client = Client::connect_at(fake.path.clone(), "test", false).await.unwrap();
+        let mut events = client.subscribe().await.unwrap();
+        fake.mode.goodbyes.store(1, Ordering::SeqCst);
+        assert_eq!(status(&client).await.unwrap(), "status");
+        assert_eq!(fake.count("status"), 2, "once on the closing connection, once on the new one");
+        // Subscribers see the restart and are subscribed again.
+        assert!(matches!(next(&mut events).await, Event::Disconnected));
+        assert!(matches!(next(&mut events).await, Event::Reconnected));
+        deliver(&fake, &mut events).await;
     }
 
     #[tokio::test]

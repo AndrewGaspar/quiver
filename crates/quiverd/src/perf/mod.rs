@@ -427,6 +427,13 @@ impl PerfHub {
         self.lock().conns.entry(c.id).or_insert_with(|| Conn { tx: c.tx.clone(), subs: Vec::new() });
     }
 
+    /// Live consumers: (perf subscriptions, HUD attachments). Either keeps quiverd from
+    /// restarting onto a new build.
+    pub fn consumers(&self) -> (usize, usize) {
+        let st = self.lock();
+        (st.conns.values().map(|c| c.subs.len()).sum(), st.sessions.values().map(|s| s.attached.len()).sum())
+    }
+
     /// The connection closed: its subscriptions and attachments go.
     pub fn disconnect(&self, conn: u64) {
         let mut st = self.lock();

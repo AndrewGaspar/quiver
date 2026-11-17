@@ -37,8 +37,10 @@ binaries are replaced atomically; unchanged files are left alone, and files an e
 install had that this one doesn't are removed. It never overwrites a file it didn't install,
 except the dev setup's `~/.local/bin/{quiver,quiverd,quiver-app,ubi}` symlinks into a
 checkout's `target/release`, which it replaces and says so. At the end it prints the version,
-the files that changed, and whether `quiverd` is running an older build and any game is
-running (`quiver sessions`).
+the files that changed, and what the running `quiverd` does about it: it restarts itself onto
+the new build once nothing needs it, and the script says whether that is right away (idle) or
+what it waits on; a `quiverd` from before self-restarts gets the old advice (restart it when
+no game is running).
 
 ## Arch package
 
@@ -68,7 +70,8 @@ If `~/.local/bin` has `quiver`, `quiverd`, `quiver-app` and `ubi` symlinked into
 Then, either way:
 
 1. **Restart the daemon** when no game is running (`quiver sessions` says what's running).
-   It keeps running the old build until then:
+   One that runs from the repo build keeps running it until then (it only restarts itself
+   onto the file it was started from):
 
    ```sh
    quiver daemon stop      # the next quiver command (or the app) starts the installed one
@@ -88,9 +91,18 @@ the checkout's cross build. Set `bridge_exe` only to force a particular bridge.
 ## Upgrades
 
 After each merge, run `tools/install-user.sh` again (or `tools/package.sh` and `pacman -U`).
-Nothing restarts the daemon on its own, since a game may be running: restart it with
-`quiver daemon stop` when convenient. A `quiver-app` started from the installed binary
-relaunches itself onto the new build.
+There is nothing to restart by hand:
+
+- `quiverd` restarts itself onto the new build once no game session, running job, perf
+  subscription, HUD, request or hold needs it for 30 s (see "Daemon lifecycle" in the main
+  README). `quiver daemon status` says what it's waiting on. To keep it on the old build
+  for a while (a benchmark in progress): `quiver daemon hold --reason "…" --for 2h`.
+- A `quiver-app` started from the installed binary relaunches itself onto the new build,
+  and shows "quiverd updated to …" when the daemon comes back.
+- `quiver daemon stop` still stops it at once (refused while a game runs).
+
+A `quiverd` from before self-restarting (no `quiver daemon status`) needs one manual
+`quiver daemon stop` when no game is running; from then on it follows upgrades.
 
 The systemd user unit is installed but not enabled; `quiverd` is started on demand by any
 client. To run it as a service instead: `systemctl --user enable --now quiverd`.
