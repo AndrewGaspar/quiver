@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use ubi_api::perf::{FpsStats, MeanMax, MetricInfo, MetricState, Percentiles, PerfSummary, PerfValue, Presenter, ProducerInfo, Stat};
-use ubi_perf::descriptor::{MetricDescriptor, MetricKind, SampleRate};
+use ubi_perf::descriptor::{MetricDescriptor, SampleRate};
 use ubi_perf::layout::LayerStatus;
 
 use super::catalog::{self, Canonical, FrameStat, Source};
@@ -14,6 +14,7 @@ use super::format::{self, Raw};
 use super::stats::{CounterSeries, FrameStore, NumSeries, WindowStats};
 
 pub const WINDOW_1S: i64 = 1_000_000_000;
+#[cfg(test)]
 pub const WINDOW_10S: i64 = 10_000_000_000;
 /// Window 0 means the whole session.
 pub const WINDOW_SESSION: i64 = 0;
@@ -28,8 +29,8 @@ enum Values {
     Empty,
     Num(NumSeries),
     Counter(CounterSeries),
-    Text(i64, String),
-    State(i64, usize),
+    Text(String),
+    State(usize),
     Events(Vec<(i64, Option<i64>, Option<String>)>),
 }
 
@@ -216,14 +217,14 @@ impl Store {
 
     pub fn push_text(&mut self, id: &str, t: i64, s: String) {
         let Some(m) = self.metrics.get_mut(id) else { return };
-        m.values = Values::Text(t, s);
+        m.values = Values::Text(s);
         m.last_ns = Some(t);
     }
 
     pub fn push_state(&mut self, id: &str, t: i64, idx: usize) {
         let Some(m) = self.metrics.get_mut(id) else { return };
         if idx < m.desc.values.len() {
-            m.values = Values::State(t, idx);
+            m.values = Values::State(idx);
             m.last_ns = Some(t);
         }
     }
@@ -323,8 +324,8 @@ impl Store {
                 _ if window_ns == WINDOW_SESSION => c.session_rate().map(Raw::Num),
                 _ => c.rate(window_ns.max(WINDOW_1S)).map(Raw::Num),
             },
-            Values::Text(_, s) => Some(Raw::Text(s.clone())),
-            Values::State(_, i) => Some(Raw::State(*i)),
+            Values::Text(s) => Some(Raw::Text(s.clone())),
+            Values::State(i) => Some(Raw::State(*i)),
             Values::Events(v) => v.last().map(|(_, _, l)| Raw::Text(l.clone().unwrap_or_else(|| "mark".into()))),
         }
     }
@@ -389,12 +390,13 @@ impl Store {
         if self.role(catalog::ROLE_BASE_COUNT).is_none() {
             return false;
         }
-        match self.role(catalog::ROLE_FG_STATE).and_then(|id| self.metrics.get(id)) {
-            Some(m) => match &m.values {
-                Values::State(_, i) => m.desc.values.get(*i).is_some_and(|v| v.value != "off" && v.level != Some(ubi_api::perf::Level::Dim) && v.level != Some(ubi_api::perf::Level::Bad)),
-                _ => false,
-            },
-            // No state metric: on when presents outrun real frames clearly.
+        let state = self.role(catalog::ROLE_FG_STATE).and_then(|id| self.metrics.get(id)).and_then(|m| match &m.values {
+            Values::State(i) => m.desc.values.get(*i),
+            _ => None,
+        });
+        match state {
+            Some(v) => v.value != "off" && !matches!(v.level, Some(ubi_api::perf::Level::Dim | ubi_api::perf::Level::Bad)),
+            // No state (yet): on when presents outrun real frames clearly.
             None => {
                 let p = self.value("fps", Stat::Mean, WINDOW_1S, now).and_then(|r| r.num());
                 let b = self.value("fps.base", Stat::Mean, WINDOW_1S, now).and_then(|r| r.num());
@@ -440,10 +442,6 @@ impl Store {
             Some(Values::Num(s)) => s.tail(n),
             _ => Vec::new(),
         }
-    }
-
-    pub fn last_ns(&self, id: &str) -> Option<i64> {
-        self.metrics.get(id).and_then(|m| m.last_ns)
     }
 
     /// Every metric id: canonical first, then producers' in id order.
@@ -554,7 +552,7 @@ impl Store {
         s.cpu_temp = mm("cpu.temp");
         s.vram_peak = mm("gpu.vram.used").map(|m| m.max as u64);
         s.gpu = match self.metrics.get("gpu.name").map(|m| &m.values) {
-            Some(Values::Text(_, n)) => Some(n.clone()),
+            Some(Values::Text(n)) => Some(n.clone()),
             _ => None,
         };
         s.sensor_seconds = self.metrics.get("cpu.load").and_then(|m| match &m.values {
@@ -614,7 +612,7 @@ fn num_stat(s: &NumSeries, stat: Stat, window_ns: i64, now: i64) -> Option<f64> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ubi_perf::descriptor::{RoleClaim, StateValue};
+    use ubi_perf::descriptor::{MetricKind, RoleClaim, StateValue};
 
     const MS: i64 = 1_000_000;
 

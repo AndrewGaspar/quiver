@@ -170,10 +170,6 @@ impl FrameStore {
         }
     }
 
-    pub fn primary(&self) -> Option<u32> {
-        self.primary
-    }
-
     /// One present (entry time, CLOCK_MONOTONIC_RAW ns). Returns the frame time in ms if
     /// it counted.
     pub fn present(&mut self, swapchain: u32, t: i64) -> Option<f64> {
@@ -309,10 +305,6 @@ impl CounterSeries {
 
     pub fn total(&self) -> Option<u64> {
         self.samples.back().map(|(_, v)| *v)
-    }
-
-    pub fn last_ns(&self) -> Option<i64> {
-        self.samples.back().map(|(t, _)| *t)
     }
 
     /// Per second over the window ending at the latest sample: from the newest sample at or
