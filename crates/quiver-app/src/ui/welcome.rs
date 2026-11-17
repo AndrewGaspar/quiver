@@ -167,7 +167,7 @@ pub struct Welcome {
     pub focus: usize,
     /// The startup check ran.
     startup: bool,
-    /// The flow waits for sign-in (the sign-in screen shows step 1).
+    /// The flow waits for the first Ubisoft sign-in (the sign-in screen shows step 1).
     pub after_signin: bool,
     pub scan: Option<Result<Vec<FoundInstall>, String>>,
     scanning: bool,
@@ -198,7 +198,7 @@ impl Quiver {
     }
 
     pub fn welcome_tick(&mut self, _n: u64, cx: &mut Context<Self>) {
-        if self.wc.after_signin && matches!(self.conn, Conn::Ready) {
+        if self.wc.after_signin && matches!(self.conn, Conn::Ready) && self.signed_in() {
             self.wc.after_signin = false;
             self.open_welcome(Step::Storage, cx);
             cx.notify();
@@ -676,7 +676,7 @@ impl Quiver {
     }
 
     pub fn render_welcome(&mut self, th: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.wc.after_signin && matches!(self.conn, Conn::Ready) {
+        if self.wc.after_signin && matches!(self.conn, Conn::Ready) && self.signed_in() {
             self.wc.after_signin = false;
             self.open_welcome(Step::Storage, cx);
         }

@@ -744,6 +744,31 @@ impl Quiver {
         }
         row_child[hi] = Some(children.len());
         children.push(head.into_any_element());
+        // Quiver downloads Ubisoft's games; other stores' clients download their own.
+        if !self.ubisoft_signed_in() {
+            children.push(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(12.))
+                    .mb(px(18.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .rounded(px(10.))
+                    .bg(th.warn_soft)
+                    .text_size(px(12.5))
+                    .child(icon(Icon::User, 14., th.warn))
+                    .child(div().flex_1().min_w(px(200.)).text_color(th.tx2).child(
+                        "Installing and updating Ubisoft games needs a signed-in Ubisoft account. Steam downloads its own games.",
+                    ))
+                    .child(
+                        button("dl-signin", th, Kind::Secondary, Size::Small, None, "Sign in to Ubisoft")
+                            .on_click(cx.listener(|this, _, _, cx| this.start_add_account(cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         // What's running.
         for e in &active {

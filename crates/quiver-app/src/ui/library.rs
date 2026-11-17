@@ -1,16 +1,18 @@
-//! Library home: "Continue playing" hero with Needs attention, then the box-art grid.
+//! Library home: "Continue playing" hero with Needs attention, then the box-art grid. The
+//! library is every store's games; Ubisoft is one store among them, and while no Ubisoft
+//! account is signed in the library offers its sign-in as a card.
 
 use gpui::{AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, prelude::*, px, relative};
 
 use super::{
     ArtState, BOLD, FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, TagKind, art_chip, art_fill, button, caption, chip,
-    chip_count, cover, display, glyph, icon, progress, soft_shadow, tag,
+    chip_count, command_line, cover, display, glyph, icon, progress, soft_shadow, tag,
 };
 use super::hero::{TitleBox, title_slot};
 use crate::app::{Attention, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
 use crate::model::{Gid, GameRow, clock, day, hours, short_name};
-use quiver_api::StoreId;
+use quiver_api::{StoreId, Status};
 use crate::nav::Target;
 use crate::theme::{Theme, on_art, rgba};
 
@@ -19,6 +21,64 @@ pub enum LibFilter {
     All,
     Installed,
     Updates,
+}
+
+/// The library's Ubisoft sign-in card, while no Ubisoft account is signed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UbisoftCard {
+    /// No account yet.
+    SignIn,
+    /// Accounts are known but none has a session (it ended).
+    SignInAgain,
+    /// A sign-in started elsewhere (`quiver login`) waits for its two-step code.
+    EnterCode,
+}
+
+impl UbisoftCard {
+    /// The card for the daemon's status; `None` once an account is signed in (or before
+    /// the daemon answered).
+    pub fn of(status: Option<&Status>) -> Option<UbisoftCard> {
+        let s = status?;
+        if s.signed_in.is_some() {
+            None
+        } else if s.awaiting_2fa {
+            Some(UbisoftCard::EnterCode)
+        } else if !s.accounts.is_empty() {
+            Some(UbisoftCard::SignInAgain)
+        } else {
+            Some(UbisoftCard::SignIn)
+        }
+    }
+
+    fn copy(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            UbisoftCard::SignIn => (
+                "Add your Ubisoft games",
+                "Sign in with your Ubisoft account and every game you own there joins this library, next to your other stores' games.",
+                "Sign in to Ubisoft",
+            ),
+            UbisoftCard::SignInAgain => (
+                "Your Ubisoft session ended",
+                "Ubisoft's games are hidden until you sign in again. Your other stores' games are unaffected.",
+                "Sign in again",
+            ),
+            UbisoftCard::EnterCode => (
+                "A Ubisoft sign-in is waiting for its code",
+                "Enter the 6-digit code from your authenticator app to finish signing in.",
+                "Enter code",
+            ),
+        }
+    }
+}
+
+/// The store badges on a tile (steer X2, as decided 2026-11-17): every store the game has
+/// a record in except Ubisoft while Ubisoft and one other store are all the stores there
+/// are; every store, Ubisoft too, once a third store is present. `present` is the stores in
+/// the library; Ubisoft always counts, signed in or not.
+pub fn tile_badges(game: &[StoreId], present: &[StoreId]) -> Vec<StoreId> {
+    let n = present.len() + usize::from(!present.contains(&StoreId::Ubisoft));
+    let all = n > 2;
+    game.iter().copied().filter(|s| all || *s != StoreId::Ubisoft).collect()
 }
 
 pub const HERO_HEIGHT: f32 = 396.;
@@ -125,17 +185,20 @@ impl Quiver {
             );
         }
         if ids.is_empty() {
-            rows.push(
-                div()
-                    .px(px(self.gutter()))
-                    .py(px(40.))
-                    .text_color(th.tx3)
-                    .child(if self.games.is_empty() { "Loading your library…" } else { "Nothing matches this filter." })
-                    .into_any_element(),
-            );
+            let empty = if !self.games.is_empty() {
+                "Nothing matches this filter."
+            } else if !self.library_loaded {
+                "Loading your library…"
+            } else if !self.ubisoft_signed_in() {
+                "No games here yet. Sign in to Ubisoft above, or install a game in Steam, and it shows up here."
+            } else {
+                "No games here yet."
+            };
+            rows.push(div().px(px(self.gutter())).py(px(40.)).text_color(th.tx3).child(empty).into_any_element());
         }
         let hero = self.render_lib_hero(th, cx);
         let header = self.render_lib_header(th, cx);
+        let signin = UbisoftCard::of(self.status.as_ref()).map(|c| self.render_ubisoft_card(th, c, cx));
         div()
             .id("library")
             .flex_1()
@@ -144,6 +207,7 @@ impl Quiver {
             .track_scroll(&self.lib_scroll)
             .child(hero)
             .child(header)
+            .children(signin)
             .children(rows)
             .child(div().h(px(48.)))
     }
@@ -247,6 +311,55 @@ impl Quiver {
                 }
             })
             .child(chips)
+    }
+
+    /// Ubisoft's sign-in, as a row above the grid: signing in is an option, not a gate.
+    fn render_ubisoft_card(&mut self, th: &Theme, card: UbisoftCard, cx: &mut Context<Self>) -> AnyElement {
+        let (title, body, action) = card.copy();
+        let bp = self.bp();
+        let warn = card == UbisoftCard::SignInAgain;
+        let (mark_bg, mark_fg) = if warn { (th.warn_soft, th.warn) } else { (th.acc_soft, th.acc_hi) };
+        let mark = if card == UbisoftCard::EnterCode { Icon::KeyRound } else if warn { Icon::ClockAlert } else { Icon::User };
+        div()
+            .px(px(self.gutter()))
+            .pb(px(22.))
+            .child(
+                super::card(th)
+                    .id("ubisoft-signin")
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(14.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .size(px(38.))
+                            .rounded(px(10.))
+                            .bg(mark_bg)
+                            .child(icon(mark, 18., mark_fg)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(220.))
+                            .gap(px(2.))
+                            .child(div().text_size(px(14.)).font_weight(SEMIBOLD).text_color(th.tx1).child(title))
+                            .child(div().text_size(px(12.5)).text_color(th.tx3).child(body)),
+                    )
+                    .when(!bp.narrow(), |d| d.child(command_line(th, "quiver login").w(px(170.))))
+                    .child(
+                        button("ubisoft-signin-go", th, Kind::Primary, Size::Medium, None, action)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_add_account(cx))),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_lib_hero(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -500,13 +613,10 @@ impl Quiver {
             tl = tl.child(tag(th, TagKind::Accent, Some(Icon::ArrowDownToLine), "Update"));
         }
         let custom = id.ubisoft().and_then(|p| self.custom_art.get(&p)).is_some_and(|c| c.tile.is_some());
-        // Store badges (steer X2): every store the game has a record in other than Ubisoft,
-        // once the library has more than one store.
-        let badges: Vec<&'static str> = if self.library_stores().len() > 1 {
-            g.entry.stores().into_iter().filter(|s| *s != StoreId::Ubisoft).map(|s| s.label()).collect()
-        } else {
-            Vec::new()
-        };
+        // Store badges ([`tile_badges`]): other stores' games always, Ubisoft's too once a
+        // third store is present.
+        let present: Vec<StoreId> = self.library_stores().into_iter().map(|(s, _)| s).collect();
+        let badges: Vec<&'static str> = tile_badges(&g.entry.stores(), &present).into_iter().map(StoreId::label).collect();
 
         let group = gpui::SharedString::from(format!("tile-{id}"));
         let deep = vec![soft_shadow(rgba(0x000000, 0.6), 18., 40.)];
@@ -655,5 +765,94 @@ pub fn primary_label(g: &GameRow) -> (&'static str, Icon) {
         ("Update", Icon::ArrowDownToLine)
     } else {
         ("Play", Icon::Play)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::demo::Demo;
+    use quiver_api::{LibraryEntry, LoginResult, Request};
+
+    fn status(demo: &Demo) -> Status {
+        serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap()
+    }
+
+    fn library(demo: &Demo) -> Vec<LibraryEntry> {
+        serde_json::from_value(demo.handle(Request::Library { refresh: false, all_stores: true }).unwrap()).unwrap()
+    }
+
+    /// The stores present, as `Quiver::library_stores` finds them.
+    fn present(lib: &[LibraryEntry]) -> Vec<StoreId> {
+        StoreId::ALL.into_iter().filter(|s| lib.iter().any(|e| e.stores().contains(s))).collect()
+    }
+
+    #[test]
+    fn badges_other_stores_until_a_third_store_is_present() {
+        use StoreId::*;
+        let two = [Ubisoft, Steam];
+        assert_eq!(tile_badges(&[Ubisoft], &two), []);
+        assert_eq!(tile_badges(&[Steam], &two), [Steam]);
+        // A Ubisoft game with its Steam copy: the copy's store shows.
+        assert_eq!(tile_badges(&[Ubisoft, Steam], &two), [Steam]);
+        // Signed out of Ubisoft, only Steam's games: Ubisoft still counts as a store, so
+        // Steam's tiles are badged.
+        assert_eq!(tile_badges(&[Steam], &[Steam]), [Steam]);
+        assert_eq!(tile_badges(&[Ubisoft], &[Ubisoft]), []);
+        // A third store: every tile says where it's from.
+        let three = [Ubisoft, Steam, Epic];
+        assert_eq!(tile_badges(&[Ubisoft], &three), [Ubisoft]);
+        assert_eq!(tile_badges(&[Epic], &three), [Epic]);
+        assert_eq!(tile_badges(&[Ubisoft, Steam], &three), [Ubisoft, Steam]);
+        assert_eq!(tile_badges(&[Ubisoft], &[Steam, Epic]), [Ubisoft]);
+    }
+
+    #[test]
+    fn sign_in_card_follows_the_session() {
+        let mut s: Status = serde_json::from_value(serde_json::json!({
+            "version": "t", "signed_in": null, "awaiting_2fa": false, "running": [], "jobs": [], "proton_default": null
+        }))
+        .unwrap();
+        assert_eq!(UbisoftCard::of(None), None, "not connected yet: no card");
+        assert_eq!(UbisoftCard::of(Some(&s)), Some(UbisoftCard::SignIn));
+        s.awaiting_2fa = true;
+        assert_eq!(UbisoftCard::of(Some(&s)), Some(UbisoftCard::EnterCode));
+        s.awaiting_2fa = false;
+        s.accounts.push(quiver_api::Account { user_id: "u".into(), name: "n".into(), default: true });
+        assert_eq!(UbisoftCard::of(Some(&s)), Some(UbisoftCard::SignInAgain));
+        s.signed_in = Some("n".into());
+        assert_eq!(UbisoftCard::of(Some(&s)), None);
+    }
+
+    /// Demo mode, signed out: the library has Steam's games, badged, and the sign-in card;
+    /// signing in (the card's form: email and password, then the code) brings Ubisoft's
+    /// games in, unbadged, and takes the card away.
+    #[tokio::test]
+    async fn signed_out_demo_then_sign_in_from_the_card() {
+        let (demo, _events) = Demo::start_signed_out();
+        let lib = library(&demo);
+        assert!(!lib.is_empty() && lib.iter().all(|e| e.game.store == StoreId::Steam));
+        assert_eq!(UbisoftCard::of(Some(&status(&demo))), Some(UbisoftCard::SignIn));
+        let p = present(&lib);
+        assert!(lib.iter().all(|e| tile_badges(&e.stores(), &p) == [StoreId::Steam]));
+
+        // What `submit_login` sends.
+        let r: LoginResult =
+            serde_json::from_value(demo.handle(Request::Login { email: "me@example.com".into(), password: "pw".into() }).unwrap()).unwrap();
+        assert!(matches!(r, LoginResult::TwoFactorRequired));
+        assert_eq!(UbisoftCard::of(Some(&status(&demo))), Some(UbisoftCard::EnterCode), "a form left at the code: the card says so");
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "246810".into() }).unwrap()).unwrap();
+        assert!(matches!(r, LoginResult::SignedIn { .. }));
+
+        assert_eq!(UbisoftCard::of(Some(&status(&demo))), None);
+        let lib = library(&demo);
+        let p = present(&lib);
+        assert_eq!(p, [StoreId::Ubisoft, StoreId::Steam]);
+        let ubisoft: Vec<&LibraryEntry> = lib.iter().filter(|e| e.game.is_ubisoft()).collect();
+        assert!(!ubisoft.is_empty());
+        // Unbadged with two stores; a Steam copy shows as Steam.
+        let expect = |e: &LibraryEntry| if e.steam.is_some() { vec![StoreId::Steam] } else { vec![] };
+        assert!(ubisoft.iter().all(|e| tile_badges(&e.stores(), &p) == expect(e)), "Ubisoft tiles stay unbadged with two stores");
+        assert!(lib.iter().filter(|e| e.game.store == StoreId::Steam).all(|e| tile_badges(&e.stores(), &p) == [StoreId::Steam]));
     }
 }

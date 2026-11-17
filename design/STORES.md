@@ -871,6 +871,23 @@ local mode.
 - `quiver list`, `quiver play steam:<appid>`, `quiver info`, `quiver playtime` and `quiver stores`.
 - In the app: store chips, tile badges, and a Steam game page.
 
+**Library first (2026-11-17, `build/library-first`).** Ubisoft is a library, not the gate to one.
+
+- The app opens the library once quiverd answers, signed in to Ubisoft or not. Signed out, the
+  library shows the other stores' games and a sign-in card above the grid ("Add your Ubisoft
+  games"; "Your Ubisoft session ended" when accounts are known; "Enter code" when a
+  `quiver login` waits for its code). The sign-in screen is the same, now always with "Back to
+  Quiver" and Esc. Settings › Accounts and the palette offer "Sign in to Ubisoft" too.
+- Signing out (or the session ending) reloads the library instead of showing the sign-in screen.
+  quiverd already served `Library { all_stores: true }` signed out; when no other store has games
+  it answers with Ubisoft's "not signed in", which the app shows as an empty library.
+- Downloads says Ubisoft installs need a signed-in account. Names of queued Ubisoft games come
+  from the queue while their entries are out of the library.
+- The welcome flow still waits for the first Ubisoft sign-in (a Steam-only user doesn't see it
+  yet; first-run UX gets its own pass once more stores land).
+- Badges: every non-Ubisoft store record on a tile; Ubisoft's too once a third store is present
+  (`ui::library::tile_badges`; Ubisoft always counts as present).
+
 **Ubisoft regression notes.** Library, jobs and activity JSON for Ubisoft games keep `product_id`.
 `exports.json`, `activity.jsonl`, `games.json` and `queue.json` are unchanged for Ubisoft records,
 with golden tests on the first two. The 8.1 regression check (installs, Origins with the bridge,
