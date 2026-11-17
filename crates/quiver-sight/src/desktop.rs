@@ -84,6 +84,15 @@ impl DesktopHud {
             return Ok(());
         }
         let key = Key { anchor: m.anchor, offset: [m.offset[0].round() as i32, m.offset[1].round() as i32], monitor: m.monitor.clone() };
+        // The game's monitor became known and the compositor already put the surface there.
+        if let Some((h, k)) = &mut self.window
+            && k.monitor.is_none()
+            && (Key { monitor: None, ..key.clone() }) == *k
+            && let Some(want) = key.monitor.as_deref().and_then(|n| display_named(cx, n))
+            && h.update(cx, |_, w, cx| w.display(cx).map(|d| d.id())).ok().flatten() == Some(want)
+        {
+            k.monitor = key.monitor.clone();
+        }
         if let Some((h, k)) = &self.window
             && *k == key
         {
