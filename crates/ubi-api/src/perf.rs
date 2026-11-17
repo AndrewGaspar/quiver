@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub use ubi_perf::descriptor::{Level, MetricDescriptor, MetricKind, Unit};
+pub use ubi_perf::descriptor::{Level, MetricDescriptor, MetricKind, Unit, Visibility};
 
 // ---------------------------------------------------------------------------------------
 // Requests
