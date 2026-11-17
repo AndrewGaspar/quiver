@@ -55,7 +55,7 @@ impl PerfHub {
         let session = quiver_core::modsdk::new_session_id();
         let b = self.begin(&session, product_id, None, None, &plan.env, &plan.wrappers, false)?;
         if b.plan.hud.as_ref().is_some_and(|h| h.enabled) {
-            plan.perf_notes.extend(b.plan.notes.into_iter().map(|n| format!("hud: {n}")));
+            plan.perf_notes.extend(b.plan.notes.into_iter().map(|n| if n.starts_with("hud:") { n } else { format!("hud: {n}") }));
         }
         plan.env.extend(b.plan.env);
         plan.perf_session = Some(session.clone());
