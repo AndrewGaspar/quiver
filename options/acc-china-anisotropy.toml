@@ -1,0 +1,89 @@
+# Options for the built-in "16x anisotropic filtering" mod (mods/1651/acc-china-anisotropy-16)
+# of Assassin's Creed Chronicles: China. The mod sets MaxAnisotropy=16 with a config patch;
+# this surface lets a profile choose another level (the profile's value wins over the
+# patch) and exposes a few neighbouring Unreal Engine 3 settings of the same file.
+format = 1
+surface = "acc-china-graphics"
+title = "Texture filtering"
+help = "Unreal Engine 3 system settings of AC Chronicles: China that the 16x filtering mod touches."
+source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Chronicles:_China"
+audited = "2026-11-16: keys and value spellings from the PCConsole-ACCSystemSettings.ini the game wrote (crates/ubi-core/fixtures/mods-v2); the game rewrites this file from its own menu, so it is program-owned and read at start."
+
+[match]
+products = [1651]
+mods = ["acc-china-anisotropy-16"]
+
+[file.settings]
+path = "My Games/UnrealEngine3/ACCGame/ACCGame/Config/PCConsole-ACCSystemSettings.ini"
+root = "docs"
+format = "ini"
+owner = "program"
+
+[[page]]
+id = "filtering"
+title = "Filtering"
+options = ["SystemSettings.MaxAnisotropy", "SystemSettings.MaxMultiSamples", "SystemSettings.bAllowTemporalAA"]
+
+[[page]]
+id = "detail"
+title = "Detail"
+options = ["SystemSettings.DetailMode", "SystemSettings.MaxDrawDistanceScale", "SystemSettings.UseVsync"]
+
+[option."SystemSettings.MaxAnisotropy"]
+type = "enum"
+label = "Anisotropic filtering"
+help = "Sharper textures seen at an angle. The 16x mod sets 16; the game's own default is 4."
+values = [
+  { value = "1", label = "Off" },
+  { value = "2", label = "2x" },
+  { value = "4", label = "4x" },
+  { value = "8", label = "8x" },
+  { value = "16", label = "16x" },
+]
+apply = "restart"
+
+[option."SystemSettings.MaxMultiSamples"]
+type = "enum"
+label = "MSAA samples"
+values = [
+  { value = "1", label = "Off" },
+  { value = "2", label = "2x" },
+  { value = "4", label = "4x" },
+  { value = "8", label = "8x" },
+]
+level = "advanced"
+apply = "restart"
+
+[option."SystemSettings.bAllowTemporalAA"]
+type = "bool"
+format = "TrueFalse"
+label = "Temporal AA"
+level = "advanced"
+apply = "restart"
+
+[option."SystemSettings.DetailMode"]
+type = "enum"
+label = "Detail level"
+values = [
+  { value = "0", label = "Low" },
+  { value = "1", label = "Medium" },
+  { value = "2", label = "High" },
+]
+apply = "restart"
+
+[option."SystemSettings.MaxDrawDistanceScale"]
+type = "float"
+label = "Draw distance scale"
+min = 0.1
+max = 2.0
+step = 0.1
+precision = 6
+unit = "×"
+level = "advanced"
+apply = "restart"
+
+[option."SystemSettings.UseVsync"]
+type = "bool"
+format = "TrueFalse"
+label = "Vertical sync"
+apply = "restart"

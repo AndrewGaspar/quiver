@@ -6,6 +6,7 @@ mod dev;
 mod downloads;
 mod exports;
 mod mods;
+mod options;
 mod info;
 mod savestores;
 mod setup;

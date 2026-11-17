@@ -1,0 +1,899 @@
+format = 1
+surface = "aco-dlss"
+title = "DLSS"
+help = "DLSS 4.5 upscaling, NVIDIA Reflex and DLSS Frame Generation for AC Origins, plus crowd, draw distance and cloth tweaks."
+audited = "2026-11-16: every key of dist/aco_dlss.ini against src/core/config.cpp (the whole file is re-read every 64 frames) and each key's use in src/ for the moment it takes effect (DllMain, sampler, swapchain, NGX, D3D12 device, DLSS-G feature and texture creation); ranges and meanings from the ini comments, README.md and docs/ENGINE_NOTES.md."
+
+[match]
+products = [3539]
+files = ["aco_dlss.ini"]
+
+[file.ini]
+path = "aco_dlss.ini"
+format = "ini"
+owner = "quiver"
+reload = "poll"
+
+# ---------------------------------------------------------------- pages
+
+[[page]]
+id = "upscaling"
+title = "Upscaling"
+options = ["upscaler.enabled", "upscaler.preset", "upscaler.render_scale",
+           "upscaler.toggle_key", "upscaler.mip_bias", "upscaler.mip_bias_offset"]
+
+[[page.group]]
+title = "Debugging"
+options = ["upscaler.backend", "upscaler.debug", "upscaler.jitter_x", "upscaler.jitter_y",
+           "upscaler.mv_x", "upscaler.mv_y"]
+
+[[page]]
+id = "latency"
+title = "Latency (Reflex)"
+options = ["reflex.mode", "reflex.fps_limit", "reflex.markers"]
+
+[[page.group]]
+title = "Experiments"
+options = ["reflex.marker_set", "reflex.optimize"]
+
+[[page]]
+id = "framegen"
+title = "Frame generation"
+options = ["fg.mode", "fg.enabled", "fg.toggle_key", "fg.refresh_hz", "fg.hudless"]
+
+[[page.group]]
+title = "Pacing and presentation"
+options = ["fg.pacing", "fg.pace", "fg.pace_relax", "fg.present_thread", "fg.present_gate",
+           "fg.sync", "fg.frame_latency", "fg.buffers"]
+
+[[page.group]]
+title = "DLSS-G inputs"
+options = ["fg.mv_scale", "fg.mv_units", "fg.camera", "fg.camera_unjitter", "fg.input",
+           "fg.bb_format_dxgi", "fg.descriptor_heap", "fg.count", "fg.show_index", "fg.extra",
+           "fg.create_extra"]
+
+[[page.group]]
+title = "Debugging"
+options = ["fg.show", "fg.swap_outputs", "fg.debug_fill", "fg.raw_output", "fg.done_fence",
+           "fg.ts_guard", "fg.hide_handle64", "fg.skip"]
+
+[[page]]
+id = "world"
+title = "World"
+options = ["world.lod_distance", "world.lod_mode", "world.npc_density", "world.npc_distance",
+           "world.npc_units"]
+
+[[page]]
+id = "cloth"
+title = "Cloth"
+options = ["cloth.mode", "cloth.scale"]
+
+[[page]]
+id = "diagnostics"
+title = "Diagnostics"
+options = ["upscaler.latency_log", "reflex.probe", "fg.ngx_log", "fg.trace_cu", "fg.verify",
+           "fg.trace_presents", "fg.trace_shots"]
+
+# ---------------------------------------------------------------- [upscaler]
+
+[option."upscaler.enabled"]
+type = "bool"
+label = "DLSS"
+help = "Off leaves the game's own TAA alone. The switch key flips it in game until the file changes."
+level = "basic"
+apply = "live"
+
+[option."upscaler.backend"]
+type = "enum"
+label = "Upscaler backend"
+help = "Bilinear has no temporal anti-aliasing; it exists for A/B comparisons and debugging."
+values = [
+  { value = "dlss", label = "DLSS" },
+  { value = "bilinear", label = "Bilinear (no AA)" },
+]
+level = "debug"
+apply = "live"
+
+[option."upscaler.preset"]
+type = "enum"
+label = "DLSS model"
+help = "The DLSS render preset; changing it recreates the DLSS feature."
+values = [
+  { value = "M", label = "M: DLSS 4.5, performance" },
+  { value = "L", label = "L: DLSS 4.5, ultra performance" },
+  { value = "K", label = "K: DLSS 4 transformer" },
+]
+open = true                # "default" and other preset letters (J, ...) are accepted too
+level = "basic"
+apply = "live"
+
+[option."upscaler.debug"]
+type = "enum"
+label = "Debug view"
+help = "Replaces the image with a visualisation of the motion vectors or the depth buffer."
+values = [
+  { value = "none", label = "Off" },
+  { value = "motion", label = "Motion vectors" },
+  { value = "depth", label = "Depth" },
+]
+level = "debug"
+apply = "live"
+
+[option."upscaler.jitter_x"]
+type = "float"
+label = "Jitter X multiplier"
+help = "Sign and scale applied to the engine's horizontal sub-pixel jitter before DLSS."
+min = -2.0
+max = 2.0
+step = 0.05
+precision = 2
+marks = [{ value = -1.0, label = "Flipped" }, { value = 1.0, label = "As is" }]
+level = "debug"
+apply = "live"
+
+[option."upscaler.jitter_y"]
+type = "float"
+label = "Jitter Y multiplier"
+help = "Sign and scale applied to the engine's vertical sub-pixel jitter before DLSS."
+min = -2.0
+max = 2.0
+step = 0.05
+precision = 2
+marks = [{ value = -1.0, label = "Flipped" }, { value = 1.0, label = "As is" }]
+level = "debug"
+apply = "live"
+
+[option."upscaler.mv_x"]
+type = "float"
+label = "Motion vector X multiplier"
+help = "Sign and scale applied to horizontal motion vectors given to DLSS."
+min = -2.0
+max = 2.0
+step = 0.05
+precision = 2
+marks = [{ value = -1.0, label = "Flipped" }, { value = 1.0, label = "As is" }]
+level = "debug"
+apply = "live"
+
+[option."upscaler.mv_y"]
+type = "float"
+label = "Motion vector Y multiplier"
+help = "Sign and scale applied to vertical motion vectors given to DLSS."
+min = -2.0
+max = 2.0
+step = 0.05
+precision = 2
+marks = [{ value = -1.0, label = "Flipped" }, { value = 1.0, label = "As is" }]
+level = "debug"
+apply = "live"
+
+[option."upscaler.render_scale"]
+type = "float"
+label = "Render scale"
+help = "Written into the game's ACO.ini (PixelDensity) when the game starts, if DLSS is on. Not set uses the game's Resolution Scale option."
+min = 0.33
+max = 1.0
+step = 0.01
+precision = 3
+special = [{ value = 0, label = "Use the game's Resolution Scale" }]
+marks = [
+  { value = 0.5, label = "Performance" }, { value = 0.58, label = "Balanced" },
+  { value = 0.667, label = "Quality" }, { value = 1.0, label = "DLAA" },
+]
+level = "basic"
+apply = "restart"
+
+[option."upscaler.mip_bias"]
+type = "float"
+label = "Texture LOD bias"
+help = "Added to the game's texture samplers below 100% render scale. Automatic uses log2(render / display) plus the offset."
+special = [{ value = "auto", label = "Automatic (from the render scale)" }]
+min = -3.0
+max = 1.0
+step = 0.05
+precision = 2
+level = "advanced"
+apply = "at"
+at = "sampler creation (the game creates its samplers while loading)"
+
+[option."upscaler.mip_bias_offset"]
+type = "float"
+label = "Automatic bias offset"
+help = "Added to the automatic texture LOD bias; negative is sharper."
+min = -1.0
+max = 1.0
+step = 0.05
+precision = 2
+when = { "upscaler.mip_bias" = "auto" }
+level = "advanced"
+apply = "at"
+at = "sampler creation (the game creates its samplers while loading)"
+
+[option."upscaler.latency_log"]
+type = "bool"
+label = "Log input latency"
+help = "Writes latency_taa.csv and latency_present.csv to the log folder, for input latency measurement."
+level = "debug"
+apply = "live"
+
+[option."upscaler.toggle_key"]
+type = "key"
+format = "vk-name"
+allowed = "F1-F24"
+none = "none"
+label = "DLSS / TAA switch key"
+help = "Switches between DLSS and the game's own TAA while playing."
+level = "basic"
+apply = "live"
+
+# ---------------------------------------------------------------- [reflex]
+
+[option."reflex.mode"]
+type = "enum"
+label = "NVIDIA Reflex"
+help = "Low-latency mode: keeps the GPU render queue short."
+values = [
+  { value = "off", label = "Off" },
+  { value = "on", label = "On" },
+  { value = "boost", label = "On + Boost", help = "Keeps GPU clocks high." },
+]
+level = "basic"
+apply = "live"
+
+[option."reflex.fps_limit"]
+type = "float"
+label = "Frame rate cap"
+help = "Caps the frame rate through Reflex, e.g. 160 on a 165 Hz VRR display."
+unit = "fps"
+min = 30
+max = 360
+step = 1
+special = [{ value = 0, label = "No cap" }]
+level = "basic"
+apply = "live"
+
+[option."reflex.markers"]
+type = "bool"
+label = "Latency markers"
+help = "Delimits frames for the driver with latency markers. Without them Reflex costs frame rate when the game is CPU-bound."
+level = "advanced"
+apply = "live"
+
+[option."reflex.marker_set"]
+type = "enum"
+label = "Marker set"
+help = "Which latency markers are sent each frame."
+values = [
+  { value = "minimal", label = "Minimal" },
+  { value = "full", label = "Full" },
+]
+when = { "reflex.mode" = ["on", "boost"] }
+experimental = true
+level = "debug"
+apply = "live"
+
+[option."reflex.optimize"]
+type = "bool"
+label = "Optimize with markers"
+help = "Sets Reflex's bUseMarkersToOptimize."
+when = { "reflex.mode" = ["on", "boost"] }
+experimental = true
+level = "debug"
+apply = "live"
+
+[option."reflex.probe"]
+type = "bool"
+label = "Log input threads"
+help = "Logs which threads read input."
+level = "debug"
+apply = "live"
+
+# ---------------------------------------------------------------- [fg]
+
+[option."fg.mode"]
+type = "enum"
+label = "Frame Generation"
+help = "The D3D12 route runs DLSS-G on a vkd3d-proton device sharing textures with DXVK."
+values = [
+  { value = "off", label = "Off" },
+  { value = "d3d12", label = "On (D3D12 route)" },
+  { value = "on", label = "Vulkan route (research; never generates)", level = "debug" },
+]
+level = "basic"
+apply = "restart"
+
+[option."fg.enabled"]
+type = "bool"
+label = "Generate frames"
+help = "Whether Frame Generation runs right now; the toggle key flips it in game."
+when = { "fg.mode" = "d3d12" }
+level = "basic"
+apply = "live"
+
+[option."fg.toggle_key"]
+type = "key"
+format = "vk-name"
+allowed = "F1-F24"
+none = "none"
+label = "Frame Generation key"
+help = "Turns Frame Generation on and off in game; the D3D12 route stays set up while off."
+when = { "fg.mode" = "d3d12" }
+level = "basic"
+apply = "live"
+
+[option."fg.mv_scale"]
+type = "float"
+label = "Motion vector scale"
+help = "Normalisation multiplier for the motion vectors given to DLSS-G (they are in UV units)."
+min = -2.0
+max = 2.0
+step = 0.05
+precision = 2
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "debug"
+apply = "live"
+
+[option."fg.mv_units"]
+type = "enum"
+label = "Motion vector units"
+help = "The units DLSS-G is told the motion vectors are in."
+values = [
+  { value = "px", label = "Pixels (scale x render size)" },
+  { value = "uv", label = "UV (scale as is)" },
+]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.camera"]
+type = "enum"
+label = "Camera data"
+help = "Where DLSS-G's camera matrices come from."
+values = [
+  { value = "engine", label = "Engine", help = "The game's projection, view and previous-frame matrices from the TAA pass." },
+  { value = "identity", label = "Identity", help = "Identity matrices and a synthetic camera." },
+]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.camera_unjitter"]
+type = "bool"
+label = "Remove jitter from projection"
+help = "DLSS-G wants unjittered matrices."
+when = { "fg.mode" = "d3d12", "fg.camera" = "engine" }
+level = "debug"
+apply = "live"
+
+[option."fg.pacing"]
+type = "bool"
+label = "Smooth pacing"
+help = "Shows the real frame half a frame after the generated one; off presents them back to back."
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "advanced"
+apply = "live"
+
+[option."fg.pace"]
+type = "enum"
+label = "Generated frame timing"
+help = "When the generated frame is presented."
+values = [
+  { value = "smooth", label = "Smooth", help = "Not sooner than half an interval after the previous real frame." },
+  { value = "ready", label = "When ready", help = "As soon as DLSS-G is done (the original behaviour)." },
+  { value = "arrival", label = "Fixed lag", help = "At a fixed lag after the game's Present." },
+]
+when = { "fg.mode" = "d3d12" }
+level = "advanced"
+apply = "live"
+
+[option."fg.pace_relax"]
+type = "float"
+label = "Pacing catch-up"
+help = "Fraction of the timing difference smooth pacing catches up each frame."
+min = 0.0
+max = 1.0
+step = 0.05
+precision = 2
+when = { "fg.mode" = "d3d12", "fg.pace" = "smooth" }
+level = "advanced"
+apply = "live"
+
+[option."fg.done_fence"]
+type = "enum"
+label = "Completion fence"
+help = "Which fence the CPU waits on for DLSS-G completion."
+values = [
+  { value = "shared", label = "Shared (also opened by D3D11)" },
+  { value = "private", label = "Private D3D12 fence" },
+]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.ts_guard"]
+type = "bool"
+label = "Wait for DLSS-G timestamp"
+help = "Before showing a generated frame, also waits up to 50 ms for DLSS-G's end-of-work GPU timestamp."
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.show"]
+type = "enum"
+label = "Frames shown"
+help = "Presents only one kind of frame, for screenshots."
+values = [
+  { value = "both", label = "Both" },
+  { value = "generated", label = "Generated only" },
+  { value = "real", label = "Real only" },
+]
+open = true                # outreal, compare and compare_gen are accepted too
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "debug"
+apply = "live"
+
+[option."fg.debug_fill"]
+type = "bool"
+label = "Magenta generated frame"
+help = "Creates the generated-frame texture magenta, so a frame DLSS-G never wrote is recognisable."
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "at"
+at = "texture creation"
+
+[option."fg.ngx_log"]
+type = "enum"
+label = "NGX log"
+help = "Copies NGX's own log into aco_dlss.log."
+values = [
+  { value = "0", label = "Off" },
+  { value = "1", label = "On" },
+  { value = "2", label = "Verbose" },
+]
+level = "debug"
+apply = "at"
+at = "NGX initialization"
+
+[option."fg.bb_format_dxgi"]
+type = "bool"
+label = "Backbuffer format as DXGI"
+help = "Passes the backbuffer format to DLSS-G as a DXGI value instead of a VkFormat."
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "at"
+at = "Frame Generation feature creation"
+
+[option."fg.extra"]
+type = "list"
+item = { type = "string", pattern = '^DLSSG\.\w+:(0[xX][0-9A-Fa-f]+|\d+)$' }
+sep = ","
+label = "Extra DLSS-G parameters"
+help = "Extra unsigned DLSS-G evaluation parameters, e.g. DLSSG.TargetFrameRate:120."
+when = { "fg.mode" = ["d3d12", "on"] }
+experimental = true
+overlay = false
+level = "debug"
+apply = "live"
+
+[option."fg.input"]
+type = "enum"
+label = "Backbuffer input"
+help = "Which image DLSS-G gets as the backbuffer."
+values = [
+  { value = "swapchain", label = "Swapchain image" },
+  { value = "copy", label = "Our copy" },
+]
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "live"
+
+[option."fg.swap_outputs"]
+type = "bool"
+label = "Swap DLSS-G outputs"
+help = "Swaps the textures given as OutputInterpolated and OutputReal."
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "live"
+
+[option."fg.hudless"]
+type = "bool"
+label = "HUD-less colour"
+help = "Gives DLSS-G the scene before the UI is composited, so the HUD isn't warped."
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "advanced"
+apply = "live"
+
+[option."fg.refresh_hz"]
+type = "int"
+label = "Display refresh rate"
+help = "The display refresh rate DLSS-G is told about."
+unit = "Hz"
+min = 30
+max = 500
+special = [{ value = 0, label = "Not set" }]
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "advanced"
+apply = "live"
+
+[option."fg.count"]
+type = "int"
+label = "Generated frames per real frame"
+help = "DLSS-G MultiFrameCount; 1 is standard 2x. With 2 only one generated frame is shown, at twice the GPU cost."
+min = 1
+max = 3
+step = 1
+when = { "fg.mode" = ["d3d12", "on"] }
+experimental = true
+level = "debug"
+apply = "live"
+
+[option."fg.show_index"]
+type = "int"
+label = "Generated frame shown"
+help = "Which generated frame (1 to the count) is presented."
+min = 1
+max = 3
+step = 1
+when = { "fg.mode" = ["d3d12", "on"], "fg.count" = { min = 2, max = 3 } }
+level = "debug"
+apply = "live"
+
+[option."fg.raw_output"]
+type = "bool"
+label = "Raw Vulkan output"
+help = "DLSS-G writes a Vulkan image the mod creates itself, which is read back and logged."
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "live"
+
+[option."fg.trace_cu"]
+type = "bool"
+label = "Trace CUDA kernels"
+help = "Logs how NGX creates and launches its CUDA kernels."
+when = { "fg.mode" = "on" }
+level = "debug"
+apply = "at"
+at = "NGX initialization"
+
+[option."fg.hide_handle64"]
+type = "bool"
+label = "Hide 64-bit image view handles"
+help = "Hides vkGetImageViewHandle64NVX and vkGetImageViewAddressNVX from DLSS-G."
+when = { "fg.mode" = "on" }
+danger = "Frame Generation fails with this on; it exists for experiments."
+experimental = true
+level = "debug"
+apply = "restart"
+
+[option."fg.create_extra"]
+type = "list"
+item = { type = "string", pattern = '^DLSSG\.\w+:(0[xX][0-9A-Fa-f]+|\d+)$' }
+sep = ","
+label = "Extra DLSS-G create parameters"
+help = "Extra unsigned DLSS-G creation parameters, e.g. DLSSG.UserInterfaceRecompositionEnabled:0."
+when = { "fg.mode" = ["d3d12", "on"] }
+experimental = true
+overlay = false
+level = "debug"
+apply = "at"
+at = "Frame Generation feature creation"
+
+[option."fg.descriptor_heap"]
+type = "bool"
+label = "vkd3d descriptor-heap mode"
+help = "Runs the mod's vkd3d-proton device in descriptor-heap mode, which gives DLSS-G the CUDA descriptors it needs."
+when = { "fg.mode" = "d3d12" }
+danger = "With this off DLSS-G cannot get CUDA descriptors for its buffers and Frame Generation fails."
+level = "debug"
+apply = "at"
+at = "D3D12 device creation"
+
+[option."fg.verify"]
+type = "bool"
+label = "Verify generated frames"
+help = "Every 2 s, logs how the generated frame differs from the real frames around it and writes all three to out/fgverify."
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.trace_presents"]
+type = "int"
+label = "Traced presents"
+help = "How many presents a trace records after touching <out>/fgtrace-start."
+min = 1
+max = 100000
+step = 100
+when = { "fg.mode" = "d3d12" }
+overlay = false
+level = "debug"
+apply = "live"
+
+[option."fg.trace_shots"]
+type = "int"
+label = "Traced images"
+help = "Of the traced presents, how many get a band of the image captured into <out>/fgtrace."
+min = 0
+max = 10000
+step = 10
+when = { "fg.mode" = "d3d12" }
+overlay = false
+level = "debug"
+apply = "live"
+
+[option."fg.present_thread"]
+type = "enum"
+label = "Present thread"
+help = "The game renders into the mod's backbuffer and a thread presents the real frame half a frame later, so the game never stalls."
+values = [
+  { value = "1", label = "On" },
+  { value = "0", label = "Off (inline; stalls the game)" },
+  { value = "2", label = "Own backbuffer, inline presents", level = "debug" },
+]
+when = { "fg.mode" = "d3d12" }
+level = "advanced"
+apply = "at"
+at = "swapchain creation"
+
+[option."fg.present_gate"]
+type = "bool"
+label = "Present gate"
+help = "While the present thread copies and presents, the game's render thread waits. Without it the present thread starves at high resolution."
+when = { "fg.mode" = "d3d12", "fg.present_thread" = "1" }
+level = "advanced"
+apply = "live"
+
+[option."fg.sync"]
+type = "enum"
+label = "D3D12 to D3D11 sync"
+help = "How the generated frame is handed back to D3D11."
+values = [
+  { value = "cpu", label = "CPU wait", help = "The present thread waits for the D3D12 fence; D3D11 never waits." },
+  { value = "gpu", label = "GPU wait", help = "A D3D11 queue wait on the shared fence; halves the frame rate under vkd3d-proton." },
+]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+
+[option."fg.frame_latency"]
+type = "int"
+label = "Maximum frame latency"
+help = "DXGI maximum frame latency while Frame Generation runs; each present counts, so FG uses two per game frame."
+min = 1
+max = 16
+step = 1
+special = [{ value = 0, label = "The game's" }]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "live"
+latency = "about 10 seconds"
+
+[option."fg.buffers"]
+type = "int"
+label = "Minimum swapchain buffers"
+help = "Raises the swapchain buffer count; DXVK caps the frame latency by it."
+min = 2
+max = 8
+step = 1
+special = [{ value = 0, label = "The game's" }]
+when = { "fg.mode" = "d3d12" }
+level = "debug"
+apply = "at"
+at = "swapchain creation or resize"
+
+[option."fg.skip"]
+type = "enum"
+label = "Skip step (bisecting)"
+help = "Leaves out one part of the Frame Generation work, to find what costs frame rate."
+values = [
+  { value = "", label = "Nothing skipped" },
+  { value = "eval", label = "DLSS-G evaluation" },
+  { value = "d3d12", label = "All D3D12 work and fences" },
+  { value = "present2", label = "Second (real) present" },
+]
+when = { "fg.mode" = "d3d12" }
+danger = "Frame Generation stops producing correct frames while a step is skipped."
+level = "debug"
+apply = "live"
+
+# ---------------------------------------------------------------- [cloth]
+
+[option."cloth.mode"]
+type = "enum"
+label = "Cloth simulation"
+help = "The game steps cloth at 60 Hz near the camera and 40 to 20 Hz further out, without interpolation. Game v1.62 only."
+values = [
+  { value = "game", label = "Game default" },
+  { value = "render", label = "Every frame", help = "Never slower than the game; costs CPU in crowds." },
+  { value = "scale", label = "Scaled (diagnostics)", level = "debug" },
+]
+level = "basic"
+apply = "live"
+
+[option."cloth.scale"]
+type = "float"
+label = "Cloth interval scale"
+help = "Multiplies the engine's cloth step intervals."
+min = 0.25
+max = 20
+step = 0.25
+unit = "×"
+when = { "cloth.mode" = "scale" }
+level = "debug"
+apply = "live"
+
+# ---------------------------------------------------------------- [world]
+
+[option."world.lod_distance"]
+type = "float"
+label = "Draw distance"
+help = "Objects stay drawn at their detailed LODs this many times further out. 1 is the game default."
+min = 0.5
+max = 4
+step = 0.25
+unit = "×"
+level = "basic"
+apply = "live"
+
+[option."world.lod_mode"]
+type = "enum"
+label = "Draw distance method"
+help = "How the draw distance multiplier is applied to LOD ranges."
+values = [
+  { value = "far", label = "Far end only", help = "Patched culling shaders; nothing vanishes before its replacement streams in." },
+  { value = "all", label = "Every range (old)", help = "Makes far proxies vanish near the camera, e.g. Alexandria's planters." },
+]
+level = "advanced"
+apply = "live"
+
+[option."world.npc_density"]
+type = "float"
+label = "Crowd density"
+help = "Multiplies the cap on ambient characters. 3 to 5 lifts it out of the way."
+min = 1
+max = 5
+step = 0.5
+unit = "×"
+level = "basic"
+apply = "live"
+latency = "about a minute"
+
+[option."world.npc_distance"]
+type = "float"
+label = "Crowd spawn distance"
+help = "Multiplies the distance at which ambient characters spawn, so more of the city is populated once the density cap is lifted."
+min = 1
+max = 3
+step = 0.25
+unit = "×"
+experimental = true
+level = "basic"
+apply = "live"
+latency = "about 10 seconds"
+
+[option."world.npc_units"]
+type = "int"
+label = "Extra people per spawner"
+help = "Extra characters per original one in each civilian spawner you approach, made with the game's own code. 1 is off."
+min = 1
+max = 4
+step = 1
+experimental = true
+level = "debug"
+apply = "live"
+
+# ---------------------------------------------------------------- presets
+
+[[preset]]
+id = "crowds"
+label = "Busy cities"
+help = "About 2.6–3× Alexandria's crowds. Costs CPU."
+set = { "world.npc_density" = 5, "world.npc_distance" = 2 }
+
+# ---------------------------------------------------------------- metrics (SIGHT-HUD §3.15)
+
+[metric.frame]
+kind = "frame"
+label = "DLSS frames"
+help = "One record per DXGI Present the mod makes: real frames with FG off or on, and generated frames."
+clock = "qpc"
+key = "present_seq"
+fields = ["game_present", "present_call", "present_return"]
+sample = "per-frame"
+level = "advanced"
+group = "Frame generation"
+roles = [
+  { role = "frame.base", flags = ["real", "nofg"], on = "game_present" },
+  { role = "frame.generated", flags = ["generated"], on = "present_call" },
+]
+
+[metric."fg.state"]
+kind = "state"
+label = "Frame Generation"
+short = "FG"
+values = [
+  { value = "off", label = "off", level = "dim" },
+  { value = "on", label = "on" },
+  { value = "failed", label = "failed", level = "bad" },
+]
+roles = ["fg.state"]
+group = "Frame generation"
+display = "badge"
+level = "basic"
+
+[metric."fg.dropped"]
+kind = "counter"
+label = "Generated frames dropped"
+help = "The generated frame wasn't ready in time; only the real frame was shown."
+unit = "count"
+better = "lower"
+group = "Frame generation"
+level = "advanced"
+
+[metric.upscaler]
+kind = "text"
+label = "Upscaler"
+help = "The upscaler in use: DLSS and its preset, or the game's TAA."
+roles = ["upscaler"]
+group = "Upscaling"
+level = "basic"
+
+[metric."res.internal"]
+kind = "text"
+label = "Internal resolution"
+help = "The resolution the game renders at before upscaling."
+roles = ["render.resolution"]
+group = "Upscaling"
+level = "basic"
+
+[metric."dlss.ms"]
+kind = "series"
+label = "DLSS cost"
+short = "DLSS"
+help = "GPU time of each DLSS evaluation."
+unit = "ms"
+better = "lower"
+sample = "per-frame"
+display = "sparkline"
+group = "Upscaling"
+level = "advanced"
+
+[metric."reflex.mode"]
+kind = "state"
+label = "Reflex"
+values = [
+  { value = "off", label = "off", level = "dim" },
+  { value = "on", label = "on" },
+  { value = "boost", label = "boost" },
+]
+group = "Latency"
+display = "badge"
+level = "basic"
+
+[metric.latency]
+kind = "frame"
+label = "Reflex latency"
+help = "Reflex's per-frame latency report: input, simulation, submit, present, driver, queue and GPU timestamps."
+clock = "reflex_us"
+key = "frame_id"
+fields = ["input", "sim_start", "sim_end", "submit_start", "submit_end", "present_start",
+          "present_end", "driver_end", "queue_end", "gpu_start", "gpu_end"]
+roles = ["latency.frame"]
+group = "Latency"
+level = "advanced"
+
+[metric.bench]
+kind = "event"
+label = "Benchmark markers"
+help = "Marks the begin and end of a benchmark run."
+group = "Diagnostics"
+level = "debug"
+
+# ---------------------------------------------------------------- actions
+
+[action."fg.toggle"]
+label = "Toggle Frame Generation"
+hotkey_option = "fg.toggle_key"
+
+[action."upscaler.toggle"]
+label = "Switch DLSS / game TAA"
+hotkey_option = "upscaler.toggle_key"

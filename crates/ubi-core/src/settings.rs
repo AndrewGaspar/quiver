@@ -69,6 +69,24 @@ pub fn apply(product_id: u32, ops: &[SettingOp], source: &str, message: Option<S
 }
 
 /// Append a finished play session to `<data>/games/<id>/playtime.jsonl`.
+/// [`record_session`] with extra fields stored beside it (readers that don't know them
+/// ignore them).
+pub fn record_session_with(product_id: u32, session: &ubi_api::PlaySession, extra: serde_json::Value) -> Result<()> {
+    let mut v = serde_json::to_value(session)?;
+    if let (Some(o), Some(x)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in x {
+            if !val.is_null() {
+                o.insert(k.clone(), val.clone());
+            }
+        }
+    }
+    let path = history_path(product_id).with_file_name("playtime.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{}", serde_json::to_string(&v)?)?;
+    Ok(())
+}
+
 pub fn record_session(product_id: u32, session: &ubi_api::PlaySession) -> Result<()> {
     let path = history_path(product_id).with_file_name("playtime.jsonl");
     std::fs::create_dir_all(path.parent().unwrap())?;

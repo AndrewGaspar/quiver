@@ -36,6 +36,12 @@ enum Encoding {
     Utf16 { le: bool },
 }
 
+/// A config file's bytes as text (UTF-8 with or without a BOM, or UTF-16), for readers that
+/// don't write it back.
+pub fn decode_text(bytes: &[u8]) -> Result<(String, bool)> {
+    decode(bytes).map(|(t, e)| (t, matches!(e, Encoding::Utf16 { .. })))
+}
+
 fn decode(bytes: &[u8]) -> Result<(String, Encoding)> {
     let utf16 = |le: bool| -> Result<(String, Encoding)> {
         let body = &bytes[2..];
@@ -588,7 +594,7 @@ pub struct View {
 }
 
 /// `name` against a pattern with `*` and `?`.
-fn wildcard(pat: &str, name: &str) -> bool {
+pub(crate) fn wildcard(pat: &str, name: &str) -> bool {
     let (p, n): (Vec<char>, Vec<char>) = (pat.chars().collect(), name.chars().collect());
     let (mut pi, mut ni, mut star, mut mark) = (0, 0, None, 0);
     while ni < n.len() {

@@ -114,6 +114,19 @@ pub enum ModsAction {
         #[arg(value_name = "MOD")]
         mod_id: Option<String>,
     },
+    /// Mod options: list, get, set, reset, preset, diff, history, restore, revert, keys,
+    /// schema, infer, lint (design/MOD-CONFIG.md). Values are per profile (--profile,
+    /// default: the game's default profile), saved as changes from the defaults; a running
+    /// game gets them live where the mod allows it, and every change says what happened.
+    Options {
+        #[command(subcommand)]
+        action: Option<crate::options::OptionsAction>,
+        /// Profile name or id, or `vanilla` (default: the game's default profile).
+        #[arg(long, global = true)]
+        profile: Option<String>,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Give every profile a save store: one with its own saves folder (or separate_saves=on)
     /// gets a store that is that folder, nothing moves; the others use Default. Launches do
     /// this on their own; `--dry-run` shows what it would do.
@@ -195,6 +208,10 @@ pub enum VersionAction {
         /// Also hide this install path (relative to the install folder).
         #[arg(long = "delete", value_name = "PATH")]
         delete: Vec<String>,
+        /// The version's options schema (default: DIR's quiver-options.toml, else the
+        /// current version's carried forward).
+        #[arg(long, value_name = "FILE")]
+        options: Option<PathBuf>,
     },
     /// A mod's versions, newest first, and which profiles track or pin which.
     List {
@@ -724,10 +741,12 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 prerelease: false,
                 save_compatible: None,
                 delete,
+                options: None,
             };
             return run_version(client, &g, action).await;
         }
         ModsAction::Version { action } => return run_version(client, &g, action).await,
+        ModsAction::Options { action, profile, json } => return crate::options::run(client, source, game, profile, json, action).await,
         ModsAction::MergeVersions { into, from, labels, dry_run, json } => {
             let confirmed = !dry_run && confirm(source, &format!("make {} versions of mod '{into}' of {} (profiles that stack them are rewritten)", from.join(", "), g.name))?;
             let req = ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed };
@@ -1006,7 +1025,8 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
     let product_id = g.product_id;
     let change = |req: ModsRequest| client.call::<VersionChange>(Request::Mods(req));
     match action {
-        VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete } => {
+        VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete, options } => {
+            let options = options.map(|f| f.canonicalize().with_context(|| format!("{} not found", f.display()))).transpose()?;
             let path = match dir {
                 Some(dir) => {
                     let path = dir.canonicalize().with_context(|| format!("{} not found", dir.display()))?;
@@ -1015,7 +1035,7 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
                 }
                 None => PathBuf::new(),
             };
-            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete };
+            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete, options };
             print_version_change(&g.name, "added", &change(req).await?);
         }
         VersionAction::Use { mod_id, version, message } => {
