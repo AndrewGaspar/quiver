@@ -128,6 +128,7 @@ pub fn default_stat(desc: &MetricDescriptor) -> ubi_api::perf::Stat {
     match desc.kind {
         MetricKind::Counter => Stat::Rate,
         MetricKind::Frame | MetricKind::Series => Stat::Mean,
+        MetricKind::Gauge if desc.sample == Some(ubi_perf::descriptor::SampleRate::PerFrame) => Stat::Mean,
         _ => Stat::Last,
     }
 }

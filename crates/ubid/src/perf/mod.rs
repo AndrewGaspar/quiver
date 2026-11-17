@@ -258,9 +258,11 @@ impl PerfHub {
         dev: bool,
     ) -> Result<Began> {
         let id = SessionId::parse(session_id).with_context(|| format!("bad session id {session_id:?}"))?;
-        let cfg = self.hud.for_launch(product_id, profile);
+        let mut cfg = self.hud.for_launch(product_id, profile);
+        // A dev session plays a launch with the HUD on (its env is what a fake layer needs).
+        cfg.enabled |= dev;
         let mut notes = Vec::new();
-        let (dir, image) = if cfg.enabled || dev {
+        let (dir, image) = if cfg.enabled {
             let dir = SessionDir::create(&self.shm_root, &id).context("creating the perf session dir")?;
             let image = match dir.create_hud_image(hud_buffer_bytes()) {
                 Ok(p) => Some(p),

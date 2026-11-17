@@ -1,0 +1,255 @@
+//! The hub end to end, with a fake layer (a ring writer in the session dir), fake client
+//! connections (a channel per connection, as the socket loop gives the hub) and the mod
+//! registry's sink.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use ubi_api::Reply;
+use ubi_api::mods::ModSdkConnection;
+use ubi_api::perf::{Captures, HudCell, HudScope, HudScopeRef, PerfEvent, Presenter, Stat};
+use ubi_core::modsdk::{DeclaredMetric, ModMetricsSink, Sample};
+use ubi_perf::clock::mono_raw_ns;
+use ubi_perf::descriptor::{CheckedValue, MetricDescriptor, MetricKind, RoleClaim, StateValue};
+use ubi_perf::layout::{DRAW_ERR_NO_IMAGE, LayerStatus};
+use ubi_perf::record::LayerPresent;
+use ubi_perf::session::SessionDir;
+
+use super::*;
+
+struct Env {
+    _data: tempfile::TempDir,
+    _shm: tempfile::TempDir,
+    hub: Arc<PerfHub>,
+}
+
+fn env() -> Env {
+    let data = tempfile::tempdir().unwrap();
+    let shm = tempfile::Builder::new().prefix("quiverd-hub-test-").tempdir_in("/dev/shm").unwrap();
+    let hub = PerfHub::new(data.path().to_owned(), shm.path().to_owned());
+    Env { _data: data, _shm: shm, hub }
+}
+
+fn conn(id: u64) -> (ConnCtx, mpsc::UnboundedReceiver<Reply>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (ConnCtx { id, tx }, rx)
+}
+
+fn perf_events(rx: &mut mpsc::UnboundedReceiver<Reply>) -> Vec<PerfEvent> {
+    let mut v = Vec::new();
+    while let Ok(r) = rx.try_recv() {
+        if let Reply::Perf(e) = r {
+            v.push(e);
+        }
+    }
+    v
+}
+
+/// A fake Sight layer: a ring in the session dir, 120 presents a second for `secs`
+/// seconds ending now, and a status block.
+fn fake_layer(dir: &SessionDir, secs: i64) -> ubi_perf::ring::RingWriter<ubi_perf::shm::Mapping> {
+    let w = dir.create_layer_ring(std::process::id(), [5; 16]).unwrap();
+    let n = secs * 120;
+    let end = mono_raw_ns();
+    for i in 0..n {
+        let t = end - (n - i) * 8_333_333;
+        w.push(&LayerPresent { swapchain: 1, seq: i as u64 + 1, entry_ns: t, return_ns: t + 100_000, ..Default::default() }.to_record());
+    }
+    let mut s = LayerStatus::ZERO;
+    s.extent_w = 2560;
+    s.extent_h = 1600;
+    s.swapchain = 1;
+    s.vendor_id = 0x10de;
+    s.draw_error = DRAW_ERR_NO_IMAGE;
+    LayerStatus::set_str(&mut s.engine_name, "DXVK");
+    w.set_layer_status(&s);
+    w.heartbeat(mono_raw_ns());
+    w
+}
+
+fn dev_session(hub: &PerfHub, product: u32) -> (String, SessionDir) {
+    let id = ubi_core::modsdk::new_session_id();
+    let b = hub.begin(&id, product, None, None, &BTreeMap::new(), &[], true).unwrap();
+    let dir = SessionDir::open(std::path::Path::new(&b.plan.env.get("QUIVER_PERF_DIR").cloned().unwrap_or_default())).ok();
+    // A dev session always has a dir, even with the HUD off for the product.
+    let dir = dir.unwrap_or_else(|| hub.lock().sessions[&id].dir.clone().unwrap());
+    (id, dir)
+}
+
+#[test]
+fn watch_sees_a_synthetic_layer_ring() {
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 3539);
+    let _w = fake_layer(&dir, 3);
+    let mut watched = HashMap::new();
+    drain_once(&e.hub, &mut watched);
+    let (c, mut rx) = conn(1);
+    let sub = e.hub.subscribe(&c, None, Some(3539), vec!["fps".into(), "frametime".into(), "fps.p1low".into(), "gpu.*".into()], 500, 1000, vec![]).unwrap();
+    e.hub.publish(mono_raw_ns());
+    let ev = perf_events(&mut rx);
+    let u = ev.iter().find_map(|e| match e {
+        PerfEvent::Update(u) => Some(u),
+        _ => None,
+    });
+    let u = u.expect("an update");
+    assert_eq!((u.sub, u.session.as_str(), u.product_id), (sub, sid.as_str(), 3539));
+    let fps = u.values["fps"][&Stat::Mean].value.unwrap();
+    assert!((fps - 120.0).abs() < 1.0, "{fps}");
+    assert_eq!(u.values["frametime"][&Stat::Mean].text, "8.3");
+    assert!(u.values.contains_key("gpu.load"), "globs expand");
+    // Producers: the layer is connected, with its records counted.
+    let info = e.hub.sessions().into_iter().find(|s| s.session == sid).unwrap();
+    let layer = info.producers.iter().find(|p| p.id == "layer").unwrap();
+    assert!(layer.connected && layer.ring == "ok" && layer.records >= 359, "{layer:?}");
+    // The next publish within `every_ms` sends nothing; unsubscribe stops it for good.
+    e.hub.publish(mono_raw_ns());
+    assert!(perf_events(&mut rx).iter().all(|e| !matches!(e, PerfEvent::Update(_))));
+    e.hub.unsubscribe(1, sub).unwrap();
+    assert!(e.hub.unsubscribe(1, sub).is_err());
+    // Catalog and status.
+    let cat = e.hub.catalog(Some(&sid), None).unwrap();
+    let fps = cat.iter().find(|m| m.descriptor.id == "fps").unwrap();
+    assert_eq!(fps.source.as_deref(), Some("present.frame"));
+    let st = e.hub.status(Some(&sid), None).unwrap();
+    let l = st.layer.unwrap();
+    assert_eq!((l.extent, l.engine.as_str(), l.draw_error.as_str()), (Some([2560, 1600]), "DXVK", "no_image"));
+    assert!(st.image.is_some(), "the dev session has a hud.image");
+    let summary = e.hub.end(&sid).unwrap();
+    // Presents from before the session's start (− 1 s) are outside its window: the last
+    // second's of the three.
+    assert!(summary.frames > 100 && summary.frames < 130, "{}", summary.frames);
+    assert!((summary.fps.unwrap().mean - 120.0).abs() < 1.0);
+    assert!(!dir.path().exists(), "the session dir is removed");
+}
+
+#[test]
+fn hud_attach_toggle_next_with_a_fake_renderer() {
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 7);
+    let _w = fake_layer(&dir, 2);
+    drain_once(&e.hub, &mut HashMap::new());
+    let (sight, mut rx) = conn(9);
+    let m = e.hub.attach(&sight, &sid).unwrap();
+    assert_eq!((m.rev, m.layout.as_str(), m.on, m.presenter), (1, "compact", false, Presenter::Game));
+    assert_eq!(m.extent, Some([2560, 1600]));
+    assert_eq!(m.image.as_deref(), Some(dir.file(&ubi_perf::session::FileKind::HudImage).as_path()));
+    assert!(m.rows[0].cells.iter().any(|c| matches!(c, HudCell::Value { metric, .. } if metric == "fps")));
+    perf_events(&mut rx);
+    // Shift+F3: shown; remembered for the game.
+    let st = e.hub.toggle(None, None).unwrap();
+    assert!(st.on && st.renderer_attached);
+    let models: Vec<_> = perf_events(&mut rx).into_iter().filter_map(|e| if let PerfEvent::HudModel(m) = e { Some(m) } else { None }).collect();
+    assert_eq!(models.len(), 1);
+    assert!(models[0].on && models[0].rev == 2);
+    // Ctrl+Shift+F3: next preset.
+    assert_eq!(e.hub.next(Some(&sid), None).unwrap().layout, "standard");
+    assert_eq!(e.hub.hud.for_launch(7, None).layout, "standard");
+    assert!(e.hub.hud.for_launch(7, None).on);
+    // Nothing changed: no model.
+    perf_events(&mut rx);
+    e.hub.publish(mono_raw_ns());
+    assert!(perf_events(&mut rx).iter().all(|e| !matches!(e, PerfEvent::HudModel(_))));
+    // The renderer goes away: no more models; ending the session tells nobody.
+    e.hub.disconnect(9);
+    assert!(!e.hub.status(None, Some(7)).unwrap().renderer_attached);
+    e.hub.end(&sid);
+}
+
+#[test]
+fn hud_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
+    let e = env();
+    let id = ubi_core::modsdk::new_session_id();
+    let b = e.hub.begin(&id, 11, None, Some(std::path::Path::new("/p")), &BTreeMap::new(), &["mangohud".into()], false).unwrap();
+    assert!(b.plan.env.is_empty(), "off by default: {:?}", b.plan.env);
+    assert!(e.hub.lock().sessions[&id].dir.is_none());
+    let (c, _rx) = conn(1);
+    assert!(e.hub.attach(&c, &id).is_err());
+    assert!(e.hub.toggle(None, Some(11)).is_err());
+    // System metrics still run, so the session still gets a (sensor-only) summary.
+    e.hub.with_session(Some(&id), 11, |s| s.store.push_num("cpu.load", mono_raw_ns(), 40.0));
+    assert!(e.hub.end(&id).unwrap().cpu_load.is_some());
+    // Turn it on for the game, hidden in captures.
+    e.hub.hud.apply(&HudScopeRef::game(11), &HudScope { enabled: Some(true), captures: Some(Captures::Hidden), ..Default::default() }, &[], "test", None).unwrap();
+    let id = ubi_core::modsdk::new_session_id();
+    let env_in: BTreeMap<String, String> = [("OBS_VKCAPTURE".to_string(), "1".to_string())].into();
+    let b = e.hub.begin(&id, 11, None, None, &env_in, &["mangohud".into()], false).unwrap();
+    let dir = std::path::PathBuf::from(&b.plan.env["QUIVER_PERF_DIR"]);
+    assert!(dir.join("hud.image").is_file());
+    assert_eq!(b.plan.env["QUIVER_SESSION"], id);
+    assert_eq!(b.plan.env["QUIVER_SIGHT"], "1");
+    assert_eq!(b.plan.env["MANGOHUD_CONFIG"], "read_cfg,toggle_logging=Shift_L+F7");
+    assert!(b.plan.env["VK_INSTANCE_LAYERS"].ends_with("VK_LAYER_OBS_vkcapture_64:VK_LAYER_QUIVER_sight"));
+    // A launch that never produced anything records no summary.
+    assert!(e.hub.end(&id).is_none());
+    assert!(!dir.exists());
+}
+
+fn conn_info(session: &str, product: u32) -> ModSdkConnection {
+    ModSdkConnection { conn: 42, product_id: product, surface: "aco-dlss".into(), sdk: "test".into(), proto: 2, session: Some(session.into()), ..Default::default() }
+}
+
+#[test]
+fn mod_metrics_through_the_registry_sink() {
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 3539);
+    let _w = fake_layer(&dir, 2);
+    drain_once(&e.hub, &mut HashMap::new());
+    let sink = mods::PerfModSink::new(&e.hub);
+    let m = conn_info(&sid, 3539);
+    let mut real = MetricDescriptor::new("aco-dlss.frames.real", MetricKind::Counter);
+    real.roles = vec![RoleClaim { role: catalog::ROLE_BASE_COUNT.into(), flags: vec![], on: None }];
+    let mut fg = MetricDescriptor::new("aco-dlss.fg.state", MetricKind::State);
+    fg.values = vec![StateValue { value: "off".into(), label: None, level: Some(ubi_api::perf::Level::Dim) }, StateValue { value: "on".into(), label: None, level: None }];
+    fg.roles = vec![RoleClaim { role: "fg.state".into(), flags: vec![], on: None }];
+    let mut up = MetricDescriptor::new("aco-dlss.upscaler", MetricKind::Text);
+    up.roles = vec![RoleClaim { role: "upscaler".into(), flags: vec![], on: None }];
+    // Not its namespace: ignored even if the registry let it through.
+    let other = MetricDescriptor::new("other.thing", MetricKind::Gauge);
+    let declared: Vec<DeclaredMetric> = [real, fg, up, other].into_iter().enumerate().map(|(i, d)| DeclaredMetric { index: i as u16 + 1, id: d.id.clone(), def: d }).collect();
+    sink.declared(&m, &declared);
+    let s = |i: usize, value| Sample { index: declared[i].index, id: declared[i].id.clone(), kind: declared[i].def.kind, value };
+    sink.samples(&m, 0, &[s(0, CheckedValue::Counter(0)), s(1, CheckedValue::State(1)), s(2, CheckedValue::Text("DLSS K".into()))]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    sink.samples(&m, 0, &[s(0, CheckedValue::Counter(18))]);
+    let cat = e.hub.catalog(Some(&sid), None).unwrap();
+    assert!(cat.iter().any(|x| x.descriptor.id == "aco-dlss.frames.real" && x.roles == [catalog::ROLE_BASE_COUNT]));
+    assert!(!cat.iter().any(|x| x.descriptor.id == "other.thing"));
+    let base = cat.iter().find(|x| x.descriptor.id == "fps.base").unwrap();
+    assert_eq!(base.source.as_deref(), Some("aco-dlss.frames.real"));
+    let v = e.hub.with_session(Some(&sid), 3539, |s| s.store.value("fps.base", Stat::Mean, registry::WINDOW_1S, mono_raw_ns())).flatten();
+    let rate = v.and_then(|r| r.num()).unwrap();
+    assert!((40.0..=80.0).contains(&rate), "{rate}");
+    assert_eq!(cat.iter().find(|x| x.descriptor.id == "upscaler").unwrap().last.as_ref().unwrap().text, "DLSS K");
+    // A mark with a QPC time far outside the session is dropped and the clock flagged.
+    sink.mark(&m, &declared[1], 1, None, Some("begin"));
+    let info = e.hub.sessions().into_iter().find(|s| s.session == sid).unwrap();
+    let p = info.producers.iter().find(|p| p.id == "mod:aco-dlss").unwrap();
+    assert_eq!(p.clock, "suspect");
+    // Gone with its last connection.
+    sink.disconnected(&m);
+    let cat = e.hub.catalog(Some(&sid), None).unwrap();
+    assert_eq!(cat.iter().find(|x| x.descriptor.id == "aco-dlss.fg.state").unwrap().state, ubi_api::perf::MetricState::Gone);
+    e.hub.end(&sid);
+}
+
+#[test]
+fn static_catalog_and_session_picking() {
+    let e = env();
+    let cat = e.hub.catalog(None, Some(1)).unwrap();
+    assert!(cat.iter().any(|m| m.descriptor.id == "fps.p1low"));
+    assert!(cat.iter().any(|m| m.descriptor.id == "gpu.load"));
+    assert!(e.hub.status(None, None).is_err());
+    let (a, _) = dev_session(&e.hub, 1);
+    assert_eq!(e.hub.status(None, None).unwrap().session, a, "the only session");
+    let (b, _) = dev_session(&e.hub, 2);
+    assert!(e.hub.status(None, None).is_err(), "two sessions, none focused");
+    assert_eq!(e.hub.status(None, Some(2)).unwrap().session, b);
+    let (c, _rx) = conn(1);
+    for _ in 0..8 {
+        e.hub.subscribe(&c, Some(&a), None, vec![], 100, 1000, vec![]).unwrap();
+    }
+    assert!(e.hub.subscribe(&c, Some(&a), None, vec![], 100, 1000, vec![]).is_err(), "≤ 8 per connection");
+    e.hub.end(&a);
+    e.hub.end(&b);
+}
