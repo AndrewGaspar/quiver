@@ -29,6 +29,8 @@ pub async fn build(auth: &Auth, session: &Session, lib: &mut Library, uplay_id: 
         })
         .collect();
     let upc_ticket = lib.uplay_pc_ticket(uplay_id).await?;
+    // Every launch context is a session of its own, with its own mod pipe.
+    let session_id = crate::modsdk::new_session_id();
     Ok(LaunchContext {
         uplay_id,
         account_id: session.user_id.clone(),
@@ -49,6 +51,9 @@ pub async fn build(auth: &Auth, session: &Session, lib: &mut Library, uplay_id: 
         language: Some("en-US".into()),
         broker: None,
         chunks: Vec::new(),
+        mods_pipe: Some(ubi_proto::modsdk::pipe_name(Some(&session_id))),
+        session: Some(session_id),
+        profile: None,
     })
 }
 

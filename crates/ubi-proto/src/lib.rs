@@ -27,5 +27,8 @@ pub mod mg {
     }
 }
 
+// Not protobuf: Quiver's own mod SDK protocol (`quiver_mod.h`), JSON over the bridge's pipe.
+pub mod modsdk;
+
 pub use mg::playtime;
 pub use mg::protocol::*;

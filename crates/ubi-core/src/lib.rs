@@ -16,6 +16,7 @@ pub mod launcher;
 pub mod library;
 pub mod manifest;
 pub mod modpkg;
+pub mod modsdk;
 pub mod mods;
 pub mod modversions;
 pub mod online;

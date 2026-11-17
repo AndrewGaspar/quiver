@@ -707,6 +707,7 @@ pub async fn play(
     ctx.broker = Some(broker.to_owned());
     ctx.chunks = launch::installed_chunks(&game.install_dir).unwrap_or_default();
     ctx.language = settings.language.clone().or(game.language.clone()).or(ctx.language);
+    ctx.profile = profile.map(|p| p.id.clone());
     let ctx_path = run_dir.join("context.json");
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -809,6 +810,14 @@ pub async fn play(
     }
     if let Some(p) = profile {
         cmd.env("QUIVER_PROFILE", &p.id);
+    }
+    // The bridge is the game's sibling here, not its parent, so the game learns the mod
+    // pipe the bridge created (from the same context) from us.
+    if let Some(s) = &ctx.session {
+        cmd.env("QUIVER_SESSION", s);
+    }
+    if let Some(pipe) = &ctx.mods_pipe {
+        cmd.env("QUIVER_MODS_PIPE", pipe);
     }
     cmd.env("UPLAY_ARGUMENTS", uplay_arguments(game.product_id, &exe_win, &workdir_win))
         .current_dir(workdir)

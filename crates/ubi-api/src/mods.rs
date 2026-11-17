@@ -1354,10 +1354,90 @@ pub enum ModsRequest {
         #[serde(default)]
         confirmed: bool,
     },
+    // -- Mod SDK (appended; build/mod-sdk) ------------------------------------------------
+    /// Mods connected through the SDK (`quiver_mod.h`) right now, for one game or all
+    /// (`Vec<ModSdkConnection>`).
+    SdkStatus {
+        #[serde(default)]
+        product_id: Option<u32>,
+    },
 }
 
 fn yes() -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------------------
+// Mod SDK (build/mod-sdk)
+
+/// A mod connected through the SDK pipe of a running game (`ModsRequest::SdkStatus`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModSdkConnection {
+    /// quiverd's id for this connection (unique while quiverd runs).
+    pub conn: u64,
+    pub product_id: u32,
+    /// The schema surface id it said `hello` with; also its metrics' namespace.
+    pub surface: String,
+    /// The SDK's version string, and the protocol agreed on.
+    pub sdk: String,
+    pub proto: u32,
+    /// Capabilities granted (`options`, `metrics`, `actions`, `log`).
+    pub caps: Vec<String>,
+    /// Windows pid the mod reported, and the one Wine reported for the pipe's client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// User id of the account playing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub connected: DateTime<Utc>,
+    /// Live options it applies itself (a `set` goes to it; others wait for a restart or the
+    /// file channel).
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub metrics: Vec<ModSdkMetric>,
+    /// It sent an inline schema in `hello`.
+    #[serde(default)]
+    pub inline_schema: bool,
+    /// Messages quiverd refused (malformed, over a rate limit, not its namespace).
+    #[serde(default)]
+    pub refused: u64,
+}
+
+/// One metric a connected mod declared, with its latest value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModSdkMetric {
+    pub index: u32,
+    /// Full id: `aco-dlss.fg.state`.
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Latest value: a number (gauge), a total (counter), a string (state, text), or an
+    /// event's latest label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<DateTime<Utc>>,
+    /// `event` metrics: marks received.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub marks: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]
