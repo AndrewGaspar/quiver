@@ -18,6 +18,7 @@ pub mod downloads;
 pub mod exports;
 pub mod mods;
 pub mod info;
+pub mod perf;
 pub mod savestores;
 pub mod setup;
 pub mod steamlib;
@@ -330,6 +331,9 @@ pub struct PlaySession {
     /// mod's current version moves on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mods: Vec<mods::ResolvedMod>,
+    // `perf` (a `perf::PerfSummary`, design/SIGHT-HUD.md §3.12) is recorded with the session
+    // in `playtime.jsonl` and read with `PerfRequest::Summaries`; it becomes a field here
+    // once every crate that builds `PlaySession`s by hand can take it.
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -600,6 +604,10 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    // ---- Performance metrics and the HUD (see [`perf`]); appended
+    /// Perf catalog, subscriptions, the HUD's settings, toggle and renderer attachment
+    /// (design/SIGHT-HUD.md §3.11).
+    Perf(perf::PerfRequest),
 }
 
 fn yes() -> bool {
@@ -620,6 +628,9 @@ pub enum Reply {
     Ok { id: u64, result: serde_json::Value },
     Err { id: u64, error: String },
     Event(Event),
+    /// Perf events (subscription updates, HUD models, perf broadcasts): beside [`Event`]s
+    /// so that clients built before them ignore them (`{"perf": {...}}`).
+    Perf(perf::PerfEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
