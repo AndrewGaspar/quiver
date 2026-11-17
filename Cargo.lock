@@ -6149,6 +6149,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gpui_platform",
+ "image",
  "notify",
  "rust-embed",
  "serde_json",

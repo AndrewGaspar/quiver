@@ -17,3 +17,6 @@ notify = { version = "8", default-features = false }
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+# Examples: the platform, and PNG output.
+gpui_platform.workspace = true
+image.workspace = true
