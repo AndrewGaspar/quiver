@@ -34,7 +34,7 @@ mod ui;
 use std::future::Future;
 use std::sync::OnceLock;
 
-use gpui::{App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 // ---------------------------------------------------------------------------------------------
 // ubi-api's client is tokio-based; GPUI has its own executor. Calls run on a tokio runtime and
@@ -75,7 +75,7 @@ fn main() {
     if demo {
         tracing::info!("demo mode: fixture data, no daemon");
     }
-    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         assets::register_fonts(cx);
         cx.set_global(theme::load(&theme::omarchy_state_dir()));
         text_input::bind_keys(cx);

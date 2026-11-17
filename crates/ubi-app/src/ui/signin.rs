@@ -242,6 +242,7 @@ impl Quiver {
                         offset: gpui::point(px(0.), px(0.)),
                         blur_radius: px(0.),
                         spread_radius: px(4.),
+                        inset: false,
                     }]))
                     .font_family(crate::assets::MONO_FONT)
                     .text_size(px(26.))
@@ -418,7 +419,7 @@ impl Quiver {
                 // Tab: email <-> password.
                 let e = email_in.read(cx).focus_handle(cx);
                 let p = password_in.read(cx).focus_handle(cx);
-                if e.is_focused(window) { window.focus(&p) } else { window.focus(&e) }
+                if e.is_focused(window) { window.focus(&p, cx) } else { window.focus(&e, cx) }
             }));
         if let Some(m) = self.render_signin_mosaic(th, cx) {
             root = root.child(m);

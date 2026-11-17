@@ -492,5 +492,3 @@ needs your own Ubisoft account and only runs games you own.
   Copyright Zed Industries).
 - `crates/ubi-app/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
   with their license files.
-- `third_party/xattr-0.2.3`: the `xattr` crate (MIT/Apache-2.0) with a one-line patch GPUI
-  needs; its license files are included.

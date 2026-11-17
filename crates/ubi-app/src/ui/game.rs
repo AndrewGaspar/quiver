@@ -541,7 +541,7 @@ impl Quiver {
                 })
                 .collect();
             gpui::deferred(
-                gpui::anchored().anchor(gpui::Corner::TopRight).offset(gpui::point(px(0.), px(36.))).snap_to_window_with_margin(px(8.)).child(
+                gpui::anchored().anchor(gpui::Anchor::TopRight).offset(gpui::point(px(0.), px(36.))).snap_to_window_with_margin(px(8.)).child(
                     div()
                         .id("art-menu")
                         .occlude()

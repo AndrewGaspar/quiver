@@ -180,7 +180,7 @@ pub fn focus_overlay(th: &Theme, radius: f32) -> [AnyElement; 2] {
 
 /// The soft halo around a focused element (drawn behind it).
 pub fn focus_halo(th: &Theme) -> BoxShadow {
-    BoxShadow { color: th.focus_halo, offset: point(px(0.), px(0.)), blur_radius: px(26.), spread_radius: px(0.) }
+    BoxShadow { color: th.focus_halo, offset: point(px(0.), px(0.)), blur_radius: px(26.), spread_radius: px(0.), inset: false }
 }
 
 pub trait FocusExt: ParentElement + Styled + Sized {
@@ -199,7 +199,7 @@ pub trait FocusExt: ParentElement + Styled + Sized {
 impl<T: ParentElement + Styled + Sized> FocusExt for T {}
 
 pub fn soft_shadow(color: Hsla, y: f32, blur: f32) -> BoxShadow {
-    BoxShadow { color, offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.) }
+    BoxShadow { color, offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(0.), inset: false }
 }
 
 // ---------------------------------------------------------------------------------------------
