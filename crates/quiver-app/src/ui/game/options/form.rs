@@ -411,6 +411,7 @@ impl Quiver {
             }
         };
         let (mut hidden_level, mut hidden_when, mut shown) = (0usize, 0usize, 0usize);
+        self.gp.opt.pad_rows.clear();
         for (gi, (gtitle, ids)) in groups.into_iter().enumerate() {
             let mut rows: Vec<AnyElement> = Vec::new();
             for oid in ids {
@@ -431,6 +432,7 @@ impl Quiver {
                     continue;
                 }
                 rows.push(self.option_row(th, s, &oid, st, &staged, &hist, cx));
+                self.gp.opt.pad_rows.push(key);
             }
             if rows.is_empty() {
                 continue;
@@ -646,12 +648,15 @@ impl Quiver {
             .child(control)
             .when(!under.is_empty(), |d| d.child(div().flex().flex_col().gap(px(2.)).text_size(px(12.)).text_color(th.tx3).children(under)));
         let stacked = self.pane_bp() < crate::ui::responsive::Bp::Large;
+        let pad_i = self.options_body_base() + super::ModsView::TABS.len() + self.gp.opt.pad_rows.len();
+        let focused = self.focused(crate::nav::Target::Body(pad_i));
         div()
             .flex()
             .when(stacked, |d| d.flex_col().items_start())
             .when(!stacked, |d| d.items_center())
             .gap(px(20.))
             .py(px(13.))
+            .when(focused, |d| d.bg(th.acc_soft).px(px(8.)).rounded(px(8.)))
             .border_t_1()
             .border_color(th.line1)
             .child(left)
@@ -1261,7 +1266,10 @@ impl Quiver {
         let pb = self.pane_bp();
         let inset = pb.pad().min(24.);
         let confirm = self.gp.opt.confirm.clone();
-        let save_focus = self.focused(crate::nav::Target::Body(usize::MAX - 1));
+        let rows = if self.gp.opt.view == ModsView::Options { self.gp.opt.pad_rows.len() } else { 0 };
+        let bar_i = self.options_body_base() + super::ModsView::TABS.len() + rows;
+        let save_focus = self.focused(crate::nav::Target::Body(bar_i));
+        let discard_focus = self.focused(crate::nav::Target::Body(bar_i + 1));
         let bar = div()
             .id("options-pending")
             .absolute()
@@ -1289,14 +1297,14 @@ impl Quiver {
                     this.gp.opt.confirm = None;
                     cx.notify();
                 })))
-                .child(button("opt-danger-save", th, Kind::Primary, Size::Small, Some(Icon::Check), "Save anyway").on_click(cx.listener(move |this, _, _, cx| this.options_save(live, true, cx)))),
+                .child(button("opt-danger-save", th, Kind::Primary, Size::Small, Some(Icon::Check), "Save anyway").focus_ring(save_focus, th, 6.).on_click(cx.listener(move |this, _, _, cx| this.options_save(live, true, cx)))),
             _ => bar
                 .border_color(th.warn.opacity(0.6))
                 .child(div().flex_none().size(px(8.)).rounded_full().bg(th.warn))
                 .child(div().flex_none().font_weight(SEMIBOLD).child(format!("{n} unsaved change{}", if n == 1 { "" } else { "s" })))
                 .child(div().min_w_0().flex_shrink_1().truncate().text_color(th.tx2).child(labels.join(", ")))
                 .child(div().flex_1().min_w(px(120.)).text_size(px(12.)).text_color(th.tx3).child(note))
-                .child(button("opt-discard", th, Kind::Ghost, Size::Small, Some(Icon::Undo), "Discard").on_click(cx.listener(|this, _, _, cx| {
+                .child(button("opt-discard", th, Kind::Ghost, Size::Small, Some(Icon::Undo), "Discard").focus_ring(discard_focus, th, 6.).on_click(cx.listener(|this, _, _, cx| {
                     this.options_discard(cx);
                     cx.notify();
                 })))

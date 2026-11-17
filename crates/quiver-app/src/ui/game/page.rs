@@ -1472,7 +1472,7 @@ impl Quiver {
                 if !g.installed() {
                     0
                 } else {
-                    2 + self.gp.profiles().len()
+                    2 + self.gp.profiles().len() + self.options_body_len(cx)
                 }
             }
             Tab::Saves => self.gp.saves.ready().map(|s| s.backups.len()).unwrap_or(0),
@@ -1520,6 +1520,11 @@ impl Quiver {
             }
             Tab::Mods => {
                 let profiles = self.gp.profiles();
+                // After the profile cards: the views and the options rows (`options/`).
+                if i >= 2 + profiles.len() {
+                    self.options_body_activate(i - 2 - profiles.len(), cx);
+                    return;
+                }
                 if i == 0 {
                     self.select_profile(id, None, cx);
                 } else if let Some(p) = profiles.get(i - 1) {

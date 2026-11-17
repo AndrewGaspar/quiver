@@ -30,7 +30,7 @@ use crate::err_text;
 use crate::nav::Tab;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
-use crate::ui::{Icon, chip, chip_count};
+use crate::ui::{FocusExt, Icon, chip, chip_count};
 
 /// The Mods tab's views.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -141,6 +141,8 @@ pub struct OptionsUi {
     pub preset_note: Option<String>,
     /// Import cards the person dismissed (revision numbers).
     pub dismissed: Vec<u32>,
+    /// The Options view's rows as last drawn, for the controller (body rows).
+    pub pad_rows: Vec<RowKey>,
 }
 
 impl OptionsUi {
@@ -653,6 +655,86 @@ impl Quiver {
         }
     }
 
+    // -- controller and keyboard: body rows after the profile cards ------------------------
+
+    /// The first body row after the profile cards (Vanilla, the profiles, "New profile").
+    pub(super) fn options_body_base(&self) -> usize {
+        2 + self.gp.profiles().len()
+    }
+
+    /// The unsaved bar's Save and Discard, when it shows.
+    pub(super) fn options_bar_rows(&self) -> usize {
+        match &self.gp.opt.of {
+            Some((g, p)) if *g == self.gp.id && !self.gp.opt.staged_for(*g, p).is_empty() => 2,
+            _ => 0,
+        }
+    }
+
+    /// Body rows after the profile cards: the views, the bar's buttons, the Options rows.
+    pub(in crate::ui::game) fn options_body_len(&self, _cx: &gpui::App) -> usize {
+        let rows = if self.gp.opt.view == ModsView::Options { self.gp.opt.pad_rows.len() } else { 0 };
+        ModsView::TABS.len() + self.options_bar_rows() + rows
+    }
+
+    pub(in crate::ui::game) fn options_body_activate(&mut self, j: usize, cx: &mut Context<Self>) {
+        let tabs = ModsView::TABS.len();
+        if j < tabs {
+            self.gp.opt.view = ModsView::TABS[j];
+            return;
+        }
+        let rows = if self.gp.opt.view == ModsView::Options { self.gp.opt.pad_rows.len() } else { 0 };
+        let j = j - tabs;
+        if j < rows {
+            if let Some(k) = self.gp.opt.pad_rows.get(j).cloned() {
+                self.options_pad_activate(k, cx);
+            }
+            return;
+        }
+        let j = j - rows;
+        if j < self.options_bar_rows() {
+            match j {
+                0 => {
+                    let (live, confirmed) = match &self.gp.opt.confirm {
+                        Some(Confirm::Danger { live, .. }) => (*live, true),
+                        _ => (Live::IfRunning, false),
+                    };
+                    self.options_save(live, confirmed, cx)
+                }
+                _ => self.options_discard(cx),
+            }
+        }
+    }
+
+    /// A on an option: flip a switch, take the next choice, step a number up (round to the
+    /// start after the end), the next key; text opens for typing.
+    fn options_pad_activate(&mut self, k: RowKey, cx: &mut Context<Self>) {
+        use quiver_api::options::{OptionType, same_value};
+        let Some((g, p)) = self.gp.opt.of.clone() else { return };
+        let Some(st) = self.gp.opt.surface(&k.0).and_then(|s| s.options.get(&k.1)).cloned() else { return };
+        let draft = logic::draft_value(&st, self.gp.opt.staged_for(g, &p).get(&k));
+        let cycle = |list: Vec<serde_json::Value>| -> Option<serde_json::Value> {
+            let i = list.iter().position(|v| same_value(v, &draft)).map_or(0, |i| (i + 1) % list.len().max(1));
+            list.get(i).cloned()
+        };
+        let next = match st.def.ty {
+            OptionType::Bool => Some(serde_json::Value::Bool(!draft.as_bool().unwrap_or(false))),
+            OptionType::Enum => {
+                let level = self.gp.opt.level;
+                cycle(st.def.values.iter().filter(|e| e.level.is_none_or(|l| l <= level)).map(|e| e.value.clone()).collect())
+            }
+            OptionType::Int | OptionType::Float => {
+                let n = logic::step_number(&st.def, &draft, 1.0);
+                Some(if same_value(&n, &draft) { st.def.special.first().map(|m| m.value.clone()).or_else(|| st.def.min.map(serde_json::Value::from)).unwrap_or(n) } else { n })
+            }
+            OptionType::Key => logic::allowed_keys(&st.def).and_then(|keys| cycle(keys.into_iter().map(serde_json::Value::String).collect())),
+            _ => None,
+        };
+        match next {
+            Some(v) => self.options_stage(k, Some(Edit::Set(v)), cx),
+            None => self.gp.opt.picker = Some(k),
+        }
+    }
+
     /// The Mods tab's view switch.
     pub(super) fn render_mods_views(&mut self, th: &Theme, id: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let profile = self.mods_profile();
@@ -661,9 +743,11 @@ impl Quiver {
         let changed: usize = if loaded { self.gp.opt.loaded_surfaces().iter().map(|s| s.options.values().filter(|o| logic::is_changed(o)).count()).sum() } else { 0 };
         let conflicts = if loaded { self.gp.opt.keys.ready().map(|k| k.conflicts.len()).unwrap_or(0) } else { 0 };
         let cur = self.gp.opt.view;
+        let base = self.options_body_base();
+        let focus: Vec<bool> = (0..ModsView::TABS.len()).map(|i| self.focused(crate::nav::Target::Body(base + i))).collect();
         div().flex().flex_wrap().items_center().gap(px(8.)).children(ModsView::TABS.into_iter().enumerate().map(|(i, v)| {
             let on = cur == v || (v == ModsView::Options && cur == ModsView::Source);
-            let mut c = chip(th, Some(v.icon()), v.label(), on).id(("mods-view", i)).cursor_pointer();
+            let mut c = chip(th, Some(v.icon()), v.label(), on).id(("mods-view", i)).cursor_pointer().focus_ring(focus[i], th, 13.);
             c = match v {
                 ModsView::Options if changed + staged > 0 => c.child(chip_count(th, changed, on)).when(staged > 0, |d| d.child(div().size(px(6.)).rounded_full().bg(th.warn))),
                 ModsView::Keys if conflicts > 0 => c.child(div().text_color(th.bad).child(conflicts.to_string())),
@@ -716,8 +800,10 @@ impl Quiver {
                 }
                 this.open_game(3539, cx);
                 this.nav.tab = Tab::Mods;
-                // The DLSS profile (the demo's default for Play).
-                this.select_profile(3539, Some("pd1s5xk".into()), cx);
+                // The DLSS profile (the demo's default for Play), unless mods come from a daemon.
+                if std::env::var_os("QUIVER_DEMO_DAEMON").is_none() {
+                    this.select_profile(3539, Some("pd1s5xk".into()), cx);
+                }
                 this.gp.opt.view = match view.as_str() {
                     "changes" | "history" => ModsView::Changes,
                     "keys" => ModsView::Keys,
@@ -741,7 +827,7 @@ impl Quiver {
                     this.body_scroll.set_offset(gpui::point(px(0.), px(-y)));
                 }
                 if staged {
-                    let key = (format!("{}/aco-dlss", "ld7s3vq"), "fg.refresh_hz".to_owned());
+                    let key = (this.gp.opt.surface.clone().unwrap_or_else(|| "ld7s3vq/aco-dlss".into()), "fg.refresh_hz".to_owned());
                     this.options_stage(key, Some(Edit::Set(serde_json::json!(144))), cx);
                 }
                 if this.gp.opt.view == ModsView::Source
@@ -755,7 +841,7 @@ impl Quiver {
                 cx.background_executor().timer(Duration::from_millis(600)).await;
                 let _ = this.update(cx, |this, cx| {
                     // A second edit that waits for a moment (Present thread: swapchain creation).
-                    let key = (format!("{}/aco-dlss", "ld7s3vq"), "fg.present_thread".to_owned());
+                    let key = (this.gp.opt.surface.clone().unwrap_or_else(|| "ld7s3vq/aco-dlss".into()), "fg.present_thread".to_owned());
                     this.options_stage(key, Some(Edit::Set(serde_json::json!("0"))), cx);
                     this.options_save(Live::IfRunning, false, cx);
                 });
