@@ -1136,7 +1136,7 @@ the overlay can show them next to the options.
   `sessions`, and for the app `files` (a mod's INI-like files, for "infer from file") and
   `session_records` (recent sessions' live changes and crash notes)), not `ModsRequest`
   variants: they stay a request family of their own.
-- **Events** are `Event::OptionsChanged`, `OptionsLive` and `OptionsCrash` (and
+- **Events** are `Event::OptionsChanged`, `OptionsLive`, `OptionsCrash` and `OptionsOutcome` (and
   `ModChannel`, sent once the SDK pipe registers with `Options`), as the design has them.
   They were `Reply::Options(OptionsEvent)` until the app had wildcard arms; quiverd's options
   code still hands out `OptionsEvent`s and the connection writer folds them
