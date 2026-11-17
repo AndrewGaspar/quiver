@@ -108,8 +108,8 @@ fn save(out: &std::path::Path, d: &quiver_perf::HudBufferHeader, px: &[u8]) {
             let s = &px[y as usize * stride + x as usize * 4..][..4];
             let dp = frame.get_pixel_mut(fx - qx, fy - qy);
             let ia = 1.0 - s[3] as f32 / 255.0 * o;
-            for c in 0..3 {
-                dp.0[c] = (s[c] as f32 * o + dp.0[c] as f32 * ia).round().min(255.0) as u8;
+            for (d, s) in dp.0.iter_mut().zip(s) {
+                *d = (*s as f32 * o + *d as f32 * ia).round().min(255.0) as u8;
             }
         }
     }

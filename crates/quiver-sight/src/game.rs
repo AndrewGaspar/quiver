@@ -41,16 +41,61 @@ struct Offscreen {
     size: (f32, f32),
 }
 
-/// Timings, for the log and `--stats`.
+/// Timings of the last images, for the log.
 #[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub published: u64,
-    /// update + layout + paint + GPU + readback, per published image (all passes).
-    pub render: Vec<Duration>,
+    /// update + layout + paint + GPU + readback, per published image (all passes); the
+    /// last [`Stats::KEEP`].
+    pub render: std::collections::VecDeque<Duration>,
     /// Copying into `hud.image`.
-    pub publish: Vec<Duration>,
+    pub publish: std::collections::VecDeque<Duration>,
     pub resizes: u64,
     pub windows: u64,
+}
+
+impl Stats {
+    const KEEP: usize = 240;
+
+    fn note(&mut self, render: Duration, publish: Duration) {
+        for (q, v) in [(&mut self.render, render), (&mut self.publish, publish)] {
+            if q.len() == Self::KEEP {
+                q.pop_front();
+            }
+            q.push_back(v);
+        }
+        self.published += 1;
+    }
+
+    /// p50 / p99 / max of a series.
+    pub fn summary(q: &std::collections::VecDeque<Duration>) -> String {
+        let mut v: Vec<Duration> = q.iter().copied().collect();
+        if v.is_empty() {
+            return "-".into();
+        }
+        v.sort();
+        let at = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
+        format!("p50 {:.2?} p99 {:.2?} max {:.2?}", at(0.5), at(0.99), v[v.len() - 1])
+    }
+
+    pub fn line(&self) -> String {
+        format!(
+            "{} images (last {}): render {}; publish {}; {} resizes, {} windows",
+            self.published,
+            self.render.len(),
+            Self::summary(&self.render),
+            Self::summary(&self.publish),
+            self.resizes,
+            self.windows
+        )
+    }
+}
+
+/// VmRSS and VmHWM of this process, MiB.
+pub fn rss_mib() -> (u64, u64) {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let f = |k: &str| s.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1024;
+    (f("VmRSS:"), f("VmHWM:"))
 }
 
 #[derive(Default)]
@@ -158,9 +203,11 @@ impl GameHud {
             let (_, writer) = self.writer.as_mut().unwrap();
             writer.publish(&desc, &pixels)?
         };
-        self.stats.publish.push(t.elapsed());
-        self.stats.render.push(render);
-        self.stats.published += 1;
+        self.stats.note(render, t.elapsed());
+        if self.stats.published == 1 || self.stats.published.is_multiple_of(120) {
+            let (rss, hwm) = rss_mib();
+            tracing::info!(rss_mib = rss, peak_mib = hwm, "HUD {}", self.stats.line());
+        }
         tracing::debug!(rev = m.rev, published = n, w = desc.width, h = desc.height, x = desc.x, y = desc.y, ?render, gpu = ?self.window.as_ref().map(|w| w.frame.borrow().render), "published");
         self.last = Some((desc, pixels));
         Ok(())

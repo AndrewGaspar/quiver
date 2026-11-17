@@ -68,11 +68,11 @@ pub fn open_layer<V: gpui::Render + 'static>(
         }),
         ..Default::default()
     };
-    Ok(cx.open_window(opts, move |window, cx| {
+    cx.open_window(opts, move |window, cx| {
         // Click-through: an empty input region.
         window.set_input_region(Some(&[]));
         cx.new(|_| view)
-    })?)
+    })
 }
 
 impl DesktopHud {

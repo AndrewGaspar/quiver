@@ -21,8 +21,11 @@ use crate::place::ToastCorner;
 
 pub const NAMESPACE: &str = "quiver-sight";
 pub const MAX_SHOWN: usize = 3;
+/// A toast's width; the surface adds room for the shadow on every side.
 const WIDTH: f32 = 360.0;
-const MARGIN: f32 = 16.0;
+const PAD: f32 = 10.0;
+/// From the screen edge (or a bar's exclusive zone) to the toast, shadow room included.
+const MARGIN: f32 = 16.0 - PAD;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToastKind {
@@ -142,6 +145,12 @@ pub struct ToastView {
     toasts: Vec<(u64, ToastData)>,
 }
 
+impl ToastView {
+    pub fn new(toasts: Vec<ToastData>) -> Self {
+        Self { toasts: toasts.into_iter().enumerate().map(|(i, t)| (i as u64, t)).collect() }
+    }
+}
+
 fn level_colors(th: &Theme, l: Level) -> (Hsla, Hsla, Icon) {
     match l {
         Level::Good => (th.ok, th.ok_soft, Icon::CircleCheck),
@@ -195,7 +204,7 @@ impl Render for ToastView {
         let measure = canvas(
             |bounds, window, cx| {
                 // The surface follows the stack's height.
-                let want = gpui::size(px(WIDTH), px(f32::from(bounds.size.height).ceil().max(1.0)));
+                let want = gpui::size(px(WIDTH + 2.0 * PAD), px(f32::from(bounds.size.height).ceil().max(1.0)));
                 let have = window.viewport_size();
                 if (f32::from(have.height) - f32::from(want.height)).abs() > 0.5 {
                     window.defer(cx, move |w, _| w.resize(want));
@@ -205,10 +214,11 @@ impl Render for ToastView {
         )
         .absolute()
         .inset_0();
-        div().w(px(WIDTH)).flex().flex_col().items_start().child(
+        div().w(px(WIDTH + 2.0 * PAD)).flex().flex_col().items_start().child(
             div()
                 .relative()
                 .w_full()
+                .p(px(PAD))
                 .flex()
                 .flex_col()
                 .gap(px(8.))
@@ -291,7 +301,7 @@ impl ToastLane {
             ToastCorner::TopRight => (L::TOP | L::RIGHT, (MARGIN, MARGIN, 0.0, 0.0)),
             ToastCorner::BottomRight => (L::BOTTOM | L::RIGHT, (0.0, MARGIN, MARGIN, 0.0)),
         };
-        let h = open_layer(cx, NAMESPACE, edges, margin, (WIDTH, 72.0 * toasts.len() as f32), self.monitor.as_deref(), ToastView { toasts })?;
+        let h = open_layer(cx, NAMESPACE, edges, margin, (WIDTH + 2.0 * PAD, 2.0 * PAD + 80.0 * toasts.len() as f32), self.monitor.as_deref(), ToastView { toasts })?;
         self.window = Some((h, self.corner, self.monitor.clone()));
         Ok(())
     }
