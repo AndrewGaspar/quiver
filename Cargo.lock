@@ -6139,7 +6139,7 @@ dependencies = [
 name = "ubi-perf"
 version = "0.1.0"
 dependencies = [
- "fastrand 2.5.0",
+ "fastrand",
  "libc",
  "serde",
  "serde_json",
