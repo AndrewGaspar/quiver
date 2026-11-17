@@ -1475,6 +1475,17 @@ mod tests {
     }
 
     #[test]
+    fn mod_sdk_wire() {
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status","product_id":5}}"#).unwrap();
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: Some(5) })));
+        let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status"}}"#).unwrap();
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: None })));
+        let c: ModSdkConnection =
+            serde_json::from_str(r#"{"conn":1,"product_id":5,"surface":"m","sdk":"s","proto":2,"caps":[],"connected":"2026-11-16T00:00:00Z"}"#).unwrap();
+        assert!(c.metrics.is_empty() && c.options.is_empty());
+    }
+
+    #[test]
     fn wire() {
         let r: crate::Request = serde_json::from_str(
             r#"{"method":"mods","params":{"op":"profile_delete","product_id":5,"profile":"x"}}"#,
