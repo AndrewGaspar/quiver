@@ -311,7 +311,7 @@ pub fn builtin(id: &str) -> Option<Layout> {
                     row(vec![ms("gpu.clock", "CLK"), m("cpu.clock")]),
                     row(vec![ms("gpu.vram.total", "VRAM"), ms("proc.rss", "GAME"), m("proc.cpu")]),
                     row(vec![ms("bat.level", "BAT"), m("bat.power"), badge(m("bat.status"))]),
-                    row(vec![ms("display.mode", "DISP"), badge(m("display.vrr")), m("display.path")]),
+                    row(vec![ms("display.mode", "DISP"), ms("display.vrr", "VRR"), ms("display.tearing", "TEAR"), m("display.path")]),
                     row(vec![ms("session.time", "TIME"), m("clock.time")]),
                 ]);
             }

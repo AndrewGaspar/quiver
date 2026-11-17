@@ -229,7 +229,7 @@ pub fn display() -> Vec<MetricDescriptor> {
     let mut refresh = d("display.refresh", MetricKind::Gauge, Unit::Hz, "Refresh rate", None, "The game's monitor refresh rate.");
     let mut vrr = d("display.vrr", MetricKind::State, Unit::None, "VRR", Some("VRR"), "Variable refresh is active on the game's monitor.");
     vrr.values = on_off();
-    let mut tearing = d("display.tearing", MetricKind::State, Unit::None, "Tearing", None, "The game's monitor is tearing (immediate presents).");
+    let mut tearing = d("display.tearing", MetricKind::State, Unit::None, "Tearing", Some("TEAR"), "The game's monitor is tearing (immediate presents).");
     tearing.values = on_off();
     let mut path = d(
         "display.path",

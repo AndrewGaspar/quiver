@@ -117,15 +117,15 @@ pub fn values(m: &Monitor) -> DisplayValues {
     let refresh = (m.refresh_rate * 100.0).round() / 100.0;
     let hz = if refresh.fract() == 0.0 { format!("{refresh:.0}") } else { format!("{refresh}") };
     let scanout = !m.direct_scanout_to.is_empty() && m.direct_scanout_to != "0";
-    // Hyprland's blockers in its words, minus the ones that always show ("CANDIDATE" is
-    // "no candidate window", "USER" is the config option being off).
-    let blockers: Vec<String> = m.direct_scanout_blocked_by.iter().filter(|b| !matches!(b.as_str(), "CANDIDATE")).map(|b| b.to_lowercase().replace('_', " ")).collect();
+    // Why Hyprland isn't scanning out, in words ("CANDIDATE", no fullscreen window, is
+    // implied by "composited").
+    let blockers: Vec<String> = m.direct_scanout_blocked_by.iter().filter(|b| b.as_str() != "CANDIDATE").map(|b| blocker_words(b)).collect();
     let path = if scanout {
-        "scanout".to_owned()
+        "scan-out".to_owned()
     } else if blockers.is_empty() {
         "composited".to_owned()
     } else {
-        format!("composited (blocked: {})", blockers.join(", "))
+        format!("composited: {}", blockers.join(", "))
     };
     DisplayValues {
         mode: format!("{}×{}@{hz}", m.width, m.height),
@@ -133,6 +133,24 @@ pub fn values(m: &Monitor) -> DisplayValues {
         vrr: if m.vrr { "on" } else { "off" },
         tearing: if m.actively_tearing { "on" } else { "off" },
         path,
+    }
+}
+
+/// One of Hyprland's `directScanoutBlockedBy` reasons, as the HUD says it.
+fn blocker_words(b: &str) -> String {
+    match b {
+        "USER" => "scan-out off in config".into(),
+        "RECORD" => "screen share".into(),
+        "MIRROR" => "mirrored".into(),
+        "SW" => "software cursor".into(),
+        "WINDOWED" => "not fullscreen".into(),
+        "CONTENT" => "not a game window".into(),
+        "TRANSFORM" => "scaled or rotated".into(),
+        "DMA" => "buffer can't scan out".into(),
+        "TEARING" => "tearing".into(),
+        "FAILED" => "scan-out failed".into(),
+        "CM" => "colour management".into(),
+        other => other.to_lowercase().replace('_', " "),
     }
 }
 
@@ -162,13 +180,13 @@ mod tests {
         let v = values(&m[0]);
         assert_eq!(v.mode, "2560×1600@165");
         assert_eq!((v.vrr, v.tearing), ("off", "off"));
-        assert_eq!(v.path, "composited (blocked: user)");
+        assert_eq!(v.path, "composited: scan-out off in config");
         let mut so = m[0].clone();
         so.direct_scanout_to = "0x55d".into();
         so.vrr = true;
         so.refresh_rate = 59.951;
         let v = values(&so);
-        assert_eq!((v.path.as_str(), v.vrr), ("scanout", "on"));
+        assert_eq!((v.path.as_str(), v.vrr), ("scan-out", "on"));
         assert_eq!(v.mode, "2560×1600@59.95");
         let st = DisplayState { monitors: m, active: Some(ActiveWindow { pid: 1, monitor: 1, ..Default::default() }) };
         assert_eq!(st.game_monitor(true).unwrap().name, "eDP-2");
