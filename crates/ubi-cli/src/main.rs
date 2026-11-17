@@ -6,6 +6,7 @@ mod dev;
 mod downloads;
 mod exports;
 mod mods;
+mod perf;
 mod options;
 mod info;
 mod savestores;
@@ -203,6 +204,16 @@ enum Cmd {
     },
     /// Print daemon events as they happen.
     Watch,
+    /// Performance metrics: `quiver perf watch|catalog|sessions|history`.
+    Perf {
+        #[command(subcommand)]
+        action: perf::PerfAction,
+    },
+    /// The pinned performance HUD: `quiver hud toggle|next|status|layout|enable|set|keybinds`.
+    Hud {
+        #[command(subcommand)]
+        action: perf::HudAction,
+    },
     /// Control the daemon.
     Daemon {
         #[command(subcommand)]
@@ -769,6 +780,8 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mods { game, action } => mods::run(&client, &cli.source, &game, action).await?,
+        Cmd::Perf { action } => perf::run(&client, action).await?,
+        Cmd::Hud { action } => perf::hud(&client, action).await?,
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
         Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,

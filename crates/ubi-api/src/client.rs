@@ -50,6 +50,8 @@ struct Shared {
     events: Subscriber,
     /// Mod options events (`Reply::Options`), for clients that asked.
     options_events: Arc<Mutex<Option<mpsc::UnboundedSender<crate::options::OptionsEvent>>>>,
+    /// Perf events (`Reply::Perf`), for clients that asked.
+    perf_events: Arc<Mutex<Option<mpsc::UnboundedSender<crate::perf::PerfEvent>>>>,
     supervising: AtomicBool,
 }
 
@@ -100,6 +102,7 @@ impl Client {
             conn: tokio::sync::Mutex::new(None),
             events: Arc::default(),
             options_events: Arc::default(),
+            perf_events: Arc::default(),
             supervising: AtomicBool::new(false),
         });
         let conn = shared.open(Duration::ZERO).await?;
@@ -136,6 +139,17 @@ impl Client {
     pub async fn subscribe_options(&self) -> Result<mpsc::UnboundedReceiver<crate::options::OptionsEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.shared.options_events.lock().unwrap() = Some(tx);
+        self.shared.subscribe_current().await?;
+        Ok(rx)
+    }
+
+    /// Receive perf events (`PerfEvent`: subscription updates, HUD models, perf broadcasts)
+    /// on this connection from now on. Per-connection state (perf subscriptions, a HUD
+    /// attachment) doesn't survive a daemon restart: call [`Self::subscribe`] too and set it
+    /// up again on [`Event::Reconnected`](crate::Event::Reconnected).
+    pub async fn subscribe_perf(&self) -> Result<mpsc::UnboundedReceiver<crate::perf::PerfEvent>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.shared.perf_events.lock().unwrap() = Some(tx);
         self.shared.subscribe_current().await?;
         Ok(rx)
     }
@@ -293,6 +307,7 @@ impl Shared {
         let reader = Arc::downgrade(&conn);
         let events = self.events.clone();
         let options_events = self.options_events.clone();
+        let perf_events = self.perf_events.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(r).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -316,6 +331,11 @@ impl Shared {
                     }
                     Ok(Reply::Options(e)) => {
                         if let Some(tx) = options_events.lock().unwrap().as_ref() {
+                            let _ = tx.send(e);
+                        }
+                    }
+                    Ok(Reply::Perf(e)) => {
+                        if let Some(tx) = perf_events.lock().unwrap().as_ref() {
                             let _ = tx.send(e);
                         }
                     }
