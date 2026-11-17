@@ -60,8 +60,14 @@ pub struct GameHud {
     /// The last image published (descriptor and pixels), to hide it again without rendering.
     last: Option<(HudBufferHeader, Vec<u8>)>,
     warned_crop: bool,
+    /// Since when the desktop presents this HUD (the off-screen window closes after a while).
+    desktop_since: Option<Instant>,
     pub stats: Stats,
 }
+
+/// The desktop presenter has drawn the HUD this long: free the off-screen window's GPU
+/// device. Not at once, so a presenter that flips back soon doesn't pay for a new device.
+const IDLE_WINDOW: Duration = Duration::from_secs(15);
 
 fn premul(c: Hsla) -> u32 {
     let c = Rgba::from(c);
@@ -101,11 +107,12 @@ impl GameHud {
             self.writer(p)?;
         }
         if m.presenter != Presenter::Game {
-            // The desktop draws it: make sure the layer doesn't too, and free the GPU.
+            // The desktop draws it: make sure the layer doesn't too (the window goes later).
             self.hide(m);
-            self.close_window(cx);
+            self.desktop_since.get_or_insert_with(Instant::now);
             return Ok(());
         }
+        self.desktop_since = None;
         if !m.on {
             self.hide(m);
             return Ok(());
@@ -277,6 +284,14 @@ impl GameHud {
         self.stats.windows += 1;
         self.window = Some(Offscreen { handle, factor: f, frame, measure, size: FIRST_SIZE });
         Ok(())
+    }
+
+    /// Frees the off-screen window once the desktop has presented for a while.
+    pub fn tick(&mut self, cx: &mut App) {
+        if self.desktop_since.is_some_and(|t| t.elapsed() >= IDLE_WINDOW) && self.window.is_some() {
+            tracing::info!("desktop presenter for {IDLE_WINDOW:?}: closing the off-screen HUD window");
+            self.close_window(cx);
+        }
     }
 
     fn close_window(&mut self, cx: &mut App) {

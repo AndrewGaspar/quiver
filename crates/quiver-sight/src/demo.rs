@@ -198,6 +198,9 @@ pub fn feed(demo: &str, a: &Args, tx: UnboundedSender<Msg>) -> Result<()> {
                 let mut m = sample_model(&layout, 0, Presenter::Game, Some([extent.0, extent.1]));
                 m.image = image;
                 send(Msg::Model(Box::new(m)));
+                // The session ends before the process does, as with quiverd.
+                std::thread::sleep(Duration::from_secs_f32((seconds - 0.5).max(0.2)));
+                send(Msg::Ended("s-demo".into()));
             }
         }
         let left = seconds - start.elapsed().as_secs_f32();

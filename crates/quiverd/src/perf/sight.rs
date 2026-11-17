@@ -81,9 +81,6 @@ impl Spawner {
             Ok(f) => cmd.stderr(f),
             Err(_) => cmd.stderr(Stdio::null()),
         };
-        if std::env::var_os("RUST_LOG").is_none() {
-            cmd.env("RUST_LOG", "quiver_sight=info");
-        }
         match cmd.spawn() {
             Ok(c) => {
                 tracing::info!(pid = c.id(), "started {} ({why})", bin.display());

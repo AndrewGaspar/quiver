@@ -92,7 +92,17 @@ impl Sight {
                     h.desktop.close(cx);
                 }
                 self.toasts.close(cx);
-                cx.quit();
+                // Leave once the windows are gone. Not through GPUI's teardown: dropping the
+                // app at exit can touch thread-locals that are already destroyed and abort
+                // ("cannot access a Thread Local Storage value during or after destruction").
+                // Nothing needs flushing: hud.image is a shared mapping, logs go to stderr.
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_millis(150)).await;
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    // SAFETY: ends the process; no Rust state is used afterwards.
+                    unsafe { libc::_exit(0) }
+                })
+                .detach();
             }
         }
     }
@@ -129,6 +139,9 @@ impl Sight {
             for h in self.huds.values() {
                 h.game.heartbeat(now);
             }
+        }
+        for h in self.huds.values_mut() {
+            h.game.tick(cx);
         }
         self.toasts.tick(cx);
     }
@@ -185,8 +198,10 @@ fn args() -> anyhow::Result<Args> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Its own variable: quiverd's RUST_LOG (inherited) is about quiverd.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiver_sight=info".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("QUIVER_SIGHT_LOG").unwrap_or_else(|_| "quiver_sight=info,warn".into()))
+        .with_ansi(false)
         .with_writer(std::io::stderr)
         .init();
     let args = args()?;
@@ -217,7 +232,8 @@ fn main() -> anyhow::Result<()> {
         Some(d) => demo::feed(&d, &args, tx)?,
     }
     tracing::info!(pid = std::process::id(), layer_shell, headless, "quiver-sight starting");
-    app.with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
+    // Windows come and go (toasts, the desktop HUD, off-screen HUDs): quit only when told.
+    app.with_quit_mode(gpui::QuitMode::Explicit).with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         let dir = theme::omarchy_state_dir();
         quiver_ui::init(cx, theme::load(&dir));
         let sight = Rc::new(RefCell::new(Sight::new(layer_shell)));
