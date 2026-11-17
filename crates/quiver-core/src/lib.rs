@@ -35,6 +35,7 @@ pub mod spaces;
 pub mod steamplan;
 pub mod steamrun;
 pub mod store;
+pub mod stores;
 pub mod ubiservices;
 pub mod zipread;
 pub mod verify;

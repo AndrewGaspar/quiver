@@ -15,6 +15,7 @@ mod setup;
 mod steamgames;
 mod spaces;
 mod steamlib;
+mod stores;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -94,6 +95,8 @@ struct Daemon {
     perf: Arc<perf::PerfHub>,
     /// Achievement unlock status and reports (shared with the broker).
     achievements: Arc<quiver_core::achievements::Engine>,
+    /// Providers of stores other than Ubisoft (see `stores`; Ubisoft's wraps the daemon).
+    stores: Vec<Arc<dyn quiver_core::stores::StoreProvider>>,
 }
 
 /// The Ubisoft product a request names; other stores' games can't do what it asks (yet).
@@ -375,18 +378,10 @@ impl Daemon {
                 self.emit(Event::LibraryChanged);
                 Value::Null
             }
-            Request::Library { refresh, all_stores: _ } => json!(self.library(refresh).await?),
+            Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
+            Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
             Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
-            Request::Play { game, profile } => {
-                let product_id = ubisoft_only(game)?;
-                if Games::load()?.get(product_id).is_none()
-                    && let Some(e) = self.library(false).await?.into_iter().find(|e| e.game == game && e.steam_only())
-                {
-                    return Ok(json!(steamlib::play(self, source, &e).await?));
-                }
-                let online = self.account_for(product_id, None).await?;
-                json!(self.start_play(source, product_id, profile, online)?)
-            }
+            Request::Play { game, profile } => json!(self.play(source, game, profile).await?),
             Request::Import { product_id, path, language } => {
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_import(source, product_id, path, language, online))
@@ -424,6 +419,9 @@ impl Daemon {
                 Value::Null
             }
             Request::Stop { game } => {
+                if !game.is_ubisoft() {
+                    stores::stop_elsewhere(game)?;
+                }
                 let product_id = ubisoft_only(game)?;
                 let game = Games::load()?.get(product_id).cloned().context("not installed")?;
                 launcher::stop(&self.cfg, &game).await?;
@@ -491,7 +489,7 @@ impl Daemon {
                 json!(ctx)
             }
             Request::ProtonList => json!(launcher::list_protons()),
-            Request::Playtime { game } => json!(settings::playtime(ubisoft_only(game)?)?),
+            Request::Playtime { game } => json!(self.playtime(game).await?),
             Request::RemotePlaytime { product_id } => {
                 let online = self.account_for(product_id, None).await?;
                 run_local(move || async move {
@@ -559,15 +557,8 @@ impl Daemon {
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
-            Request::Stores => json!([quiver_api::stores::StoreInfo {
-                store: quiver_api::StoreId::Ubisoft,
-                account: if self.account_list().0.is_empty() { quiver_api::stores::AccountState::NeedsSignIn } else { quiver_api::stores::AccountState::SignedIn },
-                account_name: self.account_list().1,
-                capabilities: Default::default(),
-                games: 0,
-                note: None,
-            }]),
-            Request::GameDetail { game, .. } => bail!("no page for {game} yet (Ubisoft games: game_info)"),
+            Request::Stores => json!(self.store_list().await?),
+            Request::GameDetail { game, refresh } => json!(self.game_detail(game, refresh).await?),
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
@@ -1016,6 +1007,7 @@ async fn main() -> Result<()> {
         mod_sdk,
         perf,
         achievements: ach,
+        stores: Vec::new(),
     });
     options::test_session(&daemon);
     downloads::start(&daemon);
