@@ -194,7 +194,7 @@ impl Quiver {
         let art = cx.new(|_| ArtStore::new(Fetcher::new(crate::art::default_cache_dir(), crate::art::CDN)));
         cx.observe(&art, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         let mut this = Self {
             source: None,
             demo,
@@ -1060,7 +1060,7 @@ impl Quiver {
         };
         let o = handle.offset();
         let max = handle.max_offset();
-        let y = (f32::from(o.y) - dy).clamp(-f32::from(max.height), 0.);
+        let y = (f32::from(o.y) - dy).clamp(-f32::from(max.y), 0.);
         handle.set_offset(gpui::point(o.x, px(y)));
     }
 
@@ -1076,15 +1076,10 @@ impl Quiver {
             while rx.next().await.is_some() {
                 let t = theme::load(&theme::omarchy_state_dir());
                 tracing::info!("theme changed: {}", t.name);
-                if cx
-                    .update(|cx| {
-                        cx.set_global(t);
-                        cx.refresh_windows();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+                cx.update(|cx| {
+                    cx.set_global(t);
+                    cx.refresh_windows();
+                });
             }
         })
         .detach();

@@ -791,14 +791,14 @@ impl Quiver {
                     self.ui.palette_query = q;
                 }
                 let h = input.read(cx).focus_handle(cx);
-                window.focus(&h);
+                window.focus(&h, cx);
                 self.ui.palette_input = Some(input);
             }
             (false, true) => {
                 self.ui.palette_input = None;
                 self.ui.palette_query.clear();
                 if matches!(self.conn, Conn::Ready) {
-                    window.focus(&self.focus);
+                    window.focus(&self.focus, cx);
                 }
             }
             _ => {}
@@ -808,10 +808,10 @@ impl Quiver {
             if self.ui.login_focused != Some(target.entity_id()) {
                 self.ui.login_focused = Some(target.entity_id());
                 let h = target.read(cx).focus_handle(cx);
-                window.focus(&h);
+                window.focus(&h, cx);
             }
         } else if self.ui.login_focused.take().is_some() && matches!(self.conn, Conn::Ready) {
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         }
     }
 

@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ubi-perf.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

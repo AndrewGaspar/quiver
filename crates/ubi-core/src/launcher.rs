@@ -608,6 +608,8 @@ pub enum LaunchEvent {
     Exited(Option<i32>),
     /// Lines worth keeping with the launch (config patches applied, pending or undone).
     Detail(Vec<String>),
+    /// The game's processes (host pids), when they change (options write through them).
+    Pids(Vec<u32>),
 }
 
 /// One line per config patch status, for a launch's job detail.
@@ -707,6 +709,13 @@ pub async fn play(
     ctx.broker = Some(broker.to_owned());
     ctx.chunks = launch::installed_chunks(&game.install_dir).unwrap_or_default();
     ctx.language = settings.language.clone().or(game.language.clone()).or(ctx.language);
+    ctx.profile = profile.map(|p| p.id.clone());
+    // One session id for the whole launch: the daemon's (Options) id when it assigned one, so
+    // the bridge, the mod pipe and Options all name the same session.
+    if let Some(s) = plan.session.as_ref().filter(|s| ubi_proto::modsdk::is_session_id(s)) {
+        ctx.session = Some(s.clone());
+        ctx.mods_pipe = Some(ubi_proto::modsdk::pipe_name(Some(s)));
+    }
     let ctx_path = run_dir.join("context.json");
     crate::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
 
@@ -770,6 +779,9 @@ pub async fn play(
         // First into the namespace: its wineserver must start in there.
         ns.enter(bridge.as_std_mut(), None)?;
     }
+    if let Some(s) = &plan.session {
+        bridge.env("QUIVER_SESSION", s);
+    }
     // The bridge is the prefix's first Wine process, so the wineserver and Wine's services
     // (winedevice's controller bus, …) start with *its* environment. Give it the game's
     // env settings, or settings such as PROTON_DISABLE_HIDRAW never reach winebus.
@@ -806,6 +818,14 @@ pub async fn play(
     if let Some(p) = profile {
         cmd.env("QUIVER_PROFILE", &p.id);
     }
+    // The bridge is the game's sibling here, not its parent, so the game learns the mod
+    // pipe the bridge created (from the same context) from us.
+    if let Some(s) = &ctx.session {
+        cmd.env("QUIVER_SESSION", s);
+    }
+    if let Some(pipe) = &ctx.mods_pipe {
+        cmd.env("QUIVER_MODS_PIPE", pipe);
+    }
     cmd.env("UPLAY_ARGUMENTS", uplay_arguments(game.product_id, &exe_win, &workdir_win))
         .current_dir(workdir)
         .stdout(Stdio::null())
@@ -819,8 +839,15 @@ pub async fn play(
     if started {
         // The bridge holds a lease too once the SDK initializes; both share one session.
         let _lease = sessions.begin(online.user_id(), game.product_id, crate::playsession::LAUNCHER_HOLDER);
-        while !game_processes(&proton).is_empty() {
+        let mut pids = game_processes(&proton);
+        events(LaunchEvent::Pids(pids.clone()));
+        while !pids.is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            let now = game_processes(&proton);
+            if now != pids {
+                events(LaunchEvent::Pids(now.clone()));
+            }
+            pids = now;
         }
     }
     let status = child.try_wait().ok().flatten();

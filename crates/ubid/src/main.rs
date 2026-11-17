@@ -8,6 +8,7 @@ mod exports;
 mod mods;
 mod perf;
 mod info;
+mod options;
 mod savestores;
 mod setup;
 mod steamgames;
@@ -83,6 +84,10 @@ struct Daemon {
     events: broadcast::Sender<Event>,
     /// Games being played, from any launch path; reports play time to Ubisoft.
     sessions: Arc<PlaySessions>,
+    /// Mod options: running sessions as options see them, the SDK link, options events.
+    options: options::Options,
+    /// Mods connected through the SDK pipe (`quiver_mod.h`), via bridges.
+    mod_sdk: Arc<ubi_core::modsdk::ModRegistry>,
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -489,7 +494,8 @@ impl Daemon {
                 let a = self.activity.lock().unwrap();
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
             }
-            Request::Sessions => json!(self.sessions.list()),
+            // With the options addressing fields (C1); older clients ignore them.
+            Request::Sessions => json!(self.sessions.list().into_iter().map(|s| self.options.detail(s)).collect::<Vec<_>>()),
             r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged | Request::SteamRestart { .. }) => exports::handle(self, source, r).await?,
             r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. } | Request::SavesSync { .. }) => info::handle(self, source, r).await?,
             r @ (Request::Queue
@@ -524,9 +530,11 @@ impl Daemon {
                 Value::Null
             }
             Request::Mods(req) => self.handle_mods(source, req).await?,
-            // Connection-bound perf requests (subscriptions, HUD attachment) are answered by
-            // the connection loop; the rest here.
-            Request::Perf(req) => self.perf.handle(self, source, None, req).await?,
+            Request::Options(req) => self.handle_options(source, req).await?,
+            Request::ModSdk(ubi_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
+            // The connection loop passes connection-bound perf requests (subscriptions, HUD
+            // attachment) with their connection; this path has none.
+            Request::Perf(req) => self.handle_perf(source, None, req).await?,
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
@@ -607,7 +615,7 @@ impl Daemon {
         // that's on), settings resolved through it, mounts, saves and config patches.
         // No profile named: the game's default profile (vanilla if it was deleted, with a
         // warning in the activity log and the job).
-        let (plan, fallback) = mods::launch_plan(&game, profile.as_deref(), source)?;
+        let (mut plan, fallback) = mods::launch_plan(&game, profile.as_deref(), source)?;
         if let Some(w) = fallback {
             self.log_activity(source, format!("{}: {w}", game.name), Some(product_id));
         }
@@ -619,7 +627,12 @@ impl Daemon {
             bail!("{} is already running", game.name);
         }
         let id = self.new_job(JobKind::Play, product_id, game.name.clone());
-        let detail = mods::plan_lines(&plan.api);
+        // Options (design/MOD-CONFIG.md): the session id the game and its mods see
+        // (`QUIVER_SESSION`), and the profile's option files rendered and patched.
+        let session_id = options::new_session_id();
+        plan.session = Some(session_id.clone());
+        let mut detail = mods::plan_lines(&plan.api);
+        detail.extend(self.options_launch(&game, &mut plan, &session_id));
         if !detail.is_empty() {
             self.update_job(id, |j| j.detail = detail);
         }
@@ -651,6 +664,11 @@ impl Daemon {
             let (profile_id, profile_revision) =
                 (plan.api.profile.as_ref().map(|p| p.id.clone()), plan.api.profile.as_ref().map(|_| plan.api.revision));
             let session_mods = plan.api.resolved.clone();
+            let options_revision = this.options.launched_revision(&session_id);
+            let exit_code: Arc<Mutex<Option<i32>>> = Arc::default();
+            let exit = exit_code.clone();
+            let sid = session_id.clone();
+            this.options_watch(session_id.clone());
             let result = run_local(move || async move {
                 launcher::play(&cfg, &online, &g, &plan, &broker, &sessions, |e| match e {
                     LaunchEvent::Detail(lines) => ev_this.update_job(id, |j| j.detail.extend(lines)),
@@ -660,12 +678,18 @@ impl Daemon {
                         ev_this.update_job(id, |j| j.status = "Running".into());
                         ev_this.emit(Event::GameStarted { product_id });
                     }
-                    LaunchEvent::Exited(_) => ev_this.update_job(id, |j| j.status = "Game exited".into()),
+                    LaunchEvent::Exited(code) => {
+                        *exit.lock().unwrap() = code;
+                        ev_this.update_job(id, |j| j.status = "Game exited".into())
+                    }
+                    LaunchEvent::Pids(pids) => ev_this.options_pids(&sid, pids),
                 })
                 .await
             })
             .await;
             this.running.lock().unwrap().remove(&product_id);
+            let code = *exit_code.lock().unwrap();
+            this.options_session_end(&session_id, code).await;
             if let Some(start) = *started_at.lock().unwrap() {
                 let end = chrono::Utc::now();
                 let session = ubi_api::PlaySession {
@@ -677,7 +701,9 @@ impl Daemon {
                     profile_revision,
                     mods: session_mods,
                 };
-                if let Err(e) = settings::record_session(product_id, &session) {
+                // Options: the session id and options revision go beside it (PlaySession
+                // gets the fields once every client knows them).
+                if let Err(e) = settings::record_session_with(product_id, &session, json!({ "session": session_id, "options_revision": options_revision })) {
                     tracing::warn!("recording play session: {e:#}");
                 }
             }
@@ -745,6 +771,21 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
             }
         };
         if matches!(env.request, Request::Subscribe) {
+            let mut options = daemon.options.events.subscribe();
+            let tx3 = tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match options.recv().await {
+                        Ok(e) => {
+                            if tx3.send(Reply::Options(e)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
             let mut events = daemon.events.subscribe();
             let tx2 = tx.clone();
             tokio::spawn(async move {
@@ -845,6 +886,10 @@ async fn main() -> Result<()> {
         s
     };
     let broker_svc = Broker::new(accounts.clone(), Some(sessions.clone()));
+    // Stand-in sinks until the Options backend and the perf hub install theirs
+    // (`set_options_sink`, `set_metrics_sink`).
+    let mod_sdk = ubi_core::modsdk::ModRegistry::logging();
+    broker_svc.set_mods(mod_sdk.clone());
     tokio::spawn(broker_svc.clone().serve(broker_listener));
 
     // Also moves a pre-multi-account keyring entry to its per-account one.
@@ -886,7 +931,10 @@ async fn main() -> Result<()> {
         activity: Mutex::new(activity),
         events,
         sessions,
+        options: options::Options::default(),
+        mod_sdk,
     });
+    options::test_session(&daemon);
     downloads::start(&daemon);
     steamgames::start(&daemon);
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);

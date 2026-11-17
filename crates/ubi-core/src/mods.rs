@@ -84,6 +84,9 @@ pub struct Plan {
     /// The saves folder the launch uses, under `savegames/<user>/` (its save store's
     /// folder: `<product>` for Default).
     pub saves_folder: String,
+    /// The launch's session id (`QUIVER_SESSION` for the bridge and the game), set by the
+    /// daemon.
+    pub session: Option<String>,
 }
 
 impl Plan {
@@ -501,6 +504,11 @@ impl ModStore {
         self.mods_dir().join("patches.json")
     }
 
+    /// The config patch record (`patches.json`).
+    pub(crate) fn patches_record(&self) -> PathBuf {
+        self.record_path()
+    }
+
     pub(crate) fn data_dir(&self) -> &Path {
         &self.data
     }
@@ -776,6 +784,12 @@ impl ModStore {
                     bail!("copying {} failed: {}", src.display(), String::from_utf8_lossy(&out.stderr).trim());
                 }
             }
+            // Options: a plain folder's `quiver-options.toml` is the version's schema, not a
+            // file laid over the install (as whiteouts are deletions).
+            if let Some(schema) = crate::options::schema_in(&tmp) {
+                crate::options::adopt_schema(self, &id, &schema)?;
+                std::fs::remove_file(&schema)?;
+            }
             if let Some(install) = install {
                 match_case(&tmp, install)?;
             }
@@ -791,6 +805,7 @@ impl ModStore {
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&tmp);
+                let _ = std::fs::remove_file(crate::options::version_schema_path(self, &id));
                 return Err(e);
             }
         };
@@ -1103,7 +1118,21 @@ impl ModStore {
         let taken = mods.iter().any(|m| same_name(&m.name, &name));
         let name = if taken { format!("{name} ({})", manifest.id) } else { name };
         let deletes = manifest.files.delete.clone();
-        self.add_mod(&name, files.as_deref(), &deletes, install, source, Some(manifest), builtin, None)
+        // Options: a package's schema sits next to its manifest; checked before installing.
+        let schema = match pkg {
+            Package::Dir { path, .. } => crate::options::schema_in(&path.canonicalize()?),
+            Package::Builtin(_) => None,
+        };
+        if let Some(f) = &schema {
+            let text = std::fs::read_to_string(f)?;
+            let s = crate::options::schema::parse(&text, f.extension().is_some_and(|e| e == "json")).with_context(|| f.display().to_string())?;
+            crate::options::schema::check(&s).with_context(|| f.display().to_string())?;
+        }
+        let mut change = self.add_mod(&name, files.as_deref(), &deletes, install, source, Some(manifest), builtin, None)?;
+        if let Some(f) = &schema {
+            change.warnings.extend(crate::options::adopt_schema(self, &change.layer.id, f)?);
+        }
+        Ok(change)
     }
 
     /// The real file behind a recorded config key.
@@ -1813,7 +1842,7 @@ impl ModStore {
             resolved: st.resolved,
         };
         let saves_folder = saves.folder.trim_start_matches("savegames/<user>/").to_owned();
-        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder })
+        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder, session: None })
     }
 
     /// Make older data explicit: every live profile without a save store gets one (see

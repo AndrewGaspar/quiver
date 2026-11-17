@@ -172,6 +172,10 @@ EOF
       export UPLAY_ARGUMENTS="-upc_uplay_id $UBI_UPLAY_ID -upc_game_version 1 -upc_exe_path $(b64 "$UBI_EXE") -upc_working_directory $(b64 "${UBI_EXE%\\*}")"
       echo "UPLAY_ARGUMENTS=$UPLAY_ARGUMENTS" >> /out/run.log
       echo "game env: $UBI_GAME_ENV" >> /out/run.log
+      # The bridge is the game'"'"'s sibling here: tell the game (and its mods) the mod SDK pipe.
+      ctx_field() { python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or \"\")" /out/context.json "$1"; }
+      export QUIVER_MODS_PIPE="$(ctx_field mods_pipe)" QUIVER_SESSION="$(ctx_field session)"
+      echo "QUIVER_MODS_PIPE=$QUIVER_MODS_PIPE" >> /out/run.log
       if [ -n "$UBI_TRACE" ]; then
         # Wine trace of the game. Proton forces WINEDEBUG=-all unless PROTON_LOG is set, and
         # then writes everything to $PROTON_LOG_DIR/steam-0.log (hundreds of MB per minute), so

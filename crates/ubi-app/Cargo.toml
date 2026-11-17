@@ -16,17 +16,17 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 libc.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
 futures.workspace = true
 reqwest.workspace = true
-gpui = "0.2.2"
-unicode-segmentation = "1"
+gpui.workspace = true
+gpui_platform.workspace = true
+ubi-ui = { path = "../ubi-ui" }
 # Same major as gpui's, so the decoders are shared.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-rust-embed = "8"
 notify = { version = "8", default-features = false }
 gilrs = "0.11"
 
