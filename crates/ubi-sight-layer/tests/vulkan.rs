@@ -259,6 +259,78 @@ fn composites_and_records() {
     assert_eq!((m.extent_w, m.extent_h, m.draw_error), (1024, 600, DRAW_ERR_NO_IMAGE));
     assert_eq!(m.flags & ubi_perf::layout::LAYER_DRAWING, 0);
 
+    // 3b. Hostile hud.image: corrupted and random descriptors written straight into the file
+    // (no HudWriter validation), a new publish every frame. Nothing may be drawn or crash;
+    // a valid image afterwards is drawn again.
+    {
+        use std::os::unix::fs::FileExt;
+        let hud = std::fs::OpenOptions::new().read(true).write(true).open(session.dir.file(&ubi_perf::session::FileKind::HudImage)).unwrap();
+        let mut word = [0u8; 4];
+        hud.read_exact_at(&mut word, 12).unwrap();
+        let bb = u32::from_le_bytes(word) as u64;
+        let valid = test_image(extent, pos, size, 3, opacity);
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut published = 1_000u64;
+        let r = run(Opts {
+            frames: 80,
+            debug_utils: validation.is_some(),
+            on_frame: Some(Box::new(|f, _, _| {
+                if f >= 60 {
+                    if f == 60 {
+                        session.publish(&valid);
+                    }
+                    return;
+                }
+                let mut d = valid.desc;
+                match f % 16 {
+                    0 => d.width = 100_000,
+                    1 => d.height = 0,
+                    2 => d.stride = d.width * 4 - 4,
+                    3 => d.stride = u32::MAX - 3,
+                    4 => d.x = -5,
+                    5 => d.y = extent.1 as i32 - 10,
+                    6 => d.opacity = f32::NAN,
+                    7 => d.scale = f32::INFINITY,
+                    8 => d.ngraphs = 3,
+                    9 => d.graph[0].w = 100_000,
+                    10 => d.graph[0].span_ms = 0,
+                    11 => d.graph[0].max_ms = f32::NAN,
+                    12 => d.format = 2,
+                    13 => d.extent_w = 1281,
+                    14 => d.graph[0].series = 0,
+                    _ => {}
+                }
+                // SAFETY: HudBufferHeader is 256 bytes of plain integers and floats.
+                let mut bytes: [u8; 256] = unsafe { std::mem::transmute(d) };
+                if f % 16 == 15 {
+                    for b in bytes.iter_mut() {
+                        *b = next() as u8;
+                    }
+                }
+                bytes[..8].fill(0); // seq even: "not being written"
+                published += 1;
+                let base = 4096 + (published % 2) * bb;
+                hud.write_all_at(&bytes, base).unwrap();
+                let junk: Vec<u8> = (0..4096).map(|_| next() as u8).collect();
+                hud.write_all_at(&junk, base + 256).unwrap();
+                hud.write_all_at(&published.to_le_bytes(), 64).unwrap();
+            })),
+            ..Opts::default()
+        });
+        assert!(r.messages.is_empty(), "{:#?}", r.messages);
+        let mut drawn = Vec::new();
+        reader.poll(10_000, |_, rec| drawn.push(LayerPresent::from_record(rec).unwrap().hud_drawn));
+        assert_eq!(drawn.len(), 80);
+        assert!(drawn[..60].iter().all(|d| !d), "a corrupt descriptor was drawn: {drawn:?}");
+        assert!(drawn[62..].iter().all(|d| *d), "no recovery after a valid image: {drawn:?}");
+    }
+
     // 4. A stale writer (no heartbeat for > 3 s): nothing is drawn.
     let mut session = session;
     session.stop_heartbeat();

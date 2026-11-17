@@ -371,7 +371,9 @@ impl Compositor {
             return Ok(Drawn::Nothing(DRAW_ERR_INTERNAL));
         }
         if !d.families.get(family as usize).is_some_and(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS)) {
-            return Err(DRAW_ERR_QUEUE);
+            // Presenting from a queue that can't draw: nothing this time (the game may
+            // present from another queue later).
+            return Ok(Drawn::Nothing(DRAW_ERR_QUEUE));
         }
         if waits.len() > MAX_WAITS {
             return Ok(Drawn::Nothing(DRAW_ERR_INTERNAL));

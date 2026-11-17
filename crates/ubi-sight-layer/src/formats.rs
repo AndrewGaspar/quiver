@@ -6,7 +6,7 @@
 //! and quiverd uses the desktop presenter.
 
 use ash::vk;
-use ubi_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_USAGE};
+use ubi_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_NO_IMAGE, DRAW_ERR_USAGE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -50,6 +50,10 @@ pub fn classify(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<Encoding, u32> {
         // HDR10_ST2084, EXTENDED_SRGB_LINEAR (scRGB), and the rest: phase 2 or never.
         return Err(DRAW_ERR_FORMAT);
     }
+    if ci.image_extent.width == 0 || ci.image_extent.height == 0 {
+        // Not valid Vulkan, but cheap to refuse: nothing to draw on.
+        return Err(DRAW_ERR_NO_IMAGE);
+    }
     if ci.image_array_layers != 1 || ci.flags.contains(vk::SwapchainCreateFlagsKHR::PROTECTED) {
         return Err(DRAW_ERR_FORMAT);
     }
@@ -69,6 +73,7 @@ mod tests {
             image_format: format,
             image_color_space: cs,
             image_array_layers: 1,
+            image_extent: vk::Extent2D { width: 1920, height: 1080 },
             present_mode: vk::PresentModeKHR::FIFO,
             ..Default::default()
         }
@@ -89,6 +94,9 @@ mod tests {
         let mut shared = ci(vk::Format::B8G8R8A8_UNORM, srgb);
         shared.present_mode = vk::PresentModeKHR::SHARED_DEMAND_REFRESH;
         assert_eq!(classify(&shared), Err(DRAW_ERR_USAGE));
+        let mut empty = ci(vk::Format::B8G8R8A8_UNORM, srgb);
+        empty.image_extent.height = 0;
+        assert_eq!(classify(&empty), Err(DRAW_ERR_NO_IMAGE));
         assert_eq!(Encoding::Srgb.texture_format(), vk::Format::R8G8B8A8_SRGB);
     }
 }

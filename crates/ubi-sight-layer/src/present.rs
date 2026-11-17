@@ -127,7 +127,8 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
         let r = match family {
             // SAFETY: inside the app's present on `queue`.
             Some(f) => unsafe { s.comp.as_mut().unwrap().draw(dev, queue, f, indices[i], waits, plan.present_ids[i], &history, entry) },
-            None => Err(DRAW_ERR_QUEUE),
+            // A queue we didn't see created: don't draw from it.
+            None => Ok(Drawn::Nothing(DRAW_ERR_QUEUE)),
         };
         plan.hud_ns = mono_raw_ns() - t0;
         match r {
