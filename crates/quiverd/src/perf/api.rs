@@ -58,7 +58,7 @@ impl Daemon {
                 json!(super::launch::plan(&cfg, &env, &s.env, &s.wrappers, super::launch::installed_layer_dir(hub.data_dir()).as_deref()))
             }
             PerfRequest::Summaries { product_id, limit } => json!(summaries(product_id, limit)),
-            PerfRequest::DevSession { product_id, stop } => {
+            PerfRequest::DevSession { product_id, stop, sight } => {
                 if !matches!(source, "cli" | "dev" | "test") {
                     bail!("dev sessions are for the CLI and tests");
                 }
@@ -75,6 +75,9 @@ impl Daemon {
                     let mut info = hub.sessions().into_iter().find(|s| s.session == id).context("session vanished")?;
                     info.dev = true;
                     self.log_activity(source, format!("perf dev session {id} for {product_id}"), Some(product_id));
+                    if sight {
+                        hub.sight.ensure(hub.data_dir(), "dev session");
+                    }
                     json!({ "info": info, "env": began.plan.env })
                 }
             }
@@ -105,6 +108,8 @@ impl Daemon {
             Ok(b) => {
                 let enabled = b.plan.hud.as_ref().is_some_and(|h| h.enabled);
                 settings.env.extend(b.plan.env);
+                // Toasts are on for Quiver launches, and the HUD (when enabled) needs it.
+                self.perf.sight.ensure(self.perf.data_dir(), if enabled { "launch with the HUD" } else { "launch (toasts)" });
                 if enabled { b.plan.notes.into_iter().map(|n| format!("hud: {n}")).collect() } else { Vec::new() }
             }
             Err(e) => {

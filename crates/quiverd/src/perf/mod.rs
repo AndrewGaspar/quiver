@@ -26,6 +26,7 @@ pub mod mods;
 pub mod nvml;
 pub mod registry;
 pub mod rings;
+pub mod sight;
 pub mod sigbus;
 pub mod stats;
 pub mod system;
@@ -196,6 +197,8 @@ pub struct PerfHub {
     state: Mutex<State>,
     pub broadcast: broadcast::Sender<PerfEvent>,
     next_sub: AtomicU64,
+    /// `quiver-sight`, started for launches and HUD toggles ([`sight`]).
+    pub sight: sight::Spawner,
 }
 
 /// What [`PerfHub::begin`] set up for a launch.
@@ -230,6 +233,7 @@ impl PerfHub {
             state: Mutex::new(State { sessions: BTreeMap::new(), conns: HashMap::new(), binder: keybinds::Binder::dry_run(), focused: None }),
             broadcast: broadcast::channel(64).0,
             next_sub: AtomicU64::new(1),
+            sight: sight::Spawner::default(),
         })
     }
 
@@ -478,24 +482,31 @@ impl PerfHub {
         st.sessions.get(session).and_then(|s| s.model.clone()).context("no HUD model yet")
     }
 
-    /// Shows or hides a running game's HUD; remembered as the game's last state.
+    /// Shows or hides a running game's HUD; remembered as the game's last state. Starts
+    /// `quiver-sight` when the HUD comes on and it isn't running (§2.9).
     pub fn toggle(&self, session: Option<&str>, product_id: Option<u32>) -> Result<HudStatus> {
-        self.change(session, product_id, |s| {
+        let st = self.change(session, product_id, |s| {
             s.on = !s.on;
             (Some(s.on), None)
-        })
+        })?;
+        if st.on {
+            self.sight.ensure(&self.data_dir, "HUD toggled on");
+        }
+        Ok(st)
     }
 
     /// The next preset; shows the HUD if it was hidden.
     pub fn next(&self, session: Option<&str>, product_id: Option<u32>) -> Result<HudStatus> {
-        self.change(session, product_id, |s| {
+        let st = self.change(session, product_id, |s| {
             let was_on = s.on;
             s.on = true;
             if was_on {
                 s.layout = layout::next_preset(&s.layout).to_owned();
             }
             (Some(true), Some(s.layout.clone()))
-        })
+        })?;
+        self.sight.ensure(&self.data_dir, "HUD preset changed");
+        Ok(st)
     }
 
     fn change(&self, session: Option<&str>, product_id: Option<u32>, f: impl FnOnce(&mut Session) -> (Option<bool>, Option<String>)) -> Result<HudStatus> {
@@ -695,6 +706,7 @@ async fn publish_loop(hub: Weak<PerfHub>) {
     loop {
         tick.tick().await;
         let Some(h) = hub.upgrade() else { return };
+        h.sight.reap();
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.publish(mono_raw_ns()))).is_err() {
             tracing::error!("perf: publishing panicked; continuing");
         }

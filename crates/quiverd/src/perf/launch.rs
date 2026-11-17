@@ -7,13 +7,15 @@
 //! | `QUIVER_PERF_DIR` | `/dev/shm/quiver-<uid>/<session>` | the Sight layer: its ring and `hud.image` |
 //! | `QUIVER_SIGHT` | `1` | the layer manifest's `enable_environment` (an implicit layer that stays inert without it) |
 //! | `VK_ADD_IMPLICIT_LAYER_PATH` | Quiver's layer dir | only when the layer is installed there rather than in `~/.local/share/vulkan/implicit_layer.d` |
-//! | `VK_INSTANCE_LAYERS` | the order below | only when obs-vkcapture is in use (`OBS_VKCAPTURE=1` or the `obs-gamecapture` wrapper) |
+//! | `VK_INSTANCE_LAYERS` | the order below | always: without it the loader may put Sight above (closer to the application than) vkBasalt or lsfg-vk, and the HUD gets post-processed or interpolated |
 //! | `MANGOHUD_CONFIG` | `…,toggle_logging=Shift_L+F7` | only when the launch runs MangoHud: moves its logging key off Sight's Shift+F2 |
 //!
-//! Layer order, application first: frame-generation and post-processing layers (the
-//! HUD must not be interpolated or post-processed), then for captures `hidden` obs-vkcapture
-//! before Sight (OBS captures before the HUD is composited), for `shown` Sight before
-//! obs-vkcapture. Spike H2 confirms the loader honours it for implicit layers.
+//! Layer order, application first: the user's own `VK_INSTANCE_LAYERS`, then the
+//! frame-generation and post-processing layers the launch turns on (the HUD must not be
+//! interpolated or post-processed), then for captures `hidden` obs-vkcapture before Sight
+//! (OBS captures before the HUD is composited), for `shown` Sight before obs-vkcapture. Only
+//! layers the launch actually enables are listed (a layer named there is loaded even without
+//! its enable variable). Spike H2 confirms the loader honours it for implicit layers.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -91,9 +93,14 @@ pub fn plan(cfg: &HudConfig, session_env: &[(&str, String)], env: &BTreeMap<Stri
     }
     let obs = uses_obs_capture(env, wrappers);
     p.layer_order = layer_order(cfg.captures, env, obs);
+    // Always, not only with OBS: the loader's own order for implicit layers could put
+    // Sight above vkBasalt or lsfg-vk.
+    p.env.insert("VK_INSTANCE_LAYERS".into(), p.layer_order.join(":"));
     if obs {
-        p.env.insert("VK_INSTANCE_LAYERS".into(), p.layer_order.join(":"));
         p.notes.push(format!("obs-vkcapture: HUD {} in OBS game capture", if cfg.captures == Captures::Hidden { "hidden" } else { "shown" }));
+    }
+    if p.layer_order.len() > 1 {
+        p.notes.push(format!("Vulkan layers: {}", p.layer_order.join(" → ")));
     }
     if uses_mangohud(env, wrappers) {
         match mangohud_config(env.get("MANGOHUD_CONFIG").map(String::as_str)) {
@@ -144,7 +151,7 @@ mod tests {
         assert_eq!(p.env["QUIVER_SESSION"], "s-1");
         assert_eq!(p.env["QUIVER_PERF_DIR"], "/dev/shm/quiver-1000/s-1");
         assert_eq!(p.env["QUIVER_SIGHT"], "1");
-        assert!(!p.env.contains_key("VK_INSTANCE_LAYERS"), "no OBS: the loader's own order");
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], SIGHT_LAYER, "always set while the HUD is on");
         assert!(!p.env.contains_key("MANGOHUD_CONFIG"));
         assert_eq!(p.layer_order, [SIGHT_LAYER]);
         let p = plan(&on(), &sess(), &BTreeMap::new(), &[], Some(Path::new("/q/sight/layer")));
@@ -158,6 +165,22 @@ mod tests {
         assert_eq!(hidden.env["VK_INSTANCE_LAYERS"], "VK_LAYER_mine:VK_LAYER_VKBASALT_post_processing:VK_LAYER_OBS_vkcapture_64:VK_LAYER_QUIVER_sight");
         let shown = plan(&on(), &sess(), &BTreeMap::new(), &["obs-gamecapture".into()], None);
         assert_eq!(shown.env["VK_INSTANCE_LAYERS"], "VK_LAYER_QUIVER_sight:VK_LAYER_OBS_vkcapture_64");
+    }
+
+    #[test]
+    fn sight_goes_below_post_processing_and_frame_generation_without_obs() {
+        let e = env(&[("ENABLE_VKBASALT", "1"), ("ENABLE_LSFG", "1")]);
+        let p = plan(&on(), &sess(), &e, &[], None);
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_VKBASALT_post_processing:VK_LAYER_LS_frame_generation:VK_LAYER_QUIVER_sight");
+        // Only layers that are on: vkBasalt off, lsfg-vk on.
+        let p = plan(&on(), &sess(), &env(&[("ENABLE_VKBASALT", "0"), ("ENABLE_LSFG", "1")]), &[], None);
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_LS_frame_generation:VK_LAYER_QUIVER_sight");
+        // The user's own list is kept, in front, without duplicates of ours.
+        let p = plan(&on(), &sess(), &env(&[("VK_INSTANCE_LAYERS", "VK_LAYER_mine:VK_LAYER_QUIVER_sight:VK_LAYER_VKBASALT_post_processing"), ("ENABLE_VKBASALT", "1")]), &[], None);
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_mine:VK_LAYER_VKBASALT_post_processing:VK_LAYER_QUIVER_sight");
+        // HUD off: untouched.
+        let p = plan(&HudConfig::default(), &sess(), &e, &[], None);
+        assert!(!p.env.contains_key("VK_INSTANCE_LAYERS"));
     }
 
     #[test]
