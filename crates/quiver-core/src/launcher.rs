@@ -82,11 +82,12 @@ fn yes() -> bool {
 /// install folder that were named `ubi-*` before the rename to Quiver. If the move fails the
 /// old path is used as it is (read old, write new; see [`quiver_api::renamed`]).
 pub fn migrate_renamed(new: PathBuf, old: &Path) -> PathBuf {
-    if new.symlink_metadata().is_err() && old.symlink_metadata().is_ok() {
-        if let Err(e) = std::fs::rename(old, &new) {
-            tracing::warn!("moving {} to {} failed: {e}", old.display(), new.display());
-            return old.to_path_buf();
-        }
+    if new.symlink_metadata().is_err()
+        && old.symlink_metadata().is_ok()
+        && let Err(e) = std::fs::rename(old, &new)
+    {
+        tracing::warn!("moving {} to {} failed: {e}", old.display(), new.display());
+        return old.to_path_buf();
     }
     new
 }
