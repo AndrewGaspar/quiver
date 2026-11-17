@@ -842,7 +842,7 @@ fn group_digits(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn configs_and_automatic_comparison() {
-        let list = vec![summary(1, Some("p1")), summary(2, Some("p1")), summary(3, None), summary(4, Some("p1"))];
+        let list = [summary(1, Some("p1")), summary(2, Some("p1")), summary(3, None), summary(4, Some("p1"))];
         let m = |v: &str| ResolvedMod { mod_id: "m".into(), name: "DLSS".into(), version: v.into(), label: v.into(), versions: 2, ..Default::default() };
         let history: Vec<PlaySession> = list
             .iter()
