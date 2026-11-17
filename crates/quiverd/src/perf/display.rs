@@ -57,10 +57,17 @@ pub struct Monitor {
     /// `"0"` when nothing is scanned out directly.
     #[serde(default)]
     pub direct_scanout_to: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub direct_scanout_blocked_by: Vec<String>,
-    #[serde(default)]
+    /// `null` (not `[]`) while a window is solitary.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub solitary_blocked_by: Vec<String>,
+}
+
+/// Hyprland reports an empty blocker list as `null`; one such field must not fail the
+/// whole `j/monitors` parse (that blanked the display line while the game was solitary).
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -166,6 +173,11 @@ mod tests {
         let st = DisplayState { monitors: m, active: Some(ActiveWindow { pid: 1, monitor: 1, ..Default::default() }) };
         assert_eq!(st.game_monitor(true).unwrap().name, "eDP-2");
         let empty: ActiveWindow = serde_json::from_str("{}").unwrap();
+        // A solitary fullscreen game: Hyprland sends `null` blocker lists.
+        let solitary = MONITORS.replace(r#"["WINDOWED","CANDIDATE"]"#, "null").replace(r#""directScanoutBlockedBy": ["USER","CANDIDATE"]"#, r#""directScanoutBlockedBy": null"#);
+        let m: Vec<Monitor> = serde_json::from_str(&solitary).unwrap();
+        assert!(m[0].solitary_blocked_by.is_empty() && m[0].direct_scanout_blocked_by.is_empty());
+        assert_eq!(values(&m[0]).path, "composited");
         assert_eq!(empty.pid, 0);
     }
 
