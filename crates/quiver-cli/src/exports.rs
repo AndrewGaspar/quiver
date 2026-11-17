@@ -154,7 +154,7 @@ async fn patch(client: &Client, game: &str, user: Option<String>, undo: bool) ->
 /// A game by name or id. Removing works by id even when the library can't be fetched.
 async fn product(client: &Client, game: &str) -> Result<(u32, String)> {
     match resolve(client, game).await {
-        Ok(e) => Ok((e.product_id, e.name)),
+        Ok(e) => Ok((e.product_id, e.name.clone())),
         Err(err) => match game.parse::<u32>() {
             Ok(id) => Ok((id, id.to_string())),
             Err(_) => Err(err),

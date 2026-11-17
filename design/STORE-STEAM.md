@@ -1,6 +1,7 @@
 # Steam as a store in Quiver (scoping notes)
 
-Status: scoping only (2026-11-16). Nothing here is built. Siblings, written in parallel:
+Status: scoped 2026-11-16; phase 1 (local mode) built 2026-11-17 on `build/steam-local`. Section 8
+says what was built and what wasn't. Siblings, written in parallel:
 `STORE-EPIC.md`, `STORE-GOG.md`, `STORE-EA.md` and `STORE-META.md` (the Meta VR store).
 `STORES.md` owns the cross-store architecture. This document is Steam-specific. Section 3 lists only the
 interfaces Steam needs from that architecture.
@@ -464,6 +465,78 @@ Consequences for code that already exists:
   app X uses profile P" one-shot is the simplest).
 
 ---
+
+## 8. As built: phase 1, local mode (2026-11-17)
+
+**What it shows.** Every installed Steam game, from every library in `libraryfolders.vdf`, Proton or
+native, shows in Quiver's library. Each one has:
+
+- Steam's art: the library cache, then its public CDN.
+- Install size and update state from the manifest, and installed DLC (`InstalledDepots/*/dlcappid`).
+- Name, type, platforms, developer, publisher and release date from `appinfo.vdf`.
+- Play time, two-week time and last played from `localconfig.vdf`.
+- Achievement counts and the list with unlock times, from the stats cache.
+- Steam Cloud state from `remotecache.vdf`: files, size, last upload and unsynced files.
+
+**What Quiver does with them.** Play runs `steam://rungameid/<appid>` through the client.
+"Running" is read from Steam's `reaper SteamLaunch AppId=<id>` processes.
+
+**Safety.** No Steam login, no Steam secret, no write to any Steam file, no signal to Steam. From
+`localconfig.vdf`, `steamlocal::playtime` keeps only `Playtime`, `Playtime2wks` and `LastPlayed`.
+
+**Where the code is.**
+
+- `crates/quiver-core/src/steamlocal/`: `appinfo` (v27–v29, string-table keys), `stats`, `playtime`,
+  `remotecache`, `kv` (a binary KeyValues reader with a nesting limit), `is_tool`, and `provider`
+  (`SteamLocal`, which caches a scan for 15 s; `refresh` rescans).
+- `AppManifest` (`exports/steamgames.rs`) now also reads `SizeOnDisk`, `LastPlayed`, `StateFlags`,
+  `TargetBuildID` and installed DLC.
+
+**Accounts (`ClientManaged`).** Each game's play time, achievements and cloud state are read for
+the Steam user who installed it (`LastOwner`), else the client's most recent user. The name comes
+from `loginusers.vdf`, as `Steam::users` already did.
+
+**Tools.** Tools and runtimes are not listed:
+
+- appinfo type `tool` or `config`;
+- Steamworks Common Redistributables, Steam Linux Runtime 1.0–4.0 and Proton 6.3–11.0,
+  Experimental and Hotfix, by app id;
+- when appinfo has no entry, by name.
+
+Applications such as Wallpaper Engine stay listed.
+
+**Steam copies of Ubisoft games stay one entry.** The Ubisoft provider's entry carries the Steam
+install in `steam`, and `merge_libraries` drops the Steam provider's record for that app id
+(steer 7). With Ubisoft signed out, the same app shows as a Steam game.
+
+**Checked against this machine, read-only.** All counts are aggregates.
+
+- `appinfo.vdf` is v29: 2.9 MB, 1223 apps, decoded in 9 ms (release build).
+- 25 app manifests: 11 tools and 14 games.
+- All 14 games have appinfo, play time and capsule art. 13 have achievements.
+- `GameDetail` works for all 14. 10 have cloud state and 9 have DLC lists.
+- A full scan takes about 120 ms in a debug build.
+- Format notes from the parser work:
+  - The schema's `type` appears as `"ACHIEVEMENTS"`, `"4"` or int 4.
+  - Most games use the bit map's key as the bit; 9 games store an explicit `bit`.
+  - The user stats file's root is `cache`.
+  - `syncstate` was always 1 and `persiststate` always 0. The meanings of the other values are
+    unverified.
+
+**Not built yet.**
+
+- Install, update, verify and uninstall through `steam://`, and progress mirrored into Downloads.
+- Steam libraries in Storage.
+- inotify change events. The scan is cached instead.
+- The first-run Steam step.
+- Flatpak Steam is found but untested.
+- Description text: there is no local source for it.
+- Achievement icons on the page. The detail carries CDN URLs, but the app doesn't draw them yet.
+- Phase 2 onwards: `steam-run` for any game, settings, mods and Sight.
+
+**Not exercised live.** `quiver play steam:<appid>` was not run, because it would start a game.
+Routing, refusals (not installed, still downloading, `--profile`) and the `rungameid` argv are
+covered by tests and by the code shared with Steam copies.
 
 ## Sources
 

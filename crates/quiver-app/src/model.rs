@@ -2,7 +2,99 @@
 //! formatting shared by every screen.
 
 use chrono::{DateTime, Datelike, Local, Utc};
-use quiver_api::{GameSettings, Job, JobKind, LibraryEntry, Playtime, Revision};
+use quiver_api::{GameRef, GameSettings, Job, JobKind, LibraryEntry, Playtime, Revision, StoreId};
+
+/// How the app names a game in its own state (pages, menus, focus, maps): a [`GameRef`]
+/// that prints as its key, `3539` for a Ubisoft product (so every `quiver …` hint the app
+/// shows reads as before) and `steam:620` for other stores.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Gid(pub GameRef);
+
+impl Gid {
+    /// The Ubisoft product id, for views and requests only Ubisoft games reach (settings,
+    /// mods, saves, Options, perf). Other stores' games never open those views; were one
+    /// to get there, `0` names no product and the daemon refuses it.
+    pub fn pid(self) -> u32 {
+        self.0.as_ubisoft().unwrap_or(0)
+    }
+
+    pub fn ubisoft(self) -> Option<u32> {
+        self.0.as_ubisoft()
+    }
+
+    pub fn store(self) -> StoreId {
+        self.0.store
+    }
+
+    pub fn is_ubisoft(self) -> bool {
+        self.0.is_ubisoft()
+    }
+
+    /// A number for GPUI element ids: the product id for Ubisoft games (as before), a hash
+    /// of the ref with the top bit set for other stores.
+    pub fn ix(self) -> usize {
+        match self.0.as_ubisoft() {
+            Some(id) => id as usize,
+            None => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                self.0.hash(&mut h);
+                (h.finish() as usize) | (1 << (usize::BITS - 1))
+            }
+        }
+    }
+}
+
+impl Default for Gid {
+    /// No game: product 0, which no store uses.
+    fn default() -> Self {
+        Gid::from(0)
+    }
+}
+
+impl std::str::FromStr for Gid {
+    type Err = quiver_api::game::GameRefError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        GameRef::parse(s).map(Gid)
+    }
+}
+
+impl PartialEq<Gid> for u32 {
+    fn eq(&self, g: &Gid) -> bool {
+        g == self
+    }
+}
+
+impl From<u32> for Gid {
+    fn from(product_id: u32) -> Self {
+        Gid(GameRef::ubisoft(product_id))
+    }
+}
+
+impl From<GameRef> for Gid {
+    fn from(g: GameRef) -> Self {
+        Gid(g)
+    }
+}
+
+impl PartialEq<u32> for Gid {
+    fn eq(&self, product_id: &u32) -> bool {
+        self.0.as_ubisoft() == Some(*product_id)
+    }
+}
+
+impl std::fmt::Display for Gid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.key())
+    }
+}
+
+impl std::fmt::Debug for Gid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Gid({})", self.0)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct GameRow {
@@ -19,8 +111,8 @@ impl GameRow {
         Self { entry, job: None, playtime: None, settings: None, history: None }
     }
 
-    pub fn id(&self) -> u32 {
-        self.entry.product_id
+    pub fn id(&self) -> Gid {
+        Gid(self.entry.game)
     }
 
     pub fn installed(&self) -> bool {
@@ -32,14 +124,20 @@ impl GameRow {
         self.entry.steam.as_ref()
     }
 
+    /// Another store's game, installed and run by its client (a Steam game).
+    pub fn client(&self) -> Option<&quiver_api::stores::ClientInstall> {
+        self.entry.client.as_ref()
+    }
+
     /// Only Steam has it installed: Steam plays, updates and uninstalls it.
     pub fn steam_only(&self) -> bool {
         self.entry.steam_only()
     }
 
-    /// Installed by Quiver or by Steam (it belongs with the installed games).
+    /// Installed by Quiver, by Steam or by another store's client (it belongs with the
+    /// installed games).
     pub fn on_disk(&self) -> bool {
-        self.installed() || self.entry.steam.is_some()
+        self.entry.on_disk()
     }
 
     /// An install job that hasn't finished.
@@ -94,6 +192,18 @@ impl GameRow {
             return format!("{} of {}", gb(j.downloaded), gb(j.total));
         }
         let played = self.playtime.as_ref().map(|p| p.total_seconds).filter(|s| *s > 0);
+        // Another store's game (its badge says which): its client's state and play time.
+        if let Some(c) = self.client() {
+            let label = self.entry.store().label();
+            let played = played.or(c.playtime.map(|p| p.total_seconds).filter(|s| *s > 0));
+            return match (c.complete, c.update_pending, played, self.last_played().or(c.playtime.and_then(|p| p.last_played))) {
+                (false, _, _, _) => format!("Downloading in {label}"),
+                (true, true, _, _) => format!("Update waiting in {label}"),
+                (true, false, Some(s), Some(t)) => format!("{} played · {}", hours(s), day(t)),
+                (true, false, Some(s), None) => format!("{} played", hours(s)),
+                (true, false, None, _) => format!("In {label} · not played yet"),
+            };
+        }
         match (self.installed(), self.entry.update_available, played, self.last_played()) {
             (true, true, Some(s), _) => format!("Update available · {} played", hours(s)),
             (true, true, None, _) => "Update available".into(),

@@ -29,7 +29,7 @@ impl Section {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Page {
     Library,
-    Game(u32),
+    Game(Gid),
     Downloads,
     Activity,
     /// Global settings; the section is [`Nav::settings`].
@@ -191,20 +191,20 @@ pub enum Input {
 pub enum Overlay {
     Palette { selected: usize },
     /// The menu for one game.
-    Menu { game: u32, selected: usize },
+    Menu { game: Gid, selected: usize },
 }
 
 /// What is focusable on screen right now, in display order. Built by the view.
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     /// Library grid, product ids in order.
-    pub grid: Vec<u32>,
+    pub grid: Vec<Gid>,
     /// Grid columns at the current window width (at least 1).
     pub columns: usize,
     /// Buttons in the library hero (0 when there is no hero).
     pub hero_buttons: usize,
     /// The game list next to a game page.
-    pub side: Vec<u32>,
+    pub side: Vec<Gid>,
     /// Buttons in the game page's action bar.
     pub actions: usize,
     /// Focusable rows in the page body.
@@ -218,8 +218,8 @@ pub struct Layout {
 pub enum Target {
     Section(Section),
     Hero(usize),
-    Tile(u32),
-    SideRow(u32),
+    Tile(Gid),
+    SideRow(Gid),
     Action(usize),
     Tab(Tab),
     Body(usize),
@@ -239,15 +239,15 @@ pub enum Effect {
     /// Library hero button `i` was activated.
     Hero(usize),
     /// Game page action `i` was activated.
-    Action(u32, usize),
+    Action(Gid, usize),
     /// Body row `i` was activated.
     Body(usize),
     /// Play this game.
-    Play(u32),
+    Play(Gid),
     /// Run palette entry `i` (the palette has closed).
     Palette(usize),
     /// Run menu entry `i` for this game (the menu has closed).
-    Menu(u32, usize),
+    Menu(Gid, usize),
 }
 
 // Serializable so a relaunch can carry it over (`selfupdate.rs`).
@@ -327,7 +327,7 @@ impl Nav {
     }
 
     /// The game the menu and Play act on: the focused tile, or the open game page.
-    pub fn focused_game(&self, l: &Layout) -> Option<u32> {
+    pub fn focused_game(&self, l: &Layout) -> Option<Gid> {
         match self.page {
             Page::Game(id) => Some(id),
             Page::Library => match self.zone {
@@ -341,7 +341,7 @@ impl Nav {
     // -----------------------------------------------------------------------------------------
     // Direct moves (mouse clicks, deep links)
 
-    pub fn open_game(&mut self, id: u32) {
+    pub fn open_game(&mut self, id: Gid) {
         self.overlay = None;
         if self.page != Page::Game(id) {
             self.tab = Tab::Overview;
@@ -432,7 +432,7 @@ impl Nav {
         self.overlay = Some(Overlay::Palette { selected: 0 });
     }
 
-    pub fn open_menu(&mut self, game: u32) {
+    pub fn open_menu(&mut self, game: Gid) {
         self.overlay = Some(Overlay::Menu { game, selected: 0 });
     }
 
@@ -818,10 +818,10 @@ mod tests {
 
     fn lib_layout() -> Layout {
         Layout {
-            grid: (1..=19).collect(), // 8 + 8 + 3
+            grid: (1..=19).map(Gid::from).collect(), // 8 + 8 + 3
             columns: 8,
             hero_buttons: 2,
-            side: (1..=19).collect(),
+            side: (1..=19).map(Gid::from).collect(),
             actions: 5,
             body: 4,
             palette_items: 6,
@@ -841,18 +841,18 @@ mod tests {
     fn grid_moves_in_reading_order_and_by_columns() {
         let l = lib_layout();
         let mut n = Nav::new();
-        assert_eq!(n.focused(&l), Some(Target::Tile(1)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(1))));
         run(&mut n, &l, &[Right, Right, Down]);
-        assert_eq!(n.focused(&l), Some(Target::Tile(11)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(11))));
         // Down into the short last row clamps to its last item.
         run(&mut n, &l, &[Right, Right, Right, Down]);
-        assert_eq!(n.focused(&l), Some(Target::Tile(19)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(19))));
         // Last row: down stays put.
         assert_eq!(n.apply(Down, &l), Effect::None);
         // Right wraps into the next row; left at the very start stays.
         let mut n = Nav::new();
         run(&mut n, &l, &[Right, Right, Right, Right, Right, Right, Right, Right]);
-        assert_eq!(n.focused(&l), Some(Target::Tile(9)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(9))));
         let mut n = Nav::new();
         assert_eq!(n.apply(Left, &l), Effect::None);
     }
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(n.focused(&l), Some(Target::Section(Section::Library)));
         run(&mut n, &l, &[Down, Down]);
         // Back in the grid, same column as before.
-        assert_eq!(n.focused(&l), Some(Target::Tile(3)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(3))));
         // No hero: straight to the top bar.
         let l2 = Layout { hero_buttons: 0, ..lib_layout() };
         let mut n = Nav::new();
@@ -882,34 +882,34 @@ mod tests {
         let l = lib_layout();
         let mut n = Nav::new();
         run(&mut n, &l, &[Down, Right]);
-        assert_eq!(n.focused(&l), Some(Target::Tile(10)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(10))));
         assert_eq!(n.apply(Activate, &l), Effect::Moved);
-        assert_eq!(n.page, Page::Game(10));
+        assert_eq!(n.page, Page::Game(Gid::from(10)));
         assert_eq!(n.focused(&l), Some(Target::Action(0)));
-        assert_eq!(n.apply(Activate, &l), Effect::Action(10, 0));
+        assert_eq!(n.apply(Activate, &l), Effect::Action(Gid::from(10), 0));
         assert_eq!(n.apply(Back, &l), Effect::Moved);
         assert_eq!(n.page, Page::Library);
-        assert_eq!(n.focused(&l), Some(Target::Tile(10)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(10))));
     }
 
     #[test]
     fn side_list_moves_select_games_and_right_enters_the_page() {
         let l = lib_layout();
         let mut n = Nav::new();
-        n.open_game(5);
+        n.open_game(Gid::from(5));
         run(&mut n, &l, &[Left]);
-        assert_eq!(n.focused(&l), Some(Target::SideRow(5)));
+        assert_eq!(n.focused(&l), Some(Target::SideRow(Gid::from(5))));
         run(&mut n, &l, &[Down, Down]);
-        assert_eq!(n.page, Page::Game(7));
+        assert_eq!(n.page, Page::Game(Gid::from(7)));
         run(&mut n, &l, &[Up]);
-        assert_eq!(n.page, Page::Game(6));
+        assert_eq!(n.page, Page::Game(Gid::from(6)));
         run(&mut n, &l, &[Right]);
         assert_eq!(n.focused(&l), Some(Target::Action(0)));
         // A on a side row jumps to Play too.
         run(&mut n, &l, &[Left, Activate]);
         assert_eq!(n.focused(&l), Some(Target::Action(0)));
         // Up from the first game reaches the top bar.
-        n.open_game(1);
+        n.open_game(Gid::from(1));
         run(&mut n, &l, &[Left, Up]);
         assert_eq!(n.zone, Zone::TopBar);
     }
@@ -918,7 +918,7 @@ mod tests {
     fn tabs_follow_triggers_and_focus() {
         let l = lib_layout();
         let mut n = Nav::new();
-        n.open_game(3);
+        n.open_game(Gid::from(3));
         assert_eq!(n.apply(PrevTab, &l), Effect::None);
         run(&mut n, &l, &[NextTab, NextTab]);
         assert_eq!(n.tab, Tab::Mods);
@@ -945,7 +945,7 @@ mod tests {
     fn bumpers_cycle_sections() {
         let l = lib_layout();
         let mut n = Nav::new();
-        n.open_game(2);
+        n.open_game(Gid::from(2));
         run(&mut n, &l, &[NextSection]);
         assert_eq!(n.page, Page::Downloads);
         assert_eq!(n.zone, Zone::Body);
@@ -983,12 +983,12 @@ mod tests {
         assert_eq!(n.apply(Activate, &l), Effect::Palette(5));
         assert!(n.overlay.is_none());
         // Focus is where it was.
-        assert_eq!(n.focused(&l), Some(Target::Tile(2)));
+        assert_eq!(n.focused(&l), Some(Target::Tile(Gid::from(2))));
         // Y opens the menu for the focused tile; B closes it.
         assert_eq!(n.apply(Menu, &l), Effect::Moved);
-        assert_eq!(n.overlay, Some(Overlay::Menu { game: 2, selected: 0 }));
+        assert_eq!(n.overlay, Some(Overlay::Menu { game: Gid::from(2), selected: 0 }));
         run(&mut n, &l, &[Down]);
-        assert_eq!(n.apply(Activate, &l), Effect::Menu(2, 1));
+        assert_eq!(n.apply(Activate, &l), Effect::Menu(Gid::from(2), 1));
         run(&mut n, &l, &[Menu, Back]);
         assert!(n.overlay.is_none());
         // Start toggles the palette.
@@ -1037,9 +1037,9 @@ mod tests {
         let l = lib_layout();
         let mut n = Nav::new();
         run(&mut n, &l, &[Right]);
-        assert_eq!(n.apply(Play, &l), Effect::Play(2));
-        n.open_game(7);
-        assert_eq!(n.apply(Play, &l), Effect::Play(7));
+        assert_eq!(n.apply(Play, &l), Effect::Play(Gid::from(2)));
+        n.open_game(Gid::from(7));
+        assert_eq!(n.apply(Play, &l), Effect::Play(Gid::from(7)));
         n.open_section(Section::Downloads);
         assert_eq!(n.apply(Play, &l), Effect::None);
         assert_eq!(n.apply(Menu, &l), Effect::None);
@@ -1050,12 +1050,13 @@ mod tests {
         let l = lib_layout();
         let mut n = Nav::new();
         run(&mut n, &l, &[Down, Down, Right]);
-        let small = Layout { grid: vec![1, 2, 3], ..lib_layout() };
-        assert_eq!(n.focused(&small), Some(Target::Tile(3)));
+        let small = Layout { grid: vec![Gid::from(1), Gid::from(2), Gid::from(3)], ..lib_layout() };
+        assert_eq!(n.focused(&small), Some(Target::Tile(Gid::from(3))));
         n.apply(Left, &small);
-        assert_eq!(n.focused(&small), Some(Target::Tile(2)));
+        assert_eq!(n.focused(&small), Some(Target::Tile(Gid::from(2))));
         let empty = Layout { grid: vec![], hero_buttons: 0, ..lib_layout() };
         assert_eq!(n.focused(&empty), None);
         assert_eq!(n.apply(Activate, &empty), Effect::None);
     }
 }
+use crate::model::Gid;

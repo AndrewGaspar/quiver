@@ -10,7 +10,7 @@ use super::form::{sec, who_badge};
 use super::logic::{self, Who};
 use super::{Confirm, ModsView};
 use crate::app::Quiver;
-use crate::model::{GameRow, ago, clock, day};
+use crate::model::{Gid, GameRow, ago, clock, day};
 use crate::theme::Theme;
 use crate::ui::game::page::Load;
 use crate::ui::{Icon, Kind, SEMIBOLD, Size, button, card, chip, icon, mono, pill, PillKind};
@@ -94,11 +94,11 @@ impl Quiver {
                         .flex()
                         .gap(px(8.))
                         .child(button("imp-keep", th, Kind::Primary, Size::Small, Some(Icon::Check), format!("Keep (r{rev})")).on_click(cx.listener(move |this, _, _, cx| {
-                            this.gp.opt.dismissed.push(rev);
+                            this.gp.opt.dismissed.push((Gid::from(rev)).pid());
                             cx.notify();
                         })))
                         .child(button("imp-undo", th, Kind::Secondary, Size::Small, Some(Icon::Undo), format!("Undo: back to r{prev}")).on_click(cx.listener(move |this, _, _, cx| {
-                            this.gp.opt.dismissed.push(rev);
+                            this.gp.opt.dismissed.push((Gid::from(rev)).pid());
                             this.options_restore(prev, cx);
                         }))),
                 )
@@ -107,7 +107,7 @@ impl Quiver {
     }
 
     /// This profile against its defaults or another profile (`OptionsDiff`).
-    fn render_options_compare(&mut self, th: &Theme, id: u32, profile: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_options_compare(&mut self, th: &Theme, id: Gid, profile: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let against = if self.gp.opt.compare.is_empty() { "default".to_owned() } else { self.gp.opt.compare.clone() };
         let mut choices: Vec<(String, String)> = vec![("default".into(), "Defaults".into())];
         if profile != quiver_api::mods::VANILLA {
@@ -171,7 +171,7 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn render_options_history(&mut self, th: &Theme, id: u32, name: &str, hist: &[OptionsRevision], cx: &mut Context<Self>) -> AnyElement {
+    fn render_options_history(&mut self, th: &Theme, id: Gid, name: &str, hist: &[OptionsRevision], cx: &mut Context<Self>) -> AnyElement {
         let cur = hist.last().map(|r| r.revision);
         let running_session = self.gp.opt.loaded_surfaces().iter().find_map(|s| s.live.session.clone());
         let confirm = self.gp.opt.confirm.clone();

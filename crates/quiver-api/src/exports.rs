@@ -15,10 +15,12 @@ pub enum ExportKind {
 /// One export Quiver wrote (or staged), as recorded in `<data>/exports.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportRecord {
-    /// Stable export key: `quiver:<product_id>[/<profile_id>]`.
+    /// Stable export key: `quiver:<game key>[/<profile_id>]` (`quiver:5059`, `quiver:steam:620`).
     pub key: String,
     pub kind: ExportKind,
-    pub product_id: u32,
+    /// Written as `product_id` for a Ubisoft game, as always (see [`crate::game::persisted`]).
+    #[serde(flatten, with = "crate::game::persisted")]
+    pub game: crate::GameRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
     /// Name shown in the launcher or Steam.
@@ -218,4 +220,23 @@ pub struct SteamPatchResult {
     /// A change for this game that was waiting for Steam was dropped instead.
     #[serde(default)]
     pub dropped_staged: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `exports.json` records written before game refs read and write back byte for byte.
+    #[test]
+    fn records_round_trip_unchanged() {
+        let old = r#"{"key":"quiver:5059","kind":"steam","product_id":5059,"name":"AC III","path":"/h/.steam/steam/userdata/1/config/shortcuts.vdf","appid":3035311609,"steam_user":"1","written_at":"2026-11-10T10:00:00Z","hash":"abc","staged":false}"#;
+        let r: ExportRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(r.game, crate::GameRef::ubisoft(5059));
+        assert_eq!(serde_json::to_string(&r).unwrap(), old);
+        let s = ExportStatus { record: r, state: ExportState::Ok };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!((v["product_id"].as_u64(), v["state"].as_str()), (Some(5059), Some("ok")));
+        let back: ExportStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back.record.game, crate::GameRef::ubisoft(5059));
+    }
 }

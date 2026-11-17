@@ -594,13 +594,14 @@ impl Downloads {
             return;
         }
         let Some(lib) = host.library_cache() else { return };
-        for e in lib.into_iter().filter(|e| e.installed.is_some() && e.update_available) {
-            if self.get(e.product_id).is_some() || self.dismissed.lock().unwrap().contains(&e.product_id) || host.playing(e.product_id) {
+        let updates = lib.into_iter().filter(|e| e.installed.is_some() && e.update_available).filter_map(|e| Some((e.ubisoft_id()?, e)));
+        for (product_id, e) in updates {
+            if self.get(product_id).is_some() || self.dismissed.lock().unwrap().contains(&product_id) || host.playing(product_id) {
                 continue;
             }
             let language = e.installed.as_ref().and_then(|g| g.language.clone());
-            if let Err(err) = self.enqueue(host, "auto-update", e.product_id, e.name.clone(), QueueKind::Update, language, None) {
-                tracing::warn!(product_id = e.product_id, "auto-update: {err:#}");
+            if let Err(err) = self.enqueue(host, "auto-update", product_id, e.name.clone(), QueueKind::Update, language, None) {
+                tracing::warn!(product_id, "auto-update: {err:#}");
             }
         }
     }
@@ -719,7 +720,7 @@ fn language_for(product_id: u32) -> String {
 }
 
 fn report_path(product_id: u32) -> PathBuf {
-    launcher::data_dir().join("games").join(product_id.to_string()).join("verify.json")
+    quiver_core::paths::game_dir(&quiver_api::GameRef::ubisoft(product_id)).join("verify.json")
 }
 
 fn save_report(r: &VerifyReport) {
@@ -753,7 +754,7 @@ async fn product_name(daemon: &Arc<Daemon>, product_id: u32) -> String {
         .library(false)
         .await
         .ok()
-        .and_then(|l| l.into_iter().find(|e| e.product_id == product_id).map(|e| e.name))
+        .and_then(|l| l.into_iter().find(|e| e.ubisoft_id() == Some(product_id)).map(|e| e.name))
         .unwrap_or_else(|| daemon.product_name(product_id))
 }
 
@@ -776,8 +777,9 @@ pub(crate) fn cancel(daemon: &Arc<Daemon>, source: &str, job: &Job, discard: boo
         p.cancel.store(true, Ordering::Relaxed);
         return Ok(());
     }
-    match daemon.downloads.get(job.product_id) {
-        Some(e) if e.job_id == Some(job.id) => daemon.downloads.remove(daemon, source, job.product_id, discard),
+    let Some(product_id) = job.game.as_ubisoft() else { bail!("job {} is not in the download queue", job.id) };
+    match daemon.downloads.get(product_id) {
+        Some(e) if e.job_id == Some(job.id) => daemon.downloads.remove(daemon, source, product_id, discard),
         _ => bail!("job {} is not in the download queue", job.id),
     }
 }

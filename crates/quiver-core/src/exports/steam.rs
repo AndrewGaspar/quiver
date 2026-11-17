@@ -135,6 +135,19 @@ pub fn game_running() -> bool {
     procs().any(|(comm, cmdline)| comm == "reaper" && cmdline.contains("SteamLaunch"))
 }
 
+/// The Steam apps running now: Steam wraps every game it starts in `reaper SteamLaunch
+/// AppId=<id> -- …`.
+pub fn running_apps() -> std::collections::HashSet<u32> {
+    procs().filter(|(comm, _)| comm == "reaper").filter_map(|(_, cmdline)| reaper_app_id(&cmdline)).collect()
+}
+
+fn reaper_app_id(cmdline: &str) -> Option<u32> {
+    if !cmdline.contains("SteamLaunch") {
+        return None;
+    }
+    cmdline.split_whitespace().find_map(|a| a.strip_prefix("AppId=")?.parse().ok())
+}
+
 fn procs() -> impl Iterator<Item = (String, String)> {
     std::fs::read_dir("/proc").into_iter().flatten().filter_map(|e| {
         let e = e.ok()?;
@@ -436,7 +449,7 @@ pub async fn export(paths: &Paths, steam: &Steam, user: &str, target: &Target, r
     let record = ExportRecord {
         key: target.key.to_string(),
         kind: ExportKind::Steam,
-        product_id: target.key.product_id,
+        game: target.key.game,
         profile_id: target.key.profile_id.clone(),
         name: target.name.clone(),
         path: shortcuts.clone(),
@@ -580,6 +593,14 @@ pub fn restart_steam(paths: &Paths, steam: &Steam, timeout: Duration) -> Result<
 mod tests {
     use super::*;
     use crate::exports::{ExportState, list};
+
+    #[test]
+    fn running_app_from_reaper() {
+        let line = "/home/u/.local/share/Steam/ubuntu12_32/reaper SteamLaunch AppId=620 -- /home/u/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point --verb=waitforexitandrun -- ";
+        assert_eq!(reaper_app_id(line), Some(620));
+        assert_eq!(reaper_app_id("reaper SteamLaunch -- x"), None);
+        assert_eq!(reaper_app_id("reaper AppId=1"), None);
+    }
 
     /// A fixture Steam tree: two users with loginusers.vdf, one with an existing
     /// shortcuts.vdf (another launcher's entry).

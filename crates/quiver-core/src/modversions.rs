@@ -74,7 +74,7 @@ fn next_label(rec: &ModRecord) -> String {
 
 impl ModStore {
     fn mods_hist_dir(&self) -> PathBuf {
-        self.data_dir().join("games").join(self.product_id().to_string()).join("mods")
+        crate::paths::game_dir_in(self.data_dir(), &quiver_api::GameRef::ubisoft(self.product_id())).join("mods")
     }
 
     pub(crate) fn mod_history_path(&self, id: &str) -> PathBuf {

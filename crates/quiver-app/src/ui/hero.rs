@@ -40,7 +40,7 @@ impl Quiver {
         let id = g.id();
         // Only the config's own hero has the logo painted in: custom art (any slot) or a
         // fallback (games API, Steam) doesn't.
-        if BAKED_LOGO.contains(&id) && !self.custom_art.contains_key(&id) {
+        if BAKED_LOGO.contains(&id.pid()) && !self.custom_art.contains_key(&id.pid()) {
             let (state, from) = self.art_pick(g, ArtSlot::Hero, Variant::Original, cx);
             if state != ArtState::Failed && from.and_then(|c| c.origin) == Some(quiver_api::art::ArtOrigin::Config) {
                 return HeroTitle::Baked;

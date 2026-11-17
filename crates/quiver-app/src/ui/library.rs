@@ -9,7 +9,8 @@ use super::{
 use super::hero::{TitleBox, title_slot};
 use crate::app::{Attention, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{GameRow, clock, day, hours, short_name};
+use crate::model::{Gid, GameRow, clock, day, hours, short_name};
+use quiver_api::StoreId;
 use crate::nav::Target;
 use crate::theme::{Theme, on_art, rgba};
 
@@ -92,12 +93,23 @@ impl Quiver {
                 LibFilter::Installed => g.on_disk(),
                 LibFilter::Updates => g.installed() && g.entry.update_available,
             })
+            .filter(|g| self.store_filter.is_none_or(|s| g.entry.stores().contains(&s)))
+            .collect()
+    }
+
+    /// Stores with games in the library, with counts, Ubisoft first (the store chips; shown
+    /// once there is more than one store).
+    pub fn library_stores(&self) -> Vec<(StoreId, usize)> {
+        StoreId::ALL
+            .into_iter()
+            .map(|s| (s, self.games.iter().filter(|g| g.entry.stores().contains(&s)).count()))
+            .filter(|(_, n)| *n > 0)
             .collect()
     }
 
     pub fn render_library(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (cols, tile_w) = self.grid_metrics();
-        let ids: Vec<u32> = self.grid_games().iter().map(|g| g.id()).collect();
+        let ids: Vec<Gid> = self.grid_games().iter().map(|g| g.id()).collect();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (r, chunk) in ids.chunks(cols).enumerate() {
             let tiles: Vec<AnyElement> = chunk.iter().map(|id| self.render_tile(th, *id, tile_w, cx)).collect();
@@ -140,6 +152,7 @@ impl Quiver {
         let total = self.games.len();
         let installed = self.games.iter().filter(|g| g.on_disk()).count();
         let updates = self.games.iter().filter(|g| g.installed() && g.entry.update_available).count();
+        let stores = self.library_stores();
         let filter_chip = |f: LibFilter, label: &'static str, n: usize, i: Option<Icon>, cx: &mut Context<Self>| {
             let on = self.lib_filter == f;
             chip(th, i, label, on)
@@ -159,6 +172,20 @@ impl Quiver {
             .child(filter_chip(LibFilter::Installed, "Installed", installed, None, cx))
             .child(filter_chip(LibFilter::Updates, "Updates", updates, Some(Icon::ArrowDownToLine), cx))
             .child(div().w(px(1.)).h(px(18.)).mx(px(6.)).bg(th.line2))
+            .when(stores.len() > 1, |d| {
+                d.children(stores.iter().map(|&(s, n)| {
+                    let on = self.store_filter == Some(s);
+                    chip(th, None, s.label(), on)
+                        .child(chip_count(th, n, on))
+                        .id(("store-chip", s as usize))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store_filter = if this.store_filter == Some(s) { None } else { Some(s) };
+                            cx.notify();
+                        }))
+                }))
+                .child(div().w(px(1.)).h(px(18.)).mx(px(6.)).bg(th.line2))
+            })
             .child(
                 chip(th, Some(Icon::Users), "All accounts", false)
                     .child(icon(Icon::ChevronDown, 12., th.tx2))
@@ -360,7 +387,7 @@ impl Quiver {
         hero.child(content).into_any_element()
     }
 
-    fn render_attention(&mut self, th: &Theme, items: &[(u32, Attention)], cx: &mut Context<Self>) -> gpui::Div {
+    fn render_attention(&mut self, th: &Theme, items: &[(Gid, Attention)], cx: &mut Context<Self>) -> gpui::Div {
         let mut panel = div()
             .flex()
             .flex_col()
@@ -452,7 +479,7 @@ impl Quiver {
         panel
     }
 
-    fn render_tile(&mut self, th: &Theme, id: u32, w: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tile(&mut self, th: &Theme, id: Gid, w: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.game(id).cloned() else { return div().into_any_element() };
         let h = (w * TILE_RATIO).round();
         let dim = !g.on_disk() && g.install_job().is_none();
@@ -472,7 +499,14 @@ impl Quiver {
         } else if g.installed() && g.entry.update_available {
             tl = tl.child(tag(th, TagKind::Accent, Some(Icon::ArrowDownToLine), "Update"));
         }
-        let custom = self.custom_art.get(&id).is_some_and(|c| c.tile.is_some());
+        let custom = id.ubisoft().and_then(|p| self.custom_art.get(&p)).is_some_and(|c| c.tile.is_some());
+        // Store badges (steer X2): every store the game has a record in other than Ubisoft,
+        // once the library has more than one store.
+        let badges: Vec<&'static str> = if self.library_stores().len() > 1 {
+            g.entry.stores().into_iter().filter(|s| *s != StoreId::Ubisoft).map(|s| s.label()).collect()
+        } else {
+            Vec::new()
+        };
 
         let group = gpui::SharedString::from(format!("tile-{id}"));
         let deep = vec![soft_shadow(rgba(0x000000, 0.6), 18., 40.)];
@@ -499,9 +533,16 @@ impl Quiver {
             .child(art_fill(th, &art, &label, 10., false))
             .child(tl)
             .focus_glow(focused, th, 10.);
-        if custom {
+        if custom || !badges.is_empty() {
             boxart = boxart.child(
-                div().absolute().right(px(8.)).top(px(8.)).child(tag(th, TagKind::Plain, Some(Icon::Image), "")),
+                div()
+                    .absolute()
+                    .right(px(8.))
+                    .top(px(8.))
+                    .flex()
+                    .gap(px(4.))
+                    .children(badges.into_iter().map(|b| tag(th, TagKind::Plain, None, b)))
+                    .when(custom, |d| d.child(tag(th, TagKind::Plain, Some(Icon::Image), ""))),
             );
         }
         if let Some(f) = g.installing() {
@@ -533,7 +574,7 @@ impl Quiver {
                     )
                     .child(progress(th, f, None, 4., None)),
             );
-        } else if g.installed() && !focused {
+        } else if (g.installed() || g.client().is_some_and(|c| c.complete)) && !focused {
             // Hover: a play disc over the art.
             boxart = boxart.child(
                 div()
@@ -573,7 +614,7 @@ impl Quiver {
         }
         let meta = g.tile_meta();
         div()
-            .id(("tile", id as usize))
+            .id(("tile", id.ix()))
             .group(group)
             .flex()
             .flex_col()

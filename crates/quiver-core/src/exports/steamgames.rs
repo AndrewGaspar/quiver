@@ -96,6 +96,17 @@ pub struct AppManifest {
     pub scripts: Vec<String>,
     /// Changes when the game updates.
     pub build_id: Option<String>,
+    /// `StateFlags`: 4 fully installed, 2 update required, 512/1024 update started/running,
+    /// 1048576 (and others) more download states.
+    pub state_flags: u32,
+    /// Bytes on disk (`SizeOnDisk`).
+    pub size_on_disk: u64,
+    /// When Steam last started it (`LastPlayed`, unix seconds; 0 or missing: never).
+    pub last_played: Option<i64>,
+    /// DLC whose depots are installed (`InstalledDepots/<depot>/dlcappid`).
+    pub dlc_installed: Vec<u32>,
+    /// A newer build is wanted than the one installed (`TargetBuildID`).
+    pub target_build_id: Option<String>,
 }
 
 impl AppManifest {
@@ -118,7 +129,22 @@ impl AppManifest {
             owner: a.str("LastOwner").and_then(|o| o.parse().ok()).filter(|&o| o != 0),
             scripts,
             build_id: a.str("buildid").map(str::to_owned),
+            state_flags: flags,
+            size_on_disk: a.str("SizeOnDisk").and_then(|s| s.parse().ok()).unwrap_or(0),
+            last_played: a.str("LastPlayed").and_then(|s| s.parse().ok()).filter(|&t: &i64| t > 0),
+            dlc_installed: a
+                .get("InstalledDepots")
+                .map(|d| d.entries().iter().filter_map(|(_, v)| v.str("dlcappid")?.parse().ok()).collect())
+                .unwrap_or_default(),
+            target_build_id: a.str("TargetBuildID").filter(|t| !t.is_empty() && *t != "0").map(str::to_owned),
         })
+    }
+
+    /// Steam has an update for it waiting or in progress (an update-required or update-
+    /// running state flag, or a target build other than the installed one).
+    pub fn update_pending(&self) -> bool {
+        const UPDATE: u32 = 2 | 512 | 1024;
+        self.state_flags & UPDATE != 0 || self.target_build_id.as_ref().is_some_and(|t| Some(t) != self.build_id.as_ref())
     }
 
     /// `<library>/steamapps/compatdata/<appid>/pfx`.
@@ -772,11 +798,19 @@ mod tests {
 	"installdir"		"Assassin's Creed Black Flag Resynced"
 	"buildid"		"25795103"
 	"LastOwner"		"76561197960266729"
+	"SizeOnDisk"		"52076634521"
+	"LastPlayed"		"1763300000"
+	"TargetBuildID"		"25795103"
 	"InstalledDepots"
 	{
 		"3751951"
 		{
 			"manifest"		"2685713943691137149"
+		}
+		"3751960"
+		{
+			"manifest"		"1"
+			"dlcappid"		"3751961"
 		}
 	}
 	"InstallScripts"
@@ -865,6 +899,10 @@ mod tests {
         let bf = &found[1].app;
         assert_eq!(bf.name, "Assassin's Creed Black Flag Resynced");
         assert_eq!(bf.owner, Some(76561197960266729));
+        assert_eq!((bf.size_on_disk, bf.last_played, bf.dlc_installed.as_slice()), (52_076_634_521, Some(1_763_300_000), &[3751961][..]));
+        assert!(!bf.update_pending() && bf.installed);
+        let pop = library_folders(&steam).iter().flat_map(|l| app_manifests(l)).find(|m| m.app_id == 2225070).unwrap();
+        assert!(pop.update_pending() && !pop.installed, "StateFlags 1026: update running");
         assert!(bf.install_dir.ends_with("steamapps/common/Assassin's Creed Black Flag Resynced"));
         let users = steam.users().unwrap();
         assert_eq!(owner_user(bf, &users).as_deref(), Some("1001"));

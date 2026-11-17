@@ -65,7 +65,7 @@ impl SaveStores {
     }
 
     fn path(&self) -> PathBuf {
-        self.data.join("games").join(self.product_id.to_string()).join("saves.jsonl")
+        crate::paths::game_dir_in(&self.data, &quiver_api::GameRef::ubisoft(self.product_id)).join("saves.jsonl")
     }
 
     /// The built-in store as it is before anything is recorded.

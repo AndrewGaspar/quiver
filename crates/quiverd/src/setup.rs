@@ -416,7 +416,7 @@ pub(crate) fn scan(r: &Roots, library: Option<&[LibraryEntry]>, installed: &[Gam
                     _ => (None, None),
                 },
             };
-            let entry = product_id.and_then(|id| library?.iter().find(|e| e.product_id == id));
+            let entry = product_id.and_then(|id| library?.iter().find(|e| e.ubisoft_id() == Some(id)));
             let owned = match (library, product_id) {
                 (Some(_), Some(_)) => Some(entry.is_some()),
                 (Some(_), None) => Some(false),
@@ -480,7 +480,7 @@ fn match_name(folder: &str, library: &[LibraryEntry]) -> Option<u32> {
         return None;
     }
     if let Some(e) = library.iter().find(|e| norm(&e.name) == f) {
-        return Some(e.product_id);
+        return e.ubisoft_id();
     }
     let close: Vec<u32> = library
         .iter()
@@ -488,7 +488,7 @@ fn match_name(folder: &str, library: &[LibraryEntry]) -> Option<u32> {
             let n = norm(&e.name);
             n.len() >= 3 && (n.contains(&f) || f.contains(&n))
         })
-        .map(|e| e.product_id)
+        .filter_map(|e| e.ubisoft_id())
         .collect();
     (close.len() == 1).then(|| close[0])
 }
@@ -526,7 +526,7 @@ mod tests {
 
     fn entry(id: u32, name: &str) -> LibraryEntry {
         LibraryEntry {
-            product_id: id,
+            game: quiver_api::GameRef::ubisoft(id),
             name: name.into(),
             installed: None,
             update_available: false,
@@ -536,6 +536,7 @@ mod tests {
             installable: true,
             steam: None,
             space_id: None,
+            client: None,
         }
     }
 

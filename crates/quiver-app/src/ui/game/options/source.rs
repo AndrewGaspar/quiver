@@ -3,6 +3,7 @@
 //! and text. For a mod without one: guess it from one of its files ("infer from file") and
 //! keep the guess as a local description.
 
+use crate::model::Gid;
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use quiver_api::options::{OptionsRequest, Schema, SchemaInfo, SchemaSource, Severity};
 use quiver_api::Request;
@@ -54,7 +55,7 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn render_schema_info(&mut self, th: &Theme, id: u32, name: &str, info: &SchemaInfo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_schema_info(&mut self, th: &Theme, id: Gid, name: &str, info: &SchemaInfo, cx: &mut Context<Self>) -> AnyElement {
         let (label, what, tone) = source_words(info.source);
         let order = [SchemaSource::Author, SchemaSource::Catalog, SchemaSource::Local, SchemaSource::Inferred];
         let chain = div().flex().flex_wrap().items_center().gap(px(6.)).children(order.into_iter().enumerate().flat_map(|(i, s)| {
@@ -122,7 +123,7 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn render_no_schema(&mut self, th: &Theme, id: u32, m: &str, name: &str, why: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_no_schema(&mut self, th: &Theme, id: Gid, m: &str, name: &str, why: &str, cx: &mut Context<Self>) -> AnyElement {
         let files = match &self.gp.opt.files {
             Load::Ready((fm, f)) if fm == m => f.clone(),
             _ => Vec::new(),
@@ -172,10 +173,10 @@ impl Quiver {
     }
 
     /// Ask quiverd to guess a schema from a mod's file.
-    pub(super) fn options_infer(&mut self, id: u32, m: String, file: String, cx: &mut Context<Self>) {
+    pub(super) fn options_infer(&mut self, id: Gid, m: String, file: String, cx: &mut Context<Self>) {
         self.gp.opt.guess = Load::Loading;
         let (m2, f2) = (m.clone(), file.clone());
-        self.call::<String, _>(Request::Options(OptionsRequest::Infer { product_id: id, mod_id: m, file }), cx, move |this, r, _| {
+        self.call::<String, _>(Request::Options(OptionsRequest::Infer { product_id: id.pid(), mod_id: m, file }), cx, move |this, r, _| {
             if this.gp.opt.source_mod.as_deref() != Some(m2.as_str()) {
                 return;
             }
@@ -190,7 +191,7 @@ impl Quiver {
     }
 
     /// The guess, as the form would show it, and its text; "Use this description" keeps it.
-    fn render_guess(&mut self, th: &Theme, id: u32, m: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_guess(&mut self, th: &Theme, id: Gid, m: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let (file, text) = match &self.gp.opt.guess {
             Load::Ready((gm, f, t)) if gm == m => (f.clone(), t.clone()),
             Load::Loading => return card(th).p(px(20.)).text_color(th.tx3).child("Guessing…").into_any_element(),
@@ -268,9 +269,9 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn options_keep_guess(&mut self, id: u32, m: String, toml: String, cx: &mut Context<Self>) {
+    fn options_keep_guess(&mut self, id: Gid, m: String, toml: String, cx: &mut Context<Self>) {
         self.call::<SchemaInfo, _>(
-            Request::Options(OptionsRequest::SchemaSet { product_id: id, mod_id: m.clone(), toml, message: Some("Guessed from the file in the app".into()) }),
+            Request::Options(OptionsRequest::SchemaSet { product_id: id.pid(), mod_id: m.clone(), toml, message: Some("Guessed from the file in the app".into()) }),
             cx,
             move |this, r, cx| match r {
                 Ok(info) => {

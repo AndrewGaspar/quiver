@@ -2,6 +2,7 @@
 //! exports, the launch-options form, dialogs and dropdowns. Rendering lives next to this
 //! file, one module per tab.
 
+use crate::model::Gid;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -93,7 +94,7 @@ pub struct KvRow {
 
 /// The launch-options form: staged edits over the current revision.
 pub struct LaunchForm {
-    pub game: u32,
+    pub game: Gid,
     pub base: GameSettings,
     pub proton: Option<String>,
     pub account: Option<String>,
@@ -109,7 +110,7 @@ pub struct LaunchForm {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LaunchDraft {
-    pub game: u32,
+    pub game: Gid,
     pub ops: Vec<SettingOp>,
     pub message: String,
 }
@@ -129,14 +130,14 @@ pub enum PlayAfter {
 
 pub enum Dialog {
     RestoreSettings { game: u32, revision: u32 },
-    RestoreSaves { game: u32, backup: SaveBackup },
-    DeleteProfile { game: u32, profile: Profile },
+    RestoreSaves { game: Gid, backup: SaveBackup },
+    DeleteProfile { game: Gid, profile: Profile },
     RestoreProfile { game: u32, id: String, name: String, revision: u32 },
-    RemoveLayer { game: u32, layer: Layer },
+    RemoveLayer { game: Gid, layer: Layer },
     /// `saves`: the store picked (`None`: follow the advice for the ticked layers).
-    NewProfile { game: u32, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String> },
+    NewProfile { game: Gid, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String> },
     SteamRestart { waiting: Vec<String> },
-    SteamUser { game: u32, users: Vec<SteamUser> },
+    SteamUser { game: Gid, users: Vec<SteamUser> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,8 +149,10 @@ pub enum Dropdown {
 #[derive(Default)]
 pub struct GamePage {
     /// The game this state belongs to (0: none yet).
-    pub id: u32,
+    pub id: Gid,
     pub info: Load<GameInfo>,
+    /// Another store's game: its page (`Request::GameDetail`).
+    pub store: Load<quiver_api::stores::GameDetail>,
     pub progress: Load<Progress>,
     pub remote: Load<RemotePlaytime>,
     pub saves: Load<SavesReport>,
@@ -160,11 +163,11 @@ pub struct GamePage {
     pub protons: Load<Vec<String>>,
     pub launch: Option<LaunchForm>,
     /// Edited forms of other games, kept while the page shows another game.
-    pub launch_drafts: HashMap<u32, LaunchForm>,
+    pub launch_drafts: HashMap<Gid, LaunchForm>,
     /// Edits waiting for their form (see [`LaunchDraft`]).
-    pub launch_seeds: HashMap<u32, LaunchDraft>,
+    pub launch_seeds: HashMap<Gid, LaunchDraft>,
     /// The next Play of this game skips the unsaved-edits question (already answered).
-    pub play_unguarded: Option<u32>,
+    pub play_unguarded: Option<Gid>,
     /// Selected revision in the launch-options history.
     pub rev_sel: Option<u32>,
     /// Selected profile on the Mods tab (`vanilla` or a profile id).
@@ -199,7 +202,7 @@ pub struct GamePage {
 }
 
 impl GamePage {
-    fn reset(&mut self, id: u32) {
+    fn reset(&mut self, id: Gid) {
         let protons = std::mem::take(&mut self.protons);
         let exports = std::mem::take(&mut self.exports);
         // Unsaved launch options belong to their game and outlive the page.
@@ -213,14 +216,14 @@ impl GamePage {
         *self = GamePage { id, protons, exports, launch_drafts, launch_seeds, opt, ..Default::default() };
     }
 
-    pub fn exports_for(&self, id: u32) -> Vec<ExportStatus> {
+    pub fn exports_for(&self, id: Gid) -> Vec<ExportStatus> {
         self.exports
             .ready()
-            .map(|l| l.iter().filter(|e| e.record.product_id == id && e.record.profile_id.is_none()).cloned().collect())
+            .map(|l| l.iter().filter(|e| e.record.game == quiver_api::GameRef::ubisoft(id.pid()) && e.record.profile_id.is_none()).cloned().collect())
             .unwrap_or_default()
     }
 
-    pub fn export(&self, id: u32, kind: ExportKind) -> Option<ExportStatus> {
+    pub fn export(&self, id: Gid, kind: ExportKind) -> Option<ExportStatus> {
         self.exports_for(id).into_iter().find(|e| e.record.kind == kind)
     }
 
@@ -389,7 +392,7 @@ pub fn sh_quote(s: &str) -> String {
 }
 
 /// The `quiver set` command equivalent to `ops`.
-pub fn set_command(id: u32, ops: &[SettingOp], message: Option<&str>) -> String {
+pub fn set_command(id: Gid, ops: &[SettingOp], message: Option<&str>) -> String {
     let mut cmd = format!("quiver set {id}");
     for op in ops {
         let word = match op {
@@ -432,11 +435,19 @@ const PAGE_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 
 impl Quiver {
     /// Load what the open game page shows (called with the app's own `load_details`).
-    pub fn load_page(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_page(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.nav.page != Page::Game(id) {
             return;
         }
         let fresh = self.gp.id != id;
+        if !id.is_ubisoft() {
+            // Another store's game: one read-only page from its client's files.
+            if fresh {
+                self.gp.reset(id);
+            }
+            self.load_store_detail(id, !fresh, cx);
+            return;
+        }
         if fresh {
             self.gp.reset(id);
             self.load_info(id, false, cx);
@@ -463,11 +474,11 @@ impl Quiver {
         }
     }
 
-    pub fn load_info(&mut self, id: u32, refresh: bool, cx: &mut Context<Self>) {
+    pub fn load_info(&mut self, id: Gid, refresh: bool, cx: &mut Context<Self>) {
         if self.gp.info.ready().is_none() {
             self.gp.info = Load::Loading;
         }
-        self.call_within::<GameInfo, _>(Request::GameInfo { product_id: id, refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
+        self.call_within::<GameInfo, _>(Request::GameInfo { product_id: id.pid(), refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.info = match r {
                     Ok(i) => Load::Ready(i),
@@ -477,11 +488,11 @@ impl Quiver {
         });
     }
 
-    pub fn load_progress(&mut self, id: u32, refresh: bool, cx: &mut Context<Self>) {
+    pub fn load_progress(&mut self, id: Gid, refresh: bool, cx: &mut Context<Self>) {
         if self.gp.progress.ready().is_none() {
             self.gp.progress = Load::Loading;
         }
-        self.call_within::<Progress, _>(Request::GameProgress { product_id: id, refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
+        self.call_within::<Progress, _>(Request::GameProgress { product_id: id.pid(), refresh }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.progress = match r {
                     Ok(p) => Load::Ready(p),
@@ -491,9 +502,9 @@ impl Quiver {
         });
     }
 
-    fn load_remote(&mut self, id: u32, cx: &mut Context<Self>) {
+    fn load_remote(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.gp.remote = Load::Loading;
-        self.call_within::<RemotePlaytime, _>(Request::RemotePlaytime { product_id: id }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
+        self.call_within::<RemotePlaytime, _>(Request::RemotePlaytime { product_id: id.pid() }, PAGE_LOAD_TIMEOUT, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.remote = match r {
                     Ok(p) => Load::Ready(p),
@@ -503,12 +514,12 @@ impl Quiver {
         });
     }
 
-    pub fn load_saves(&mut self, id: u32, cloud: bool, cx: &mut Context<Self>) {
+    pub fn load_saves(&mut self, id: Gid, cloud: bool, cx: &mut Context<Self>) {
         if self.gp.saves.ready().is_none() {
             self.gp.saves = Load::Loading;
         }
         self.gp.saves_cloud = cloud;
-        self.call::<SavesReport, _>(Request::Saves { product_id: id, cloud }, cx, move |this, r, _| {
+        self.call::<SavesReport, _>(Request::Saves { product_id: id.pid(), cloud }, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.saves = match r {
                     Ok(s) => Load::Ready(s),
@@ -518,11 +529,11 @@ impl Quiver {
         });
     }
 
-    pub fn load_mods(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_mods(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.gp.mods.ready().is_none() {
             self.gp.mods = Load::Loading;
         }
-        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { product_id: id }), cx, move |this, r, cx| {
+        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { product_id: id.pid() }), cx, move |this, r, cx| {
             if this.gp.id != id {
                 return;
             }
@@ -540,10 +551,10 @@ impl Quiver {
         });
     }
 
-    pub fn load_profile_history(&mut self, id: u32, profile: &str, cx: &mut Context<Self>) {
+    pub fn load_profile_history(&mut self, id: Gid, profile: &str, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<Vec<ProfileRevision>, _>(
-            Request::Mods(ModsRequest::ProfileHistory { product_id: id, profile: p.clone() }),
+            Request::Mods(ModsRequest::ProfileHistory { product_id: id.pid(), profile: p.clone() }),
             cx,
             move |this, r, _| {
                 if this.gp.id == id {
@@ -569,7 +580,7 @@ impl Quiver {
 
     /// The selected log of the open game, read from `<prefix>/quiver-run/` (fixtures in demo
     /// mode).
-    pub fn load_log(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_log(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some(prefix) = self.game(id).and_then(|g| g.entry.installed.as_ref()).map(|g| g.prefix.clone()) else {
             self.gp.log = Load::Failed("Not installed".into());
             return;
@@ -578,7 +589,7 @@ impl Quiver {
         let path = quiver_api::launch_logs_dir(&prefix).join(file);
         self.gp.log = Load::Loading;
         if self.demo {
-            self.gp.log = match crate::demo::detail::log_text(id, file) {
+            self.gp.log = match crate::demo::detail::log_text(id.pid(), file) {
                 Some(t) => {
                     let (lines, truncated) = log_lines(t.as_bytes(), 512 * 1024);
                     Load::Ready(LogText { path, lines: Arc::new(lines), bytes: t.len() as u64, truncated, modified: Some(chrono::Utc::now() - chrono::Duration::hours(20)) })
@@ -655,13 +666,13 @@ impl Quiver {
 
     /// The game's `profile` setting as saved (a profile id; `None`: vanilla). It may name a
     /// deleted profile; [`Self::default_profile`] is what Play really runs.
-    pub fn default_profile_setting(&self, id: u32) -> Option<String> {
+    pub fn default_profile_setting(&self, id: Gid) -> Option<String> {
         self.game(id)?.settings.as_ref()?.profile.clone()
     }
 
     /// The profile Play runs for `id` when none is named (the daemon resolves the same
     /// way): the game's default, unless it's no longer a live profile.
-    pub fn default_profile(&self, id: u32) -> Option<String> {
+    pub fn default_profile(&self, id: Gid) -> Option<String> {
         let p = self.default_profile_setting(id)?;
         if self.gp.id == id && self.gp.mods.ready().is_some() && !self.gp.profiles().iter().any(|x| x.id == p) {
             return None;
@@ -670,7 +681,7 @@ impl Quiver {
     }
 
     /// Play once with profile entry `i` of the play menu (0: vanilla); the default stays.
-    pub fn play_with(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
+    pub fn play_with(&mut self, id: Gid, i: usize, cx: &mut Context<Self>) {
         let profiles = self.gp.profiles();
         let chosen = if i == 0 { None } else { profiles.get(i - 1).cloned() };
         let label = chosen.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Vanilla".into());
@@ -684,7 +695,7 @@ impl Quiver {
         }
         // Named explicitly, so the daemon doesn't apply the default (`vanilla` forces it).
         let profile = Some(chosen.map(|p| p.id).unwrap_or_else(|| VANILLA.into()));
-        self.call::<u64, _>(Request::Play { product_id: id, profile }, cx, move |this, r, cx| match r {
+        self.call::<u64, _>(Request::Play { game: id.0, profile }, cx, move |this, r, cx| match r {
             Ok(_) => this.show_toast(format!("Starting {name} · {label}…"), cx),
             Err(e) => this.show_toast(err_text(&e), cx),
         });
@@ -692,7 +703,7 @@ impl Quiver {
 
     /// Make profile entry `i` (0: vanilla) the game's default: the `profile` setting, a
     /// revision in its settings history, which Play, `quiver play` and shortcuts follow.
-    pub fn set_default_profile(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
+    pub fn set_default_profile(&mut self, id: Gid, i: usize, cx: &mut Context<Self>) {
         let profiles = self.gp.profiles();
         let chosen = if i == 0 { None } else { profiles.get(i - 1).cloned() };
         let label = chosen.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Vanilla".into());
@@ -703,7 +714,7 @@ impl Quiver {
         }
         let ops = vec![SettingOp::Set { key: "profile".into(), value: value.unwrap_or_else(|| VANILLA.into()) }];
         let message = Some(format!("Default for Play: {label}"));
-        self.call::<Revision, _>(Request::SettingsSet { product_id: id, ops, message }, cx, move |this, r, cx| match r {
+        self.call::<Revision, _>(Request::SettingsSet { product_id: id.pid(), ops, message }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Play now uses {label} (launch options r{})", rev.revision), cx);
                 this.load_details(id, cx);
@@ -713,7 +724,7 @@ impl Quiver {
     }
 
     /// The profile chip's menu: pick the game's default profile.
-    fn default_menu_commands(&self, id: u32) -> Vec<Command> {
+    fn default_menu_commands(&self, id: Gid) -> Vec<Command> {
         let current = self.default_profile(id);
         let entry = |i: usize, key: Option<&str>, name: &str, what: String| {
             let on = current.as_deref() == key;
@@ -742,8 +753,9 @@ impl Quiver {
 
     /// The play menu (X, or the Play button's arrow): play once with Vanilla or a profile.
     /// From the profile chip it's the default-profile menu instead.
-    pub fn play_menu_commands(&self, id: u32) -> Option<Vec<Command>> {
-        if !self.gp.play_menu {
+    pub fn play_menu_commands(&self, id: Gid) -> Option<Vec<Command>> {
+        // Mod profiles are for Quiver's own launches; other stores' games get the game menu.
+        if !self.gp.play_menu || !id.is_ubisoft() {
             return None;
         }
         if self.gp.default_menu {
@@ -787,7 +799,7 @@ impl Quiver {
     }
 
     /// Steam, .desktop and Verify entries for the game menu, with their state.
-    pub fn export_commands(&self, id: u32) -> Vec<Command> {
+    pub fn export_commands(&self, id: Gid) -> Vec<Command> {
         let installed = self.game(id).is_some_and(|g| g.installed());
         let steam = self.gp.export(id, ExportKind::Steam);
         let desktop = self.gp.export(id, ExportKind::Desktop);
@@ -861,10 +873,10 @@ impl Quiver {
     }
 
     /// The action bar's Steam button.
-    pub fn steam_button(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn steam_button(&mut self, id: Gid, cx: &mut Context<Self>) {
         // A Steam copy: switch it to Quiver, or show its options.
         if let Some(g) = self.game(id).filter(|g| g.steam_only()).and_then(|g| g.steam().cloned()) {
-            let copy = self.steam_copy(id).unwrap_or(g);
+            let copy = self.steam_copy(id.pid()).unwrap_or(g);
             match crate::ui::steamgames::control(&copy) {
                 Some(true) => self.steam_patch(copy.app_id, false, cx),
                 _ => {
@@ -884,7 +896,7 @@ impl Quiver {
         }
     }
 
-    pub fn run_export(&mut self, id: u32, a: ExportAction, cx: &mut Context<Self>) {
+    pub fn run_export(&mut self, id: Gid, a: ExportAction, cx: &mut Context<Self>) {
         let name = self.game(id).map(|g| g.entry.name.clone()).unwrap_or_default();
         match a {
             ExportAction::SteamAdd => {
@@ -898,7 +910,7 @@ impl Quiver {
                 });
             }
             ExportAction::SteamRemove => {
-                self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id, remove: true, steam_user: None }, cx, move |this, r, cx| {
+                self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: true, steam_user: None }, cx, move |this, r, cx| {
                     match r {
                         Ok(r) if r.staged => this.show_toast(format!("{name} leaves Steam when Steam next restarts"), cx),
                         Ok(_) => this.show_toast(format!("Removed {name} from Steam"), cx),
@@ -918,7 +930,7 @@ impl Quiver {
             }
             ExportAction::DesktopAdd | ExportAction::DesktopRemove => {
                 let remove = a == ExportAction::DesktopRemove;
-                self.call::<serde_json::Value, _>(Request::ExportDesktop { product_id: id, remove }, cx, move |this, r, cx| {
+                self.call::<serde_json::Value, _>(Request::ExportDesktop { product_id: id.pid(), remove }, cx, move |this, r, cx| {
                     match r {
                         Ok(v) => {
                             let path = v.get("path").and_then(|p| p.as_str()).map(|p| crate::model::tilde(Path::new(p))).unwrap_or_default();
@@ -932,9 +944,9 @@ impl Quiver {
         }
     }
 
-    fn export_steam(&mut self, id: u32, user: Option<String>, cx: &mut Context<Self>) {
+    fn export_steam(&mut self, id: Gid, user: Option<String>, cx: &mut Context<Self>) {
         let name = self.game(id).map(|g| g.entry.name.clone()).unwrap_or_default();
-        self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id, remove: false, steam_user: user }, cx, move |this, r, cx| {
+        self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: user }, cx, move |this, r, cx| {
             match r {
                 Ok(r) if r.staged => {
                     this.load_exports(cx);
@@ -991,7 +1003,7 @@ impl Quiver {
 
     /// (Re)build the form when there's none, it's for another game, or the saved settings
     /// changed under an unedited form. Another game's edited form is kept for later.
-    pub fn ensure_launch_form(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn ensure_launch_form(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some(saved) = self.game(id).and_then(|g| g.settings.clone()) else { return };
         if self.gp.launch.as_ref().is_some_and(|f| f.game != id)
             && let Some(f) = self.gp.launch.take()
@@ -1031,7 +1043,7 @@ impl Quiver {
     }
 
     /// The form holding `id`'s launch options, if one was built (open, or kept for later).
-    pub fn launch_form(&self, id: u32) -> Option<&LaunchForm> {
+    pub fn launch_form(&self, id: Gid) -> Option<&LaunchForm> {
         self.gp.launch.as_ref().filter(|f| f.game == id).or_else(|| self.gp.launch_drafts.get(&id))
     }
 
@@ -1045,7 +1057,7 @@ impl Quiver {
 
     /// Unsaved launch-options edits of game `id`, wherever they are: its form (open, or
     /// kept while another game shows) or carried-over edits that have no form yet.
-    pub fn launch_pending(&self, id: u32, cx: &App) -> Vec<SettingOp> {
+    pub fn launch_pending(&self, id: Gid, cx: &App) -> Vec<SettingOp> {
         if let Some(f) = self.launch_form(id) {
             return form_ops(f, cx);
         }
@@ -1064,7 +1076,7 @@ impl Quiver {
 
     /// Every game's unsaved launch-options edits, for a relaunch to carry over.
     pub fn launch_drafts_all(&self, cx: &App) -> Vec<LaunchDraft> {
-        let mut games: Vec<u32> = self
+        let mut games: Vec<Gid> = self
             .gp
             .launch
             .iter()
@@ -1085,7 +1097,7 @@ impl Quiver {
     }
 
     /// The "why" typed for game `id`'s unsaved edits.
-    fn launch_message(&self, id: u32, cx: &App) -> Option<String> {
+    fn launch_message(&self, id: Gid, cx: &App) -> Option<String> {
         self.launch_form(id)
             .map(|f| f.message.read(cx).text().trim().to_owned())
             .or_else(|| self.gp.launch_seeds.get(&id).map(|d| d.message.clone()))
@@ -1104,7 +1116,7 @@ impl Quiver {
     }
 
     /// Drop game `id`'s unsaved launch options.
-    pub fn launch_discard(&mut self, id: u32) {
+    pub fn launch_discard(&mut self, id: Gid) {
         if self.gp.launch.as_ref().is_some_and(|f| f.game == id) {
             self.gp.launch = None;
         }
@@ -1113,7 +1125,7 @@ impl Quiver {
     }
 
     /// Save game `id`'s edits as a new revision; then start it, if asked to.
-    pub fn launch_save(&mut self, id: u32, then: Option<PlayAfter>, cx: &mut Context<Self>) {
+    pub fn launch_save(&mut self, id: Gid, then: Option<PlayAfter>, cx: &mut Context<Self>) {
         let ops = self.launch_pending(id, cx);
         if self.gp.busy {
             return;
@@ -1126,7 +1138,7 @@ impl Quiver {
         }
         let message = self.launch_message(id, cx);
         self.gp.busy = true;
-        self.call::<Revision, _>(Request::SettingsSet { product_id: id, ops, message }, cx, move |this, r, cx| {
+        self.call::<Revision, _>(Request::SettingsSet { product_id: id.pid(), ops, message }, cx, move |this, r, cx| {
             this.gp.busy = false;
             match r {
                 Ok(rev) => {
@@ -1148,9 +1160,9 @@ impl Quiver {
         self.call::<Revision, _>(Request::SettingsRestore { product_id: id, revision }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Restored r{revision} as r{}", rev.revision), cx);
-                this.launch_discard(id);
+                this.launch_discard(Gid::from(id));
                 this.gp.rev_sel = Some(rev.revision);
-                this.load_details(id, cx);
+                this.load_details(Gid::from(id), cx);
             }
             Err(e) => this.show_toast(err_text(&e), cx),
         });
@@ -1166,7 +1178,7 @@ impl Quiver {
         }
     }
 
-    pub fn select_profile(&mut self, id: u32, profile: Option<String>, cx: &mut Context<Self>) {
+    pub fn select_profile(&mut self, id: Gid, profile: Option<String>, cx: &mut Context<Self>) {
         let p = profile.unwrap_or_else(|| VANILLA.into());
         if p != VANILLA {
             self.load_profile_history(id, &p, cx);
@@ -1176,10 +1188,10 @@ impl Quiver {
     }
 
     /// Edit a profile (`ProfileSet`) and reload.
-    pub fn profile_set(&mut self, id: u32, profile: &str, ops: Vec<SettingOp>, cx: &mut Context<Self>) {
+    pub fn profile_set(&mut self, id: Gid, profile: &str, ops: Vec<SettingOp>, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<ProfileRevision, _>(
-            Request::Mods(ModsRequest::ProfileSet { product_id: id, profile: p.clone(), ops, message: None }),
+            Request::Mods(ModsRequest::ProfileSet { product_id: id.pid(), profile: p.clone(), ops, message: None }),
             cx,
             move |this, r, cx| match r {
                 Ok(rev) => {
@@ -1192,7 +1204,7 @@ impl Quiver {
         );
     }
 
-    pub fn add_layer(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn add_layer(&mut self, id: Gid, cx: &mut Context<Self>) {
         let (Some(n), Some(p)) = (&self.gp.layer_name, &self.gp.layer_path) else { return };
         let name = n.read(cx).text().trim().to_owned();
         let path = p.read(cx).text().trim().to_owned();
@@ -1207,7 +1219,7 @@ impl Quiver {
         let name = if name.is_empty() { path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() } else { name };
         let (ni, pi) = (n.clone(), p.clone());
         self.show_toast(format!("Copying {} into the mod store…", crate::model::tilde(&path)), cx);
-        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id, name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
+        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id.pid(), name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
             Ok(l) => {
                 this.show_toast(format!("Added layer {} ({} files)", l.name, l.files), cx);
                 ni.update(cx, |t, cx| t.set_text("", cx));
@@ -1218,7 +1230,7 @@ impl Quiver {
         });
     }
 
-    pub fn new_profile_dialog(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn new_profile_dialog(&mut self, id: Gid, cx: &mut Context<Self>) {
         let layers = self
             .gp
             .mods
@@ -1280,7 +1292,7 @@ impl Quiver {
             Dialog::RestoreSaves { game, backup } => {
                 // The person confirmed in this dialog, so the request says so.
                 let bid = backup.id.clone();
-                self.call::<RestoreResult, _>(Request::SavesRestore { product_id: game, backup: bid, confirmed: true }, cx, move |this, r, cx| {
+                self.call::<RestoreResult, _>(Request::SavesRestore { product_id: game.pid(), backup: bid, confirmed: true }, cx, move |this, r, cx| {
                     match r {
                         Ok(r) => {
                             let prev = r.previous.map(|p| format!("; the saves that were there are in backup {}", p.id)).unwrap_or_default();
@@ -1295,7 +1307,7 @@ impl Quiver {
             Dialog::DeleteProfile { game, profile } => {
                 let name = profile.name.clone();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileDelete { product_id: game, profile: profile.id.clone(), confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileDelete { product_id: game.pid(), profile: profile.id.clone(), confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1317,8 +1329,8 @@ impl Quiver {
                         Ok(rev) => {
                             this.show_toast(format!("Restored {name} r{revision} as r{}", rev.revision), cx);
                             this.gp.prof_sel = Some(id.clone());
-                            this.load_mods(game, cx);
-                            this.load_profile_history(game, &id, cx);
+                            this.load_mods(Gid::from(game), cx);
+                            this.load_profile_history(Gid::from(game), &id, cx);
                         }
                         Err(e) => this.show_toast(err_text(&e), cx),
                     },
@@ -1327,7 +1339,7 @@ impl Quiver {
             Dialog::RemoveLayer { game, layer } => {
                 let name = layer.name.clone();
                 self.call::<Layer, _>(
-                    Request::Mods(ModsRequest::LayerRemove { product_id: game, layer: layer.id, confirmed: true }),
+                    Request::Mods(ModsRequest::LayerRemove { product_id: game.pid(), layer: layer.id, confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(_) => {
@@ -1348,7 +1360,7 @@ impl Quiver {
                 }
                 let chosen: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileCreate { product_id: game, name: n, layers: chosen, message: None, saves }),
+                    Request::Mods(ModsRequest::ProfileCreate { product_id: game.pid(), name: n, layers: chosen, message: None, saves }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1456,14 +1468,14 @@ impl Quiver {
     // Controller rows in each tab's body
 
     /// Body rows the unsaved-changes bar adds in front of the history (Save, Discard).
-    pub fn launch_bar_rows(&self, id: u32, cx: &App) -> usize {
+    pub fn launch_bar_rows(&self, id: Gid, cx: &App) -> usize {
         match self.launch_form(id) {
             Some(f) if !form_ops(f, cx).is_empty() => 2,
             _ => 0,
         }
     }
 
-    pub fn page_body_len(&self, id: u32, tab: Tab, cx: &App) -> usize {
+    pub fn page_body_len(&self, id: Gid, tab: Tab, cx: &App) -> usize {
         let Some(g) = self.game(id) else { return 0 };
         match tab {
             Tab::Overview => g.playtime.as_ref().map(|p| p.sessions.len().min(8)).unwrap_or(0),
@@ -1495,7 +1507,7 @@ impl Quiver {
         }
     }
 
-    pub fn page_body_activate(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
+    pub fn page_body_activate(&mut self, id: Gid, i: usize, cx: &mut Context<Self>) {
         match self.nav.tab {
             Tab::Overview => {}
             Tab::LaunchOptions => {
@@ -1513,7 +1525,7 @@ impl Quiver {
                 if let Some(r) = revs.get(i).copied() {
                     let current = revs.first().copied();
                     if self.gp.rev_sel == Some(r) && Some(r) != current {
-                        self.open_dialog(Dialog::RestoreSettings { game: id, revision: r });
+                        self.open_dialog(Dialog::RestoreSettings { game: id.pid(), revision: r });
                     } else {
                         self.gp.rev_sel = Some(r);
                     }
@@ -1577,7 +1589,7 @@ impl Quiver {
     }
 
     /// (label, path, what) for the Files tab: install, prefix, saves, logs.
-    pub fn file_locations(&self, id: u32) -> Vec<(&'static str, PathBuf, &'static str)> {
+    pub fn file_locations(&self, id: Gid) -> Vec<(&'static str, PathBuf, &'static str)> {
         let Some(game) = self.game(id).and_then(|g| g.entry.installed.clone()) else { return vec![] };
         let saves = self.gp.saves.ready().and_then(|s| s.dir.clone()).unwrap_or_else(|| {
             game.prefix.join("drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/savegames")
@@ -1613,7 +1625,7 @@ impl Quiver {
     }
 
     /// The account a game launches with, and whether that's an override.
-    pub fn launch_account(&self, id: u32) -> (String, bool) {
+    pub fn launch_account(&self, id: Gid) -> (String, bool) {
         let g = self.game(id);
         if let Some(a) = g.and_then(|g| g.settings.as_ref()).and_then(|s| s.account.clone()) {
             return (self.account_name(&a), true);
@@ -1626,7 +1638,7 @@ impl Quiver {
     }
 
     /// Ubisoft's play-time total, when known, and where it came from.
-    pub fn ubisoft_playtime(&self, id: u32) -> Option<(u64, &'static str)> {
+    pub fn ubisoft_playtime(&self, id: Gid) -> Option<(u64, &'static str)> {
         if self.gp.id != id {
             return None;
         }
@@ -1874,7 +1886,7 @@ impl Quiver {
                     .into_any_element()],
             ),
             Dialog::RestoreSettings { revision, game } => {
-                let g = self.game(*game);
+                let g = self.game(Gid::from(*game));
                 let cur = g.and_then(|g| g.history.as_ref()).and_then(|h| h.iter().max_by_key(|r| r.revision)).map(|r| r.revision).unwrap_or(0);
                 (
                     Icon::RotateCcw,
@@ -2148,13 +2160,13 @@ mod tests {
         assert!(ops.contains(&SettingOp::Unset { key: "proton".into() }));
         assert!(!ops.iter().any(|o| matches!(o, SettingOp::Set { key, .. } if key == "env.A")));
         assert!(ops_between(&staged, &staged).is_empty());
-        let cmd = set_command(3539, &ops, Some("try mangohud"));
+        let cmd = set_command(Gid::from(3539), &ops, Some("try mangohud"));
         assert!(cmd.starts_with("quiver set 3539 "));
         assert!(cmd.contains(" proton= "));
         assert!(cmd.contains("dll.dxgi=n,b"));
         assert!(cmd.ends_with(" -m 'try mangohud'"));
         assert_eq!(sh_quote("it's"), "'it'\\''s'");
-        assert_eq!(set_command(1, &[SettingOp::Set { key: "args".into(), value: "-W 3440".into() }], None), "quiver set 1 'args=-W 3440'");
+        assert_eq!(set_command(Gid::from(1), &[SettingOp::Set { key: "args".into(), value: "-W 3440".into() }], None), "quiver set 1 'args=-W 3440'");
     }
 
     #[test]

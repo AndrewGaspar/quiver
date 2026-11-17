@@ -86,7 +86,7 @@ pub async fn export(paths: &Paths, target: &Target) -> Result<ExportRecord> {
     let record = ExportRecord {
         key: target.key.to_string(),
         kind: ExportKind::Desktop,
-        product_id: target.key.product_id,
+        game: target.key.game,
         profile_id: target.key.profile_id.clone(),
         name: target.name.clone(),
         path: file,
@@ -156,7 +156,7 @@ mod tests {
         assert!(text.contains("Icon=applications-games\n"));
         assert!(text.contains("StartupWMClass=accgame-win32-shipping.exe\n"));
         assert!(text.contains("X-Quiver-Id=quiver:1651\n"));
-        let t = Target { key: ExportKey { product_id: 1651, profile_id: Some("p7f3k2q".into()) }, ..t };
+        let t = Target { key: ExportKey { game: quiver_api::GameRef::ubisoft(1651), profile_id: Some("p7f3k2q".into()) }, ..t };
         assert!(render(&t, None).contains(" play 1651 --profile-id p7f3k2q\n"));
         assert_eq!(path(&Paths { data_home: "/d".into(), home: "/h".into() }, &t.key), Path::new("/d/applications/quiver-1651-p7f3k2q.desktop"));
     }

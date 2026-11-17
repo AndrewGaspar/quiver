@@ -17,6 +17,7 @@ pub mod art;
 pub mod client;
 pub mod downloads;
 pub mod exports;
+pub mod game;
 pub mod mods;
 pub mod info;
 pub mod options;
@@ -24,7 +25,9 @@ pub mod perf;
 pub mod savestores;
 pub mod setup;
 pub mod steamlib;
+pub mod stores;
 pub use client::Client;
+pub use game::{GameId, GameRef, StoreId};
 pub use mods::{ModsRequest, Profile};
 
 // ---------------------------------------------------------------------------------------
@@ -200,10 +203,16 @@ pub struct Revision {
     pub settings: GameSettings,
 }
 
-/// A product in the library, with its local install state.
+/// A game in the library, with its local install state.
+///
+/// `game` is its home record: what installs, launches and keys its data. Ubisoft entries
+/// also carry the old `product_id` on the wire ([`game::wire`]). A Ubisoft game bought on
+/// Steam is one Ubisoft entry with its Steam install in `steam`; other stores' games have
+/// their store's install in `client`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryEntry {
-    pub product_id: u32,
+    #[serde(flatten, with = "game::wire")]
+    pub game: GameRef,
     pub name: String,
     pub installed: Option<Game>,
     pub update_available: bool,
@@ -228,12 +237,42 @@ pub struct LibraryEntry {
     /// The game's UbiServices space (ownership data, else its product config).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// A game of another store, installed and run by that store's client (a Steam game in
+    /// local mode): its install, art, play time and achievement counts as the client keeps
+    /// them. `None` for Ubisoft games.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<stores::ClientInstall>,
 }
 
 impl LibraryEntry {
-    /// Installed only through Steam (no Quiver install of its own).
+    /// The Ubisoft product id, for a Ubisoft game.
+    pub fn ubisoft_id(&self) -> Option<u32> {
+        self.game.as_ubisoft()
+    }
+
+    pub fn store(&self) -> StoreId {
+        self.game.store
+    }
+
+    /// Installed only through Steam (no Quiver install of its own): a Ubisoft game's Steam
+    /// copy, or a Steam game.
     pub fn steam_only(&self) -> bool {
-        self.installed.is_none() && self.steam.is_some()
+        self.installed.is_none() && (self.steam.is_some() || self.client.is_some() && self.game.store == StoreId::Steam)
+    }
+
+    /// Installed by Quiver, by Steam, or by another store's client.
+    pub fn on_disk(&self) -> bool {
+        self.installed.is_some() || self.steam.is_some() || self.client.is_some()
+    }
+
+    /// Every store the entry has a record in, home store first (for store badges and
+    /// filters): a Ubisoft game bought on Steam is in both.
+    pub fn stores(&self) -> Vec<StoreId> {
+        let mut out = vec![self.game.store];
+        if self.steam.is_some() && !out.contains(&StoreId::Steam) {
+            out.push(StoreId::Steam);
+        }
+        out
     }
 }
 
@@ -292,7 +331,9 @@ pub enum JobKind {
 pub struct Job {
     pub id: u64,
     pub kind: JobKind,
-    pub product_id: u32,
+    /// The game (with the old `product_id` too, for Ubisoft games).
+    #[serde(flatten, with = "game::wire")]
+    pub game: GameRef,
     pub name: String,
     pub status: String,
     pub downloaded: u64,
@@ -387,8 +428,10 @@ pub struct ActivityEntry {
     pub at: DateTime<Utc>,
     pub source: String,
     pub action: String,
-    #[serde(default)]
-    pub product_id: Option<u32>,
+    /// The game it was about, if any: `product_id` for Ubisoft games, as always (so older
+    /// daemons read `activity.jsonl`), `game` for others.
+    #[serde(flatten, with = "game::persisted::option")]
+    pub game: Option<GameRef>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -407,8 +450,13 @@ pub enum Request {
         #[serde(default)]
         account: Option<String>,
     },
-    /// Owned, installable games with install state.
-    Library { refresh: bool },
+    /// Owned, installable games with install state. `all_stores`: also every other store's
+    /// games (Steam's); clients from before other stores leave it out and get Ubisoft's.
+    Library {
+        refresh: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all_stores: bool,
+    },
     Install { product_id: u32, language: Option<String> },
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
     Import { product_id: u32, path: PathBuf, language: Option<String> },
@@ -416,12 +464,17 @@ pub enum Request {
     /// Launch a game. `profile`: a mod profile's name or id, or `vanilla` for the unmodded
     /// game; `None` (what older clients send): the game's default profile (its `profile`
     /// setting; vanilla when unset, or with a warning when that profile was deleted).
+    /// A game of another store asks its client to start it (Steam: `steam://rungameid`).
     Play {
-        product_id: u32,
+        #[serde(alias = "product_id")]
+        game: GameRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
-    Stop { product_id: u32 },
+    Stop {
+        #[serde(alias = "product_id")]
+        game: GameRef,
+    },
     /// Cancel a job. Installs stop and can be resumed by installing again; `discard`
     /// also deletes the partial files (only for games that weren't installed before).
     /// Launches stop the game.
@@ -446,8 +499,12 @@ pub enum Request {
     },
     /// Installed Proton builds.
     ProtonList,
-    /// Play sessions recorded by this launcher.
-    Playtime { product_id: u32 },
+    /// Play sessions recorded by this launcher; for another store's game, the total and last
+    /// played time its client recorded (no sessions).
+    Playtime {
+        #[serde(alias = "product_id")]
+        game: GameRef,
+    },
     /// Ubisoft's own play-time record for a game (read-only).
     RemotePlaytime { product_id: u32 },
     Activity { limit: usize },
@@ -663,6 +720,18 @@ pub enum Request {
     // ---- Achievements (appended; build/achievements)
     /// Unlock status, the report journal, manual resends (see [`achievements`]).
     Achievements(achievements::AchievementsRequest),
+    // ---- Stores (appended; design/STORES.md)
+    /// Every store provider, its account state, capabilities and game count
+    /// (`Vec<stores::StoreInfo>`).
+    Stores,
+    /// A game's page for any store (`stores::GameDetail`): facts, install, play time,
+    /// achievements, cloud state, as far as the store's files say.
+    GameDetail {
+        #[serde(alias = "product_id")]
+        game: GameRef,
+        #[serde(default)]
+        refresh: bool,
+    },
 }
 
 fn yes() -> bool {
@@ -1129,6 +1198,57 @@ mod tests {
         assert_eq!(p.perf.as_ref().map(|x| x.frames), Some(10));
         let v = serde_json::to_value(PlaySession::default()).unwrap();
         assert!(v.get("perf").is_none() && v.get("session").is_none());
+    }
+
+    /// Requests and records from before game refs (STORES.md §2.3) still read, and Ubisoft
+    /// records still carry `product_id`.
+    #[test]
+    fn game_refs_on_the_wire() {
+        let r: Request = serde_json::from_str(r#"{"method":"play","params":{"product_id":3539}}"#).unwrap();
+        assert!(matches!(r, Request::Play { game, profile: None } if game == GameRef::ubisoft(3539)));
+        let r: Request = serde_json::from_str(r#"{"method":"play","params":{"game":"steam:620"}}"#).unwrap();
+        assert!(matches!(r, Request::Play { game, .. } if game == GameRef::steam(620)));
+        let r: Request = serde_json::from_str(r#"{"method":"play","params":{"game":3539,"profile":"p1"}}"#).unwrap();
+        assert!(matches!(r, Request::Play { game, profile: Some(_) } if game == GameRef::ubisoft(3539)));
+        let r: Request = serde_json::from_str(r#"{"method":"stop","params":{"product_id":1}}"#).unwrap();
+        assert!(matches!(r, Request::Stop { game } if game == GameRef::ubisoft(1)));
+        let r: Request = serde_json::from_str(r#"{"method":"playtime","params":{"product_id":1}}"#).unwrap();
+        assert!(matches!(r, Request::Playtime { game } if game == GameRef::ubisoft(1)));
+        // Older clients ask for the library without `all_stores`, and get Ubisoft's.
+        let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
+        assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));
+        let v = serde_json::to_value(Request::Library { refresh: true, all_stores: false }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "library", "params": { "refresh": true } }));
+        let v = serde_json::to_value(Request::Play { game: GameRef::steam(620), profile: None }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "play", "params": { "game": "steam:620" } }));
+
+        // Library entries: Ubisoft ones keep `product_id` beside `game`.
+        let old = r#"{"product_id":3539,"name":"Origins","installed":null,"update_available":false,"running":false,"art":{"thumb":null,"background":null,"logo":null,"icon":null},"owned_by":["u"],"installable":true}"#;
+        let e: LibraryEntry = serde_json::from_str(old).unwrap();
+        assert_eq!((e.game, e.ubisoft_id()), (GameRef::ubisoft(3539), Some(3539)));
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!((v["product_id"].as_u64(), v["game"].as_str()), (Some(3539), Some("ubisoft:3539")));
+        let steam = LibraryEntry { game: GameRef::steam(620), client: Some(Default::default()), ..e.clone() };
+        let v = serde_json::to_value(&steam).unwrap();
+        assert!(v.get("product_id").is_none() && v["game"] == "steam:620", "{v}");
+        let back: LibraryEntry = serde_json::from_value(v).unwrap();
+        assert!(back.steam_only() && back.on_disk() && back.stores() == [StoreId::Steam]);
+
+        // Jobs carry both for Ubisoft.
+        let j: Job = serde_json::from_str(r#"{"id":1,"kind":"play","product_id":5,"name":"x","status":"","downloaded":0,"total":0,"done":true,"error":null}"#).unwrap();
+        assert_eq!(j.game, GameRef::ubisoft(5));
+        assert_eq!(serde_json::to_value(&j).unwrap()["product_id"], 5);
+
+        // activity.jsonl lines: Ubisoft ones are written exactly as before.
+        let line = r#"{"at":"2026-11-16T20:00:00Z","source":"cli","action":"play x","product_id":3539}"#;
+        let a: ActivityEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(a.game, Some(GameRef::ubisoft(3539)));
+        assert_eq!(serde_json::to_string(&a).unwrap(), line);
+        let a: ActivityEntry = serde_json::from_str(r#"{"at":"2026-11-16T20:00:00Z","source":"cli","action":"signed out x","product_id":null}"#).unwrap();
+        assert_eq!(a.game, None);
+        assert_eq!(serde_json::to_string(&a).unwrap(), r#"{"at":"2026-11-16T20:00:00Z","source":"cli","action":"signed out x"}"#);
+        let s = ActivityEntry { game: Some(GameRef::steam(620)), ..a };
+        assert!(serde_json::to_string(&s).unwrap().ends_with(r#""game":"steam:620"}"#));
     }
 
     #[test]

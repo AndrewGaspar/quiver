@@ -18,7 +18,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use quiver_api::{Account, ActivityEntry, Client, Event, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status};
+use quiver_api::{Account, ActivityEntry, Client, Event, GameRef, LibraryEntry, LoginResult, Request, Revision, SettingOp, Status, StoreId};
 
 #[derive(Parser)]
 #[command(name = "quiver", about = "Quiver: a third-party launcher for your Ubisoft library")]
@@ -50,11 +50,21 @@ enum Cmd {
         #[command(subcommand)]
         action: AccountAction,
     },
-    /// Owned games and their install state.
+    /// The stores Quiver reads games from, whose account each follows, and what each does.
+    Stores {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Owned games and their install state, from every store (Ubisoft, and Steam's installed
+    /// games), with each game's ref (`3539`, `steam:620`).
+    #[command(visible_alias = "list")]
     Library {
         /// Re-fetch from Ubisoft instead of using the daemon's cache.
         #[arg(long)]
         refresh: bool,
+        /// Only one store's games (`ubisoft`, `steam`).
+        #[arg(long, value_parser = parse_store)]
+        store: Option<StoreId>,
         #[arg(long)]
         json: bool,
     },
@@ -383,22 +393,90 @@ async fn logout(client: &Client, account: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a game argument: product id, or a unique case-insensitive name match.
-pub(crate) async fn resolve(client: &Client, game: &str) -> Result<LibraryEntry> {
-    let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await?;
-    if let Ok(id) = game.parse::<u32>() {
-        return lib.into_iter().find(|e| e.product_id == id).with_context(|| format!("product {id} is not in your library"));
+/// A Ubisoft game a command resolved ([`resolve`]): the library entry and its product id.
+pub(crate) struct UbiEntry {
+    pub product_id: u32,
+    pub entry: LibraryEntry,
+}
+
+impl std::ops::Deref for UbiEntry {
+    type Target = LibraryEntry;
+    fn deref(&self) -> &LibraryEntry {
+        &self.entry
+    }
+}
+
+/// Resolve a game argument for a Ubisoft-only command: a product id (`3539`,
+/// `ubisoft:3539`), or a unique case-insensitive name match among Ubisoft games. Another
+/// store's ref (`steam:620`) is refused with what to do instead.
+pub(crate) async fn resolve(client: &Client, game: &str) -> Result<UbiEntry> {
+    if let Some(r) = GameRef::parse_ref(game).filter(|r| !r.is_ubisoft()) {
+        bail!("{r} is a {} game; this command is for Ubisoft games ({} handles it, or try `quiver play {r}`)", r.store.label(), r.store.label());
+    }
+    let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: false }).await?;
+    let entry = pick(lib, game)?;
+    let product_id = entry.ubisoft_id().context("not a Ubisoft game")?;
+    Ok(UbiEntry { product_id, entry })
+}
+
+/// Resolve a game argument across every store: a ref (`3539`, `ubi:3539`, `steam:620`)
+/// or a unique case-insensitive name match. A name in several stores lists the matches
+/// with their refs; a full ref picks one.
+pub(crate) async fn resolve_any(client: &Client, game: &str) -> Result<LibraryEntry> {
+    let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: true }).await?;
+    pick(lib, game)
+}
+
+/// [`resolve_any`] over a library already fetched.
+fn pick(lib: Vec<LibraryEntry>, game: &str) -> Result<LibraryEntry> {
+    if let Some(r) = GameRef::parse_ref(game) {
+        let what = if r.is_ubisoft() { format!("product {}", r.id) } else { r.to_string() };
+        return lib.into_iter().find(|e| e.game == r).with_context(|| format!("{what} is not in your library"));
     }
     let norm = |s: &str| s.to_lowercase().replace(['®', '™', '’', '\''], "");
     let needle = norm(game);
-    let matches: Vec<LibraryEntry> = lib.into_iter().filter(|e| norm(&e.name).contains(&needle)).collect();
+    let mut matches: Vec<LibraryEntry> = lib.into_iter().filter(|e| norm(&e.name).contains(&needle)).collect();
+    // An exact name wins over names that merely contain it ("Portal" vs "Portal 2").
+    if matches.len() > 1 && matches.iter().filter(|e| norm(&e.name) == needle).count() == 1 {
+        matches.retain(|e| norm(&e.name) == needle);
+    }
     match matches.len() {
         1 => Ok(matches.into_iter().next().unwrap()),
         0 => bail!("no game matches '{game}'"),
-        _ => bail!(
-            "'{game}' matches several games: {}",
-            matches.iter().map(|e| format!("{} ({})", e.name, e.product_id)).collect::<Vec<_>>().join(", ")
-        ),
+        _ => {
+            let stores: std::collections::BTreeSet<_> = matches.iter().map(|e| e.store()).collect();
+            let hint = if stores.len() > 1 { "; they are in different stores, so name one by its ref" } else { "" };
+            bail!(
+                "'{game}' matches several games: {}{hint}",
+                matches.iter().map(|e| format!("{} ({})", e.name, game_label(&e.game))).collect::<Vec<_>>().join(", ")
+            )
+        }
+    }
+}
+
+/// `--store` values.
+fn parse_store(s: &str) -> std::result::Result<StoreId, String> {
+    StoreId::parse(s).ok_or_else(|| format!("unknown store '{s}' (ubisoft, steam)"))
+}
+
+/// The list's note for another store's game: "(Steam · 12.4 GB · 41 h played · 12/50 achievements)".
+fn client_note(c: &quiver_api::stores::ClientInstall) -> String {
+    let mut parts = vec![format!("{:.1} GB", c.size_bytes as f64 / 1e9)];
+    if let Some(p) = c.playtime.filter(|p| p.total_seconds > 0) {
+        parts.push(format!("{} h played", p.total_seconds / 3600));
+    }
+    if let Some(a) = c.achievements.filter(|a| a.total > 0) {
+        parts.push(format!("{}/{} achievements", a.unlocked, a.total));
+    }
+    format!("  ({})", parts.join(" · "))
+}
+
+/// How the CLI prints a game's ref: the bare product id for Ubisoft (as always), the full
+/// ref for other stores.
+pub(crate) fn game_label(g: &GameRef) -> String {
+    match g.as_ubisoft() {
+        Some(id) => id.to_string(),
+        None => g.to_string(),
     }
 }
 
@@ -543,8 +621,44 @@ async fn main() -> Result<()> {
             let s: Status = client.call(Request::Status).await?;
             println!("default account: {}", s.signed_in.as_deref().unwrap_or("?"));
         }
-        Cmd::Library { refresh, json } => {
-            let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh }).await?;
+        Cmd::Stores { json } => {
+            let list: Vec<quiver_api::stores::StoreInfo> = client.call(Request::Stores).await?;
+            if json {
+                return print_json(&list);
+            }
+            for s in list {
+                use quiver_api::stores::AccountState as A;
+                let account = match (s.account, &s.account_name) {
+                    (A::SignedIn, Some(n)) => format!("signed in as {n}"),
+                    (A::ClientManaged, Some(n)) => format!("follows the {} client ({n})", s.store.label()),
+                    (A::ClientManaged, None) => format!("follows the {} client", s.store.label()),
+                    (A::SignedInElsewhere, _) => "signed in elsewhere".into(),
+                    (A::NeedsSignIn, _) | (A::SignedIn, None) => "not signed in".into(),
+                };
+                let note = s.note.map(|n| format!(" ({n})")).unwrap_or_default();
+                println!("{:<8} {:>4} game(s)  {account}{note}", s.store.label(), s.games);
+                let c = s.capabilities;
+                let caps = [("library", c.library), ("install", c.install), ("play", c.launch), ("settings", c.settings), ("mods", c.mods), ("cloud saves", c.cloud_saves), ("achievements", c.achievements), ("play time", c.playtime)];
+                let shown: Vec<String> = caps
+                    .iter()
+                    .map(|(k, v)| {
+                        let how = match v {
+                            quiver_api::stores::Support::Quiver => "",
+                            quiver_api::stores::Support::Delegated => " (via the client)",
+                            quiver_api::stores::Support::ReadOnly => " (read-only)",
+                            quiver_api::stores::Support::No => " (no)",
+                        };
+                        format!("{k}{how}")
+                    })
+                    .collect();
+                println!("         {}", shown.join(", "));
+            }
+        }
+        Cmd::Library { refresh, store, json } => {
+            let mut lib: Vec<LibraryEntry> = client.call(Request::Library { refresh, all_stores: true }).await?;
+            if let Some(s) = store {
+                lib.retain(|e| e.stores().contains(&s));
+            }
             if json {
                 return print_json(&lib);
             }
@@ -557,27 +671,34 @@ async fn main() -> Result<()> {
                     .join(", ")
             };
             let width = lib.iter().map(|e| owners(e).chars().count()).max().unwrap_or(0).max("owned by".len());
+            // Ubisoft ids keep their old column; other stores' refs widen it.
+            let idw = lib.iter().map(|e| game_label(&e.game).len()).max().unwrap_or(0).max(6);
             if accounts.len() > 1 {
-                println!("{:>6}  {:<10} {:<width$}  name", "id", "state", "owned by");
+                println!("{:>idw$}  {:<10} {:<width$}  name", "id", "state", "owned by");
             }
             for e in &lib {
-                let state = match (&e.installed, e.update_available, e.running, &e.steam) {
-                    (_, _, true, _) => "running",
-                    (Some(_), true, _, _) => "update",
-                    (Some(_), false, _, _) => "installed",
-                    (None, _, _, Some(_)) => "steam",
-                    (None, _, _, None) => "",
+                let state = match (&e.installed, e.update_available, e.running, &e.steam, &e.client) {
+                    (_, _, true, _, _) => "running",
+                    (Some(_), true, _, _, _) => "update",
+                    (Some(_), false, _, _, _) => "installed",
+                    (None, _, _, Some(_), _) => "steam",
+                    (None, _, _, None, Some(c)) if c.update_pending => "update",
+                    (None, _, _, None, Some(c)) if !c.complete => "installing",
+                    (None, _, _, None, Some(_)) => e.store().as_str(),
+                    (None, _, _, None, None) => "",
                 };
-                let note = match &e.steam {
-                    Some(g) if e.owned_by.is_empty() => format!("  (Steam app {}; not on a signed-in Ubisoft account)", g.app_id),
-                    Some(g) if !e.installable => format!("  (owned on Steam, app {})", g.app_id),
-                    Some(g) if e.installed.is_none() => format!("  (Steam app {})", g.app_id),
+                let note = match (&e.steam, &e.client) {
+                    (Some(g), _) if e.owned_by.is_empty() => format!("  (Steam app {}; not on a signed-in Ubisoft account)", g.app_id),
+                    (Some(g), _) if !e.installable => format!("  (owned on Steam, app {})", g.app_id),
+                    (Some(g), _) if e.installed.is_none() => format!("  (Steam app {})", g.app_id),
+                    (None, Some(c)) => client_note(c),
                     _ => String::new(),
                 };
+                let id = game_label(&e.game);
                 if accounts.len() > 1 {
-                    println!("{:>6}  {:<10} {:<width$}  {}{note}", e.product_id, state, owners(e), e.name);
+                    println!("{id:>idw$}  {:<10} {:<width$}  {}{note}", state, owners(e), e.name);
                 } else {
-                    println!("{:>6}  {:<10} {}{note}", e.product_id, state, e.name);
+                    println!("{id:>idw$}  {:<10} {}{note}", state, e.name);
                 }
             }
         }
@@ -617,7 +738,16 @@ async fn main() -> Result<()> {
             println!("uninstalled {}", e.name);
         }
         Cmd::Play { game, profile, profile_id, vanilla, detach } => {
-            let e = resolve(&client, &game).await?;
+            let any = resolve_any(&client, &game).await?;
+            if let (None, Some(c)) = (any.ubisoft_id(), &any.client) {
+                if profile.is_some() || profile_id.is_some() {
+                    bail!("{} games play as {} starts them; mod profiles don't apply", any.store().label(), any.store().label());
+                }
+                let _: u64 = client.call(Request::Play { game: any.game, profile: None }).await?;
+                eprintln!("asked {} to start {} ({})", any.store().label(), any.name, c.launch_url.as_deref().unwrap_or("its client"));
+                return Ok(());
+            }
+            let e = resolve(&client, &game_label(&any.game)).await?;
             let events = client.subscribe().await?;
             // `None`: the daemon runs the game's default profile; `vanilla` forces vanilla.
             let profile = profile.or(profile_id).or(vanilla.then(|| quiver_api::mods::VANILLA.to_owned()));
@@ -629,7 +759,7 @@ async fn main() -> Result<()> {
                     .map(|s| mods::default_label(&s)),
                 Some(_) => None,
             };
-            let id: u64 = client.call(Request::Play { product_id: e.product_id, profile: profile.clone() }).await?;
+            let id: u64 = client.call(Request::Play { game: e.game, profile: profile.clone() }).await?;
             if let Some(g) = e.steam.as_ref().filter(|_| e.steam_only()) {
                 let how = if g.state.uses_quiver() { "it starts through Quiver" } else { "it starts through Ubisoft Connect; `quiver steam patch` switches it" };
                 eprintln!("asked Steam to start {} (steam://rungameid/{}; {how})", e.name, g.app_id);
@@ -650,7 +780,7 @@ async fn main() -> Result<()> {
             let job = status
                 .jobs
                 .iter()
-                .filter(|j| j.product_id == e.product_id && !j.done)
+                .filter(|j| j.game == e.game && !j.done)
                 .max_by_key(|j| j.id)
                 .with_context(|| format!("nothing running for {}", e.name))?;
             let () = client.call(Request::Cancel { job_id: job.id, discard }).await?;
@@ -658,7 +788,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Stop { game } => {
             let e = resolve(&client, &game).await?;
-            let () = client.call(Request::Stop { product_id: e.product_id }).await?;
+            let () = client.call(Request::Stop { game: e.game }).await?;
         }
         Cmd::Get { game } => {
             let e = resolve(&client, &game).await?;
@@ -707,8 +837,15 @@ async fn main() -> Result<()> {
             println!("{}: restored r{revision} as revision {}", e.name, rev.revision);
         }
         Cmd::Playtime { game } => {
-            let e = resolve(&client, &game).await?;
-            let p: quiver_api::Playtime = client.call(Request::Playtime { product_id: e.product_id }).await?;
+            let any = resolve_any(&client, &game).await?;
+            if any.ubisoft_id().is_none() {
+                let p: quiver_api::Playtime = client.call(Request::Playtime { game: any.game }).await?;
+                let last = p.last_played.map(|t| t.with_timezone(&chrono::Local).format(" (last played %Y-%m-%d %H:%M)").to_string()).unwrap_or_default();
+                println!("{}: {}h{:02}m, as {} recorded it{last}", any.name, p.total_seconds / 3600, p.total_seconds % 3600 / 60, any.store().label());
+                return Ok(());
+            }
+            let e = resolve(&client, &game_label(&any.game)).await?;
+            let p: quiver_api::Playtime = client.call(Request::Playtime { game: e.game }).await?;
             match client.call::<serde_json::Value>(Request::RemotePlaytime { product_id: e.product_id }).await {
                 Ok(r) => println!("Ubisoft says: {} (raw: {r})", r["seconds"].as_u64().map(|s| format!("{}h{:02}m", s / 3600, s % 3600 / 60)).unwrap_or("?".into())),
                 Err(err) => println!("Ubisoft play time unavailable: {err:#}"),
@@ -771,10 +908,10 @@ async fn main() -> Result<()> {
             } else if list.is_empty() {
                 println!("nothing running");
             } else {
-                let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await.unwrap_or_default();
+                let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: false }).await.unwrap_or_default();
                 for s in list {
                     let mins = (chrono::Utc::now() - s.started).num_minutes();
-                    let name = lib.iter().find(|e| e.product_id == s.product_id).map(|e| e.name.clone()).unwrap_or_default();
+                    let name = lib.iter().find(|e| e.ubisoft_id() == Some(s.product_id)).map(|e| e.name.clone()).unwrap_or_default();
                     let via = match s.steam_app_id {
                         Some(app) => format!("Steam app {app}"),
                         None => s.holders.join("+"),
@@ -824,4 +961,42 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(game: GameRef, name: &str) -> LibraryEntry {
+        serde_json::from_value(serde_json::json!({
+            "game": game, "name": name, "installed": null, "update_available": false, "running": false,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn resolves_refs_and_names_across_stores() {
+        let lib = || {
+            vec![
+                entry(GameRef::ubisoft(3539), "Assassin's Creed® Origins"),
+                entry(GameRef::steam(620), "Portal 2"),
+                entry(GameRef::steam(400), "Portal"),
+                entry(GameRef::steam(582160), "Assassin's Creed Origins"),
+            ]
+        };
+        assert_eq!(pick(lib(), "3539").unwrap().game, GameRef::ubisoft(3539));
+        assert_eq!(pick(lib(), "ubi:3539").unwrap().game, GameRef::ubisoft(3539));
+        assert_eq!(pick(lib(), "steam:620").unwrap().game, GameRef::steam(620));
+        assert!(pick(lib(), "steam:1").unwrap_err().to_string().contains("steam:1 is not in your library"));
+        assert!(pick(lib(), "9").unwrap_err().to_string().contains("product 9"));
+        // A name: unique, exact over contained, or ambiguous across stores with refs to pick.
+        assert_eq!(pick(lib(), "portal 2").unwrap().game, GameRef::steam(620));
+        assert_eq!(pick(lib(), "portal").unwrap().game, GameRef::steam(400));
+        let err = pick(lib(), "origins").unwrap_err().to_string();
+        assert!(err.contains("(3539)") && err.contains("(steam:582160)") && err.contains("different stores"), "{err}");
+        // Names with a colon aren't refs.
+        assert!(pick(lib(), "Portal: 2").is_err());
+        assert_eq!(game_label(&GameRef::ubisoft(5)), "5");
+        assert_eq!(game_label(&GameRef::steam(5)), "steam:5");
+    }
 }

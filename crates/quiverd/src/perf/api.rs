@@ -154,7 +154,7 @@ impl Daemon {
 
 /// A game's recorded sessions that carry a perf summary, newest first.
 pub fn summaries(product_id: u32, limit: usize) -> Vec<SessionSummary> {
-    let path = launcher::data_dir().join("games").join(product_id.to_string()).join("playtime.jsonl");
+    let path = quiver_core::paths::game_dir(&quiver_api::GameRef::ubisoft(product_id)).join("playtime.jsonl");
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<SessionSummary> = text
         .lines()

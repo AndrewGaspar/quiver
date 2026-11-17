@@ -61,11 +61,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn games_dir(store: &ModStore) -> PathBuf {
-    store.data_dir().join("games").join(store.product_id().to_string()).join("options")
+    crate::paths::game_dir_in(store.data_dir(), &quiver_api::GameRef::ubisoft(store.product_id())).join("options")
 }
 
 fn mods_dir(store: &ModStore) -> PathBuf {
-    store.data_dir().join("mods").join(store.product_id().to_string())
+    crate::paths::mods_dir_in(store.data_dir(), &quiver_api::GameRef::ubisoft(store.product_id()))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

@@ -12,7 +12,7 @@ use quiver_api::{PlaySession, Profile};
 
 use super::page::{load_note, note};
 use crate::app::Quiver;
-use crate::model::{GameRow, clock, day, duration};
+use crate::model::{Gid, GameRow, clock, day, duration};
 use crate::nav::Target;
 use crate::theme::Theme;
 use crate::ui::perf::{HUD_FIELDS, HudField, ScopePick};
@@ -165,7 +165,7 @@ impl Quiver {
         (list, configs)
     }
 
-    fn perf_scope_pick(&self, id: u32) -> ScopePick {
+    fn perf_scope_pick(&self, id: Gid) -> ScopePick {
         let pick = self.perf.scope.get(&id).cloned().unwrap_or_default();
         match &pick {
             ScopePick::Profile(p) if self.gp.id == id && !self.gp.profiles().iter().any(|x| x.id == *p) => ScopePick::Game,
@@ -174,7 +174,7 @@ impl Quiver {
     }
 
     /// Controller rows: the sessions, the HUD's scope, then each HUD setting.
-    pub(super) fn perf_body_len(&self, id: u32) -> usize {
+    pub(super) fn perf_body_len(&self, id: Gid) -> usize {
         let n = match (self.perf.summaries_for == id, self.perf.summaries.ready()) {
             (true, Some(v)) => v.len().min(PERF_ROWS),
             _ => 0,
@@ -184,7 +184,7 @@ impl Quiver {
         n + hud
     }
 
-    pub(super) fn perf_body_activate(&mut self, id: u32, i: usize, cx: &mut Context<Self>) {
+    pub(super) fn perf_body_activate(&mut self, id: Gid, i: usize, cx: &mut Context<Self>) {
         let n = match (self.perf.summaries_for == id, self.perf.summaries.ready()) {
             (true, Some(v)) => v.len().min(PERF_ROWS),
             _ => 0,

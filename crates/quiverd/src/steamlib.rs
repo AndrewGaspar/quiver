@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use quiver_api::exports::{SteamGame, SteamGames};
 use quiver_api::steamlib::{OwnedProduct, SteamLaunchPlan};
-use quiver_api::{Art, Event, JobKind, LibraryEntry, Request};
+use quiver_api::{Art, Event, GameRef, JobKind, LibraryEntry, Request};
 use quiver_core::exports::Paths;
 use quiver_core::exports::steam::Steam;
 use quiver_core::library::{Library, Product, ProductConfig};
@@ -70,7 +70,7 @@ pub(crate) fn entry_for(p: &Product, installed: Option<quiver_api::Game>, update
     let space_id = p.space_id.clone().filter(|s| !s.is_empty()).or(meta.space_id);
     let art = meta.art;
     LibraryEntry {
-        product_id: p.product_id,
+        game: GameRef::ubisoft(p.product_id),
         name: p.name.clone().unwrap_or_else(|| p.product_id.to_string()),
         update_available,
         installed,
@@ -80,6 +80,7 @@ pub(crate) fn entry_for(p: &Product, installed: Option<quiver_api::Game>, update
         installable: p.is_installable(),
         steam: None,
         space_id,
+        client: None,
     }
 }
 
@@ -100,8 +101,9 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
     let mut out: Vec<LibraryEntry> = owned
         .into_iter()
         .filter_map(|mut e| {
-            e.steam = by_product.get(&e.product_id).map(|g| (*g).clone());
-            seen.insert(e.product_id);
+            let id = e.ubisoft_id()?;
+            e.steam = by_product.get(&id).map(|g| (*g).clone());
+            seen.insert(id);
             (e.installable || e.steam.is_some() || e.installed.is_some()).then_some(e)
         })
         .collect();
@@ -112,7 +114,7 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
         }
         let Meta { name, art, space_id } = unowned.get(&id).cloned().flatten().unwrap_or_default();
         out.push(LibraryEntry {
-            product_id: id,
+            game: GameRef::ubisoft(id),
             name: name.unwrap_or_else(|| g.name.clone()),
             installed: None,
             update_available: false,
@@ -122,6 +124,7 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
             installable: false,
             steam: Some(g.clone()),
             space_id,
+            client: None,
         });
     }
     out.sort_by(|a, b| {
@@ -178,7 +181,7 @@ pub(crate) async fn library(daemon: &Arc<Daemon>, refresh: bool) -> Result<Vec<L
     let steam = steam_games(daemon).await;
     let missing: Vec<u32> = {
         let known = UNOWNED.lock().unwrap();
-        let ids: HashSet<u32> = owned.iter().map(|e| e.product_id).collect();
+        let ids: HashSet<u32> = owned.iter().filter_map(|e| e.ubisoft_id()).collect();
         steam.iter().filter_map(|g| g.product_id).filter(|id| !ids.contains(id) && (refresh || !known.contains_key(id))).collect()
     };
     fetch_unowned(daemon, missing).await;
@@ -189,7 +192,7 @@ pub(crate) async fn library(daemon: &Arc<Daemon>, refresh: bool) -> Result<Vec<L
     // installs keep `running` for games quiverd started, which it can stop.
     let playing: HashSet<u32> = daemon.sessions.list().iter().map(|s| s.product_id).collect();
     for e in out.iter_mut().filter(|e| e.steam_only()) {
-        e.running = playing.contains(&e.product_id);
+        e.running = e.ubisoft_id().is_some_and(|id| playing.contains(&id));
     }
     Ok(out)
 }
@@ -219,7 +222,7 @@ async fn add_space_art(daemon: &Arc<Daemon>, entries: &mut [LibraryEntry], refre
 /// finished Play job (the session shows up when the game's bridge reports in).
 pub(crate) async fn play(daemon: &Arc<Daemon>, source: &str, entry: &LibraryEntry) -> Result<u64> {
     let g = entry.steam.clone().context("not installed through Steam")?;
-    let product_id = entry.product_id;
+    let product_id = entry.ubisoft_id().context("not a Ubisoft game")?;
     let app_id = g.app_id;
     let argv = tokio::task::spawn_blocking(move || {
         let steam = Steam::find(&Paths::from_env().home).context("Steam not found")?;
@@ -340,7 +343,7 @@ mod tests {
 
     fn entry(id: u32, name: &str, installable: bool) -> LibraryEntry {
         LibraryEntry {
-            product_id: id,
+            game: quiver_api::GameRef::ubisoft(id),
             name: name.into(),
             installed: None,
             update_available: false,
@@ -350,6 +353,7 @@ mod tests {
             installable,
             steam: None,
             space_id: None,
+            client: None,
         }
     }
 
@@ -390,7 +394,7 @@ mod tests {
             Some(Meta { name: Some("Far Cry Thing".to_owned()), art: Art { thumb: Some("t.jpg".into()), ..Default::default() }, space_id: Some("s-1".into()) }),
         );
         let lib = merge(owned, &steam_games, &unowned);
-        let ids: Vec<u32> = lib.iter().map(|e| e.product_id).collect();
+        let ids: Vec<u32> = lib.iter().filter_map(|e| e.ubisoft_id()).collect();
         // Installed (Steam or Quiver) first, by name; the uninstalled game without a build is gone.
         assert_eq!(ids, [66088, 3539, 5000]);
         let bf = &lib[0];
@@ -405,7 +409,7 @@ mod tests {
 
         // Without Steam, the old library: installable games only.
         let lib = merge(vec![entry(3539, "O", true), entry(66088, "BF", false)], &[], &HashMap::new());
-        assert_eq!(lib.iter().map(|e| e.product_id).collect::<Vec<_>>(), [3539]);
+        assert_eq!(lib.iter().filter_map(|e| e.ubisoft_id()).collect::<Vec<_>>(), [3539]);
         // A Steam install whose config couldn't be fetched uses Steam's name.
         let lib = merge(vec![], &[steam(9, Some(9), "Steam Name")], &HashMap::new());
         assert_eq!(lib[0].name, "Steam Name");

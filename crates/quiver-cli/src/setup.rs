@@ -194,19 +194,19 @@ pub async fn run(client: &Client) -> Result<()> {
         println!("  Steam reads shortcuts only when it starts, so new ones show after it restarts;");
         println!("  Quiver never restarts Steam without asking you first.");
         steam_on_install = yes("Offer \"Add to Steam\" when an install finishes?", true)?;
-        let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false }).await.unwrap_or_default();
+        let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: false }).await.unwrap_or_default();
         let exports: Vec<ExportStatus> = client.call(Request::ExportList).await.unwrap_or_default();
         let missing: Vec<&LibraryEntry> = lib
             .iter()
             .filter(|e| e.installed.is_some())
-            .filter(|e| !exports.iter().any(|x| x.record.kind == ExportKind::Steam && x.record.product_id == e.product_id && x.record.profile_id.is_none()))
+            .filter(|e| !exports.iter().any(|x| x.record.kind == ExportKind::Steam && x.record.game == e.game && x.record.profile_id.is_none()))
             .collect();
         if !missing.is_empty() && yes(&format!("Add {} installed game(s) to Steam now?", missing.len()), false)? {
             let user = exports::pick_user(client, None).await?;
             let mut staged = false;
-            for e in missing {
+            for (e, product_id) in missing.into_iter().filter_map(|e| Some((e, e.ubisoft_id()?))) {
                 match client
-                    .call::<SteamExportResult>(Request::ExportSteam { product_id: e.product_id, remove: false, steam_user: user.clone() })
+                    .call::<SteamExportResult>(Request::ExportSteam { product_id, remove: false, steam_user: user.clone() })
                     .await
                 {
                     Ok(r) => {

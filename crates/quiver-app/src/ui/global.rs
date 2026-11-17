@@ -18,7 +18,7 @@ use quiver_api::{ActiveSession, ActivityEntry, Event, Request, Status};
 use super::{BOLD, FocusExt, Icon, Kind, PillKind, SEMIBOLD, Size, art_fill, button, icon, pill, soft_shadow};
 use crate::app::{Conn, InputMode, NAV_CONTEXT, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{Actor, actor, clean_name, clock, short_name};
+use crate::model::{Gid, Actor, actor, clean_name, clock, short_name};
 use crate::nav::{Input, Overlay, Page, Section, SettingsSection};
 use crate::text_input::TextInput;
 use crate::ui::game::PlayAfter;
@@ -130,16 +130,16 @@ pub enum GlobalCmd {
     /// Write staged Steam shortcut changes (only offered while Steam is closed).
     SteamApply,
     RescanProtons,
-    Stop(u32),
+    Stop(Gid),
     /// Open Activity with this source filter.
     ActivityFrom(SourceFilter),
     /// The now-playing card.
     NowPlaying,
     /// Open Activity for one game.
-    ActivityGame(u32),
+    ActivityGame(Gid),
     /// Add a game to Steam (staged while Steam runs) or to the app launcher.
-    ExportSteam(u32),
-    ExportDesktop(u32),
+    ExportSteam(Gid),
+    ExportDesktop(Gid),
     /// A Steam copy of a Ubisoft game (by Steam app id): start it through Quiver, or
     /// through Ubisoft Connect again.
     SteamPatch(u32),
@@ -155,12 +155,12 @@ pub enum GlobalCmd {
 #[derive(Clone, Debug)]
 pub enum ConfirmAction {
     SignOut { user_id: String, name: String },
-    RemoveExport { kind: ExportKind, product_id: u32 },
+    RemoveExport { kind: ExportKind, product_id: Gid },
     /// Close Steam, write staged changes, start it again (`quiver steam restart`).
     RestartSteam,
     /// Start a game with unsaved launch-options edits: save them first (the action) or
     /// play without them (the alternative), keeping them staged.
-    PlayUnsaved { game: u32, play: PlayAfter },
+    PlayUnsaved { game: Gid, play: PlayAfter },
 }
 
 impl ConfirmAction {
@@ -224,7 +224,7 @@ pub struct GlobalUi {
     pub palette_input: Option<Entity<TextInput>>,
     pub palette_query: String,
     pub activity_source: Option<SourceFilter>,
-    pub activity_game: Option<u32>,
+    pub activity_game: Option<Gid>,
     pub activity_games_open: bool,
     pub activity_checked: Option<Instant>,
     activity_loading: bool,
@@ -406,7 +406,7 @@ impl Quiver {
                     self.ui.now_playing_open = false;
                     if let Some(s) = self.ui.sessions.first() {
                         let id = s.product_id;
-                        self.open_game(id, cx);
+                        self.open_game(Gid::from(id), cx);
                     }
                     return true;
                 }
@@ -423,7 +423,7 @@ impl Quiver {
                 }
                 // Y: only this entry's game (again: every game).
                 Input::Menu => {
-                    let game = self.activity_rows().get(self.nav.body_index()).and_then(|a| a.product_id);
+                    let game = self.activity_rows().get(self.nav.body_index()).and_then(|a| a.game.map(Gid));
                     self.ui.activity_game = if self.ui.activity_game.is_some() { None } else { game };
                     return true;
                 }
@@ -444,7 +444,7 @@ impl Quiver {
                     .sessions
                     .iter()
                     .filter(|s| s.account == a.user_id)
-                    .map(|s| self.game_name(s.product_id))
+                    .map(|s| self.game_name(Gid::from(s.product_id)))
                     .collect();
                 let only: usize = self
                     .games
@@ -490,17 +490,18 @@ impl Quiver {
                 let Some(Ok(list)) = &self.ui.exports else { return };
                 let Some(x) = list.get(i).cloned() else { return };
                 let r = &x.record;
+                let Some(product_id) = r.game.as_ubisoft() else { return };
                 let (what, cli, body) = match r.kind {
                     ExportKind::Desktop => (
                         ".desktop entry",
-                        format!("quiver export desktop {} --remove", r.product_id),
+                        format!("quiver export desktop {} --remove", r.game.key()),
                         format!("Deletes {} from your app launcher.", crate::model::tilde(&r.path)),
                     ),
                     ExportKind::Steam => {
                         let running = matches!(&self.ui.steam, Some(Ok(s)) if s.running);
                         (
                             "Steam shortcut",
-                            format!("quiver export steam {} --remove", r.product_id),
+                            format!("quiver export steam {} --remove", r.game.key()),
                             if running {
                                 "Steam is running, so the removal is staged and shows after Steam restarts. Quiver doesn't restart Steam for you.".to_owned()
                             } else {
@@ -514,7 +515,7 @@ impl Quiver {
                     body: body.into(),
                     confirm: "Remove".into(),
                     cli: Some(cli.into()),
-                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id: r.product_id },
+                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id: Gid::from(product_id) },
                     alt: None,
                     selected: 0,
                 });
@@ -537,7 +538,7 @@ impl Quiver {
             }
             GlobalCmd::Stop(id) => {
                 let name = self.game_name(id);
-                self.call::<(), _>(Request::Stop { product_id: id }, cx, move |this, r, cx| match r {
+                self.call::<(), _>(Request::Stop { game: id.0 }, cx, move |this, r, cx| match r {
                     Ok(()) => this.show_toast(format!("Stopping {name}"), cx),
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
@@ -555,7 +556,7 @@ impl Quiver {
             }
             GlobalCmd::ExportSteam(id) => {
                 let name = self.game_name(id);
-                let req = Request::ExportSteam { product_id: id, remove: false, steam_user: None };
+                let req = Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: None };
                 self.call::<quiver_api::exports::SteamExportResult, _>(req, cx, move |this, r, cx| {
                     match r {
                         Ok(r) if r.staged => this.show_toast(
@@ -578,7 +579,7 @@ impl Quiver {
             GlobalCmd::SteamRestart => self.ask_restart_steam(cx),
             GlobalCmd::ExportDesktop(id) => {
                 let name = self.game_name(id);
-                let req = Request::ExportDesktop { product_id: id, remove: false };
+                let req = Request::ExportDesktop { product_id: id.pid(), remove: false };
                 self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
                     match r {
                         Ok(_) => this.show_toast(format!("Added {name} to the app launcher"), cx),
@@ -625,8 +626,8 @@ impl Quiver {
             ConfirmAction::RestartSteam => self.restart_steam(cx),
             ConfirmAction::RemoveExport { kind, product_id } => {
                 let req = match kind {
-                    ExportKind::Desktop => Request::ExportDesktop { product_id, remove: true },
-                    ExportKind::Steam => Request::ExportSteam { product_id, remove: true, steam_user: None },
+                    ExportKind::Desktop => Request::ExportDesktop { product_id: product_id.pid(), remove: true },
+                    ExportKind::Steam => Request::ExportSteam { product_id: product_id.pid(), remove: true, steam_user: None },
                 };
                 self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
                     match r {
@@ -709,7 +710,7 @@ impl Quiver {
         self.body_scroll.set_offset(gpui::point(px(0.), px(0.)));
     }
 
-    pub fn game_name(&self, id: u32) -> String {
+    pub fn game_name(&self, id: Gid) -> String {
         self.game(id).map(|g| short_name(&g.entry.name)).unwrap_or_else(|| format!("Game {id}"))
     }
 
@@ -952,7 +953,7 @@ impl Quiver {
         let now = chrono::Utc::now();
         let mut cards: Vec<AnyElement> = Vec::new();
         for (i, s) in sessions.iter().enumerate() {
-            let g = self.game(s.product_id).cloned();
+            let g = self.game(Gid::from(s.product_id)).cloned();
             let art = match &g {
                 Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                 None => crate::art::ArtState::Failed,
@@ -1021,7 +1022,7 @@ impl Quiver {
                                 button(("np-open", i), th, Kind::Secondary, Size::Small, Some(Icon::Info), "Open game")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.ui.now_playing_open = false;
-                                        this.open_game(id, cx);
+                                        this.open_game(Gid::from(id), cx);
                                         cx.notify();
                                     })),
                             )
@@ -1029,7 +1030,7 @@ impl Quiver {
                                 d.child(
                                     button(("np-stop", i), th, Kind::Secondary, Size::Small, Some(Icon::Square), "Stop game")
                                         .text_color(th.bad)
-                                        .on_click(cx.listener(move |this, _, _, cx| this.run_global(GlobalCmd::Stop(id), cx))),
+                                        .on_click(cx.listener(move |this, _, _, cx| this.run_global(GlobalCmd::Stop(Gid::from(id)), cx))),
                                 )
                             }),
                     )
@@ -1083,7 +1084,7 @@ impl Quiver {
     pub fn render_now_playing_pill(&mut self, th: &Theme, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let first = self.ui.sessions.first()?.clone();
         let n = self.ui.sessions.len();
-        let label = if n == 1 { self.game_name(first.product_id) } else { format!("{n} games") };
+        let label = if n == 1 { self.game_name(Gid::from(first.product_id)) } else { format!("{n} games") };
         let secs = (chrono::Utc::now() - first.started).num_seconds();
         let reported = self.ui.sessions.iter().all(|s| s.reported);
         let open = self.ui.now_playing_open;
@@ -1207,6 +1208,8 @@ impl Quiver {
                                 this.open_game(id, cx);
                             }
                         }
+                        // The library's store filter (`store=steam`).
+                        "store" => this.store_filter = quiver_api::StoreId::parse(v),
                         // Unsaved launch-options edits on a game (`unsaved=3539`).
                         "unsaved" => {
                             if let Ok(id) = v.parse() {
@@ -1279,7 +1282,7 @@ mod tests {
         assert_eq!((c.pick(0), c.pick(1)), (ConfirmPick::Cancel, ConfirmPick::Action));
         assert!(!c.action.constructive(), "destructive questions get the red button");
         c.alt = Some("Play without them".into());
-        c.action = ConfirmAction::PlayUnsaved { game: 1, play: PlayAfter::Primary };
+        c.action = ConfirmAction::PlayUnsaved { game: Gid::from(1), play: PlayAfter::Primary };
         assert_eq!(c.buttons(), 3);
         assert_eq!((c.pick(0), c.pick(1), c.pick(2)), (ConfirmPick::Cancel, ConfirmPick::Alt, ConfirmPick::Action));
         assert!(c.action.constructive());

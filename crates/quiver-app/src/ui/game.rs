@@ -11,6 +11,7 @@ mod overview;
 mod page;
 mod perf;
 mod saves;
+mod storepage;
 mod stores;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
@@ -24,7 +25,7 @@ use super::{
 };
 use crate::app::{ACTION_FILES, ACTION_LAUNCH, ACTION_MORE, ACTION_OPTIONS, ACTION_PRIMARY, ACTION_STEAM, InputMode, Quiver, SideFilter};
 use crate::art::{ArtPreference, ArtSlot, Variant};
-use crate::model::{GameRow, day, gb, hours, short_name};
+use crate::model::{Gid, GameRow, day, gb, hours, short_name};
 use crate::nav::{Tab, Target};
 use crate::theme::{Theme, on_art, rgba};
 use super::hero::{HeroTitle, TitleBox, title_element};
@@ -37,7 +38,7 @@ const SHORT: f32 = 720.;
 
 
 impl Quiver {
-    pub fn render_game(&mut self, th: &Theme, id: u32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub fn render_game(&mut self, th: &Theme, id: Gid, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let _ = window;
         let row = div().flex().flex_1().min_h_0().relative();
         match self.side_mode() {
@@ -79,7 +80,7 @@ impl Quiver {
     }
 
     /// Narrow windows: the game list as a row of box art down the left edge.
-    fn render_rail(&mut self, th: &Theme, selected: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_rail(&mut self, th: &Theme, selected: Gid, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let games: Vec<GameRow> = self.side_games().into_iter().cloned().collect();
         // Children line up with the full list's (`side_child_index`): an empty first
         // child where its header is, the divider where "Not installed" is.
@@ -107,7 +108,7 @@ impl Quiver {
             let hover = th.ink3;
             rows.push(
                 div()
-                    .id(("rail", id as usize))
+                    .id(("rail", id.ix()))
                     .relative()
                     .flex()
                     .flex_none()
@@ -154,7 +155,7 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Side list
 
-    fn render_side(&mut self, th: &Theme, selected: u32, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_side(&mut self, th: &Theme, selected: Gid, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let games: Vec<GameRow> = self.side_games().into_iter().cloned().collect();
         let active = |g: &GameRow| g.on_disk() || g.install_job().is_some();
         let n_active = games.iter().filter(|g| active(g)).count();
@@ -296,7 +297,7 @@ impl Quiver {
         let hover = th.ink3;
         let hover_fg = th.tx1;
         div()
-            .id(("side", id as usize))
+            .id(("side", id.ix()))
             .relative()
             .flex()
             .items_center()
@@ -326,11 +327,13 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Pane
 
-    fn render_pane(&mut self, th: &Theme, id: u32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pane(&mut self, th: &Theme, id: Gid, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.game(id).cloned() else {
             return div().flex_1().p(px(28.)).text_color(th.tx3).child("This game isn't in your library.").into_any_element();
         };
-        let tab = self.nav.tab;
+        // Other stores' games have one page: their client's facts (no Quiver tabs).
+        let store_page = !id.is_ubisoft();
+        let tab = if store_page { Tab::Overview } else { self.nav.tab };
         let slim = tab != Tab::Overview;
         let pane_w = self.pane_width();
         let pane_h = (self.viewport.1 - 52.).max(300.);
@@ -368,6 +371,7 @@ impl Quiver {
             )));
 
         let body = match tab {
+            Tab::Overview if store_page => self.render_store_overview(th, &g, cx),
             Tab::Overview => self.render_overview(th, &g, cx),
             Tab::LaunchOptions => self.render_launch(th, &g, cx),
             Tab::Mods => self.render_mods(th, &g, cx),
@@ -399,8 +403,10 @@ impl Quiver {
             head.push(self.render_actionbar(th, &g, false, cx).into_any_element());
             head.push(self.render_stats(th, &g).into_any_element());
         }
-        head.push(self.render_tabs(th, &g, cx).into_any_element());
-        let scroll = div().id(("body", id as usize)).flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.body_scroll);
+        if !store_page {
+            head.push(self.render_tabs(th, &g, cx).into_any_element());
+        }
+        let scroll = div().id(("body", id.ix())).flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.body_scroll);
         let body = div().px(px(pad)).pt(px(20.)).pb(px(28.)).child(body);
         // Short or narrow windows: the hero and tabs scroll away with the tab's content,
         // which would otherwise get a sliver of the window.
@@ -475,7 +481,7 @@ impl Quiver {
     /// game's `art` setting, which the library, Now Playing and the home hero follow too).
     fn render_art_chip(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        let custom = self.custom_art.get(&id).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
+        let custom = self.custom_art.get(&id.pid()).is_some_and(|c| c.hero.is_some() || c.tile.is_some() || c.logo.is_some());
         let shown = [ArtSlot::Hero, ArtSlot::Tile, ArtSlot::Logo]
             .into_iter()
             .find_map(|slot| match self.art_pick(g, slot, Variant::Original, cx) {
@@ -573,7 +579,7 @@ impl Quiver {
     }
 
     /// Save the game's `art` setting (`steam`, or unset for Ubisoft's first).
-    pub fn set_art_pref(&mut self, id: u32, p: ArtPreference, cx: &mut Context<Self>) {
+    pub fn set_art_pref(&mut self, id: Gid, p: ArtPreference, cx: &mut Context<Self>) {
         if self.game(id).is_some_and(|g| self.art_pref(g) == p) {
             return;
         }
@@ -585,7 +591,7 @@ impl Quiver {
             ArtPreference::Steam => "Steam's art first".to_owned(),
             ArtPreference::Ubisoft => "Ubisoft's art first".to_owned(),
         });
-        self.call::<quiver_api::Revision, _>(quiver_api::Request::SettingsSet { product_id: id, ops: vec![op], message }, cx, move |this, r, cx| match r {
+        self.call::<quiver_api::Revision, _>(quiver_api::Request::SettingsSet { product_id: id.pid(), ops: vec![op], message }, cx, move |this, r, cx| match r {
             Ok(_) => this.load_details(id, cx),
             Err(e) => this.show_toast(crate::err_text(&e), cx),
         });
@@ -711,6 +717,40 @@ impl Quiver {
                     this.click(Target::Action(ACTION_OPTIONS), cx)
                 }))
         });
+        // Another store's game: Play (its client starts it), its state, and the menu. No
+        // shortcuts, files, launch options or profiles: those are Quiver's own launches'.
+        if let Some(c) = g.client() {
+            let label = g.entry.store().label();
+            let (kind, i, text) = if g.running() {
+                (PillKind::Ok, Icon::Gamepad, "Playing now".to_owned())
+            } else if !c.complete {
+                (PillKind::Warn, Icon::Download, format!("Downloading in {label}"))
+            } else if c.update_pending {
+                (PillKind::Warn, Icon::ArrowDownToLine, format!("Update waiting in {label}"))
+            } else {
+                (PillKind::Ok, Icon::Gamepad, format!("Installed via {label}"))
+            };
+            let more_btn = icon_button("act-menu", th, Icon::Ellipsis, true)
+                .bg(th.ink2)
+                .focus_ring(f(ACTION_MORE), th, 8.)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gp.play_menu = false;
+                    this.click(Target::Action(ACTION_MORE), cx)
+                }));
+            let pad = if slim { 0. } else { self.pane_bp().pad() };
+            return div()
+                .flex()
+                .flex_none()
+                .flex_wrap()
+                .items_center()
+                .gap(px(10.))
+                .px(px(pad))
+                .when(!slim, |d| d.mt(px(-58.)))
+                .child(play)
+                .child(pill(th, kind, Some(i), text).py(px(5.)))
+                .child(div().flex_1())
+                .child(more_btn);
+        }
         let status: Option<(PillKind, Icon, String)> = if g.running() {
             Some((PillKind::Ok, Icon::Gamepad, "Playing now".into()))
         } else if let Some(fr) = g.installing() {
@@ -733,7 +773,7 @@ impl Quiver {
         });
         // A Steam copy: the button switches it to Quiver (or shows that it is) instead of
         // adding a shortcut.
-        let copy = g.steam().and_then(|s| self.steam_copy(id).or_else(|| Some(s.clone())));
+        let copy = g.steam().and_then(|s| self.steam_copy(id.pid()).or_else(|| Some(s.clone())));
         // Add to Steam shows the shortcut's state.
         let steam_state = self.gp.export(id, quiver_api::exports::ExportKind::Steam).map(|e| e.state);
         use quiver_api::exports::ExportState as S;
@@ -907,7 +947,7 @@ impl Quiver {
         let ubi = self.ubisoft_playtime(id);
         let info = self.gp.info.ready().filter(|_| self.gp.id == id);
         let (account, override_) = self.launch_account(id);
-        let stats: Vec<(&str, String)> = vec![
+        let stats: Vec<(&str, String)> = if !id.is_ubisoft() { self.store_stats(g) } else { vec![
             ("Last played", g.last_played().map(day).unwrap_or_else(|| "Never".into())),
             (
                 "Play time",
@@ -945,7 +985,7 @@ impl Quiver {
                 }),
             ),
             ("Account", format!("{account} · {}", if override_ { "this game" } else { "default" })),
-        ];
+        ] };
         let n = stats.len();
         let pb = self.pane_bp();
         if !pb.two_columns() {

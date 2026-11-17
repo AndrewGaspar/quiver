@@ -35,7 +35,7 @@ fn product(f: &Found, lib: Option<&[LibraryEntry]>) -> Option<(u32, &'static str
         return Some((id, src.as_str()));
     }
     let n = norm(&f.app.name);
-    lib?.iter().find(|e| norm(&e.name) == n).map(|e| (e.product_id, "library_name"))
+    lib?.iter().find(|e| norm(&e.name) == n).and_then(|e| Some((e.ubisoft_id()?, "library_name")))
 }
 
 /// Whose launch options: the user asked for, else the one who installed it, else the
@@ -77,7 +77,7 @@ impl Ctx {
             Some(u) => st.patch_state(u, f.app.app_id, &launch_options),
             None => PatchState::Unknown,
         };
-        let owned = lib.map(|l| product.is_some_and(|(id, _)| l.iter().any(|e| e.product_id == id)));
+        let owned = lib.map(|l| product.is_some_and(|(id, _)| l.iter().any(|e| e.ubisoft_id() == Some(id))));
         let note = if self.steam.flatpak {
             Some("Steam from Flatpak can't start Quiver from inside its sandbox".to_owned())
         } else if product.is_none() {
