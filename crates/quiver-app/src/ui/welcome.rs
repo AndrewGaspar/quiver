@@ -24,7 +24,7 @@ use super::settings::brand_mark;
 use super::{BOLD, FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, art_fill, button, caption, command_line, display, glyph, icon, mono, pill, progress, soft_shadow};
 use crate::app::{Conn, InputMode, Quiver};
 use crate::art::{ArtSlot, ArtState, Variant};
-use crate::model::{clean_name, gb, tilde};
+use crate::model::{Gid, clean_name, gb, tilde};
 use crate::nav::Input;
 use crate::text_input::TextInput;
 use crate::theme::{Theme, rgba};
@@ -140,7 +140,7 @@ pub enum WCtl {
     Import(usize),
     SteamOnInstall,
     SteamUser(usize),
-    SteamAdd(u32),
+    SteamAdd(Gid),
     SteamAddAll,
     /// A Ubisoft game in Steam (by app id): start it through Quiver, or undo that.
     SteamPatch(u32),
@@ -235,7 +235,7 @@ impl Quiver {
                 self.show_toast("quiverd is back with the new folders", cx);
             }
             Event::Job(j) if j.kind == JobKind::Import && j.done && self.wc.imports.values().any(|id| *id == j.id) => {
-                let name = self.game_name(j.product_id);
+                let name = self.game_name(Gid(j.game));
                 match &j.error {
                     Some(e) => self.show_toast(format!("Import of {name} failed: {e}"), cx),
                     None => self.show_toast(format!("{name}: {}", j.status), cx),
@@ -367,7 +367,7 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Controls and input
 
-    fn steam_games(&self) -> Vec<(u32, String, Option<ExportState>)> {
+    fn steam_games(&self) -> Vec<(Gid, String, Option<ExportState>)> {
         let exports = match &self.ui.exports {
             Some(Ok(l)) => l.clone(),
             _ => vec![],
@@ -376,13 +376,13 @@ impl Quiver {
             .into_iter()
             .filter(|g| g.installed())
             .map(|g| {
-                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.game == quiver_api::GameRef::ubisoft(g.id()) && x.record.profile_id.is_none()).map(|x| x.state);
+                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.game == quiver_api::GameRef::ubisoft((g.id()).pid()) && x.record.profile_id.is_none()).map(|x| x.state);
                 (g.id(), clean_name(&g.entry.name), st)
             })
             .collect()
     }
 
-    fn steam_missing(&self) -> Vec<u32> {
+    fn steam_missing(&self) -> Vec<Gid> {
         self.steam_games().into_iter().filter(|(_, _, s)| matches!(s, None | Some(ExportState::Missing) | Some(ExportState::Changed))).map(|(id, ..)| id).collect()
     }
 
@@ -617,15 +617,15 @@ impl Quiver {
         cx.notify();
     }
 
-    fn welcome_add_steam(&mut self, ids: Vec<u32>, cx: &mut Context<Self>) {
+    fn welcome_add_steam(&mut self, ids: Vec<Gid>, cx: &mut Context<Self>) {
         if !self.steam_choice().is_empty() && self.wc.steam_user.is_none() {
             return self.show_toast("Pick which Steam user gets the shortcuts first", cx);
         }
         for id in ids {
-            self.wc.steam_busy.insert(id);
+            self.wc.steam_busy.insert(id.pid());
             let user = self.wc.steam_user.clone();
-            self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id, remove: false, steam_user: user }, cx, move |this, r, cx| {
-                this.wc.steam_busy.remove(&id);
+            self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: user }, cx, move |this, r, cx| {
+                this.wc.steam_busy.remove(&(&id).pid());
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
                 }
@@ -1233,7 +1233,7 @@ impl Quiver {
     }
 
     fn found_row(&mut self, th: &Theme, i: usize, f: &FoundInstall, cx: &mut Context<Self>) -> AnyElement {
-        let g = f.product_id.and_then(|id| self.game(id)).cloned();
+        let g = f.product_id.and_then(|id| self.game(Gid::from(id))).cloned();
         let art = match &g {
             Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
             None => ArtState::Failed,
@@ -1433,12 +1433,12 @@ impl Quiver {
             .enumerate()
             .map(|(i, (id, name, st))| {
                 let id = *id;
-                let busy = self.wc.steam_busy.contains(&id);
+                let busy = self.wc.steam_busy.contains(&(&id).pid());
                 let right: AnyElement = match st {
                     _ if busy => pill(th, PillKind::Muted, Some(Icon::LoaderCircle), "Adding…").into_any_element(),
                     Some(ExportState::Ok) => pill(th, PillKind::Ok, Some(Icon::CircleCheck), "In Steam").into_any_element(),
                     Some(ExportState::WaitingForSteam) => pill(th, PillKind::Warn, Some(Icon::Clock), "Shows after Steam restarts").into_any_element(),
-                    _ => button(("wc-sa", id as usize), th, Kind::Secondary, Size::Small, Some(Icon::Plus), "Add")
+                    _ => button(("wc-sa", id.ix()), th, Kind::Secondary, Size::Small, Some(Icon::Plus), "Add")
                         .focus_ring(self.wfocused(WCtl::SteamAdd(id)), th, 6.)
                         .on_click(cx.listener(move |this, _, _, cx| this.welcome_press(WCtl::SteamAdd(id), cx)))
                         .into_any_element(),
@@ -1536,7 +1536,7 @@ impl Quiver {
         let mut rows: Vec<AnyElement> = vec![];
         for (i, g) in list.games.iter().enumerate() {
             let busy = self.ui.sg.busy.contains(&g.app_id);
-            let lib = g.product_id.and_then(|p| self.game(p)).cloned();
+            let lib = g.product_id.and_then(|p| self.game(Gid::from(p))).cloned();
             let art = match &lib {
                 Some(l) => self.art_for(l, ArtSlot::Tile, Variant::Tile, cx),
                 None => ArtState::Failed,

@@ -21,7 +21,7 @@ use crate::Daemon;
 /// else from the installed game.
 async fn target(daemon: &Arc<Daemon>, product_id: u32) -> Result<Target> {
     let entry = match daemon.library(false).await {
-        Ok(lib) => lib.into_iter().find(|e| e.product_id == product_id),
+        Ok(lib) => lib.into_iter().find(|e| e.ubisoft_id() == Some(product_id)),
         Err(e) => {
             tracing::info!("library unavailable for export of {product_id}: {e:#}");
             None

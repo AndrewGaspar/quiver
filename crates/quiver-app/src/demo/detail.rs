@@ -97,7 +97,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
     let out = match req {
         // A game only Steam installed: Steam starts it, and (switched to Quiver) its bridge
         // reports a session from Steam.
-        Request::Play { product_id, .. } if entry(st, product_id).is_ok_and(|e| e.steam_only()) => {
+        Request::Play { game, .. } if entry(st, game.as_ubisoft().unwrap_or(0)).is_ok_and(|e| e.steam_only()) => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let e = entry(st, product_id)?.clone();
             let g = e.steam.clone().unwrap_or_else(|| unreachable!());
             let id = st.next_job;
@@ -105,7 +106,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             let job = quiver_api::Job {
                 id,
                 kind: quiver_api::JobKind::Play,
-                product_id,
+                game: quiver_api::GameRef::ubisoft(product_id),
                 name: e.name.clone(),
                 status: "Asked Steam to start it".into(),
                 downloaded: 0,
@@ -324,14 +325,16 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }
             json!({ "applied": d.apply_staged() })
         }
-        Request::Play { product_id, profile } => {
+        Request::Play { game, profile } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let id = launch_profile(d, st, product_id, profile.as_deref())?;
             if !st.sessions.iter().any(|s| s.product_id == product_id) {
                 d.running.insert(product_id, (id, Utc::now()));
             }
-            return Ok(Err(Request::Play { product_id, profile }));
+            return Ok(Err(Request::Play { game, profile }));
         }
-        Request::Stop { product_id } => {
+        Request::Stop { game } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             // Record the session like the daemon does (at least 25 minutes, so it shows).
             if let Some((profile, started)) = d.running.remove(&product_id) {
                 let ended = Utc::now();
@@ -346,7 +349,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 pt.total_seconds += seconds;
                 pt.last_played = Some(ended);
             }
-            return Ok(Err(Request::Stop { product_id }));
+            return Ok(Err(Request::Stop { game }));
         }
         other => return Ok(Err(other)),
     };
@@ -489,14 +492,14 @@ fn sync_steam(st: &mut State, games: &[SteamGame]) {
     }
     for g in games {
         let Some(id) = g.product_id else { continue };
-        match st.entries.iter_mut().find(|e| e.product_id == id) {
+        match st.entries.iter_mut().find(|e| e.ubisoft_id() == Some(id)) {
             Some(e) => e.steam = Some(g.clone()),
             None => {
                 let at = st.entries.iter().take_while(|e| e.installed.is_some()).count();
                 st.entries.insert(
                     at,
                     LibraryEntry {
-                        product_id: id,
+                        game: quiver_api::GameRef::ubisoft(id),
                         name: g.name.clone(),
                         installed: None,
                         update_available: false,
@@ -506,23 +509,24 @@ fn sync_steam(st: &mut State, games: &[SteamGame]) {
                         installable: false,
                         steam: Some(g.clone()),
                         space_id: None,
+                        client: None,
                     },
                 );
             }
         }
     }
-    for e in st.entries.iter_mut().filter(|e| OWNED_ON_STEAM.contains(&e.product_id)) {
+    for e in st.entries.iter_mut().filter(|e| e.ubisoft_id().is_some_and(|id| OWNED_ON_STEAM.contains(&id))) {
         e.installable = false;
     }
     // As quiverd does: a Steam copy with a session is running (Steam started it).
     let playing: Vec<u32> = st.sessions.iter().map(|s| s.product_id).collect();
     for e in st.entries.iter_mut().filter(|e| e.steam_only()) {
-        e.running = playing.contains(&e.product_id);
+        e.running = e.ubisoft_id().is_some_and(|id| playing.contains(&id));
     }
 }
 
 fn entry(st: &State, id: u32) -> Result<&LibraryEntry> {
-    st.entries.iter().find(|e| e.product_id == id).ok_or_else(|| anyhow!("unknown product {id}"))
+    st.entries.iter().find(|e| e.ubisoft_id() == Some(id)).ok_or_else(|| anyhow!("unknown product {id}"))
 }
 
 fn name(st: &State, id: u32) -> String {
@@ -796,7 +800,7 @@ impl Detail {
             next: 1,
             running: HashMap::new(),
         };
-        let name = |id: u32| entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
+        let name = |id: u32| entries.iter().find(|e| e.ubisoft_id() == Some(id)).map(|e| e.name.clone()).unwrap_or_default();
         // Exports: Origins is in Steam and the app launcher; Odyssey waits for a Steam restart.
         d.exports.push(ExportStatus { record: record(ExportKind::Steam, 3539, &name(3539), steam_vdf(), at(12, 21, 4), false), state: ExportState::Ok });
         d.exports.push(ExportStatus {
@@ -1593,8 +1597,8 @@ impl Detail {
                 .filter(|e| e.installed.is_some())
                 .map(|e| {
                     let profiles: Vec<Profile> =
-                        self.mods.get(&e.product_id).map(|m| m.live().map(|r| r.profile.clone()).collect()).unwrap_or_default();
-                    json!({ "product_id": e.product_id, "name": e.name, "profiles": profiles })
+                        e.ubisoft_id().and_then(|id| self.mods.get(&id)).map(|m| m.live().map(|r| r.profile.clone()).collect()).unwrap_or_default();
+                    json!({ "product_id": e.ubisoft_id(), "name": e.name, "profiles": profiles })
                 })
                 .collect();
             return Ok((json!(list), None));
@@ -1773,13 +1777,13 @@ mod tests {
         assert_eq!(m.default_profile.as_deref(), Some(ORIGINS_DEFAULT));
         assert!(m.profiles.iter().any(|p| p.profile.id == ORIGINS_DEFAULT && p.profile.name == "DLSS"));
         let session_profile = |demo: &Demo| {
-            let pt: quiver_api::Playtime = call(demo, Request::Playtime { product_id: 3539 });
+            let pt: quiver_api::Playtime = call(demo, Request::Playtime { game: quiver_api::GameRef::ubisoft(3539) });
             pt.sessions[0].profile.clone()
         };
         // No profile named: the default. `vanilla`: forced vanilla.
         for (asked, ran) in [(None, Some(ORIGINS_DEFAULT)), (Some(VANILLA), None), (Some("reshade"), Some("pz6c4uf"))] {
-            demo.handle(Request::Play { product_id: 3539, profile: asked.map(str::to_owned) }).unwrap();
-            demo.handle(Request::Stop { product_id: 3539 }).unwrap();
+            demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: asked.map(str::to_owned) }).unwrap();
+            demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539) }).unwrap();
             assert_eq!(session_profile(&demo).as_deref(), ran, "{asked:?}");
         }
         // Set by name, stored as the id; unknown names are refused; `vanilla` clears it.
@@ -1789,8 +1793,8 @@ mod tests {
         assert!(demo.handle(set("nope")).is_err());
         let r: Revision = call(&demo, set("vanilla"));
         assert_eq!(r.settings.profile, None);
-        demo.handle(Request::Play { product_id: 3539, profile: None }).unwrap();
-        demo.handle(Request::Stop { product_id: 3539 }).unwrap();
+        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }).unwrap();
+        demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539) }).unwrap();
         assert_eq!(session_profile(&demo), None);
     }
 
@@ -1866,15 +1870,15 @@ mod tests {
         );
         assert!(!back.deleted && back.profile.pinned);
         // Play with a profile that exists, by name; an unknown one fails.
-        assert!(demo.handle(Request::Play { product_id: 5059, profile: Some("Visual overhaul".into()) }).is_ok());
-        assert!(demo.handle(Request::Play { product_id: 3539, profile: Some("nope".into()) }).is_err());
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(5059), profile: Some("Visual overhaul".into()) }).is_ok());
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: Some("nope".into()) }).is_err());
     }
 
     #[tokio::test]
     async fn exports_wait_for_steam() {
         let (demo, _events) = Demo::start();
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
-        assert!(list.iter().any(|e| e.record.product_id == 5059 && e.state == ExportState::WaitingForSteam));
+        assert!(list.iter().any(|e| e.record.game == quiver_api::GameRef::ubisoft(5059) && e.state == ExportState::WaitingForSteam));
         let r: SteamExportResult = call(&demo, Request::ExportSteam { product_id: 1651, remove: false, steam_user: None });
         assert!(r.staged);
         assert!(demo.handle(Request::SteamApplyStaged).is_err(), "Steam is running");
@@ -1921,8 +1925,8 @@ mod tests {
     #[tokio::test]
     async fn steam_copies_in_the_library() {
         let (demo, _events) = Demo::start();
-        let lib: Vec<LibraryEntry> = call(&demo, Request::Library { refresh: false });
-        let e = |id: u32| lib.iter().find(|e| e.product_id == id).unwrap().clone();
+        let lib: Vec<LibraryEntry> = call(&demo, Request::Library { refresh: false, all_stores: true });
+        let e = |id: u32| lib.iter().find(|e| e.ubisoft_id() == Some(id)).unwrap().clone();
         // Black Flag Resynced: only Steam has it, and it's owned on Steam.
         let bf = e(66088);
         assert!(bf.steam_only() && !bf.installable && bf.steam.as_ref().unwrap().app_id == 3751950);
@@ -1931,12 +1935,12 @@ mod tests {
         assert!(e(420).steam_only() && e(420).installable);
         assert!(e(3539).steam.is_none());
         // Play asks Steam; a game switched to Quiver then reports a session from Steam.
-        let _: u64 = call(&demo, Request::Play { product_id: 66088, profile: None });
+        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(66088), profile: None });
         let sessions: Vec<quiver_api::ActiveSession> = call(&demo, Request::Sessions);
         let s = sessions.iter().find(|s| s.product_id == 66088).unwrap();
         assert_eq!((s.holders.as_slice(), s.steam_app_id), (&["steam".to_owned()][..], Some(3751950)));
         // Syndicate still opens Connect: no Quiver session.
-        let _: u64 = call(&demo, Request::Play { product_id: 1875, profile: None });
+        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(1875), profile: None });
         let sessions: Vec<quiver_api::ActiveSession> = call(&demo, Request::Sessions);
         assert!(sessions.iter().all(|s| s.product_id != 1875));
     }

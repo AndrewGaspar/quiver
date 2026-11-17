@@ -14,7 +14,7 @@ use quiver_api::{ActivityEntry, Event, Job, LibraryEntry, LoginResult, Playtime,
 use crate::art::{ArtSource, ArtState, ArtStore, CustomArt, Fetcher, Variant};
 use crate::assets::UI_FONT;
 use crate::gamepad::PadEvent;
-use crate::model::{GameRow, clean_name};
+use crate::model::{Gid, GameRow, clean_name};
 use crate::nav::{Effect, Input, Layout, Nav, Page, Section, Tab, Target, Zone};
 use crate::source::Source;
 use crate::text_input::TextInput;
@@ -133,18 +133,18 @@ pub struct Command {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
     Go(Section),
-    Open(u32),
-    Primary(u32),
-    Tab(u32, Tab),
-    CopyCli(u32),
+    Open(Gid),
+    Primary(Gid),
+    Tab(Gid, Tab),
+    CopyCli(Gid),
     Refresh,
     NotYet,
     /// Game page: play once with play-menu entry `i` (0: vanilla); Steam/.desktop exports.
-    PlayWith(u32, usize),
+    PlayWith(Gid, usize),
     /// Game page: make profile entry `i` (0: vanilla) the default for Play; open that menu.
-    DefaultProfile(u32, usize),
-    DefaultMenu(u32),
-    Export(u32, crate::ui::game::ExportAction),
+    DefaultProfile(Gid, usize),
+    DefaultMenu(Gid),
+    Export(Gid, crate::ui::game::ExportAction),
     /// Settings at a section.
     Settings(crate::nav::SettingsSection),
     /// Accounts, exports, sessions, Activity filters (`ui/global.rs`).
@@ -360,13 +360,13 @@ impl Quiver {
             Event::Job(job) => self.apply_job(job),
             Event::GameStarted { product_id } | Event::GameStopped { product_id } => {
                 let running = matches!(e, Event::GameStarted { .. });
-                if let Some(g) = self.game_mut(product_id) {
+                if let Some(g) = self.game_mut(Gid::from(product_id)) {
                     g.entry.running = running;
                 }
                 if !running {
-                    self.load_details(product_id, cx);
+                    self.load_details(Gid::from(product_id), cx);
                 }
-                self.options_game_state(product_id, running, cx);
+                self.options_game_state(Gid::from(product_id), running, cx);
             }
             Event::SessionChanged { signed_in: Some(name) } => {
                 if let Some(s) = &mut self.status {
@@ -386,17 +386,17 @@ impl Quiver {
             }
             // Steam games change Steam copies in the library (installed, switched to Quiver).
             Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
-            Event::SettingsChanged { product_id, .. } => self.load_details(product_id, cx),
-            Event::ModsChanged { product_id } => self.load_page(product_id, cx),
+            Event::SettingsChanged { product_id, .. } => self.load_details(Gid::from(product_id), cx),
+            Event::ModsChanged { product_id } => self.load_page(Gid::from(product_id), cx),
             // The open page's achievements show it (Sight will toast it).
             Event::AchievementUnlocked { product_id, .. } => {
-                if self.nav.page == Page::Game(product_id) && self.gp.id == product_id {
-                    self.load_progress(product_id, false, cx);
+                if self.nav.page == Page::Game(Gid::from(product_id)) && self.gp.id == product_id {
+                    self.load_progress(Gid::from(product_id), false, cx);
                 }
             }
             // A Steam copy shows as running while Steam plays it (quiverd's library says so).
             Event::SessionsChanged { sessions } => {
-                let steam_now = sessions.iter().any(|s| self.game(s.product_id).is_some_and(|g| g.steam_only()));
+                let steam_now = sessions.iter().any(|s| self.game(Gid::from(s.product_id)).is_some_and(|g| g.steam_only()));
                 let steam_before = self.games.iter().any(|g| g.steam_only() && g.entry.running);
                 if steam_now || steam_before {
                     self.load_library(false, cx);
@@ -467,7 +467,7 @@ impl Quiver {
                 None => s.jobs.push(job.clone()),
             }
         }
-        if let Some(g) = self.game_mut(job.product_id) {
+        if let Some(g) = self.game_mut(Gid(job.game)) {
             // Keep an unfinished install visible over a finished launch, and vice versa.
             let keep_old = g.job.as_ref().is_some_and(|old| old.id != job.id && !old.done && job.done);
             if !keep_old {
@@ -477,14 +477,14 @@ impl Quiver {
     }
 
     pub fn load_library(&mut self, refresh: bool, cx: &mut Context<Self>) {
-        self.call::<Vec<LibraryEntry>, _>(Request::Library { refresh }, cx, |this, result, cx| match result {
+        self.call::<Vec<LibraryEntry>, _>(Request::Library { refresh, all_stores: true }, cx, |this, result, cx| match result {
             Ok(entries) => {
-                let mut old: HashMap<u32, GameRow> = this.games.drain(..).map(|g| (g.id(), g)).collect();
+                let mut old: HashMap<Gid, GameRow> = this.games.drain(..).map(|g| (g.id(), g)).collect();
                 this.games = entries
                     .into_iter()
                     .map(|mut entry| {
                         entry.name = clean_name(&entry.name);
-                        match old.remove(&entry.product_id) {
+                        match old.remove(&Gid(entry.game)) {
                             Some(mut g) => {
                                 g.entry = entry;
                                 g
@@ -498,12 +498,12 @@ impl Quiver {
                     this.apply_job(j);
                 }
                 // Steam copies too: their sessions are recorded when Steam starts them through Quiver.
-                let ids: Vec<u32> = this.games.iter().filter(|g| g.on_disk()).map(|g| g.id()).collect();
+                let ids: Vec<Gid> = this.games.iter().filter(|g| g.on_disk()).map(|g| g.id()).collect();
                 for id in ids {
                     this.load_playtime(id, cx);
                 }
                 // Games with a Steam copy: their `art` setting picks whose art shows.
-                let steam: Vec<u32> = this.games.iter().filter(|g| g.steam().is_some() && g.settings.is_none()).map(|g| g.id()).collect();
+                let steam: Vec<Gid> = this.games.iter().filter(|g| g.steam().is_some() && g.settings.is_none()).map(|g| g.id()).collect();
                 for id in steam {
                     this.load_settings(id, cx);
                 }
@@ -524,8 +524,8 @@ impl Quiver {
         });
     }
 
-    fn load_playtime(&mut self, id: u32, cx: &mut Context<Self>) {
-        self.call::<Playtime, _>(Request::Playtime { product_id: id }, cx, move |this, r, cx| {
+    fn load_playtime(&mut self, id: Gid, cx: &mut Context<Self>) {
+        self.call::<Playtime, _>(Request::Playtime { game: id.0 }, cx, move |this, r, cx| {
             if let (Ok(p), Some(g)) = (r, this.game_mut(id)) {
                 g.playtime = Some(p);
             }
@@ -538,35 +538,35 @@ impl Quiver {
     }
 
     /// Everything the game page shows that the library doesn't carry.
-    pub fn load_details(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_details(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.load_playtime(id, cx);
         self.load_settings(id, cx);
         self.load_page(id, cx);
     }
 
-    fn load_settings(&mut self, id: u32, cx: &mut Context<Self>) {
+    fn load_settings(&mut self, id: Gid, cx: &mut Context<Self>) {
         // A Steam copy's settings apply when Steam starts it through Quiver.
         if !self.game(id).is_some_and(|g| g.installed() || g.steam_only()) {
             return;
         }
         // The daemon replies `{revision, settings}`.
-        self.call::<serde_json::Value, _>(Request::SettingsGet { product_id: id }, cx, move |this, r, _| {
+        self.call::<serde_json::Value, _>(Request::SettingsGet { product_id: id.pid() }, cx, move |this, r, _| {
             if let (Ok(v), Some(g)) = (r, this.game_mut(id)) {
                 g.settings = Some(crate::ui::game::settings_from_reply(v).0);
             }
         });
-        self.call::<Vec<Revision>, _>(Request::SettingsHistory { product_id: id }, cx, move |this, r, _| {
+        self.call::<Vec<Revision>, _>(Request::SettingsHistory { product_id: id.pid() }, cx, move |this, r, _| {
             if let (Ok(h), Some(g)) = (r, this.game_mut(id)) {
                 g.history = Some(h);
             }
         });
     }
 
-    pub fn game(&self, id: u32) -> Option<&GameRow> {
+    pub fn game(&self, id: Gid) -> Option<&GameRow> {
         self.games.iter().find(|g| g.id() == id)
     }
 
-    fn game_mut(&mut self, id: u32) -> Option<&mut GameRow> {
+    fn game_mut(&mut self, id: Gid) -> Option<&mut GameRow> {
         self.games.iter_mut().find(|g| g.id() == id)
     }
 
@@ -641,7 +641,7 @@ impl Quiver {
         variant: Variant,
         cx: &mut Context<Self>,
     ) -> (ArtState, Option<crate::art::Candidate>) {
-        let cands = crate::art::candidates(&g.entry, self.custom_art.get(&g.id()), slot, self.art_pref(g));
+        let cands = crate::art::candidates(&g.entry, self.custom_art.get(&(&g.id()).pid()), slot, self.art_pref(g));
         let (state, c) = crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx)));
         (state, c.cloned())
     }
@@ -653,7 +653,7 @@ impl Quiver {
     /// Steam's art for a Steam install that isn't in the library.
     pub fn art_for_steam_game(&self, g: &quiver_api::exports::SteamGame, slot: crate::art::ArtSlot, variant: Variant, cx: &mut Context<Self>) -> ArtState {
         let entry = LibraryEntry {
-            product_id: g.product_id.unwrap_or_default(),
+            game: quiver_api::GameRef::steam(g.app_id),
             name: g.name.clone(),
             installed: None,
             update_available: false,
@@ -663,6 +663,7 @@ impl Quiver {
             installable: false,
             steam: Some(g.clone()),
             space_id: None,
+            client: None,
         };
         let cands = crate::art::candidates(&entry, None, slot, crate::art::ArtPreference::Steam);
         crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx))).0
@@ -700,7 +701,7 @@ impl Quiver {
     }
 
     /// Things waiting on the user, for the hero's "Needs attention" panel.
-    pub fn attention(&self) -> Vec<(u32, Attention)> {
+    pub fn attention(&self) -> Vec<(Gid, Attention)> {
         let mut out = vec![];
         for g in self.ordered() {
             if let Some(e) = g.failed() {
@@ -726,8 +727,8 @@ impl Quiver {
     }
 
     pub fn compute_layout(&self, cx: &App) -> Layout {
-        let grid: Vec<u32> = self.grid_games().iter().map(|g| g.id()).collect();
-        let side: Vec<u32> = self.side_games().iter().map(|g| g.id()).collect();
+        let grid: Vec<Gid> = self.grid_games().iter().map(|g| g.id()).collect();
+        let side: Vec<Gid> = self.side_games().iter().map(|g| g.id()).collect();
         let hero_buttons = if self.hero_game().is_some() { 2 + self.attention().len() } else { 0 };
         let body = match self.nav.page {
             Page::Downloads => self.downloads_body_len(),
@@ -780,7 +781,7 @@ impl Quiver {
         }
     }
 
-    pub fn menu_commands(&self, id: u32) -> Vec<Command> {
+    pub fn menu_commands(&self, id: Gid) -> Vec<Command> {
         if let Some(v) = self.play_menu_commands(id) {
             return v;
         }
@@ -797,7 +798,7 @@ impl Quiver {
         // A Steam copy: Steam installs it, so no shortcuts or install actions; the switch
         // between Quiver and Ubisoft Connect instead.
         if let Some(s) = g.steam().filter(|_| g.steam_only()) {
-            let s = self.steam_copy(id).unwrap_or_else(|| s.clone());
+            let s = self.steam_copy(id.pid()).unwrap_or_else(|| s.clone());
             let app_id = s.app_id;
             match crate::ui::steamgames::control(&s) {
                 Some(true) => v.push(Command {
@@ -884,19 +885,19 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Actions
 
-    pub fn open_game(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn open_game(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.nav.open_game(id);
         self.load_details(id, cx);
     }
 
     /// Play, or whatever stands in for it: Stop while running, Install / Update otherwise.
-    pub fn primary(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn primary(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some(g) = self.game(id) else { return };
         let name = g.entry.name.clone();
         if g.running() && g.steam_only() {
             self.show_toast(format!("{name} is running from Steam; quit it from the game or Steam"), cx);
         } else if g.running() {
-            self.call::<(), _>(Request::Stop { product_id: id }, cx, |this, r, cx| {
+            self.call::<(), _>(Request::Stop { game: id.0 }, cx, |this, r, cx| {
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
                 }
@@ -915,7 +916,7 @@ impl Quiver {
             if self.launch_guard(id, PlayAfter::Primary, cx) {
                 return;
             }
-            self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
@@ -930,7 +931,7 @@ impl Quiver {
             }
             // No profile named: the daemon runs the game's default.
             let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
-            self.call::<u64, _>(Request::Play { product_id: id, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Starting {name}{}…", with.unwrap_or_default()), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
@@ -1062,7 +1063,7 @@ impl Quiver {
     }
 
     /// Index of a game's row among the side list's children (group headers included).
-    pub fn side_child_index(&self, id: u32) -> Option<usize> {
+    pub fn side_child_index(&self, id: Gid) -> Option<usize> {
         let games = self.side_games();
         let pos = games.iter().position(|g| g.id() == id)?;
         let first_rest = games.iter().position(|g| !(g.on_disk() || g.install_job().is_some()));

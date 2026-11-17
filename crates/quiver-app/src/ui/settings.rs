@@ -2,6 +2,7 @@
 //! Automation and CLI, About. A section list on the left (Zone::Side), the section on the
 //! right; its buttons are the focusable body rows, in [`Quiver::settings_actions`] order.
 
+use crate::model::Gid;
 use std::collections::BTreeMap;
 
 use gpui::{AnyElement, ClipboardItem, Context, Div, Hsla, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
@@ -364,7 +365,7 @@ impl Quiver {
             let owned = self.games.iter().filter(|g| g.entry.owned_by.contains(&a.user_id)).count();
             let only = self.games.iter().filter(|g| g.entry.owned_by.len() == 1 && g.entry.owned_by[0] == a.user_id).count();
             let playing: Vec<String> =
-                self.ui.sessions.iter().filter(|s| s.account == a.user_id).map(|s| self.game_name(s.product_id)).collect();
+                self.ui.sessions.iter().filter(|s| s.account == a.user_id).map(|s| self.game_name(Gid::from(s.product_id))).collect();
             let (from, to) = account_colors(i);
             let games = if accounts.len() > 1 && only > 0 {
                 format!("{owned} games, {only} only on this account")
@@ -524,7 +525,7 @@ impl Quiver {
             let id = g.id();
             rows.push(
                 div()
-                    .id(("own", id as usize))
+                    .id(("own", id.ix()))
                     .flex()
                     .items_center()
                     .gap(px(12.))
@@ -1020,7 +1021,7 @@ impl Quiver {
                 rows.push(table_head(th, &names, &widths));
                 for (i, x) in list.clone().iter().enumerate() {
                     let r = &x.record;
-                    let g = r.game.as_ubisoft().and_then(|id| self.game(id)).cloned();
+                    let g = r.game.as_ubisoft().and_then(|id| self.game(Gid::from(id))).cloned();
                     let art = match &g {
                         Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                         None => crate::art::ArtState::Failed,
@@ -1058,7 +1059,7 @@ impl Quiver {
                                     .items_center()
                                     .gap(px(10.))
                                     .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| this.open_game(id, cx)))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.open_game(Gid::from(id), cx)))
                                     .child(div().w(px(22.)).h(px(26.)).flex_none().child(art_fill(th, &art, "", 4., false)))
                                     .child(div().truncate().child(crate::model::short_name(&r.name)))
                                     .child(chip(th, Some(kind_icon), kind, false).h(px(22.)).text_size(px(11.))),
@@ -1102,7 +1103,7 @@ impl Quiver {
             Some(Ok(list)) => {
                 for g in list.games.clone() {
                     let busy = self.ui.sg.busy.contains(&g.app_id);
-                    let lib = g.product_id.and_then(|p| self.game(p)).cloned();
+                    let lib = g.product_id.and_then(|p| self.game(Gid::from(p))).cloned();
                     let art = match &lib {
                         Some(l) => self.art_for(l, ArtSlot::Tile, Variant::Tile, cx),
                         None => self.art_for_steam_game(&g, ArtSlot::Tile, Variant::Tile, cx),
@@ -1143,8 +1144,8 @@ impl Quiver {
                                     .gap(px(1.))
                                     .when(lib.is_some(), |d| d.cursor_pointer())
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(id) = id.filter(|id| this.game(*id).is_some()) {
-                                            this.open_game(id, cx);
+                                        if let Some(id) = id.filter(|id| this.game(Gid::from(*id)).is_some()) {
+                                            this.open_game(Gid::from(id), cx);
                                         }
                                     }))
                                     .child(div().flex().items_center().gap(px(8.)).child(div().truncate().child(clean_name(&g.name))).when(g.offer, |d| d.child(pill(th, PillKind::Accent, None, "New"))))

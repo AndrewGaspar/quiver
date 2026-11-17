@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
     fn resume_round_trips_navigation_and_closes_overlays() {
         let mut nav = Nav::new();
-        nav.open_game(4242);
+        nav.open_game(crate::model::Gid::from(4242));
         nav.select_tab(Tab::Saves);
         nav.open_palette();
         let r = Resume {
@@ -1118,7 +1118,7 @@ mod tests {
             scroll: ScrollState { library: -10., side: -20., body: -300. },
             window: Some(WindowState { kind: WindowKind::Maximized, x: 10., y: 20., w: 1200., h: 800. }),
             launch_drafts: vec![LaunchDraft {
-                game: 4242,
+                game: crate::model::Gid::from(4242),
                 ops: vec![quiver_api::SettingOp::Set { key: "wrappers".into(), value: "gamemoderun,mangohud".into() }],
                 message: "HUD".into(),
             }],
@@ -1128,7 +1128,7 @@ mod tests {
         let back: Resume = serde_json::from_str(&json).unwrap();
         assert_eq!(back.launch_drafts, r.launch_drafts, "unsaved launch options carry over");
         let n = back.nav();
-        assert_eq!(n.page, Page::Game(4242));
+        assert_eq!(n.page, Page::Game(crate::model::Gid::from(4242)));
         assert_eq!(n.tab, Tab::Saves);
         assert_eq!(n.zone, nav.zone);
         assert_eq!(n.overlay, None, "the palette is closed");
@@ -1144,7 +1144,7 @@ mod tests {
             ..Default::default()
         };
         let n = r.nav();
-        assert_eq!(n.page, Page::Game(99));
+        assert_eq!(n.page, Page::Game(crate::model::Gid::from(99)));
         assert_eq!(n.tab, Tab::LaunchOptions);
         // Garbage, or an older build's missing fields: defaults.
         let r: Resume = serde_json::from_str(r#"{"nav": 5, "unknown": true}"#).unwrap();

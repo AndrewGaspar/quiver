@@ -913,7 +913,7 @@ mod tests {
         assert!(e.to_string().contains("needs confirmation"), "{e}");
         assert!(set("fg.hide_handle64", json!(true), true).is_ok());
         // Running: live options apply live, the others say when.
-        demo.handle(Request::Play { product_id: ORIGINS, profile: None }).unwrap();
+        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(ORIGINS), profile: None }).unwrap();
         let c = set("world.npc_density", json!(4), false).unwrap();
         assert!(matches!(c.outcomes[0].outcome, Outcome::AppliedLive { channel: LiveChannel::File, .. }));
         let c = set("fg.present_thread", json!("0"), false).unwrap();

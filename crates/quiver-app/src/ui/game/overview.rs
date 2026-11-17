@@ -8,7 +8,7 @@ use quiver_api::exports::{ExportKind, ExportState};
 
 use super::page::{kv, load_note, note};
 use crate::app::Quiver;
-use crate::model::{GameRow, clock, day, duration, gb, hours};
+use crate::model::{Gid, GameRow, clock, day, duration, gb, hours};
 use crate::nav::{Tab, Target};
 use crate::theme::Theme;
 use crate::ui::{BOLD, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, button, caption, card, card_header, chip, icon, icon_button, mono, pill, progress};
@@ -196,7 +196,7 @@ impl Quiver {
             )))
     }
 
-    fn profile_label(&self, id: u32, p: Option<&str>) -> String {
+    fn profile_label(&self, id: Gid, p: Option<&str>) -> String {
         let Some(p) = p else { return "Vanilla".into() };
         if self.gp.id == id
             && let Some(m) = self.gp.mods.ready()
@@ -519,7 +519,7 @@ impl Quiver {
             kvs = kvs.child(kv(th, "Steam", export(ExportKind::Steam))).child(kv(th, "Desktop entry", export(ExportKind::Desktop)));
         }
         // Also installed through Steam: whether that copy starts through Quiver.
-        if let Some(sc) = self.steam_copy(id) {
+        if let Some(sc) = self.steam_copy(id.pid()) {
             let app_id = sc.app_id;
             let action = crate::ui::steamgames::control(&sc);
             let (col, label) = if sc.state.uses_quiver() { (th.ok, "Starts through Quiver") } else { (th.tx2, "Opens Connect first") };

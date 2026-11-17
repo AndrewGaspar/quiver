@@ -219,7 +219,7 @@ mod tests {
 
     fn entry(art: Art, steam: Option<SteamArt>) -> LibraryEntry {
         LibraryEntry {
-            product_id: 66088,
+            game: crate::GameRef::ubisoft(66088),
             name: "BF".into(),
             installed: None,
             update_available: false,
@@ -228,6 +228,7 @@ mod tests {
             owned_by: vec![],
             installable: false,
             space_id: None,
+            client: None,
             steam: steam.map(|art| SteamGame {
                 app_id: 3751950,
                 name: "BF".into(),

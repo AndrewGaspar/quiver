@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::logic::{self, Edit, RowKey, Tone, Who};
 use super::{Confirm, ModsView};
 use crate::app::Quiver;
-use crate::model::{GameRow, clock, day};
+use crate::model::{Gid, GameRow, clock, day};
 use crate::theme::Theme;
 use crate::ui::game::page::{Load, toggle};
 use crate::ui::{FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, button, caption, chip, icon, mono, soft_shadow};
@@ -278,7 +278,7 @@ impl Quiver {
         self.gp.opt.view = ModsView::Source;
     }
 
-    fn render_surface_page(&mut self, th: &Theme, id: u32, profile: &str, s: &SurfaceState, cx: &mut Context<Self>) -> AnyElement {
+    fn render_surface_page(&mut self, th: &Theme, id: Gid, profile: &str, s: &SurfaceState, cx: &mut Context<Self>) -> AnyElement {
         let staged = self.gp.opt.staged_for(id, profile);
         let level = self.gp.opt.level;
         let page_id = self.gp.opt.page.clone().unwrap_or_default();
@@ -1104,7 +1104,7 @@ impl Quiver {
 
     /// What the profile changes, across its surfaces, newest first (MOD-CONFIG: "What this
     /// profile changes").
-    fn render_profile_changes(&mut self, th: &Theme, id: u32, profile: &str, surfaces: &[SurfaceState], cx: &mut Context<Self>) -> AnyElement {
+    fn render_profile_changes(&mut self, th: &Theme, id: Gid, profile: &str, surfaces: &[SurfaceState], cx: &mut Context<Self>) -> AnyElement {
         let staged = self.gp.opt.staged_for(id, profile);
         let hist = self.gp.opt.history.ready().cloned().unwrap_or_default();
         let name = self.mods_profile_name(profile);

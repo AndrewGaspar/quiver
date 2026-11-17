@@ -66,9 +66,9 @@ fn seed_activity(st: &mut State) {
         at: Utc::now() - Span::minutes(mins),
         source: source.into(),
         action: action.into(),
-        product_id: id,
+        game: id.map(quiver_api::GameRef::ubisoft),
     };
-    let name = |id: u32| st.entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
+    let name = |id: u32| st.entries.iter().find(|e| e.ubisoft_id() == Some(id)).map(|e| e.name.clone()).unwrap_or_default();
     let extra = vec![
         act(2, "aco-dlss", "issued launch context for 3539 as family", Some(3539)),
         act(25, "cli", &format!("wrote Steam shortcut for {} (user {STEAM_USER}); staged until Steam restarts", name(5059)), Some(5059)),
@@ -113,7 +113,7 @@ fn resolve<'a>(g: &'a mut Global, q: &str) -> Result<&'a mut Account> {
 }
 
 fn log(st: &mut State, action: String, id: Option<u32>) {
-    st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action, product_id: id });
+    st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action, game: id.map(quiver_api::GameRef::ubisoft) });
 }
 
 /// Answer `req` if it's one of the global screens' requests; `None` lets `demo.rs` answer.
@@ -160,7 +160,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                 .iter()
                 .cloned()
                 .map(|mut e| {
-                    e.owned_by = owners(g, e.product_id);
+                    e.owned_by = owners(g, e.ubisoft_id().unwrap_or(0));
                     e
                 })
                 .filter(|e| !e.owned_by.is_empty())
@@ -252,8 +252,8 @@ mod tests {
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert!(status.accounts.len() >= 2, "two accounts to start with");
         // Who owns what: shared and family-only games, the default account first.
-        let lib: Vec<LibraryEntry> = serde_json::from_value(demo.handle(Request::Library { refresh: false }).unwrap()).unwrap();
-        let origins = lib.iter().find(|e| e.product_id == 3539).unwrap();
+        let lib: Vec<LibraryEntry> = serde_json::from_value(demo.handle(Request::Library { refresh: false, all_stores: true }).unwrap()).unwrap();
+        let origins = lib.iter().find(|e| e.ubisoft_id() == Some(3539)).unwrap();
         assert_eq!(origins.owned_by[0], "demo");
         assert!(lib.iter().any(|e| e.owned_by == [FAMILY]));
         // Sign in a third account with 2FA, then sign it out.

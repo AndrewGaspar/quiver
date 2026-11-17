@@ -8,7 +8,7 @@ use super::global::{GlobalCmd, SourceFilter};
 use super::{Icon, MEDIUM, PillKind, SEMIBOLD, art_fill, caption, glyph, icon, kbd, mono, pill, soft_shadow};
 use crate::app::{Cmd, Command, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{GameRow, clean_name, short_name};
+use crate::model::{Gid, GameRow, clean_name, short_name};
 use crate::nav::{Page, Section, SettingsSection, Tab, Target};
 use crate::theme::{Theme, rgba};
 
@@ -21,7 +21,7 @@ const MAX_GAMES: usize = 5;
 pub struct Entry {
     pub group: String,
     pub cmd: Command,
-    pub game: Option<u32>,
+    pub game: Option<Gid>,
 }
 
 fn cmd(icon: Icon, label: impl Into<String>, detail: Option<String>, cli: Option<String>, action: Cmd) -> Command {
@@ -109,7 +109,7 @@ impl Quiver {
             if focused.is_some_and(|g| g.id() == s.product_id) {
                 continue;
             }
-            let name = self.game_name(s.product_id);
+            let name = self.game_name(Gid::from(s.product_id));
             out.push(Entry {
                 group: "Now playing".into(),
                 cmd: cmd(
@@ -117,9 +117,9 @@ impl Quiver {
                     format!("Go to {name}"),
                     Some(if s.reported { "Playing now · reported to Ubisoft".into() } else { "Playing now".into() }),
                     Some("quiver sessions".into()),
-                    Cmd::Open(s.product_id),
+                    Cmd::Open(Gid::from(s.product_id)),
                 ),
-                game: Some(s.product_id),
+                game: Some(Gid::from(s.product_id)),
             });
         }
         let go = |icon: Icon, label: &str, cli: Option<&str>, action: Cmd| Entry {
@@ -244,10 +244,10 @@ impl Quiver {
             }
         }
         for s in &self.ui.sessions {
-            let name = self.game_name(s.product_id);
+            let name = self.game_name(Gid::from(s.product_id));
             add(cmd(Icon::Gamepad, "Now playing", Some(name.clone()), Some("quiver sessions".into()), Cmd::Global(GlobalCmd::NowPlaying)), "running session play time");
             if s.holders.iter().any(|h| h == "launcher") {
-                add(cmd(Icon::Square, format!("Stop {name}"), None, Some(format!("quiver stop {}", s.product_id)), Cmd::Global(GlobalCmd::Stop(s.product_id))), "quit kill end running");
+                add(cmd(Icon::Square, format!("Stop {name}"), None, Some(format!("quiver stop {}", s.product_id)), Cmd::Global(GlobalCmd::Stop(Gid::from(s.product_id)))), "quit kill end running");
             }
         }
         // Per game: found by the game's name plus what they do ("origins proton").
@@ -300,7 +300,7 @@ impl Quiver {
             })
             .collect();
         named.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.installed().cmp(&a.1.installed())));
-        let top: Vec<u32> = named.iter().take(2).map(|(_, g)| g.id()).collect();
+        let top: Vec<Gid> = named.iter().take(2).map(|(_, g)| g.id()).collect();
         let per_game = |c: &Command| match c.action {
             Cmd::Tab(id, _) => Some(id),
             Cmd::Global(GlobalCmd::ExportSteam(id) | GlobalCmd::ExportDesktop(id) | GlobalCmd::ActivityGame(id)) => Some(id),

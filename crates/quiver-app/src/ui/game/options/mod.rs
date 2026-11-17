@@ -14,6 +14,7 @@ mod keys;
 pub mod logic;
 mod source;
 
+use crate::model::Gid;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -99,7 +100,7 @@ pub struct SaveResult {
 pub struct OptionsUi {
     pub view: ModsView,
     /// The game and profile id the loaded data is for.
-    pub of: Option<(u32, String)>,
+    pub of: Option<(Gid, String)>,
     pub surfaces: Load<Vec<SurfaceState>>,
     pub history: Load<Vec<OptionsRevision>>,
     pub keys: Load<KeysReport>,
@@ -121,9 +122,9 @@ pub struct OptionsUi {
     pub changed_only: bool,
     pub search: Option<Entity<TextInput>>,
     /// Unsaved edits per (game, profile id). They outlive the page and profile switches.
-    pub staged: BTreeMap<(u32, String), BTreeMap<RowKey, Edit>>,
+    pub staged: BTreeMap<(Gid, String), BTreeMap<RowKey, Edit>>,
     /// Text fields per (game, profile, surface, option).
-    pub inputs: HashMap<(u32, String, String, String), FieldInput>,
+    pub inputs: HashMap<(Gid, String, String, String), FieldInput>,
     /// The last save's outcome per row (for the loaded game and profile).
     pub outcomes: HashMap<RowKey, OpOutcome>,
     pub result: Option<SaveResult>,
@@ -134,7 +135,7 @@ pub struct OptionsUi {
     /// Values the running session reported that weren't saved (a hotkey flip): row → (value, by).
     pub in_game: HashMap<RowKey, (serde_json::Value, String)>,
     /// A crash right after a live change (from the event), for this game.
-    pub crash: Option<(u32, String, SessionOptions)>,
+    pub crash: Option<(Gid, String, SessionOptions)>,
     /// A change someone else made while the page was open.
     pub notice: Option<String>,
     /// The preset the staged edits came from (the revision's message).
@@ -173,7 +174,7 @@ impl OptionsUi {
         };
     }
 
-    pub fn staged_for(&self, game: u32, profile: &str) -> BTreeMap<RowKey, Edit> {
+    pub fn staged_for(&self, game: Gid, profile: &str) -> BTreeMap<RowKey, Edit> {
         self.staged.get(&(game, profile.to_owned())).cloned().unwrap_or_default()
     }
 
@@ -198,7 +199,7 @@ impl Quiver {
     }
 
     /// Load what the current view needs for (game, profile), once.
-    pub(super) fn options_ensure(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn options_ensure(&mut self, id: Gid, cx: &mut Context<Self>) {
         let profile = self.mods_profile();
         if self.gp.opt.of.as_ref() != Some(&(id, profile.clone())) {
             self.gp.opt.forget_loaded();
@@ -230,17 +231,17 @@ impl Quiver {
         }
     }
 
-    fn options_req(&self) -> Option<(u32, String)> {
+    fn options_req(&self) -> Option<(Gid, String)> {
         self.gp.opt.of.clone()
     }
 
-    pub(super) fn load_option_surfaces(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn load_option_surfaces(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some((g, profile)) = self.options_req().filter(|(g, _)| *g == id) else { return };
         if self.gp.opt.surfaces.ready().is_none() {
             self.gp.opt.surfaces = Load::Loading;
         }
         let p = profile.clone();
-        self.call::<Vec<SurfaceState>, _>(Request::Options(OptionsRequest::List { product_id: g, profile: Some(profile), level: None }), cx, move |this, r, cx| {
+        self.call::<Vec<SurfaceState>, _>(Request::Options(OptionsRequest::List { product_id: g.pid(), profile: Some(profile), level: None }), cx, move |this, r, cx| {
             if this.gp.opt.of.as_ref() != Some(&(g, p.clone())) {
                 return;
             }
@@ -255,10 +256,10 @@ impl Quiver {
         });
     }
 
-    pub(super) fn load_option_history(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn load_option_history(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some((g, profile)) = self.options_req().filter(|(g, _)| *g == id) else { return };
         let p = profile.clone();
-        self.call::<Vec<OptionsRevision>, _>(Request::Options(OptionsRequest::History { product_id: g, profile: Some(profile) }), cx, move |this, r, _| {
+        self.call::<Vec<OptionsRevision>, _>(Request::Options(OptionsRequest::History { product_id: g.pid(), profile: Some(profile) }), cx, move |this, r, _| {
             if this.gp.opt.of.as_ref() == Some(&(g, p)) {
                 this.gp.opt.history = match r {
                     Ok(h) => Load::Ready(h),
@@ -268,10 +269,10 @@ impl Quiver {
         });
     }
 
-    pub(super) fn load_option_keys(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn load_option_keys(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some((g, profile)) = self.options_req().filter(|(g, _)| *g == id) else { return };
         let p = profile.clone();
-        self.call::<KeysReport, _>(Request::Options(OptionsRequest::Keys { product_id: g, profile: Some(profile) }), cx, move |this, r, _| {
+        self.call::<KeysReport, _>(Request::Options(OptionsRequest::Keys { product_id: g.pid(), profile: Some(profile) }), cx, move |this, r, _| {
             if this.gp.opt.of.as_ref() == Some(&(g, p)) {
                 this.gp.opt.keys = match r {
                     Ok(k) => Load::Ready(k),
@@ -281,14 +282,14 @@ impl Quiver {
         });
     }
 
-    pub(super) fn load_option_diff(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn load_option_diff(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some((g, profile)) = self.options_req().filter(|(g, _)| *g == id) else { return };
         let against = if self.gp.opt.compare.is_empty() { "default".to_owned() } else { self.gp.opt.compare.clone() };
         if self.gp.opt.diff.ready().is_none() {
             self.gp.opt.diff = Load::Loading;
         }
         let (p, a) = (profile.clone(), against.clone());
-        self.call::<Vec<OptionDiff>, _>(Request::Options(OptionsRequest::Diff { product_id: g, profile: Some(profile), against: Some(against) }), cx, move |this, r, _| {
+        self.call::<Vec<OptionDiff>, _>(Request::Options(OptionsRequest::Diff { product_id: g.pid(), profile: Some(profile), against: Some(against) }), cx, move |this, r, _| {
             if this.gp.opt.of.as_ref() == Some(&(g, p)) {
                 this.gp.opt.diff = match r {
                     Ok(d) => Load::Ready((a, d)),
@@ -298,12 +299,12 @@ impl Quiver {
         });
     }
 
-    pub(super) fn load_option_records(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub(super) fn load_option_records(&mut self, id: Gid, cx: &mut Context<Self>) {
         let Some((g, profile)) = self.options_req().filter(|(g, _)| *g == id) else { return };
         self.gp.opt.records = Load::Loading;
         let p = profile.clone();
         self.call::<Vec<SessionOptions>, _>(
-            Request::Options(OptionsRequest::SessionRecords { product_id: g, profile: Some(profile), limit: Some(10) }),
+            Request::Options(OptionsRequest::SessionRecords { product_id: g.pid(), profile: Some(profile), limit: Some(10) }),
             cx,
             move |this, r, _| {
                 if this.gp.opt.of.as_ref() == Some(&(g, p)) {
@@ -314,10 +315,10 @@ impl Quiver {
         );
     }
 
-    pub(super) fn load_option_schema(&mut self, id: u32, mod_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn load_option_schema(&mut self, id: Gid, mod_id: &str, cx: &mut Context<Self>) {
         self.gp.opt.schema = Load::Loading;
         let m = mod_id.to_owned();
-        self.call::<SchemaInfo, _>(Request::Options(OptionsRequest::Schema { product_id: id, mod_id: m.clone(), version: None }), cx, move |this, r, _| {
+        self.call::<SchemaInfo, _>(Request::Options(OptionsRequest::Schema { product_id: id.pid(), mod_id: m.clone(), version: None }), cx, move |this, r, _| {
             if this.gp.opt.source_mod.as_deref() == Some(m.as_str()) {
                 this.gp.opt.schema = match r {
                     Ok(s) => Load::Ready((m, s)),
@@ -327,10 +328,10 @@ impl Quiver {
         });
     }
 
-    pub(super) fn load_option_files(&mut self, id: u32, mod_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn load_option_files(&mut self, id: Gid, mod_id: &str, cx: &mut Context<Self>) {
         self.gp.opt.files = Load::Loading;
         let m = mod_id.to_owned();
-        self.call::<Vec<String>, _>(Request::Options(OptionsRequest::Files { product_id: id, mod_id: m.clone() }), cx, move |this, r, _| {
+        self.call::<Vec<String>, _>(Request::Options(OptionsRequest::Files { product_id: id.pid(), mod_id: m.clone() }), cx, move |this, r, _| {
             if this.gp.opt.source_mod.as_deref() == Some(m.as_str()) {
                 this.gp.opt.files = match r {
                     Ok(f) => Load::Ready((m, f)),
@@ -372,7 +373,7 @@ impl Quiver {
     }
 
     /// Text fields without an unsaved edit show the saved value again.
-    fn options_sync_inputs(&mut self, g: u32, profile: &str, cx: &mut Context<Self>) {
+    fn options_sync_inputs(&mut self, g: Gid, profile: &str, cx: &mut Context<Self>) {
         let staged = self.gp.opt.staged_for(g, profile);
         let surfaces = self.gp.opt.loaded_surfaces().to_vec();
         for ((ig, ip, sk, id), f) in self.gp.opt.inputs.iter_mut() {
@@ -514,7 +515,7 @@ impl Quiver {
         self.gp.opt.confirm = None;
         let pp = p.clone();
         self.call::<OptionsChange, _>(
-            Request::Options(OptionsRequest::Set { product_id: g, profile: Some(p), ops, live, message, confirmed: !dangers.is_empty() && confirmed }),
+            Request::Options(OptionsRequest::Set { product_id: g.pid(), profile: Some(p), ops, live, message, confirmed: !dangers.is_empty() && confirmed }),
             cx,
             move |this, r, cx| {
                 this.gp.opt.saving = false;
@@ -526,7 +527,7 @@ impl Quiver {
         );
     }
 
-    fn options_saved(&mut self, g: u32, p: &str, c: OptionsChange, cx: &mut Context<Self>) {
+    fn options_saved(&mut self, g: Gid, p: &str, c: OptionsChange, cx: &mut Context<Self>) {
         let mut keep = BTreeMap::new();
         let staged = self.gp.opt.staged_for(g, p);
         for o in &c.outcomes {
@@ -553,7 +554,7 @@ impl Quiver {
     pub(super) fn options_restore(&mut self, revision: u32, cx: &mut Context<Self>) {
         let Some((g, p)) = self.gp.opt.of.clone() else { return };
         self.gp.opt.confirm = None;
-        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::Restore { product_id: g, profile: Some(p), revision, confirmed: false }), cx, move |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::Restore { product_id: g.pid(), profile: Some(p), revision, confirmed: false }), cx, move |this, r, cx| match r {
             Ok(c) => {
                 for o in &c.outcomes {
                     this.gp.opt.outcomes.insert((o.surface.clone(), o.id.clone()), o.clone());
@@ -571,7 +572,7 @@ impl Quiver {
     pub(super) fn options_revert_session(&mut self, session: String, cx: &mut Context<Self>) {
         let Some((g, _)) = self.gp.opt.of.clone() else { return };
         self.gp.opt.confirm = None;
-        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::RevertSession { product_id: g, session: session.clone(), confirmed: false }), cx, move |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::RevertSession { product_id: g.pid(), session: session.clone(), confirmed: false }), cx, move |this, r, cx| match r {
             Ok(c) => {
                 let summary = if c.revision == 0 { format!("Session {session} changed nothing that's still set") } else { format!("Reverted session {session} · {}", logic::outcome_summary(c.revision, &c.outcomes)) };
                 if this.gp.opt.crash.as_ref().is_some_and(|x| x.2.session == session) {
@@ -603,7 +604,7 @@ impl Quiver {
         let loaded = self.gp.opt.of.clone();
         match e {
             Event::OptionsChanged { product_id, profile, revision, source, changes } => {
-                if loaded.as_ref() == Some(&(*product_id, profile.clone())) {
+                if loaded.as_ref() == Some(&(Gid::from(*product_id), profile.clone())) {
                     if source != "gui" {
                         let who = logic::who(source);
                         let labels = self.option_labels();
@@ -627,24 +628,24 @@ impl Quiver {
             }
             // What someone else's change did in the running game (Sight, the CLI, an agent):
             // the rows say it too. The app's own saves show the reply's outcomes already.
-            Event::OptionsOutcome { product_id, profile, by, outcomes, .. } if by != "gui" && loaded.as_ref() == Some(&(*product_id, profile.clone())) => {
+            Event::OptionsOutcome { product_id, profile, by, outcomes, .. } if by != "gui" && loaded.as_ref() == Some(&(Gid::from(*product_id), profile.clone())) => {
                 for o in outcomes {
                     self.gp.opt.outcomes.insert((o.surface.clone(), o.id.clone()), o.clone());
                 }
             }
             Event::OptionsCrash { product_id, profile, note } => {
-                self.gp.opt.crash = Some((*product_id, profile.clone(), note.clone()));
+                self.gp.opt.crash = Some((Gid::from(*product_id), profile.clone(), note.clone()));
                 if loaded.as_ref().is_some_and(|(g, _)| g == product_id) {
-                    self.load_option_records(*product_id, cx);
+                    self.load_option_records(Gid::from(*product_id), cx);
                 }
             }
-            Event::ModChannel { product_id, .. } if loaded.as_ref().is_some_and(|(g, _)| g == product_id) => self.load_option_surfaces(*product_id, cx),
+            Event::ModChannel { product_id, .. } if loaded.as_ref().is_some_and(|(g, _)| g == product_id) => self.load_option_surfaces(Gid::from(*product_id), cx),
             _ => {}
         }
     }
 
     /// The game started or stopped: what reaches it live changes.
-    pub fn options_game_state(&mut self, product_id: u32, running: bool, cx: &mut Context<Self>) {
+    pub fn options_game_state(&mut self, product_id: Gid, running: bool, cx: &mut Context<Self>) {
         if self.gp.opt.of.as_ref().is_none_or(|(g, _)| *g != product_id) {
             return;
         }
@@ -743,7 +744,7 @@ impl Quiver {
     }
 
     /// The Mods tab's view switch.
-    pub(super) fn render_mods_views(&mut self, th: &Theme, id: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_mods_views(&mut self, th: &Theme, id: Gid, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let profile = self.mods_profile();
         let staged = self.gp.opt.staged_for(id, &profile).len();
         let loaded = self.gp.opt.of.as_ref() == Some(&(id, profile.clone()));
@@ -804,13 +805,13 @@ impl Quiver {
             }
             let _ = this.update(cx, |this, cx| {
                 if running {
-                    this.call::<u64, _>(Request::Play { product_id: 3539, profile: None }, cx, |_, _, _| {});
+                    this.call::<u64, _>(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }, cx, |_, _, _| {});
                 }
-                this.open_game(3539, cx);
+                this.open_game(Gid::from(3539), cx);
                 this.nav.tab = Tab::Mods;
                 // The DLSS profile (the demo's default for Play), unless mods come from a daemon.
                 if std::env::var_os("QUIVER_DEMO_DAEMON").is_none() {
-                    this.select_profile(3539, Some("pd1s5xk".into()), cx);
+                    this.select_profile(Gid::from(3539), Some("pd1s5xk".into()), cx);
                 }
                 this.gp.opt.view = match view.as_str() {
                     "changes" | "history" => ModsView::Changes,
@@ -870,7 +871,7 @@ impl Quiver {
     }
 
     /// The `quiver` command for what a view shows, for the CLI lines.
-    pub(super) fn options_cli(&self, id: u32, what: &str) -> SharedString {
+    pub(super) fn options_cli(&self, id: Gid, what: &str) -> SharedString {
         let p = self.mods_profile();
         let name = self.mods_profile_name(&p);
         format!("quiver mods {id} options {what} --profile {}", super::page::sh_quote(&name)).into()

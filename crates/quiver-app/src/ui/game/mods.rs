@@ -9,7 +9,7 @@ use quiver_api::{Request, SettingOp};
 
 use super::page::{Dialog, Load, checkbox, danger, human_size, kv, load_note, note, small, toggle};
 use crate::app::Quiver;
-use crate::model::{GameRow, actor_label, ago, day, gb, tilde};
+use crate::model::{Gid, GameRow, actor_label, ago, day, gb, tilde};
 use crate::nav::Target;
 use crate::theme::Theme;
 use crate::ui::{FocusExt, Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, badge, button, caption, card, card_header, chip, icon, icon_button, mono, pill};
@@ -499,7 +499,7 @@ impl Quiver {
     fn version_chips(
         &mut self,
         th: &Theme,
-        id: u32,
+        id: Gid,
         pid: &str,
         entries: &[String],
         at: usize,
@@ -539,7 +539,7 @@ impl Quiver {
     }
 
     /// Make a version current, or retire one (or bring it back), then reload.
-    fn version_op(&mut self, id: u32, req: ModsRequest, cx: &mut Context<Self>) {
+    fn version_op(&mut self, id: Gid, req: ModsRequest, cx: &mut Context<Self>) {
         self.call::<VersionChange, _>(Request::Mods(req), cx, move |this, r, cx| match r {
             Ok(c) => {
                 let label = c.record.label_of(&c.version.id);
@@ -674,7 +674,7 @@ impl Quiver {
 
     /// A mod's versions, newest first: which is current, who pins which, and the buttons to
     /// make one current (for every profile that tracks the mod) or retire it.
-    fn render_versions(&mut self, th: &Theme, id: u32, m: &ModsState, rec: &ModRecord, cx: &mut Context<Self>) -> AnyElement {
+    fn render_versions(&mut self, th: &Theme, id: Gid, m: &ModsState, rec: &ModRecord, cx: &mut Context<Self>) -> AnyElement {
         let users = m.users_of(&rec.id);
         let tracking: Vec<String> = users.iter().filter(|(_, r)| !r.pinned).map(|(p, _)| p.profile.name.clone()).collect();
         let rows: Vec<AnyElement> = rec
@@ -729,7 +729,7 @@ impl Quiver {
                     .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
                     .when(!is_cur && !v.retired, |d| {
                         d.child(small(key("use"), th, Some(Icon::CircleCheck), "Make current").on_click(cx.listener(move |this, _, _, cx| {
-                            this.version_op(id, ModsRequest::VersionUse { product_id: id, mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
+                            this.version_op(id, ModsRequest::VersionUse { product_id: id.pid(), mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
                         })))
                     })
                     .when(!is_cur, |d| {
@@ -737,7 +737,7 @@ impl Quiver {
                         d.child(
                             small(key("retire"), th, Some(if retired { Icon::ArchiveRestore } else { Icon::Minus }), if retired { "Bring back" } else { "Retire" })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let req = ModsRequest::VersionRetire { product_id: id, mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
+                                    let req = ModsRequest::VersionRetire { product_id: id.pid(), mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
                                     this.version_op(id, req, cx);
                                 })),
                         )
@@ -873,7 +873,7 @@ impl Quiver {
 
     /// "Make default" (profile entry `i`, 0: vanilla), or a "Default for Play" mark when it
     /// already is: the game's default profile, which Play and shortcuts run.
-    fn make_default_button(&mut self, th: &Theme, id: u32, i: usize, is_default: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn make_default_button(&mut self, th: &Theme, id: Gid, i: usize, is_default: bool, cx: &mut Context<Self>) -> AnyElement {
         if is_default {
             return div().flex().items_center().child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), "Default for Play")).into_any_element();
         }
@@ -924,7 +924,7 @@ impl Quiver {
                     .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
                     .when(!is_cur && !r.deleted, |d| {
                         d.child(small(("prof-restore", i), th, Some(Icon::RotateCcw), "Restore").on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_dialog(Dialog::RestoreProfile { game: id, id: pid.clone(), name: name.clone(), revision: rev });
+                            this.open_dialog(Dialog::RestoreProfile { game: id.pid(), id: pid.clone(), name: name.clone(), revision: rev });
                             cx.notify();
                         })))
                     })
@@ -949,7 +949,7 @@ impl Quiver {
                 .child(icon(Icon::Layers, 14., th.tx3))
                 .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_color(th.tx2).child(name.clone())).child(mono(11., th.tx3).child(format!("{} · saves kept", p.profile.id))))
                 .child(small(("deleted-restore", i), th, Some(Icon::Undo), "Restore").on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_dialog(Dialog::RestoreProfile { game: id, id: pid.clone(), name: name.clone(), revision: rev });
+                    this.open_dialog(Dialog::RestoreProfile { game: id.pid(), id: pid.clone(), name: name.clone(), revision: rev });
                     cx.notify();
                 })))
         }))

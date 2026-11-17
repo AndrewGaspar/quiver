@@ -13,7 +13,7 @@ use super::global::SourceFilter;
 use super::{FocusExt, Icon, MEDIUM, PillKind, SEMIBOLD, art_fill, caption, card, command_line, display, glyph, icon, mono, pill};
 use crate::app::{InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{Actor, actor, actor_label, clean_name, clock, day, short_name};
+use crate::model::{Gid, Actor, actor, actor_label, clean_name, clock, day, short_name};
 use crate::nav::{Page, Target, Zone};
 use crate::theme::Theme;
 
@@ -54,13 +54,13 @@ impl Quiver {
         self.activity
             .iter()
             .filter(|a| f.matches(&a.source))
-            .filter(|a| self.ui.activity_game.is_none() || a.product_id == self.ui.activity_game)
+            .filter(|a| self.ui.activity_game.is_none() || a.game.map(Gid) == self.ui.activity_game)
             .collect()
     }
 
     /// A on an entry: its game.
     pub fn activity_open(&mut self, i: usize, cx: &mut Context<Self>) {
-        if let Some(id) = self.activity_rows().get(i).and_then(|a| a.product_id) {
+        if let Some(id) = self.activity_rows().get(i).and_then(|a| a.game.map(Gid)) {
             self.open_game(id, cx);
         }
     }
@@ -91,7 +91,7 @@ impl Quiver {
 
         // Source filter: segmented, with counts (of the game filter's entries).
         let in_game: Vec<&ActivityEntry> =
-            self.activity.iter().filter(|a| self.ui.activity_game.is_none() || a.product_id == self.ui.activity_game).collect();
+            self.activity.iter().filter(|a| self.ui.activity_game.is_none() || a.game.map(Gid) == self.ui.activity_game).collect();
         let seg = div()
             .flex()
             .flex_none()
@@ -296,7 +296,7 @@ impl Quiver {
             Actor::Agent => (th.who_agent, Icon::Bot),
             Actor::System => (th.who_sys, Icon::Cog),
         };
-        let g = a.product_id.and_then(|id| self.game(id)).cloned();
+        let g = a.game.and_then(|id| self.game(Gid(id))).cloned();
         let thumb: AnyElement = match &g {
             Some(g) => {
                 let art = self.art_for(g, ArtSlot::Tile, Variant::Tile, cx);
@@ -320,7 +320,7 @@ impl Quiver {
         let named = !highlights.is_empty();
         let action = StyledText::new(text).with_highlights(highlights);
         let game_suffix = g.as_ref().filter(|_| !named).map(|g| short_name(&g.entry.name));
-        let pid = a.product_id;
+        let pid = a.game.map(Gid);
         let open = pid.is_some();
         let narrow = self.bp().narrow();
         div()
@@ -480,13 +480,13 @@ impl Quiver {
 
     fn render_game_filter_menu(&mut self, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Games in the log, most entries first.
-        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut counts: BTreeMap<Gid, usize> = BTreeMap::new();
         for a in &self.activity {
-            if let Some(id) = a.product_id {
+            if let Some(id) = a.game.map(Gid) {
                 *counts.entry(id).or_default() += 1;
             }
         }
-        let mut games: Vec<(u32, usize)> = counts.into_iter().collect();
+        let mut games: Vec<(Gid, usize)> = counts.into_iter().collect();
         games.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| self.game_name(a.0).cmp(&self.game_name(b.0))));
         let current = self.ui.activity_game;
         let mut rows: Vec<AnyElement> = vec![];
@@ -522,7 +522,7 @@ impl Quiver {
             };
             rows.push(
                 div()
-                    .id(("gf", id as usize))
+                    .id(("gf", id.ix()))
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -608,7 +608,7 @@ mod tests {
     use chrono::Duration;
 
     fn entry(mins: i64) -> ActivityEntry {
-        ActivityEntry { at: Utc::now() - Duration::minutes(mins), source: "gui".into(), action: "x".into(), product_id: None }
+        ActivityEntry { at: Utc::now() - Duration::minutes(mins), source: "gui".into(), action: "x".into(), game: None }
     }
 
     #[test]

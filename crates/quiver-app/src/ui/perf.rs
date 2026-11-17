@@ -6,6 +6,7 @@
 //! a time and says, per setting, which scope the value comes from; a setting stored at the
 //! scope being edited can be reset to fall back to the next one out.
 
+use crate::model::Gid;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -38,10 +39,10 @@ pub enum ScopePick {
 }
 
 impl ScopePick {
-    pub fn scope(&self, product: u32) -> HudScopeRef {
+    pub fn scope(&self, product: Gid) -> HudScopeRef {
         match self {
-            ScopePick::Game => HudScopeRef::game(product),
-            ScopePick::Profile(p) => HudScopeRef { product_id: Some(product), profile: Some(p.clone()) },
+            ScopePick::Game => HudScopeRef::game(product.pid()),
+            ScopePick::Profile(p) => HudScopeRef { product_id: Some(product.pid()), profile: Some(p.clone()) },
             ScopePick::Global => HudScopeRef::global(),
         }
     }
@@ -49,7 +50,7 @@ impl ScopePick {
 
 /// A live subscription for the open game's Performance tab.
 pub struct Live {
-    pub product: u32,
+    pub product: Gid,
     /// The subscription id, once quiverd answered.
     pub sub: Option<u64>,
     pub last: Option<PerfUpdate>,
@@ -59,7 +60,7 @@ pub struct Live {
 #[derive(Default)]
 pub struct PerfUi {
     /// The game whose summaries are loaded (0: none).
-    pub summaries_for: u32,
+    pub summaries_for: Gid,
     pub summaries: Load<Vec<SessionSummary>>,
     /// The session shown (an index into `summaries`).
     pub sel: usize,
@@ -69,10 +70,10 @@ pub struct PerfUi {
     pub sessions: Load<Vec<PerfSessionInfo>>,
     pub hud: BTreeMap<HudScopeRef, Load<HudSettingsView>>,
     /// The game page's HUD scope, per game.
-    pub scope: HashMap<u32, ScopePick>,
+    pub scope: HashMap<Gid, ScopePick>,
     pub layouts: Load<Vec<HudLayoutInfo>>,
     pub keybinds: Load<HudKeybinds>,
-    pub status: HashMap<u32, Load<HudStatus>>,
+    pub status: HashMap<Gid, Load<HudStatus>>,
     pub live: Option<Live>,
     /// The perf event stream is set up.
     pub events: bool,
@@ -368,7 +369,7 @@ impl Quiver {
     fn perf_event(&mut self, e: PerfEvent, cx: &mut Context<Self>) {
         match e {
             PerfEvent::Update(u) => {
-                let shown = self.perf_tab_open() == Some(u.product_id);
+                let shown = self.perf_tab_open() == Some(Gid::from(u.product_id));
                 match &mut self.perf.live {
                     Some(l) if shown && l.product == u.product_id && l.sub.is_none_or(|s| s == u.sub) => {
                         l.sub = Some(u.sub);
@@ -386,7 +387,7 @@ impl Quiver {
             }
             PerfEvent::Session { product_id, ended, .. } => {
                 self.load_perf_sessions(cx);
-                self.perf.status.remove(&product_id);
+                self.perf.status.remove(&Gid::from(product_id));
                 if ended {
                     if self.perf.live.as_ref().is_some_and(|l| l.product == product_id) {
                         self.perf.live = None;
@@ -396,7 +397,7 @@ impl Quiver {
                         let id = product_id;
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(Duration::from_millis(800)).await;
-                            let _ = this.update(cx, |this, cx| this.load_summaries(id, cx));
+                            let _ = this.update(cx, |this, cx| this.load_summaries(Gid::from(id), cx));
                         })
                         .detach();
                     }
@@ -409,7 +410,7 @@ impl Quiver {
                     self.load_hud(s, cx);
                 }
                 if let Some(p) = product_id {
-                    self.perf.status.remove(&p);
+                    self.perf.status.remove(&Gid::from(p));
                 }
             }
             PerfEvent::CatalogChanged { .. } | PerfEvent::HudModel(_) => {}
@@ -432,7 +433,7 @@ impl Quiver {
                 }
             }
             Event::GameStarted { product_id } | Event::GameStopped { product_id } => {
-                self.perf.status.remove(product_id);
+                self.perf.status.remove(&Gid::from(*product_id));
                 self.load_perf_sessions(cx);
             }
             _ => {}
@@ -440,21 +441,21 @@ impl Quiver {
     }
 
     /// The game whose Performance tab is on screen.
-    pub fn perf_tab_open(&self) -> Option<u32> {
+    pub fn perf_tab_open(&self) -> Option<Gid> {
         match self.nav.page {
             Page::Game(id) if self.nav.tab == Tab::Performance => Some(id),
             _ => None,
         }
     }
 
-    pub fn load_summaries(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_summaries(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.perf.summaries_for != id {
             self.perf.summaries_for = id;
             self.perf.summaries = Load::Loading;
             self.perf.sel = 0;
             self.perf.compare = None;
         }
-        self.call::<Vec<SessionSummary>, _>(Request::Perf(PerfRequest::Summaries { product_id: id, limit: 30 }), cx, move |this, r, _| {
+        self.call::<Vec<SessionSummary>, _>(Request::Perf(PerfRequest::Summaries { product_id: id.pid(), limit: 30 }), cx, move |this, r, _| {
             if this.perf.summaries_for != id {
                 return;
             }
@@ -482,7 +483,7 @@ impl Quiver {
     }
 
     /// The running perf session of a game.
-    pub fn perf_session(&self, id: u32) -> Option<&PerfSessionInfo> {
+    pub fn perf_session(&self, id: Gid) -> Option<&PerfSessionInfo> {
         self.perf.sessions.ready()?.iter().find(|s| s.product_id == id)
     }
 
@@ -525,9 +526,9 @@ impl Quiver {
         }
     }
 
-    pub fn load_hud_status(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_hud_status(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.perf.status.insert(id, Load::Loading);
-        self.call::<HudStatus, _>(Request::Perf(PerfRequest::HudStatus { session: None, product_id: Some(id) }), cx, move |this, r, _| {
+        self.call::<HudStatus, _>(Request::Perf(PerfRequest::HudStatus { session: None, product_id: Some(id.pid()) }), cx, move |this, r, _| {
             this.perf.status.insert(
                 id,
                 match r {
@@ -539,7 +540,7 @@ impl Quiver {
     }
 
     /// Keep a live subscription for the game's tab while its perf session runs.
-    pub fn ensure_live(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn ensure_live(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.perf.live.as_ref().is_some_and(|l| l.product == id) {
             return;
         }
@@ -547,7 +548,7 @@ impl Quiver {
             self.call::<serde_json::Value, _>(Request::Perf(PerfRequest::Unsubscribe { sub }), cx, |_, _, _| {});
         }
         self.perf.live = Some(Live { product: id, sub: None, last: None, error: None });
-        let req = PerfRequest::Subscribe { session: None, product_id: Some(id), select: vec![], every_ms: 1000, window_ms: 1000, stats: vec![] };
+        let req = PerfRequest::Subscribe { session: None, product_id: Some(id.pid()), select: vec![], every_ms: 1000, window_ms: 1000, stats: vec![] };
         self.call::<u64, _>(Request::Perf(req), cx, move |this, r, cx| match (r, &mut this.perf.live) {
             (Ok(sub), Some(l)) if l.product == id => l.sub = Some(sub),
             (Ok(sub), _) => this.call::<serde_json::Value, _>(Request::Perf(PerfRequest::Unsubscribe { sub }), cx, |_, _, _| {}),
@@ -577,7 +578,7 @@ impl Quiver {
                         this.load_hud(s, cx);
                     }
                     if let Some(p) = key.product_id {
-                        this.perf.status.remove(&p);
+                        this.perf.status.remove(&Gid::from(p));
                     } else {
                         this.perf.status.clear();
                     }
@@ -1036,7 +1037,7 @@ impl Quiver {
 
     /// Who draws the HUD of a running game and why (`HudStatus`), or what the setting means
     /// before launch.
-    pub fn render_hud_status(&self, th: &Theme, id: u32, c: Option<&HudConfig>) -> AnyElement {
+    pub fn render_hud_status(&self, th: &Theme, id: Gid, c: Option<&HudConfig>) -> AnyElement {
         let running = self.perf_session(id).is_some();
         let line = |ic: Icon, color: Hsla, title: String, sub: String| {
             div()
@@ -1096,7 +1097,7 @@ impl Quiver {
     }
 
     /// The running game's numbers, once a second.
-    pub fn render_live_strip(&self, th: &Theme, id: u32) -> Option<AnyElement> {
+    pub fn render_live_strip(&self, th: &Theme, id: Gid) -> Option<AnyElement> {
         let info = self.perf_session(id)?;
         let live = self.perf.live.as_ref().filter(|l| l.product == id);
         // FPS cells are labelled FPS already; other units stay with their numbers.

@@ -89,7 +89,7 @@ struct Dl {
 static DL: LazyLock<Mutex<HashMap<usize, Dl>>> = LazyLock::new(Mutex::default);
 
 fn job(id: u64, kind: JobKind, product_id: u32, name: &str, status: &str, downloaded: u64, total: u64) -> Job {
-    Job { id, kind, product_id, name: name.into(), status: status.into(), downloaded, total, done: false, error: None, detail: vec![] }
+    Job { id, kind, game: quiver_api::GameRef::ubisoft(product_id), name: name.into(), status: status.into(), downloaded, total, done: false, error: None, detail: vec![] }
 }
 
 fn entry(st: &State, id: u32, kind: QueueKind, state: QueueState, job_id: u64, source: &str, mins_ago: i64) -> QueueEntry {
@@ -263,7 +263,7 @@ impl Dl {
             QueueKind::Update => "update",
             QueueKind::Repair => "repair",
         };
-        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("queued {what} of {}", j.name), product_id: Some(product_id) });
+        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("queued {what} of {}", j.name), game: Some(quiver_api::GameRef::ubisoft(product_id)) });
         let mut ev = vec![Event::Job(j.clone())];
         ev.extend(self.pump(st));
         ev.extend(self.queue.iter().filter_map(|e| st.jobs.iter().find(|j| Some(j.id) == e.job_id)).map(|j| Event::Job(j.clone())));
@@ -305,7 +305,7 @@ impl Dl {
     }
 
     fn preview(&self, st: &State, product_id: u32, language: Option<String>) -> Result<InstallPreview> {
-        let e = st.entries.iter().find(|e| e.product_id == product_id).ok_or_else(|| anyhow!("unknown product {product_id}"))?;
+        let e = st.entries.iter().find(|e| e.ubisoft_id() == Some(product_id)).ok_or_else(|| anyhow!("unknown product {product_id}"))?;
         let lang = language.unwrap_or_else(|| "en-US".into());
         let base = size_of(product_id);
         let extra = |code: &str| LANGS.iter().find(|(c, _)| *c == code).map(|(_, g)| (g * GB as f64) as u64).unwrap_or(0);
@@ -343,7 +343,7 @@ impl Dl {
         let games = home().join("Games");
         let connect = games.join("ubisoft-connect");
         let in_connect = |folder: &str| connect.join("drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games").join(folder);
-        let installed = |id: u32| st.entries.iter().any(|e| e.product_id == id && e.installed.is_some());
+        let installed = |id: u32| st.entries.iter().any(|e| e.ubisoft_id() == Some(id) && e.installed.is_some());
         let name = |id: u32| super::name_of(st, id).unwrap_or_default();
         let lutris = vec!["Ubisoft Connect".to_owned(), "Assassin's Creed Origins (DLSS)".to_owned(), "Assassin's Creed III Remastered".to_owned()];
         let mk = |path: PathBuf, prefix: &PathBuf, source: InstallSource, label: &str, id: Option<u32>, by: Option<MatchedBy>, size: f64, files: usize, version: Option<&str>, note: Option<String>| {
@@ -403,7 +403,7 @@ impl Dl {
     }
 
     fn update_preview(&self, st: &State, product_id: u32) -> Result<UpdatePreview> {
-        let e = st.entries.iter().find(|e| e.product_id == product_id).ok_or_else(|| anyhow!("unknown product {product_id}"))?;
+        let e = st.entries.iter().find(|e| e.ubisoft_id() == Some(product_id)).ok_or_else(|| anyhow!("unknown product {product_id}"))?;
         if e.installed.is_none() {
             bail!("not installed");
         }
@@ -495,7 +495,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             Value::Null
         }
         Request::Install { product_id, language } => {
-            let kind = if st.entries.iter().any(|e| e.product_id == product_id && e.installed.is_some()) { QueueKind::Update } else { QueueKind::Install };
+            let kind = if st.entries.iter().any(|e| e.ubisoft_id() == Some(product_id) && e.installed.is_some()) { QueueKind::Update } else { QueueKind::Install };
             if kind == QueueKind::Install && flag("low-space") {
                 bail!("not enough space on ~/Games: needs {} plus a margin", crate::model::gb(size_of(product_id)));
             }
@@ -521,7 +521,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         }
         Request::InstallPreview { product_id, language } => {
             let mut p = d.preview(st, product_id, language)?;
-            if st.entries.iter().any(|e| e.product_id == product_id && e.installed.is_some()) {
+            if st.entries.iter().any(|e| e.ubisoft_id() == Some(product_id) && e.installed.is_some()) {
                 p.update = Some(d.update_preview(st, product_id)?);
             }
             json!(p)
@@ -539,7 +539,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             let j = Dl::new_job(st, JobKind::Verify, product_id, "Verifying…");
             d.verifying = Some((product_id, j.id, 0, size_of(product_id)));
             events.push(Event::Job(j.clone()));
-            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("verify {}", j.name), product_id: Some(product_id) });
+            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("verify {}", j.name), game: Some(quiver_api::GameRef::ubisoft(product_id)) });
             json!(j.id)
         }
         Request::VerifyResult { product_id } => json!(d.reports.get(&product_id)),
@@ -660,8 +660,8 @@ pub(super) fn tick(demo: &Demo, st: &mut State) -> Vec<Event> {
     for id in finished {
         let Some(i) = d.queue.iter().position(|e| e.product_id == id) else { continue };
         let e = d.queue.remove(i);
-        let was_installed = st.entries.iter().any(|x| x.product_id == id && x.installed.is_some());
-        if let Some(x) = st.entries.iter_mut().find(|x| x.product_id == id) {
+        let was_installed = st.entries.iter().any(|x| x.ubisoft_id() == Some(id) && x.installed.is_some());
+        if let Some(x) = st.entries.iter_mut().find(|x| x.ubisoft_id() == Some(id)) {
             if x.installed.is_none() {
                 x.installed = Some(game_for(id, &x.name, None));
             }
@@ -678,7 +678,7 @@ pub(super) fn tick(demo: &Demo, st: &mut State) -> Vec<Event> {
             j.downloaded = j.total;
             events.push(Event::Job(j.clone()));
         }
-        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "system".into(), action: "install finished".into(), product_id: Some(id) });
+        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "system".into(), action: "install finished".into(), game: Some(quiver_api::GameRef::ubisoft(id)) });
         events.extend(d.pump(st));
         events.push(Event::LibraryChanged);
     }
@@ -729,10 +729,10 @@ pub(super) fn tick(demo: &Demo, st: &mut State) -> Vec<Event> {
         }
     }
     for id in imported {
-        if let Some(x) = st.entries.iter_mut().find(|x| x.product_id == id) {
+        if let Some(x) = st.entries.iter_mut().find(|x| x.ubisoft_id() == Some(id)) {
             x.installed = Some(game_for(id, &x.name, None));
         }
-        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: "imported from Lutris".into(), product_id: Some(id) });
+        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: "imported from Lutris".into(), game: Some(quiver_api::GameRef::ubisoft(id)) });
         events.push(Event::LibraryChanged);
     }
     events

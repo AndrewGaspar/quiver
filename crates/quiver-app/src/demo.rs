@@ -201,7 +201,7 @@ impl Demo {
                 accounts: vec![quiver_api::Account { user_id: "demo".into(), name: "demo".into(), default: true }],
             }),
             Request::Library { .. } => json!(st.entries),
-            Request::Playtime { product_id } => json!(st.playtime.get(&product_id).cloned().unwrap_or_default()),
+            Request::Playtime { game } => json!(game.as_ubisoft().and_then(|id| st.playtime.get(&id)).cloned().unwrap_or_default()),
             Request::SettingsGet { product_id } => json!(st.settings.get(&product_id).cloned().unwrap_or_default()),
             Request::SettingsHistory { product_id } => json!(st.history.get(&product_id).cloned().unwrap_or_default()),
             Request::Activity { limit } => json!(st.activity.iter().take(limit).collect::<Vec<_>>()),
@@ -216,7 +216,7 @@ impl Demo {
                 let job = Job {
                     id,
                     kind: JobKind::Install,
-                    product_id,
+                    game: quiver_api::GameRef::ubisoft(product_id),
                     name,
                     status: if queued { "Queued".into() } else { "Downloading · 0%".into() },
                     downloaded: 0,
@@ -230,9 +230,10 @@ impl Demo {
                 self.emit(Event::Job(job));
                 json!(id)
             }
-            Request::Play { product_id, .. } => {
+            Request::Play { game, .. } => {
+                let product_id = game.as_ubisoft().unwrap_or(0);
                 let name = name_of(&st, product_id)?;
-                if st.entries.iter().all(|e| e.product_id != product_id || e.installed.is_none()) {
+                if st.entries.iter().all(|e| e.ubisoft_id() != Some(product_id) || e.installed.is_none()) {
                     bail!("{name} is not installed");
                 }
                 let id = st.next_job;
@@ -240,7 +241,7 @@ impl Demo {
                 let job = Job {
                     id,
                     kind: JobKind::Play,
-                    product_id,
+                    game: quiver_api::GameRef::ubisoft(product_id),
                     name,
                     status: "Running".into(),
                     downloaded: 0,
@@ -251,7 +252,7 @@ impl Demo {
                 };
                 st.jobs.push(job.clone());
                 st.sessions.push(ActiveSession { product_id, account: "demo".into(), started: Utc::now(), holders: vec!["launcher".into()], reported: true, steam_app_id: None, ..Default::default() });
-                if let Some(e) = st.entries.iter_mut().find(|e| e.product_id == product_id) {
+                if let Some(e) = st.entries.iter_mut().find(|e| e.ubisoft_id() == Some(product_id)) {
                     e.running = true;
                 }
                 drop(st);
@@ -260,15 +261,16 @@ impl Demo {
                 perf::session_event(self, product_id, false);
                 json!(id)
             }
-            Request::Stop { product_id } => {
+            Request::Stop { game } => {
+                let product_id = game.as_ubisoft().unwrap_or(0);
                 st.sessions.retain(|s| s.product_id != product_id);
                 let mut ended = None;
-                for j in st.jobs.iter_mut().filter(|j| j.kind == JobKind::Play && j.product_id == product_id && !j.done) {
+                for j in st.jobs.iter_mut().filter(|j| j.kind == JobKind::Play && j.game.as_ubisoft() == Some(product_id) && !j.done) {
                     j.done = true;
                     j.status = "Exited".into();
                     ended = Some(j.clone());
                 }
-                if let Some(e) = st.entries.iter_mut().find(|e| e.product_id == product_id) {
+                if let Some(e) = st.entries.iter_mut().find(|e| e.ubisoft_id() == Some(product_id)) {
                     e.running = false;
                 }
                 drop(st);
@@ -299,7 +301,7 @@ fn method_name(r: &Request) -> String {
 }
 
 fn name_of(st: &State, id: u32) -> Result<String> {
-    st.entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).ok_or_else(|| anyhow!("unknown product {id}"))
+    st.entries.iter().find(|e| e.ubisoft_id() == Some(id)).map(|e| e.name.clone()).ok_or_else(|| anyhow!("unknown product {id}"))
 }
 
 fn game_for(id: u32, name: &str, exe: Option<&str>) -> Game {
@@ -327,7 +329,7 @@ pub fn library() -> Vec<LibraryEntry> {
             let order = fx.unwrap_or(usize::MAX);
             let name = clean(&r.lib_name);
             let entry = LibraryEntry {
-                product_id: r.product_id,
+                game: quiver_api::GameRef::ubisoft(r.product_id),
                 installed: installed.then(|| game_for(r.product_id, &name, r.exes.first().map(String::as_str))),
                 name,
                 update_available: fx.is_some_and(|i| FIXTURES[i].update),
@@ -337,6 +339,7 @@ pub fn library() -> Vec<LibraryEntry> {
                 installable: true,
                 steam: None,
                 space_id: None,
+                client: None,
             };
             (order, entry)
         })
@@ -379,12 +382,12 @@ fn build_state() -> State {
         histories.insert(fx.id, vec![rev(1, 40, "system", "Created from global defaults", GameSettings::default())]);
         settings.insert(fx.id, s);
     }
-    let name = |id: u32| entries.iter().find(|e| e.product_id == id).map(|e| e.name.clone()).unwrap_or_default();
+    let name = |id: u32| entries.iter().find(|e| e.ubisoft_id() == Some(id)).map(|e| e.name.clone()).unwrap_or_default();
     let jobs = vec![
         Job {
             id: 41,
             kind: JobKind::Install,
-            product_id: INSTALLING,
+            game: quiver_api::GameRef::ubisoft(INSTALLING),
             name: name(INSTALLING),
             status: "Downloading · 64%".into(),
             downloaded: 31_200_000_000,
@@ -396,7 +399,7 @@ fn build_state() -> State {
         Job {
             id: 42,
             kind: JobKind::Install,
-            product_id: QUEUED,
+            game: quiver_api::GameRef::ubisoft(QUEUED),
             name: name(QUEUED),
             status: "Queued".into(),
             downloaded: 0,
@@ -410,7 +413,7 @@ fn build_state() -> State {
         at: Utc::now() - Span::minutes(mins),
         source: source.into(),
         action: action.into(),
-        product_id: id,
+        game: id.map(quiver_api::GameRef::ubisoft),
     };
     let activity = vec![
         act(4, "gui", "install started", Some(INSTALLING)),
@@ -442,11 +445,11 @@ mod tests {
     fn library_covers_art_json_with_art_names() {
         let lib = library();
         assert_eq!(lib.len(), 23);
-        assert_eq!(lib[0].product_id, 3539, "most recent first");
+        assert_eq!(lib[0].ubisoft_id(), Some(3539), "most recent first");
         assert!(lib.iter().all(|e| e.art.thumb.is_some() && e.art.background.is_some()));
         assert_eq!(lib.iter().filter(|e| e.installed.is_some()).count(), FIXTURES.len());
         assert!(lib.iter().all(|e| !e.name.contains('®')));
-        assert!(lib.iter().find(|e| e.product_id == 5059).unwrap().update_available);
+        assert!(lib.iter().find(|e| e.ubisoft_id() == Some(5059)).unwrap().update_available);
     }
 
     #[tokio::test]
@@ -455,7 +458,7 @@ mod tests {
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert_eq!(status.signed_in.as_deref(), Some("demo"));
         assert!(status.jobs.iter().filter(|j| j.kind == JobKind::Install && !j.done).count() >= 2);
-        let pt: Playtime = serde_json::from_value(demo.handle(Request::Playtime { product_id: 3539 }).unwrap()).unwrap();
+        let pt: Playtime = serde_json::from_value(demo.handle(Request::Playtime { game: quiver_api::GameRef::ubisoft(3539) }).unwrap()).unwrap();
         assert_eq!(pt.total_seconds / 3600, 87);
         assert!(pt.sessions[0].started > pt.sessions[1].started, "newest first");
         let hist: Vec<Revision> =
@@ -464,9 +467,9 @@ mod tests {
         assert!(demo.handle(Request::Login { email: "a".into(), password: "b".into() }).is_err());
         // The install job advances on its own.
         let e = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
-        assert!(matches!(e, Event::Job(j) if j.product_id == INSTALLING && j.downloaded > 31_200_000_000));
+        assert!(matches!(e, Event::Job(j) if j.game.as_ubisoft() == Some(INSTALLING) && j.downloaded > 31_200_000_000));
         // Play emits a job and GameStarted.
-        demo.handle(Request::Play { product_id: 3539, profile: None }).unwrap();
+        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }).unwrap();
         let mut started = false;
         for _ in 0..4 {
             if let Ok(Some(Event::GameStarted { product_id: 3539 })) =
@@ -477,6 +480,6 @@ mod tests {
             }
         }
         assert!(started);
-        assert!(demo.handle(Request::Play { product_id: 6100, profile: None }).is_err(), "not installed");
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(6100), profile: None }).is_err(), "not installed");
     }
 }

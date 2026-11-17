@@ -115,7 +115,7 @@ async fn ownership(online: &Arc<Online>, product_id: Option<u32>, refresh: bool)
 
 async fn game_info(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> Result<GameInfo> {
     let online = daemon.account_for(product_id, None).await?;
-    let entry = daemon.library(refresh).await.ok().and_then(|l| l.into_iter().find(|e| e.product_id == product_id));
+    let entry = daemon.library(refresh).await.ok().and_then(|l| l.into_iter().find(|e| e.ubisoft_id() == Some(product_id)));
     let installed = Games::load()?.get(product_id).cloned();
     let (owned, configs) = ownership(&online, Some(product_id), refresh).await?;
     let product = owned.products.get(&product_id);
@@ -268,7 +268,7 @@ async fn saves_report(daemon: &Arc<Daemon>, product_id: u32, cloud: bool) -> Res
     // A Steam copy keeps its saves in Steam's prefix.
     let steam = match &game {
         Some(_) => None,
-        None => daemon.library(false).await.ok().and_then(|l| l.into_iter().find(|e| e.product_id == product_id)).and_then(|e| e.steam),
+        None => daemon.library(false).await.ok().and_then(|l| l.into_iter().find(|e| e.ubisoft_id() == Some(product_id))).and_then(|e| e.steam),
     };
     // An installed game: the save store that syncs with the cloud (Default unless moved).
     let primary = game.as_ref().map(|_| quiver_core::savestores::SaveStores::new(&quiver_core::launcher::data_dir(), product_id).primary());

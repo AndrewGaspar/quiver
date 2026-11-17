@@ -10,7 +10,7 @@ use quiver_api::savestores::{DEFAULT_STORE, NEW_STORE, SaveStore, SaveStoresRepo
 
 use super::page::{Dialog, Load, load_note};
 use crate::app::Quiver;
-use crate::model::{GameRow, ago};
+use crate::model::{Gid, GameRow, ago};
 use crate::theme::Theme;
 use crate::ui::{Icon, PillKind, SEMIBOLD, card, card_header, caption, chip, icon, mono, pill};
 
@@ -112,11 +112,11 @@ fn capitalize(s: &str) -> String {
 }
 
 impl Quiver {
-    pub fn load_stores(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn load_stores(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.gp.stores.ready().is_none() {
             self.gp.stores = Load::Loading;
         }
-        self.call::<SaveStoresReport, _>(Request::SaveStores { product_id: id }, cx, move |this, r, _| {
+        self.call::<SaveStoresReport, _>(Request::SaveStores { product_id: id.pid() }, cx, move |this, r, _| {
             if this.gp.id == id {
                 this.gp.stores = match r {
                     Ok(s) => Load::Ready(s),

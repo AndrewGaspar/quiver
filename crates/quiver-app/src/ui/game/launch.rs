@@ -10,7 +10,7 @@ use super::page::{
     section, set_command, sh_quote, small, split_wrappers,
 };
 use crate::app::{InputMode, Quiver};
-use crate::model::{Actor, GameRow, actor, actor_label, ago, clean_name, tilde};
+use crate::model::{Gid, Actor, GameRow, actor, actor_label, ago, clean_name, tilde};
 use crate::nav::Target;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -525,7 +525,7 @@ impl Quiver {
 
     /// Before starting game `id`: when it has unsaved launch-options edits, ask (Save and
     /// play / Play without them / Cancel) and return true; the answer starts it later.
-    pub fn launch_guard(&mut self, id: u32, play: PlayAfter, cx: &mut Context<Self>) -> bool {
+    pub fn launch_guard(&mut self, id: Gid, play: PlayAfter, cx: &mut Context<Self>) -> bool {
         if self.gp.play_unguarded.take() == Some(id) {
             return false;
         }
@@ -559,7 +559,7 @@ impl Quiver {
     }
 
     /// Start game `id` the way it was asked for, without asking about unsaved edits again.
-    pub fn play_after(&mut self, id: u32, play: PlayAfter, cx: &mut Context<Self>) {
+    pub fn play_after(&mut self, id: Gid, play: PlayAfter, cx: &mut Context<Self>) {
         self.gp.play_unguarded = Some(id);
         match play {
             PlayAfter::Primary => self.primary(id, cx),
@@ -570,7 +570,7 @@ impl Quiver {
 
     /// Demo mode (`QUIVER_DEMO_GLOBAL=unsaved=ID`): game `id` gets unsaved edits, as if the
     /// MangoHud chip had been clicked and a variable added, once its settings are in.
-    pub fn demo_unsaved(&mut self, id: u32, cx: &mut Context<Self>) {
+    pub fn demo_unsaved(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.load_details(id, cx);
         cx.spawn(async move |this, cx| {
             for _ in 0..50 {
@@ -719,7 +719,7 @@ impl Quiver {
                             .when(!is_cur, |d| {
                                 d.child(button(("rev-restore", i), th, Kind::Primary, Size::Small, Some(Icon::RotateCcw), format!("Restore r{rev}")).on_click(cx.listener(
                                     move |this, _, _, cx| {
-                                        this.open_dialog(Dialog::RestoreSettings { game: id, revision: rev });
+                                        this.open_dialog(Dialog::RestoreSettings { game: id.pid(), revision: rev });
                                         cx.notify();
                                     },
                                 )))

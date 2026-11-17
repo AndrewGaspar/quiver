@@ -9,7 +9,7 @@ use super::{
 use super::hero::{TitleBox, title_slot};
 use crate::app::{Attention, InputMode, Quiver};
 use crate::art::{ArtSlot, Variant};
-use crate::model::{GameRow, clock, day, hours, short_name};
+use crate::model::{Gid, GameRow, clock, day, hours, short_name};
 use crate::nav::Target;
 use crate::theme::{Theme, on_art, rgba};
 
@@ -97,7 +97,7 @@ impl Quiver {
 
     pub fn render_library(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (cols, tile_w) = self.grid_metrics();
-        let ids: Vec<u32> = self.grid_games().iter().map(|g| g.id()).collect();
+        let ids: Vec<Gid> = self.grid_games().iter().map(|g| g.id()).collect();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (r, chunk) in ids.chunks(cols).enumerate() {
             let tiles: Vec<AnyElement> = chunk.iter().map(|id| self.render_tile(th, *id, tile_w, cx)).collect();
@@ -360,7 +360,7 @@ impl Quiver {
         hero.child(content).into_any_element()
     }
 
-    fn render_attention(&mut self, th: &Theme, items: &[(u32, Attention)], cx: &mut Context<Self>) -> gpui::Div {
+    fn render_attention(&mut self, th: &Theme, items: &[(Gid, Attention)], cx: &mut Context<Self>) -> gpui::Div {
         let mut panel = div()
             .flex()
             .flex_col()
@@ -452,7 +452,7 @@ impl Quiver {
         panel
     }
 
-    fn render_tile(&mut self, th: &Theme, id: u32, w: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tile(&mut self, th: &Theme, id: Gid, w: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.game(id).cloned() else { return div().into_any_element() };
         let h = (w * TILE_RATIO).round();
         let dim = !g.on_disk() && g.install_job().is_none();
@@ -472,7 +472,7 @@ impl Quiver {
         } else if g.installed() && g.entry.update_available {
             tl = tl.child(tag(th, TagKind::Accent, Some(Icon::ArrowDownToLine), "Update"));
         }
-        let custom = self.custom_art.get(&id).is_some_and(|c| c.tile.is_some());
+        let custom = self.custom_art.get(&(&id).pid()).is_some_and(|c| c.tile.is_some());
 
         let group = gpui::SharedString::from(format!("tile-{id}"));
         let deep = vec![soft_shadow(rgba(0x000000, 0.6), 18., 40.)];
@@ -573,7 +573,7 @@ impl Quiver {
         }
         let meta = g.tile_meta();
         div()
-            .id(("tile", id as usize))
+            .id(("tile", id.ix()))
             .group(group)
             .flex()
             .flex_col()

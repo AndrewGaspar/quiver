@@ -115,7 +115,7 @@ impl TestHost {
 impl Host for TestHost {
     fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let job = Job { id, kind, product_id, name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None, detail: Vec::new() };
+        let job = Job { id, kind, game: quiver_api::GameRef::ubisoft(product_id), name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None, detail: Vec::new() };
         self.jobs.lock().unwrap().insert(id, job);
         id
     }

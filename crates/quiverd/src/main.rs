@@ -29,7 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use quiver_api::{
-    Account, ActivityEntry, Envelope, Event, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, SettingOp,
+    Account, ActivityEntry, Envelope, Event, GameRef, Job, JobKind, LibraryEntry, LoginResult, Reply, Request, SettingOp,
     Status,
 };
 use quiver_core::auth::{Auth, LoginOutcome, TwoFactorChallenge};
@@ -96,6 +96,11 @@ struct Daemon {
     achievements: Arc<quiver_core::achievements::Engine>,
 }
 
+/// The Ubisoft product a request names; other stores' games can't do what it asks (yet).
+fn ubisoft_only(game: GameRef) -> Result<u32> {
+    game.as_ubisoft().with_context(|| format!("{game}: {} games can't do that in Quiver yet", game.store.label()))
+}
+
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
 async fn run_local<F, Fut, T>(f: F) -> Result<T>
 where
@@ -112,8 +117,13 @@ impl Daemon {
     }
 
     fn log_activity(&self, source: &str, action: String, product_id: Option<u32>) {
-        let entry = ActivityEntry { at: chrono::Utc::now(), source: source.to_owned(), action, product_id };
-        tracing::info!(source, product_id, "{}", entry.action);
+        self.log_activity_game(source, action, product_id.map(GameRef::ubisoft))
+    }
+
+    /// [`Self::log_activity`] for a game of any store.
+    fn log_activity_game(&self, source: &str, action: String, game: Option<GameRef>) {
+        let entry = ActivityEntry { at: chrono::Utc::now(), source: source.to_owned(), action, game };
+        tracing::info!(source, game = game.map(|g| g.to_string()), "{}", entry.action);
         let path = launcher::data_dir().join("activity.jsonl");
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{}", serde_json::to_string(&entry).unwrap_or_default());
@@ -136,11 +146,15 @@ impl Daemon {
     }
 
     fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64 {
+        self.new_game_job(kind, GameRef::ubisoft(product_id), name)
+    }
+
+    fn new_game_job(&self, kind: JobKind, game: GameRef, name: String) -> u64 {
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
         let job = Job {
             id,
             kind,
-            product_id,
+            game,
             name,
             status: "Queued".into(),
             downloaded: 0,
@@ -219,7 +233,7 @@ impl Daemon {
                 // If the default's library couldn't be fetched, its ownership is unknown:
                 // keep the default rather than silently switching save histories.
                 Ok(_) if default.as_ref().is_some_and(|d| self.library_failed.lock().unwrap().contains(d)) => Vec::new(),
-                Ok(lib) => lib.into_iter().find(|e| e.product_id == product_id).map(|e| e.owned_by).unwrap_or_default(),
+                Ok(lib) => lib.into_iter().find(|e| e.ubisoft_id() == Some(product_id)).map(|e| e.owned_by).unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(product_id, "library unavailable to pick an account; using the default: {e:#}");
                     Vec::new()
@@ -296,7 +310,7 @@ impl Daemon {
             .unwrap_or_default()
             .into_iter()
             .map(|mut e| {
-                e.running = running.contains(&e.product_id);
+                e.running = e.ubisoft_id().is_some_and(|id| running.contains(&id));
                 e
             })
             .collect())
@@ -361,11 +375,12 @@ impl Daemon {
                 self.emit(Event::LibraryChanged);
                 Value::Null
             }
-            Request::Library { refresh } => json!(self.library(refresh).await?),
+            Request::Library { refresh, all_stores: _ } => json!(self.library(refresh).await?),
             Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
-            Request::Play { product_id, profile } => {
+            Request::Play { game, profile } => {
+                let product_id = ubisoft_only(game)?;
                 if Games::load()?.get(product_id).is_none()
-                    && let Some(e) = self.library(false).await?.into_iter().find(|e| e.product_id == product_id && e.steam_only())
+                    && let Some(e) = self.library(false).await?.into_iter().find(|e| e.game == game && e.steam_only())
                 {
                     return Ok(json!(steamlib::play(self, source, &e).await?));
                 }
@@ -399,15 +414,17 @@ impl Daemon {
                 match job.kind {
                     JobKind::Install | JobKind::Verify => downloads::cancel(self, source, &job, discard)?,
                     JobKind::Play => {
-                        let game = Games::load()?.get(job.product_id).cloned().context("not installed")?;
+                        let id = job.game.as_ubisoft().context("its store's client runs it; stop it there")?;
+                        let game = Games::load()?.get(id).cloned().context("not installed")?;
                         launcher::stop(&self.cfg, &game).await?;
                     }
                     JobKind::Import => bail!("imports can't be cancelled"),
                 }
-                self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), Some(job.product_id));
+                self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), job.game.as_ubisoft());
                 Value::Null
             }
-            Request::Stop { product_id } => {
+            Request::Stop { game } => {
+                let product_id = ubisoft_only(game)?;
                 let game = Games::load()?.get(product_id).cloned().context("not installed")?;
                 launcher::stop(&self.cfg, &game).await?;
                 self.log_activity(source, format!("stopped {}", game.name), Some(product_id));
@@ -474,7 +491,7 @@ impl Daemon {
                 json!(ctx)
             }
             Request::ProtonList => json!(launcher::list_protons()),
-            Request::Playtime { product_id } => json!(settings::playtime(product_id)?),
+            Request::Playtime { game } => json!(settings::playtime(ubisoft_only(game)?)?),
             Request::RemotePlaytime { product_id } => {
                 let online = self.account_for(product_id, None).await?;
                 run_local(move || async move {
@@ -542,6 +559,15 @@ impl Daemon {
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
+            Request::Stores => json!([quiver_api::stores::StoreInfo {
+                store: quiver_api::StoreId::Ubisoft,
+                account: if self.account_list().0.is_empty() { quiver_api::stores::AccountState::NeedsSignIn } else { quiver_api::stores::AccountState::SignedIn },
+                account_name: self.account_list().1,
+                capabilities: Default::default(),
+                games: 0,
+                note: None,
+            }]),
+            Request::GameDetail { game, .. } => bail!("no page for {game} yet (Ubisoft games: game_info)"),
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }

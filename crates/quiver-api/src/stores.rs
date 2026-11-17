@@ -1,0 +1,253 @@
+//! Stores other than Ubisoft, as front ends see them (design/STORES.md §3).
+//!
+//! Each store is a provider in quiverd. A provider says what it does ([`Capabilities`]),
+//! so a front end can show what isn't wired instead of inventing it. Steam is the first:
+//! in *local mode* it reads the Steam client's own files (libraries, app manifests,
+//! `appinfo.vdf`, art, play time, achievements, cloud state) and plays through the client
+//! (`steam://rungameid/<appid>`); Steam keeps licensing, installs, updates, cloud sync and
+//! play-time records. No Steam sign-in happens in Quiver.
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::game::{self, GameRef, StoreId};
+
+/// How a store does one thing in Quiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Support {
+    /// Quiver does it.
+    Quiver,
+    /// The store's own client does it; Quiver starts it or shows what the client did.
+    Delegated,
+    /// Quiver only reads what the store recorded.
+    ReadOnly,
+    /// Not available (not built, or the store doesn't allow it).
+    #[default]
+    #[serde(other)]
+    No,
+}
+
+impl Support {
+    pub fn available(self) -> bool {
+        self != Support::No
+    }
+}
+
+/// What a store's provider implements (STORES.md §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Capabilities {
+    pub library: Support,
+    pub install: Support,
+    pub launch: Support,
+    /// Quiver's per-game settings (environment, wrappers, …) apply to launches.
+    pub settings: Support,
+    pub mods: Support,
+    pub cloud_saves: Support,
+    pub achievements: Support,
+    pub playtime: Support,
+}
+
+/// Whose account a store's games come from (STORES.md §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountState {
+    SignedIn,
+    SignedInElsewhere,
+    /// The store's own client is signed in, and Quiver follows it (Steam local mode).
+    ClientManaged,
+    #[default]
+    #[serde(other)]
+    NeedsSignIn,
+}
+
+/// One store in the daemon (`Request::Stores`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreInfo {
+    pub store: StoreId,
+    pub account: AccountState,
+    /// The account the store's games are read for, by name, when known (Steam: the
+    /// client's most recent user).
+    #[serde(default)]
+    pub account_name: Option<String>,
+    #[serde(default)]
+    pub capabilities: Capabilities,
+    /// Games in the library from this store.
+    #[serde(default)]
+    pub games: usize,
+    /// Why the store has no games, or anything else to know ("Steam not found").
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// A game installed and run by its store's own client (a Steam game in local mode), as the
+/// library lists it (`LibraryEntry::client`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientInstall {
+    /// The game's folder.
+    pub dir: PathBuf,
+    /// The store library folder it is in (a Steam library).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<PathBuf>,
+    /// Bytes on disk, as the store counts them (Steam's `SizeOnDisk`).
+    #[serde(default)]
+    pub size_bytes: u64,
+    /// Fully installed, not still downloading.
+    #[serde(default)]
+    pub complete: bool,
+    /// The store has an update waiting or in progress.
+    #[serde(default)]
+    pub update_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+    /// Platforms the store's build supports (`windows`, `linux`, `macos`), when known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    /// The store's own art, from its local cache.
+    #[serde(default, skip_serializing_if = "crate::art::SteamArt::is_empty")]
+    pub art: crate::art::SteamArt,
+    /// Play time the store recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtime: Option<StorePlaytime>,
+    /// Achievements unlocked, of the total, from the store's local cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achievements: Option<AchievementCount>,
+    /// What Play opens: `steam://rungameid/620`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+}
+
+/// Play time as a store recorded it (Steam: `localconfig.vdf`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorePlaytime {
+    #[serde(default)]
+    pub total_seconds: u64,
+    /// The last two weeks, when the store keeps that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_weeks_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_played: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AchievementCount {
+    pub unlocked: usize,
+    pub total: usize,
+}
+
+/// A game's page for stores other than Ubisoft (`Request::GameDetail`): facts, install,
+/// play time, achievements and cloud state, each only as far as the store's files say.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameDetail {
+    #[serde(flatten, with = "game::wire")]
+    pub game: GameRef,
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: Capabilities,
+    /// `game`, `application`, `demo`, … as the store types it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<DateTime<Utc>>,
+    /// The store's page for the game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<ClientInstall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtime: Option<StorePlaytime>,
+    /// `None`: the store's cache has nothing for the game (unknown, not "none").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achievements: Option<Achievements>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudState>,
+    /// DLC the store lists for the game, with whether it is installed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dlc: Vec<Dlc>,
+    /// The account the facts are for (Steam: the client's user), by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Detail no source provides (shown as "not available", not invented).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Achievements {
+    pub unlocked: usize,
+    pub total: usize,
+    #[serde(default)]
+    pub list: Vec<Achievement>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Achievement {
+    /// The store's id for it (Steam's API name).
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlocked_at: Option<DateTime<Utc>>,
+    /// Unlocked, even when the store kept no time for it.
+    #[serde(default)]
+    pub unlocked: bool,
+    /// Icon URL (unlocked, and greyed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_gray: Option<String>,
+}
+
+/// What the store's client last knew of the game's cloud files (Steam: `remotecache.vdf`).
+/// Sync is the client's; Quiver only shows it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CloudState {
+    pub files: usize,
+    pub bytes: u64,
+    /// Newest remote time of any file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_upload: Option<DateTime<Utc>>,
+    /// Files the client hasn't synced (sync state other than "in sync").
+    #[serde(default)]
+    pub unsynced: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dlc {
+    #[serde(flatten, with = "game::wire")]
+    pub game: GameRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub installed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_and_newer_replies_decode() {
+        let d: GameDetail = serde_json::from_str(r#"{"game":"steam:620","name":"Portal 2","later":1}"#).unwrap();
+        assert_eq!(d.game, GameRef::steam(620));
+        assert!(d.achievements.is_none() && d.install.is_none());
+        let c: Capabilities = serde_json::from_str(r#"{"launch":"delegated","install":"teleport"}"#).unwrap();
+        assert_eq!((c.launch, c.install, c.mods), (Support::Delegated, Support::No, Support::No));
+        let s: StoreInfo = serde_json::from_str(r#"{"store":"steam","account":"client_managed"}"#).unwrap();
+        assert_eq!(s.account, AccountState::ClientManaged);
+        let i: ClientInstall = serde_json::from_str(r#"{"dir":"/s/common/Portal 2"}"#).unwrap();
+        assert!(!i.complete && i.art.is_empty());
+        let v = serde_json::to_value(Dlc { game: GameRef::steam(1), name: None, installed: true }).unwrap();
+        assert_eq!(v, serde_json::json!({"game": "steam:1", "installed": true}));
+    }
+}
