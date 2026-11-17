@@ -176,6 +176,9 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
             .or_else(|| cfg.as_ref()?.root()["space_id"].as_str().map(str::to_owned)),
         achievements_asset: cfg.as_ref().and_then(|c| c.root()["uplay"]["achievements"].as_str().map(str::to_owned)),
     };
+    if let Some(cfg) = &cfg {
+        daemon.achievements.set_refs(product_id, ubi_core::achievements::AchRefs::from_config(cfg, refs.space_id.clone()));
+    }
     let o = online.clone();
     let mut p = run_local(move || async move {
         let session = o.session().await?;
@@ -195,6 +198,20 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
         Ok(p)
     })
     .await?;
+    // Unlock status (ach_frontend / legacyPlayerAchievements) and the report journal.
+    if p.achievements.is_some() {
+        match daemon.achievements.status(Some(&account), product_id, refresh, "en-US").await {
+            Ok(s) => {
+                if let Some(a) = s.achievements {
+                    if !a.unlocked_known {
+                        p.errors.extend(s.errors.into_iter().map(|e| format!("achievement unlocks: {e}")));
+                    }
+                    p.achievements = Some(a);
+                }
+            }
+            Err(e) => p.errors.push(format!("achievement unlocks: {e:#}")),
+        }
+    }
     if p.playtime_seconds.is_none()
         && let Some(s) = playtime_stat(&p.stats)
     {
@@ -203,6 +220,13 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
     }
     CACHES.lock().unwrap().progress.insert(key, (Instant::now(), p.clone()));
     Ok(p)
+}
+
+/// A game's achievement facts (sync id, definition set, space) from the cached ownership
+/// list, so the achievements engine needn't fetch the library itself.
+pub(crate) async fn achievement_refs(online: &Arc<Online>, product_id: u32) -> Option<ubi_core::achievements::AchRefs> {
+    let (owned, _) = ownership(online, None, false).await.ok()?;
+    owned.products.get(&product_id).map(ubi_core::achievements::AchRefs::from_product)
 }
 
 /// A game's own play-time stat: `TimePlayed` (Origins, …) or `Playtime` (Black Flag

@@ -3,6 +3,7 @@
 //! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `ubi-api` for the protocol.
 
+mod achievements;
 mod downloads;
 mod exports;
 mod mods;
@@ -87,6 +88,8 @@ struct Daemon {
     options: options::Options,
     /// Mods connected through the SDK pipe (`quiver_mod.h`), via bridges.
     mod_sdk: Arc<ubi_core::modsdk::ModRegistry>,
+    /// Achievement unlock status and reports (shared with the broker).
+    achievements: Arc<ubi_core::achievements::Engine>,
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -531,6 +534,7 @@ impl Daemon {
             Request::Mods(req) => self.handle_mods(source, req).await?,
             Request::Options(req) => self.handle_options(source, req).await?,
             Request::ModSdk(ubi_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
+            Request::Achievements(req) => achievements::handle(self, source, req).await?,
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
@@ -886,6 +890,8 @@ async fn main() -> Result<()> {
     // (`set_options_sink`, `set_metrics_sink`).
     let mod_sdk = ubi_core::modsdk::ModRegistry::logging();
     broker_svc.set_mods(mod_sdk.clone());
+    let ach = achievements::engine(accounts.clone(), events.clone());
+    broker_svc.set_achievements(ach.clone());
     tokio::spawn(broker_svc.clone().serve(broker_listener));
 
     // Also moves a pre-multi-account keyring entry to its per-account one.
@@ -929,10 +935,12 @@ async fn main() -> Result<()> {
         sessions,
         options: options::Options::default(),
         mod_sdk,
+        achievements: ach,
     });
     options::test_session(&daemon);
     downloads::start(&daemon);
     steamgames::start(&daemon);
+    achievements::start(&daemon);
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;
