@@ -371,6 +371,12 @@ impl<R: ShmRegion> HudReader<R> {
         &self.info
     }
 
+    /// The mapping, for checks like [`crate::shm::Mapping::is_file_at`] (the layer re-opens
+    /// `hud.image` when quiverd replaces it).
+    pub fn region(&self) -> &R {
+        &self.region
+    }
+
     /// The publish counter (acquire): one load, the per-present "anything new?" check.
     #[inline]
     pub fn published(&self) -> u64 {

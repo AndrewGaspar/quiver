@@ -6435,6 +6435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ubi-sight-layer"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "image",
+ "libc",
+ "tempfile",
+ "ubi-perf",
+ "x11rb",
+]
+
+[[package]]
 name = "ubid"
 version = "0.1.0"
 dependencies = [
@@ -7556,6 +7568,8 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
+ "libloading",
+ "once_cell",
  "rustix 1.1.6",
  "x11rb-protocol",
  "xcursor",
