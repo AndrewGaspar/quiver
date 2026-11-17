@@ -613,7 +613,14 @@ pub enum Request {
     },
     /// The launch settings `quiver steam-run` applies to a Steam copy
     /// (`SteamLaunchPlan`): the game's environment, DLL overrides, arguments and wrappers.
-    SteamLaunchPlan { product_id: u32 },
+    /// With `perf`, quiverd also starts the launch's perf session (design/SIGHT-HUD.md):
+    /// its environment is in the plan's `env` and its id in `perf_session`; it ends with the
+    /// Steam copy's play session (or, if the game never starts, after a while).
+    SteamLaunchPlan {
+        product_id: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        perf: bool,
+    },
     // ---- Save stores (see [`savestores`]); appended
     /// A game's save stores, who uses each, slot counts (`savestores::SaveStoresReport`).
     /// Reads only the prefix; no Ubisoft request.

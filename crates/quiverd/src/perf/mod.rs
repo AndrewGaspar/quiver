@@ -28,6 +28,7 @@ pub mod registry;
 pub mod rings;
 pub mod sigbus;
 pub mod stats;
+pub mod steam;
 pub mod system;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -196,6 +197,8 @@ pub struct PerfHub {
     state: Mutex<State>,
     pub broadcast: broadcast::Sender<PerfEvent>,
     next_sub: AtomicU64,
+    /// Perf sessions of `quiver steam-run` launches (`steam.rs`).
+    steam: steam::SteamSessions,
 }
 
 /// What [`PerfHub::begin`] set up for a launch.
@@ -230,6 +233,7 @@ impl PerfHub {
             state: Mutex::new(State { sessions: BTreeMap::new(), conns: HashMap::new(), binder: keybinds::Binder::dry_run(), focused: None }),
             broadcast: broadcast::channel(64).0,
             next_sub: AtomicU64::new(1),
+            steam: Default::default(),
         })
     }
 

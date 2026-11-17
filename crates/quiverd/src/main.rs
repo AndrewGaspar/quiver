@@ -740,7 +740,8 @@ impl Daemon {
 /// A session no quiverd launch held, started from Steam by `quiver steam-run`, into the
 /// game's local play history, with the settings revision it ran
 /// under (Steam launches apply the game's settings; see `steamlib::launch_plan`).
-fn record_bridge_session(f: &quiver_core::playsession::Finished) {
+/// `perf`: the summary of its perf session (`quiver steam-run` asks for one).
+fn record_bridge_session(f: &quiver_core::playsession::Finished, perf: Option<quiver_api::perf::PerfSummary>) {
     // Only Steam launches through `quiver steam-run` are someone playing. Other bridges
     // (containers, agents' test instances, often several at once and dozens a day) would
     // bury the person's own play history, so they stay out of it.
@@ -762,7 +763,8 @@ fn record_bridge_session(f: &quiver_core::playsession::Finished) {
     };
     let via = format!("Steam app {app}");
     tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
-    if let Err(e) = settings::record_session(f.product_id, &session) {
+    // Perf: beside the session, as quiverd's own launches record it (`PerfRequest::Summaries`).
+    if let Err(e) = settings::record_session_with(f.product_id, &session, json!({ "perf": perf })) {
         tracing::warn!("recording play session: {e:#}");
     }
 }
@@ -908,7 +910,11 @@ async fn main() -> Result<()> {
     };
     let broker = broker_listener.local_addr()?.to_string();
     let (events, _) = broadcast::channel(256);
+    // The perf hub takes mods' metrics, and ends Steam launches' perf sessions with their
+    // play sessions.
+    let perf = perf::PerfHub::start(launcher::data_dir(), perf::shm_root());
     let sessions = {
+        let finished_perf = perf.clone();
         let events = events.clone();
         let list: Arc<Mutex<Option<Arc<PlaySessions>>>> = Arc::default();
         let l = list.clone();
@@ -922,7 +928,8 @@ async fn main() -> Result<()> {
                 }
             },
             move |f| {
-                record_bridge_session(&f);
+                let summary = f.steam_app_id.and_then(|_| finished_perf.end_steam(f.product_id));
+                record_bridge_session(&f, summary);
                 let _ = finished_events.send(Event::GameStopped { product_id: f.product_id });
             },
         );
@@ -933,8 +940,6 @@ async fn main() -> Result<()> {
     // Stand-in sinks until the Options backend and the perf hub install theirs
     // (`set_options_sink`, `set_metrics_sink`).
     let mod_sdk = quiver_core::modsdk::ModRegistry::logging();
-    // The perf hub takes mods' metrics.
-    let perf = perf::PerfHub::start(launcher::data_dir(), perf::shm_root());
     mod_sdk.set_metrics_sink(perf::mods::PerfModSink::new(&perf));
     broker_svc.set_mods(mod_sdk.clone());
     let ach = achievements::engine(accounts.clone(), events.clone());
@@ -989,6 +994,7 @@ async fn main() -> Result<()> {
     downloads::start(&daemon);
     steamgames::start(&daemon);
     achievements::start(&daemon);
+    daemon.start_perf_steam_sweep();
     tracing::info!("quiverd listening on {} (broker {})", path.display(), daemon.broker);
     loop {
         let (stream, _) = listener.accept().await?;

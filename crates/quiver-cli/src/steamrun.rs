@@ -225,12 +225,19 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     log.line(format!("saves: {}", ctx["savegame_path"].as_str().unwrap_or_default()));
 
     // The game's launch settings (env, DLL overrides, args, wrappers); an older quiverd
-    // doesn't have them, and the launch goes on without.
+    // doesn't have them, and the launch goes on without. With them comes the launch's perf
+    // session (its environment is in the plan's env; quiverd ends it with the play session).
     let mut plan_env = Vec::new();
-    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { product_id }).await {
+    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { product_id, perf: !a.no_settings }).await {
         Ok(plan) if !a.no_settings => {
             for l in steamplan::describe(&plan) {
                 log.line(format!("settings r{}: {l}", plan.revision));
+            }
+            if let Some(s) = &plan.perf_session {
+                log.line(format!("perf session {s}"));
+            }
+            for l in &plan.perf_notes {
+                log.line(l);
             }
             argv = steamplan::wrap(&plan, command_for(&plan.args));
             if !plan.dll_overrides.is_empty() {

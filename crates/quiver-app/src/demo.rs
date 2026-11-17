@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 pub mod detail;
 pub mod downloads;
+pub mod perf;
 
 use quiver_api::{
     ActiveSession, ActivityEntry, Art, Event, Game, GameSettings, Job, JobKind, LibraryEntry, PlaySession, Playtime,
@@ -88,6 +89,8 @@ struct State {
 pub struct Demo {
     state: Mutex<State>,
     events: mpsc::UnboundedSender<Event>,
+    /// Perf sessions, HUD settings and live updates (`demo/perf.rs`).
+    pub perf: perf::DemoPerf,
 }
 
 fn home() -> PathBuf {
@@ -141,7 +144,7 @@ fn origins_history() -> (GameSettings, Vec<Revision>) {
 impl Demo {
     pub fn start() -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let demo = Arc::new(Demo { state: Mutex::new(build_state()), events: tx });
+        let demo = Arc::new(Demo { state: Mutex::new(build_state()), events: tx, perf: perf::DemoPerf::new() });
         let weak = Arc::downgrade(&demo);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -173,10 +176,14 @@ impl Demo {
         for e in events {
             self.emit(e);
         }
+        perf::tick(self);
     }
 
     pub fn handle(&self, req: Request) -> Result<Value> {
         let mut st = self.state.lock().unwrap();
+        if let Request::Perf(p) = req {
+            return perf::handle(self, &st, p);
+        }
         let req = match downloads::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         let req = match detail::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = global::handle(self, &mut st, &req)? {
@@ -250,6 +257,7 @@ impl Demo {
                 drop(st);
                 self.emit(Event::Job(job));
                 self.emit(Event::GameStarted { product_id });
+                perf::session_event(self, product_id, false);
                 json!(id)
             }
             Request::Stop { product_id } => {
@@ -268,6 +276,7 @@ impl Demo {
                     self.emit(Event::Job(j));
                 }
                 self.emit(Event::GameStopped { product_id });
+                perf::session_event(self, product_id, true);
                 Value::Null
             }
             Request::Cancel { job_id, .. } => {
@@ -356,6 +365,7 @@ fn build_state() -> State {
         let last = sessions.first().map(|s| s.ended); // newest first
         playtime.insert(fx.id, Playtime { total_seconds: fx.hours * 3600 + 25 * 60, last_played: last, sessions });
     }
+    perf::decorate(&mut playtime);
     let (origins, history) = origins_history();
     let mut settings = BTreeMap::new();
     settings.insert(3539, origins);

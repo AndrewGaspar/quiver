@@ -224,6 +224,18 @@ struct Session {
     refused: u64,
 }
 
+impl Session {
+    /// A declared metric by the index mods use: 1-based (`metrics_ok` hands out 1..=64);
+    /// 0 is never valid.
+    fn def(&self, index: u16) -> Option<&DeclaredMetric> {
+        def_at(&self.defs, index)
+    }
+}
+
+fn def_at(defs: &[DeclaredMetric], index: u16) -> Option<&DeclaredMetric> {
+    defs.get(usize::from(index).checked_sub(1)?)
+}
+
 impl ModRegistry {
     pub fn new(options: Arc<dyn ModOptionsSink>, metrics: Arc<dyn ModMetricsSink>) -> Arc<Self> {
         Arc::new(Self {
@@ -627,7 +639,7 @@ impl ModRegistry {
                             Err(_) => continue,
                         },
                     };
-                    let d = &s.defs[index as usize];
+                    let Some(d) = s.def(index) else { continue };
                     if let Ok(value) = pd::check_sample(&d.def, &SampleValue::Text(text)) {
                         samples.push(Sample { index, id: d.id.clone(), kind: d.def.kind, value });
                     }
@@ -674,7 +686,7 @@ impl ModRegistry {
                 }
                 let mut samples = Vec::with_capacity(v.len());
                 for (index, val) in v.iter().take(pl::MAX_METRICS_PER_PRODUCER) {
-                    let Some(d) = s.defs.get(*index as usize) else {
+                    let Some(d) = def_at(&s.defs, *index) else {
                         s.refused += 1;
                         continue;
                     };
@@ -697,7 +709,7 @@ impl ModRegistry {
                     self.refuse(s, "marks over the rate");
                     return None;
                 }
-                let Some(d) = s.defs.get(index as usize).filter(|d| d.def.kind == MetricKind::Event).cloned() else {
+                let Some(d) = s.def(index).filter(|d| d.def.kind == MetricKind::Event).cloned() else {
                     self.refuse(s, "mark on a metric that isn't an event");
                     return None;
                 };
@@ -731,7 +743,7 @@ impl ModRegistry {
             return Err(format!("{} metrics need a shared-memory ring, which this Quiver doesn't offer yet", kind_name(def.kind)));
         }
         if let Some(&i) = s.by_id.get(&def.id) {
-            let old = &mut s.defs[i as usize];
+            let old = &mut s.defs[usize::from(i) - 1];
             if old.def.kind != def.kind {
                 return Err(format!("already declared as {}", kind_name(old.def.kind)));
             }
@@ -741,7 +753,9 @@ impl ModRegistry {
         if s.defs.len() >= pl::MAX_METRICS_PER_PRODUCER {
             return Err(format!("more than {} metrics", pl::MAX_METRICS_PER_PRODUCER));
         }
-        let d = DeclaredMetric { index: s.defs.len() as u16, id: def.id.clone(), def };
+        // 1-based: index 0 is never valid in ring records (quiver_perf::layout), so the
+        // indices mods get here are the ones their rings will use.
+        let d = DeclaredMetric { index: s.defs.len() as u16 + 1, id: def.id.clone(), def };
         s.by_id.insert(d.id.clone(), d.index);
         s.defs.push(d.clone());
         Ok(d)
@@ -805,7 +819,7 @@ impl ModRegistry {
             match &smp.value {
                 CheckedValue::Gauge(x) => serde_json::json!(x),
                 CheckedValue::Counter(n) => serde_json::json!(n),
-                CheckedValue::State(i) => serde_json::json!(s.defs[smp.index as usize].def.values[*i].value),
+                CheckedValue::State(i) => serde_json::json!(s.def(smp.index).and_then(|d| d.def.values.get(*i)).map(|v| v.value.clone())),
                 CheckedValue::Text(t) => serde_json::json!(t),
                 CheckedValue::Histogram(h) => serde_json::json!({ "edges": h.edges, "counts": h.counts }),
             }

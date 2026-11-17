@@ -82,6 +82,15 @@ impl Source {
         Ok((Source::Daemon(client), status, events))
     }
 
+    /// Perf events (`PerfEvent`: subscription updates, perf sessions, HUD changes) from now
+    /// on. Subscriptions don't survive a daemon restart: make them again on `Reconnected`.
+    pub async fn perf_events(&self) -> Result<mpsc::UnboundedReceiver<quiver_api::perf::PerfEvent>> {
+        match self {
+            Source::Daemon(c) => c.subscribe_perf().await,
+            Source::Demo(d) => Ok(d.perf.events()),
+        }
+    }
+
     pub async fn call<T: DeserializeOwned>(&self, req: Request) -> Result<T> {
         match self {
             Source::Daemon(c) => c.call(req).await,

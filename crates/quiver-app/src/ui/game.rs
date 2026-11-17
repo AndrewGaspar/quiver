@@ -9,12 +9,13 @@ mod mods;
 mod options;
 mod overview;
 mod page;
+mod perf;
 mod saves;
 mod stores;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
-pub use page::{ExportAction, GamePage, LaunchDraft, PlayAfter, checkbox, settings_from_reply, toggle};
+pub use page::{ExportAction, GamePage, LaunchDraft, Load, PlayAfter, checkbox, settings_from_reply, toggle};
 
 use super::library::{play_button, primary_label};
 use super::{
@@ -370,6 +371,7 @@ impl Quiver {
             Tab::Overview => self.render_overview(th, &g, cx),
             Tab::LaunchOptions => self.render_launch(th, &g, cx),
             Tab::Mods => self.render_mods(th, &g, cx),
+            Tab::Performance => self.render_perf(th, &g, cx),
             Tab::Saves => self.render_saves(th, &g, cx),
             Tab::AddOns => self.render_addons(th, &g, cx),
             Tab::Files => self.render_files(th, &g, cx),
