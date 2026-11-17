@@ -786,6 +786,7 @@ impl Quiver {
         let level = flags.iter().any(|f| f == "options-advanced");
         let staged = flags.iter().any(|f| f == "options-unsaved");
         let save = flags.iter().any(|f| f == "options-save");
+        let source_mod = flags.iter().find_map(|f| f.strip_prefix("options-source=")).unwrap_or("lb5k1yq").to_owned();
         let scroll: Option<f32> = flags.iter().find_map(|f| f.strip_prefix("options-scroll=")).and_then(|v| v.parse().ok());
         cx.spawn_in(window, async move |this, cx| {
             for _ in 0..100 {
@@ -811,7 +812,7 @@ impl Quiver {
                     _ => ModsView::Options,
                 };
                 if view == "source" {
-                    this.gp.opt.source_mod = Some("lb5k1yq".into());
+                    this.gp.opt.source_mod = Some(source_mod.clone());
                 }
                 if level {
                     this.gp.opt.level = Level::Advanced;
@@ -831,6 +832,7 @@ impl Quiver {
                     this.options_stage(key, Some(Edit::Set(serde_json::json!(144))), cx);
                 }
                 if this.gp.opt.view == ModsView::Source
+                    && source_mod == "lb5k1yq"
                     && let Some((g, _)) = this.gp.opt.of.clone()
                 {
                     this.options_infer(g, "lb5k1yq".into(), "SkipIntro.ini".into(), cx);
