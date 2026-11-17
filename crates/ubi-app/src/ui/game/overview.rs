@@ -351,7 +351,7 @@ impl Quiver {
                             .flex_col()
                             .w(px(150.))
                             .child(div().flex().items_baseline().gap(px(5.)).child(div().text_size(px(20.)).font_weight(BOLD).child(a.total.to_string())).child(div().text_color(th.tx3).child("achievements")))
-                            .child(div().text_size(px(11.5)).text_color(th.tx3).child(if a.unlocked_known { format!("{} unlocked", a.unlocked) } else { "Unlock status not available yet".into() })),
+                            .child(div().text_size(px(11.5)).text_color(th.tx3).child(if a.unlocked_known { format!("{} unlocked", a.unlocked) } else { "Unlock status not available right now".into() })),
                     )
                     .children(icons)
                     .when(a.items.len() > 10, |d| d.child(div().text_size(px(12.)).text_color(th.tx3).ml(px(4.)).child(format!("+ {}", a.items.len() - 10)))),

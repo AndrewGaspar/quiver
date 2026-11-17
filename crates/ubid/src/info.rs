@@ -158,11 +158,11 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
     let online = daemon.account_for(product_id, None).await?;
     let account = user_id(&online)?;
     let key = (account.clone(), product_id);
-    if !refresh
-        && let Some((at, p)) = CACHES.lock().unwrap().progress.get(&key)
-        && at.elapsed() < PROGRESS_TTL
-    {
-        return Ok(p.clone());
+    let cached = CACHES.lock().unwrap().progress.get(&key).filter(|(at, _)| !refresh && at.elapsed() < PROGRESS_TTL).map(|(_, p)| p.clone());
+    if let Some(mut p) = cached {
+        // Unlocks change during play (the journal): merged afresh, from the engine's cache.
+        with_unlocks(daemon, &account, product_id, false, &mut p).await;
+        return Ok(p);
     }
     // The space id is in the ownership data (and the game's config), the achievement set in
     // the config.
@@ -198,20 +198,7 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
         Ok(p)
     })
     .await?;
-    // Unlock status (ach_frontend / legacyPlayerAchievements) and the report journal.
-    if p.achievements.is_some() {
-        match daemon.achievements.status(Some(&account), product_id, refresh, "en-US").await {
-            Ok(s) => {
-                if let Some(a) = s.achievements {
-                    if !a.unlocked_known {
-                        p.errors.extend(s.errors.into_iter().map(|e| format!("achievement unlocks: {e}")));
-                    }
-                    p.achievements = Some(a);
-                }
-            }
-            Err(e) => p.errors.push(format!("achievement unlocks: {e:#}")),
-        }
-    }
+    with_unlocks(daemon, &account, product_id, refresh, &mut p).await;
     if p.playtime_seconds.is_none()
         && let Some(s) = playtime_stat(&p.stats)
     {
@@ -220,6 +207,28 @@ async fn game_progress(daemon: &Arc<Daemon>, product_id: u32, refresh: bool) -> 
     }
     CACHES.lock().unwrap().progress.insert(key, (Instant::now(), p.clone()));
     Ok(p)
+}
+
+/// Unlock status (ach_frontend / legacyPlayerAchievements) and the report journal, merged
+/// into the progress's achievement set. Source failures are listed only when no source
+/// answered.
+async fn with_unlocks(daemon: &Arc<Daemon>, account: &str, product_id: u32, refresh: bool, p: &mut Progress) {
+    if p.achievements.is_none() {
+        return;
+    }
+    const PREFIX: &str = "achievement unlocks: ";
+    p.errors.retain(|e| !e.starts_with(PREFIX));
+    match daemon.achievements.status(Some(account), product_id, refresh, "en-US").await {
+        Ok(s) => {
+            if let Some(a) = s.achievements {
+                if !a.unlocked_known {
+                    p.errors.extend(s.errors.into_iter().map(|e| format!("{PREFIX}{e}")));
+                }
+                p.achievements = Some(a);
+            }
+        }
+        Err(e) => p.errors.push(format!("{PREFIX}{e:#}")),
+    }
 }
 
 /// A game's achievement facts (sync id, definition set, space) from the cached ownership

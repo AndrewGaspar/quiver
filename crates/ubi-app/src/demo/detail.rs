@@ -702,12 +702,15 @@ fn achievements(id: u32) -> Option<Achievements> {
                 name: f.next().map(|s| s.trim().to_owned()),
                 description: f.next().map(|s| s.trim().to_owned()),
                 image: icon.map(|p| p.to_string_lossy().into_owned()),
-                unlocked: false,
-                unlocked_at: None,
+                // Demo: 59 "Namaste" earned (as on the real account).
+                unlocked: id == "59",
+                unlocked_at: (id == "59").then(|| "2026-11-17T01:00:00Z".parse().unwrap()),
+                report: None,
             })
         })
         .collect();
-    Some(Achievements { unlocked_known: false, unlocked: 0, total: items.len() as u32, items, source: None })
+    let unlocked = items.iter().filter(|a| a.unlocked).count() as u32;
+    Some(Achievements { unlocked_known: true, unlocked, total: items.len() as u32, items, source: Some("ach_frontend".into()) })
 }
 
 fn progress(st: &State, id: u32) -> Result<Progress> {
@@ -1786,7 +1789,9 @@ mod tests {
         assert!(p.playtime_seconds.unwrap() > 80 * 3600);
         let a = p.achievements.unwrap();
         assert_eq!(a.total, 67);
-        assert!(!a.unlocked_known && a.items.iter().all(|x| !x.unlocked));
+        // Unlock status shown: 59 "Namaste" earned.
+        assert!(a.unlocked_known && a.unlocked == 1);
+        assert!(a.items.iter().all(|x| x.unlocked == (x.id == "59")));
         let s: SavesReport = call(&demo, Request::Saves { product_id: 3539, cloud: true });
         assert!(s.slots.iter().any(|x| x.state == SlotState::CloudNewer));
         let local: SavesReport = call(&demo, Request::Saves { product_id: 3539, cloud: false });

@@ -2,6 +2,7 @@
 //! daemon (started on demand), so the CLI, the GUI and agents share one runtime and one
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
+mod achievements;
 mod dev;
 mod downloads;
 mod exports;
@@ -144,10 +145,12 @@ enum Cmd {
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
-    /// Keys: proton, language, account, profile, art, args, wrappers, env.NAME, dll.NAME.
+    /// Keys: proton, language, account, profile, art, achievements, args, wrappers, env.NAME,
+    /// dll.NAME.
     /// `account` (username or user id) picks the account the game launches with; `profile`
     /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default; `art`
-    /// (`steam` or `ubisoft`) whose art the app shows first for a game with a Steam copy.
+    /// (`steam` or `ubisoft`) whose art the app shows first for a game with a Steam copy;
+    /// `achievements` (`on`, `off` or `dry-run`) whether earned achievements are reported.
     Set {
         game: String,
         #[arg(required = true)]
@@ -250,6 +253,19 @@ enum Cmd {
         /// Ask Ubisoft again instead of using the daemon's few-minute cache.
         #[arg(long)]
         refresh: bool,
+    },
+    /// A game's achievements with this account's unlock status, and Quiver's report journal
+    /// (achievements games earned through Quiver, reported to Ubisoft unless the game's
+    /// `achievements` setting is `off` or `dry-run`). `report <id>` sends one again.
+    Achievements {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        /// Ask Ubisoft again instead of using the cached unlock set.
+        #[arg(long)]
+        refresh: bool,
+        #[command(subcommand)]
+        action: Option<achievements::AchAction>,
     },
     /// A game's save slots (local and cloud) and backups; `restore` brings a backup back.
     Saves {
@@ -772,6 +788,13 @@ async fn main() -> Result<()> {
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
         Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,
+        Cmd::Achievements { game, json, refresh, action: None } => achievements::list(&client, &game, json, refresh).await?,
+        Cmd::Achievements { game, action: Some(achievements::AchAction::Report { id, dry_run, json }), json: j, .. } => {
+            achievements::report(&client, &cli.source, &game, id, dry_run, json || j).await?
+        }
+        Cmd::Achievements { game, action: Some(achievements::AchAction::Probe { platform, framing, all_products }), .. } => {
+            achievements::probe(&client, &game, platform, framing, all_products).await?
+        }
         Cmd::Saves { game, json, local, action: None } => info::saves(&client, &game, json, local).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Sync { profile }), .. } => info::sync(&client, &game, profile).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
