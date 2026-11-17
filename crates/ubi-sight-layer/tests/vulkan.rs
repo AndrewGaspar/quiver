@@ -92,7 +92,7 @@ fn composites_and_records() {
         frames,
         hitches: vec![60, 100],
         debug_utils: validation.is_some(),
-        on_frame: Some(Box::new(|f, _| {
+        on_frame: Some(Box::new(|f, _, _| {
             if f == 75 {
                 session.publish(&v1);
             }
@@ -195,12 +195,49 @@ fn composites_and_records() {
     }
     reader.poll(10_000, |_, _| {});
 
+    // 2b. Two swapchains in one present (two wait semaphores): the larger one gets the HUD,
+    // both get records.
+    let mid = std::cell::RefCell::new(None);
+    let r = run(Opts {
+        frames: 30,
+        second: Some((320, 240)),
+        debug_utils: validation.is_some(),
+        on_frame: Some(Box::new(|f, _, _| {
+            if f == 29 {
+                std::thread::sleep(Duration::from_millis(300));
+                *mid.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status());
+            }
+        })),
+        ..Opts::default()
+    });
+    assert!(r.messages.is_empty(), "{:#?}", r.messages);
+    let f = Frame { px: r.pixels.as_ref().unwrap(), w: extent.0 };
+    let dst = f.at(1200, 700);
+    close(f.at(pos.0 + w - 10, pos.1 + 20), expect(BG, opacity, dst, false), 3.0, "two swapchains: background");
+    let m = mid.borrow().unwrap();
+    assert_eq!((m.extent_w, m.extent_h, m.swapchain_count), (1280, 720, 2));
+    let mut by_id = std::collections::BTreeMap::<u32, (usize, usize, Option<u64>)>::new();
+    reader.poll(10_000, |_, rec| {
+        let p = LayerPresent::from_record(rec).unwrap();
+        let e = by_id.entry(p.swapchain).or_default();
+        e.0 += 1;
+        e.1 += p.hud_drawn as usize;
+        e.2 = p.present_id;
+    });
+    let v: Vec<_> = by_id.values().collect();
+    assert_eq!(v.len(), 2, "{by_id:?}");
+    assert_eq!((v[0].0, v[1].0), (30, 30));
+    assert!(v[0].1 >= 28 && v[1].1 == 0, "{by_id:?}");
+    if r.present_id {
+        assert_eq!((v[0].2, v[1].2), (Some(30), Some(10_030)));
+    }
+
     // 3. Another extent: the image is laid out for 1280×720, so nothing is drawn.
     let mid = std::cell::RefCell::new(None);
     let r = run(Opts {
         frames: 20,
         extent: (1024, 600),
-        on_frame: Some(Box::new(|f, _| {
+        on_frame: Some(Box::new(|f, _, _| {
             if f == 19 {
                 std::thread::sleep(Duration::from_millis(300));
                 *mid.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status());

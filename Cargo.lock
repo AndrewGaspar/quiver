@@ -6441,6 +6441,7 @@ dependencies = [
  "ash",
  "image",
  "libc",
+ "serde_json",
  "tempfile",
  "ubi-perf",
  "x11rb",
