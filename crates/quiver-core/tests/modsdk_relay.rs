@@ -63,10 +63,10 @@ async fn mod_to_registry_through_the_relay() {
     assert_eq!((w["t"].as_str(), w["session"].as_str()), (Some("welcome"), Some("s-relay")));
     m.send(json!({"t":"options","ids":["fg.enabled"]})).await;
     m.send(json!({"t":"metrics","defs":[{"id":"aco-dlss.fg.state","kind":"state","values":[{"value":"on"},{"value":"off"}]}]})).await;
-    assert_eq!(m.recv().await["ids"]["aco-dlss.fg.state"], 0);
+    assert_eq!(m.recv().await["ids"]["aco-dlss.fg.state"], 1);
     // Junk on the pipe never reaches quiverd.
     write_frame(&mut m.0, b"\x00\x01garbage").await.unwrap();
-    m.send(json!({"t":"m","ts":1,"v":{"0":"on"}})).await;
+    m.send(json!({"t":"m","ts":1,"v":{"1":"on"}})).await;
     let c = until(|| reg.connections(Some(3539)).into_iter().find(|c| c.metrics.first().is_some_and(|x| x.value.is_some()))).await;
     assert_eq!((c.client_pid, c.refused), (Some(1234), 0));
 

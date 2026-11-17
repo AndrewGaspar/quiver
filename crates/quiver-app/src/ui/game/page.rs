@@ -1471,6 +1471,7 @@ impl Quiver {
                     2 + self.gp.profiles().len()
                 }
             }
+            Tab::Performance => self.perf_body_len(id),
             Tab::Saves => self.gp.saves.ready().map(|s| s.backups.len()).unwrap_or(0),
             Tab::AddOns => self.addons_shown().len(),
             Tab::Files => {
@@ -1525,6 +1526,7 @@ impl Quiver {
                     self.new_profile_dialog(id, cx);
                 }
             }
+            Tab::Performance => self.perf_body_activate(id, i, cx),
             Tab::Saves => {
                 if let Some(b) = self.gp.saves.ready().and_then(|s| s.backups.get(i)).cloned() {
                     self.open_dialog(Dialog::RestoreSaves { game: id, backup: b });

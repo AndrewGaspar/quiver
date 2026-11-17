@@ -77,4 +77,10 @@ pub struct SteamLaunchPlan {
     /// Settings that don't apply to a Steam launch (Steam picks Proton, …).
     #[serde(default)]
     pub ignored: Vec<String>,
+    /// The perf session quiverd started for this launch (`SteamLaunchPlan { perf: true }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf_session: Option<String>,
+    /// Lines about the perf session ("hud: …"), for the launch log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perf_notes: Vec<String>,
 }

@@ -128,17 +128,17 @@ async fn handshake_metrics_and_status() {
     .await;
     let ok = m.recv().await;
     assert_eq!(ok["t"], "metrics_ok");
-    assert_eq!(ok["ids"], json!({"aco-dlss.fg.state":0,"aco-dlss.fps.base":1,"aco-dlss.frames.real":2,"aco-dlss.upscaler":3,"aco-dlss.bench":4}));
+    assert_eq!(ok["ids"], json!({"aco-dlss.fg.state":1,"aco-dlss.fps.base":2,"aco-dlss.frames.real":3,"aco-dlss.upscaler":4,"aco-dlss.bench":5}), "1-based, like ring records");
     let rejected = ok["rejected"].as_object().unwrap();
     assert!(rejected["aco-dlss.frame"].as_str().unwrap().contains("ring"));
     assert!(rejected["other-mod.x"].as_str().unwrap().contains("namespace"), "only its own namespace");
     assert!(rejected.contains_key("Bad Name") && rejected.contains_key("#8"), "{rejected:?}");
 
-    m.send(json!({"t":"m","ts":1000,"v":{"0":"on","1":79.5,"2":4211,"3":"DLSS K","9":1}})).await;
+    m.send(json!({"t":"m","ts":1000,"v":{"1":"on","2":79.5,"3":4211,"4":"DLSS K","9":1,"0":2}})).await;
     // Wrong types are refused per value.
-    m.send(json!({"t":"m","ts":1001,"v":{"0":"sideways","1":"fast"}})).await;
-    m.send(json!({"t":"mark","index":4,"ts":1002,"label":"begin\u{202e}"})).await;
-    m.send(json!({"t":"mark","index":1,"ts":1003})).await;
+    m.send(json!({"t":"m","ts":1001,"v":{"1":"sideways","2":"fast"}})).await;
+    m.send(json!({"t":"mark","index":5,"ts":1002,"label":"begin\u{202e}"})).await;
+    m.send(json!({"t":"mark","index":2,"ts":1003})).await;
     let st = until(|| reg.connections(Some(3539)).into_iter().next().filter(|c| c.metrics.iter().any(|m| m.marks > 0))).await;
     assert_eq!(st.surface, "aco-dlss");
     assert_eq!(st.module.as_deref(), Some("d3d11.dll"));
@@ -153,7 +153,7 @@ async fn handshake_metrics_and_status() {
 
     let log = rec.take();
     assert_eq!(log[0], "snapshot aco-dlss");
-    assert!(log[1].starts_with("declared [(0, \"aco-dlss.fg.state\")"), "{log:?}");
+    assert!(log[1].starts_with("declared [(1, \"aco-dlss.fg.state\")"), "{log:?}");
     assert!(log[2].contains("at=1000") && log[2].contains("Gauge(79.5)") && log[2].contains("Counter(4211)") && log[2].contains("State(1)"), "{log:?}");
     assert_eq!(log[3], "mark aco-dlss.bench at=1002 dur=None label=Some(\"begin\")");
 
