@@ -1160,17 +1160,31 @@ pub fn import_external(ctx: &Ctx, root: Option<&Path>, when: &str) -> Result<Opt
                 if rec.is_some_and(|r| r.written_sha == sha256_hex(text.as_bytes())) {
                     continue;
                 }
-                let shipped = Ini::parse(&ev.texts.get(&f.id).cloned().flatten().unwrap_or_default());
+                let shipped_text = ev.texts.get(&f.id).cloned().flatten().unwrap_or_default();
+                let shipped = Ini::parse(&shipped_text);
+                // The copy was rendered from an older version's file: compare with that one, so
+                // the new version's own values aren't mistaken for hand edits (and don't get
+                // pinned over the new version). `Some(None)`: that file is gone.
+                let rendered_from: Option<Option<Ini>> = rec.filter(|r| r.shipped_sha != sha256_hex(shipped_text.as_bytes())).map(|r| older_base(ctx, f, &r.shipped_sha));
                 for (sec, key) in schema::ini_keys(&ini) {
                     let b = Binding { file: f.id.clone(), section: sec.clone(), key: key.clone() };
                     let now = ini.get(&sec, &key).last().cloned().unwrap_or_default();
-                    let expected = rec
-                        .and_then(|r| r.written.iter().find(|(k, _)| k.eq_ignore_ascii_case(&b.raw_key())).map(|(_, v)| v.clone()))
-                        .or_else(|| shipped.get(&sec, &key).last().cloned());
-                    if expected.as_deref() == Some(now.as_str()) {
+                    let written = rec.and_then(|r| r.written.iter().find(|(k, _)| k.eq_ignore_ascii_case(&b.raw_key())).map(|(_, v)| v.clone()));
+                    let base = match &rendered_from {
+                        None => shipped.get(&sec, &key).last().cloned(),
+                        Some(Some(old)) => old.get(&sec, &key).last().cloned(),
+                        Some(None) => None,
+                    };
+                    if written.is_none() && matches!(rendered_from, Some(None)) {
+                        // Can't tell an edit from the old version's text: the new version wins.
                         continue;
                     }
-                    import_key(s, &ev, &b, &now, &mut values, &mut raw, &mut changes, true);
+                    if written.as_ref().or(base.as_ref()) == Some(&now) {
+                        continue;
+                    }
+                    // Edited back to the shipped value: that's "the version's default", not a pin.
+                    let to_default = base.as_deref() == Some(now.as_str());
+                    import_key(s, &ev, &b, &now, &mut values, &mut raw, &mut changes, true, to_default);
                     sources.insert("file");
                 }
             } else {
@@ -1187,7 +1201,7 @@ pub fn import_external(ctx: &Ctx, root: Option<&Path>, when: &str) -> Result<Opt
                     });
                     let Some(now) = ini.get(&b.section, &b.key).last().cloned() else { continue };
                     if was_set && now != want {
-                        import_key(s, &ev, b, &now, &mut values, &mut raw, &mut changes, false);
+                        import_key(s, &ev, b, &now, &mut values, &mut raw, &mut changes, false, false);
                         sources.insert("game");
                     }
                 }
@@ -1201,10 +1215,29 @@ pub fn import_external(ctx: &Ctx, root: Option<&Path>, when: &str) -> Result<Opt
     Ok(Some(append(&ctx.store, &ctx.profile_id, values, raw, source, None, Some(format!("{what}; found {when}")), changes)?))
 }
 
+/// The older version's copy of `f` whose text hashes to `sha` (any installed layer).
+fn older_base(ctx: &Ctx, f: &FileLoc, sha: &str) -> Option<Ini> {
+    let dirs = std::fs::read_dir(ctx.store.layers_dir()).ok()?;
+    dirs.flatten().map(|d| d.path().join(&f.rel)).filter_map(|p| read_text(&p)).find(|t| sha256_hex(t.as_bytes()) == sha).map(|t| Ini::parse(&t))
+}
+
+/// `to_default`: the file has the shipped value again, so a stored value is dropped (the
+/// version's default shows through) rather than `now` being pinned.
 #[allow(clippy::too_many_arguments)]
-fn import_key(s: &Surface, ev: &SurfaceEval, b: &Binding, now: &str, values: &mut Values, raw: &mut RawValues, changes: &mut Vec<String>, raw_ok: bool) {
+fn import_key(s: &Surface, ev: &SurfaceEval, b: &Binding, now: &str, values: &mut Values, raw: &mut RawValues, changes: &mut Vec<String>, raw_ok: bool, to_default: bool) {
     let title = s.title();
     match ev.options.iter().find(|(_, e)| e.binding.as_ref().is_some_and(|x| x.raw_key().eq_ignore_ascii_case(&b.raw_key()))) {
+        Some((id, e)) if to_default => {
+            let stored = values.get_mut(&s.key).and_then(|m| m.remove(id));
+            if let Some(v) = stored {
+                changes.push(format!("{title} {id} {} → the version's default ({now})", e.def.display(&v)));
+            }
+        }
+        None if to_default => {
+            if raw.get_mut(&s.key).and_then(|m| m.remove(&b.raw_key())).is_some() {
+                changes.push(format!("{title} {} → the version's default ({now})", b.raw_key()));
+            }
+        }
         Some((id, e)) => {
             let before = e.effective();
             match e.def.parse_text(now).and_then(|v| e.def.validate(&v).map(|_| v)) {
@@ -1216,7 +1249,10 @@ fn import_key(s: &Surface, ev: &SurfaceEval, b: &Binding, now: &str, values: &mu
                     values.entry(s.key.clone()).or_default().insert(id.clone(), v);
                 }
                 Err(err) => {
-                    // Recorded as a fact, kept dormant.
+                    // Recorded as a fact, kept dormant (once: the file keeps differing).
+                    if values.get(&s.key).and_then(|m| m.get(id)) == Some(&Value::String(now.to_owned())) {
+                        return;
+                    }
                     changes.push(format!("{title} {id} → {now:?} (doesn't fit: {err})"));
                     values.entry(s.key.clone()).or_default().insert(id.clone(), Value::String(now.to_owned()));
                 }

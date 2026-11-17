@@ -364,3 +364,33 @@ fn static_metrics_for_the_perf_catalog() {
     assert_eq!(m.len(), 1);
     assert!(m[0].2.iter().any(|d| d.id == "aco-dlss.fg.state" && d.kind == quiver_api::options::MetricKind::State));
 }
+
+#[test]
+fn imports_compare_with_the_version_the_copy_was_rendered_from() {
+    let f = aco();
+    set(&f, vec![op("fg.toggle_key", json!("f8")), op("world.npc_density", json!(3))]);
+    let upper = f.store.profile_dir(&f.profile).join("upper/aco_dlss.ini");
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    let mut plan = f.store.plan(Some(&f.profile)).unwrap();
+    prepare_launch(&ctx, &mut plan).unwrap();
+    let key = ctx.surfaces[0].key.clone();
+    // Edited back to the shipped value by hand: the pin goes, the version's default shows through.
+    std::fs::write(&upper, std::fs::read_to_string(&upper).unwrap().replace("npc_density=3", "npc_density=1")).unwrap();
+    let r = import_external(&ctx, None, "while the game ran").unwrap().expect("imported");
+    assert!(!r.values[&key].contains_key("world.npc_density"), "{:?}", r.values);
+    assert!(import_external(&ctx, None, "again").unwrap().is_none());
+    // v2 ships other values. The copy rendered from v1 isn't a hand edit of v2's values.
+    let v2 = folder(&f.t.join("v2"), &[("aco_dlss.ini", &ACO_INI.replace("npc_distance=1", "npc_distance=2"))]);
+    f.store.add_version("DLSS", &NewVersion { path: Some(v2), ..Default::default() }, "cli").unwrap();
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    assert!(import_external(&ctx, None, "at launch").unwrap().is_none(), "nothing pinned from v1's text");
+    let mut plan = f.store.plan(Some(&f.profile)).unwrap();
+    prepare_launch(&ctx, &mut plan).unwrap();
+    let text = std::fs::read_to_string(&upper).unwrap();
+    assert!(text.contains("npc_distance=2") && text.contains("toggle_key=F8"), "{text}");
+    // A value the schema doesn't know yet is recorded once, not on every look.
+    std::fs::write(&upper, text.replace("mode=d3d12", "mode=future")).unwrap();
+    let r = import_external(&ctx, None, "while the game ran").unwrap().expect("recorded");
+    assert!(r.changes[0].contains("doesn't fit"), "{:?}", r.changes);
+    assert!(import_external(&ctx, None, "while the game ran").unwrap().is_none());
+}
