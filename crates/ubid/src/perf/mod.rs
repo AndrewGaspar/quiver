@@ -116,6 +116,8 @@ pub struct Session {
     /// of the flag yet; kept for the presenter rule.
     pub anti_cheat: bool,
     pub monitor: Option<String>,
+    /// The presenter while shown, as last accounted for the summary.
+    noted: Option<Presenter>,
 }
 
 impl Session {
@@ -318,6 +320,7 @@ impl PerfHub {
             mod_conns: HashMap::new(),
             anti_cheat: false,
             monitor: None,
+            noted: None,
         };
         {
             let mut st = self.lock();
@@ -539,9 +542,14 @@ impl PerfHub {
                 if s.presenter.as_ref().is_some_and(|(op, _)| *op != p) {
                     tracing::info!(session = %s.id, ?p, "HUD presenter: {why}");
                 }
-                s.store.note_presenter(s.on.then_some(p), now);
                 s.presenter = Some((p, why));
                 s.dirty = true;
+            }
+            // Presenter time while shown, for the summary.
+            let shown = s.on.then_some(p);
+            if shown != s.noted {
+                s.store.note_presenter(shown, now);
+                s.noted = shown;
             }
             if !s.dirty && now < s.next_model_ns {
                 continue;

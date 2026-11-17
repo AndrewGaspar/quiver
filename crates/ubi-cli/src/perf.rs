@@ -369,7 +369,8 @@ pub fn watch_line(u: &PerfUpdate) -> String {
     for (id, label) in WATCH_LINE {
         used.push(id);
         let Some(v) = val(id) else { continue };
-        if v.stale && id != "fps" {
+        // Nothing provides it (no latency, no upscaler): leave it out, except FPS itself.
+        if (v.stale || v.text == "—") && id != "fps" {
             continue;
         }
         let mut text = v.display().replace(' ', "");

@@ -202,14 +202,22 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
     for r in &inp.layout.rows {
         let mut cells: Vec<HudCell> = Vec::new();
         let mut last_label: Option<String> = None;
+        // A dropped cell's label goes to the next value in its group ("CPU" stays with the
+        // temperature while the load has no sample yet).
+        let mut carry: Option<String> = None;
         for c in &r.cells {
+            let own = c.short.clone().or_else(|| c.label.clone()).filter(|l| !l.is_empty());
             if let Some(w) = &c.when
                 && !shown_condition(store, w, now)
             {
+                if c.metric.is_some() && carry.is_none() {
+                    carry = own;
+                }
                 continue;
             }
             if c.separator {
                 last_label = None;
+                carry = None;
                 cells.push(HudCell::Separator);
             } else if let Some(t) = &c.text {
                 cells.push(HudCell::Text { text: t.clone(), level: c.level.unwrap_or(Level::Normal) });
@@ -222,15 +230,23 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
                 let series = if c.series.is_empty() { vec!["frametime".to_owned()] } else { c.series.clone() };
                 cells.push(HudCell::Graph { series, span_ms, rows: c.rows.unwrap_or(2), min_ms: 0.0, max_ms: 0.0, warn_above_ms: 33.4, bad_above_ms: 50.0, points });
             } else if let Some(id) = &c.metric {
-                let mut label = c.short.clone().or_else(|| c.label.clone()).filter(|l| !l.is_empty());
+                let mut label = own.clone().or_else(|| carry.clone());
                 if label.is_some() && label == last_label {
                     label = None;
                 }
-                if let Some(cell) = metric_cell(store, c, id, now, label.clone()) {
-                    if label.is_some() {
-                        last_label = label;
+                match metric_cell(store, c, id, now, label.clone()) {
+                    Some(cell) => {
+                        if label.is_some() {
+                            last_label = label;
+                        }
+                        carry = None;
+                        cells.push(cell);
                     }
-                    cells.push(cell);
+                    None => {
+                        if carry.is_none() {
+                            carry = own;
+                        }
+                    }
                 }
             }
         }
@@ -401,6 +417,22 @@ mod tests {
         // Stale frames show —, and the model says so.
         let m = model(&s, "fps", now + 5_000 * MS);
         assert!(text_of(&m).contains('—'));
+    }
+
+    #[test]
+    fn a_dropped_cells_label_moves_to_the_next() {
+        let (mut s, now) = session(false);
+        // A fresh session: CPU load needs two readings, the temperature is there.
+        let mut fresh = Store::new(0, Utc::now());
+        fresh.producer("system", "System", true);
+        for d in catalog::system() {
+            fresh.declare("system", d);
+        }
+        fresh.push_num("cpu.temp", now, 64.0);
+        assert_eq!(text_of(&model(&fresh, "compact", now)), "CPU 64°");
+        // Not across a separator.
+        s.push_num("gpu.load", now, 50.0);
+        assert!(text_of(&model(&s, "compact", now)).contains("GPU 50%"));
     }
 
     #[test]
