@@ -57,6 +57,10 @@ pub fn classify(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<Encoding, u32> {
     if ci.image_array_layers != 1 || ci.flags.contains(vk::SwapchainCreateFlagsKHR::PROTECTED) {
         return Err(DRAW_ERR_FORMAT);
     }
+    if ci.flags.contains(vk::SwapchainCreateFlagsKHR::DEFERRED_MEMORY_ALLOCATION_EXT) {
+        // Images have no memory until first acquired: no views at creation.
+        return Err(DRAW_ERR_USAGE);
+    }
     if matches!(ci.present_mode, vk::PresentModeKHR::SHARED_DEMAND_REFRESH | vk::PresentModeKHR::SHARED_CONTINUOUS_REFRESH) {
         // Shared presentable images live in SHARED_PRESENT layout; not handled.
         return Err(DRAW_ERR_USAGE);
@@ -94,6 +98,9 @@ mod tests {
         let mut shared = ci(vk::Format::B8G8R8A8_UNORM, srgb);
         shared.present_mode = vk::PresentModeKHR::SHARED_DEMAND_REFRESH;
         assert_eq!(classify(&shared), Err(DRAW_ERR_USAGE));
+        let mut deferred = ci(vk::Format::B8G8R8A8_UNORM, srgb);
+        deferred.flags = vk::SwapchainCreateFlagsKHR::DEFERRED_MEMORY_ALLOCATION_EXT;
+        assert_eq!(classify(&deferred), Err(DRAW_ERR_USAGE));
         let mut empty = ci(vk::Format::B8G8R8A8_UNORM, srgb);
         empty.image_extent.height = 0;
         assert_eq!(classify(&empty), Err(DRAW_ERR_NO_IMAGE));

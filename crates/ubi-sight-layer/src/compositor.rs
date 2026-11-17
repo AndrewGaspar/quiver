@@ -71,6 +71,9 @@ struct Texture {
 struct Slot {
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
+    /// The fence belongs to a submission that went through (a failed submit leaves it reset
+    /// and never signalled).
+    submitted: bool,
 }
 
 pub struct Compositor {
@@ -105,6 +108,8 @@ pub struct Compositor {
     current: Option<HudBufferHeader>,
     hud_generation: u64,
     last_published: u64,
+    /// Take the current hud.image buffer again (the texture lost its contents).
+    reupload: bool,
     last_queue: vk::Queue,
     /// Presents skipped because every slot was in flight.
     pub skipped: u64,
@@ -118,7 +123,6 @@ impl Compositor {
     /// `images` are the swapchain's images; `d` is its live device.
     pub unsafe fn new(d: &DeviceData, images: &[vk::Image], format: vk::Format, extent: vk::Extent2D, enc: Encoding) -> Result<Compositor, vk::Result> {
         let pipes = d.pipelines_for(format)?;
-        let dev = &d.dev;
         let mut c = Compositor {
             pipes,
             enc,
@@ -141,6 +145,7 @@ impl Compositor {
             current: None,
             hud_generation: u64::MAX,
             last_published: 0,
+            reupload: false,
             last_queue: vk::Queue::null(),
             skipped: 0,
         };
@@ -149,7 +154,7 @@ impl Compositor {
         match unsafe { c.build(d, images, format) } {
             Ok(()) => Ok(c),
             Err(e) => {
-                unsafe { c.destroy_now(dev) };
+                unsafe { c.destroy_now(d) };
                 Err(e)
             }
         }
@@ -185,7 +190,7 @@ impl Compositor {
             // Images in flight plus one, so a free slot is normally there without waiting.
             for _ in 0..images.len() + 1 {
                 let fence = dev.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)?;
-                self.slots.push(Slot { cmd: vk::CommandBuffer::null(), fence });
+                self.slots.push(Slot { cmd: vk::CommandBuffer::null(), fence, submitted: false });
             }
             self.vertices = make_buffer(d, (self.slots.len() * VB_SLOT_BYTES) as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
             let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 }];
@@ -199,6 +204,9 @@ impl Compositor {
 
     /// Fence of slot `i` signalled (its work is done). `Err` on device loss.
     unsafe fn idle(&self, dev: &ash::Device, i: usize) -> Result<bool, u32> {
+        if !self.slots[i].submitted {
+            return Ok(true);
+        }
         // SAFETY: our fence.
         match unsafe { dev.get_fence_status(self.slots[i].fence) } {
             Ok(done) => Ok(done),
@@ -233,6 +241,13 @@ impl Compositor {
                 dev.destroy_command_pool(pool, None);
             }
             self.pool = None;
+            // The texture is EXCLUSIVE to the old family: its contents are undefined on the
+            // new one without an ownership transfer, so upload the current image again.
+            if let Some(t) = self.texture.as_mut() {
+                t.filled = false;
+            }
+            self.current = None;
+            self.reupload = true;
         }
         let internal = |_| DRAW_ERR_INTERNAL;
         // SAFETY: valid create info; command buffers get the loader's dispatch pointer.
@@ -332,10 +347,15 @@ impl Compositor {
 
     /// Step 2: picks up a new `hud.image` buffer into staging if one was published and staging
     /// is free. Returns whether the HUD image is fresh (heartbeat within 3 s).
-    unsafe fn poll_hud(&mut self, d: &DeviceData, queue: vk::Queue, now: i64) -> Result<bool, u32> {
+    unsafe fn poll_hud(&mut self, d: &DeviceData, now: i64) -> Result<bool, u32> {
         // The heartbeat thread holds the lock only while (re)opening the file: then skip.
-        let Ok(mut hud) = HUD.try_lock() else { return Ok(self.current.is_some()) };
-        if hud.generation != self.hud_generation {
+        let mut hud = match HUD.try_lock() {
+            Ok(h) => h,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(self.current.is_some()),
+        };
+        if hud.generation != self.hud_generation || self.reupload {
+            self.reupload = false;
             self.hud_generation = hud.generation;
             self.pending = None;
             self.current = None;
@@ -350,17 +370,13 @@ impl Compositor {
         if published == self.last_published || self.pending.is_some() {
             return Ok(fresh);
         }
-        // Staging must not be read by a submission still in flight; and the texture copy
-        // relies on queue order unless everything is idle.
+        // Staging must not be read by a submission still in flight.
         let dev = &d.dev;
         // SAFETY: our fences.
         unsafe {
             if let Some(s) = self.staging_reader
                 && !self.idle(dev, s)?
             {
-                return Ok(fresh);
-            }
-            if self.last_queue != vk::Queue::null() && self.last_queue != queue && !self.all_idle(dev)? {
                 return Ok(fresh);
             }
         }
@@ -439,9 +455,16 @@ impl Compositor {
                 self.skipped += 1;
                 return Ok(Drawn::Skipped);
             };
+            // The texture and staging are ordered by queue submission order and barriers on
+            // one queue. When the app presents from another queue, wait (by skipping) until
+            // the other queue's work is done.
+            if self.last_queue != vk::Queue::null() && self.last_queue != queue && !self.all_idle(dev)? {
+                self.skipped += 1;
+                return Ok(Drawn::Skipped);
+            }
 
             self.reap_retired(dev)?;
-            let fresh = self.poll_hud(d, queue, now)?;
+            let fresh = self.poll_hud(d, now)?;
             let mut copy = None;
             if let Some(p) = self.pending
                 && self.ensure_texture(d, p.width, p.height)?
@@ -478,9 +501,10 @@ impl Compositor {
                 submit = submit.push_next(&mut latency);
             }
             let fence = self.slots[slot].fence;
+            self.slots[slot].submitted = false;
             dev.reset_fences(&[fence]).map_err(fail)?;
             match dev.queue_submit(queue, &[submit], fence) {
-                Ok(()) => {}
+                Ok(()) => self.slots[slot].submitted = true,
                 Err(vk::Result::ERROR_DEVICE_LOST) => return Err(DRAW_ERR_DEVICE_LOST),
                 Err(_) => return Err(DRAW_ERR_INTERNAL),
             }
@@ -585,22 +609,29 @@ impl Compositor {
     /// Destroys everything after waiting (bounded) for our submissions. If they don't finish
     /// in time, the objects are leaked rather than destroyed while in use.
     ///
+    /// Returns false if it leaked them (the device's shared objects must then stay too).
+    ///
     /// # Safety
-    /// The swapchain is being destroyed; `dev` is its device.
-    pub unsafe fn destroy(mut self, dev: &ash::Device) {
-        let fences: Vec<vk::Fence> = self.slots.iter().map(|s| s.fence).collect();
+    /// The swapchain is being destroyed; `d` is its device.
+    pub unsafe fn destroy(mut self, d: &DeviceData) -> bool {
+        let fences: Vec<vk::Fence> = self.slots.iter().filter(|s| s.submitted).map(|s| s.fence).collect();
         // SAFETY: our fences.
-        let done = fences.is_empty() || unsafe { dev.wait_for_fences(&fences, true, 1_000_000_000) }.is_ok();
+        let done = fences.is_empty() || unsafe { d.dev.wait_for_fences(&fences, true, 1_000_000_000) }.is_ok();
         if done {
             // SAFETY: idle now.
-            unsafe { self.destroy_now(dev) };
+            unsafe { self.destroy_now(d) };
         } else {
             log!("compositor work still pending at swapchain destroy; leaking its objects");
             self.slots.clear();
         }
+        done
     }
 
-    unsafe fn destroy_now(&mut self, dev: &ash::Device) {
+    unsafe fn destroy_now(&mut self, d: &DeviceData) {
+        let dev = &d.dev;
+        // A present may still be waiting on the per-image semaphores (our fences cover only
+        // our submits): the device destroys them later.
+        d.retire_semaphores(self.semaphores.drain(..));
         // SAFETY: nothing of ours is in flight; null handles are ignored.
         unsafe {
             if let Some((_, pool)) = self.pool.take() {
@@ -608,9 +639,6 @@ impl Compositor {
             }
             for s in self.slots.drain(..) {
                 dev.destroy_fence(s.fence, None);
-            }
-            for s in self.semaphores.drain(..) {
-                dev.destroy_semaphore(s, None);
             }
             for f in self.framebuffers.drain(..) {
                 dev.destroy_framebuffer(f, None);

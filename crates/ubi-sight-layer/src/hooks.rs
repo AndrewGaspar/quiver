@@ -180,15 +180,19 @@ pub unsafe extern "system" fn destroy_device(device: vk::Device, alloc: *const v
     let Some(d) = state::remove_device(device) else { return };
     guard("vkDestroyDevice", || {
         // Swapchains the app didn't destroy, then the per-format pipelines.
-        let scs: Vec<_> = d.swapchains.write().map(|mut v| v.drain(..).collect()).unwrap_or_default();
+        let scs: Vec<_> = state::write(&d.swapchains).drain(..).collect();
+        let mut done = true;
         for (_, sc) in scs {
-            let mut s = lock(&sc);
-            destroy_compositors(&d, &mut s);
+            done &= destroy_compositors(&d, &mut lock(&sc));
         }
-        let pipes: Vec<_> = lock(&d.pipelines).drain(..).collect();
-        for p in pipes {
-            // SAFETY: nothing of ours is in flight (compositors waited).
-            unsafe { p.destroy(&d.dev) };
+        // A compositor that timed out leaked its objects; then these must leak too.
+        if done {
+            let pipes: Vec<_> = lock(&d.pipelines).drain(..).collect();
+            for p in pipes {
+                // SAFETY: nothing of ours is in flight (compositors waited).
+                unsafe { p.destroy(&d.dev) };
+            }
+            d.destroy_retired_semaphores();
         }
         state::retarget();
     });
@@ -242,7 +246,7 @@ pub unsafe extern "system" fn create_swapchain_khr(
     // SAFETY: the app's arguments, maybe with one more usage bit (always supported for
     // swapchains: VkSurfaceCapabilitiesKHR::supportedUsageFlags includes COLOR_ATTACHMENT).
     let mut r = unsafe { next(device, &patched, alloc, out) };
-    if r != vk::Result::SUCCESS && patched.image_usage != orig.image_usage {
+    if r != vk::Result::SUCCESS && patched.image_usage != orig.image_usage && orig.old_swapchain == vk::SwapchainKHR::null() {
         // SAFETY: as the app asked.
         r = unsafe { next(device, ci, alloc, out) };
         plan = Err(DRAW_ERR_USAGE);
@@ -330,29 +334,30 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         disabled: Vec::new(),
         draw_error,
     };
-    if let Ok(mut v) = d.swapchains.write() {
-        v.push((handle, Arc::new(Mutex::new(sc))));
-    }
+    state::write(&d.swapchains).push((handle, Arc::new(Mutex::new(sc))));
     state::retarget();
 }
 
-fn destroy_compositors(d: &DeviceData, s: &mut Swapchain) {
+/// Destroys a swapchain's compositors; false if one had to leak its objects.
+fn destroy_compositors(d: &DeviceData, s: &mut Swapchain) -> bool {
     let mut all: Vec<Compositor> = s.disabled.drain(..).collect();
     all.extend(s.comp.take());
+    let mut done = true;
     for c in all {
         // SAFETY: the swapchain (and so its images) is going away; waits for our work.
-        unsafe { c.destroy(&d.dev) };
+        done &= unsafe { c.destroy(d) };
     }
+    done
 }
 
 pub unsafe extern "system" fn destroy_swapchain_khr(device: vk::Device, swapchain: vk::SwapchainKHR, alloc: *const vk::AllocationCallbacks<'_>) {
     let Some(d) = state::device(device) else { return };
     if swapchain != vk::SwapchainKHR::null() {
         guard("vkDestroySwapchainKHR", || {
-            let sc = d.swapchains.write().ok().and_then(|mut v| {
-                let i = v.iter().position(|(h, _)| *h == swapchain)?;
-                Some(v.remove(i).1)
-            });
+            let sc = {
+                let mut v = state::write(&d.swapchains);
+                v.iter().position(|(h, _)| *h == swapchain).map(|i| v.remove(i).1)
+            };
             if let Some(sc) = sc {
                 destroy_compositors(&d, &mut lock(&sc));
                 state::retarget();

@@ -123,8 +123,12 @@ pub fn build(hist: &History, g: &HudGraph, origin: (i32, i32), thickness: f32, o
         return 0;
     }
 
-    let min = g.min_ms.max(0.0);
-    let max = if g.max_ms > min { g.max_ms } else { auto_max(slowest, min) };
+    // Ranges beyond 10 s are nonsense (and min + 1 == min for huge floats): clamp.
+    let min = g.min_ms.clamp(0.0, 10_000.0);
+    let max = if g.max_ms > min { g.max_ms.min(20_000.0) } else { auto_max(slowest.min(10_000.0), min) };
+    if max <= min || !max.is_finite() {
+        return 0;
+    }
     let bottom = gy + gh;
     let y = |ft: f32| bottom - ((ft - min) / (max - min)).clamp(0.0, 1.0) * gh;
     let line = if g.line == 0 { DEFAULT_LINE } else { g.line };
@@ -268,6 +272,17 @@ mod tests {
         // The hitch reaches 50/60 of the height: y ≈ 20 + 60 - 50.
         let top = out[..n].iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
         assert!((top - 30.0).abs() < 1.5, "{top}");
+    }
+
+    #[test]
+    fn absurd_ranges_draw_nothing_or_finite() {
+        let h = history(60.0, 4.0);
+        let mut out = vec![Vertex::default(); VERTS_PER_GRAPH];
+        for (min, max) in [(1e30, 0.0), (1e30, 2e30), (0.0, 1e30), (5.0, 0.0)] {
+            let g = HudGraph { min_ms: min, max_ms: max, ..graph(200, 50) };
+            let n = build(&h, &g, (0, 0), 1.0, &mut out);
+            assert!(out[..n].iter().all(|v| v.pos[0].is_finite() && v.pos[1].is_finite()), "{min} {max}");
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! writers are creation and destruction calls.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ash::vk;
 use ash::vk::Handle;
@@ -42,6 +42,9 @@ pub struct DeviceData {
     queues: RwLock<Vec<(vk::Queue, u32)>>,
     pub swapchains: RwLock<Vec<(vk::SwapchainKHR, Arc<Mutex<Swapchain>>)>>,
     pub pipelines: Mutex<Vec<Arc<Pipelines>>>,
+    /// Semaphores of destroyed compositors a present may still wait on: destroyed with the
+    /// device, or once they're long retired.
+    semaphores: Mutex<Vec<vk::Semaphore>>,
     /// The device was lost (our submit or the app's present said so): no more drawing.
     pub lost: AtomicBool,
 }
@@ -78,25 +81,45 @@ impl DeviceData {
             queues: RwLock::new(Vec::new()),
             swapchains: RwLock::new(Vec::new()),
             pipelines: Mutex::new(Vec::new()),
+            semaphores: Mutex::new(Vec::new()),
             lost: AtomicBool::new(false),
         }
     }
 
     pub fn add_queue(&self, queue: vk::Queue, family: u32) {
-        if let Ok(mut q) = self.queues.write()
-            && !q.iter().any(|(h, _)| *h == queue)
-        {
+        let mut q = write(&self.queues);
+        if !q.iter().any(|(h, _)| *h == queue) {
             q.push((queue, family));
         }
     }
 
     pub fn queue_family(&self, queue: vk::Queue) -> Option<u32> {
-        self.queues.read().ok()?.iter().find(|(h, _)| *h == queue).map(|(_, f)| *f)
+        read(&self.queues).iter().find(|(h, _)| *h == queue).map(|(_, f)| *f)
     }
 
     pub fn swapchain(&self, handle: vk::SwapchainKHR) -> Option<Arc<Mutex<Swapchain>>> {
-        let v = self.swapchains.read().ok()?;
-        v.iter().find(|(h, _)| *h == handle).map(|(_, s)| s.clone())
+        read(&self.swapchains).iter().find(|(h, _)| *h == handle).map(|(_, s)| s.clone())
+    }
+
+    /// Keeps per-image semaphores of a destroyed compositor. The oldest are destroyed once
+    /// there are many: by then many swapchains (and presents) have come and gone.
+    pub fn retire_semaphores(&self, sems: impl Iterator<Item = vk::Semaphore>) {
+        let mut v = lock(&self.semaphores);
+        v.extend(sems);
+        if v.len() > 256 {
+            for s in v.drain(..128) {
+                // SAFETY: retired long ago.
+                unsafe { self.dev.destroy_semaphore(s, None) };
+            }
+        }
+    }
+
+    /// At vkDestroyDevice (the app has waited for the device).
+    pub fn destroy_retired_semaphores(&self) {
+        for s in lock(&self.semaphores).drain(..) {
+            // SAFETY: the device is idle and going away.
+            unsafe { self.dev.destroy_semaphore(s, None) };
+        }
     }
 
     /// A memory type in `bits` with all of `want` (and preferably `prefer` too).
@@ -141,6 +164,14 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+pub fn read<T>(l: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(|p| p.into_inner())
+}
+
+pub fn write<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(|p| p.into_inner())
+}
+
 static INSTANCES: RwLock<Vec<(usize, Arc<InstanceData>)>> = RwLock::new(Vec::new());
 static DEVICES: RwLock<Vec<(usize, Arc<DeviceData>)>> = RwLock::new(Vec::new());
 
@@ -162,43 +193,41 @@ fn key_of(raw: u64) -> Option<usize> {
 
 pub fn add_instance(i: InstanceData) {
     let Some(k) = key_of(i.handle.as_raw()) else { return };
-    if let Ok(mut v) = INSTANCES.write() {
-        v.retain(|(kk, _)| *kk != k);
-        v.push((k, Arc::new(i)));
-    }
+    let mut v = write(&INSTANCES);
+    v.retain(|(kk, _)| *kk != k);
+    v.push((k, Arc::new(i)));
 }
 
 pub fn remove_instance(h: vk::Instance) -> Option<Arc<InstanceData>> {
     let k = key_of(h.as_raw())?;
-    let mut v = INSTANCES.write().ok()?;
+    let mut v = write(&INSTANCES);
     let i = v.iter().position(|(kk, _)| *kk == k)?;
     Some(v.remove(i).1)
 }
 
 pub fn instance(h: vk::Instance) -> Option<Arc<InstanceData>> {
     let k = key_of(h.as_raw())?;
-    INSTANCES.read().ok()?.iter().find(|(kk, _)| *kk == k).map(|(_, i)| i.clone())
+    read(&INSTANCES).iter().find(|(kk, _)| *kk == k).map(|(_, i)| i.clone())
 }
 
 /// The instance a physical device belongs to: physical devices share their instance's
 /// dispatch key. Falls back to the newest instance.
 pub fn instance_of_physical(p: vk::PhysicalDevice) -> Option<Arc<InstanceData>> {
     let k = key_of(p.as_raw())?;
-    let v = INSTANCES.read().ok()?;
+    let v = read(&INSTANCES);
     v.iter().find(|(kk, _)| *kk == k).or(v.last()).map(|(_, i)| i.clone())
 }
 
 pub fn add_device(d: Arc<DeviceData>) {
     let Some(k) = key_of(d.handle.as_raw()) else { return };
-    if let Ok(mut v) = DEVICES.write() {
-        v.retain(|(kk, _)| *kk != k);
-        v.push((k, d));
-    }
+    let mut v = write(&DEVICES);
+    v.retain(|(kk, _)| *kk != k);
+    v.push((k, d));
 }
 
 pub fn remove_device(h: vk::Device) -> Option<Arc<DeviceData>> {
     let k = key_of(h.as_raw())?;
-    let mut v = DEVICES.write().ok()?;
+    let mut v = write(&DEVICES);
     let i = v.iter().position(|(kk, _)| *kk == k)?;
     Some(v.remove(i).1)
 }
@@ -206,7 +235,7 @@ pub fn remove_device(h: vk::Device) -> Option<Arc<DeviceData>> {
 /// The device of any of its dispatchable handles (device, queue, command buffer).
 pub fn device_by_raw(raw: u64) -> Option<Arc<DeviceData>> {
     let k = key_of(raw)?;
-    DEVICES.read().ok()?.iter().find(|(kk, _)| *kk == k).map(|(_, d)| d.clone())
+    read(&DEVICES).iter().find(|(kk, _)| *kk == k).map(|(_, d)| d.clone())
 }
 
 pub fn device(h: vk::Device) -> Option<Arc<DeviceData>> {
@@ -218,9 +247,10 @@ pub fn device(h: vk::Device) -> Option<Arc<DeviceData>> {
 pub fn retarget() {
     let mut best: Option<(u64, u32, LayerStatus)> = None;
     let mut count = 0;
-    if let Ok(devs) = DEVICES.read() {
+    {
+        let devs = read(&DEVICES);
         for (_, d) in devs.iter() {
-            let Ok(scs) = d.swapchains.read() else { continue };
+            let scs = read(&d.swapchains);
             for (_, sc) in scs.iter() {
                 let s = lock(sc);
                 count += 1;

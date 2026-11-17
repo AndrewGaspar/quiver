@@ -108,7 +108,9 @@ pub fn log_enabled() -> bool {
 macro_rules! log {
     ($($t:tt)*) => {
         if $crate::log_enabled() {
-            eprintln!("quiver-sight-layer: {}", format_args!($($t)*));
+            // Not eprintln!: a closed stderr would panic, inside the game.
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "quiver-sight-layer: {}", format_args!($($t)*));
         }
     };
 }
