@@ -1097,7 +1097,11 @@ does with `Reply::Options`, so clients built before them skip the line instead o
 unknown `Event`; `Client::subscribe_perf` receives them. `Update` and `HudModel` go only to the
 connection that subscribed or attached; the rest to every `Subscribe`r. The session summary is
 stored beside the `PlaySession` in `playtime.jsonl` (key `perf`), read with `Summaries`, until
-`PlaySession` can grow the field.
+`PlaySession` can grow the field. `quiver steam-run` launches get a perf session too: it begins
+when steam-run asks for `SteamLaunchPlan { perf: true }` (its environment goes into the plan's
+`env`), ends with the Steam copy's play session, whose record carries the summary, and is
+dropped after 10 minutes if the game never starts (`crates/quiverd/src/perf/steam.rs`). Mods'
+metric indices are 1-based (1..=64), the same numbers their ring records will carry.
 
 ### 3.12 Consumers
 

@@ -42,6 +42,8 @@ pub enum SettingsSection {
     Accounts,
     Library,
     Compatibility,
+    /// The performance HUD's defaults for every game (`ui/perf.rs`).
+    Performance,
     Steam,
     Appearance,
     Automation,
@@ -49,10 +51,11 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 7] = [
+    pub const ALL: [SettingsSection; 8] = [
         SettingsSection::Accounts,
         SettingsSection::Library,
         SettingsSection::Compatibility,
+        SettingsSection::Performance,
         SettingsSection::Steam,
         SettingsSection::Appearance,
         SettingsSection::Automation,
@@ -68,6 +71,7 @@ impl SettingsSection {
             SettingsSection::Accounts => "Accounts",
             SettingsSection::Library => "Library and storage",
             SettingsSection::Compatibility => "Compatibility",
+            SettingsSection::Performance => "Performance HUD",
             SettingsSection::Steam => "Steam and shortcuts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Automation => "Automation and CLI",
@@ -104,6 +108,8 @@ pub enum Tab {
     Overview,
     LaunchOptions,
     Mods,
+    /// Performance summaries, comparisons, live numbers and the HUD (`ui/game/perf.rs`).
+    Performance,
     Saves,
     AddOns,
     Files,
@@ -111,7 +117,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Overview, Tab::LaunchOptions, Tab::Mods, Tab::Saves, Tab::AddOns, Tab::Files, Tab::Logs];
+    pub const ALL: [Tab; 8] = [Tab::Overview, Tab::LaunchOptions, Tab::Mods, Tab::Performance, Tab::Saves, Tab::AddOns, Tab::Files, Tab::Logs];
 
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -122,6 +128,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::LaunchOptions => "Launch options",
             Tab::Mods => "Mods",
+            Tab::Performance => "Performance",
             Tab::Saves => "Saves & progress",
             Tab::AddOns => "Add-ons",
             Tab::Files => "Files",
@@ -918,7 +925,7 @@ mod tests {
         run(&mut n, &l, &[Down]);
         assert_eq!(n.focused(&l), Some(Target::Tab(Tab::Mods)));
         run(&mut n, &l, &[Right]);
-        assert_eq!(n.tab, Tab::Saves);
+        assert_eq!(n.tab, Tab::Performance);
         run(&mut n, &l, &[Down, Down]);
         assert_eq!(n.focused(&l), Some(Target::Body(1)));
         assert_eq!(n.apply(Activate, &l), Effect::Body(1));
@@ -1009,7 +1016,7 @@ mod tests {
         assert_eq!(n.zone, Zone::Side);
         // LT / RT switch sections; the first section's Up reaches the top bar.
         run(&mut n, &l, &[NextTab]);
-        assert_eq!(n.settings, SettingsSection::Steam);
+        assert_eq!(n.settings, SettingsSection::Performance);
         run(&mut n, &l, &[PrevTab, PrevTab, PrevTab, Up]);
         assert_eq!(n.zone, Zone::TopBar);
         run(&mut n, &l, &[Down]);

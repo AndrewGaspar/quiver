@@ -9,6 +9,7 @@ pub mod library;
 pub mod overlay;
 pub mod downloads;
 pub mod palette;
+pub mod perf;
 pub mod responsive;
 pub mod settings;
 pub mod signin;

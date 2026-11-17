@@ -31,6 +31,8 @@ pub enum SettingsAction {
     Welcome,
     /// Library and storage › Advanced: show or hide the compatibility folders.
     Advanced,
+    /// Performance HUD: step a setting for every game (`ui/perf.rs`).
+    Hud(crate::ui::perf::HudField),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -45,6 +47,7 @@ pub fn section_icon(s: SettingsSection) -> Icon {
         SettingsSection::Accounts => Icon::Users,
         SettingsSection::Library => Icon::HardDrive,
         SettingsSection::Compatibility => Icon::Cpu,
+        SettingsSection::Performance => Icon::Activity,
         SettingsSection::Steam => Icon::Gamepad,
         SettingsSection::Appearance => Icon::Palette,
         SettingsSection::Automation => Icon::Bot,
@@ -82,6 +85,11 @@ impl Quiver {
             }
             SettingsSection::Library => v.extend([SettingsAction::Welcome, SettingsAction::Advanced]),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
+            SettingsSection::Performance => {
+                if self.hud_effective(&quiver_api::perf::HudScopeRef::global()).is_some() {
+                    v.extend(crate::ui::perf::HUD_FIELDS.map(SettingsAction::Hud));
+                }
+            }
             SettingsSection::Steam => {
                 if matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some()) {
                     for g in self.steam_copies() {
@@ -141,6 +149,7 @@ impl Quiver {
             }
             SettingsAction::Welcome => self.run_dl(crate::ui::downloads::DlCmd::Welcome, cx),
             SettingsAction::Advanced => self.ui.lib_advanced = !self.ui.lib_advanced,
+            SettingsAction::Hud(f) => self.hud_cycle(quiver_api::perf::HudScopeRef::global(), f, cx),
         }
     }
 
@@ -192,6 +201,11 @@ impl Quiver {
                 v
             }
             SettingsSection::Compatibility => self.settings_compat(th, &actions, cx),
+            SettingsSection::Performance => {
+                let focused: Vec<crate::ui::perf::HudField> =
+                    crate::ui::perf::HUD_FIELDS.into_iter().filter(|f| self.action_focused(&actions, &SettingsAction::Hud(*f))).collect();
+                self.settings_hud(th, &focused, cx)
+            }
             SettingsSection::Steam => self.settings_steam(th, &actions, cx),
             SettingsSection::Appearance => self.settings_appearance(th, cx),
             SettingsSection::Automation => self.settings_automation(th, &actions, cx),

@@ -29,6 +29,7 @@ pub mod rings;
 pub mod sight;
 pub mod sigbus;
 pub mod stats;
+pub mod steam;
 pub mod system;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -199,6 +200,8 @@ pub struct PerfHub {
     next_sub: AtomicU64,
     /// `quiver-sight`, started for launches and HUD toggles ([`sight`]).
     pub sight: sight::Spawner,
+    /// Perf sessions of `quiver steam-run` launches (`steam.rs`).
+    steam: steam::SteamSessions,
 }
 
 /// What [`PerfHub::begin`] set up for a launch.
@@ -234,6 +237,7 @@ impl PerfHub {
             broadcast: broadcast::channel(64).0,
             next_sub: AtomicU64::new(1),
             sight: sight::Spawner::default(),
+            steam: Default::default(),
         })
     }
 

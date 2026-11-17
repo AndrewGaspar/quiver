@@ -120,6 +120,38 @@ impl Daemon {
     }
 }
 
+impl Daemon {
+    /// The perf part of a `quiver steam-run` launch (`steam.rs`): its session and the
+    /// environment for Steam's command, in `plan`. A failure leaves the plan as it was.
+    pub(crate) fn perf_steam_launch(&self, plan: &mut quiver_api::steamlib::SteamLaunchPlan) {
+        if std::env::var("QUIVER_PERF").is_ok_and(|v| v == "0") {
+            return;
+        }
+        match self.perf.begin_steam(plan) {
+            // Sight is on for Steam copies as for Quiver installs (SIGHT steer 15).
+            Ok(()) => self.perf.sight.ensure(self.perf.data_dir(), "Steam launch"),
+            Err(e) => {
+                tracing::warn!(product_id = plan.product_id, "perf for a Steam launch: {e:#}");
+                plan.perf_notes.push(format!("hud: not set up ({e:#})"));
+            }
+        }
+    }
+
+    /// Every minute: end Steam launches' perf sessions whose game never started.
+    pub(crate) fn start_perf_steam_sweep(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let Some(d) = weak.upgrade() else { return };
+                let playing: std::collections::HashSet<u32> = d.sessions.list().iter().map(|s| s.product_id).collect();
+                d.perf.sweep_steam(|p| playing.contains(&p), std::time::Instant::now());
+            }
+        });
+    }
+}
+
 /// A game's recorded sessions that carry a perf summary, newest first.
 pub fn summaries(product_id: u32, limit: usize) -> Vec<SessionSummary> {
     let path = launcher::data_dir().join("games").join(product_id.to_string()).join("playtime.jsonl");
