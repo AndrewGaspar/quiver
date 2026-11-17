@@ -169,7 +169,7 @@ fn hand_edits_are_imported_as_undoable_revisions() {
     let f = aco();
     // Before options existed, the person edited the copy in the profile's upper.
     let upper = f.store.profile_dir(&f.profile).join("upper/aco_dlss.ini");
-    folder(&upper.parent().unwrap().to_owned(), &[("aco_dlss.ini", &ACO_INI.replace("npc_density=1", "npc_density=3").replace("unknown_future_key=7", "unknown_future_key=8"))]);
+    folder(upper.parent().unwrap(), &[("aco_dlss.ini", &ACO_INI.replace("npc_density=1", "npc_density=3").replace("unknown_future_key=7", "unknown_future_key=8"))]);
     let ctx = context(&f.store, Some(&f.profile)).unwrap();
     let r = import_external(&ctx, None, "at launch").unwrap().expect("imported");
     assert_eq!(r.source, "file");

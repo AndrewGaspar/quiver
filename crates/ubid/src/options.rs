@@ -168,6 +168,11 @@ fn game(product_id: u32) -> Result<ubi_core::launcher::Game> {
 fn resolve(product_id: u32, profile: Option<&str>) -> Result<(ModStore, Option<String>)> {
     let store = store_for(&game(product_id)?);
     let (p, _) = launch_profile(&store, product_id, profile)?;
+    // A name to the profile's id (values are stored by id).
+    let p = match p {
+        Some(q) if !q.eq_ignore_ascii_case(VANILLA) => Some(store.profile(&q)?.0.id),
+        _ => None,
+    };
     Ok((store, p))
 }
 

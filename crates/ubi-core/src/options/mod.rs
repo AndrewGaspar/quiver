@@ -738,6 +738,10 @@ fn rev_source(ctx: &Ctx, key: &str, id: &str, rev: &OptionsRevision) -> ValueSou
 
 // -- changes ----------------------------------------------------------------------------------
 
+/// One op applied: (surface key, option id or raw binding, its outcome if already known,
+/// value before, value after).
+pub type OpResult = (String, String, Option<Outcome>, Option<Value>, Option<Value>);
+
 /// The result of applying ops to a set of values (nothing written yet).
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
@@ -745,7 +749,7 @@ pub struct Applied {
     pub raw: RawValues,
     /// One per op, outcome `Unchanged` or `Rejected` so far, else filled in by the caller
     /// (`saved_*`/`applied_live`): `None` here.
-    pub outcomes: Vec<(String, String, Option<Outcome>, Option<Value>, Option<Value>)>,
+    pub outcomes: Vec<OpResult>,
     pub changes: Vec<String>,
     /// Options changed that have `danger` (labels and sentences).
     pub dangers: Vec<String>,
@@ -1033,8 +1037,7 @@ pub struct LaunchOptions {
 /// to the plan's config patches (applied with the mods' in one pass). Before the namespace
 /// is mounted. Vanilla gets an install mount when it has install-file values.
 pub fn prepare_launch(ctx: &Ctx, plan: &mut Plan) -> Result<LaunchOptions> {
-    let mut out = LaunchOptions::default();
-    out.imported = import_external(ctx, None, "at launch")?;
+    let mut out = LaunchOptions { imported: import_external(ctx, None, "at launch")?, ..Default::default() };
     if let Some(r) = &out.imported {
         out.lines.push(format!("options: imported r{} ({})", r.revision, r.changes.join("; ")));
     }

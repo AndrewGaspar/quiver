@@ -121,11 +121,11 @@ pub fn binding(schema: &Schema, id: &str, def: &OptionDef) -> Result<Binding> {
     Ok(Binding { file, section, key })
 }
 
+/// Sentences in a help text: boundaries are ". ", "! " or "? " followed by a capital
+/// ("e.g. 160" and "0.5" don't end one).
 fn sentences(s: &str) -> usize {
-    s.split(['.', '!', '?']).filter(|p| p.trim().len() > 1).count().max(1).min(
-        // "e.g." and decimals aren't sentence ends: count ". X" boundaries instead.
-        s.matches(". ").count() + s.matches("! ").count() + s.matches("? ").count() + 1,
-    )
+    let b = s.as_bytes();
+    1 + (0..b.len().saturating_sub(2)).filter(|&i| matches!(b[i], b'.' | b'!' | b'?') && b[i + 1] == b' ' && b[i + 2].is_ascii_uppercase()).count()
 }
 
 fn valid_id(id: &str) -> bool {
@@ -229,9 +229,6 @@ fn lint_def(id: &str, d: &OptionDef, out: &mut Vec<LintFinding>, at: &str) {
                 }
             }
             for s in &d.special {
-                if s.value.is_string() && d.ty == OptionType::Int && false {
-                    unreachable!();
-                }
                 if !(s.value.is_string() || s.value.is_number()) {
                     push(Severity::Error, format!("special value {} must be a number or text", s.value));
                 }
@@ -503,7 +500,7 @@ pub fn lint(schema: &Schema) -> Vec<LintFinding> {
     if schema.matches.is_some() && schema.audited.is_none() {
         out.push(LintFinding { severity: Severity::Warning, at: "match".into(), message: "a catalog schema says who audited it (`audited`)".into() });
     }
-    out.sort_by(|a, b| b.severity.cmp(&a.severity));
+    out.sort_by_key(|f| std::cmp::Reverse(f.severity));
     out
 }
 
