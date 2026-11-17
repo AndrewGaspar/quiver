@@ -2795,6 +2795,83 @@ pub struct WindowParams {
 
     #[cfg(target_os = "macos")]
     pub use_display_p3: bool,
+
+    /// Set when the window renders off-screen (see [`crate::App::open_offscreen_window`]).
+    /// Platforms without off-screen support never see it: that method refuses first.
+    pub offscreen: Option<OffscreenParams>,
+}
+
+/// Options for [`crate::App::open_offscreen_window`].
+#[derive(Debug, Clone)]
+pub struct OffscreenWindowOptions {
+    /// Logical size of the window.
+    pub size: Size<Pixels>,
+    /// Device pixels per logical pixel; the rendered image is `size * scale_factor`, rounded up.
+    pub scale_factor: f32,
+    /// The appearance reported to the window.
+    pub appearance: WindowAppearance,
+    /// Frames are rendered on demand, when something the window observes calls `notify` (or
+    /// after [`crate::Window::refresh`]). This is the minimum time between two such frames;
+    /// changes in between are coalesced into one frame at the end of the interval. `None`
+    /// renders as soon as the foreground executor gets to it.
+    /// [`crate::Window::render_now`] ignores it.
+    pub min_frame_interval: Option<Duration>,
+    /// Prefer an integrated GPU (the low-power adapter) over a discrete one, to keep the
+    /// rendering off a GPU a game is using and avoid waking a sleeping discrete GPU.
+    pub prefer_low_power_gpu: bool,
+}
+
+impl Default for OffscreenWindowOptions {
+    fn default() -> Self {
+        Self {
+            size: Size {
+                width: Pixels(300.0),
+                height: Pixels(200.0),
+            },
+            scale_factor: 1.0,
+            appearance: WindowAppearance::Dark,
+            min_frame_interval: None,
+            prefer_low_power_gpu: true,
+        }
+    }
+}
+
+/// A frame rendered by an off-screen window.
+#[derive(Debug)]
+pub struct OffscreenFrame<'a> {
+    /// Width in device pixels.
+    pub width: u32,
+    /// Height in device pixels.
+    pub height: u32,
+    /// Bytes between the starts of consecutive rows (at least `width * 4`).
+    pub stride: u32,
+    /// The scale factor the frame was rendered at.
+    pub scale_factor: f32,
+    /// Time spent in the renderer for this frame: encoding, GPU execution, waiting and
+    /// readback. Excludes layout and paint.
+    pub render_duration: Duration,
+    /// RGBA8 pixels, sRGB-encoded, premultiplied alpha, transparent where nothing was
+    /// painted; `stride * height` bytes (the last row may be only `width * 4`).
+    pub data: &'a [u8],
+}
+
+/// Callback receiving every frame an off-screen window renders.
+pub type OffscreenFrameCallback = Box<dyn FnMut(&OffscreenFrame<'_>)>;
+
+/// What a platform needs to open an off-screen window.
+pub struct OffscreenParams {
+    /// The window's options.
+    pub options: OffscreenWindowOptions,
+    /// Receives each rendered frame.
+    pub on_frame: OffscreenFrameCallback,
+}
+
+impl std::fmt::Debug for OffscreenParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OffscreenParams")
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Represents the status of how a window should be opened.

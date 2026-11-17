@@ -1640,6 +1640,7 @@ impl Window {
     pub(crate) fn new(
         handle: AnyWindowHandle,
         options: WindowOptions,
+        offscreen: Option<crate::OffscreenParams>,
         cx: &mut App,
     ) -> Result<Self> {
         let WindowOptions {
@@ -1714,6 +1715,7 @@ impl Window {
                 tabbing_identifier,
                 #[cfg(target_os = "macos")]
                 use_display_p3,
+                offscreen,
             },
         )?;
 
@@ -3775,6 +3777,21 @@ impl Window {
     /// The current state of the keyboard's capslock
     pub fn capslock(&self) -> Capslock {
         self.capslock
+    }
+
+    /// Draws the window now if it is dirty and presents the result if there is anything new,
+    /// without waiting for the platform's next frame request. For an off-screen window
+    /// ([`App::open_offscreen_window`]) this renders the frame and hands it to the window's
+    /// frame callback before returning.
+    pub fn render_now(&mut self, cx: &mut App) {
+        if self.invalidator.is_dirty() {
+            let arena_clear_needed = self.draw(cx);
+            self.advance_scene_animations(cx);
+            self.present();
+            arena_clear_needed.clear(cx);
+        } else if self.needs_present.get() {
+            self.present();
+        }
     }
 
     /// Produces a new frame and assigns it to `rendered_frame`. To actually show

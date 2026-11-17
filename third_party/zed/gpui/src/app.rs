@@ -1648,10 +1648,61 @@ impl App {
         options: crate::WindowOptions,
         build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
     ) -> anyhow::Result<WindowHandle<V>> {
+        self.open_window_internal(options, None, build_root_view)
+    }
+
+    /// Opens a window that is never shown on screen. It renders into an owned GPU texture,
+    /// and every frame is read back and passed to `on_frame` as RGBA8 pixels (sRGB-encoded,
+    /// premultiplied alpha, transparent where nothing is painted).
+    ///
+    /// Frames are rendered on demand: when the window becomes dirty (`cx.notify()` on an
+    /// entity it observes, or [`Window::refresh`]), at most once per
+    /// [`crate::OffscreenWindowOptions::min_frame_interval`]. [`Window::render_now`] renders
+    /// synchronously. The window has no display, receives no input, and needs no display
+    /// server: it works the same under Wayland, X11 and the headless platform.
+    ///
+    /// Only supported on Linux and FreeBSD (wgpu).
+    pub fn open_offscreen_window<V: 'static + Render>(
+        &mut self,
+        options: crate::OffscreenWindowOptions,
+        on_frame: impl FnMut(&crate::OffscreenFrame<'_>) + 'static,
+        build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+    ) -> anyhow::Result<WindowHandle<V>> {
+        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            anyhow::bail!("off-screen windows are only supported on Linux and FreeBSD");
+        }
+        let window_options = crate::WindowOptions {
+            window_bounds: Some(crate::WindowBounds::Windowed(crate::Bounds {
+                origin: crate::Point::default(),
+                size: options.size,
+            })),
+            titlebar: None,
+            focus: false,
+            show: false,
+            // Frame pacing is the off-screen window's own (`min_frame_interval`).
+            inactive_frame_interval: None,
+            low_power_frame_interval: None,
+            thermal_frame_interval: None,
+            window_background: crate::WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        };
+        let offscreen = crate::OffscreenParams {
+            options,
+            on_frame: Box::new(on_frame),
+        };
+        self.open_window_internal(window_options, Some(offscreen), build_root_view)
+    }
+
+    fn open_window_internal<V: 'static + Render>(
+        &mut self,
+        options: crate::WindowOptions,
+        offscreen: Option<crate::OffscreenParams>,
+        build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+    ) -> anyhow::Result<WindowHandle<V>> {
         self.update(|cx| {
             let id = cx.windows.insert(None);
             let handle = WindowHandle::new(id);
-            match Window::new(handle.into(), options, cx) {
+            match Window::new(handle.into(), options, offscreen, cx) {
                 Ok(mut window) => {
                     cx.window_update_stack.push(WindowUpdateEntry {
                         window_id: id,
