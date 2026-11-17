@@ -127,9 +127,11 @@ pub enum TweaksAction {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
-    /// A scope's revisions.
+    /// A scope's revisions (--global, or GAME with or without --profile).
     History {
         game: Option<String>,
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         profile: Option<String>,
     },
@@ -153,7 +155,12 @@ fn json_out<T: serde::Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+/// A game argument: a ref (`3539`, `steam:620`) as is (no library needed, so it works
+/// signed out), else a name looked up in the library.
 async fn game_ref(client: &Client, game: &str) -> Result<(GameRef, String)> {
+    if let Some(r) = GameRef::parse_ref(game) {
+        return Ok((r, r.to_string()));
+    }
     let e = crate::resolve_any(client, game).await?;
     Ok((e.game, e.name))
 }
@@ -236,6 +243,26 @@ fn from_text(o: &OptionState) -> String {
     }
 }
 
+/// A value as people read it (labels for sentinels and enum values).
+fn show_value(def: &quiver_api::options::OptionDef, v: &Value) -> String {
+    if let Some(sp) = def.special_of(v) {
+        sp.label.clone()
+    } else if let Some(l) = def.values.iter().find(|e| quiver_api::options::same_value(&e.value, v)).and_then(|e| e.label.clone()) {
+        l
+    } else {
+        def.display(v)
+    }
+}
+
+/// The row's value as people read it, `vrr` resolved.
+fn show(o: &OptionState) -> String {
+    let base = show_value(&o.def, &o.value);
+    match o.text.split_once(" (") {
+        Some((_, rest)) if o.value.as_str() == Some("vrr") => format!("{base} ({rest}"),
+        _ => base,
+    }
+}
+
 fn effect_short(e: &Effect) -> String {
     match e {
         Effect::Confirmed { evidence, .. } => format!("confirmed ({evidence})"),
@@ -257,10 +284,7 @@ fn print_state(s: &SurfaceState, title: &str, all: bool, changed: bool) {
                 continue;
             }
             let row = o.tweak.as_deref();
-            let val = match o.def.special_of(&o.value) {
-                Some(sp) => sp.label.clone(),
-                None => o.def.display(&o.value),
-            };
+            let val = show(o);
             let mut tail = String::new();
             if let Some(p) = row.and_then(|r| r.planned.as_ref()).filter(|p| **p != Planned::Default) {
                 tail.push_str(&p.describe());
@@ -391,16 +415,16 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
             if json {
                 return json_out(o);
             }
-            println!("{id} ({title}): {}", o.def.display(&o.value));
+            println!("{id} ({title}): {}", show(o));
             println!("  {}", o.def.label_or(id));
             if let Some(h) = &o.def.help {
                 println!("  {h}");
             }
-            println!("  from: {}; below this scope: {}", from_text(o), o.def.display(&o.default));
+            println!("  from: {}; below this scope: {}", from_text(o), show_value(&o.def, &o.default));
             if let Some(r) = &o.tweak {
                 for (k, v) in [("global", &r.global), ("game", &r.game), ("profile", &r.profile)] {
                     if let Some(v) = v {
-                        println!("  {k}: {}", o.def.display(v));
+                        println!("  {k}: {}", show_value(&o.def, v));
                     }
                 }
                 if let Some(p) = &r.planned {
@@ -508,8 +532,8 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
             }
             s.iter().for_each(print_session);
         }
-        TweaksAction::History { game, profile } => {
-            let (scope, title) = scope_of(client, game.as_deref(), false, profile).await?;
+        TweaksAction::History { game, global, profile } => {
+            let (scope, title) = scope_of(client, game.as_deref(), global, profile).await?;
             let h: Vec<OptionsRevision> = client.call(Request::Tweaks(TweaksRequest::History { scope })).await?;
             if json {
                 return json_out(&h);

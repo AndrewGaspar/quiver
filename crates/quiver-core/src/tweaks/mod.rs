@@ -301,14 +301,23 @@ pub fn concrete(id: &str, v: &Value, display: Option<&DisplayCaps>) -> Result<Va
     Ok(v.clone())
 }
 
+/// A tweak value for people: a sentinel's or an enum value's label (`No cap`, `Game's
+/// choice`, `K: DLSS 4 transformer`), else the value with its unit (`160 fps`).
+pub fn short_display(def: &OptionDef, v: &Value) -> String {
+    if let Some(s) = def.special_of(v) {
+        return s.label.clone();
+    }
+    if let Some(l) = def.values.iter().find(|e| same_value(&e.value, v)).and_then(|e| e.label.clone()) {
+        return l;
+    }
+    def.display(v)
+}
+
 /// A value for people, with `vrr` resolved where the display is known.
 pub fn display_value(id: &str, def: &OptionDef, v: &Value, display: Option<&DisplayCaps>) -> String {
     match concrete(id, v, display) {
         Ok(c) if &c != v => format!("refresh rate − 3 ({})", def.display(&c)),
-        _ => match def.special_of(v) {
-            Some(s) => s.label.clone(),
-            None => def.display(v),
-        },
+        _ => short_display(def, v),
     }
 }
 
@@ -546,7 +555,7 @@ pub fn apply_ops(schema: &Schema, at: ScopeKind, cur: &OptionsRevision, inherite
             if let Some(d) = &def.danger {
                 a.dangers.push(format!("{id}: {d}"));
             }
-            a.changes.push(format!("{scope}: {id} {} → {}{}", def.display(&before), def.display(&after), if new.is_none() { " (reset)" } else { "" }));
+            a.changes.push(format!("{scope}: {id} {} → {}{}", short_display(def, &before), short_display(def, &after), if new.is_none() { " (reset)" } else { "" }));
             a.outcomes.push((id.to_owned(), None, Some(before), Some(after)));
         };
         match op {
