@@ -113,11 +113,11 @@ fn surfaces_resolve_from_the_catalog_with_file_defaults() {
 #[test]
 fn values_are_validated_and_stored_as_changes() {
     let f = aco();
-    let (a, r) = set(&f, vec![op("world.npc_density", json!("4")), op("upscaler.preset", json!("k")), op("world.npc_density", json!(9)), op("nope.x", json!(1))]);
+    let (a, r) = set(&f, vec![op("world.npc_density", json!("4")), op("upscaler.preset", json!("k")), op("world.npc_density", json!(900)), op("nope.x", json!(1))]);
     assert_eq!(r.revision, 1);
     let outcomes: Vec<&Option<Outcome>> = a.outcomes.iter().map(|o| &o.2).collect();
     assert!(outcomes[0].is_none() && outcomes[1].is_none(), "{outcomes:?}");
-    assert!(matches!(&outcomes[2], Some(Outcome::Rejected { reason }) if reason.contains("above the maximum 5")), "{outcomes:?}");
+    assert!(matches!(&outcomes[2], Some(Outcome::Rejected { reason }) if reason.contains("above the maximum 100")), "{outcomes:?}");
     assert!(matches!(&outcomes[3], Some(Outcome::Rejected { reason }) if reason.contains("no option nope.x")));
     // Only what changed is stored, typed.
     let key = format!("{}/aco-dlss", f.mod_id);
@@ -393,4 +393,22 @@ fn imports_compare_with_the_version_the_copy_was_rendered_from() {
     let r = import_external(&ctx, None, "while the game ran").unwrap().expect("recorded");
     assert!(r.changes[0].contains("doesn't fit"), "{:?}", r.changes);
     assert!(import_external(&ctx, None, "while the game ran").unwrap().is_none());
+}
+
+#[test]
+fn shipped_values_outside_the_schema_are_never_rewritten() {
+    let f = aco();
+    // v2 ships values the catalog's ranges don't cover (a newer mod than the catalog).
+    let shipped = ACO_INI.replace("npc_density=1", "npc_density=400").replace("mode=d3d12", "mode=future");
+    let v2 = folder(&f.t.join("v2"), &[("aco_dlss.ini", &shipped)]);
+    f.store.add_version("DLSS", &NewVersion { path: Some(v2), ..Default::default() }, "cli").unwrap();
+    // Another option is set, so the file is rendered.
+    set(&f, vec![op("fg.toggle_key", json!("f8"))]);
+    let ctx = context(&f.store, Some(&f.profile)).unwrap();
+    let mut plan = f.store.plan(Some(&f.profile)).unwrap();
+    prepare_launch(&ctx, &mut plan).unwrap();
+    let upper = f.store.profile_dir(&f.profile).join("upper/aco_dlss.ini");
+    assert_eq!(std::fs::read_to_string(&upper).unwrap(), shipped.replace("toggle_key=F9", "toggle_key=F8"), "only the set value changes");
+    // And the rendered copy isn't imported back as an edit.
+    assert!(import_external(&ctx, None, "after the session").unwrap().is_none());
 }

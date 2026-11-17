@@ -43,14 +43,15 @@ options = ["fg.mode", "fg.enabled", "fg.toggle_key", "fg.refresh_hz", "fg.hudles
 
 [[page.group]]
 title = "Pacing and presentation"
-options = ["fg.auto_cap", "fg.auto_cap_lag", "fg.auto_cap_min", "fg.auto_cap_max", "fg.sets",
+options = ["fg.count", "fg.count_min", "fg.count_max", "fg.target_hz",
+           "fg.auto_cap", "fg.auto_cap_lag", "fg.auto_cap_lag_from", "fg.auto_cap_min", "fg.auto_cap_max", "fg.sets",
            "fg.pacing", "fg.pace", "fg.pace_relax", "fg.present_thread", "fg.present_gate",
            "fg.sync", "fg.frame_latency", "fg.buffers"]
 
 [[page.group]]
 title = "DLSS-G inputs"
 options = ["fg.mv_scale", "fg.mv_units", "fg.camera", "fg.camera_unjitter", "fg.input",
-           "fg.bb_format_dxgi", "fg.descriptor_heap", "fg.count", "fg.show_index", "fg.extra",
+           "fg.bb_format_dxgi", "fg.descriptor_heap", "fg.show_index", "fg.extra",
            "fg.create_extra"]
 
 [[page.group]]
@@ -62,7 +63,8 @@ options = ["fg.show", "fg.swap_outputs", "fg.debug_fill", "fg.raw_output", "fg.d
 id = "world"
 title = "World"
 options = ["world.lod_distance", "world.lod_mode", "world.npc_density", "world.npc_distance",
-           "world.npc_units"]
+           "world.npc_units", "world.tls_extend", "world.npc_spawn_ceiling", "world.npc_units_rate",
+           "world.npc_units_max"]
 
 [[page]]
 id = "cloth"
@@ -583,31 +585,80 @@ help = "The display refresh rate DLSS-G is told about."
 unit = "Hz"
 min = 30
 max = 500
-special = [{ value = 0, label = "Not set" }]
+special = [{ value = 0, label = "Detect" }]
 when = { "fg.mode" = ["d3d12", "on"] }
 level = "advanced"
 apply = "live"
 
 [option."fg.count"]
-type = "int"
-label = "Generated frames per real frame"
-help = "DLSS-G MultiFrameCount; 1 is standard 2x. With 2 only one generated frame is shown, at twice the GPU cost."
-min = 1
-max = 3
-step = 1
+type = "enum"
+label = "Frame generation multiplier"
+help = "Frames presented per real frame: 2× is one generated frame; 3× to 6× is DLSS Multi Frame Generation (RTX 50). Automatic picks the smallest multiplier in the range that reaches the target rate."
+values = [
+  { value = "2", label = "2×" },
+  { value = "3", label = "3×" },
+  { value = "4", label = "4×" },
+  { value = "5", label = "5×" },
+  { value = "6", label = "6×" },
+  { value = "auto", label = "Automatic" },
+  { value = "1", label = "2× (older setting)", help = "What older versions wrote for 2×." },
+]
 when = { "fg.mode" = ["d3d12", "on"] }
-experimental = true
+level = "basic"
+apply = "live"
+
+[option."fg.count_min"]
+type = "int"
+label = "Automatic multiplier: lowest"
+min = 2
+max = 6
+step = 1
+when = { "fg.mode" = ["d3d12", "on"], "fg.count" = "auto" }
+level = "advanced"
+apply = "live"
+
+[option."fg.count_max"]
+type = "int"
+label = "Automatic multiplier: highest"
+min = 2
+max = 6
+step = 1
+when = { "fg.mode" = ["d3d12", "on"], "fg.count" = "auto" }
+level = "advanced"
+apply = "live"
+
+[option."fg.target_hz"]
+type = "int"
+label = "Target presents per second"
+help = "With the automatic cap, the real frame rate is capped at this divided by the multiplier, so with VRR every refresh shows one frame at an even cadence."
+unit = "Hz"
+min = 30
+max = 1000
+special = [{ value = 0, label = "Display refresh" }]
+when = { "fg.mode" = ["d3d12", "on"] }
+level = "advanced"
+apply = "live"
+
+[option."fg.auto_cap_lag_from"]
+type = "enum"
+label = "Automatic cap: measure DLSS-G done at"
+values = [
+  { value = "ready", label = "First generated frame ready", help = "When the present thread has the first generated frame; includes waiting for the previous frame's presents." },
+  { value = "gpu", label = "GPU finished", help = "When DLSS-G finished on the GPU." },
+]
+when = { "fg.mode" = "d3d12", "fg.auto_cap" = true }
 level = "debug"
 apply = "live"
 
 [option."fg.show_index"]
 type = "int"
 label = "Generated frame shown"
-help = "Which generated frame (1 to the count) is presented."
-min = 1
-max = 3
+help = "Which generated frame is presented (0: the mod's default)."
+min = 0
+max = 5
 step = 1
-when = { "fg.mode" = ["d3d12", "on"], "fg.count" = { min = 2, max = 3 } }
+default = 0
+when = { "fg.mode" = ["d3d12", "on"] }
 level = "debug"
 apply = "live"
 
@@ -821,14 +872,56 @@ apply = "live"
 [option."world.npc_density"]
 type = "float"
 label = "Crowd density"
-help = "Multiplies the cap on ambient characters. 3 to 5 lifts it out of the way."
+help = "Multiplies the cap on ambient characters. 3 to 5 lifts it out of the way; higher values need more characters at once (see the TLS extension)."
 min = 1
-max = 5
+max = 100
 step = 0.5
 unit = "×"
 level = "basic"
 apply = "live"
 latency = "about a minute"
+
+[option."world.tls_extend"]
+type = "bool"
+label = "Extend the character limit (TLS)"
+help = "The game freezes at about 1000 animated characters (one Windows TLS index each); on, it gets extra virtual indices. Off holds crowd density below that limit."
+level = "advanced"
+apply = "at"
+at = "game start (first frame)"
+
+[option."world.npc_spawn_ceiling"]
+type = "int"
+label = "Most characters at once"
+help = "The effective cap on spawned characters while the TLS extension is off."
+min = 100
+max = 1000
+step = 50
+default = 800
+when = { "world.tls_extend" = false }
+level = "advanced"
+apply = "live"
+
+[option."world.npc_units_rate"]
+type = "int"
+label = "Extra people created per 100 ms"
+min = 1
+max = 1000
+step = 1
+special = [{ value = 0, label = "Built-in (96)" }]
+default = 0
+level = "debug"
+apply = "live"
+
+[option."world.npc_units_max"]
+type = "int"
+label = "Most extra people per world"
+min = 1
+max = 100000
+step = 1
+special = [{ value = 0, label = "Built-in" }]
+default = 0
+level = "debug"
+apply = "live"
 
 [option."world.npc_distance"]
 type = "float"
@@ -846,9 +939,9 @@ latency = "about 10 seconds"
 [option."world.npc_units"]
 type = "int"
 label = "Extra people per spawner"
-help = "Extra characters per original one in each civilian spawner you approach, made with the game's own code. 1 is off."
+help = "Extra characters per original one in each civilian spawner you approach, made with the game's own code. 1 is off. Applies to spawners from then on; extras already made stay."
 min = 1
-max = 4
+max = 16
 step = 1
 experimental = true
 level = "debug"
