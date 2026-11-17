@@ -160,7 +160,11 @@ connected); otherwise a `live` option is saved and marked "applies when the mod 
 ### SDK-only entries
 
 - `[readout.<id>]`: a value the running mod reports (FG on/off right now, render
-  resolution, upscaler cost). Display only.
+  resolution, upscaler cost). Display only. **Proposed change (SIGHT-HUD.md §3.13):** readouts
+  become metrics, `[metric.<id>]` with a `kind` (`state`/`text` for what readouts were, plus
+  `gauge`, `counter`, `series`, `frame`, `event` for performance data such as aco-dlss's base
+  FPS and Reflex latency), delivered through the metrics model in
+  [SIGHT-HUD.md](SIGHT-HUD.md) instead of `OptionsReadout`.
 - `[action.<id>]`: a button the mod handles (toggle FG, reload shaders), optionally
   `hotkey_option = "<key option>"` naming the mod's own binding for it.
 
@@ -983,6 +987,9 @@ folders, the SDK or the bridge.
 
 **C10. Not provided.** Rendering, input, focus, text entry, screenshots; FPS/frametime
 metrics (MangoHud-like data is SIGHT.md's, though a mod's readouts are delivered here).
+*Proposed (SIGHT-HUD.md):* all mod-reported values, readouts included, and FPS/frame-time data
+move to SIGHT-HUD's metrics model; C2's `readouts` and C5's `OptionsReadout` are replaced by
+`PerfCatalog` / `PerfSubscribe`.
 
 ## Prior art
 
