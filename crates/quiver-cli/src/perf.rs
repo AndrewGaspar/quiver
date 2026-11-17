@@ -67,6 +67,9 @@ pub enum PerfAction {
         game: String,
         #[arg(long)]
         stop: bool,
+        /// Also start quiver-sight for it (HUD renderer and toasts), as a launch does.
+        #[arg(long)]
+        sight: bool,
     },
 }
 
@@ -281,9 +284,9 @@ pub async fn run(client: &Client, action: PerfAction) -> Result<()> {
                 println!("{}  {:>4} min  {}", s.started.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"), s.seconds / 60, summary_line(&s.perf));
             }
         }
-        PerfAction::DevSession { game, stop } => {
+        PerfAction::DevSession { game, stop, sight } => {
             let product_id = product(client, &game).await?;
-            let v: serde_json::Value = client.call(perf(PerfRequest::DevSession { product_id, stop })).await?;
+            let v: serde_json::Value = client.call(perf(PerfRequest::DevSession { product_id, stop, sight })).await?;
             if stop {
                 println!("ended {}", v["session"].as_str().unwrap_or("?"));
                 if let Ok(s) = serde_json::from_value::<PerfSummary>(v["summary"].clone()) {

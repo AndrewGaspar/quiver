@@ -163,15 +163,39 @@ impl PlatformWindow for OffscreenWindow {
     }
 
     fn resize(&mut self, size: Size<Pixels>) {
-        let (scale_factor, callback) = {
+        // The new size applies to the next frame at once. GPUI's resize handling runs later,
+        // on the foreground executor: `Window::resize` is called from inside an update of
+        // this very window, where GPUI can't re-enter it (callers that render right away call
+        // `Window::bounds_changed` themselves first).
+        let changed = {
             let mut state = self.state.borrow_mut();
+            let changed = state.size != size;
             state.size = size;
-            (state.scale_factor, state.resize_callback.take())
+            changed
         };
-        if let Some(mut callback) = callback {
-            callback(size, scale_factor);
-            self.state.borrow_mut().resize_callback = Some(callback);
+        if !changed {
+            return;
         }
+        let state = Rc::downgrade(&self.state);
+        self.frames
+            .foreground
+            .spawn(async move {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                let (size, scale_factor, callback) = {
+                    let mut s = state.borrow_mut();
+                    (s.size, s.scale_factor, s.resize_callback.take())
+                };
+                if let Some(mut callback) = callback {
+                    callback(size, scale_factor);
+                    let mut s = state.borrow_mut();
+                    if s.resize_callback.is_none() {
+                        s.resize_callback = Some(callback);
+                    }
+                }
+            })
+            .detach();
     }
 
     fn scale_factor(&self) -> f32 {

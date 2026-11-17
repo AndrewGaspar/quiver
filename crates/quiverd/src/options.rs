@@ -561,6 +561,11 @@ impl Daemon {
             for (surface, values) in by_surface {
                 self.options.emit(OptionsEvent::Live { session: sid.clone(), product_id, surface, values, by: source.to_owned(), saved: live != Live::Only });
             }
+            // Sight's toast lane: every outcome, rejections included.
+            let outcomes: Vec<OpOutcome> = out.outcomes.iter().filter(|o| o.outcome != Outcome::Unchanged).cloned().collect();
+            if !outcomes.is_empty() {
+                self.options.emit(OptionsEvent::Outcome { session: sid, product_id, profile: ctx.profile_id.clone(), by: source.to_owned(), outcomes, changes: out.changes.clone() });
+            }
         }
         if out.revision > 0 {
             self.options.emit(OptionsEvent::Changed { product_id, profile: ctx.profile_id.clone(), revision: out.revision, source: source.to_owned(), changes: out.changes.clone() });
