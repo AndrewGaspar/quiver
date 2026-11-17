@@ -237,13 +237,39 @@ impl Daemon {
                         {
                             first.lint.extend(ctx.problems.iter().cloned());
                         }
+                        // Quiver Tweaks, at the profile scope, last on the wire (indexes stay as
+                        // they were; the app lists it first, design/TWEAKS.md §8.3).
+                        out.push(this.tweaks_profile_state(product_id, &ctx, level)?);
                         Ok(out)
                     })
                     .await?
                 )
             }
             OptionsRequest::Set { product_id, profile, ops, live, message, confirmed } => {
-                json!(self.options_set(&src, product_id, profile, ops, live, message, confirmed, None).await?)
+                // Ops on Quiver Tweaks go to the profile scope of the tweaks store.
+                let (tweak_ops, ops): (Vec<OptionOp>, Vec<OptionOp>) = ops.into_iter().partition(|o| quiver_api::tweaks::is_platform_surface(op_surface(o)));
+                let mut out = if ops.is_empty() && !tweak_ops.is_empty() {
+                    None
+                } else {
+                    Some(self.options_set(&src, product_id, profile.clone(), ops, live, message.clone(), confirmed, None).await?)
+                };
+                if !tweak_ops.is_empty() {
+                    let scope = quiver_api::tweaks::Scope::Profile { game: quiver_api::GameRef::ubisoft(product_id), profile: profile.clone() };
+                    let t = self.tweaks_set_ops(&src, scope, tweak_ops, message, confirmed).await?;
+                    out = Some(match out {
+                        None => t,
+                        Some(mut o) => {
+                            o.outcomes.extend(t.outcomes);
+                            o.changes.extend(t.changes);
+                            o.warnings.extend(t.warnings);
+                            if o.revision == 0 {
+                                o.revision = t.revision;
+                            }
+                            o
+                        }
+                    });
+                }
+                json!(out.unwrap_or_default())
             }
             OptionsRequest::History { product_id, profile } => {
                 json!(
@@ -752,6 +778,12 @@ impl Daemon {
             s.clean_bye = true;
             s.sdk_seen = true;
         });
+    }
+}
+
+fn op_surface(o: &OptionOp) -> &str {
+    match o {
+        OptionOp::Set { surface, .. } | OptionOp::Reset { surface, .. } | OptionOp::Preset { surface, .. } | OptionOp::Raw { surface, .. } | OptionOp::ResetAll { surface } => surface,
     }
 }
 
