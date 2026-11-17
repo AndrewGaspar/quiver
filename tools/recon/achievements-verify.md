@@ -28,7 +28,7 @@ This prints the request sent (minus the token), the decoded blob and `product.ea
   a different token than the UbiServices ticket. That's a finding: stop and report it.
 - If only `--framing wrapped` works, the framing needs changing. Either restart quiverd with
   `QUIVER_ACH_FRAMING=wrapped`, or flip the default (`Framing::default` in
-  `crates/ubi-core/src/achievements.rs`).
+  `crates/quiver-core/src/achievements.rs`).
 
 ## 2. Merged status (what the CLI, app and bridge see)
 

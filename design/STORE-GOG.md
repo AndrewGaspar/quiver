@@ -45,7 +45,7 @@ for Ubisoft today:
 - **comet already is that service, in Rust.** It reports achievements, stats and leaderboards
   to the real GOG backend with the user's own token. Its author is imLinguin, a Heroic
   maintainer. It is Apache-2.0, at v0.4.1 (2026-10-28), with active development and Heroic
-  using it by default since 2.15.0. It is Quiver's `ubi-bridge` analogue, already written.
+  using it by default since 2.15.0. It is Quiver's `quiver-bridge` analogue, already written.
 - **Content system v2 is a clean, documented, chunked format.** It uses zlib JSON manifests
   and MD5-checked chunks under signed CDN links, and maps well onto Quiver's slice-based
   queue, verify and repair.
@@ -53,7 +53,7 @@ for Ubisoft today:
   date, description and genres, and `gameplay.gog.com` has per-user achievement *unlock
   state* and play time. Today Quiver shows Ubisoft achievement definitions only
   (`Achievements.unlocked_known = false`), and the bridge logs earned achievements without
-  reporting them (`ubi-bridge/src/win/api.rs`).
+  reporting them (`quiver-bridge/src/win/api.rs`).
 
 **Recommendation:**
 
@@ -71,7 +71,7 @@ for Ubisoft today:
    can route games of different accounts. Don't port it: it would be a large job for no gain.
 3. **Add a tiny Windows "GalaxyCommunication" dummy service**, registered in each GOG prefix.
    Some SDK builds want it (5 of the 36 titles in comet's compatibility table). Build it next
-   to `ubi-bridge` for `x86_64-pc-windows-gnu`.
+   to `quiver-bridge` for `x86_64-pc-windows-gnu`.
 4. **Sight replaces Galaxy's overlay** and doesn't inject GOG's proprietary one. Achievement
    unlocks reach Sight as toasts through comet's `achievement_unlocked` custom event, and
    later through an in-process hook.
@@ -108,16 +108,16 @@ is built, design only, or not built.
 
 | # | Capability | Ubisoft status | Where (verified) |
 |---|---|---|---|
-| C1 | Accounts: several accounts, a default, a per-game launch account, keyring sessions, password + 2FA, "signed in elsewhere" | built | `ubi-core/src/{auth,store,online}.rs`, `Request::{Login,Login2fa,Logout,AccountDefault}` |
+| C1 | Accounts: several accounts, a default, a per-game launch account, keyring sessions, password + 2FA, "signed in elsewhere" | built | `quiver-core/src/{auth,store,online}.rs`, `Request::{Login,Login2fa,Logout,AccountDefault}` |
 | C2 | Library sync: ownership, product configs, art (tile, hero, logo, icon), game info, add-ons owned and not owned with store links | built | `library.rs`, `gameinfo.rs`, `spaces.rs`, `exports/art.rs`, `Request::{Library,GameInfo,Ownership}` |
-| C3 | Install, update and repair queue: preview, free-space check, pause, resume, reorder, bandwidth limit, auto-update, per-slice resume, retries | built | `builds.rs`, `install.rs`, `ubid/src/downloads.rs`, `Request::{Install,InstallPreview,Queue*,Update,UpdatePreview,DownloadSettings}` |
+| C3 | Install, update and repair queue: preview, free-space check, pause, resume, reorder, bandwidth limit, auto-update, per-slice resume, retries | built | `builds.rs`, `install.rs`, `quiverd/src/downloads.rs`, `Request::{Install,InstallPreview,Queue*,Update,UpdatePreview,DownloadSettings}` |
 | C4 | Verify and repair (hash every slice, re-fetch only bad slices, never touch non-manifest files) | built | `verify.rs`, `Request::{Verify,VerifyResult}` |
 | C5 | Uninstall (optionally the prefix), import of existing installs (Lutris, Connect, reflink) | built | `launcher.rs::{uninstall,import_game}`, `Request::{Uninstall,Import,ScanInstalls}` |
 | C6 | Move an install | **not built** (PROPOSAL only) | no `Move` request exists |
 | C7 | Per-game Proton prefix, Proton choice, launch settings with revisioned history | built | `launcher.rs::ensure_prefix`, `settings.rs`, `Request::Settings*` |
-| C8 | Launch with licensing: bridge in the prefix (SDK pipes, `InitReq` with ticket, owned ids, CD keys), Denuvo broker, play-session lease, sessions, stop | built | `ubi-bridge`, `broker.rs`, `launch.rs`, `ubi-ipc` |
+| C8 | Launch with licensing: bridge in the prefix (SDK pipes, `InitReq` with ticket, owned ids, CD keys), Denuvo broker, play-session lease, sessions, stop | built | `quiver-bridge`, `broker.rs`, `launch.rs`, `quiver-ipc` |
 | C9 | Cloud saves: pull before and push after, backups, restore, save stores (several per game, one synced), merge | built | `cloudsave.rs`, `savesync.rs`, `saves.rs`, `savestores.rs` |
-| C10 | Achievements and stats: *read* definitions, stats, challenges and rewards. Unlock state unknown; bridge earns logged, not reported | partly built | `progress.rs`, `ubi-bridge/src/win/api.rs:403` |
+| C10 | Achievements and stats: *read* definitions, stats, challenges and rewards. Unlock state unknown; bridge earns logged, not reported | partly built | `progress.rs`, `quiver-bridge/src/win/api.rs:403` |
 | C11 | Play time: report to the platform (start, heartbeat, end), read the platform total, local sessions | built | `playsession.rs`, `Request::{Playtime,RemotePlaytime}` |
 | C12 | DLC: owned add-on ids served to the game; add-on listing | built | `LaunchContext.owned_uplay_ids`, `info.rs` |
 | C13 | Mods v2: packages, versions, profiles, overlayfs, config patches, built-in catalog, fixes on vanilla | built | `mods.rs`, `modversions.rs`, `modpkg.rs`, `overlay.rs`, `confpatch.rs` |
@@ -125,8 +125,8 @@ is built, design only, or not built.
 | C15 | Sight overlay and HUD | design only | `design/SIGHT.md`, `design/SIGHT-HUD.md` |
 | C16 | Exports: `.desktop` entries and Steam shortcuts, keyed `quiver:<product>[/<profile>]` | built | `exports/*` |
 | C17 | Steam copies (`steam-run`) | built | `steamrun.rs`, `exports/steamgames.rs` (no GOG analogue; see 2.2) |
-| C18 | CLI and agent automation: every action is a daemon request, `--source`, activity log, `confirmed` for agent-sensitive actions | built | `ubi-api`, `ubi-cli` |
-| C19 | First-run UX: Sign in, Storage, Import, Steam, Controller, Fixes, Theme | built | `ubi-app/src/ui/welcome.rs` (`Step::ALL`) |
+| C18 | CLI and agent automation: every action is a daemon request, `--source`, activity log, `confirmed` for agent-sensitive actions | built | `quiver-api`, `quiver-cli` |
+| C19 | First-run UX: Sign in, Storage, Import, Steam, Controller, Fixes, Theme | built | `quiver-app/src/ui/welcome.rs` (`Step::ALL`) |
 
 ### 2.2 GOG approach per capability
 
@@ -166,14 +166,14 @@ policy risk combined.
 ```
  quiver-app   quiver CLI   agents
         \        |        /
-         ubi-api (JSON lines) — requests carry a GameRef { store, id }
+         quiver-api (JSON lines) — requests carry a GameRef { store, id }
                  |
               quiverd
    ├─ accounts (keyring)          ubisoft sessions | gog refresh tokens
-   ├─ library (merged)            ubi-core::library | gog-core::library (galaxy-library + gamesdb)
+   ├─ library (merged)            quiver-core::library | gog-core::library (galaxy-library + gamesdb)
    ├─ download queue              one queue; per-store ContentSource (Ubisoft slices | GOG chunks)
    ├─ launcher (prefix, Proton)   per-store LaunchPlan + RuntimeService
-   │     ├─ Ubisoft: ubi-bridge.exe in the prefix (SDK pipes) + broker on :47810
+   │     ├─ Ubisoft: quiver-bridge.exe in the prefix (SDK pipes) + broker on :47810
    │     └─ GOG:     comet on the host :9977 (Galaxy SDK TCP) + dummy service in the prefix
    ├─ cloud saves                 per-store CloudSaves (Ubisoft slots | GOG folder trees)
    ├─ progress / play time        per-store Progress (UbiServices | gameplay.gog.com)
@@ -184,12 +184,12 @@ New crates:
 
 - **`gog-core`**: auth, the API client, library, content system v1/v2, install, verify,
   cloud saves, play time, achievements read, `goggame-*.info` and setup plans. It sits next
-  to `ubi-core` and shares no Ubisoft code. Shared mechanics, such as the queue, prefix
+  to `quiver-core` and shares no Ubisoft code. Shared mechanics, such as the queue, prefix
   creation, Proton runner, overlay namespace, save backups and keyring, should move into a
   `quiver-core` (STORES.md section 5).
 - **`gog-galaxy`** (thin): supervises comet, first as a child process (sidecar), later as an
   in-process library call. It also receives comet's custom events.
-- **`gog-dummy-service`** (Windows, `x86_64-pc-windows-gnu`, like `ubi-bridge`): a
+- **`gog-dummy-service`** (Windows, `x86_64-pc-windows-gnu`, like `quiver-bridge`): a
   service binary that registers with the SCM and idles. It can be a port of comet's
   `dummy-service/communication.c` (Apache-2.0) or a few lines of Rust with
   `windows-service`.
@@ -256,7 +256,7 @@ The table lists 18 request types; anything else gets `not_implemented`
 (`src/api/handlers/communication_service.rs`). Not covered: global stats, and nothing
 shown for lobbies, matchmaking or networking (P2P multiplayer).
 
-How this differs from `ubi-bridge`:
+How this differs from `quiver-bridge`:
 
 - comet runs on the host. Nothing Quiver-owned has to run in the prefix except the dummy
   service.
@@ -535,10 +535,10 @@ Each spike needs the person's GOG sign-in, so ask first.
 
 Quiver code (this branch):
 
-- `crates/ubi-api/src/lib.rs` (requests)
-- `crates/ubi-core/src/*` (module docs cited per row)
-- `crates/ubi-bridge/src/win/api.rs`
-- `crates/ubi-app/src/ui/welcome.rs`
+- `crates/quiver-api/src/lib.rs` (requests)
+- `crates/quiver-core/src/*` (module docs cited per row)
+- `crates/quiver-bridge/src/win/api.rs`
+- `crates/quiver-app/src/ui/welcome.rs`
 - `design/*.md`
 
 Heroic (read only, `7e7d7883`):

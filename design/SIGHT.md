@@ -7,7 +7,7 @@ the metrics model are designed, with their steers decided, in [SIGHT-HUD.md](SIG
 document's own steers (section 13) are still open.
 
 **Name.** In this codebase "overlay" already means the overlayfs mod mounts
-(`crates/ubi-core/src/overlay.rs`, "mod overlays"). The in-game layer is called **Sight**: on a
+(`crates/quiver-core/src/overlay.rs`, "mod overlays"). The in-game layer is called **Sight**: on a
 bow, the sight is the thing in front of your eye while you aim, which is where this lives. Names
 used below:
 
@@ -50,9 +50,9 @@ Found while preparing this (read-only), and the ones the recommendation depends 
 
 **How games reach Quiver today**
 
-- quiverd launches start `ubi-bridge.exe` as the prefix's *first Wine process* and the game as a
+- quiverd launches start `quiver-bridge.exe` as the prefix's *first Wine process* and the game as a
   separate `proton run` (`launcher::play`); the bridge is a sibling of the game, not its parent.
-  Only `quiver steam-run` uses `ubi-bridge.exe --run … -- game.exe`, where the bridge is the
+  Only `quiver steam-run` uses `quiver-bridge.exe --run … -- game.exe`, where the bridge is the
   game's parent. Either way the bridge is a separate Windows process: **nothing Quiver-owned runs
   inside the game process today** (mods like aco-dlss do, via `d3d11.dll`).
 - The bridge talks to quiverd's broker over TCP (`127.0.0.1:47810`, JSON lines,
@@ -62,7 +62,7 @@ Found while preparing this (read-only), and the ones the recommendation depends 
   games": `QUIVER_SESSION`, `QUIVER_GAME_ID`, a systemd scope, Hyprland `tag:quiver-game`) are
   designed, not built. `ActiveSession` has no session id, pids or window addresses yet.
 
-**What games ask of an overlay** (`proto/proto_uplaydll/UplayDll.proto`, `crates/ubi-bridge/src/win/api.rs`)
+**What games ask of an overlay** (`proto/proto_uplaydll/UplayDll.proto`, `crates/quiver-bridge/src/win/api.rs`)
 
 - `InitProcessRsp` and `InitRsp.overlay` say `enabled: false`, `injection_method: None`. Enum:
   `None=1, Default=2, SDK=3`.
@@ -442,7 +442,7 @@ and narrow item 4: the layer composites the pinned HUD from the MVP. See steer 2
 
 1. **`quiver-sight` (GPUI, separate process) owns all UI and UI state.** It is a quiverd client
    like the app, sharing the app's theme, components, focus navigation and gamepad code (move
-   them into a shared crate, e.g. `ubi-ui`). It never talks to Ubisoft and holds no tokens.
+   them into a shared crate, e.g. `quiver-ui`). It never talks to Ubisoft and holds no tokens.
 2. **Presenter 1 (MVP): wlr-layer-shell surfaces on the game's monitor**, `overlay` layer
    (drawn above fullscreen windows on Hyprland): a click-through toast surface that never takes
    focus, and the panel surface that takes exclusive keyboard focus while open. Requires a GPUI
@@ -491,8 +491,8 @@ focus stealing breaks games, the fallback for input is the bridge's SDK-level
 ```
  host (your session)                                             game's Wine prefix / container
  ───────────────────                                             ────────────────────────────────
- quiver-app ─┐                                                   ubi-bridge.exe (Windows, sibling
- quiver CLI ─┼── ubi-api (JSON lines, $XDG_RUNTIME_DIR/quiver/   or parent of the game)
+ quiver-app ─┐                                                   quiver-bridge.exe (Windows, sibling
+ quiver CLI ─┼── quiver-api (JSON lines, $XDG_RUNTIME_DIR/quiver/   or parent of the game)
  agents ─────┤    quiverd.sock)                                   │  SDK pipes ⇄ game's uplay_r1/r2
  quiver-sight┘        │                                           │
    │  │               │                     broker (TCP 127.0.0.1:47810, JSON lines)
@@ -538,7 +538,7 @@ focus stealing breaks games, the fallback for input is the bridge's SDK-level
   into the session dir and reads `hud.image` from it (SIGHT-HUD §3.6–3.8); capture requests
   (v2) arrive the same way, as a command word it checks once per present. It contains no UI
   code and no text rendering.
-- **ubi-bridge** gets new broker messages:
+- **quiver-bridge** gets new broker messages:
   - `SdkEvent { session, kind }` (fire-and-forget): `AchievementEarned { id }`,
     `RichPresence { presence_id, tokens }`, `GameSession` / `MultiplayerSession` changes,
     `InviteReceived`, and every `OverlayReq` for logging.
@@ -1001,12 +1001,12 @@ for the record.
 15. **Steam copies.** (a) Sight on for Steam copies like Quiver installs; (b) off when Steam's
     overlay is present; (c) toasts only.
     *Recommend (a): different chords, and Sight lives outside the game process.*
-16. **Where Sight's UI code lives.** (a) a new crate/binary `ubi-sight` (`quiver-sight`) with a
-    shared `ubi-ui` crate extracted from `ubi-app`; (b) a mode of the app binary
+16. **Where Sight's UI code lives.** (a) a new crate/binary `quiver-sight` with a
+    shared `quiver-ui` crate extracted from `quiver-app`; (b) a mode of the app binary
     (`quiver-app --sight`); (c) inside quiverd.
     *Recommend (a): separate lifecycle (per session, systemd user unit) without a second copy of
     the components.*
-    *Affected by SIGHT-HUD:* the HUD is rendered with `ubi-ui` components in `quiver-sight` and
-    needs that process for the whole session, so the `ubi-ui` extraction is needed in the HUD's
+    *Affected by SIGHT-HUD:* the HUD is rendered with `quiver-ui` components in `quiver-sight` and
+    needs that process for the whole session, so the `quiver-ui` extraction is needed in the HUD's
     MVP. (c) is ruled out for the HUD: decision 18 keeps the Vulkan device (100–280 MiB RSS) out
     of quiverd.

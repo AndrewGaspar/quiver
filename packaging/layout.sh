@@ -6,8 +6,9 @@
 #
 # Final locations come from the environment (absolute paths, as installed; files land at
 # <staging root><path>):
-#   BINDIR      quiver, quiverd, quiver-app, ubi             (/usr/bin)
-#   LIBDIR      ubi-bridge.exe, sight/<arch>/libquiver_sight_layer.so  (/usr/lib/quiver)
+#   BINDIR      quiver, quiverd, quiver-app, ubi (the CLI's old name)  (/usr/bin)
+#   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
+#               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer (built for i686-unknown-linux-gnu)
@@ -15,8 +16,8 @@
 #   LICENSEDIR  LICENSE and third-party licenses             (/usr/share/licenses/quiver)
 #   EXEC_START  the unit's ExecStart                         ($BINDIR/quiverd)
 #
-# quiverd finds the bridge at <its dir>/../lib/quiver/ubi-bridge.exe, so LIBDIR must be
-# $BINDIR/../lib/quiver (crates/ubi-core/src/launcher.rs, bridge_candidates).
+# quiverd finds the bridge at <its dir>/../lib/quiver/quiver-bridge.exe, so LIBDIR must be
+# $BINDIR/../lib/quiver (crates/quiver-core/src/launcher.rs, bridge_candidates).
 set -euo pipefail
 
 target=${1:?usage: layout.sh <cargo target dir> <staging root>}
@@ -35,9 +36,12 @@ fi
 for bin in quiver quiverd quiver-app ubi; do
     install -Dm755 "$target/release/$bin" "$root$BINDIR/$bin"
 done
-install -Dm644 "$target/x86_64-pc-windows-gnu/release/ubi-bridge.exe" "$root$LIBDIR/ubi-bridge.exe"
+install -Dm644 "$target/x86_64-pc-windows-gnu/release/quiver-bridge.exe" "$root$LIBDIR/quiver-bridge.exe"
+# The bridge's name before the rename, for scripts and launch options that still name it.
+# install-user.sh installs it as a copy (its manifest tracks files).
+ln -sfn quiver-bridge.exe "$root$LIBDIR/ubi-bridge.exe"
 
-# The Sight Vulkan layer (crates/ubi-sight-layer), VK_LAYER_QUIVER_sight: an implicit layer
+# The Sight Vulkan layer (crates/quiver-sight-layer), VK_LAYER_QUIVER_sight: an implicit layer
 # the loader enables only with QUIVER_SIGHT=1 (or when VK_INSTANCE_LAYERS names it), which
 # Quiver sets for launches with the HUD on. Its manifests are the
 # template with the installed path filled in; `library_arch` lets the 64-bit and 32-bit ones
@@ -49,7 +53,7 @@ sight_layer() { # <built .so> <arch>
     install -Dm755 "$1" "$root$lib"
     install -d "$root$DATADIR/vulkan/implicit_layer.d"
     sed -e "s|@LIBRARY_PATH@|$lib|" -e "s|@LIBRARY_ARCH@|$bits|" \
-        "$src/crates/ubi-sight-layer/manifest/VK_LAYER_QUIVER_sight.json.in" \
+        "$src/crates/quiver-sight-layer/manifest/VK_LAYER_QUIVER_sight.json.in" \
         >"$root$DATADIR/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.$2.json"
     chmod 644 "$root$DATADIR/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.$2.json"
 }
@@ -71,9 +75,9 @@ chmod 644 "$root$UNITDIR/quiverd.service"
 
 lic=$root$LICENSEDIR
 install -Dm644 "$src/LICENSE" "$lic/LICENSE"
-install -Dm644 "$src/crates/ubi-ui/assets/fonts/Geist-OFL.txt" "$lic/fonts/Geist-OFL.txt"
-install -Dm644 "$src/crates/ubi-ui/assets/fonts/Archivo-OFL.txt" "$lic/fonts/Archivo-OFL.txt"
-install -Dm644 "$src/crates/ubi-ui/assets/icons/LICENSE" "$lic/icons/Lucide-LICENSE"
+install -Dm644 "$src/crates/quiver-ui/assets/fonts/Geist-OFL.txt" "$lic/fonts/Geist-OFL.txt"
+install -Dm644 "$src/crates/quiver-ui/assets/fonts/Archivo-OFL.txt" "$lic/fonts/Archivo-OFL.txt"
+install -Dm644 "$src/crates/quiver-ui/assets/icons/LICENSE" "$lic/icons/Lucide-LICENSE"
 # GPUI (vendored and patched under third_party/zed) is Apache-2.0; the same text covers
 # text_input.rs, adapted from GPUI's examples/input.rs.
 install -Dm644 "$src/third_party/zed/gpui/LICENSE-APACHE" "$lic/gpui/LICENSE-APACHE"

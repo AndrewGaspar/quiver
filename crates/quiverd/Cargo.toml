@@ -1,0 +1,33 @@
+[package]
+name = "quiverd"
+description = "Background daemon: owns the Ubisoft session, games, settings and jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quiverd"
+path = "src/main.rs"
+
+[dependencies]
+quiver-core.workspace = true
+quiver-api.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+libc.workspace = true
+serde_yaml.workspace = true
+quiver-perf.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+sha1.workspace = true
+hex.workspace = true
+prost.workspace = true
+flate2.workspace = true

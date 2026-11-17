@@ -20,13 +20,13 @@ their asset CDN.</sub>
 ## Layout
 
 - `proto/`: Ubisoft Connect protobuf definitions, vendored (see `proto/README.md`)
-- `crates/ubi-proto/`: generated protobuf types
-- `crates/ubi-core/`: UbiServices auth, the demux client, ownership/library and manifest parsing
-- `crates/ubi-cli/`: the `ubi` command
-- `crates/ubi-ipc/`: types shared by the native side and the bridge
-- `crates/ubi-bridge/`: a Windows binary that runs inside the game's prefix in place of Connect
+- `crates/quiver-proto/`: generated protobuf types
+- `crates/quiver-core/`: UbiServices auth, the demux client, ownership/library and manifest parsing
+- `crates/quiver-cli/`: the `quiver` command (and `ubi`, its pre-Quiver name)
+- `crates/quiver-ipc/`: types shared by the native side and the bridge
+- `crates/quiver-bridge/`: a Windows binary that runs inside the game's prefix in place of Connect
 - `mods/<product id>/<mod id>/quiver-mod.toml`: Quiver's built-in mods (audited recipes,
-  compiled into `ubi-core`)
+  compiled into `quiver-core`)
 - `tools/instance.sh`: per-game reflinked prefixes, run headless in podman
 - `tools/recon/`: SDK harness and the offline recon prefix scripts
 
@@ -34,7 +34,7 @@ their asset CDN.</sub>
 
 The game's `uplay_r1_loader64.dll` loads Ubisoft's own `uplay_r164.dll` and `uplay_aux_r164.dll`
 from the Connect install directory, unmodified. They reach Connect through named pipes
-(4-byte big-endian length + protobuf), and `ubi-bridge` owns those pipes:
+(4-byte big-endian length + protobuf), and `quiver-bridge` owns those pipes:
 
 | Pipe | Protocol | What the bridge does |
 |---|---|---|
@@ -55,20 +55,20 @@ from the Connect install directory, unmodified. They reach Connect through named
   what the bridge gets wrong. That's how the missing account email (which stops Origins from
   listing saves) was found.
 - `tools/proto-extract/extract.py <binary>`: dump the protobuf schemas embedded in Ubisoft binaries.
-- `UBI_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
+- `QUIVER_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
 
 ## Architecture
 
 ```
  quiver-app (GPUI)   quiver (CLI)   scripts / agents
             \              |              /
-             +---- ubi-api: JSON lines over $XDG_RUNTIME_DIR/quiver/quiverd.sock
+             +---- quiver-api: JSON lines over $XDG_RUNTIME_DIR/quiver/quiverd.sock
                             |
                         quiverd  (daemon; started on demand by any client)
             session · library · installs · launches · settings history · activity log
-                 · Denuvo token broker for every running game's ubi-bridge
+                 · Denuvo token broker for every running game's quiver-bridge
                             |
-                         ubi-core (Ubisoft protocols, installer, saves, launcher)
+                         quiver-core (Ubisoft protocols, installer, saves, launcher)
 ```
 
 Front ends hold no state. Every request carries a source label (`gui`, `cli`, or whatever
@@ -93,7 +93,7 @@ To run straight from a build directory instead:
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
-cargo build --release -p ubi-bridge --target x86_64-pc-windows-gnu
+cargo build --release -p quiver-bridge --target x86_64-pc-windows-gnu
 cargo build --release
 export PATH=$PWD/target/release:$PATH
 
@@ -213,7 +213,7 @@ copies are designed in [design/STEAM-COPIES.md](design/STEAM-COPIES.md), not bui
 Installs, updates and repairs go through one queue in `quiverd` (`<data>/queue.json`), one at
 a time unless `--max-active` says otherwise. A download refuses to start if what it will write
 plus a margin (1 GiB or 5%) doesn't fit on the library's filesystem. Progress is kept per file
-(`.ubi-install/done`) and per slice (`.ubi-install/slices`), so pausing, a crash or a daemon
+(`.quiver-install/done`) and per slice (`.quiver-install/slices`), so pausing, a crash or a daemon
 restart loses at most the slices in flight; a restarted daemon resumes what was running and
 leaves paused items paused. Each slice is tried up to six times (1 s doubling to 30 s, with
 jitter) on connection errors, timeouts, cut-off bodies, 5xx and 429, and its signed URL is
@@ -462,7 +462,11 @@ Settings keys: `proton`, `language`, `account`, `profile`, `args`, `wrappers`, `
 State lives in `~/.local/share/quiver/` (`config.json`, `games.json`, `accounts.json`,
 `games/<id>/history.jsonl`, `activity.jsonl`, save backups, `quiverd.log`); a pre-Quiver
 `~/.local/share/ubisoft-linux/` and keyring entry are moved there automatically. `ubi` is kept
-as an alias for `quiver`.
+as an alias for `quiver`. Quiver's own files from before its crates were renamed from `ubi-*`
+still work: a prefix's `ubi-run/` and `.ubi-prefix-ready` and an install's `.ubi-install/` move
+to their `quiver-*` names on next use, existing `~/Games/ubi-library` and `~/Games/ubi-prefixes`
+stay the defaults where they exist, and `C:\ubi\ubi-bridge.exe` (in each prefix) and
+`ubi-bridge.exe` (next to `quiver-bridge.exe`) remain as links or copies of the bridge.
 
 ## Roadmap
 
@@ -488,7 +492,7 @@ needs your own Ubisoft account and only runs games you own.
 - `proto/`: protobuf definitions of Ubisoft Connect's protocols, originally vendored from
   [YoobieRE/ubisoft-demux-node](https://github.com/YoobieRE/ubisoft-demux-node) and refreshed
   from the client's embedded descriptors with `tools/proto-extract` (see `proto/README.md`).
-- `crates/ubi-ui/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
+- `crates/quiver-ui/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
   Copyright Zed Industries).
-- `crates/ubi-ui/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
+- `crates/quiver-ui/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
   with their license files.

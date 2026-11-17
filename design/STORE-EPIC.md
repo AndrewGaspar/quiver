@@ -27,7 +27,7 @@ today, so the main architecture work is a `GameKey` that names the store.
 Five findings shape the design:
 
 1. **Epic games need no bridge.** A Ubisoft game's SDK talks to Connect over local pipes, so
-   Quiver had to build `ubi-bridge`. An Epic game's EOS SDK talks to Epic's servers itself,
+   Quiver had to build `quiver-bridge`. An Epic game's EOS SDK talks to Epic's servers itself,
    authenticated by a one-time **exchange code** that the launcher passes on the command line
    (`-AUTH_PASSWORD=<code> -AUTH_TYPE=exchangecode …`). Some games also take an ownership-token
    file (`-epicovt=`). So legitimate licensing on Epic means "mint a real exchange code from
@@ -40,7 +40,7 @@ Five findings shape the design:
    set to the **Ubisoft product id**. legendary's `activate --uplay` claims and redeems the
    Ubisoft codes onto the Epic account's linked Ubisoft account. After that the Ubisoft account
    owns the product (`ownership.target_partner = TargetPartner_EpicGames`). Ubisoft's CDN
-   serves it, and ubi-bridge, Denuvo, cloud saves and play time work unchanged. On this machine
+   serves it, and quiver-bridge, Denuvo, cloud saves and play time work unchanged. On this machine
    the Epic library includes five such titles: AC Origins (3539), AC Odyssey (5059), Far Cry 4
    (420), AC III Remastered (5183) and AC Syndicate (1875). Quiver already plays two of them,
    3539 and 420. Whether those copies came through Epic, and so whether Quiver already plays an
@@ -76,25 +76,25 @@ roadmap. Each item says whether it's built.
 
 | # | Capability | Where it lives | State |
 |---|---|---|---|
-| C1 | Accounts: several accounts, default and per-game launch account, 2FA, keyring sessions, "signed in elsewhere" | `ubi-core::{auth, store, online}`, `Request::{Login, Login2fa, Logout, AccountDefault}` | built |
-| C2 | Library: ownership, install state, owners, update flag, art candidates (config → games API → Steam cache → CDN), custom art | `ubi-core::{library, spaces}`, `ubi-api::{art, LibraryEntry}` | built |
-| C3 | Game info: publisher, links, languages, add-ons owned or not with store links | `ubi-core::gameinfo`, `Request::GameInfo` | built |
-| C4 | Install, update (with preview), verify and repair, uninstall, import an existing install (reflink, checked against the manifest), first-run scan | `ubi-core::{install, download, verify, builds, manifest}`, `ubid::downloads`, `Request::{Install, Import, ScanInstalls, …}` | built |
-| C5 | Queue: pause, resume, reorder, bandwidth, max active, free-space check, per-slice resume and retry | `ubid::downloads`, `Request::Queue*`, `DownloadSettings` | built |
+| C1 | Accounts: several accounts, default and per-game launch account, 2FA, keyring sessions, "signed in elsewhere" | `quiver-core::{auth, store, online}`, `Request::{Login, Login2fa, Logout, AccountDefault}` | built |
+| C2 | Library: ownership, install state, owners, update flag, art candidates (config → games API → Steam cache → CDN), custom art | `quiver-core::{library, spaces}`, `quiver-api::{art, LibraryEntry}` | built |
+| C3 | Game info: publisher, links, languages, add-ons owned or not with store links | `quiver-core::gameinfo`, `Request::GameInfo` | built |
+| C4 | Install, update (with preview), verify and repair, uninstall, import an existing install (reflink, checked against the manifest), first-run scan | `quiver-core::{install, download, verify, builds, manifest}`, `quiverd::downloads`, `Request::{Install, Import, ScanInstalls, …}` | built |
+| C5 | Queue: pause, resume, reorder, bandwidth, max active, free-space check, per-slice resume and retry | `quiverd::downloads`, `Request::Queue*`, `DownloadSettings` | built |
 | C6 | Move an install to another folder | PROPOSAL only | **not built** |
-| C7 | One Proton prefix per game, Proton choice, launch settings (env, DLL, args, wrappers) with revisioned history | `ubi-core::{launcher, settings}`, `Request::Settings*` | built (prefix snapshots designed only) |
-| C8 | Licensed launch: bridge in the prefix, Connect pipes, Denuvo tokens from the host broker, ticket and owned ids in `InitRsp` | `ubi-bridge`, `ubi-core::{broker, launch}` | built |
-| C9 | Cloud saves: pull before, push after, `.upload` markers, backups, restore, save stores, merge | `ubi-core::{cloudsave, savesync, saves, savestores}` | built |
-| C10 | Play time: local sessions, Ubisoft play-session reporting (heartbeat every 330 s), remote total | `ubi-core::playsession`, `Request::{Playtime, RemotePlaytime}` | built |
-| C11 | Progression: achievement definitions (product-config zip), stats, challenges, rewards, Connect level | `ubi-core::progress`, `Request::GameProgress` | definitions built; **unlock state and unlock reporting not built** (the bridge logs `EarnAchievement`) |
+| C7 | One Proton prefix per game, Proton choice, launch settings (env, DLL, args, wrappers) with revisioned history | `quiver-core::{launcher, settings}`, `Request::Settings*` | built (prefix snapshots designed only) |
+| C8 | Licensed launch: bridge in the prefix, Connect pipes, Denuvo tokens from the host broker, ticket and owned ids in `InitRsp` | `quiver-bridge`, `quiver-core::{broker, launch}` | built |
+| C9 | Cloud saves: pull before, push after, `.upload` markers, backups, restore, save stores, merge | `quiver-core::{cloudsave, savesync, saves, savestores}` | built |
+| C10 | Play time: local sessions, Ubisoft play-session reporting (heartbeat every 330 s), remote total | `quiver-core::playsession`, `Request::{Playtime, RemotePlaytime}` | built |
+| C11 | Progression: achievement definitions (product-config zip), stats, challenges, rewards, Connect level | `quiver-core::progress`, `Request::GameProgress` | definitions built; **unlock state and unlock reporting not built** (the bridge logs `EarnAchievement`) |
 | C12 | DLC: add-ons listed, owned ids passed to the game | `gameinfo`, bridge `InitRsp` | built |
-| C13 | Mods: layers, packages, versions, profiles, overlayfs in a user namespace, config patches, built-in audited mods (`products = [id]`) | `ubi-core::{mods, modversions, modpkg, overlay, confpatch}`, `mods/<product>/` | built; MOD-CONFIG options designed |
-| C14 | Exports: .desktop entries, Steam shortcuts, Steam copies started through Quiver (`steam-run`) | `ubi-core::exports`, `steamrun` | built |
+| C13 | Mods: layers, packages, versions, profiles, overlayfs in a user namespace, config patches, built-in audited mods (`products = [id]`) | `quiver-core::{mods, modversions, modpkg, overlay, confpatch}`, `mods/<product>/` | built; MOD-CONFIG options designed |
+| C14 | Exports: .desktop entries, Steam shortcuts, Steam copies started through Quiver (`steam-run`) | `quiver-core::exports`, `steamrun` | built |
 | C15 | Sight overlay and the pinned HUD | SIGHT.md, SIGHT-HUD.md | **designed, not built** |
-| C16 | CLI and agents: every action is a daemon request with a source label, activity log, `confirmed` gates for risky actions | `ubi-api`, `ubi-cli`, activity | built (scoped tokens and MCP designed) |
-| C17 | First-run: install folder, import Connect installs, Steam step, fixes on vanilla | `ubi-api::setup`, app `welcome.rs` | built |
+| C16 | CLI and agents: every action is a daemon request with a source label, activity log, `confirmed` gates for risky actions | `quiver-api`, `quiver-cli`, activity | built (scoped tokens and MCP designed) |
+| C17 | First-run: install folder, import Connect installs, Steam step, fixes on vanilla | `quiver-api::setup`, app `welcome.rs` | built |
 
-Everything in `ubi-api` is keyed by `product_id: u32` (`Request::Install { product_id }`,
+Everything in `quiver-api` is keyed by `product_id: u32` (`Request::Install { product_id }`,
 `LibraryEntry.product_id`, mod manifests' `products = [420]`, `games/<product>/…` on disk).
 That key is the one structural thing Epic forces to change (section 4.1).
 
@@ -111,7 +111,7 @@ the approach breaks or can't be done.
 | C2 Library and art | `library-service …/library/api/public/items?includeMetadata=true` (cursor pages), then catalog `…/bulk/items` per namespace. Art from `keyImages`: `DieselGameBoxTall` (tile), `DieselGameBox` (hero), `DieselGameBoxLogo` (logo). Filter out UE assets and mobile-only items | legendary `get_game_and_dlc_list`, Heroic `library.ts` | S–M | Low |
 | C3 Game info | catalog: title, developer, description, `releaseInfo`, `customAttributes` (`CanRunOffline`, `CloudSaveFolder`, `FolderName`, `AdditionalCommandLine`, `OwnershipToken`, `ThirdPartyManaged*`). DLC from `dlcItemList`, store link from the title slug | same | S | Low |
 | C4 Install, update, verify, uninstall, import | Native **chunked-manifest downloader**: assets/v2 manifest API → binary manifest (magic `0x44BEC00C`, zlib, sometimes AES-GCM with API-provided secrets) → chunks (`ChunksV4/<group>/<hash>_<guid>.chunk`, magic `0xB1FE3AA2`, zlib, 1 MiB windows) assembled into files. Per-file SHA-1 for verify. Updates diff file hashes and reuse old files' data; delta manifests when offered. Install tags (selective downloads). Import from legendary/Heroic `installed.json` and EGL `.item` manifests, verified against the manifest | legendary `downloader/mp`, `models/manifest.py`, egs-api `asset_download_manifests` | **L** | Med: manifest v22+ chunk paths, encrypted builds, prereqs |
-| C5 Queue | Same `ubid::downloads` queue behind a store-agnostic `Installer`. Resume unit is per file plus per chunk instead of per slice. Same retry and free-space rules | Quiver's queue | M | Low |
+| C5 Queue | Same `quiverd::downloads` queue behind a store-agnostic `Installer`. Resume unit is per file plus per chunk instead of per slice. Same retry and free-space rules | Quiver's queue | M | Low |
 | C6 Move | Store-agnostic (move the folder, rewrite the install record, re-point overlay mounts). Epic itself needs nothing; build it once for all stores | – | S (shared) | Low |
 | C7 Prefixes | Unchanged launcher. The bridge becomes optional per launch. Prereqs from the manifest (`prereq_path`, `prereq_args`) run once per prefix with a marker. EOS overlay registry entry only when turned on | Heroic `prepareWineLaunch` | S | Low |
 | C8 Licensed launch | `LaunchProvider::Epic`: mint an exchange code (`GET …/oauth/exchange`) just before start. Add `-AUTH_LOGIN=unused -AUTH_PASSWORD=<code> -AUTH_TYPE=exchangecode -epicapp=<app> -epicenv=Prod -EpicPortal -epicusername= -epicuserid= -epiclocale= -epicsandboxid=<namespace>`, plus `-epicovt=<file>` when `OwnershipToken=true` and `-epicdeploymentid=` from the sidecar. Offline with an empty token only when `CanRunOffline` | legendary `get_launch_parameters`, Heroic `launch()` | S–M | Low for EOS-auth games; per-game quirks (legendary keeps `game_overrides`) |
@@ -146,7 +146,7 @@ struct EpicApp { app_name: String }  // Epic's stable asset id ("Camellia"); nam
                                       // catalog item id are looked up from it
 ```
 
-- `ubi-api` requests take `game: GameKey` where they take `product_id: u32` today. Serde
+- `quiver-api` requests take `game: GameKey` where they take `product_id: u32` today. Serde
   accepts both (`3539` → `Ubisoft(3539)`), so the CLI, the app and older scripts keep working.
 - On-disk paths move from `games/<product>/…` to `games/<store>-<id>/…` for new stores only.
   Ubisoft paths stay where they are, so nothing is migrated.
@@ -165,7 +165,7 @@ trait Installer       { plan(key, opts) -> Plan, run(plan, sink: &mut dyn Progre
                         verify(key), repair(key), uninstall(key), adopt(key, path) }    // C4, C5
 trait LaunchProvider  { prepare(key, account) -> LaunchLicense, on_exit(&LaunchLicense) } // C8
 struct LaunchLicense  { args: Vec<Secret<String>>, env: Vec<(String, Secret<String>)>,
-                        files: Vec<TempFile>, companions: Vec<Companion> /* ubi-bridge */,
+                        files: Vec<TempFile>, companions: Vec<Companion> /* quiver-bridge */,
                         refresh: Option<Duration> }
 trait CloudSaves      { locate(key, prefix) -> Vec<SaveRoot>, status, pull, push }      // C9
 trait Progression     { achievements(key) -> Achievements, unlocks_reported_by: Game | Launcher }
@@ -182,7 +182,7 @@ the activity log and the resolved command the app shows (`-AUTH_PASSWORD=<redact
 
 ```
 quiverd
-  ├─ ubi-core (unchanged; implements the traits for Ubisoft)
+  ├─ quiver-core (unchanged; implements the traits for Ubisoft)
   ├─ epic-core (new)
   │    api.rs        EGS hosts and calls; EGL client id/secret/UA/label from a refreshable config
   │    auth.rs       code login, refresh with rotation, exchange codes, ownership tokens
@@ -193,7 +193,7 @@ quiverd
   │    saves.rs      savesync manifests ↔ prefix folders
   │    progress.rs   achievements (GraphQL), playtime (library-service)
   │    link.rs       externalAuths, Ubisoft codes: list, claim, redeem
-  └─ ubid::downloads (one queue; Installer trait per store)
+  └─ quiverd::downloads (one queue; Installer trait per store)
 ```
 
 - **No new long-lived process.** Epic needs nothing like the broker, because games talk to
@@ -211,7 +211,7 @@ quiverd
   copy code into Quiver. Calling the `legendary` binary as a subprocess would be fine
   license-wise; the recommendation against it is about the architecture.
 
-### 4.4 Ubisoft titles sold on Epic: how it composes with ubi-bridge
+### 4.4 Ubisoft titles sold on Epic: how it composes with quiver-bridge
 
 Evidence: this machine's Heroic legendary catalog cache (non-secret catalog JSON); legendary
 `cli.py activate --uplay` and `core.py get_ubisoft_uri`; Heroic `games.ts installUbisoft`;
@@ -226,7 +226,7 @@ Epic entitlement (Camellia, partnerLinkType=ubisoft, GameID=3539)
    ▼
 Ubisoft ownership 3539 (target_partner = EpicGames)  ── one-time and irreversible; link is permanent
    ▼
-everything Quiver does today: Ubisoft CDN install, ubi-bridge, Denuvo broker,
+everything Quiver does today: Ubisoft CDN install, quiver-bridge, Denuvo broker,
 cloud saves, play-session reporting, mods keyed 3539
 ```
 
@@ -330,7 +330,7 @@ tokens rotate, it would sign the other client out.
 
 | What | Where |
 |---|---|
-| Refresh token (and the cached access token, for fast daemon restarts) | Secret Service keyring, service `quiver`, entry `epic:<account_id>`, JSON. Same mechanism as `session:<userId>` for Ubisoft (`ubi-core::store`) |
+| Refresh token (and the cached access token, for fast daemon restarts) | Secret Service keyring, service `quiver`, entry `epic:<account_id>`, JSON. Same mechanism as `session:<userId>` for Ubisoft (`quiver-core::store`) |
 | Account index: id, display name, default, linked Ubisoft id | `<data>/accounts.json`, entries with `store: "epic"` (non-secret; STORES.md section 3.2) |
 | EGL client config (client id/secret, UA, label) | Compiled-in defaults plus `<data>/epic-client.json` override (non-secret, public values); steer 2 for how it updates |
 | Exchange codes, ownership tokens | memory, and a 0600 temp file in the prefix for the duration of a session |
@@ -357,7 +357,7 @@ unless you import EGL's session); this is unverified, so it's covered by S0.
 | S6 | Achievements GraphQL and play-time PUT/GET with the launcher token | Read-only GETs first; one PUT after a real session |
 
 **Phase 1 (M): Epic accounts and library; Ubisoft-on-Epic.**
-- `GameKey` in `ubi-api` (serde-compatible), `games/<store>-<id>` paths for new stores.
+- `GameKey` in `quiver-api` (serde-compatible), `games/<store>-<id>` paths for new stores.
 - `epic-core` auth (code login, refresh, keyring, several accounts), library and catalog,
   art, game info, DLC lists.
 - Library: Epic titles with "Bought on Epic", install state "Not installed" (install arrives
@@ -474,8 +474,8 @@ unless you import EGL's session); this is unverified, so it's covered by S0.
 ## Sources
 
 Local, read-only:
-- Quiver: `crates/ubi-api/src/lib.rs` (`Request`, `LibraryEntry`), `crates/ubi-core/src/{store,auth,launcher,playsession,progress,savesync,broker,online}.rs`,
-  `crates/ubi-bridge/src/win/api.rs` (achievements stub, `target_partner: None`), `proto/proto_ownership/ownership.proto`,
+- Quiver: `crates/quiver-api/src/lib.rs` (`Request`, `LibraryEntry`), `crates/quiver-core/src/{store,auth,launcher,playsession,progress,savesync,broker,online}.rs`,
+  `crates/quiver-bridge/src/win/api.rs` (achievements stub, `target_partner: None`), `proto/proto_ownership/ownership.proto`,
   `proto/proto_settings/common_settings.proto`, `proto/proto_download_install_state/download_install_state.proto`,
   `proto/proto_uplaydll/UplayDll.proto`.
 - Heroic (`HeroicGamesLauncher` @ 7e7d7883, 2026-08-15): `src/backend/storeManagers/legendary/{games,library,user,thirdParty}.ts`,

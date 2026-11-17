@@ -122,7 +122,7 @@ typedef enum quiver_kind {
 /* Declare (or look up) a metric. `name` is relative to the surface: "fg.state" becomes
  * "aco-dlss.fg.state" (at most 64 bytes in all). `descriptor_json` may be NULL when
  * quiver-options.toml declares [metric.<name>]; otherwise a JSON object with the other
- * descriptor fields (ubi_perf::descriptor::MetricDescriptor: unit, label, short, help,
+ * descriptor fields (quiver_perf::descriptor::MetricDescriptor: unit, label, short, help,
  * values, roles, thresholds...; not id, name or kind). A state metric needs its `values`.
  * Call at init, not per frame. Up to 64. Returns QUIVER_NO_METRIC on the no-op handle or
  * a bad name; Quiver's verdict comes later (quiver_metric_status). */
@@ -141,7 +141,7 @@ void quiver_text(quiver_mod *m, quiver_metric h, const char *utf8);   /* <= 48 b
 void quiver_mark(quiver_mod *m, quiver_metric h, int64_t t_qpc, int64_t dur_qpc, const char *label);
 int64_t quiver_now(void); /* QueryPerformanceCounter */
 
-/* Per-frame data (SIGHT-HUD phase 2: shared-memory rings, whose layout is ubi-perf's
+/* Per-frame data (SIGHT-HUD phase 2: shared-memory rings, whose layout is quiver-perf's
  * include/quiver_perf.h; this header will include it then). Declared so mods can be written
  * against them now; until Quiver offers rings they drop everything (counted), and
  * quiver_perf_wanted() returns 0. */

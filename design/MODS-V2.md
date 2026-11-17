@@ -123,7 +123,7 @@ version".
 ## As built (2026-11-16)
 
 - **Format:** `quiver-mod.toml` (TOML, `deny_unknown_fields` so typos fail loudly;
-  `quiver-mod.json` with the same fields is read too). Types: `ubi_api::mods::ModManifest`.
+  `quiver-mod.json` with the same fields is read too). Types: `quiver_api::mods::ModManifest`.
 - **Store:** an installed mod is a layer record with a `manifest` (same folders, same ids,
   same history file; new ids start with `m`). v1 layers are file-only mods as they are,
   with unknown save compatibility (counted as not compatible). `quiver mods <game> set MOD
@@ -138,9 +138,9 @@ version".
 
 ### Save stores (as built, 2026-11-16)
 
-- **Types:** `ubi_api::savestores` (`SaveStore`, `SaveStoresRevision`, `SaveStoreOp`,
+- **Types:** `quiver_api::savestores` (`SaveStore`, `SaveStoresRevision`, `SaveStoreOp`,
   `SaveStoresReport`, `MergeReport`, `saves_advice`, `shared_store_warning`); core in
-  `ubi_core::savestores`. Requests (appended): `SaveStores`, `SaveStoreEdit`,
+  `quiver_core::savestores`. Requests (appended): `SaveStores`, `SaveStoreEdit`,
   `SaveStoreHistory`, `SavesMerge`; `ModsRequest::ProfileCreate` takes an optional `saves`.
 - **Storage:** `games/<product>/saves.jsonl`, whole-state revisions (stores with id, name,
   folder, created, created_by, cloud, retired, note; plus vanilla's store). No file means
@@ -183,7 +183,7 @@ version".
   (Far Cry 4 keeps `GamerProfile.xml` in a per-account folder).
 - **Vanilla with fixes:** fixes with install files mount over the install for vanilla too,
   with `profiles/vanilla/upper` as the writable layer.
-- **Built-ins:** `mods/<product>/<id>/quiver-mod.toml`, compiled in by `ubi-core/build.rs`;
+- **Built-ins:** `mods/<product>/<id>/quiver-mod.toml`, compiled in by `quiver-core/build.rs`;
   a unit test checks every entry parses, links PCGamingWiki, has an `audited` note and names
   its product.
 - **Default profile:** the game setting `profile` (`GameSettings::profile`, a profile id; the
@@ -195,7 +195,7 @@ version".
 
 ### Mod versions (as built, 2026-11-16)
 
-- **Types** (`ubi_api::mods`): `ModRecord` (id, name, current, versions, disabled),
+- **Types** (`quiver_api::mods`): `ModRecord` (id, name, current, versions, disabled),
   `ModVersion` (id, label, added, added_by, notes, retired, prerelease), `ModRevision`
   (whole-record history entries; `deleted` for a mod merged away or removed),
   `ResolvedMod` (an entry resolved: mod, version, label, pinned, current; `describe()`),
@@ -203,7 +203,7 @@ version".
   ones included), `ProfileInfo.resolved`, `LaunchPlan.resolved`, `ModDetail.record/used_as`,
   `PlaySession.mods`, `MigrationReport.builtin_updates`; replies `VersionChange`,
   `VersionMerge`. Requests (appended): `VersionAdd`, `VersionUse`, `VersionRetire`,
-  `ModHistory`, `MergeVersions`. Core: `ubi_core::modversions`.
+  `ModHistory`, `MergeVersions`. Core: `quiver_core::modversions`.
 - **Storage:** a version *is* a layer: `mods/<product>/layers/<version id>/` (files),
   `<version id>.json` (its `Layer`: metadata and manifest), `games/<product>/layers/<version
   id>.jsonl` (deletions history). A mod's record is `games/<product>/mods/<mod id>.jsonl`, one

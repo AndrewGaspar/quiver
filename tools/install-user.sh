@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build Quiver from this checkout and install it into your home directory (no root):
 #
-#   ~/.local/bin/{quiver,quiverd,quiver-app,ubi}
-#   ~/.local/lib/quiver/ubi-bridge.exe
+#   ~/.local/bin/{quiver,quiverd,quiver-app,ubi}  (ubi: the CLI's pre-Quiver name)
+#   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
@@ -256,12 +256,12 @@ export CARGO_TARGET_DIR=$build/target
 mkdir -p "$build"
 echo "Building Quiver $version (target dir $CARGO_TARGET_DIR)"
 cargo build --release --locked
-cargo build --release --locked -p ubi-bridge --target x86_64-pc-windows-gnu
+cargo build --release --locked -p quiver-bridge --target x86_64-pc-windows-gnu
 # The Sight layer for 32-bit games, when Rust's i686 target is there (rustup target add
 # i686-unknown-linux-gnu; also needs 32-bit glibc, lib32-glibc on Arch).
 sight_i686=0
 if rustup target list --installed 2>/dev/null | grep -qx i686-unknown-linux-gnu; then
-    if cargo build --release --locked -p ubi-sight-layer --lib --target i686-unknown-linux-gnu; then
+    if cargo build --release --locked -p quiver-sight-layer --lib --target i686-unknown-linux-gnu; then
         sight_i686=1
     else
         echo "Note: the 32-bit Sight layer didn't build; installing without it."

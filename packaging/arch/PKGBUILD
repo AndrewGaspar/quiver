@@ -49,7 +49,7 @@ pkgver() {
 prepare() {
   cd quiver
   export RUSTUP_TOOLCHAIN=stable
-  # ubi-bridge.exe needs the Windows standard library, which only rustup ships (Arch's
+  # quiver-bridge.exe needs the Windows standard library, which only rustup ships (Arch's
   # rust package has no mingw target).
   if [[ ! -d "$(rustc --print sysroot)/lib/rustlib/$_bridge_target" ]]; then
     if command -v rustup >/dev/null; then
@@ -69,7 +69,7 @@ build() {
   # makepkg sets SOURCE_DATE_EPOCH to the time of each build, and the cc crate reruns every
   # C build script (ring, zstd-sys, …) when it changes, which defeats a cached target dir.
   env -u SOURCE_DATE_EPOCH cargo build --frozen --release
-  env -u SOURCE_DATE_EPOCH cargo build --frozen --release -p ubi-bridge --target "$_bridge_target"
+  env -u SOURCE_DATE_EPOCH cargo build --frozen --release -p quiver-bridge --target "$_bridge_target"
 }
 
 package() {

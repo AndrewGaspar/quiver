@@ -7,7 +7,7 @@ interfaces Steam needs from that architecture.
 
 The ask: "scope out integrating Steam… I want all the same great capabilities we built for
 Ubisoft Connect." Quiver already reads and writes a lot of Steam's local state for Steam
-copies of Ubisoft games (`design/STEAM-COPIES.md`, `crates/ubi-core/src/exports/steam*.rs`,
+copies of Ubisoft games (`design/STEAM-COPIES.md`, `crates/quiver-core/src/exports/steam*.rs`,
 `textvdf.rs`, `vdf.rs`, `steamrun.rs`). Much of this plan generalises that code from
 "Ubisoft games Steam installed" to "every Steam game".
 
@@ -96,21 +96,21 @@ Top risks:
 
 | # | Capability as built for Ubisoft | Where |
 |---|---|---|
-| C1 | Accounts: password + 2FA login, remember-me refresh, one keyring entry per account, several accounts, default and per-game launch account | `ubi-core/src/auth.rs`, `store.rs`; `Request::Login/Login2fa/Logout/AccountDefault` |
-| C2 | Library: ownership sync, product configs, merged across accounts; art chain (config → games API → Steam cache → Steam CDN → custom); game info, add-ons, links | `library.rs`, `gameinfo.rs`, `spaces.rs`, `ubi-api/src/art.rs` |
-| C3 | Install pipeline: one queue (pause, resume, reorder, bandwidth limit, max active, auto-update), free-space check with margin, slice-level resume, update preview, verify and repair, import of existing installs (reflink), uninstall with or without prefix. **Move is designed, not built** (no `Request::Move`) | `install.rs`, `download.rs`, `verify.rs`, `ubid/src/downloads.rs` |
+| C1 | Accounts: password + 2FA login, remember-me refresh, one keyring entry per account, several accounts, default and per-game launch account | `quiver-core/src/auth.rs`, `store.rs`; `Request::Login/Login2fa/Logout/AccountDefault` |
+| C2 | Library: ownership sync, product configs, merged across accounts; art chain (config → games API → Steam cache → Steam CDN → custom); game info, add-ons, links | `library.rs`, `gameinfo.rs`, `spaces.rs`, `quiver-api/src/art.rs` |
+| C3 | Install pipeline: one queue (pause, resume, reorder, bandwidth limit, max active, auto-update), free-space check with margin, slice-level resume, update preview, verify and repair, import of existing installs (reflink), uninstall with or without prefix. **Move is designed, not built** (no `Request::Move`) | `install.rs`, `download.rs`, `verify.rs`, `quiverd/src/downloads.rs` |
 | C4 | One Proton prefix per game; Proton choice; settings with revision history, restore, actor labels | `launcher.rs` (`list_protons`), `settings.rs`, `SettingsSet/History/Restore` |
-| C5 | Licensed launch without Connect: `ubi-bridge` owns the SDK pipes; the broker gets Denuvo and ownership tokens | `ubi-bridge`, `broker.rs`, `launch.rs` |
+| C5 | Licensed launch without Connect: `quiver-bridge` owns the SDK pipes; the broker gets Denuvo and ownership tokens | `quiver-bridge`, `broker.rs`, `launch.rs` |
 | C6 | Cloud saves (pull before, push after), backups, save stores, merge, restore with approvals | `cloudsave.rs`, `savesync.rs`, `saves.rs`, `savestores.rs` |
-| C7 | Achievements and progression, read-only from UbiServices. Earning is logged by the bridge but not reported (`EarnAchievementRsp` OK) | `progress.rs`, `ubi-bridge/src/win/api.rs` |
+| C7 | Achievements and progression, read-only from UbiServices. Earning is logged by the bridge but not reported (`EarnAchievementRsp` OK) | `progress.rs`, `quiver-bridge/src/win/api.rs` |
 | C8 | Play time: reported to Ubisoft (heartbeat every 330 s), local `playtime.jsonl` with settings revision, `RemotePlaytime` | `playsession.rs`, `settings.rs` |
 | C9 | DLC / add-ons: owned and not owned, store links | `info.rs` (`GameInfo`) |
 | C10 | Mods v2: layers, profiles, versions, config patches, per-profile prefix folders, fixes on vanilla, built-in audited catalog keyed by product id; MOD-CONFIG options (designed) | `mods.rs`, `modversions.rs`, `confpatch.rs`, `overlay.rs`, `mods/<product>/…` |
 | C11 | Sight overlay and the pinned HUD (designed, not built) | `design/SIGHT.md`, `design/SIGHT-HUD.md` |
 | C12 | Exports: `.desktop` files and Steam shortcuts (`shortcuts.vdf`, grid art), staged while Steam runs, restart only after confirmation | `exports/*` |
-| C13 | Steam copies of Ubisoft games: in the library, `steam-run`, patch and unpatch, offers, launch settings applied inside Steam's launch | `steamrun.rs`, `steamplan.rs`, `exports/steamgames.rs`, `ubid/src/steamlib.rs` |
-| C14 | CLI and agents: everything is a daemon request with a source label, activity log, `confirmed` gates for destructive acts, `--json` | `ubi-api`, `ubi-cli`, PROPOSAL "What agents may do" |
-| C15 | First run: Sign in, Storage, Import, Steam, Controller, Fixes, Theme | `ubi-app/src/ui/welcome.rs` (`Step`) |
+| C13 | Steam copies of Ubisoft games: in the library, `steam-run`, patch and unpatch, offers, launch settings applied inside Steam's launch | `steamrun.rs`, `steamplan.rs`, `exports/steamgames.rs`, `quiverd/src/steamlib.rs` |
+| C14 | CLI and agents: everything is a daemon request with a source label, activity log, `confirmed` gates for destructive acts, `--json` | `quiver-api`, `quiver-cli`, PROPOSAL "What agents may do" |
+| C15 | First run: Sign in, Storage, Import, Steam, Controller, Fixes, Theme | `quiver-app/src/ui/welcome.rs` (`Step`) |
 
 ### 2.2 Steam, per capability
 
@@ -196,7 +196,7 @@ ToS and data-loss risk.
 - `exports::steamgames` walks libraries and manifests and does the launch-option patch and
   unpatch with staging. `exports::steamlaunch` handles `steam://rungameid` with a systemd
   scope, and `exports::steamart` handles the local art cache.
-- `steamrun` (pure) with `ubi-cli steamrun.rs` (I/O) rewrites Steam's launch command, and
+- `steamrun` (pure) with `quiver-cli steamrun.rs` (I/O) rewrites Steam's launch command, and
   `SteamLaunchPlan` applies settings inside Steam's launch.
 
 ### 3.2 Generalising: store-agnostic interfaces Steam needs
@@ -217,7 +217,7 @@ filled.
 | `RuntimeProvider` | Proton choice, prefix location | `CompatToolMapping` (staged), `compatdata/<appid>` |
 
 **Identity.** Today every request carries `product_id: u32` (41 places in
-`ubi-api/src/lib.rs`). A multi-store Quiver needs a store-qualified reference such as
+`quiver-api/src/lib.rs`). A multi-store Quiver needs a store-qualified reference such as
 `GameRef { store: "steam", id: "292030" }`, printed `steam:292030`. Ubisoft keeps bare ids
 for compatibility, so `3539` means `ubisoft:3539` (`ubi:` is accepted as input). Export keys become `quiver:steam:292030[/profile]`.
 Existing Ubisoft keys and their CRC-derived shortcut app ids must not change.
@@ -229,11 +229,11 @@ Ubisoft games that route is "Steam launch, `steam-run`, Ubisoft bridge" (built).
 provider's records replace today's Ubisoft-only Steam scan, and owned-but-not-installed
 Steam copies can appear once signed in.
 
-**Crates.** A `store-steam` crate (or `ubi-core::steam`, if the crate rename waits) holding
+**Crates.** A `store-steam` crate (or `quiver-core::steam`, if the crate rename waits) holding
 the local readers (moved from `exports/` with re-exports), the `appinfo` and stats parsers,
 the URL driver, and later `steam-vent` sign-in and the depot installer behind a cargo
 feature. That keeps the CM stack out of builds that don't want it. `quiverd` hosts the
-provider. `ubi-bridge` stays Ubisoft-only.
+provider. `quiver-bridge` stays Ubisoft-only.
 
 ### 3.3 Generalised `steam-run`
 
@@ -339,7 +339,7 @@ Consequences for code that already exists:
   cache, cloud file state from `remotecache.vdf`, DLC list (installed DLC marked).
 - Play through `rungameid` (built). Install, verify and uninstall through `steam://`.
   Downloads view mirrors Steam's progress. The Storage view includes Steam libraries.
-- Identity: `steam:<appid>` refs across `ubi-api` and the CLI. Ubisoft ids unchanged.
+- Identity: `steam:<appid>` refs across `quiver-api` and the CLI. Ubisoft ids unchanged.
 - The existing Steam copies merge into the same entries (no regression to Ubisoft-on-Steam).
 - First-run Steam step: show Steam games yes or no, which user.
 

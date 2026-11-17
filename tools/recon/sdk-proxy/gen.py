@@ -51,8 +51,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID r) {{
     HMODULE real = LoadLibraryA(path);
     if (!real) return FALSE;
     for (int i = 0; i < {len(names)}; i++) REAL[i] = (void *)GetProcAddress(real, NAMES[i]);
-    /* UBI_SDK_LOG, else sdk-calls.log next to this DLL. */
-    const char *log = getenv("UBI_SDK_LOG");
+    /* QUIVER_SDK_LOG (or UBI_SDK_LOG), else sdk-calls.log next to this DLL. */
+    const char *log = getenv("QUIVER_SDK_LOG");
+    if (!log) log = getenv("UBI_SDK_LOG");
     char deflog[MAX_PATH];
     GetModuleFileNameA(inst, deflog, MAX_PATH);
     char *dslash = strrchr(deflog, '\\\\'); if (dslash) strcpy(dslash + 1, "sdk-calls.log");

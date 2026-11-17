@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# instance.sh — run a Ubisoft game against ubi-bridge (no Connect) in a headless container.
+# instance.sh — run a Ubisoft game against quiver-bridge (no Connect) in a headless container.
 #
 #   instance.sh new <name>                   fresh Proton prefix with only Ubisoft's SDK DLLs (no
 #                                            Connect); games are run from the library directory
 #   instance.sh create <name> [src-prefix]   reflink-clone a prefix; strip Connect's login data
 #                                            and disable Connect's executables
-#   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, ubi-bridge,
+#   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, quiver-bridge,
 #                                            then the game (<exe> is a Windows path). Extra game
-#                                            environment: UBI_GAME_ENV="K=V K2=V2". Wine trace of
-#                                            the game (kept inside the container): UBI_TRACE=+file
+#                                            environment: QUIVER_GAME_ENV="K=V K2=V2". Wine trace of
+#                                            the game (kept inside the container): QUIVER_TRACE=+file
 #   instance.sh trace-grep <name> <regex>    search that trace
 #   instance.sh wait <name>                  block until the game exits, then upload changed saves
 #   instance.sh shot <name> [file]           screenshot the container's display
@@ -20,24 +20,33 @@
 # local changes are kept; overwritten files go to $INST_ROOT/save-backups). Uploading happens
 # on `wait`/`stop` and covers only slots the game wrote (<slot>.save.upload markers).
 #
-# Live requests from the game (Denuvo tokens) go from ubi-bridge to `ubi broker` on the host,
+# Live requests from the game (Denuvo tokens) go from quiver-bridge to `quiver broker` on the host,
 # which holds the Ubisoft session; the container shares the host network to reach it.
 #
 # The clone keeps the source prefix's path inside the container so registry paths stay valid.
+#
+# Settings are QUIVER_* environment variables; their pre-rename UBI_* names still work. The
+# bridge goes to C:\quiver\quiver-bridge.exe, and C:\ubi\ubi-bridge.exe links to it for context
+# files and scripts that name the old path.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-INST_ROOT=${UBI_INST_ROOT:-$HOME/Games/ubi-instances}
-DEFAULT_SRC=${UBI_SRC_PREFIX:-$HOME/Games/ubisoft-connect}
-PROTON=${UBI_PROTON:-$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-12-x86_64}
-IMAGE=${UBI_IMAGE:-localhost/aco-headless:latest}
-RES=${UBI_RES:-1920x1080}
-BROKER=${UBI_BROKER:-127.0.0.1:47810}
+# Instances made before the rename are in ~/Games/ubi-instances; keep using it while it is there.
+INST_DEFAULT=$HOME/Games/quiver-instances
+[[ ! -d $INST_DEFAULT && -d $HOME/Games/ubi-instances ]] && INST_DEFAULT=$HOME/Games/ubi-instances
+INST_ROOT=${QUIVER_INST_ROOT:-${UBI_INST_ROOT:-$INST_DEFAULT}}
+DEFAULT_SRC=${QUIVER_SRC_PREFIX:-${UBI_SRC_PREFIX:-$HOME/Games/ubisoft-connect}}
+PROTON=${QUIVER_PROTON:-${UBI_PROTON:-$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-12-x86_64}}
+IMAGE=${QUIVER_IMAGE:-${UBI_IMAGE:-localhost/aco-headless:latest}}
+RES=${QUIVER_RES:-${UBI_RES:-1920x1080}}
+BROKER=${QUIVER_BROKER:-${UBI_BROKER:-127.0.0.1:47810}}
 # Containers share the host network (to reach the broker), and with it the abstract X11
 # socket namespace: an Xvfb on :0 there would capture the desktop's X clients (Xwayland only
 # listens on the path socket). Use a display number the desktop won't have.
-XDISPLAY=${UBI_XDISPLAY:-:97}
-LIBRARY=${UBI_LIBRARY:-$HOME/Games/ubi-library}
+XDISPLAY=${QUIVER_XDISPLAY:-${UBI_XDISPLAY:-:97}}
+LIB_DEFAULT=$HOME/Games/quiver-library
+[[ ! -d $LIB_DEFAULT && -d $HOME/Games/ubi-library ]] && LIB_DEFAULT=$HOME/Games/ubi-library
+LIBRARY=${QUIVER_LIBRARY:-${UBI_LIBRARY:-$LIB_DEFAULT}}
 # SDK DLLs games load from the "Connect" install dir; copied from an existing Connect install.
 SDK_DLLS=(uplay_r1.dll uplay_r164.dll uplay_r2.dll uplay_r264.dll uplay_aux_r1.dll uplay_aux_r164.dll
           ubiorbitapi_r2.dll ubiorbitapi_r264.dll)
@@ -46,7 +55,8 @@ CONNECT_APPDATA="drive_c/users/steamuser/AppData/Local/Ubisoft Game Launcher"
 CONNECT_EXES=(upc.exe UbisoftConnect.exe UbisoftGameLauncher.exe UbisoftGameLauncher64.exe UplayService.exe UplayWebCore.exe UbisoftExtension.exe)
 
 die() { echo "instance: $*" >&2; exit 1; }
-ctr() { echo "ubi-$1"; }
+# Containers started before the rename are named ubi-<name>; those are found too.
+ctr() { if podman container exists "ubi-$1" 2>/dev/null; then echo "ubi-$1"; else echo "quiver-$1"; fi; }
 dir() { echo "$INST_ROOT/$1"; }
 
 # Run a command with Proton inside the runtime image against an instance's prefix.
@@ -56,15 +66,15 @@ proton_exec() {
   podman run --rm --userns=keep-id --user 1000:1000 --security-opt label=disable \
     -v "$pfx:$pfx" -v "$PROTON:$PROTON:ro" \
     -e HOME=/home/steamuser -e WINEPREFIX="$pfx" -e STEAM_COMPAT_DATA_PATH="$pfx" \
-    -e STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steam -e WINEDEBUG=-all -e UBI_PROTON="$PROTON" \
-    "$IMAGE" bash -c 'mkdir -p /tmp/steam; python3 "$UBI_PROTON/proton" run "$@"; rc=$?
-      "$UBI_PROTON/files/bin/wineserver" -w; exit $rc' _ "$@"
+    -e STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steam -e WINEDEBUG=-all -e QUIVER_PROTON="$PROTON" \
+    "$IMAGE" bash -c 'mkdir -p /tmp/steam; python3 "$QUIVER_PROTON/proton" run "$@"; rc=$?
+      "$QUIVER_PROTON/files/bin/wineserver" -w; exit $rc' _ "$@"
 }
 
 cmd_new() {
   local name=$1 dst; dst=$(dir "$name")
   [[ -e $dst ]] && die "$name exists"
-  local sdk_src=${UBI_SDK_SRC:-$HOME/Games/ubisoft-connect/$UPC_REL}
+  local sdk_src=${QUIVER_SDK_SRC:-${UBI_SDK_SRC:-$HOME/Games/ubisoft-connect/$UPC_REL}}
   mkdir -p "$dst/out" "$dst/prefix"
   ln -s . "$dst/prefix/pfx"   # Proton initializes the prefix root itself (same layout as Lutris)
   echo "$dst/prefix" > "$dst/src"
@@ -100,13 +110,15 @@ cmd_run() {
   [[ -d $dst/prefix ]] || die "no instance $name"
   src=$(cat "$dst/src")
   podman rm -f "$(ctr "$name")" >/dev/null 2>&1 || true
-  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p ubi-cli
-  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p ubi-bridge --target x86_64-pc-windows-gnu
-  mkdir -p "$dst/prefix/drive_c/ubi" "$dst/out"
-  cp "$ROOT/target/x86_64-pc-windows-gnu/debug/ubi-bridge.exe" "$dst/prefix/drive_c/ubi/"
+  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p quiver-cli
+  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p quiver-bridge --target x86_64-pc-windows-gnu
+  mkdir -p "$dst/prefix/drive_c/quiver" "$dst/prefix/drive_c/ubi" "$dst/out"
+  cp "$ROOT/target/x86_64-pc-windows-gnu/debug/quiver-bridge.exe" "$dst/prefix/drive_c/quiver/"
+  # The pre-rename path, for context files and scripts that still name C:\ubi\ubi-bridge.exe.
+  ln -sfn ../quiver/quiver-bridge.exe "$dst/prefix/drive_c/ubi/ubi-bridge.exe"
   # One broker on the host serves every instance; start it if nothing is listening.
   if ! (exec 3<>"/dev/tcp/${BROKER%:*}/${BROKER#*:}") 2>/dev/null; then
-    RUST_LOG=${RUST_LOG:-ubi_core=info} nohup "$ROOT/target/debug/ubi" broker --listen "$BROKER" >>"$INST_ROOT/broker.log" 2>&1 &
+    RUST_LOG=${RUST_LOG:-quiver_core=info} nohup "$ROOT/target/debug/quiver" broker --listen "$BROKER" >>"$INST_ROOT/broker.log" 2>&1 &
     echo "started broker on $BROKER (log: $INST_ROOT/broker.log)"
   fi
   local user_id
@@ -117,11 +129,11 @@ cmd_run() {
     *) host_dir="$dst/prefix/drive_c/$(printf %s "${win_dir#[Cc]:\\}" | tr '\\' /)";;
   esac
   [[ -f $host_dir/uplay_install.manifest ]] || die "no uplay_install.manifest in $host_dir"
-  ( umask 077; "$ROOT/target/debug/ubi" launch-context "$id" --broker "$BROKER" --install-dir "$host_dir" -o "$dst/out/context.json" )
+  ( umask 077; "$ROOT/target/debug/quiver" launch-context "$id" --broker "$BROKER" --install-dir "$host_dir" -o "$dst/out/context.json" )
   user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
   echo "$id" > "$dst/uplay_id"
   local saves="$dst/prefix/$UPC_REL/savegames/$user_id/$id"
-  "$ROOT/target/debug/ubi" saves pull "$id" "$saves" --backup-dir "$INST_ROOT/save-backups"
+  "$ROOT/target/debug/quiver" saves pull "$id" "$saves" --backup-dir "$INST_ROOT/save-backups"
   # Same layout Connect uses: savegames\<user id>\<uplay id>
   python3 -I - "$dst/out/context.json" "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\savegames\\$user_id\\$id" <<'EOF'
 import json, sys
@@ -152,38 +164,38 @@ EOF
     -e STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steam \
     -e STEAM_COMPAT_APP_ID=0 -e SteamAppId=0 -e SteamGameId=0 \
     -e PROTON_ENABLE_NVAPI=1 -e DXVK_ENABLE_NVAPI=1 \
-    -e WINEDEBUG="${UBI_WINEDEBUG:--all}" \
+    -e WINEDEBUG="${QUIVER_WINEDEBUG:-${UBI_WINEDEBUG:--all}}" \
     -e PROTON_LOG=1 -e PROTON_LOG_DIR=/out \
-    -e UBI_BRIDGE_LOG='Z:\out\bridge-ipc.log' \
-    -e UBI_GAME_ENV="${UBI_GAME_ENV:-}" -e UBI_UPLAY_ID="$id" \
-    -e UBI_TRACE="${UBI_TRACE:-}" \
-    -e UBI_PROTON="$PROTON" -e UBI_RES="$RES" -e UBI_EXE="$exe" \
+    -e QUIVER_BRIDGE_LOG='Z:\out\bridge-ipc.log' \
+    -e QUIVER_GAME_ENV="${QUIVER_GAME_ENV:-${UBI_GAME_ENV:-}}" -e QUIVER_UPLAY_ID="$id" \
+    -e QUIVER_TRACE="${QUIVER_TRACE:-${UBI_TRACE:-}}" \
+    -e QUIVER_PROTON="$PROTON" -e QUIVER_RES="$RES" -e QUIVER_EXE="$exe" \
     "$IMAGE" bash -c '
       mkdir -p /tmp/xdg /tmp/steam; chmod 700 /tmp/xdg
-      Xvfb "$DISPLAY" -screen 0 ${UBI_RES}x24 -nolisten tcp >/out/xvfb.log 2>&1 &
+      Xvfb "$DISPLAY" -screen 0 ${QUIVER_RES}x24 -nolisten tcp >/out/xvfb.log 2>&1 &
       for i in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
       echo "boot $(date -Is)" >> /out/run.log
-      python3 "$UBI_PROTON/proton" run "C:\\ubi\\ubi-bridge.exe" "Z:\\out\\context.json" >/out/bridge.log 2>&1 &
+      python3 "$QUIVER_PROTON/proton" run "C:\\quiver\\quiver-bridge.exe" "Z:\\out\\context.json" >/out/bridge.log 2>&1 &
       for i in $(seq 100); do grep -q "listening on .*uplay_ipc_pipe" /out/bridge-ipc.log 2>/dev/null && break; sleep 0.2; done
       echo "game $(date -Is)" >> /out/run.log
       # `run`, not `waitforexitandrun`: the latter waits for the bridge'"'"'s wineserver to exit.
       # What Connect hands a game it starts: arguments for uplay_aux_r164.dll, paths base64-encoded.
       b64() { printf %s "$1" | base64 -w0; }
-      export UPLAY_ARGUMENTS="-upc_uplay_id $UBI_UPLAY_ID -upc_game_version 1 -upc_exe_path $(b64 "$UBI_EXE") -upc_working_directory $(b64 "${UBI_EXE%\\*}")"
+      export UPLAY_ARGUMENTS="-upc_uplay_id $QUIVER_UPLAY_ID -upc_game_version 1 -upc_exe_path $(b64 "$QUIVER_EXE") -upc_working_directory $(b64 "${QUIVER_EXE%\\*}")"
       echo "UPLAY_ARGUMENTS=$UPLAY_ARGUMENTS" >> /out/run.log
-      echo "game env: $UBI_GAME_ENV" >> /out/run.log
+      echo "game env: $QUIVER_GAME_ENV" >> /out/run.log
       # The bridge is the game'"'"'s sibling here: tell the game (and its mods) the mod SDK pipe.
       ctx_field() { python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or \"\")" /out/context.json "$1"; }
       export QUIVER_MODS_PIPE="$(ctx_field mods_pipe)" QUIVER_SESSION="$(ctx_field session)"
       echo "QUIVER_MODS_PIPE=$QUIVER_MODS_PIPE" >> /out/run.log
-      if [ -n "$UBI_TRACE" ]; then
+      if [ -n "$QUIVER_TRACE" ]; then
         # Wine trace of the game. Proton forces WINEDEBUG=-all unless PROTON_LOG is set, and
         # then writes everything to $PROTON_LOG_DIR/steam-0.log (hundreds of MB per minute), so
         # keep it in the container'"'"'s /tmp, which is discarded with the container.
-        env $UBI_GAME_ENV PROTON_LOG=1 PROTON_LOG_DIR=/tmp/gamelog WINEDEBUG="$UBI_TRACE" \
-          python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
+        env $QUIVER_GAME_ENV PROTON_LOG=1 PROTON_LOG_DIR=/tmp/gamelog WINEDEBUG="$QUIVER_TRACE" \
+          python3 "$QUIVER_PROTON/proton" run "$QUIVER_EXE" >>/out/run.log 2>&1
       else
-        env $UBI_GAME_ENV python3 "$UBI_PROTON/proton" run "$UBI_EXE" >>/out/run.log 2>&1
+        env $QUIVER_GAME_ENV python3 "$QUIVER_PROTON/proton" run "$QUIVER_EXE" >>/out/run.log 2>&1
       fi
       echo "game exited $(date -Is) status $?" >> /out/run.log' >/dev/null
   echo "started $(ctr "$name"); logs in $dst/out"
@@ -202,7 +214,7 @@ cmd_logs() { local d; d=$(dir "$1")/out; tail -60 "$d/bridge-ipc.log"; echo "---
 push_saves() {
   local dst id user_id; dst=$(dir "$1"); id=$(cat "$dst/uplay_id" 2>/dev/null) || return 0
   user_id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["account_id"])' "$dst/out/context.json")
-  "$ROOT/target/debug/ubi" saves push "$id" "$dst/prefix/$UPC_REL/savegames/$user_id/$id"
+  "$ROOT/target/debug/quiver" saves push "$id" "$dst/prefix/$UPC_REL/savegames/$user_id/$id"
 }
 cmd_wait() { podman wait "$(ctr "$1")" >/dev/null 2>&1 || true; push_saves "$1"; }
 cmd_stop() {

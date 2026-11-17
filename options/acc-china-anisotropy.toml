@@ -7,7 +7,7 @@ surface = "acc-china-graphics"
 title = "Texture filtering"
 help = "Unreal Engine 3 system settings of AC Chronicles: China that the 16x filtering mod touches."
 source = "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed_Chronicles:_China"
-audited = "2026-11-16: keys and value spellings from the PCConsole-ACCSystemSettings.ini the game wrote (crates/ubi-core/fixtures/mods-v2); the game rewrites this file from its own menu, so it is program-owned and read at start."
+audited = "2026-11-16: keys and value spellings from the PCConsole-ACCSystemSettings.ini the game wrote (crates/quiver-core/fixtures/mods-v2); the game rewrites this file from its own menu, so it is program-owned and read at start."
 
 [match]
 products = [1651]

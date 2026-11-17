@@ -4,8 +4,8 @@ Goal: find, without any live call, how an achievement **unlock** is reported ups
 unlock **status** is read, so Quiver can report unlocks the bridge currently only logs
 (`EarnAchievementReq`) and show per-user unlock state.
 
-Evidence: `proto/` (vendored from upc.exe), Quiver's demux client (`crates/ubi-core/src/demux.rs`)
-and progress code (`crates/ubi-core/src/progress.rs`), the Connect UI bundle (`uicommon.pak`),
+Evidence: `proto/` (vendored from upc.exe), Quiver's demux client (`crates/quiver-core/src/demux.rs`)
+and progress code (`crates/quiver-core/src/progress.rs`), the Connect UI bundle (`uicommon.pak`),
 and **strings extracted from the user's own `upc.exe` after unpacking it offline** (run in a
 throwaway Wine prefix inside a network namespace with no connectivity — no network calls, no
 login, nothing written to the user's prefix). upc.exe is packed (`.ubx*` sections); the readable
@@ -51,7 +51,7 @@ upc.exe source files (from the embedded Jenkins paths) and their strings:
   `cloudsave_service`, …). Quiver's demux client opens services by name exactly like this
   (`ServiceConnection`, `demux.rs`); `ach_frontend` is simply not in Quiver's `service!(...)`
   list yet.
-- Messages (`Uplay.proto`, already compiled into `ubi-proto` would need a module add):
+- Messages (`Uplay.proto`, already compiled into `quiver-proto` would need a module add):
   - `Req { AuthenticateReq(orbit_token) | ReadAchievementsReq | WriteAchievementsReq }`
   - `ReadAchievementsReq { user_id, Product{product_id, platform_id} }`
     → `ReadAchievementsRsp { user_id, AchievementBlob{ ProductAchievements[]{ Product,
@@ -78,7 +78,7 @@ plaintext matched a keyword and skipped binary demux frames.
 Game calls `UPLAY_ACH_EarnAchievement` → upc `AchievementsEarn.cpp` sets the earn in a local cache
 + spool, then `AchievementsSync.cpp` → `AchievementsPostEarnedToApi` (REST) and/or the
 `ach_frontend` `WriteAchievements`. In Quiver this arrives at the bridge as
-`mg.protocol.uplaydll.EarnAchievementReq{ id }` (`crates/ubi-bridge/src/respond.rs::achievements`,
+`mg.protocol.uplaydll.EarnAchievementReq{ id }` (`crates/quiver-bridge/src/respond.rs::achievements`,
 TODO at line 426). `GetAchievementsReq` → `GetAchievementsRsp{ AchievementData{ id, name,
 description, isEarned, timestamp } }` is how the bridge should answer the game's read; today it
 returns an empty list.
@@ -95,7 +95,7 @@ demux `ach_frontend` ReadAchievements) is implemented.
 Highest-confidence implementable path **without a capture**: demux `ach_frontend` +
 `mg.protocol.uplay.WriteAchievementsReq` — it reuses Quiver's existing demux socket and
 orbit-token auth, no request signing. Add an `ach_frontend` service to `demux.rs`, a
-`ubi::protocol::uplay` module to `ubi-proto`, and have the bridge's `EarnAchievementReq` handler
+`ubi::protocol::uplay` module to `quiver-proto`, and have the bridge's `EarnAchievementReq` handler
 send `WriteAchievementsReq{ AchievementBlob{ ProductAchievements{ Product{product_id=<ACO space's
 product>, platform_id}, Achievements{ Achievement{ achievement_id=59, timestamp=now } } } } }`.
 Risk: `ach_frontend` may reject modern titles that use the REST path (would time out silently, as

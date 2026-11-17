@@ -1,0 +1,41 @@
+[package]
+name = "quiver-core"
+description = "Native Ubisoft Connect client core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quiver-proto.workspace = true
+quiver-perf.workspace = true
+anyhow.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+flate2.workspace = true
+base64.workspace = true
+keyring.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+quiver-ipc.workspace = true
+md5.workspace = true
+zstd.workspace = true
+sha1.workspace = true
+hex.workspace = true
+futures.workspace = true
+quiver-api.workspace = true
+crc32fast.workspace = true
+image.workspace = true
+libc.workspace = true
+toml.workspace = true
+sha2 = "0.10"
+regex = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

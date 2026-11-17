@@ -47,7 +47,7 @@ const SCREENS = [
       '<b>Play time</b>: Ubisoft’s total is the headline once it is wired. Local sessions stay underneath as the detail (weekly chart, per-session outcomes).',
       '<b>Slots</b> are Ubisoft cloud-save slots: number, Ubisoft’s save name (timestamp parsed for display), size, local and cloud times.',
       '<b>Status per slot</b>: in sync, cloud only, local only, conflict. Resolution is explicit. Quiver never overwrites silently.',
-      '<b>Every pull and push is preceded by a backup</b>, which is how ubi-core already works. Backups are listed and restorable.',
+      '<b>Every pull and push is preceded by a backup</b>, which is how quiver-core already works. Backups are listed and restorable.',
       '<b>Modded profiles</b> keep separate saves; for a game with mod profiles, a profile switcher appears at the top of this tab.',
     ],
     src: [['Save slots', P, 'cloudsave_service V2'], ['Backups', L, '~/.local/share/ubisoft-linux'], ['Play time total', F, 'Ubisoft play-session API'], ['Weekly chart, sessions', L, 'quiverd'], ['Achievements', F, 'UbiServices'], ['Player stats', F, 'stat ids from config, values from UbiServices']] },
@@ -119,7 +119,7 @@ const SCREENS = [
       '<b>Notifications</b> report the cloud pull before launch and the push after exit.',
       '<b>The top-left overlay is MangoHud</b>, enabled in launch options. It is not drawn by Quiver.',
     ],
-    src: [['Session state', L, 'quiverd + ubi-bridge IPC'], ['Ticket refresh, Denuvo token', P, 'UbiServices, via the broker']] },
+    src: [['Session state', L, 'quiverd + quiver-bridge IPC'], ['Ticket refresh, Denuvo token', P, 'UbiServices, via the broker']] },
   { id: 'palette', grp: 'Flows', label: 'Command palette', title: 'Command palette', sub: 'Ctrl K or Start. Every command is a daemon call with a CLI twin.', render: scrPalette,
     notes: [
       '<b>Ctrl K or Start anywhere.</b> Fuzzy search over games, actions and settings, scoped to the current game first.',

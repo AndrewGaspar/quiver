@@ -1,5 +1,5 @@
-/* A stand-in mod for testing quiver_mod.h against ubi-bridge under Wine
- * (crates/ubi-core/tests/modsdk_wine.rs). Built as a console exe so it can print what it
+/* A stand-in mod for testing quiver_mod.h against quiver-bridge under Wine
+ * (crates/quiver-core/tests/modsdk_wine.rs). Built as a console exe so it can print what it
  * sees; a real mod is a DLL, which changes nothing about the SDK.
  *
  *   quiver_mod_test.exe [seconds] [poll]

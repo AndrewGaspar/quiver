@@ -35,7 +35,7 @@ little risk. Running games is the hard part, for two independent reasons:
    answers the entitlement check against Meta's backend. That needs two in-memory patches to
    Meta's signed `OculusAppFramework.dll`, a byte-patched copy of `OVRServer_x64.exe`, and a
    service shim. None of them touches entitlement logic, but they are modifications of Meta's
-   software. A ubi-bridge-style "meta-bridge" that implements the service side of the Platform
+   software. A quiver-bridge-style "meta-bridge" that implements the service side of the Platform
    SDK's IPC is the clean architectural analogue, but nobody has done it and it is a large
    reverse-engineering job.
 
@@ -220,7 +220,7 @@ public project. "Spec." means speculative.
 | **Update** | manifest diff, reuse slices | Compare the installed `versionCode` with `latest_supported_binary`, then download changed files and reuse matching ones. Version pinning (`--build-id`) is possible: Oculus-PCVR-Linux and Oculus Downgrader fetch older builds | fork (reinstall), Oculus-PCVR-Linux (proven, per its README) | S–M | Low |
 | **DLC and asset files** | owned and unowned add-ons, store links | Two kinds. **IAP add-ons** are entitlements and can be listed. **Asset files** (`*_assets.zip` plus `.sig`, and DLC packs) are downloaded by Meta's platform (`ovr_AssetFile_*`). Install the captured signed archive without TxF, or fetch it ourselves | fork captures (partial) | M | Med: Meta's install semantics and `.sig` handling are unknown |
 | **Per-game prefixes** | one Proton prefix per game, reflinked | The Meta stack must run in the **same wineserver** as the game, because the Platform SDK reaches it over Windows IPC. Either clone a per-game prefix from a template runtime prefix (reflinks) or keep one shared runtime prefix. See steer 3 | fork (shared prefix only) | M | Med |
-| **Launch with licensing** | ubi-bridge owns Connect's pipes; quiverd brokers Denuvo | Meta stack in-prefix, plus OAF `/library/launch`, plus platform runtime start. Meta's code checks ownership against Meta. Needs the patches in §2.3 | fork (proven for Walkabout) | L | **High**: binary patches pinned to one Meta build; the purpose of one patch is unknown; Meta updates must be frozen |
+| **Launch with licensing** | quiver-bridge owns Connect's pipes; quiverd brokers Denuvo | Meta stack in-prefix, plus OAF `/library/launch`, plus platform runtime start. Meta's code checks ownership against Meta. Needs the patches in §2.3 | fork (proven for Walkabout) | L | **High**: binary patches pinned to one Meta build; the purpose of one patch is unknown; Meta updates must be frozen |
 | **Rendering: OpenXR titles** | n/a | Proton `wineopenxr` to WiVRn or Monado, with the `vrclient_init_registry` preflight. OVRPlugin titles also need a per-build unlock patch, shipped as a fix mod | fork (proven, 1 title); LVRA guides | M | Med (per title) |
 | **Rendering: LibOVR titles** | n/a | Revive-derived LibOVR→OpenXR/OpenVR runtime in the prefix (RiftLift's runtime, MIT, from Revive) | RiftLift (self-reported 14/17 on Linux and Windows); Oculus-PCVR-Linux (own shim to SteamVR, early) | L | **High**: per-title; no Quiver experience yet |
 | **Cloud saves** | cloudsave_service V2, pull before and push after, save stores | With the Meta stack running, Meta's **Rift Cloud Storage v1** (deprecated in 2019, still used by older titles) syncs inside the platform runtime, if it works under Wine (unverified). Quiver can't sync it itself without that service. **Locally,** save stores, backups and merge work wherever the save path is known (a per-game table) | none | M | Med |
@@ -379,7 +379,7 @@ should be reconciled into one `store` module.
 
 ```
 quiverd
- ├─ store registry ── Ubisoft (ubi-core)  Steam  Epic  GOG  EA  Meta (meta-core)
+ ├─ store registry ── Ubisoft (quiver-core)  Steam  Epic  GOG  EA  Meta (meta-core)
  │     each store implements the store-agnostic traits below
  ├─ download queue / verify / repair (generic over FileManifest + ChunkSource)
  ├─ launcher: LaunchPlan = prefix + proton + env + sidecars + license bridge + xr
@@ -405,7 +405,7 @@ all five scopes.
 - **`ContentSource`**: `manifest(title, build) → FileManifest {path, size, hash, chunks[{hash,
   size, codec}]}` and `fetch(chunk)`. Ubisoft slices and Meta segments are both "hashed chunks
   of a file", so queue, resume, verify and repair become generic.
-- **`LicenseBridge`**: what must run beside the game for the store SDK. Today ubi-bridge
+- **`LicenseBridge`**: what must run beside the game for the store SDK. Today quiver-bridge
   (Ubisoft); for Meta, the Meta stack plus the OAF launch. It contributes sidecars, env and
   prefix requirements to the `LaunchPlan`, and reports "ready" and "license refused" events.
 - **`XrRequirement`** in `LaunchPlan`: needs-XR, the chosen runtime (`XR_RUNTIME_JSON`), the
@@ -459,7 +459,7 @@ account, or re-signing the shared one (steer 6).
 
 ### The line for Meta's platform service
 
-The ubi-bridge rule carries over: **Quiver may replace the vendor's launcher. It may not change
+The quiver-bridge rule carries over: **Quiver may replace the vendor's launcher. It may not change
 what the vendor's licensing decides, and every "you own this" must come from the vendor's backend
 for the user's own account.**
 
@@ -468,7 +468,7 @@ for the user's own account.**
 | Running Meta's own stack unmodified in Wine, so Meta's code makes the entitlement decision | Stubbing or forcing `ovr_Entitlement_GetIsViewerEntitled` (Oculus-PCVR-Linux's "entitlement (always passes)" stub, which its author calls a "ToS gray area") |
 | Wine-compatibility workarounds that leave the license decision alone, such as stubbing the missing WiFi factory or working around missing TxF | Patching a branch whose job is a license, ownership, signature or trusted-caller check, in Meta's software or the game |
 | Translating rendering APIs (a LibOVR→OpenXR runtime, like DXVK for D3D) | Replacing `LibOVRPlatform64_1.dll` with a DLL that defeats `OVR_PlatformLoader`'s signature verification |
-| A **meta-bridge** that implements the service side of the Platform SDK's IPC while Meta's DLLs stay unmodified, and answers entitlement by asking Meta's backend with the user's token (the ubi-bridge pattern) | Any cached or offline "yes" that Meta itself wouldn't give, or sharing entitlement across accounts |
+| A **meta-bridge** that implements the service side of the Platform SDK's IPC while Meta's DLLs stay unmodified, and answers entitlement by asking Meta's backend with the user's token (the quiver-bridge pattern) | Any cached or offline "yes" that Meta itself wouldn't give, or sharing entitlement across accounts |
 | Downloading builds the account is entitled to with the account's own token, including older builds | Downloading anything the account isn't entitled to |
 | Unlocking an OVRPlugin runtime check so a game runs on a non-Meta OpenXR runtime (steer 4) | |
 
@@ -536,7 +536,7 @@ user's Meta account and prefix.
 - A Rust OAF client instead of the Electron/`OafIpc.node` helper (needs the pipe framing; spec.).
 
 **Research track (maybe never): meta-bridge.** Implement the Platform SDK's service side, in
-the shape of ubi-bridge, with real ownership from Meta's backend. Only worth it if the Meta stack
+the shape of quiver-bridge, with real ownership from Meta's backend. Only worth it if the Meta stack
 proves too brittle under Wine. Effort L+; the protocol is unknown and may be authenticated.
 
 ---

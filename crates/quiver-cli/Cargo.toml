@@ -1,0 +1,30 @@
+[package]
+name = "quiver-cli"
+description = "Command-line front end for quiver-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quiver"
+path = "src/main.rs"
+
+# Pre-Quiver name, kept so existing scripts keep working.
+[[bin]]
+name = "ubi"
+path = "src/alias.rs"
+
+[dependencies]
+quiver-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+hex.workspace = true
+quiver-api.workspace = true
+quiver-ipc.workspace = true
+serde.workspace = true

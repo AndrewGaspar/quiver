@@ -43,7 +43,7 @@ The user's direction, which this document works out:
 - **How it's drawn.** The layer is a **thin compositor**: it blends a premultiplied RGBA HUD
   image from shared memory (re-uploaded only when its publish counter changes) and draws the
   live frame-time graph itself on every present. The image is **rendered by GPUI, off-screen,
-  in `quiver-sight`**, with the same `ubi-ui` components, theme and fonts (Geist, Geist Mono)
+  in `quiver-sight`**, with the same `quiver-ui` components, theme and fonts (Geist, Geist Mono)
   as the app, so the HUD looks like Quiver. quiverd owns the registry, aggregation and
   formatting and sends `quiver-sight` a compact HUD model. A spike on GPUI 0.2.2 measured a
   warm HUD frame (layout, paint, GPU, readback) at 0.2–0.7 ms p50.
@@ -146,7 +146,7 @@ layout (`clock`) using the same machinery; it has no performance metrics.
 | `captures` | `shown` / `hidden` (section 2.12) | `shown` |
 
 Colours are theme **levels**, never raw colours: `normal`, `dim`, `good`, `warn`, `bad`,
-`accent`, mapped to the theme tokens the app uses (the shared `ubi-ui` theme, SIGHT §4.3). A
+`accent`, mapped to the theme tokens the app uses (the shared `quiver-ui` theme, SIGHT §4.3). A
 mod can say "this value is bad above 50 ms"; it can't pick hot pink. Text uses the app's fonts:
 Geist for labels, Geist Mono for numbers (tabular, so values don't jitter as they change).
 
@@ -261,7 +261,7 @@ works the way MOD-CONFIG's forms do (A adds, D-pad reorders, Y removes).
 
 Mod metrics are listed **even when the game isn't running**, because the descriptors ship in the
 mod version's `quiver-options.toml` (section 3.3). The app's game page has the same layout
-editor, and since the HUD is drawn by the same `ubi-ui` components it can preview the layout
+editor, and since the HUD is drawn by the same `quiver-ui` components it can preview the layout
 exactly as it will look in game.
 
 CLI: `quiver hud layout show|set|edit`, `quiver hud catalog origins` (the same catalog as text),
@@ -418,11 +418,11 @@ interactive; losing scan-out for the six seconds a toast is up is acceptable).
 ### 2.7 Processes and data flow
 
 ```
- quiverd                                 quiver-sight (GPUI, ubi-ui)                game process
+ quiverd                                 quiver-sight (GPUI, quiver-ui)                game process
  ───────                                 ───────────────────────────                ────────────
  registry, stats, formatting   HUD model    one off-screen GPUI window   hud.image   Sight layer
  (layer ring, sensors, mods) ───────────▶   per session with the HUD  ────────────▶ (composite +
-       ▲                       ubi-api,     on; renders on model change  /dev/shm,   live graph)
+       ▲                       quiver-api,     on; renders on model change  /dev/shm,   live graph)
        │                       ≤ 10 Hz      → CPU readback → RGBA        2 buffers       │
        └───────────────────── present ring (/dev/shm, per present) ─────────────────────┘
 ```
@@ -434,7 +434,7 @@ interactive; losing scan-out for the six seconds a toast is up is acceptable).
   cells (text with a level, badges, bar fractions or segment stacks, sparkline points, a graph
   placeholder), plus anchor, offset, scale, background, the swapchain extent and format from
   the layer's status block, and the presenter in use. A few KiB, sent whole on each change.
-- **quiver-sight** renders the model with `ubi-ui` components (section 2.9). For the game
+- **quiver-sight** renders the model with `quiver-ui` components (section 2.9). For the game
   presenter it writes the result into `hud.image`; for the desktop presenter it draws the same
   view into a layer-shell surface.
 - **The Sight layer** composites the current image and draws the graph (section 2.8).
@@ -500,7 +500,7 @@ first image. `quiver hud status` says why it's missing meanwhile.
 `quiver-sight` is already the GPUI process that owns Sight's UI (SIGHT §4.3), so the HUD is one
 more view there: one **off-screen GPUI window per session** with the HUD on, sized to the HUD
 at the pixel scale the swapchain implies, rendered on each HUD model change, read back to CPU
-memory as premultiplied RGBA and written into `hud.image`. The view is built from `ubi-ui`
+memory as premultiplied RGBA and written into `hud.image`. The view is built from `quiver-ui`
 components with the app's theme tokens and fonts (Geist, Geist Mono), so the HUD, the Sight
 panel, the app's game page and its layout preview are the same widgets.
 
@@ -529,7 +529,7 @@ panel, the app's game page and its layout preview are the same widgets.
 
 ### 2.10 Spike results (GPUI off-screen)
 
-Branch `spike/gpui-offscreen`, commit `792819b` (not merged): an `ubi-app` example that renders
+Branch `spike/gpui-offscreen`, commit `792819b` (not merged): an `quiver-app` example that renders
 the Standard HUD off-screen with the app's fonts and theme tokens.
 
 - **Patch size.** gpui 0.2.2: +681/−26 (an off-screen `BladeTarget`, `OffscreenWindow`,
@@ -623,7 +623,7 @@ and the layer gets smaller still: one textured quad and a line graph, no text at
  game process (Wine)                                     host
  ───────────────────                                     ────
  mod DLL (aco-dlss) ──quiver_mod.h──┐
-   │ JSON (≤10 Hz): declare, gauges,│ \\.\pipe\quiver-mods-<s>   ubi-bridge.exe ── broker TCP ──┐
+   │ JSON (≤10 Hz): declare, gauges,│ \\.\pipe\quiver-mods-<s>   quiver-bridge.exe ── broker TCP ──┐
    │   states, counters, marks      └──────────────────────────▶ (relays to quiverd)            │
    │ ring: frame / series / event records                                                     ▼
    └──▶ /dev/shm/quiver-<uid>/<s>/mod-aco-dlss.ring ◀── mmap (read-only) ───────────── quiverd
@@ -634,7 +634,7 @@ and the layer gets smaller still: one textured quad and a line graph, no text at
                                                                       │             HUD model,
                                                                       │             recordings
  sensors: NVML, /proc, hwmon, power_supply, Hyprland IPC ─────────────┼─────────────▶   │
-                                                                      │                 │ ubi-api
+                                                                      │                 │ quiver-api
             app, CLI, agents, quiver-sight (panel, HUD renderer) ◀────┴─────────────────┘
 ```
 
@@ -771,7 +771,7 @@ discovers rings with inotify on the session dir. This replaces SIGHT §5's "memf
 abstract socket to quiver-sight": the hub is quiverd, so recording, the CLI and agents work
 without the Sight UI running. (The HUD itself does need `quiver-sight`, section 2.9.)
 
-**Consumers ↔ quiverd.** New `ubi_api::perf` requests (section 3.11).
+**Consumers ↔ quiverd.** New `quiver_api::perf` requests (section 3.11).
 
 ### 3.7 Data plane: the session dir and Wine shared memory
 
@@ -785,7 +785,7 @@ QUIVER_PERF_DIR=/dev/shm/quiver-1000/s-4kq2              # for the layer (Linux 
 QUIVER_SIGHT=1                                           # the layer manifest's enable_environment
 ```
 
-As built (quiverd's perf hub, `crates/ubid/src/perf/launch.rs`): these go to a launch only
+As built (quiverd's perf hub, `crates/quiverd/src/perf/launch.rs`): these go to a launch only
 while the HUD is enabled for the game (`quiver hud enable GAME`; off by default for now).
 `QUIVER_SESSION` is the launch's one session id (Options and the mod pipe use the same). With
 obs-vkcapture in use (`OBS_VKCAPTURE=1` or the `obs-gamecapture` wrapper) quiverd also sets
@@ -848,7 +848,7 @@ connection). Fixed-size slots, many writer threads, many readers, readers never 
 ```c
 /* Shared by the SDK (C), the layer (Rust) and quiverd (Rust). Little-endian x86 (32- and
  * 64-bit lay out the same). Offsets are fixed; the header is one 4 KiB page. As built in
- * crates/ubi-perf (layout.rs), mirrored and checked by include/quiver_perf.h. */
+ * crates/quiver-perf (layout.rs), mirrored and checked by include/quiver_perf.h. */
 #define QV_RING_MAGIC   0x474E495256515551ull   /* "QUQVRING" */
 #define QV_RING_VERSION 1
 
@@ -1045,7 +1045,7 @@ metrics), an in-memory store (last 10 s of raw records per metric, 1 s buckets f
 session), the correlator, the HUD model builder (layout resolution and formatting, section
 2.7), and any active recording.
 
-New requests in `ubi_api::perf` (appended to `Request` as `Perf(PerfRequest)`, like
+New requests in `quiver_api::perf` (appended to `Request` as `Perf(PerfRequest)`, like
 `ModsRequest`):
 
 | Request | Reply | Notes |
@@ -1067,10 +1067,10 @@ Events: `PerfCatalogChanged { session }`, `PerfUpdate` (per subscription only), 
 
 `Event::PerfUpdate` and `Event::HudModel` are the first events that aren't broadcast to every
 `Subscribe`r: today's `Subscribe` is a single `broadcast` channel. They need a per-connection
-sender in the connection loop (`crates/ubid/src/main.rs`), which is a small change but a new
+sender in the connection loop (`crates/quiverd/src/main.rs`), which is a small change but a new
 pattern.
 
-As built (phase 1, `crates/ubi-api/src/perf.rs`, `crates/ubid/src/perf/`): the requests are
+As built (phase 1, `crates/quiver-api/src/perf.rs`, `crates/quiverd/src/perf/`): the requests are
 `Request::Perf(PerfRequest)` (`Sessions`, `Catalog`, `Subscribe`/`Unsubscribe`, `HudGet`/`HudSet`,
 `HudToggle`, `HudNext`, `HudAttach`, `HudStatus`, `HudLayouts`/`HudLayout`, `HudKeybinds`,
 `LaunchEnv`, `Summaries`, `DevSession`). The events are a `PerfEvent` enum (`Update`, `HudModel`,
@@ -1463,13 +1463,13 @@ the app.
 
 **Phase 0** (no UI): spikes H1–H5 and H8 (with SIGHT S2, S3, S12, since the GPUI bump, the
 layer and session ids are shared), the session dir and `QUIVER_PERF_DIR`, the ring and HUD
-image formats as a shared crate (`ubi-perf`: ring reader/writer, `hud.image` reader/writer,
+image formats as a shared crate (`quiver-perf`: ring reader/writer, `hud.image` reader/writer,
 descriptor types, validation) with a C header generated or checked against it.
 
 **Phase 1 (MVP): a MangoHud replacement for Quiver launches, with mods' headline numbers.**
 
-- GPUI bump with layer-shell and the off-screen window (SIGHT S2 + H8), and the `ubi-ui` crate
-  extracted from `ubi-app` (theme, fonts, the components the HUD uses).
+- GPUI bump with layer-shell and the off-screen window (SIGHT S2 + H8), and the `quiver-ui` crate
+  extracted from `quiver-app` (theme, fonts, the components the HUD uses).
 - Sight layer: present ring + status block; **compositor** (image upload, quad, live graph,
   sRGB/UNORM; HDR swapchains use the desktop presenter until phase 2).
 - `quiver-sight`: the HUD view, the off-screen renderer writing `hud.image`, `HudAttach`;
@@ -1563,7 +1563,7 @@ Decided by the user, 2026-11-16. Each: the decision, why, and what was rejected.
    no automatic fallback.
 2. **How it's drawn in the game: the layer composites a GPUI-rendered HUD image and draws the
    live frame-time graph itself.** The image is rendered off-screen by GPUI in `quiver-sight`
-   with `ubi-ui` components, theme and fonts, and shared through a double-buffered,
+   with `quiver-ui` components, theme and fonts, and shared through a double-buffered,
    sequence-checked shared-memory buffer (3.8). Why: visual consistency with the main app, and
    the layer gets smaller. Rejected: a cell renderer with an out-of-process glyph atlas in the
    layer (this document's earlier pick, 2.13); Dear ImGui in the layer; egui in the layer.
