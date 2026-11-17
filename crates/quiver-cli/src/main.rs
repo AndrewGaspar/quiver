@@ -3,6 +3,7 @@
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
 mod achievements;
+mod daemon;
 mod dev;
 mod downloads;
 mod exports;
@@ -227,10 +228,10 @@ enum Cmd {
         #[command(subcommand)]
         action: perf::HudAction,
     },
-    /// Control the daemon.
+    /// The daemon: status, holding off its restart onto a new build, stopping it.
     Daemon {
         #[command(subcommand)]
-        action: DaemonAction,
+        action: daemon::DaemonAction,
     },
     /// .desktop entries and Steam shortcuts for games.
     Export {
@@ -318,12 +319,6 @@ enum Cmd {
     /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
     /// game's Steam install script or its prefix's registry).
     SteamRun(steamrun::SteamRunArgs),
-}
-
-#[derive(Subcommand)]
-enum DaemonAction {
-    /// Ask quiverd to exit.
-    Stop,
 }
 
 #[derive(Subcommand)]
@@ -572,9 +567,13 @@ async fn main() -> Result<()> {
     if let Cmd::SteamRun(args) = cli.cmd {
         return steamrun::run(&cli.source, args).await;
     }
+    // Connects on its own (and only `hold` starts the daemon).
+    if let Cmd::Daemon { action } = cli.cmd {
+        return daemon::run(&cli.source, action).await;
+    }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } => {
+        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
@@ -954,10 +953,6 @@ async fn main() -> Result<()> {
         Cmd::Saves { game, action: Some(info::SavesAction::Store { action }), .. } => savestores::store(&client, &cli.source, &game, action).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Merge { from, into }), .. } => {
             savestores::merge(&client, &cli.source, &game, from, into).await?
-        }
-        Cmd::Daemon { action: DaemonAction::Stop } => {
-            let () = client.call(Request::Shutdown).await?;
-            println!("quiverd stopping");
         }
     }
     Ok(())

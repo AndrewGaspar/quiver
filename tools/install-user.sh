@@ -253,6 +253,8 @@ version="$semver.r$(git rev-list --count HEAD).g$(git rev-parse --short=7 HEAD)"
 
 build=${QUIVER_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/quiver-build}
 export CARGO_TARGET_DIR=$build/target
+# quiverd reports its build (`quiver daemon status`) and names the one it restarts onto.
+export QUIVER_BUILD_VERSION=$version QUIVER_BUILD_COMMIT=$commit
 mkdir -p "$build"
 echo "Building Quiver $version (target dir $CARGO_TARGET_DIR)"
 cargo build --release --locked
@@ -291,7 +293,8 @@ case ":$PATH:" in
     *) echo "Note: $bindir isn't on PATH; the desktop entry works regardless." ;;
 esac
 
-# Running processes: never restarted from here (a game may be running).
+# Running processes: never restarted from here (a game may be running). quiver-app
+# relaunches itself; quiverd restarts itself onto the new build once nothing needs it.
 uid=$(id -u)
 for pid in $(pgrep -u "$uid" -x quiver-app 2>/dev/null); do
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
@@ -313,7 +316,27 @@ if [[ $exe == "$bindir/quiverd" ]] && ! grep -qxF "$bindir/quiverd" "$changed_ou
     echo "quiverd is already running this build."
     exit 0
 fi
+# A quiverd that restarts itself onto new builds says what it's waiting on.
+if [[ $exe == "$bindir/quiverd" || $exe == "$bindir/quiverd (deleted)" ]] \
+    && st=$(timeout 5 "$bindir/quiver" daemon status --json 2>/dev/null) \
+    && plan=$(python3 -I -c '
+import json, sys
+s = json.load(sys.stdin)
+if not s.get("auto_restart"):
+    sys.exit(1)
+w = s.get("waiting_on") or []
+print("; ".join(w))
+' <<<"$st"); then
+    if [[ -z $plan ]]; then
+        echo "quiverd is idle, so it restarts onto this build within a few seconds (quiver daemon status)."
+    else
+        echo "quiverd restarts onto this build by itself once nothing needs it; waiting on: $plan"
+        echo "  (quiver daemon status shows progress; quiver daemon hold --reason … keeps it from restarting)"
+    fi
+    exit 0
+fi
 echo "quiverd is running the previous build ($exe); restart it when no game is running: quiver daemon stop"
+echo "  (builds from now on restart onto new installs by themselves when idle)"
 if running=$(timeout 10 "$bindir/quiver" sessions 2>&1); then
     if [[ $running == "nothing running" ]]; then
         echo "No game is running right now."

@@ -59,6 +59,10 @@ pub(crate) trait Host: Send + Sync + 'static {
     fn discard(&self, product_id: u32, name: &str) -> bool;
     /// Do the work of an item.
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>>;
+    /// Whether new items may start (not while quiverd restarts onto a new build).
+    fn accepting(&self) -> bool {
+        true
+    }
 }
 
 enum Stop {
@@ -402,6 +406,29 @@ impl Downloads {
     }
 
     /// Refuse while a game has a queue item running or a verify going.
+    /// What is running, in words ("installing X", "verifying Y"): these block restarting
+    /// onto a new build. Queued, paused and failed items don't (the queue is saved).
+    pub(crate) fn running(&self, mut name: impl FnMut(u32) -> String) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.progress.is_some())
+            .map(|i| {
+                let verb = match i.entry.kind {
+                    QueueKind::Install => "installing",
+                    QueueKind::Update => "updating",
+                    QueueKind::Repair => "repairing",
+                };
+                format!("{verb} {}", i.entry.name)
+            })
+            .collect();
+        let verifying: Vec<u32> = self.verifying.lock().unwrap().iter().map(|(p, ..)| *p).collect();
+        out.extend(verifying.into_iter().map(|p| format!("verifying {}", name(p))));
+        out
+    }
+
     pub(crate) fn ensure_idle(&self, product_id: u32) -> Result<()> {
         if self.items.lock().unwrap().iter().any(|i| i.entry.product_id == product_id && i.progress.is_some()) {
             bail!("a download for this game is running; pause or remove it first (quiver queue)");
@@ -414,6 +441,9 @@ impl Downloads {
 
     /// Start queued items, top first, while fewer than `max_active` run.
     pub(crate) fn pump<H: Host>(self: &Arc<Self>, host: &Arc<H>) {
+        if !host.accepting() {
+            return;
+        }
         let max = self.settings.lock().unwrap().max_active.max(1);
         let mut started = Vec::new();
         {
@@ -653,6 +683,10 @@ impl Host for Daemon {
 
     fn library_cache(&self) -> Option<Vec<LibraryEntry>> {
         self.library.try_lock().ok().and_then(|l| l.clone())
+    }
+
+    fn accepting(&self) -> bool {
+        !self.lifecycle.closed()
     }
 
     fn changed(self: Arc<Self>) {

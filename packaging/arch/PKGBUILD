@@ -66,6 +66,8 @@ build() {
   cd quiver
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=${QUIVER_CARGO_TARGET_DIR:-$srcdir/target}
+  # quiverd reports its build (`quiver daemon status`).
+  export QUIVER_BUILD_VERSION=$pkgver QUIVER_BUILD_COMMIT=$(git rev-parse HEAD)
   # makepkg sets SOURCE_DATE_EPOCH to the time of each build, and the cc crate reruns every
   # C build script (ring, zstd-sys, …) when it changes, which defeats a cached target dir.
   env -u SOURCE_DATE_EPOCH cargo build --frozen --release

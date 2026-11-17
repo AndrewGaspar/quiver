@@ -175,6 +175,9 @@ pub struct Quiver {
     toast_gen: u64,
     pub link: Link,
     link_gen: u64,
+    /// quiverd said it is restarting onto this build (`Event::DaemonRestarting`): shown
+    /// once it is back.
+    daemon_update: Option<String>,
     pub side_filter: SideFilter,
     pub lib_filter: crate::ui::library::LibFilter,
     /// Only one store's games in the grid (`None`: every store).
@@ -222,6 +225,7 @@ impl Quiver {
             toast_gen: 0,
             link: Link::Up,
             link_gen: 0,
+            daemon_update: None,
             side_filter: SideFilter::All,
             lib_filter: crate::ui::library::LibFilter::All,
             store_filter: None,
@@ -410,6 +414,7 @@ impl Quiver {
                 self.link_gen += 1;
             }
             Event::Reconnected => self.on_reconnected(cx),
+            Event::DaemonRestarting { to, .. } => self.daemon_update = Some(to.unwrap_or_else(|| "a new build".into())),
             // Mod options (the open game's Mods tab follows them).
             Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::OptionsOutcome { .. } | Event::ModChannel { .. } => {
                 self.options_event(&e, cx)
@@ -425,6 +430,9 @@ impl Quiver {
     fn on_reconnected(&mut self, cx: &mut Context<Self>) {
         self.link = Link::Reconnected;
         self.link_gen += 1;
+        if let Some(build) = self.daemon_update.take() {
+            self.show_toast(format!("quiverd updated to {build}"), cx);
+        }
         let generation = self.link_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(3200)).await;
