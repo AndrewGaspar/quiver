@@ -1777,13 +1777,13 @@ mod tests {
         assert_eq!(m.default_profile.as_deref(), Some(ORIGINS_DEFAULT));
         assert!(m.profiles.iter().any(|p| p.profile.id == ORIGINS_DEFAULT && p.profile.name == "DLSS"));
         let session_profile = |demo: &Demo| {
-            let pt: quiver_api::Playtime = call(demo, Request::Playtime { game: quiver_api::GameRef::ubisoft(3539) });
+            let pt: quiver_api::Playtime = call(demo, Request::Playtime { game: quiver_api::GameRef::ubisoft(3539).into() });
             pt.sessions[0].profile.clone()
         };
         // No profile named: the default. `vanilla`: forced vanilla.
         for (asked, ran) in [(None, Some(ORIGINS_DEFAULT)), (Some(VANILLA), None), (Some("reshade"), Some("pz6c4uf"))] {
-            demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: asked.map(str::to_owned) }).unwrap();
-            demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539) }).unwrap();
+            demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539).into(), profile: asked.map(str::to_owned) }).unwrap();
+            demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539).into() }).unwrap();
             assert_eq!(session_profile(&demo).as_deref(), ran, "{asked:?}");
         }
         // Set by name, stored as the id; unknown names are refused; `vanilla` clears it.
@@ -1793,8 +1793,8 @@ mod tests {
         assert!(demo.handle(set("nope")).is_err());
         let r: Revision = call(&demo, set("vanilla"));
         assert_eq!(r.settings.profile, None);
-        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }).unwrap();
-        demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539) }).unwrap();
+        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539).into(), profile: None }).unwrap();
+        demo.handle(Request::Stop { game: quiver_api::GameRef::ubisoft(3539).into() }).unwrap();
         assert_eq!(session_profile(&demo), None);
     }
 
@@ -1870,8 +1870,8 @@ mod tests {
         );
         assert!(!back.deleted && back.profile.pinned);
         // Play with a profile that exists, by name; an unknown one fails.
-        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(5059), profile: Some("Visual overhaul".into()) }).is_ok());
-        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: Some("nope".into()) }).is_err());
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(5059).into(), profile: Some("Visual overhaul".into()) }).is_ok());
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539).into(), profile: Some("nope".into()) }).is_err());
     }
 
     #[tokio::test]
@@ -1935,12 +1935,12 @@ mod tests {
         assert!(e(420).steam_only() && e(420).installable);
         assert!(e(3539).steam.is_none());
         // Play asks Steam; a game switched to Quiver then reports a session from Steam.
-        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(66088), profile: None });
+        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(66088).into(), profile: None });
         let sessions: Vec<quiver_api::ActiveSession> = call(&demo, Request::Sessions);
         let s = sessions.iter().find(|s| s.product_id == 66088).unwrap();
         assert_eq!((s.holders.as_slice(), s.steam_app_id), (&["steam".to_owned()][..], Some(3751950)));
         // Syndicate still opens Connect: no Quiver session.
-        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(1875), profile: None });
+        let _: u64 = call(&demo, Request::Play { game: quiver_api::GameRef::ubisoft(1875).into(), profile: None });
         let sessions: Vec<quiver_api::ActiveSession> = call(&demo, Request::Sessions);
         assert!(sessions.iter().all(|s| s.product_id != 1875));
     }

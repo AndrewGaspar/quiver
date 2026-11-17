@@ -695,7 +695,7 @@ impl Quiver {
         }
         // Named explicitly, so the daemon doesn't apply the default (`vanilla` forces it).
         let profile = Some(chosen.map(|p| p.id).unwrap_or_else(|| VANILLA.into()));
-        self.call::<u64, _>(Request::Play { game: id.0, profile }, cx, move |this, r, cx| match r {
+        self.call::<u64, _>(Request::Play { game: id.0.into(), profile }, cx, move |this, r, cx| match r {
             Ok(_) => this.show_toast(format!("Starting {name} · {label}…"), cx),
             Err(e) => this.show_toast(err_text(&e), cx),
         });

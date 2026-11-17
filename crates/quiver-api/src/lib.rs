@@ -466,14 +466,14 @@ pub enum Request {
     /// setting; vanilla when unset, or with a warning when that profile was deleted).
     /// A game of another store asks its client to start it (Steam: `steam://rungameid`).
     Play {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
     Stop {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
     },
     /// Cancel a job. Installs stop and can be resumed by installing again; `discard`
     /// also deletes the partial files (only for games that weren't installed before).
@@ -502,8 +502,8 @@ pub enum Request {
     /// Play sessions recorded by this launcher; for another store's game, the total and last
     /// played time its client recorded (no sessions).
     Playtime {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
     },
     /// Ubisoft's own play-time record for a game (read-only).
     RemotePlaytime { product_id: u32 },
@@ -1217,9 +1217,14 @@ mod tests {
         // Older clients ask for the library without `all_stores`, and get Ubisoft's.
         let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
         assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));
+        // Ubisoft games go out as `product_id` numbers: a daemon from before game refs reads them.
+        let v = serde_json::to_value(Request::Playtime { game: GameRef::ubisoft(3539).into() }).unwrap();
+        assert_eq!(v["params"], serde_json::json!({ "product_id": 3539 }));
+        let v = serde_json::to_value(Request::Playtime { game: GameRef::steam(620).into() }).unwrap();
+        assert_eq!(v["params"], serde_json::json!({ "game": "steam:620" }));
         let v = serde_json::to_value(Request::Library { refresh: true, all_stores: false }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "library", "params": { "refresh": true } }));
-        let v = serde_json::to_value(Request::Play { game: GameRef::steam(620), profile: None }).unwrap();
+        let v = serde_json::to_value(Request::Play { game: GameRef::steam(620).into(), profile: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "play", "params": { "game": "steam:620" } }));
 
         // Library entries: Ubisoft ones keep `product_id` beside `game`.

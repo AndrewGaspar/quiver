@@ -528,7 +528,7 @@ impl Quiver {
     }
 
     fn load_playtime(&mut self, id: Gid, cx: &mut Context<Self>) {
-        self.call::<Playtime, _>(Request::Playtime { game: id.0 }, cx, move |this, r, cx| {
+        self.call::<Playtime, _>(Request::Playtime { game: id.0.into() }, cx, move |this, r, cx| {
             if let (Ok(p), Some(g)) = (r, this.game_mut(id)) {
                 g.playtime = Some(p);
             }
@@ -921,7 +921,7 @@ impl Quiver {
         if g.running() && g.steam_only() {
             self.show_toast(format!("{name} is running from Steam; quit it from the game or Steam"), cx);
         } else if g.running() {
-            self.call::<(), _>(Request::Stop { game: id.0 }, cx, |this, r, cx| {
+            self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, |this, r, cx| {
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
                 }
@@ -932,7 +932,7 @@ impl Quiver {
             self.show_toast(format!("{name} is queued"), cx);
         } else if let Some(label) = g.client().map(|_| g.entry.store().label()) {
             // Another store's game: its client starts it.
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Asked {label} to start {name}"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
@@ -946,7 +946,7 @@ impl Quiver {
             if self.launch_guard(id, PlayAfter::Primary, cx) {
                 return;
             }
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
@@ -961,7 +961,7 @@ impl Quiver {
             }
             // No profile named: the daemon runs the game's default.
             let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Starting {name}{}…", with.unwrap_or_default()), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });

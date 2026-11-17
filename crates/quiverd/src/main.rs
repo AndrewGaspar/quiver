@@ -381,7 +381,7 @@ impl Daemon {
             Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
             Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
             Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
-            Request::Play { game, profile } => json!(self.play(source, game, profile).await?),
+            Request::Play { game, profile } => json!(self.play(source, game.0, profile).await?),
             Request::Import { product_id, path, language } => {
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_import(source, product_id, path, language, online))
@@ -420,9 +420,9 @@ impl Daemon {
             }
             Request::Stop { game } => {
                 if !game.is_ubisoft() {
-                    stores::stop_elsewhere(game)?;
+                    stores::stop_elsewhere(game.0)?;
                 }
-                let product_id = ubisoft_only(game)?;
+                let product_id = ubisoft_only(game.0)?;
                 let game = Games::load()?.get(product_id).cloned().context("not installed")?;
                 launcher::stop(&self.cfg, &game).await?;
                 self.log_activity(source, format!("stopped {}", game.name), Some(product_id));
@@ -489,7 +489,7 @@ impl Daemon {
                 json!(ctx)
             }
             Request::ProtonList => json!(launcher::list_protons()),
-            Request::Playtime { game } => json!(self.playtime(game).await?),
+            Request::Playtime { game } => json!(self.playtime(game.0).await?),
             Request::RemotePlaytime { product_id } => {
                 let online = self.account_for(product_id, None).await?;
                 run_local(move || async move {

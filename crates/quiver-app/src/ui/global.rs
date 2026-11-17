@@ -538,7 +538,7 @@ impl Quiver {
             }
             GlobalCmd::Stop(id) => {
                 let name = self.game_name(id);
-                self.call::<(), _>(Request::Stop { game: id.0 }, cx, move |this, r, cx| match r {
+                self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, move |this, r, cx| match r {
                     Ok(()) => this.show_toast(format!("Stopping {name}"), cx),
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });

@@ -164,7 +164,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             let job = Job {
                 id,
                 kind: JobKind::Play,
-                game: *game,
+                game: **game,
                 name: f.name.into(),
                 status: "Asked Steam to start it".into(),
                 downloaded: 0,
@@ -174,7 +174,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                 detail: vec![format!("steam://rungameid/{}", f.app_id)],
             };
             st.jobs.push(job.clone());
-            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("play {} from Steam", f.name), game: Some(*game) });
+            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("play {} from Steam", f.name), game: Some(**game) });
             demo.emit(Event::Job(job));
             json!(id)
         }
