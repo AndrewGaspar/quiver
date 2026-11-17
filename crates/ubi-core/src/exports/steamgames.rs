@@ -521,8 +521,9 @@ fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp)
         if launch_options_in(&out, app_id) != new {
             bail!("editing {} didn't read back; left it alone", file.display());
         }
-        // One backup of the file as it was before Quiver's last write.
-        let _ = std::fs::write(file.with_extension("vdf.quiver-backup"), &text);
+        // One backup of the file as it was before Quiver's last write. It holds Steam's
+        // app and offline tickets, CDN tokens and cloud key: owner-only.
+        let _ = crate::private::write_private(&file.with_extension("vdf.quiver-backup"), text.as_bytes());
         write_atomic(file, out.as_bytes())?;
     }
     st.patches.retain(|r| !(r.user == user && r.app_id == app_id));
@@ -874,12 +875,18 @@ mod tests {
         let (_tmp, paths, steam) = fixture();
         let file = localconfig(&steam, "1001");
         let before = std::fs::read_to_string(&file).unwrap();
+        // A world-readable backup left by an older Quiver.
+        let backup = file.with_extension("vdf.quiver-backup");
+        std::fs::write(&backup, "stale").unwrap();
+        std::fs::set_permissions(&backup, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
         // An app with options already.
         let c = patch(&paths, &steam, "1001", 552520, "Far Cry 5", Q, false).unwrap();
         assert!(!c.staged && !c.unchanged);
         assert_eq!(c.launch_options, format!("PROTON_LOG=1 {Q} %command% -skipintro"));
         assert_eq!(launch_options(&steam, "1001", 552520), c.launch_options);
-        assert_eq!(std::fs::read_to_string(file.with_extension("vdf.quiver-backup")).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+        // It holds Steam's tickets and tokens: owner-only.
+        assert_eq!(crate::private::tests::mode(&backup), 0o600);
         let st = load(&paths);
         assert_eq!(st.patch_state("1001", 552520, &c.launch_options), PatchState::On);
         // Twice: nothing to do.
