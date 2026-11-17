@@ -224,6 +224,10 @@ Sight can't be ahead of quiverd here; the panel sections ship when quiverd has t
 
 ### 3.5 Performance
 
+The pinned HUD, the metrics model (producers, descriptors, rings, subscriptions) and mod-provided
+metrics are designed in [SIGHT-HUD.md](SIGHT-HUD.md), which changes the HUD rows below (own HUD
+in the MVP, drawn by the Sight layer; MangoHud optional).
+
 | Capability | Priority | Source | Notes |
 |---|---|---|---|
 | FPS, frame time, 1% low in the panel | MVP | Sight layer present timestamps (shared-memory ring) | counts presents; FG doubles them (see below) |
@@ -901,7 +905,10 @@ Other risks:
    pauses); (b) never take focus; rely on SDK `OverlayStateChangedPush` and in-process input
    hooks later; (c) per game, default (a), fallback "toasts only".
    *Recommend (c): S1 will find games that misbehave; the default stays simple.*
-7. **Performance HUD.** (a) integrate MangoHud (Sight toggles it and its presets; Sight's panel
+7. **Superseded (2026-11-16) by [SIGHT-HUD.md](SIGHT-HUD.md):** the user chose Quiver's own
+   pinned HUD (drawn in the Sight layer by default, layer-shell fallback) with pluggable,
+   mod-provided metrics; MangoHud stays a per-game option. The original steer, for the record:
+   **Performance HUD.** (a) integrate MangoHud (Sight toggles it and its presets; Sight's panel
    shows its own numbers); (b) replace MangoHud with a Sight HUD; (c) Sight panel numbers only,
    MangoHud left as is.
    *Recommend (a): MangoHud is mature and already in your launches; replacing it needs in-game
