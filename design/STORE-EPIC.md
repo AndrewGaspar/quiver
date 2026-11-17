@@ -1,9 +1,9 @@
 # Epic Games Store in Quiver (scoping and design notes)
 
 Status: research and design only (2026-11-16). Nothing here is built. This is one of five
-parallel store scopes (STORE-STEAM, STORE-GOG, STORE-EA, STORE-META); the cross-store parts
-(one title owned in several stores, the shared interfaces, library merging) belong to
-STORE-META, and this document only proposes what Epic needs from them.
+parallel store scopes (STORE-STEAM, STORE-GOG, STORE-EA, STORE-META, the last being the Meta VR
+store); the cross-store parts (one title owned in several stores, the shared interfaces, library
+merging) belong to STORES.md, and this document only proposes what Epic needs from them.
 
 The ask: "scope out integrating Epic Games Store… I want all the same great capabilities we
 built for Ubisoft Connect."
@@ -134,6 +134,10 @@ the approach breaks or can't be done.
 
 ### 4.1 The key change: `GameKey`
 
+Reconciled in STORES.md section 2: the type is `GameRef { store, id }` with a string id, and
+`EpicApp` stays a newtype inside `epic-core`. The forms below (`epic:Camellia`, bare numbers for
+Ubisoft, `games/epic-<app>/`) are unchanged.
+
 ```rust
 /// Which store a title, install or setting belongs to. Serialized as "ubisoft:3539",
 /// "epic:Camellia"; a bare number keeps meaning Ubisoft so old clients and files still read.
@@ -146,12 +150,13 @@ struct EpicApp { app_name: String }  // Epic's stable asset id ("Camellia"); nam
   accepts both (`3539` → `Ubisoft(3539)`), so the CLI, the app and older scripts keep working.
 - On-disk paths move from `games/<product>/…` to `games/<store>-<id>/…` for new stores only.
   Ubisoft paths stay where they are, so nothing is migrated.
-- Fuzzy names (`quiver play origins`) search every store. If a name matches copies in two
-  stores, the result is the merged title (STORE-META), not an error.
+- Fuzzy names (`quiver play origins`) search every store. Copies linked by a vendor-declared id
+  (such as Epic's `GameID` for Ubisoft titles) are one merged title. Matches in unlinked stores
+  are listed for the person to choose from (STORES.md section 2.4).
 - Mod manifests: `products = [420]` keeps meaning Ubisoft, and `games = ["epic:Camellia"]` is
   added.
 
-### 4.2 Store-agnostic interfaces Epic needs (brief; STORE-META owns the final shape)
+### 4.2 Store-agnostic interfaces Epic needs (brief; STORES.md owns the final shape)
 
 ```rust
 trait StoreAccounts   { login_begin, login_complete, refresh, logout, list, status }   // C1
@@ -228,7 +233,7 @@ cloud saves, play-session reporting, mods keyed 3539
 - **One library entry.** The title is `ubisoft:3539` with a provenance line, "Bought on Epic ·
   activated on <Ubisoft account>", like Steam copies' "Owned on Steam". If it isn't redeemed
   yet, the line reads "Bought on Epic · not on your Ubisoft account yet", with an **Activate**
-  action. The Epic entry is folded into the Ubisoft one through `GameID` (STORE-META's
+  action. The Epic entry is folded into the Ubisoft one through `GameID` (STORES.md's
   merge rule; Epic gives the Ubisoft id directly, so no fuzzy matching).
 - **The linked account matters.** The Epic account's linked Ubisoft account
   (`externalAuths[type=ubisoft].externalAuthId`) receives the codes. Epic's help says a link,
@@ -326,7 +331,7 @@ tokens rotate, it would sign the other client out.
 | What | Where |
 |---|---|
 | Refresh token (and the cached access token, for fast daemon restarts) | Secret Service keyring, service `quiver`, entry `epic:<account_id>`, JSON. Same mechanism as `session:<userId>` for Ubisoft (`ubi-core::store`) |
-| Account index: id, display name, default, linked Ubisoft id | `<data>/accounts.json`, an `epic` section (non-secret) |
+| Account index: id, display name, default, linked Ubisoft id | `<data>/accounts.json`, entries with `store: "epic"` (non-secret; STORES.md section 3.2) |
 | EGL client config (client id/secret, UA, label) | Compiled-in defaults plus `<data>/epic-client.json` override (non-secret, public values); steer 2 for how it updates |
 | Exchange codes, ownership tokens | memory, and a 0600 temp file in the prefix for the duration of a session |
 | Never | plaintext tokens on disk (legendary keeps `user.json` in plaintext), tokens in logs, activity, job details or `--json` output |
@@ -440,7 +445,7 @@ unless you import EGL's session); this is unverified, so it's covered by S0.
    *Recommend (a), then 2 right after.*
 5. **Library presentation.** (a) One merged library with store badges and a store filter;
    (b) a store switcher.
-   *Recommend (a), consistent with Steam copies (STORE-META decides the merge rules).*
+   *Recommend (a), consistent with Steam copies (STORES.md section 2.4 sets the merge rules).*
 6. **Who may redeem Ubisoft codes and sign in to Epic.** (a) Person only, every time (a
    dialog or terminal confirm), agents denied; (b) agents may request it as a pending approval.
    *Recommend (b) for activation (it lists exactly what will be redeemed and onto which

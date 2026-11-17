@@ -1,9 +1,9 @@
 # Store: EA (the EA app, formerly Origin) (scoping notes)
 
 Status: scoping only (2026-11-16). Nothing here is built and no EA service was contacted.
-Companion to the sibling scopes STORE-STEAM, STORE-EPIC, STORE-GOG and STORE-META (written in
-parallel); the store-agnostic interfaces are sketched here only as far as EA needs them, and
-STORE-META owns the shared shape.
+Companion to the sibling scopes STORE-STEAM, STORE-EPIC, STORE-GOG and STORE-META (the Meta VR
+store), written in parallel; the store-agnostic interfaces are sketched here only as far as EA
+needs them, and STORES.md owns the shared shape.
 
 The ask: "integrate EA Games, with all the same great capabilities we built for Ubisoft
 Connect." This document lists those capabilities as the code has them today, says how EA does
@@ -147,11 +147,11 @@ qualifier on game ids ([§3.1](#31-store-agnostic-interfaces-brief)).
 
 ### 3.1 Store-agnostic interfaces (brief)
 
-These are only what EA forces. STORE-META should own the real shape.
+These are only what EA forces. STORES.md owns the real shape (`GameRef`, not `GameKey`).
 
 - **`GameKey { store: StoreId, id: String }`** replaces `product_id: u32` in `Request`, in data
-  paths (`games/<store>/<id>/…`; Ubisoft's existing paths are read as `ubisoft/<id>`) and in
-  export keys (`quiver:ea/<offer>/<profile>`). Ubisoft stays the default store, so
+  paths (`games/ea-<offer>/…`; Ubisoft's existing `games/<id>/` paths stay as they are) and in
+  export keys (`quiver:ea:<offer>/<profile>`; STORES.md section 2.2). Ubisoft stays the default store, so
   `quiver play origins` still works. This is the single largest change; every other
   interface depends on it.
 - **`StoreAccounts`**: sign in, sign out, list, default, refresh, and "signed in elsewhere".
@@ -278,7 +278,7 @@ GET query string [M2][M6]. **Quiver never does either.**
 ### 4.3 Storage and accounts
 
 - **Storage.** Refresh tokens go in the Secret Service keyring under `quiver`, as
-  `ea-session:<userId>`, next to the Ubisoft entries. The account index goes in
+  `ea:<userId>` (STORES.md section 3.2), next to the Ubisoft entries. The account index goes in
   `accounts.json` with a `store` field. Nothing is stored in a plain file (Maxima uses
   `auth.toml` [M5]).
 - **Several EA accounts** work as Ubisoft's do: merged library, per-game launch account, and
@@ -359,8 +359,8 @@ touches EA needs the user to sign in themselves, and asks first, per the real-pr
 
 **Phase 1: MVP (one EA account, own-store games).**
 
-- The `GameKey` refactor across `ubi-api`, `quiverd` and storage, with Ubisoft paths migrated
-  by reading them in place.
+- The `GameKey` refactor across `ubi-api`, `quiverd` and storage, with Ubisoft paths left
+  unchanged (no migration).
 - `ea-core`: nucleus, gql (library, art, info), content (DiP install, update, verify),
   ooa, and the LSX server (license, auth code, entitlements, config, profile; everything
   else answered with an error so no game blocks).
@@ -511,7 +511,7 @@ Each steer lists the options with my recommendation marked **(rec)**.
     (b) Not handled at all.
 12. **Store qualifiers in names and ids.**
     (a) `GameKey { store, id }` everywhere, with Ubisoft as the default store so existing
-    commands and paths keep working. **(rec, defer the exact shape to STORE-META)**
+    commands and paths keep working. **(rec; the exact shape is in STORES.md section 2)**
     (b) Map EA offers into a u32 namespace.
 13. **Old titles.** Out of scope for EA, or the fallback runner: pre-DiP manifests (Dead
     Space 2, Bad Company 2) and Battlelog games (BF3, BF4)? Rec: out of scope until steer 1(c).
