@@ -2255,35 +2255,238 @@ impl HeadlessRenderTarget {
     }
 }
 
+/// How a [`WgpuHeadlessRenderer`] renders.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeadlessRendererOptions {
+    /// Clear to transparent and blend with premultiplied alpha, so the image has a
+    /// premultiplied alpha channel (what a window with a transparent background shows).
+    /// Otherwise the image is opaque over black.
+    pub transparent: bool,
+    /// Prefer an integrated GPU over a discrete one.
+    pub prefer_low_power_gpu: bool,
+}
+
+/// A frame read back by [`WgpuHeadlessRenderer::render_and_read`].
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug)]
+pub struct HeadlessFrame<'a> {
+    /// Width in device pixels.
+    pub width: u32,
+    /// Height in device pixels.
+    pub height: u32,
+    /// Bytes between the starts of consecutive rows (at least `width * 4`).
+    pub stride: u32,
+    /// RGBA8 pixels, at least `stride * (height - 1) + width * 4` bytes.
+    pub data: &'a [u8],
+}
+
+/// A mappable buffer the render target is copied into, kept between frames.
+#[cfg(not(target_family = "wasm"))]
+struct ReadbackBuffer {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    padded_bytes_per_row: u32,
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub struct WgpuHeadlessRenderer {
     context: WgpuContext,
     core: WgpuRendererCore,
     render_target: Option<HeadlessRenderTarget>,
     observed_error_generation: u64,
+    clear_color: wgpu::Color,
+    readback: Option<ReadbackBuffer>,
+    /// Rows swizzled from BGRA, for adapters that can't render to RGBA8.
+    swizzled: Vec<u8>,
 }
 
 #[cfg(not(target_family = "wasm"))]
 impl WgpuHeadlessRenderer {
+    /// An opaque renderer on the default adapter (a discrete GPU first).
     pub fn new() -> anyhow::Result<Self> {
-        let (context, target_format) = WgpuContext::new_headless()?;
+        Self::with_options(HeadlessRendererOptions::default())
+    }
+
+    pub fn with_options(options: HeadlessRendererOptions) -> anyhow::Result<Self> {
+        let (context, target_format) = WgpuContext::new_headless(options.prefer_low_power_gpu)?;
         // The device may be shared with earlier renderers; observe only errors raised from
         // here on, including any while this renderer builds its pipelines.
         let observed_error_generation = context.errors().current_generation();
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
-        let core = WgpuRendererCore::new(
-            &context,
-            atlas,
-            target_format,
-            wgpu::CompositeAlphaMode::Opaque,
-        );
+        let (alpha_mode, clear_color) = if options.transparent {
+            (
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::Color::TRANSPARENT,
+            )
+        } else {
+            (wgpu::CompositeAlphaMode::Opaque, wgpu::Color::BLACK)
+        };
+        let core = WgpuRendererCore::new(&context, atlas, target_format, alpha_mode);
 
         Ok(Self {
             context,
             core,
             render_target: None,
             observed_error_generation,
+            clear_color,
+            readback: None,
+            swizzled: Vec::new(),
         })
+    }
+
+    /// The atlas sprites for this renderer's scenes must be uploaded to.
+    pub fn atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.core.atlas.clone()
+    }
+
+    pub fn gpu_specs(&self) -> GpuSpecs {
+        let adapter_info = &self.core.adapter_info;
+        GpuSpecs {
+            is_software_emulated: adapter_info.device_type == wgpu::DeviceType::Cpu,
+            device_name: adapter_info.name.clone(),
+            driver_name: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+        }
+    }
+
+    /// Renders `scene` at `size`, waits for the GPU, and passes the pixels to `read` while
+    /// they are mapped. The readback buffer is kept between frames of the same size, and
+    /// rows are handed over with their copy padding (`stride`) rather than repacked.
+    pub fn render_and_read<R>(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        read: impl FnOnce(HeadlessFrame<'_>) -> R,
+    ) -> anyhow::Result<R> {
+        self.render(scene, size)?;
+        let (width, height) = (size.width.0 as u32, size.height.0 as u32);
+        self.ensure_readback_buffer(width, height)?;
+        let (Some(target), Some(readback)) = (self.render_target.as_ref(), self.readback.as_ref())
+        else {
+            anyhow::bail!("Headless render target was not created");
+        };
+
+        let device = &self.core.resources.device;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("headless_readback_encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback.buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(readback.padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = self
+            .core
+            .resources
+            .queue
+            .submit(std::iter::once(encoder.finish()));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let slice = readback.buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .map_err(|error| anyhow::anyhow!("Failed to wait for headless rendering: {error}"))?;
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .map_err(|error| anyhow::anyhow!("Failed to receive headless mapping result: {error}"))?
+            .map_err(|error| anyhow::anyhow!("Failed to map headless readback buffer: {error}"))?;
+
+        let result = {
+            let mapped = slice.get_mapped_range()?;
+            let (bytes_per_row, padded) = (readback.bytes_per_row, readback.padded_bytes_per_row);
+            if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
+                self.swizzled.clear();
+                for row in mapped.chunks(padded as usize).take(height as usize) {
+                    self.swizzled
+                        .extend_from_slice(&row[..bytes_per_row as usize]);
+                }
+                for pixel in self.swizzled.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                read(HeadlessFrame {
+                    width,
+                    height,
+                    stride: bytes_per_row,
+                    data: &self.swizzled,
+                })
+            } else {
+                read(HeadlessFrame {
+                    width,
+                    height,
+                    stride: padded,
+                    data: &mapped,
+                })
+            }
+        };
+        readback.buffer.unmap();
+        self.check_gpu_errors()?;
+        Ok(result)
+    }
+
+    fn ensure_readback_buffer(&mut self, width: u32, height: u32) -> anyhow::Result<()> {
+        if self
+            .readback
+            .as_ref()
+            .is_some_and(|readback| readback.width == width && readback.height == height)
+        {
+            return Ok(());
+        }
+        let bytes_per_row = width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("Headless render target row size overflowed"))?;
+        let padded_bytes_per_row = bytes_per_row
+            .checked_next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            .ok_or_else(|| anyhow::anyhow!("Headless padded row size overflowed"))?;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| anyhow::anyhow!("Headless readback buffer size overflowed"))?;
+        let device = &self.core.resources.device;
+        anyhow::ensure!(
+            buffer_size <= device.limits().max_buffer_size,
+            "Headless readback buffer size {buffer_size} exceeds maximum buffer size {}",
+            device.limits().max_buffer_size
+        );
+        // MAP_READ | COPY_DST is the download pattern: wgpu-hal places it in host-cached
+        // memory where the driver offers it, so reading it back is a cached memcpy rather
+        // than uncached reads over the bus.
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("headless_readback_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        self.readback = Some(ReadbackBuffer {
+            buffer,
+            width,
+            height,
+            bytes_per_row,
+            padded_bytes_per_row,
+        });
+        Ok(())
     }
 
     fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
@@ -2352,8 +2555,7 @@ impl WgpuHeadlessRenderer {
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
             .view
             .clone();
-        self.core
-            .render_frame(scene, &view, size, wgpu::Color::BLACK)?;
+        self.core.render_frame(scene, &view, size, self.clear_color)?;
         Ok(())
     }
 

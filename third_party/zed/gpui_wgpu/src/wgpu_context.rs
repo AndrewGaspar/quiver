@@ -181,33 +181,45 @@ impl WgpuContext {
         ))
     }
 
+    /// A device for rendering without a surface. With `prefer_low_power`, an integrated GPU
+    /// is tried before a discrete one (unless `ZED_DEVICE_ID` picks an adapter).
     #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn new_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+    pub(crate) fn new_headless(
+        prefer_low_power: bool,
+    ) -> anyhow::Result<(Self, wgpu::TextureFormat)> {
         // Creating a device takes tens of milliseconds, and benchmarks create a headless
         // renderer for every window they open, so the process shares one device until it
         // is lost. A static rather than a thread-local: the cached device is never dropped,
         // because wgpu's queue reads its own thread-locals on drop and would panic if
         // dropped while a thread's thread-locals are being destroyed.
-        static HEADLESS: Mutex<Option<(WgpuContext, wgpu::TextureFormat)>> = Mutex::new(None);
+        static HEADLESS: Mutex<[Option<(WgpuContext, wgpu::TextureFormat)>; 2]> =
+            Mutex::new([None, None]);
         let mut headless = HEADLESS.lock();
-        if let Some((context, format)) = headless.as_ref()
+        let slot = &mut headless[prefer_low_power as usize];
+        if let Some((context, format)) = slot.as_ref()
             && !context.device_lost()
         {
             return Ok((context.clone(), *format));
         }
-        let created = Self::create_headless()?;
-        *headless = Some(created.clone());
+        let created = Self::create_headless(prefer_low_power)?;
+        *slot = Some(created.clone());
         Ok(created)
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+    fn create_headless(prefer_low_power: bool) -> anyhow::Result<(Self, wgpu::TextureFormat)> {
         let instance = Self::instance(None);
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
                 let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
                 Self::sort_adapters(&mut adapters, device_id_filter, None);
+                if prefer_low_power && device_id_filter.is_none() {
+                    // Stable: keeps the backend order within each group.
+                    adapters.sort_by_key(|adapter| {
+                        adapter.get_info().device_type != wgpu::DeviceType::IntegratedGpu
+                    });
+                }
 
                 for adapter in adapters {
                     let adapter_info = adapter.get_info();
