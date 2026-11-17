@@ -759,12 +759,13 @@ fn record_bridge_session(f: &quiver_core::playsession::Finished, perf: Option<qu
         profile_revision: None,
         // Steam launches don't apply mod profiles (yet).
         mods: Vec::new(),
+        // Perf: as quiverd's own launches record it (`PerfRequest::Summaries` reads it too).
+        perf,
         ..Default::default()
     };
     let via = format!("Steam app {app}");
     tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
-    // Perf: beside the session, as quiverd's own launches record it (`PerfRequest::Summaries`).
-    if let Err(e) = settings::record_session_with(f.product_id, &session, json!({ "perf": perf })) {
+    if let Err(e) = settings::record_session(f.product_id, &session) {
         tracing::warn!("recording play session: {e:#}");
     }
 }
