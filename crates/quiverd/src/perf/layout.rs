@@ -352,6 +352,8 @@ pub fn builtin(id: &str) -> Option<Layout> {
                     row(vec![ms("bat.level", "BAT"), m("bat.power"), badge(m("bat.status"))]),
                     row(vec![ms("display.mode", "DISP"), ms("display.vrr", "VRR"), ms("display.tearing", "TEAR"), m("display.path")]),
                     row(vec![ms("session.time", "TIME"), m("clock.time")]),
+                    // Quiver Tweaks' chips (design/TWEAKS.md §6): `CAP 160 · DLSS K · LL on`.
+                    row(vec![when(ms("tweaks.summary", "TWK"), "tweaks.summary")]),
                 ]);
             }
         }
@@ -509,7 +511,7 @@ cells = [
         assert_eq!(s.size(true), [260.0, 188.0]);
         assert_eq!(s.size(false), [260.0, 174.0]);
         assert_eq!(builtin("compact").unwrap().size(true), [780.0, 34.0]);
-        assert_eq!(builtin("full").unwrap().size(true)[1], 11.0 * 20.0 + 30.0 + 11.0 * 4.0 + 14.0);
+        assert_eq!(builtin("full").unwrap().size(true)[1], 12.0 * 20.0 + 30.0 + 12.0 * 4.0 + 14.0);
         // A user layout: defaults by orientation, or what it asks for.
         let one = parse("x", "[[row]]\ncells = [{ metric = \"fps\" }]").unwrap();
         assert_eq!(one.size(true), [hud_card::DEFAULT_WIDTH_ROW, 34.0]);

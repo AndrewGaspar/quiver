@@ -36,6 +36,7 @@ pub mod steamplan;
 pub mod steamlocal;
 pub mod steamrun;
 pub mod store;
+pub mod tweaks;
 pub mod stores;
 pub mod ubiservices;
 pub mod zipread;

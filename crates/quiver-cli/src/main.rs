@@ -14,6 +14,7 @@ mod info;
 mod savestores;
 mod setup;
 mod steamrun;
+mod tweaks;
 
 use std::io::Write;
 
@@ -243,6 +244,15 @@ enum Cmd {
     Steam {
         #[command(subcommand)]
         action: exports::SteamAction,
+    },
+    /// Quiver Tweaks: frame rate, sync, latency, DLSS and frame generation overrides for any
+    /// game Quiver launches, globally, per game or per profile:
+    /// `quiver tweaks [list|get|set|reset|preset|prefer|explain|plan|status|sessions|history|restore|caps]`.
+    Tweaks {
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<tweaks::TweaksAction>,
     },
     /// Mods and profiles: `quiver mods <game> list | catalog | install … | profile … | plan …`.
     Mods {
@@ -933,6 +943,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Mods { game, action } => mods::run(&client, &cli.source, &game, action).await?,
         Cmd::Perf { action } => perf::run(&client, action).await?,
+        Cmd::Tweaks { json, action } => tweaks::run(&client, &cli.source, json, action).await?,
         Cmd::Hud { action } => perf::hud(&client, action).await?,
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,

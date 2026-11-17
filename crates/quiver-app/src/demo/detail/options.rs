@@ -410,6 +410,7 @@ fn state(s: &Resolved, hist: &[OptionsRevision], running: bool, session: Option<
                 pending,
                 dormant: None,
                 invalid: None,
+                tweak: None,
             };
             (id.clone(), st)
         })
@@ -479,6 +480,8 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
             let pid = (p != VANILLA).then_some(p.as_str());
             let mut out: Vec<SurfaceState> =
                 surfaces(d, o, product_id, pid).iter().map(|s| state(s, &hist, running, running.then(|| session_id(d, product_id)).flatten(), has.as_ref())).collect();
+            // Quiver Tweaks at this profile's scope, last (as quiverd lists it).
+            out.push(super::tweaks::profile_surface(key, d, st, product_id, &p)?);
             if let Some(l) = level {
                 for s in &mut out {
                     s.options.retain(|_, x| x.def.level <= l);
@@ -488,7 +491,21 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
         }
         OptionsRequest::Set { product_id, profile, ops, live, message, confirmed } => {
             let p = profile_of(product_id, profile.as_deref())?;
-            json!(set(o, d, st, product_id, &p, ops, live, message, confirmed, "gui", events)?)
+            // Ops on Quiver Tweaks go to the profile's tweak scope (as quiverd routes them).
+            let (tw, ops): (Vec<OptionOp>, Vec<OptionOp>) = ops.into_iter().partition(|op| quiver_api::tweaks::is_platform_surface(op_surface(op)));
+            let mut out = if ops.is_empty() {
+                OptionsChange { product_id, profile: p.clone(), ..Default::default() }
+            } else {
+                set(o, d, st, product_id, &p, ops, live, message.clone(), confirmed, "gui", events)?
+            };
+            if !tw.is_empty() {
+                let t = super::tweaks::profile_set(key, d, st, product_id, &p, tw, message, events)?;
+                out.revision = out.revision.max(t.revision);
+                out.outcomes.extend(t.outcomes);
+                out.changes.extend(t.changes);
+                out.warnings.extend(t.warnings);
+            }
+            json!(out)
         }
         OptionsRequest::History { product_id, profile } => {
             let p = profile_of(product_id, profile.as_deref())?;
@@ -550,6 +567,18 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
         OptionsRequest::Invoke { .. } => bail!("actions need a mod connected over the mod SDK; none is in demo mode"),
         OptionsRequest::Lint { .. } => bail!("not available in demo mode: options lint"),
     })
+}
+
+fn op_surface(op: &OptionOp) -> &str {
+    match op {
+        OptionOp::Set { surface, .. } | OptionOp::Reset { surface, .. } | OptionOp::Preset { surface, .. } | OptionOp::ResetAll { surface } | OptionOp::Raw { surface, .. } => surface,
+    }
+}
+
+/// The DLSS mod is in a profile's stack (it implements some tweaks).
+pub(super) fn has_dlss_mod(d: &Detail, product_id: u32, profile: Option<&str>) -> bool {
+    let Some(p) = profile else { return false };
+    d.mods.get(&product_id).and_then(|m| m.live().find(|r| r.profile.id == p)).is_some_and(|r| m_info(d, product_id, r).iter().any(|x| x.mod_id == DLSS_MOD))
 }
 
 /// When the demo game starts with a profile, what it launched with is what it "has".
@@ -908,7 +937,7 @@ mod tests {
         let c = set("world.npc_density", json!(3), false).unwrap();
         assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: false });
         assert_eq!(c.revision, 16);
-        assert!(matches!(&set("world.npc_density", json!(9), false).unwrap().outcomes[0].outcome, Outcome::Rejected { reason } if reason.contains("above the maximum")));
+        assert!(matches!(&set("world.npc_density", json!(900), false).unwrap().outcomes[0].outcome, Outcome::Rejected { reason } if reason.contains("above the maximum")));
         let e = set("fg.hide_handle64", json!(true), false).unwrap_err();
         assert!(e.to_string().contains("needs confirmation"), "{e}");
         assert!(set("fg.hide_handle64", json!(true), true).is_ok());

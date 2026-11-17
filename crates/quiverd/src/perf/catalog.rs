@@ -10,6 +10,8 @@ pub const PRODUCER_QUIVERD: &str = "quiverd";
 pub const PRODUCER_LAYER: &str = "layer";
 pub const PRODUCER_SYSTEM: &str = "system";
 pub const PRODUCER_DISPLAY: &str = "display";
+/// Quiver Tweaks (design/TWEAKS.md §6): what each active tweak does this session.
+pub const PRODUCER_TWEAKS: &str = "tweaks";
 
 /// Roles a phase-1 mod fills over JSON, beside quiver-perf's ring roles (`frame.base`, …):
 /// a counter of real frames, whose rate is `fps.base` (mean only), and a counter of
@@ -245,6 +247,35 @@ pub fn display() -> Vec<MetricDescriptor> {
         x.sample = Some(SampleRate::Hz(1.0));
     }
     vec![mode, refresh, vrr, tearing, path, blocked]
+}
+
+/// `tweaks.summary`: the Full preset's chip row (`CAP 160 · DLSS K · LL on`).
+pub fn tweaks_summary() -> MetricDescriptor {
+    let mut s = d("tweaks.summary", MetricKind::Text, Unit::None, "Quiver Tweaks", Some("TWK"), "The tweaks this session applies; a ? marks one nothing has confirmed yet.");
+    s.group = Some("Tweaks".into());
+    s
+}
+
+/// `tweaks.<id>` (what it does, in words) and `tweaks.<id>.effect` (its effect).
+pub fn tweak_metrics(id: &str, label: &str) -> Vec<MetricDescriptor> {
+    let mut text = d(&format!("tweaks.{id}"), MetricKind::Text, Unit::None, label, None, "The tweak's value and how it reaches the game.");
+    let mut state = d(&format!("tweaks.{id}.effect"), MetricKind::State, Unit::None, &format!("{label}: effect"), None, "Whether the game used it: confirmed, unconfirmed, provided, and so on.");
+    state.values = ["applied", "confirmed", "measured", "unconfirmed", "provided", "superseded", "unavailable", "failed"]
+        .iter()
+        .map(|v| StateValue {
+            value: (*v).into(),
+            label: Some((*v).into()),
+            level: Some(match *v {
+                "confirmed" | "measured" | "provided" => Level::Good,
+                "unavailable" | "failed" => Level::Warn,
+                _ => Level::Dim,
+            }),
+        })
+        .collect();
+    for x in [&mut text, &mut state] {
+        x.group = Some("Tweaks".into());
+    }
+    vec![text, state]
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use quiver_api::options::{Level, Live, OptionState, OptionType, OptionsRevision,
 use serde_json::Value;
 
 use super::logic::{self, Edit, RowKey, Tone, Who};
+use crate::ui::game::tweaks::logic as tweak_logic;
 use super::{Confirm, ModsView};
 use crate::app::Quiver;
 use crate::model::{Gid, GameRow, clock, day};
@@ -17,8 +18,54 @@ use crate::theme::Theme;
 use crate::ui::game::page::{Load, toggle};
 use crate::ui::{FocusExt, Icon, Kind, MEDIUM, SEMIBOLD, Size, button, caption, chip, icon, mono, soft_shadow};
 
+/// Which form a generated control belongs to: the Mods tab's Options view, or Quiver Tweaks
+/// (Settings → Tweaks and the game page's Tweaks tab). The controls are the same; where an
+/// edit is staged, which picker is open and the level shown differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Form {
+    Options,
+    Tweaks,
+}
+
+impl Quiver {
+    pub(in crate::ui) fn form_stage(&mut self, f: Form, key: RowKey, edit: Option<Edit>, cx: &mut Context<Self>) {
+        match f {
+            Form::Options => self.options_stage(key, edit, cx),
+            Form::Tweaks => self.tweaks_stage(key, edit, cx),
+        }
+    }
+
+    pub(in crate::ui) fn form_picker(&self, f: Form) -> Option<&RowKey> {
+        match f {
+            Form::Options => self.gp.opt.picker.as_ref(),
+            Form::Tweaks => self.tw.picker.as_ref(),
+        }
+    }
+
+    pub(in crate::ui) fn form_set_picker(&mut self, f: Form, p: Option<RowKey>) {
+        match f {
+            Form::Options => self.gp.opt.picker = p,
+            Form::Tweaks => self.tw.picker = p,
+        }
+    }
+
+    fn form_level(&self, f: Form) -> Level {
+        match f {
+            Form::Options => self.gp.opt.level,
+            Form::Tweaks => self.tw.level,
+        }
+    }
+
+    fn form_input(&mut self, f: Form, key: &RowKey, text: &str, placeholder: &str, cx: &mut Context<Self>) -> gpui::Entity<crate::text_input::TextInput> {
+        match f {
+            Form::Options => self.option_input(key, text, placeholder, cx),
+            Form::Tweaks => self.tweaks_input(key, text, placeholder, cx),
+        }
+    }
+}
+
 /// A small uppercase badge (`LIVE`, `RESTART`, `EXP`).
-pub(super) fn tone_badge(th: &Theme, label: impl Into<SharedString>, tone: Tone) -> gpui::Div {
+pub(in crate::ui) fn tone_badge(th: &Theme, label: impl Into<SharedString>, tone: Tone) -> gpui::Div {
     let (bg, fg) = tone_colors(th, tone);
     div()
         .flex()
@@ -35,7 +82,7 @@ pub(super) fn tone_badge(th: &Theme, label: impl Into<SharedString>, tone: Tone)
         .child(label.into())
 }
 
-pub(super) fn tone_colors(th: &Theme, tone: Tone) -> (gpui::Hsla, gpui::Hsla) {
+pub(in crate::ui) fn tone_colors(th: &Theme, tone: Tone) -> (gpui::Hsla, gpui::Hsla) {
     match tone {
         Tone::Ok => (th.ok_soft, th.ok),
         Tone::Warn => (th.warn_soft, th.warn),
@@ -56,7 +103,7 @@ pub(super) fn who_color(th: &Theme, w: &Who) -> gpui::Hsla {
 }
 
 /// Who made a change, as a coloured badge ("app", "in game", "agent aco-dlss").
-pub(super) fn who_badge(th: &Theme, source: &str) -> gpui::Div {
+pub(in crate::ui) fn who_badge(th: &Theme, source: &str) -> gpui::Div {
     let w = logic::who(source);
     let c = who_color(th, &w);
     div()
@@ -77,12 +124,12 @@ pub(super) fn who_badge(th: &Theme, source: &str) -> gpui::Div {
 }
 
 /// A section caption in the mock-ups' style (uppercase, tracked).
-pub(super) fn sec(th: &Theme, label: impl Into<String>) -> gpui::Div {
+pub(in crate::ui) fn sec(th: &Theme, label: impl Into<String>) -> gpui::Div {
     caption(&label.into(), th.tx3)
 }
 
 /// A banner across the form (running game, a change from elsewhere, a crash).
-pub(super) fn banner(th: &Theme, tone: Tone, ic: Icon, text: impl Into<SharedString>) -> gpui::Div {
+pub(in crate::ui) fn banner(th: &Theme, tone: Tone, ic: Icon, text: impl Into<SharedString>) -> gpui::Div {
     let (_, fg) = tone_colors(th, tone);
     div()
         .flex()
@@ -101,7 +148,7 @@ pub(super) fn banner(th: &Theme, tone: Tone, ic: Icon, text: impl Into<SharedStr
 }
 
 /// When a revision happened, for provenance lines ("Nov 14", "today 21:16").
-pub(super) fn when(hist: &[OptionsRevision], revision: u32) -> Option<String> {
+pub(in crate::ui) fn when(hist: &[OptionsRevision], revision: u32) -> Option<String> {
     let r = hist.iter().find(|r| r.revision == revision)?;
     let d = day(r.at);
     Some(if d == "Today" || d == "Yesterday" { format!("{} {}", d.to_lowercase(), clock(r.at)) } else { d })
@@ -172,8 +219,28 @@ impl Quiver {
                 .children(right)
         };
         let count = |n: usize| (n > 0).then(|| div().px(px(7.)).rounded_full().bg(th.acc).text_color(th.acc_ink).text_size(px(11.)).font_weight(gpui::FontWeight::BOLD).child(n.to_string()).into_any_element());
-        let mut col: Vec<AnyElement> = vec![sec(th, "Stack").px(px(10.)).pb(px(2.)).into_any_element()];
-        let mut seen = Vec::new();
+        let mut col: Vec<AnyElement> = Vec::new();
+        // Quiver Tweaks first (TWEAKS §8.3): the platform surface at this profile's scope.
+        let platform: Vec<&SurfaceState> = surfaces.iter().filter(|s| s.kind == SurfaceKind::Platform).collect();
+        if !platform.is_empty() {
+            col.push(sec(th, "Quiver").px(px(10.)).pb(px(2.)).into_any_element());
+            for s in &platform {
+                let n = logic::changed_on(s, &s.options.keys().cloned().collect::<Vec<_>>(), &staged);
+                let key = s.key.clone();
+                let on = sel.as_deref() == Some(key.as_str()) && self.gp.opt.view == ModsView::Options;
+                let right = count(n).or_else(|| Some(div().text_size(px(11.5)).text_color(th.tx3).child("this profile").into_any_element()));
+                col.push(
+                    item(format!("nav-s-{key}"), s.title.clone(), right, on)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.options_jump(&key, None);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        col.push(sec(th, "Stack").px(px(10.)).pb(px(2.)).when(!platform.is_empty(), |d| d.pt(px(12.))).into_any_element());
+        let mut seen: Vec<String> = platform.iter().map(|s| s.key.clone()).collect();
         for r in &stack {
             let surf = surfaces.iter().find(|s| s.mod_id.as_deref() == Some(r.mod_id.as_str()));
             match surf {
@@ -487,6 +554,18 @@ impl Quiver {
         let mut out = Vec::new();
         let g = self.gp.id;
         let name = self.game(g).map(|g| crate::model::clean_name(&g.entry.name)).unwrap_or_default();
+        if s.kind == SurfaceKind::Platform {
+            let profile = self.mods_profile_name(&self.mods_profile());
+            out.push(
+                banner(th, Tone::Accent, Icon::SlidersHorizontal, format!("Quiver Tweaks for the {profile} profile. Values set for {name} or for every game show where they come from; set those in the Tweaks tab or Settings → Tweaks. Tweaks apply at the next launch."))
+                    .child(button("opt-open-tweaks", th, Kind::Secondary, Size::Small, None, "Open Tweaks").on_click(cx.listener(|this, _, _, cx| {
+                        let p = this.mods_profile();
+                        this.tweaks_open_tab(this.gp.id, Some(p), cx);
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
         if s.live.session.is_some() {
             let text = match (s.live.channel, s.live.connected) {
                 (quiver_api::options::LiveChannel::Sdk, true) => format!("{name} is running with this profile and {} is connected: live options apply at once; the others wait for the moment shown.", s.title),
@@ -564,7 +643,29 @@ impl Quiver {
                 meta.push(div().child("this session only, not saved").into_any_element());
             }
             ValueSource::ModPatch { mod_id } => meta.push(div().child(format!("set by {mod_id}'s config patch; yours overrides it")).into_any_element()),
+            ValueSource::Tweak { tweak, scope, revision } => {
+                meta.push(div().child(format!("from Quiver Tweaks ({}, r{revision}: {tweak}); yours overrides it", scope.label())).into_any_element())
+            }
+            ValueSource::Scope { source, .. } => {
+                let profile = self.mods_profile_name(&self.mods_profile());
+                meta.push(who_badge(th, source).into_any_element());
+                meta.push(div().child(tweak_logic::source_text(st, Some(&profile)).0).into_any_element());
+            }
             ValueSource::Default => {}
+        }
+        // Quiver Tweaks rows: where the tweak can work, what the next launch does, the last
+        // session's effect (the Tweaks tab has the actions).
+        if let Some(t) = st.tweak.as_deref() {
+            for c in &t.chips {
+                meta.push(tone_badge(th, c.clone(), Tone::Muted).into_any_element());
+            }
+            if let Some(l) = t.planned.as_ref().and_then(|p| tweak_logic::planned_line(p, t.prefer)) {
+                meta.push(div().text_color(tone_colors(th, l.tone).1).child(l.text).into_any_element());
+            }
+            if let Some(e) = &t.last {
+                let (b, tone, _) = tweak_logic::effect_badge(e);
+                meta.push(tone_badge(th, format!("LAST SESSION · {b}"), tone).into_any_element());
+            }
         }
         if let Some(o) = self.gp.opt.outcomes.get(&key) {
             let (t, tone) = logic::outcome_text(&o.outcome);
@@ -606,7 +707,7 @@ impl Quiver {
             .child(mono(11., th.tx4).child(oid.to_owned()));
 
         // Right: the control, then what resetting or undoing does.
-        let control = self.option_control(th, s, &key, st, &draft, cx);
+        let control = self.option_control(Form::Options, th, s, &key, st, &draft, cx);
         let mut under: Vec<AnyElement> = Vec::new();
         if let Some(Edit::Set(v)) = &edit
             && let Err(why) = st.def.normalize(v)
@@ -665,7 +766,8 @@ impl Quiver {
     }
 
     /// The control for one option's type.
-    fn option_control(&mut self, th: &Theme, s: &SurfaceState, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::ui) fn option_control(&mut self, f: Form, th: &Theme, s: &SurfaceState, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
         let id_base = format!("{}-{}", key.0, key.1);
         let def = st.def.clone();
         match def.ty {
@@ -676,18 +778,18 @@ impl Quiver {
                     .flex()
                     .justify_end()
                     .child(div().id(SharedString::from(format!("b-{id_base}"))).cursor_pointer().child(toggle(th, on)).on_click(cx.listener(move |this, _, _, cx| {
-                        this.options_stage(k.clone(), Some(Edit::Set(Value::Bool(!on))), cx);
+                        this.form_stage(f, k.clone(), Some(Edit::Set(Value::Bool(!on))), cx);
                         cx.notify();
                     })))
                     .into_any_element()
             }
-            OptionType::Enum => self.enum_control(th, key, st, draft, cx),
-            OptionType::Int | OptionType::Float => self.number_control(th, key, st, draft, cx),
-            OptionType::Key => self.key_control(th, s, key, st, draft, cx),
-            OptionType::List => self.list_control(th, key, st, draft, cx),
+            OptionType::Enum => self.enum_control(f, th, key, st, draft, cx),
+            OptionType::Int | OptionType::Float => self.number_control(f, th, key, st, draft, cx),
+            OptionType::Key => self.key_control(f, th, s, key, st, draft, cx),
+            OptionType::List => self.list_control(f, th, key, st, draft, cx),
             OptionType::String | OptionType::Path | OptionType::Color => {
                 let text = def.to_text(draft);
-                let input = self.option_input(key, &text, if def.ty == OptionType::Path { "Path" } else { "Text" }, cx);
+                let input = self.form_input(f, key, &text, if def.ty == OptionType::Path { "Path" } else { "Text" }, cx);
                 let swatch = (def.ty == OptionType::Color).then(|| parse_hex(&text)).flatten();
                 div()
                     .flex()
@@ -700,8 +802,8 @@ impl Quiver {
         }
     }
 
-    fn enum_control(&mut self, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let level = self.gp.opt.level;
+    fn enum_control(&mut self, f: Form, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
+        let level = self.form_level(f);
         let values: Vec<quiver_api::options::EnumValue> =
             st.def.values.iter().filter(|e| e.level.is_none_or(|l| l <= level) || same_value(&e.value, draft) || same_value(&e.value, &st.value)).cloned().collect();
         let label_of = |e: &quiver_api::options::EnumValue| e.label.clone().unwrap_or_else(|| scalar_text(&e.value));
@@ -737,13 +839,13 @@ impl Quiver {
                         .cursor_pointer()
                         .child(label_of(&e))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.options_stage(k.clone(), Some(Edit::Set(v.clone())), cx);
+                            this.form_stage(f, k.clone(), Some(Edit::Set(v.clone())), cx);
                             cx.notify();
                         }))
                 }))
                 .into_any_element();
         }
-        let open = self.gp.opt.picker.as_ref() == Some(key);
+        let open = self.form_picker(f) == Some(key);
         let current = values.iter().find(|e| same_value(&e.value, draft)).map(label_of).unwrap_or_else(|| scalar_text(draft));
         let k = key.clone();
         let btn = div()
@@ -762,7 +864,8 @@ impl Quiver {
             .child(div().flex_1().min_w_0().truncate().font_weight(MEDIUM).child(current))
             .child(icon(if open { Icon::ChevronUp } else { Icon::ChevronDown }, 14., th.tx3))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.gp.opt.picker = if this.gp.opt.picker.as_ref() == Some(&k) { None } else { Some(k.clone()) };
+                let p = if this.form_picker(f) == Some(&k) { None } else { Some(k.clone()) };
+                this.form_set_picker(f, p);
                 cx.notify();
             }));
         let list = open.then(|| {
@@ -792,8 +895,8 @@ impl Quiver {
                                 .when_some(e.help.clone(), |d, h| d.child(div().text_size(px(11.5)).text_color(th.tx3).child(h))),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.options_stage(k.clone(), Some(Edit::Set(v.clone())), cx);
-                            this.gp.opt.picker = None;
+                            this.form_stage(f, k.clone(), Some(Edit::Set(v.clone())), cx);
+                            this.form_set_picker(f, None);
                             cx.notify();
                         }))
                 }),
@@ -802,11 +905,11 @@ impl Quiver {
         div().flex().flex_col().gap(px(4.)).child(btn).children(list).into_any_element()
     }
 
-    fn number_control(&mut self, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
+    fn number_control(&mut self, f: Form, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
         let def = st.def.clone();
         let id_base = format!("{}-{}", key.0, key.1);
         let text = def.to_text(draft);
-        let input = self.option_input(key, &text, "", cx);
+        let input = self.form_input(f, key, &text, "", cx);
         let step = |dir: f64, this: &mut Self, cx: &mut Context<Self>| {
             let _ = this;
             let k = key.clone();
@@ -828,7 +931,7 @@ impl Quiver {
                 .child(icon(if dir > 0. { Icon::Plus } else { Icon::Minus }, 13., th.tx2))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let n = logic::step_number(&d, &v, dir);
-                    this.options_stage(k.clone(), Some(Edit::Set(n)), cx);
+                    this.form_stage(f, k.clone(), Some(Edit::Set(n)), cx);
                     cx.notify();
                 }))
         };
@@ -883,7 +986,7 @@ impl Quiver {
                         .hover(|s| s.text_color(th.tx1))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.options_stage(k.clone(), Some(Edit::Set(v.clone())), cx);
+                            this.form_stage(f, k.clone(), Some(Edit::Set(v.clone())), cx);
                             cx.notify();
                         }))
                 })))
@@ -891,13 +994,14 @@ impl Quiver {
             .into_any_element()
     }
 
-    fn key_control(&mut self, th: &Theme, s: &SurfaceState, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn key_control(&mut self, f: Form, th: &Theme, s: &SurfaceState, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
         let def = st.def.clone();
         let id_base = format!("{}-{}", key.0, key.1);
         let none = def.none.clone().unwrap_or_else(|| "none".into());
         let cur = scalar_text(draft);
         let is_none = cur.eq_ignore_ascii_case(&none) || cur.is_empty();
-        let open = self.gp.opt.picker.as_ref() == Some(key);
+        let open = self.form_picker(f) == Some(key);
         let keys = self.gp.opt.keys.ready().cloned();
         // Who else uses a key (normalized names compare case-insensitively).
         let others = |k: &str| -> Vec<String> {
@@ -927,7 +1031,8 @@ impl Quiver {
                     .child(if is_none { "No key".to_owned() } else { cur.clone() }),
             )
             .child(button(SharedString::from(format!("k-{id_base}")), th, Kind::Secondary, Size::Small, None, if open { "Done" } else { "Change…" }).on_click(cx.listener(move |this, _, _, cx| {
-                this.gp.opt.picker = if this.gp.opt.picker.as_ref() == Some(&k) { None } else { Some(k.clone()) };
+                let p = if this.form_picker(f) == Some(&k) { None } else { Some(k.clone()) };
+                this.form_set_picker(f, p);
                 cx.notify();
             })));
         let warn = (!clash.is_empty()).then(|| div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(th.bad).child(icon(Icon::TriangleAlert, 12., th.bad)).child(format!("Also used by {}", clash.join(", "))));
@@ -969,26 +1074,26 @@ impl Quiver {
                             .child(label)
                             .when(!tip.is_empty(), |d| d.tooltip(crate::ui::responsive::tip(th, tip.clone())))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.options_stage(k.clone(), Some(Edit::Set(Value::String(v.clone()))), cx);
-                                this.gp.opt.picker = None;
+                                this.form_stage(f, k.clone(), Some(Edit::Set(Value::String(v.clone()))), cx);
+                                this.form_set_picker(f, None);
                                 cx.notify();
                             }))
                     }))
                     .into_any_element()
             }
             None => {
-                let input = self.option_input(key, &cur, "Key, e.g. F9 or Shift+Home", cx);
+                let input = self.form_input(f, key, &cur, "Key, e.g. F9 or Shift+Home", cx);
                 div().child(input).into_any_element()
             }
         });
         div().flex().flex_col().gap(px(6.)).child(head).children(warn).children(picker).into_any_element()
     }
 
-    fn list_control(&mut self, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
+    fn list_control(&mut self, f: Form, th: &Theme, key: &RowKey, st: &OptionState, draft: &Value, cx: &mut Context<Self>) -> AnyElement {
         let id_base = format!("{}-{}", key.0, key.1);
         let items: Vec<Value> = draft.as_array().cloned().unwrap_or_default();
         let add_key = (key.0.clone(), format!("+{}", key.1));
-        let add = self.option_input(&add_key, "", "Add an item", cx);
+        let add = self.form_input(f, &add_key, "", "Add an item", cx);
         let item_def = st.def.item.as_deref().cloned().unwrap_or_default();
         let chips = items.iter().enumerate().map(|(i, v)| {
             let k = key.clone();
@@ -1007,7 +1112,7 @@ impl Quiver {
                 .border_color(th.line2)
                 .child(mono(11.5, th.tx1).child(item_def.to_text(v)))
                 .child(div().id(SharedString::from(format!("l-{id_base}-{i}"))).cursor_pointer().child(icon(Icon::X, 11., th.tx3)).on_click(cx.listener(move |this, _, _, cx| {
-                    this.options_stage(k.clone(), Some(Edit::Set(Value::Array(rest.clone()))), cx);
+                    this.form_stage(f, k.clone(), Some(Edit::Set(Value::Array(rest.clone()))), cx);
                     cx.notify();
                 })))
                 .into_any_element()
@@ -1028,7 +1133,7 @@ impl Quiver {
                     }
                     let mut v = items.clone();
                     v.push(item_def.parse_text(&t).unwrap_or(Value::String(t)));
-                    this.options_stage(k.clone(), Some(Edit::Set(Value::Array(v))), cx);
+                    this.form_stage(f, k.clone(), Some(Edit::Set(Value::Array(v))), cx);
                     input.update(cx, |i, cx| i.set_text("", cx));
                     cx.notify();
                 }),

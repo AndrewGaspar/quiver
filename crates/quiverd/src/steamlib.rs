@@ -327,6 +327,9 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, _source: &str, req: Request) ->
         Request::Ownership { product_id, account } => json!(ownership(daemon, product_id, account).await?),
         Request::SteamLaunchPlan { product_id, perf } => {
             let mut plan = launch_plan(product_id)?;
+            // Quiver Tweaks: the same compiled environment a Quiver launch gets (Steam picks
+            // the Proton build; design/TWEAKS.md §8.1).
+            crate::tweaks::steam_plan(&daemon.cfg, &mut plan);
             if perf {
                 daemon.perf_steam_launch(&mut plan);
             }

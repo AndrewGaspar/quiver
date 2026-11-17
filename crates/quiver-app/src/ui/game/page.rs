@@ -1487,6 +1487,7 @@ impl Quiver {
                     2 + self.gp.profiles().len() + self.options_body_len(cx)
                 }
             }
+            Tab::Tweaks => self.tweaks_targets(Some(id)).len(),
             Tab::Performance => self.perf_body_len(id),
             Tab::Saves => self.gp.saves.ready().map(|s| s.backups.len()).unwrap_or(0),
             Tab::AddOns => self.addons_shown().len(),
@@ -1547,6 +1548,7 @@ impl Quiver {
                     self.new_profile_dialog(id, cx);
                 }
             }
+            Tab::Tweaks => self.tweaks_activate(Some(id), i, cx),
             Tab::Performance => self.perf_body_activate(id, i, cx),
             Tab::Saves => {
                 if let Some(b) = self.gp.saves.ready().and_then(|s| s.backups.get(i)).cloned() {

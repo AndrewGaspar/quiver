@@ -196,6 +196,8 @@ pub struct Quiver {
     pub wc: crate::ui::welcome::Welcome,
     /// Performance and the HUD (`ui/perf.rs`, `ui/game/perf.rs`).
     pub perf: crate::ui::perf::PerfUi,
+    /// Quiver Tweaks: Settings → Tweaks and the game page's Tweaks tab.
+    pub tw: crate::ui::game::tweaks::TweaksUi,
 }
 
 impl Quiver {
@@ -237,6 +239,7 @@ impl Quiver {
             dl: Default::default(),
             wc: Default::default(),
             perf: Default::default(),
+            tw: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
@@ -246,6 +249,7 @@ impl Quiver {
         if demo {
             this.start_demo_script(window, cx);
             this.start_options_demo(window, cx);
+            this.start_tweaks_demo(window, cx);
         }
         this
     }
@@ -419,6 +423,8 @@ impl Quiver {
             Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::OptionsOutcome { .. } | Event::ModChannel { .. } => {
                 self.options_event(&e, cx)
             }
+            // Quiver Tweaks (Settings → Tweaks and the Tweaks tab follow them).
+            Event::TweaksChanged { .. } | Event::TweaksEffect { .. } => self.tweaks_event(&e, cx),
             // Events this app doesn't show (perf updates, HUD models) and ones added later.
             _ => return,
         }

@@ -184,6 +184,7 @@ impl Quiver {
                 SettingsSection::Library => (Icon::HardDrive, Some("quiver library"), "storage folders paths disk compatibility prefixes proton cache"),
                 SettingsSection::Compatibility => (Icon::Cpu, Some("quiver protons"), "proton wine ge runtime builds"),
                 SettingsSection::Performance => (Icon::Activity, Some("quiver hud status"), "hud fps overlay mangohud frame rate latency performance"),
+                SettingsSection::Tweaks => (Icon::SlidersHorizontal, Some("quiver tweaks"), "tweaks dlss frame rate cap vsync latency reflex anisotropic frame generation nvidia override"),
                 SettingsSection::Steam => (Icon::Gamepad, Some("quiver export list"), "shortcuts desktop entries exports restart steam user"),
                 SettingsSection::Appearance => (Icon::Palette, None, "theme omarchy colors controller gamepad hyprpad hints"),
                 SettingsSection::Automation => (Icon::Bot, Some("quiver status"), "cli agents permissions policy socket daemon quiverd"),

@@ -11,6 +11,7 @@ mod perf;
 mod info;
 mod lifecycle;
 mod options;
+mod tweaks;
 mod savestores;
 mod setup;
 mod steamgames;
@@ -89,6 +90,7 @@ struct Daemon {
     sessions: Arc<PlaySessions>,
     /// Mod options: running sessions as options see them, the SDK link, options events.
     options: options::Options,
+    tweaks: tweaks::Tweaks,
     /// Mods connected through the SDK pipe (`quiver_mod.h`), via bridges.
     mod_sdk: Arc<quiver_core::modsdk::ModRegistry>,
     /// Performance metrics and the HUD (design/SIGHT-HUD.md): per-session registry,
@@ -563,6 +565,7 @@ impl Daemon {
             }
             Request::Mods(req) => self.handle_mods(source, req).await?,
             Request::Options(req) => self.handle_options(source, req).await?,
+            Request::Tweaks(req) => self.handle_tweaks(source, req).await?,
             Request::ModSdk(quiver_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
             // The connection loop passes connection-bound perf requests (subscriptions, HUD
             // attachment) with their connection; this path has none.
@@ -674,6 +677,10 @@ impl Daemon {
         // Perf (design/SIGHT-HUD.md): the session's metrics, and with the HUD enabled for
         // the game, its session dir, the Sight layer's environment and the MangoHud remap.
         let perf_profile = plan.api.profile.as_ref().map(|p| p.id.clone());
+        // Quiver Tweaks (design/TWEAKS.md): the compiled environment, before the perf part so
+        // the layer order sees variables tweaks turn on (NVIDIA Smooth Motion).
+        let (tweak_lines, tweak_revisions) = self.tweaks_launch(&game, &mut plan, &session_id);
+        detail.extend(tweak_lines);
         detail.extend(self.perf_launch(&session_id, &game, perf_profile.as_deref(), &mut plan.api.settings));
         if !detail.is_empty() {
             self.update_job(id, |j| j.detail = detail);
@@ -711,6 +718,7 @@ impl Daemon {
             let exit = exit_code.clone();
             let sid = session_id.clone();
             this.options_watch(session_id.clone());
+            this.tweaks_watch(session_id.clone());
             let result = run_local(move || async move {
                 launcher::play(&cfg, &online, &g, &plan, &broker, &sessions, |e| match e {
                     LaunchEvent::Detail(lines) => ev_this.update_job(id, |j| j.detail.extend(lines)),
@@ -735,6 +743,7 @@ impl Daemon {
             this.running.lock().unwrap().remove(&product_id);
             let code = *exit_code.lock().unwrap();
             this.options_session_end(&session_id, code).await;
+            this.tweaks_session_end(&session_id, product_id);
             let perf_summary = this.perf.end(&session_id);
             if let Some(start) = *started_at.lock().unwrap() {
                 let end = chrono::Utc::now();
@@ -750,6 +759,7 @@ impl Daemon {
                     options_revision,
                     // Perf: the session's summary (`PerfRequest::Summaries` reads it back).
                     perf: perf_summary,
+                    tweaks: tweak_revisions,
                 };
                 if let Err(e) = settings::record_session(product_id, &session) {
                     tracing::warn!("recording play session: {e:#}");
@@ -1078,6 +1088,7 @@ async fn main() -> Result<()> {
         events,
         sessions,
         options: options::Options::default(),
+        tweaks: tweaks::Tweaks::default(),
         mod_sdk,
         perf,
         achievements: ach,

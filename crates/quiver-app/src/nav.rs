@@ -44,6 +44,8 @@ pub enum SettingsSection {
     Compatibility,
     /// The performance HUD's defaults for every game (`ui/perf.rs`).
     Performance,
+    /// Quiver Tweaks at the global scope (`ui/game/tweaks/`).
+    Tweaks,
     Steam,
     Appearance,
     Automation,
@@ -51,11 +53,12 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Accounts,
         SettingsSection::Library,
         SettingsSection::Compatibility,
         SettingsSection::Performance,
+        SettingsSection::Tweaks,
         SettingsSection::Steam,
         SettingsSection::Appearance,
         SettingsSection::Automation,
@@ -72,6 +75,7 @@ impl SettingsSection {
             SettingsSection::Library => "Library and storage",
             SettingsSection::Compatibility => "Compatibility",
             SettingsSection::Performance => "Performance HUD",
+            SettingsSection::Tweaks => "Tweaks",
             SettingsSection::Steam => "Steam and shortcuts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Automation => "Automation and CLI",
@@ -108,6 +112,9 @@ pub enum Tab {
     Overview,
     LaunchOptions,
     Mods,
+    /// Quiver Tweaks for the game and its profiles (`ui/game/tweaks/`); the one tab other
+    /// stores' games have besides Overview.
+    Tweaks,
     /// Performance summaries, comparisons, live numbers and the HUD (`ui/game/perf.rs`).
     Performance,
     Saves,
@@ -117,7 +124,14 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [Tab::Overview, Tab::LaunchOptions, Tab::Mods, Tab::Performance, Tab::Saves, Tab::AddOns, Tab::Files, Tab::Logs];
+    pub const ALL: [Tab; 9] = [Tab::Overview, Tab::LaunchOptions, Tab::Mods, Tab::Tweaks, Tab::Performance, Tab::Saves, Tab::AddOns, Tab::Files, Tab::Logs];
+    /// Other stores' games: their client's facts and Quiver Tweaks.
+    pub const STORE: [Tab; 2] = [Tab::Overview, Tab::Tweaks];
+
+    /// The tabs a game's page has.
+    pub fn of(id: Gid) -> &'static [Tab] {
+        if id.is_ubisoft() { &Self::ALL } else { &Self::STORE }
+    }
 
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -128,6 +142,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::LaunchOptions => "Launch options",
             Tab::Mods => "Mods",
+            Tab::Tweaks => "Tweaks",
             Tab::Performance => "Performance",
             Tab::Saves => "Saves & progress",
             Tab::AddOns => "Add-ons",
@@ -136,9 +151,12 @@ impl Tab {
         }
     }
 
-    fn step(self, delta: isize) -> Tab {
-        let i = (self.index() as isize + delta).clamp(0, Self::ALL.len() as isize - 1);
-        Self::ALL[i as usize]
+    /// The next tab of `id`'s page (a tab the page doesn't have steps from its first).
+    fn step_in(self, id: Gid, delta: isize) -> Tab {
+        let list = Self::of(id);
+        let Some(cur) = list.iter().position(|t| *t == self) else { return list[0] };
+        let i = (cur as isize + delta).clamp(0, list.len() as isize - 1);
+        list[i as usize]
     }
 }
 
@@ -481,8 +499,8 @@ impl Nav {
                 Effect::Moved
             }
             Input::PrevTab | Input::NextTab => match self.page {
-                Page::Game(_) => {
-                    let t = self.tab.step(if input == Input::NextTab { 1 } else { -1 });
+                Page::Game(id) => {
+                    let t = self.tab.step_in(id, if input == Input::NextTab { 1 } else { -1 });
                     if t == self.tab {
                         return Effect::None;
                     }
@@ -713,14 +731,14 @@ impl Nav {
             (Page::Game(_), Zone::Actions, Down) => self.zone = Zone::Tabs,
 
             // Tabs: selection follows focus.
-            (Page::Game(_), Zone::Tabs, Left) => {
+            (Page::Game(id), Zone::Tabs, Left) => {
                 if self.tab.index() == 0 {
                     self.zone = Zone::Side;
                 } else {
-                    self.select_tab(self.tab.step(-1));
+                    self.select_tab(self.tab.step_in(id, -1));
                 }
             }
-            (Page::Game(_), Zone::Tabs, Right) => self.select_tab(self.tab.step(1)),
+            (Page::Game(id), Zone::Tabs, Right) => self.select_tab(self.tab.step_in(id, 1)),
             (Page::Game(_), Zone::Tabs, Up) => self.zone = Zone::Actions,
             (Page::Game(_), Zone::Tabs, Down) => {
                 if l.body > 0 {
@@ -915,6 +933,20 @@ mod tests {
     }
 
     #[test]
+    fn other_stores_games_have_overview_and_tweaks() {
+        let l = lib_layout();
+        let mut n = Nav::new();
+        let steam = Gid(quiver_api::GameRef::steam(620));
+        n.open_game(steam);
+        run(&mut n, &l, &[NextTab]);
+        assert_eq!(n.tab, Tab::Tweaks);
+        assert_eq!(n.apply(NextTab, &l), Effect::None, "the last tab");
+        run(&mut n, &l, &[PrevTab]);
+        assert_eq!(n.tab, Tab::Overview);
+        assert_eq!(Tab::of(Gid::from(3539)).len(), Tab::ALL.len());
+    }
+
+    #[test]
     fn tabs_follow_triggers_and_focus() {
         let l = lib_layout();
         let mut n = Nav::new();
@@ -925,7 +957,7 @@ mod tests {
         run(&mut n, &l, &[Down]);
         assert_eq!(n.focused(&l), Some(Target::Tab(Tab::Mods)));
         run(&mut n, &l, &[Right]);
-        assert_eq!(n.tab, Tab::Performance);
+        assert_eq!(n.tab, Tab::Tweaks);
         run(&mut n, &l, &[Down, Down]);
         assert_eq!(n.focused(&l), Some(Target::Body(1)));
         assert_eq!(n.apply(Activate, &l), Effect::Body(1));

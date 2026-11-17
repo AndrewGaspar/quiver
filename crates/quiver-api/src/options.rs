@@ -74,6 +74,207 @@ pub struct Schema {
     /// Where the information comes from (a link), for catalog schemas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    // ---- appended: Quiver Tweaks (design/TWEAKS.md §3.2, §7.1)
+    /// `platform` for Quiver's built-in Tweaks surface (scopes global → game → profile,
+    /// options bound with `via`); other surfaces leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SurfaceKind>,
+    /// Tweaks this surface implements itself: tweak id → the option that does it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provides: BTreeMap<String, ProvidesDef>,
+    /// Tweaks or mechanisms that must not apply while this surface is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ConflictDef>,
+}
+
+/// How a provider maps a tweak onto its own option (`[provides."fps.cap"]`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvideMode {
+    /// The tweak's value becomes the option's value (a default layer under the profile's).
+    #[default]
+    Bind,
+    /// The provider decides; the tweak row only shows its value.
+    Own,
+}
+
+/// `[provides."<tweak>"]` in a mod or game schema (TWEAKS §7.1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProvidesDef {
+    /// The provider's option that implements the tweak.
+    pub option: String,
+    /// Tweak value → option value; `"@keep"`: don't touch the option; `"{percent / 100}"`: a
+    /// tiny arithmetic on `v`, `percent` or `fps`. Unmapped values pass through.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub map: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub mode: ProvideMode,
+    /// The option value that turns the provider's implementation off (lets the person prefer
+    /// Quiver's mechanism).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off: Option<Value>,
+    /// Holds only under these values of the provider's own options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<When>,
+}
+
+/// `[[conflicts]]`: a tweak, or one mechanism of tweaks, that must not apply while the
+/// surface is active (and `when` holds), with the reason shown.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweak: Option<String>,
+    /// `dxvk`, `dxvk:dxgi.maxFrameRate`, `nvapi-drs:NGX_DLSSG_MULTI_FRAME_COUNT`, `layer:limiter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mech: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<When>,
+    pub reason: String,
+}
+
+/// One `via` value: text substituted for `{v}`, `"@unset"` (write nothing), or a table of
+/// writes that replaces the binding's `set` for that value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ViaValue {
+    Text(String),
+    Set(BTreeMap<String, String>),
+}
+
+/// The evidence that confirms a binding took effect (TWEAKS §6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmDef {
+    /// `dxvk`, `nvapi` (dxvk-nvapi), `nvpresent` (Smooth Motion).
+    pub log: String,
+    /// A fixed line (substring) to look for.
+    pub line: String,
+    /// The line (or the block it starts) must also name this key (dxvk-nvapi's DRS lines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// What to say when it's found ("DXVK engaged its frame rate limiter").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
+}
+
+/// Display requirements of a binding.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vrr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<bool>,
+}
+
+/// A binding's `requires`: every given test must hold (an empty one always does). Names, not
+/// versions, where options move between releases (`has`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Requires {
+    /// `nvidia`, `amd`, `intel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx: Option<bool>,
+    /// The lowest RTX series (`40`: RTX 40 and 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_series: Option<u32>,
+    /// `>=580.82` against the driver version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// `>=0.9.0` against the Proton build's dxvk-nvapi, DXVK or vkd3d-proton version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvapi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxvk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vkd3d: Option<String>,
+    /// Names the build must contain: `dxvk:dxvk.latencySleep`, `nvapi:NGX_DLSSG_MODE`,
+    /// `proton:PROTON_ENABLE_HDR`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub has: Vec<String>,
+    /// Names it must not contain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lacks: Vec<String>,
+    /// The game's API as last seen (`d3d8` … `d3d12`, `vulkan`, `opengl`, `unknown`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api: Vec<String>,
+    /// `not-dxvk`: the game's DXGI isn't DXVK's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxgi: Option<String>,
+    /// The Sight layer runs this launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<bool>,
+    /// `running`: only for a change made while the game runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// `quiver`, `steam`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route: Vec<String>,
+    /// Driver NGX files that must exist (`nvngx_update.exe`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ngx: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplayReq>,
+    /// Other tweaks' values (`{ "scale.gamescope" = "@on" }`; `@on`: anything but the default).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tweak: BTreeMap<String, WhenCond>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anti_cheat: Option<bool>,
+    /// …and at least one of these holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub any: Vec<Requires>,
+}
+
+/// One mechanism binding of a tweak (`via = [{ mech = "dxvk", set = {…} }, …]`, TWEAKS §3.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViaDef {
+    /// `env`, `dxvk`, `vkd3d`, `nvapi-drs`, `ngx`; later `layer`, `vk-layer`, `wrapper`,
+    /// `mangohud`.
+    pub mech: String,
+    /// What it writes: names → templates (`{v}`: the value as text after `map`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+    /// Value (as text) → replacement text, `"@unset"`, or a table of writes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub map: BTreeMap<String, ViaValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply: Option<Apply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub requires: Requires,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<ConfirmDef>,
+    /// The Quiver phase that implements it (a later one is ignored with a lint note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+    /// Applied in addition to the chosen binding, when its `requires` holds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub also: bool,
+    /// `vkd3d`: `VKD3D_CONFIG` flags merged with the person's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    /// `ngx`: copy the driver's `nvngx_update.exe` into the prefix (TWEAKS steer 6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub copy_updater: bool,
+    /// `ngx`: the DLSS indicator (its registry side effect is undone later, §9 rule 6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub indicator: bool,
+    /// Later phases: `layer` control, `wrapper` and its arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// A chip for people ("NVIDIA", "D3D9–11").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Which installed mod versions a catalog schema is for. Every given test must hold.
@@ -392,6 +593,13 @@ pub struct OptionDef {
     pub min_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<usize>,
+    // ---- appended: Quiver Tweaks (design/TWEAKS.md)
+    /// Platform surfaces: the mechanisms, tried in order per launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub via: Vec<ViaDef>,
+    /// A provider's option also shown on this Tweaks page ("From DLSS").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweak_page: Option<String>,
 }
 
 // -- metrics (SIGHT-HUD §3.3) ------------------------------------------------------------------
@@ -853,6 +1061,8 @@ pub enum SurfaceKind {
     Game,
     /// A tool (DXVK, MangoHud, the in-game overlay's own keys).
     Runtime,
+    /// Quiver's own settings for every game (Quiver Tweaks, design/TWEAKS.md).
+    Platform,
 }
 
 /// Where a surface's schema came from (precedence: author, catalog, local, inferred).
@@ -941,6 +1151,12 @@ pub enum ValueSource {
     Profile { revision: u32, source: String },
     /// Set for the running session only (`Live::Only`), not saved.
     Session { source: String },
+    // ---- appended: Quiver Tweaks
+    /// A tweak scope's value (platform surfaces): global, game or profile.
+    Scope { scope: crate::tweaks::ScopeKind, revision: u32, source: String },
+    /// A tweak's value bound into a provider's option (TWEAKS §7.2): a default layer under
+    /// the profile's own value.
+    Tweak { tweak: String, scope: crate::tweaks::ScopeKind, revision: u32 },
 }
 
 /// A saved value the running game hasn't picked up (yet).
@@ -983,6 +1199,10 @@ pub struct OptionState {
     /// The file's own text for this key doesn't fit the schema (shown, used as is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid: Option<String>,
+    /// Platform surfaces (Quiver Tweaks): values per scope, who implements it, what the next
+    /// launch does, the last session's effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweak: Option<Box<crate::tweaks::TweakRow>>,
 }
 
 /// A key in a surface's files that its schema doesn't describe ("Other keys"), with a

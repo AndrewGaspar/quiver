@@ -9,7 +9,7 @@
 //! policy (MOD-CONFIG steer 13) applies to agents, whose changes show as theirs in history.
 
 mod changes;
-mod form;
+pub(super) mod form;
 mod keys;
 pub mod logic;
 mod source;
@@ -434,7 +434,7 @@ impl Quiver {
         input
     }
 
-    fn new_option_input(&self, text: &str, placeholder: &str, cx: &mut Context<Self>) -> Entity<TextInput> {
+    pub(in crate::ui) fn new_option_input(&self, text: &str, placeholder: &str, cx: &mut Context<Self>) -> Entity<TextInput> {
         let text = text.to_owned();
         let e = cx.new(|cx| {
             let mut t = TextInput::new(cx, placeholder, false).compact(false);
@@ -716,28 +716,10 @@ impl Quiver {
     /// A on an option: flip a switch, take the next choice, step a number up (round to the
     /// start after the end), the next key; text opens for typing.
     fn options_pad_activate(&mut self, k: RowKey, cx: &mut Context<Self>) {
-        use quiver_api::options::{OptionType, same_value};
         let Some((g, p)) = self.gp.opt.of.clone() else { return };
         let Some(st) = self.gp.opt.surface(&k.0).and_then(|s| s.options.get(&k.1)).cloned() else { return };
         let draft = logic::draft_value(&st, self.gp.opt.staged_for(g, &p).get(&k));
-        let cycle = |list: Vec<serde_json::Value>| -> Option<serde_json::Value> {
-            let i = list.iter().position(|v| same_value(v, &draft)).map_or(0, |i| (i + 1) % list.len().max(1));
-            list.get(i).cloned()
-        };
-        let next = match st.def.ty {
-            OptionType::Bool => Some(serde_json::Value::Bool(!draft.as_bool().unwrap_or(false))),
-            OptionType::Enum => {
-                let level = self.gp.opt.level;
-                cycle(st.def.values.iter().filter(|e| e.level.is_none_or(|l| l <= level)).map(|e| e.value.clone()).collect())
-            }
-            OptionType::Int | OptionType::Float => {
-                let n = logic::step_number(&st.def, &draft, 1.0);
-                Some(if same_value(&n, &draft) { st.def.special.first().map(|m| m.value.clone()).or_else(|| st.def.min.map(serde_json::Value::from)).unwrap_or(n) } else { n })
-            }
-            OptionType::Key => logic::allowed_keys(&st.def).and_then(|keys| cycle(keys.into_iter().map(serde_json::Value::String).collect())),
-            _ => None,
-        };
-        match next {
+        match logic::pad_next(&st, &draft, self.gp.opt.level) {
             Some(v) => self.options_stage(k, Some(Edit::Set(v)), cx),
             None => self.gp.opt.picker = Some(k),
         }
@@ -782,8 +764,9 @@ impl Quiver {
         }
     }
 
-    /// Demo mode: `QUIVER_DEMO_GLOBAL=options=form|changes|keys|source[,options-running]`
-    /// opens AC Origins' Mods tab on that view (for screenshots).
+    /// Demo mode: `QUIVER_DEMO_GLOBAL=options=form|changes|keys|source[,options-running]
+    /// [,options-surface=KEY][,options-page=ID]` opens AC Origins' Mods tab on that view (for
+    /// screenshots).
     pub fn start_options_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let flags: Vec<String> = std::env::var("QUIVER_DEMO_GLOBAL").map(|v| v.split(',').map(|s| s.trim().to_owned()).collect()).unwrap_or_default();
         let view = flags.iter().find_map(|f| f.strip_prefix("options=")).map(str::to_owned);
@@ -791,6 +774,7 @@ impl Quiver {
         let running = flags.iter().any(|f| f == "options-running");
         let in_game = flags.iter().any(|f| f == "options-in-game");
         let surface = flags.iter().find_map(|f| f.strip_prefix("options-page=")).map(str::to_owned);
+        let pick = flags.iter().find_map(|f| f.strip_prefix("options-surface=")).map(str::to_owned);
         let level = flags.iter().any(|f| f == "options-advanced");
         let staged = flags.iter().any(|f| f == "options-unsaved");
         let save = flags.iter().any(|f| f == "options-save");
@@ -829,6 +813,9 @@ impl Quiver {
             });
             cx.background_executor().timer(Duration::from_millis(1200)).await;
             let _ = this.update(cx, |this, cx| {
+                if let Some(k) = &pick {
+                    this.options_jump(k, None);
+                }
                 if let Some(p) = &surface {
                     this.gp.opt.page = Some(p.clone());
                 }

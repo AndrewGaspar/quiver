@@ -410,6 +410,10 @@ pub struct Ctx {
     pub surfaces: Vec<Surface>,
     /// Broken schemas, in words.
     pub problems: Vec<String>,
+    /// Quiver Tweaks values bound into providers' options (design/TWEAKS.md §7.2): surface key
+    /// → option → (where it comes from, value). A default layer between mod config patches
+    /// and the profile's own value.
+    pub bound: BTreeMap<String, BTreeMap<String, (ValueSource, Value)>>,
 }
 
 /// The surfaces of `profile` (an id or name; `None`/`vanilla`: vanilla). The store needs
@@ -446,7 +450,12 @@ pub fn context(store: &ModStore, profile: Option<&str>) -> Result<Ctx> {
             }
         }
     }
-    Ok(Ctx { store: store.clone(), profile, profile_id, install, upper, lowers, view: plan.view.clone(), patches: plan.patches.clone(), surfaces, problems })
+    let mut ctx = Ctx { store: store.clone(), profile, profile_id, install, upper, lowers, view: plan.view.clone(), patches: plan.patches.clone(), surfaces, problems, bound: BTreeMap::new() };
+    match crate::tweaks::bound_for(&ctx) {
+        Ok(b) => ctx.bound = b,
+        Err(e) => ctx.problems.push(format!("Quiver Tweaks: {e:#}")),
+    }
+    Ok(ctx)
 }
 
 fn locate(def: &FileDef, id: &str, install: &Path, lowers: &[PathBuf], upper: &Path, view: &View, profile: &str) -> FileLoc {
@@ -483,6 +492,8 @@ pub struct Eval {
     /// The file's own text didn't fit.
     pub invalid: Option<String>,
     pub patch: Option<(String, Value)>,
+    /// A Quiver Tweaks value bound into this option (above the patch, below the profile).
+    pub bound: Option<(ValueSource, Value)>,
     /// The stored value: normalized, or why it's dormant.
     pub stored: Option<Result<Value, (Value, String)>>,
     pub session: Option<Value>,
@@ -501,12 +512,15 @@ impl Eval {
 
     /// Without the profile's and the session's values.
     pub fn base(&self) -> Value {
+        if let Some((_, v)) = &self.bound {
+            return v.clone();
+        }
         self.patch.as_ref().map_or_else(|| self.default.clone(), |p| p.1.clone())
     }
 
-    /// The value the profile (or session) makes Quiver write, if any.
+    /// The value the profile (or session, or a bound tweak) makes Quiver write, if any.
     pub fn wanted(&self) -> Option<Value> {
-        self.session.clone().or_else(|| self.stored.as_ref().and_then(|s| s.as_ref().ok().cloned()))
+        self.session.clone().or_else(|| self.stored.as_ref().and_then(|s| s.as_ref().ok().cloned())).or_else(|| self.bound.as_ref().map(|b| b.1.clone()))
     }
 }
 
@@ -578,7 +592,8 @@ pub fn eval(ctx: &Ctx, s: &Surface, values: &Values, raw: &RawValues, session: O
         });
         let stored = stored.get(id).map(|v| d.normalize(v).map_err(|e| (v.clone(), e)));
         let session = sess.get(id).cloned();
-        options.insert(id.clone(), Eval { def: d.clone(), binding, default, invalid, patch, stored, session });
+        let bound = ctx.bound.get(&s.key).and_then(|m| m.get(id)).cloned();
+        options.insert(id.clone(), Eval { def: d.clone(), binding, default, invalid, patch, bound, stored, session });
     }
     let dormant = stored
         .iter()
@@ -635,6 +650,8 @@ pub fn state(ctx: &Ctx, s: &Surface, rev: &OptionsRevision, run: &RunInfo<'_>, l
             ValueSource::Session { source: "session".into() }
         } else if matches!(e.stored, Some(Ok(_))) {
             changed_by(id)
+        } else if let Some((src, _)) = &e.bound {
+            src.clone()
         } else if let Some((m, _)) = &e.patch {
             ValueSource::ModPatch { mod_id: m.clone() }
         } else {
@@ -665,6 +682,7 @@ pub fn state(ctx: &Ctx, s: &Surface, rev: &OptionsRevision, run: &RunInfo<'_>, l
                 pending,
                 dormant,
                 invalid: e.invalid.clone(),
+                tweak: None,
             },
         );
     }
