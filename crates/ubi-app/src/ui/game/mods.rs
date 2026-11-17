@@ -650,7 +650,7 @@ impl Quiver {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().w(px(200.)).flex_shrink().min_w(px(110.)).children(name))
+                            .child(div().w(px(200.)).flex_shrink_1().min_w(px(110.)).children(name))
                             .child(div().flex_1().min_w_0().children(path))
                             .child(button("layer-add", th, Kind::Primary, Size::Small, Some(Icon::Plus), "Add mod").on_click(cx.listener(move |this, _, _, cx| this.add_layer(id, cx)))),
                     )
