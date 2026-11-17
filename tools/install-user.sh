@@ -4,8 +4,8 @@
 #   ~/.local/bin/{quiver,quiverd,quiver-app,ubi}
 #   ~/.local/lib/quiver/ubi-bridge.exe
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
-#   ~/.local/share/vulkan/explicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
-#                                             (explicit: loaded only when a launch enables it)
+#   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
+#                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg
 #   ~/.config/systemd/user/quiverd.service   (installed, not enabled)
 #   ~/.local/share/doc/quiver/                (licenses)

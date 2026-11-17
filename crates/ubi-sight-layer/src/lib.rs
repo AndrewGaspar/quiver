@@ -11,8 +11,22 @@
 //!   position and opacity onto the swapchain image just before present, plus the live
 //!   frame-time graph drawn from the layer's own present history.
 //!
-//! It is inert unless Quiver enables it: the loader only loads it when `VK_INSTANCE_LAYERS`
-//! names it (manifest/), and without `QUIVER_PERF_DIR` it passes every call through.
+//! **Enabling.** The manifest (manifest/) makes it an *implicit* layer that the loader loads
+//! only when `QUIVER_SIGHT=1` is set (`QUIVER_SIGHT_DISABLE=1` vetoes it), or when
+//! `VK_INSTANCE_LAYERS` names it; anything else on the machine never loads it. Without
+//! `QUIVER_PERF_DIR` it passes every call through. Installed as
+//! `<datadir>/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json`.
+//!
+//! **Order** (SIGHT-HUD §2.4): the HUD must be composited *below* frame-generation and
+//! post-processing layers (closer to the driver). Measured with loader 1.4.363: implicit
+//! layers enabled by their environment variables are ordered by manifest discovery, which can
+//! put Sight above them; layers named in `VK_INSTANCE_LAYERS` move after the remaining
+//! implicit layers, in the listed order (application first), and a named implicit layer is
+//! enabled even without its `enable_environment` variable. So a launch should always set
+//! `VK_INSTANCE_LAYERS`, listing only layers that are on, with Sight after vkBasalt/lsfg-vk
+//! (and before or after obs-vkcapture for captures shown/hidden);
+//! `VK_INSTANCE_LAYERS=VK_LAYER_QUIVER_sight` alone already puts Sight below every implicit
+//! layer.
 //!
 //! Robustness rules, since this runs inside the game: every entry point catches panics (the
 //! first one disables drawing for the process; telemetry and pass-through stay); every
@@ -54,8 +68,12 @@ pub fn manifest_json(library_path: &str, is_64bit: bool) -> String {
     MANIFEST_TEMPLATE.replace("@LIBRARY_PATH@", &escaped).replace("@LIBRARY_ARCH@", if is_64bit { "64" } else { "32" })
 }
 
-/// Environment the layer reads (the loader-level switch is `VK_INSTANCE_LAYERS`).
+/// Environment the layer and its manifest use.
 pub mod env {
+    /// `1`: the loader enables the layer (the manifest's `enable_environment`).
+    pub const ENABLE: &str = "QUIVER_SIGHT";
+    /// `1`: the loader never enables it (`disable_environment`).
+    pub const DISABLE: &str = "QUIVER_SIGHT_DISABLE";
     /// The session dir (ubi-perf): without it the layer passes everything through.
     pub use ubi_perf::session::ENV_PERF_DIR as PERF_DIR;
     /// `0`: telemetry only, never composite (debugging; the per-game kill switch doesn't load
@@ -203,4 +221,23 @@ unsafe extern "system" fn get_device_proc_addr(device: vk::Device, name: *const 
     // stay NULL).
     next?;
     device_hook(n).or(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest() {
+        let m: serde_json::Value = serde_json::from_str(&manifest_json("/opt/q \"x\"\\lib.so", false)).unwrap();
+        let l = &m["layer"];
+        assert_eq!(l["name"], LAYER_NAME);
+        assert_eq!(l["library_path"], "/opt/q \"x\"\\lib.so");
+        assert_eq!(l["library_arch"], "32");
+        assert_eq!(l["enable_environment"][env::ENABLE], "1");
+        assert_eq!(l["disable_environment"][env::DISABLE], "1");
+        let m: serde_json::Value = serde_json::from_str(&manifest_json("/usr/lib/quiver/sight/x86_64/libquiver_sight_layer.so", true)).unwrap();
+        assert_eq!(m["layer"]["library_arch"], "64");
+        assert_eq!(m["file_format_version"], "1.2.1");
+    }
 }

@@ -644,16 +644,19 @@ pub fn run(mut o: Opts<'_>) -> Report {
     }
 }
 
-/// The loader environment for a run: our layer (and optionally validation below it).
+/// The loader environment for a run, as a Quiver launch sets it: the layer's (implicit)
+/// manifest dir, `QUIVER_SIGHT=1`, and `VK_INSTANCE_LAYERS` naming Sight (so it sits below
+/// every other implicit layer), optionally with validation below it.
 pub fn layer_env(manifest_dir: &Path, validation: Option<&Path>) -> Vec<(String, String)> {
-    let mut path = manifest_dir.display().to_string();
     let mut layers = LAYER.to_owned();
+    let mut env = vec![("VK_ADD_IMPLICIT_LAYER_PATH".to_owned(), manifest_dir.display().to_string()), ("QUIVER_SIGHT".to_owned(), "1".to_owned())];
     if let Some(v) = validation {
-        path = format!("{path}:{}", v.display());
+        env.push(("VK_ADD_LAYER_PATH".into(), v.display().to_string()));
         // First listed = closest to the app: validation sits below Sight and checks its calls.
         layers = format!("{LAYER}:{VALIDATION}");
     }
-    vec![("VK_ADD_LAYER_PATH".into(), path), ("VK_INSTANCE_LAYERS".into(), layers)]
+    env.push(("VK_INSTANCE_LAYERS".into(), layers));
+    env
 }
 
 /// Where a validation layer manifest lives, if there's one on this machine (never installed by

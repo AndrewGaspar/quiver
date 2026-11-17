@@ -70,13 +70,31 @@ fn composites_and_records() {
     let scratch = tempfile::tempdir().unwrap();
     write_manifest(scratch.path(), &layer_so());
     let validation = if std::env::var("QUIVER_TEST_VALIDATION").as_deref() == Ok("0") { None } else { validation_dir() };
-    // SAFETY: the only test in this binary, before any thread reads the environment.
+    // SAFETY (all set_var/remove_var here): the only test in this binary; the session's
+    // heartbeat thread and the Vulkan loader don't read these concurrently with the writes.
+    // 0. Inert unless enabled: the manifest is discoverable and QUIVER_PERF_DIR is set, but
+    // without QUIVER_SIGHT=1 (or with QUIVER_SIGHT_DISABLE=1) the loader doesn't load it.
     unsafe {
+        std::env::set_var("VK_ADD_IMPLICIT_LAYER_PATH", scratch.path());
+        std::env::set_var("QUIVER_PERF_DIR", session.dir.path());
+        std::env::set_var("QUIVER_SIGHT_LOG", "1");
+    }
+    let inert = |what: &str| {
+        let r = run(Opts { frames: 3, readback: false, ..Opts::default() });
+        assert_eq!(r.present_ns.len(), 3);
+        assert!(!session.ring_path().exists(), "the layer loaded {what}");
+    };
+    inert("without QUIVER_SIGHT");
+    unsafe {
+        std::env::set_var("QUIVER_SIGHT", "1");
+        std::env::set_var("QUIVER_SIGHT_DISABLE", "1");
+    }
+    inert("with QUIVER_SIGHT_DISABLE=1");
+    unsafe {
+        std::env::remove_var("QUIVER_SIGHT_DISABLE");
         for (k, v) in layer_env(scratch.path(), validation.as_deref()) {
             std::env::set_var(k, v);
         }
-        std::env::set_var("QUIVER_PERF_DIR", session.dir.path());
-        std::env::set_var("QUIVER_SIGHT_LOG", "1");
     }
     eprintln!("validation: {validation:?}");
 
