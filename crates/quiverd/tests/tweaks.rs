@@ -41,6 +41,8 @@ impl Env {
             .env("XDG_RUNTIME_DIR", self.dir("run"))
             .env("HOME", self.dir("home"))
             .env("QUIVER_BROKER", "127.0.0.1:0")
+            // Never the user's /dev/shm/quiver-<uid>: a daemon clears stale perf session dirs there.
+            .env("QUIVER_SHM_ROOT", self.dir("shm"))
             .env("RUST_LOG", "warn")
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("QUIVER_TEST_SESSION")
