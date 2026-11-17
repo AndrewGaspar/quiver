@@ -224,10 +224,10 @@ impl MetricDef {
         short_text("short", &self.short, 6)?;
         short_text("help", &self.help, 200)?;
         short_text("group", &self.group, 24)?;
-        if let Some(Range::Fixed { min, max }) = self.range {
-            if !(min.is_finite() && max.is_finite() && min < max) {
-                return Err("range needs finite min < max".into());
-            }
+        if let Some(Range::Fixed { min, max }) = self.range
+            && !(min.is_finite() && max.is_finite() && min < max)
+        {
+            return Err("range needs finite min < max".into());
         }
         if let Some(Range::Auto(s)) = &self.range
             && s != "auto"

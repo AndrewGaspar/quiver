@@ -1354,13 +1354,6 @@ pub enum ModsRequest {
         #[serde(default)]
         confirmed: bool,
     },
-    // -- Mod SDK (appended; build/mod-sdk) ------------------------------------------------
-    /// Mods connected through the SDK (`quiver_mod.h`) right now, for one game or all
-    /// (`Vec<ModSdkConnection>`).
-    SdkStatus {
-        #[serde(default)]
-        product_id: Option<u32>,
-    },
 }
 
 fn yes() -> bool {
@@ -1370,7 +1363,19 @@ fn yes() -> bool {
 // ---------------------------------------------------------------------------------------
 // Mod SDK (build/mod-sdk)
 
-/// A mod connected through the SDK pipe of a running game (`ModsRequest::SdkStatus`).
+/// Requests about mods connected through the mod SDK (`Request::ModSdk`). Kept apart from
+/// [`ModsRequest`] (installed mods and profiles): these are about running games.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ModSdkRequest {
+    /// Mods connected right now, for one game or all, oldest first (`Vec<ModSdkConnection>`).
+    Status {
+        #[serde(default)]
+        product_id: Option<u32>,
+    },
+}
+
+/// A mod connected through the SDK pipe of a running game (`ModSdkRequest::Status`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModSdkConnection {
     /// quiverd's id for this connection (unique while quiverd runs).

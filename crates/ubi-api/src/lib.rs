@@ -600,6 +600,9 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    // ---- Mod SDK (appended; build/mod-sdk)
+    /// Mods connected through the mod SDK (`quiver_mod.h`) in running games.
+    ModSdk(mods::ModSdkRequest),
 }
 
 fn yes() -> bool {

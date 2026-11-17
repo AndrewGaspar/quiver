@@ -539,7 +539,7 @@ impl ModRegistry {
             }
             FromMod::Ack { seq, rejected } => {
                 let mut conns = self.conns.lock().unwrap();
-                let Some(p) = conns.get_mut(&s.id).and_then(|c| c.pending.remove(&seq)) else { return None };
+                let p = conns.get_mut(&s.id).and_then(|c| c.pending.remove(&seq))?;
                 drop(conns);
                 let rejected: BTreeMap<String, String> = rejected
                     .into_iter()
