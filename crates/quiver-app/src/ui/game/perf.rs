@@ -626,8 +626,8 @@ impl Quiver {
         let live = self.perf.live.as_ref().filter(|l| l.product == g.id()).and_then(|l| l.last.clone());
         let latest = self.perf.summaries.ready().and_then(|v| v.first()).filter(|_| self.perf.summaries_for == g.id()).map(|s| s.perf.clone());
         let provided = |metric: &str| match metric {
-            "fps.base" => live.as_ref().map(|u| u.values.contains_key("fps.base")).unwrap_or(latest.as_ref().is_some_and(|p| p.fps_base.is_some())),
-            "latency.render" => live.as_ref().map(|u| u.values.contains_key("latency.render")).unwrap_or(latest.as_ref().is_some_and(|p| p.latency_ms.is_some())),
+            "fps.base" => live.as_ref().map(|u| crate::ui::perf::live_has(u, "fps.base")).unwrap_or(latest.as_ref().is_some_and(|p| p.fps_base.is_some())),
+            "latency.render" => live.as_ref().map(|u| crate::ui::perf::live_has(u, "latency.render")).unwrap_or(latest.as_ref().is_some_and(|p| p.latency_ms.is_some())),
             _ => true,
         };
         let k = c.scale.clamp(0.75, 2.5);

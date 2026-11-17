@@ -309,6 +309,25 @@ pub fn live_value<'a>(u: &'a PerfUpdate, id: &str) -> Option<&'a PerfValue> {
     m.get(&Stat::Mean).or_else(|| m.get(&Stat::Last)).or_else(|| m.values().next())
 }
 
+/// A value with something in it (quiverd sends `—` for a metric nobody provides).
+pub fn has_value(v: &PerfValue) -> bool {
+    v.value.is_some() || (!v.text.is_empty() && v.text != "—")
+}
+
+/// A frame-generation mod reports real frames: `fps.base` is its rate, not presented FPS
+/// (which quiverd falls back to), and FG ratio has a value.
+pub fn live_has_base(u: &PerfUpdate) -> bool {
+    live_value(u, "fg.ratio").is_some_and(|v| v.value.is_some())
+}
+
+/// A mod-provided metric with a value.
+pub fn live_has(u: &PerfUpdate, id: &str) -> bool {
+    match id {
+        "fps.base" => live_has_base(u),
+        _ => live_value(u, id).is_some_and(has_value),
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Loading, events
 
@@ -1098,13 +1117,14 @@ impl Quiver {
         };
         let u = live.and_then(|l| l.last.as_ref());
         let get = |id: &str| u.and_then(|u| live_value(u, id));
+        let has = |id: &str| u.is_some_and(|u| live_has(u, id));
         let mut cells = vec![cell("FPS", get("fps"), true)];
-        if get("fps.base").is_some() {
+        if has("fps.base") {
             cells.push(cell("BASE", get("fps.base"), true));
         }
         cells.push(cell("1% LOW", get("fps.p1low"), false));
         cells.push(cell("FRAME TIME", get("frametime"), false));
-        if get("latency.render").is_some() {
+        if has("latency.render") {
             cells.push(cell("LATENCY", get("latency.render"), false));
         }
         cells.push(cell("GPU", get("gpu.load"), false));
@@ -1112,7 +1132,7 @@ impl Quiver {
         cells.push(cell("", get("gpu.power"), false));
         cells.push(cell("CPU", get("cpu.load"), false));
         cells.push(cell("", get("cpu.temp"), false));
-        let upscaler = get("upscaler").map(|v| v.text.clone());
+        let upscaler = get("upscaler").filter(|v| has_value(v)).map(|v| v.text.clone());
         let status = match live {
             Some(Live { error: Some(e), .. }) => e.clone(),
             Some(Live { last: Some(u), .. }) => format!("updated {}", u.at.with_timezone(&chrono::Local).format("%H:%M:%S")),
@@ -1176,6 +1196,18 @@ mod tests {
         for f in HUD_FIELDS {
             assert!(f.is_set(&f.next(&c, &l)), "{f:?}");
         }
+    }
+
+    #[test]
+    fn live_values_without_a_mod() {
+        // From a scratch quiverd with the fake layer and no mod: quiverd fills fps.base
+        // with presented FPS and sends `—` for what nobody provides.
+        let line = r#"{"sub":2,"session":"s-732n13vjd7","product_id":3539,"at":"2026-11-17T08:14:45.767736691Z","values":{"cpu.load":{"last":{"value":66.18,"text":"66","unit":"%"}},"fg.ratio":{"last":{"text":"—","level":"dim"}},"fps":{"mean":{"value":143.99,"text":"144"}},"fps.base":{"last":{"value":143.99,"text":"144"}},"latency.render":{"last":{"text":"—","level":"dim"}},"upscaler":{"last":{"text":"—","level":"dim"}}}}"#;
+        let u: PerfUpdate = serde_json::from_str(line).unwrap();
+        assert!(!live_has(&u, "fps.base"), "base is presented FPS without an FG mod");
+        assert!(!live_has(&u, "latency.render") && !live_has(&u, "upscaler"));
+        assert!(live_has(&u, "fps") && live_has(&u, "cpu.load"));
+        assert_eq!(live_value(&u, "cpu.load").unwrap().display(), "66%");
     }
 
     #[test]
