@@ -554,6 +554,13 @@ the extra flips of section 2.1. Built in phase 2.
 
 ### 2.12 The HUD in captures
 
+**Deferred (2026-11-16):** the user chose not to separate the HUD from screen shares for now.
+The MVP ships the setting for Sight's own captures and the obs-vkcapture layer order only;
+the screencast-driven switch (H9) and the `no_screen_share` question are parked. (Note found
+in review: Hyprland's `no_screen_share` paints the layer's box black in monitor and region
+shares rather than revealing the game, so a revisit needs option (b) hide-during-share or a
+compositor patch.)
+
 A setting, **"HUD in captures: Shown / Hidden"** (`hud.*.captures`), with the same scopes as
 layouts (global, per game, per profile) and default **Shown**, like MangoHud. Each kind of
 capture is handled where it happens:

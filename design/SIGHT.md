@@ -917,7 +917,9 @@ Other risks:
 
 ## 13. Steers wanted
 
-Still open. Where SIGHT-HUD's decisions change what an option means, the steer carries a note.
+**Decided 2026-11-16:** the user accepted every recommendation below as written (with the
+SIGHT-HUD notes applied). Each steer's *Recommend* is the decision; the other options are kept
+for the record.
 
 1. **Name.** (a) Sight; (b) Nock; (c) Fletch; (d) plain "Quiver HUD".
    *Recommend (a): short, archery-themed, and unlike "overlay" or "HUD" it isn't already taken

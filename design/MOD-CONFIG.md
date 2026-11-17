@@ -1073,6 +1073,9 @@ the overlay can show them next to the options.
 
 ## Steers wanted
 
+**Decided 2026-11-16:** the user accepted every recommendation below as written. Each steer's
+*Recommend* is the decision; the other options are kept for the record.
+
 1. **Name of the feature.** (a) Options (`quiver mods <game> options`, `ubi_api::options`);
    (b) Config; (c) Settings. *Recommend (a): "config" and "settings" already mean patches,
    `profile_config` and launch settings.*
