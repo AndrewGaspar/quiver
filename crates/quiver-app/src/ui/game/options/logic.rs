@@ -191,9 +191,33 @@ pub fn draft_value(st: &OptionState, edit: Option<&Edit>) -> Value {
     }
 }
 
-/// The profile changed it (or the session did), as opposed to the shipped default.
+/// The profile changed it (or the session did), as opposed to the shipped default. A tweak
+/// counts as changed where its scope sets it, not where it's inherited from a lower scope.
 pub fn is_changed(st: &OptionState) -> bool {
-    !matches!(st.from, ValueSource::Default | ValueSource::Tweak { .. })
+    match &st.from {
+        ValueSource::Default | ValueSource::Tweak { .. } => false,
+        ValueSource::Scope { scope, .. } => st.tweak.as_ref().is_none_or(|t| t.at == *scope),
+        _ => true,
+    }
+}
+
+/// A on a row: flip a switch, take the next choice, step a number up (round to the start
+/// after the end), the next key. `None`: the row needs its picker or typing.
+pub fn pad_next(st: &OptionState, draft: &Value, level: Level) -> Option<Value> {
+    let cycle = |list: Vec<Value>| -> Option<Value> {
+        let i = list.iter().position(|v| same_value(v, draft)).map_or(0, |i| (i + 1) % list.len().max(1));
+        list.get(i).cloned()
+    };
+    match st.def.ty {
+        OptionType::Bool => Some(Value::Bool(!draft.as_bool().unwrap_or(false))),
+        OptionType::Enum => cycle(st.def.values.iter().filter(|e| e.level.is_none_or(|l| l <= level)).map(|e| e.value.clone()).collect()),
+        OptionType::Int | OptionType::Float => {
+            let n = step_number(&st.def, draft, 1.0);
+            Some(if same_value(&n, draft) { st.def.special.first().map(|m| m.value.clone()).or_else(|| st.def.min.map(Value::from)).unwrap_or(n) } else { n })
+        }
+        OptionType::Key => allowed_keys(&st.def).and_then(|keys| cycle(keys.into_iter().map(Value::String).collect())),
+        _ => None,
+    }
 }
 
 /// Staged edits as the daemon's ops, in a stable order. Rows of "Other keys" are keyed
@@ -449,6 +473,24 @@ mod tests {
         assert_eq!(what, "AC Origins Graphics.Fov");
         assert_eq!(ft.unwrap().0, "1.00");
         assert_eq!(split_change("restored r6").1, None);
+    }
+
+    #[test]
+    fn tweaks_count_as_changed_where_set() {
+        use quiver_api::tweaks::{ScopeKind, TweakRow};
+        let from = ValueSource::Scope { scope: ScopeKind::Global, revision: 2, source: "gui".into() };
+        let row = |at| Some(Box::new(TweakRow { at, ..Default::default() }));
+        assert!(is_changed(&OptionState { from: from.clone(), tweak: row(ScopeKind::Global), ..Default::default() }));
+        assert!(!is_changed(&OptionState { from, tweak: row(ScopeKind::Profile), ..Default::default() }), "inherited from global");
+        let b = OptionState { def: def(OptionType::Bool), value: json!(false), ..Default::default() };
+        assert_eq!(pad_next(&b, &json!(false), Level::Basic), Some(json!(true)));
+        let e = OptionState {
+            def: OptionDef { values: vec![EnumValue { value: json!("app"), ..Default::default() }, EnumValue { value: json!("on"), ..Default::default() }], ..def(OptionType::Enum) },
+            ..Default::default()
+        };
+        assert_eq!(pad_next(&e, &json!("on"), Level::Basic), Some(json!("app")), "round to the start");
+        let n = OptionState { def: OptionDef { min: Some(20.0), max: Some(500.0), step: Some(1.0), special: vec![Mark { value: json!(0), label: "No cap".into() }], ..def(OptionType::Float) }, ..Default::default() };
+        assert_eq!(pad_next(&n, &json!(500), Level::Basic), Some(json!(0)), "the end steps to the special");
     }
 
     #[test]

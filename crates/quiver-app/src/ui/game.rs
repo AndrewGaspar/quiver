@@ -13,6 +13,7 @@ mod perf;
 mod saves;
 mod storepage;
 mod stores;
+pub(crate) mod tweaks;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
@@ -333,7 +334,7 @@ impl Quiver {
         };
         // Other stores' games have one page: their client's facts (no Quiver tabs).
         let store_page = !id.is_ubisoft();
-        let tab = if store_page { Tab::Overview } else { self.nav.tab };
+        let tab = if Tab::of(id).contains(&self.nav.tab) { self.nav.tab } else { Tab::Overview };
         let slim = tab != Tab::Overview;
         let pane_w = self.pane_width();
         let pane_h = (self.viewport.1 - 52.).max(300.);
@@ -375,6 +376,7 @@ impl Quiver {
             Tab::Overview => self.render_overview(th, &g, cx),
             Tab::LaunchOptions => self.render_launch(th, &g, cx),
             Tab::Mods => self.render_mods(th, &g, cx),
+            Tab::Tweaks => self.render_tweaks_tab(th, &g, cx),
             Tab::Performance => self.render_perf(th, &g, cx),
             Tab::Saves => self.render_saves(th, &g, cx),
             Tab::AddOns => self.render_addons(th, &g, cx),
@@ -382,7 +384,12 @@ impl Quiver {
             Tab::Logs => self.render_logs(th, &g, cx),
         };
 
-        let pending = if tab == Tab::LaunchOptions { self.render_pending(th, &g, cx) } else if tab == Tab::Mods { self.render_options_bar(th, &g, cx) } else { None };
+        let pending = match tab {
+            Tab::LaunchOptions => self.render_pending(th, &g, cx),
+            Tab::Mods => self.render_options_bar(th, &g, cx),
+            Tab::Tweaks => self.render_tweaks_bar(th, cx),
+            _ => None,
+        };
         let mut pane = div()
             .flex_1()
             .min_w_0()
@@ -403,9 +410,7 @@ impl Quiver {
             head.push(self.render_actionbar(th, &g, false, cx).into_any_element());
             head.push(self.render_stats(th, &g).into_any_element());
         }
-        if !store_page {
-            head.push(self.render_tabs(th, &g, cx).into_any_element());
-        }
+        head.push(self.render_tabs(th, &g, cx).into_any_element());
         let scroll = div().id(("body", id.ix())).flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.body_scroll);
         let body = div().px(px(pad)).pt(px(20.)).pb(px(28.)).child(body);
         // Short or narrow windows: the hero and tabs scroll away with the tab's content,
@@ -1032,6 +1037,7 @@ impl Quiver {
         let addons_n = if self.gp.id == id { self.gp.info.ready().map(|i| i.addons.iter().filter(|a| a.visible || a.owned).count()) } else { None };
         let side = self.pane_bp().pad();
         let unsaved = !self.launch_pending(id, cx).is_empty();
+        let tweaks_unsaved = self.tweaks_unsaved(&self.tweaks_game_scope(id));
         div()
             .flex()
             .flex_wrap()
@@ -1042,7 +1048,7 @@ impl Quiver {
             .border_b_1()
             .border_color(th.line1)
             .when(pad, |d| d.child(glyph(th, "LT", true).mr(px(6.))))
-            .children(Tab::ALL.iter().map(|&t| {
+            .children(Tab::of(id).iter().map(|&t| {
                 let on = t == current;
                 let focused = self.focused(Target::Tab(t));
                 let count = match t {
@@ -1077,8 +1083,9 @@ impl Quiver {
                             .focus_ring(focused, th, 6.)
                             .child(t.label())
                             .when_some(count, |d, n| d.child(badge(th, n.to_string(), false)))
-                            // Unsaved launch-options edits (kept while elsewhere).
-                            .when(t == Tab::LaunchOptions && unsaved, |d| d.child(div().size(px(7.)).rounded_full().bg(th.warn))),
+                            // Unsaved launch-options edits and tweaks (kept while elsewhere).
+                            .when(t == Tab::LaunchOptions && unsaved, |d| d.child(div().size(px(7.)).rounded_full().bg(th.warn)))
+                            .when(t == Tab::Tweaks && tweaks_unsaved, |d| d.child(div().size(px(7.)).rounded_full().bg(th.warn))),
                     )
                     .when(on, |d| d.child(div().absolute().left(px(10.)).right(px(10.)).bottom(px(-1.)).h(px(2.)).rounded(px(2.)).bg(th.acc)))
             }))

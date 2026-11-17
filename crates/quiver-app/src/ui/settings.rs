@@ -34,6 +34,8 @@ pub enum SettingsAction {
     Advanced,
     /// Performance HUD: step a setting for every game (`ui/perf.rs`).
     Hud(crate::ui::perf::HudField),
+    /// Tweaks: the global scope's focusable controls, in order (`ui/game/tweaks/`).
+    Tweak(usize),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -49,6 +51,7 @@ pub fn section_icon(s: SettingsSection) -> Icon {
         SettingsSection::Library => Icon::HardDrive,
         SettingsSection::Compatibility => Icon::Cpu,
         SettingsSection::Performance => Icon::Activity,
+        SettingsSection::Tweaks => Icon::SlidersHorizontal,
         SettingsSection::Steam => Icon::Gamepad,
         SettingsSection::Appearance => Icon::Palette,
         SettingsSection::Automation => Icon::Bot,
@@ -91,6 +94,7 @@ impl Quiver {
                     v.extend(crate::ui::perf::HUD_FIELDS.map(SettingsAction::Hud));
                 }
             }
+            SettingsSection::Tweaks => v.extend((0..self.tweaks_targets(None).len()).map(SettingsAction::Tweak)),
             SettingsSection::Steam => {
                 if matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some()) {
                     for g in self.steam_copies() {
@@ -151,6 +155,7 @@ impl Quiver {
             SettingsAction::Welcome => self.run_dl(crate::ui::downloads::DlCmd::Welcome, cx),
             SettingsAction::Advanced => self.ui.lib_advanced = !self.ui.lib_advanced,
             SettingsAction::Hud(f) => self.hud_cycle(quiver_api::perf::HudScopeRef::global(), f, cx),
+            SettingsAction::Tweak(i) => self.tweaks_activate(None, i, cx),
         }
     }
 
@@ -207,6 +212,7 @@ impl Quiver {
                     crate::ui::perf::HUD_FIELDS.into_iter().filter(|f| self.action_focused(&actions, &SettingsAction::Hud(*f))).collect();
                 self.settings_hud(th, &focused, cx)
             }
+            SettingsSection::Tweaks => self.settings_tweaks(th, cx),
             SettingsSection::Steam => self.settings_steam(th, &actions, cx),
             SettingsSection::Appearance => self.settings_appearance(th, cx),
             SettingsSection::Automation => self.settings_automation(th, &actions, cx),
@@ -218,11 +224,15 @@ impl Quiver {
         let pad = if stacked { bp.pad() } else { 36. };
         let width = self.settings_w();
         let nav = self.render_settings_nav(th, stacked, cx);
+        // Tweaks' unsaved bar floats over the bottom of the section, as on a game page.
+        let bar = if section == SettingsSection::Tweaks { self.render_tweaks_bar(th, cx) } else { None };
         div()
             .flex()
             .when(stacked, |d| d.flex_col())
             .flex_1()
             .min_h_0()
+            .relative()
+            .children(bar)
             .child(nav)
             .child(
                 div()
@@ -260,6 +270,10 @@ impl Quiver {
                         Some(Ok(st)) if !st.staged.is_empty() => Some(div().size(px(7.)).rounded_full().bg(th.warn).into_any_element()),
                         _ => None,
                     },
+                    // Unsaved global tweaks (kept while elsewhere).
+                    SettingsSection::Tweaks if self.tweaks_unsaved(&quiver_api::tweaks::Scope::Global) => {
+                        Some(div().size(px(7.)).rounded_full().bg(th.warn).into_any_element())
+                    }
                     _ => None,
                 };
                 div()
