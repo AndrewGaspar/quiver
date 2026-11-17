@@ -1,9 +1,9 @@
 # GOG.com as a Quiver store (scoping notes)
 
 Status: scoping and design only (2026-11-16). Nothing here is built. This is one of five
-sibling documents. STORE-STEAM, STORE-EPIC and STORE-EA cover the other stores, and
-STORE-META covers the store-agnostic core. This document proposes only the interfaces GOG
-needs (section 3.2) and leaves reconciling them to STORE-META.
+sibling documents. STORE-STEAM, STORE-EPIC, STORE-EA and STORE-META (the Meta VR store) cover
+the other stores, and STORES.md reconciles the store-agnostic core. This document proposes only
+the interfaces GOG needs (section 3.2); where STORES.md differs, it wins.
 
 The user's ask: "scope out integrating GOG.com… I want all the same great capabilities we
 built for Ubisoft Connect."
@@ -150,7 +150,7 @@ policy risk combined.
 | C13 | Mods and mod profiles | Store-agnostic once ids are namespaced: overlayfs over the install, profile prefix folders, config patches, versions. The built-in catalog moves to `mods/<store>/<id>/…`. GOG specials: REDmod deploy for Cyberpunk 2077 (Heroic special-cases it) can be a recipe | Heroic `getCyberpunkMods` | S (generic) | Low |
 | C14 | Mod Options | Store-agnostic (MOD-CONFIG) | n/a | 0 | n/a |
 | C15 | Sight overlay and HUD | Store-agnostic (Vulkan layer, `quiver-sight`). GOG parity: the SDK's overlay calls (open a web page, invite dialogs, visibility) are answered by comet's overlay service. Quiver should *not* inject GOG's own overlay (it is proprietary; comet downloads it and uses `galaxy-helper` to inject it). Unlock toasts come from comet's `[[custom_event]] achievement_unlocked` POST to a quiverd URL | comet `api/handlers/overlay_*.rs`, wiki "Overlay" | S–M | Med: how games behave when the overlay is reported unavailable (unverified per game) |
-| C16 | Exports | Store-agnostic; the key becomes `quiver:gog/<id>[/<profile>]` (section 3.2). Art from gamesdb | n/a | S | Low |
+| C16 | Exports | Store-agnostic; the key becomes `quiver:gog:<id>[/<profile>]` (section 3.2). Art from gamesdb | n/a | S | Low |
 | C17 | Steam copies | No GOG analogue: a game bought on Steam is not on the GOG account. Out of scope | n/a | n/a | n/a |
 | C18 | CLI and agents | The same requests with a store-qualified game reference (`quiver install gog:witcher3`, or by fuzzy name across stores). The agent policy is unchanged: GOG sign-in and sign-out are "Deny" for agents | n/a | S | Low |
 | C19 | First run | A "GOG" step: sign in (browser plus paste) or skip, then import (Heroic, Lutris, a Galaxy-in-Wine prefix, folders, offline installers). Storage, Fixes and Theme are shared | Heroic login WebView | S–M | Low |
@@ -186,7 +186,7 @@ New crates:
   cloud saves, play time, achievements read, `goggame-*.info` and setup plans. It sits next
   to `ubi-core` and shares no Ubisoft code. Shared mechanics, such as the queue, prefix
   creation, Proton runner, overlay namespace, save backups and keyring, should move into a
-  `quiver-core` (STORE-META's call).
+  `quiver-core` (STORES.md section 5).
 - **`gog-galaxy`** (thin): supervises comet, first as a child process (sidecar), later as an
   in-process library call. It also receives comet's custom events.
 - **`gog-dummy-service`** (Windows, `x86_64-pc-windows-gnu`, like `ubi-bridge`): a
@@ -194,13 +194,14 @@ New crates:
   `dummy-service/communication.c` (Apache-2.0) or a few lines of Rust with
   `windows-service`.
 
-### 3.2 Store-agnostic interfaces GOG needs (brief; STORE-META reconciles)
+### 3.2 Store-agnostic interfaces GOG needs (brief; reconciled in STORES.md)
 
 - **`GameRef { store: StoreId, id: String }`.** GOG ids are numeric (for example
   `1423049311`); Epic's are strings. Today everything is `product_id: u32`. Keep Ubisoft's
   on-disk paths and export keys as they are (`games/<id>/`, `quiver:<id>`), so existing
   Steam appids and records don't change. Namespace new stores (`games/gog-<id>/`,
-  `mods/gog-<id>/`, `quiver:gog/<id>`).
+  `mods/gog-<id>/`, `quiver:gog:<id>`; the export key uses `:` because `/` already
+  separates the profile, see STORES.md section 2.2).
 - **`AuthFlow`**: `Password { email, password } → 2FA` (Ubisoft) or `BrowserCode { url } →
   paste(redirect_url)` (GOG, Epic). The app and CLI render the flow from the store's kind.
 - **`Library`**: `owned() → Vec<Entitlement { id, kind: Game|Dlc, parent }>`;
@@ -321,7 +322,7 @@ $XDG_RUNTIME_DIR/quiver/comet/               comet's runtime dir (sidecar), mode
 ### 4.2 Storage and refresh
 
 - The refresh token, plus the cached access token and its expiry, go in the Secret Service
-  keyring as `gog-session:<user_id>`, the same mechanism as `store.rs`'s `session:<userId>`.
+  keyring as `gog:<user_id>` (STORES.md section 3.2), the same mechanism as `store.rs`'s `session:<userId>`.
   `accounts.json` gains a `store` field and the non-secret index.
 - The access token is refreshed when it is within a few minutes of expiry, with
   `grant_type=refresh_token`. gogdl stores whatever new refresh token comes back. Quiver
@@ -412,7 +413,7 @@ Each spike needs the person's GOG sign-in, so ask first.
 - DLC install and remove; DLC list with "View on GOG" links.
 - v1 builds; imports from Heroic, Lutris, Galaxy-in-Wine, folders and offline installers
   (`innoextract`), each verified against the manifest.
-- Exports (`quiver:gog/<id>`), mods with a namespaced catalog, a welcome "GOG" step, Move
+- Exports (`quiver:gog:<id>`), mods with a namespaced catalog, a welcome "GOG" step, Move
   (generic, for all stores).
 - Sight: unlock toasts and session info for GOG games; answer the SDK's overlay calls
   sensibly.
@@ -482,10 +483,10 @@ Each spike needs the person's GOG sign-in, so ask first.
 
    *Recommend (a), with the conflict prompt in the app and `confirmed` required for agents.*
 9. **Store namespacing of ids, paths and export keys.**
-   - (a) Ubisoft stays bare; other stores are prefixed (`gog-<id>`, `quiver:gog/<id>`).
+   - (a) Ubisoft stays bare; other stores are prefixed (`gog-<id>`, `quiver:gog:<id>`).
    - (b) Migrate everything to prefixed keys.
 
-   *Recommend (a) (no Steam appid churn); STORE-META decides.*
+   *Recommend (a) (no Steam appid churn); decided in STORES.md (steer X1).*
 10. **Achievements read before the game reports.** Show GOG's unlock state on the game page
     and in Sight, even though Ubisoft only shows definitions?
 

@@ -1,8 +1,8 @@
 # Steam as a store in Quiver (scoping notes)
 
 Status: scoping only (2026-11-16). Nothing here is built. Siblings, written in parallel:
-`STORE-EPIC.md`, `STORE-GOG.md`, `STORE-EA.md` and `STORE-META.md`, which owns the
-cross-store architecture. This document is Steam-specific. Section 3 lists only the
+`STORE-EPIC.md`, `STORE-GOG.md`, `STORE-EA.md` and `STORE-META.md` (the Meta VR store).
+`STORES.md` owns the cross-store architecture. This document is Steam-specific. Section 3 lists only the
 interfaces Steam needs from that architecture.
 
 The ask: "scope out integrating Steam… I want all the same great capabilities we built for
@@ -201,7 +201,7 @@ ToS and data-loss risk.
 
 ### 3.2 Generalising: store-agnostic interfaces Steam needs
 
-Names are suggestions. STORE-META decides the real shape. The Steam column says how each is
+Names are suggestions. STORES.md decides the real shape. The Steam column says how each is
 filled.
 
 | Interface | Responsibility | Steam implementation |
@@ -219,12 +219,12 @@ filled.
 **Identity.** Today every request carries `product_id: u32` (41 places in
 `ubi-api/src/lib.rs`). A multi-store Quiver needs a store-qualified reference such as
 `GameRef { store: "steam", id: "292030" }`, printed `steam:292030`. Ubisoft keeps bare ids
-for compatibility, so `3539` means `ubi:3539`. Export keys become `quiver:steam:292030[/profile]`.
+for compatibility, so `3539` means `ubisoft:3539` (`ubi:` is accepted as input). Export keys become `quiver:steam:292030[/profile]`.
 Existing Ubisoft keys and their CRC-derived shortcut app ids must not change.
 
 **One title, several stores.** A Ubisoft game bought on Steam is already *one* library entry
 with `steam: Option<SteamGame>`. In general, an entry links store records
-(`ubi:66088` with `steam:3751950`) and picks a *play route* per entry. For Steam copies of
+(`ubisoft:66088` with `steam:3751950`) and picks a *play route* per entry. For Steam copies of
 Ubisoft games that route is "Steam launch, `steam-run`, Ubisoft bridge" (built). The Steam
 provider's records replace today's Ubisoft-only Steam scan, and owned-but-not-installed
 Steam copies can appear once signed in.
@@ -311,7 +311,7 @@ Consequences for code that already exists:
 - **Multiple Steam accounts.** Several local users are supported read-only. One is active in
   the client at a time. "Play" for a game owned only by the other user offers to switch
   (restart Steam, after confirmation). Steam Families sharing is the client's business.
-- **Agents.** Sign-in is Deny (as for Ubisoft). Sign-out is Ask.
+- **Agents.** Sign-in and sign-out are Deny (as for Ubisoft; PROPOSAL "What agents may do").
 
 ---
 
@@ -401,7 +401,7 @@ Consequences for code that already exists:
 
    *Recommendation: (a);* (b) can't launch DRM'd games through Steam.
 6. **Identity scheme.** Store-qualified `steam:<appid>`, with Ubisoft ids kept bare for
-   compatibility. *Recommendation: yes; align with STORE-META.*
+   compatibility. *Recommendation: yes; settled in STORES.md section 2.*
 7. **Ubisoft games bought on Steam.** One entry with two store records (today's behaviour),
    or two entries? *Recommendation: one entry,* play route "Steam, then `steam-run`, then
    bridge"; the Steam provider replaces the Ubisoft-only scan.

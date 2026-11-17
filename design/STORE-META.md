@@ -2,7 +2,7 @@
 
 Status: scoping only (2026-11-16). Nothing here is built. This is one of five store scopes written
 in parallel (STORE-STEAM, STORE-EPIC, STORE-GOG, STORE-EA, STORE-META); the shared store
-interfaces are sketched briefly in section 5 and should be settled across all five.
+interfaces are sketched briefly in section 5 and are settled in STORES.md.
 
 The ask: integrate the Meta (Oculus/Rift) PC VR store "with all the same great capabilities we
 built for Ubisoft Connect", using the user's Heroic fork as prior art.
@@ -433,7 +433,9 @@ The fork needs the original client clone only for this. Everything else reads OA
   shows "Sign in with Meta" and opens the system browser.
 - Quiver needs its **own copy** of the token for downloads and library refresh. Two options:
   read it once from OAF after sign-in into the Secret Service keyring, or (better) obtain it
-  through the native flow below. The keyring entry is per Meta account.
+  through the native flow below. The keyring entry is per Meta account. The OAF read is allowed
+  only for the session Quiver's own sign-in just created in Quiver's runtime prefix, never from
+  the Heroic fork's or any other prefix (STORES.md section 7, item 8).
 - Logs redact `access_token=` everywhere, because Meta's CDN takes the token in the query
   string.
 - **Session expiry:** a 401 or 403 from securecdn or graph means "Sign in again", the same flow
