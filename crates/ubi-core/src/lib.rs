@@ -22,6 +22,7 @@ pub mod modversions;
 pub mod online;
 pub mod overlay;
 pub mod playsession;
+pub mod private;
 pub mod progress;
 pub mod saves;
 pub mod savestores;

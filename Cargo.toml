@@ -13,6 +13,7 @@ ubi-proto = { path = "crates/ubi-proto" }
 ubi-core = { path = "crates/ubi-core" }
 ubi-ipc = { path = "crates/ubi-ipc" }
 ubi-api = { path = "crates/ubi-api" }
+ubi-perf = { path = "crates/ubi-perf" }
 anyhow = "1"
 thiserror = "2"
 prost = "0.14"

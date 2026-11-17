@@ -709,11 +709,7 @@ pub async fn play(
     ctx.language = settings.language.clone().or(game.language.clone()).or(ctx.language);
     ctx.profile = profile.map(|p| p.id.clone());
     let ctx_path = run_dir.join("context.json");
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&ctx_path)?;
-        std::io::Write::write_all(&mut f, &serde_json::to_vec(&ctx)?)?;
-    }
+    crate::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
 
     let mut cloud = if cloud_sync {
         events(LaunchEvent::Status("Syncing cloud saves…".into()));

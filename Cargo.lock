@@ -6419,6 +6419,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ubi-perf"
+version = "0.1.0"
+dependencies = [
+ "fastrand 2.5.0",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ubi-proto"
 version = "0.1.0"
 dependencies = [
