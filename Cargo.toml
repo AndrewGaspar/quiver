@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Vendored, patched crates (see [patch] below) are dependencies, not members.
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -46,3 +48,10 @@ toml = "1"
 # layer-shell windows and the wgpu headless renderer (crates/ubi-ui/src/lib.rs).
 gpui = { git = "https://github.com/zed-industries/zed", rev = "482e76524bd33d8cbdfc352f1fef3eefbf2fad92" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "482e76524bd33d8cbdfc352f1fef3eefbf2fad92", features = ["wayland", "x11"] }
+
+# GPUI crates Quiver patches (off-screen windows rendered by the wgpu headless renderer):
+# pristine copies of the pinned revision in third_party/zed, Quiver's commits on top.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "third_party/zed/gpui" }
+gpui_linux = { path = "third_party/zed/gpui_linux" }
+gpui_wgpu = { path = "third_party/zed/gpui_wgpu" }
