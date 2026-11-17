@@ -696,7 +696,107 @@ pub struct HudModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<String>,
     pub captures: Captures,
+    /// The card's fixed size, `[width, height]` in logical px at scale 1 (the layout's
+    /// `width`/`height`, the height by default from its rows: [`hud_card`]). The card never
+    /// changes size with its contents: rows pack from the top, values that don't fit are
+    /// truncated. `[0, 0]` (a quiverd from before fixed sizes): `quiver-sight` derives one.
+    #[serde(default)]
+    pub size: [f32; 2],
     pub rows: Vec<HudRow>,
+}
+
+/// The HUD card's geometry (SIGHT-HUD §1.4), shared by quiverd (which sizes the card from
+/// the layout) and `quiver-sight` (which lays the rows out in these slots). Logical px at
+/// scale 1; the image's scale factor (text size × `scale`) or the desktop `scale` multiplies
+/// them.
+pub mod hud_card {
+    use super::{HudCell, Orientation};
+
+    /// A text row's slot height.
+    pub const LINE: f32 = 20.0;
+    /// One graph row (`rows = 2`: 30 px).
+    pub const GRAPH_LINE: f32 = 15.0;
+    /// Between rows (block) and between cells.
+    pub const ROW_GAP: f32 = 4.0;
+    pub const CELL_GAP: f32 = 8.0;
+    /// Inside a panel (background on), and around bare text (background off).
+    pub const PAD: [f32; 2] = [9.0, 6.0];
+    pub const BARE_PAD: [f32; 2] = [2.0, 0.0];
+    /// The panel's border, on every side.
+    pub const BORDER: f32 = 1.0;
+    /// A layout without a width: block and row (one line) orientations.
+    pub const DEFAULT_WIDTH_BLOCK: f32 = 260.0;
+    pub const DEFAULT_WIDTH_ROW: f32 = 640.0;
+    /// What a layout may ask for.
+    pub const MIN_WIDTH: f32 = 40.0;
+    pub const MAX_WIDTH: f32 = 1200.0;
+    pub const MIN_HEIGHT: f32 = 16.0;
+    pub const MAX_HEIGHT: f32 = 1000.0;
+
+    /// The built-in presets' widths: what their usual contents need with numbers at their
+    /// reserved widths, plus a little room (longer values are truncated). quiverd's presets
+    /// and `quiver-sight`'s demo models both use these.
+    pub fn preset_width(id: &str) -> Option<f32> {
+        Some(match id {
+            "fps" => 100.0,
+            "compact" => 780.0,
+            "standard" => 260.0,
+            "full" => 320.0,
+            "clock" => 220.0,
+            _ => return None,
+        })
+    }
+
+    /// A panel is drawn (padding, border) when the background isn't (nearly) transparent.
+    pub fn panel(background: f32) -> bool {
+        background > 0.01
+    }
+
+    pub fn default_width(o: Orientation) -> f32 {
+        match o {
+            Orientation::Row => DEFAULT_WIDTH_ROW,
+            Orientation::Block => DEFAULT_WIDTH_BLOCK,
+        }
+    }
+
+    /// A row's slot: a graph's rows, else one line.
+    pub fn slot(graph_rows: Option<u32>) -> f32 {
+        match graph_rows {
+            Some(r) => (r.clamp(1, 6) as f32 * GRAPH_LINE).max(LINE),
+            None => LINE,
+        }
+    }
+
+    /// The slot of a model row (its tallest cell).
+    pub fn row_slot(cells: &[HudCell]) -> f32 {
+        cells.iter().map(|c| slot(if let HudCell::Graph { rows, .. } = c { Some(*rows) } else { None })).fold(LINE, f32::max)
+    }
+
+    /// The card's height for rows with these slots: stacked (block) or the tallest (row:
+    /// everything on one line), plus padding and border.
+    pub fn height(o: Orientation, slots: &[f32], panel: bool) -> f32 {
+        let content = match o {
+            Orientation::Block => slots.iter().sum::<f32>() + ROW_GAP * slots.len().saturating_sub(1) as f32,
+            Orientation::Row => slots.iter().copied().fold(0.0, f32::max),
+        };
+        let pad = if panel { PAD[1] + BORDER } else { BARE_PAD[1] };
+        content.max(LINE) + 2.0 * pad
+    }
+
+    /// The content box's width for a card `width` wide.
+    pub fn inner_width(width: f32, panel: bool) -> f32 {
+        let pad = if panel { PAD[0] + BORDER } else { BARE_PAD[0] };
+        (width - 2.0 * pad).max(0.0)
+    }
+
+    /// A requested size, clamped to what's allowed (non-finite: the fallback).
+    pub fn clamp_width(w: f32, fallback: f32) -> f32 {
+        if w.is_finite() { w.clamp(MIN_WIDTH, MAX_WIDTH) } else { fallback }
+    }
+
+    pub fn clamp_height(h: f32, fallback: f32) -> f32 {
+        if h.is_finite() { h.clamp(MIN_HEIGHT, MAX_HEIGHT) } else { fallback }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -785,6 +885,10 @@ pub struct HudLayout {
     pub anchor: Option<Anchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<f32>,
+    /// The card's fixed size, logical px at scale 1 (the height follows from the rows unless
+    /// the layout sets one).
+    #[serde(default)]
+    pub size: [f32; 2],
     pub rows: Vec<Vec<serde_json::Value>>,
 }
 
@@ -948,5 +1052,31 @@ mod tests {
         assert_eq!(pv.display(), "12.7 ms");
         let pv = PerfValue { text: "97".into(), unit: "%".into(), ..Default::default() };
         assert_eq!(pv.display(), "97%");
+    }
+
+    #[test]
+    fn card_geometry() {
+        use hud_card::*;
+        let graph = HudCell::Graph { series: vec![], span_ms: 3000, rows: 2, min_ms: 0.0, max_ms: 0.0, warn_above_ms: 0.0, bad_above_ms: 0.0, points: vec![] };
+        assert_eq!(row_slot(&[HudCell::Separator]), LINE);
+        assert_eq!(row_slot(&[graph]), 30.0);
+        assert_eq!(slot(Some(4)), 60.0);
+        // Three lines and a graph in a panel: 20+20+30+20, three gaps, padding and border.
+        assert_eq!(height(Orientation::Block, &[LINE, LINE, 30.0, LINE], true), 90.0 + 12.0 + 14.0);
+        assert_eq!(height(Orientation::Row, &[LINE, 30.0], false), 30.0);
+        assert_eq!(height(Orientation::Block, &[], false), LINE);
+        assert_eq!(inner_width(260.0, true), 240.0);
+        assert_eq!(clamp_width(5.0, 1.0), MIN_WIDTH);
+        assert_eq!(clamp_width(f32::NAN, 260.0), 260.0);
+        assert_eq!(clamp_height(1e9, 1.0), MAX_HEIGHT);
+        // A model from before fixed sizes parses with size [0, 0].
+        let m: HudModel = serde_json::from_value(serde_json::json!({
+            "session": "s-1", "product_id": 1, "rev": 1, "on": true, "layout": "fps", "name": "FPS",
+            "presenter": "game", "presenter_reason": "", "anchor": "top-left", "offset": [12.0, 12.0], "scale": 1.0,
+            "text_px": 17.0, "background": 0.0, "text_opacity": 1.0, "level_colors": true, "orientation": "row",
+            "safe_area": 0.0, "captures": "shown", "rows": []
+        }))
+        .unwrap();
+        assert_eq!(m.size, [0.0, 0.0]);
     }
 }

@@ -111,7 +111,10 @@ impl DesktopHud {
         self.close(cx);
         let unit = m.scale.clamp(0.5, 4.0);
         let (edges, margin) = layer_anchor(m.anchor, m.offset);
-        let h = open_layer(cx, NAMESPACE, edges, margin, (300.0 * unit, 40.0 * unit), m.monitor.as_deref(), HudView::new(m.clone(), unit, Mode::Desktop))?;
+        // The card's fixed size; the surface follows it if the layout changes.
+        let (w, hh) = crate::hud_view::model_size(m);
+        let first = ((w * unit).ceil() + 1.0, (hh * unit).ceil() + 1.0);
+        let h = open_layer(cx, NAMESPACE, edges, margin, first, m.monitor.as_deref(), HudView::new(m.clone(), unit, Mode::Desktop))?;
         tracing::info!(monitor = ?m.monitor, anchor = ?m.anchor, reason = %m.presenter_reason, "desktop HUD shown");
         self.window = Some((h, key));
         Ok(())

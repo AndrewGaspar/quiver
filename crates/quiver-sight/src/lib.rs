@@ -20,7 +20,7 @@
 //! quiver-sight                      # what quiverd runs
 //! quiver-sight --demo toasts        # sample toasts on this desktop, then exit
 //! quiver-sight --demo desktop [--seconds N]      # a sample desktop HUD
-//! quiver-sight --demo image --image PATH [--extent WxH] [--layout standard]
+//! quiver-sight --demo image --image PATH [--extent WxH] [--layout standard] [--variant long]
 //!                                   # render a sample model into a hud.image file
 //! ```
 
@@ -163,11 +163,12 @@ pub struct Args {
     image: Option<PathBuf>,
     extent: (u32, u32),
     layout: String,
+    variant: String,
     headless: bool,
 }
 
 fn args() -> anyhow::Result<Args> {
-    let mut a = Args { demo: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), headless: false };
+    let mut a = Args { demo: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), variant: "base".into(), headless: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
@@ -181,6 +182,7 @@ fn args() -> anyhow::Result<Args> {
                 a.extent = (w.parse()?, h.parse()?);
             }
             "--layout" => a.layout = val()?,
+            "--variant" => a.variant = val()?,
             "--headless" => a.headless = true,
             "-V" | "--version" => {
                 println!("quiver-sight {}", env!("CARGO_PKG_VERSION"));

@@ -98,7 +98,8 @@ and presented:
 FPS 79→158  12.7ms  1%↓ 64  │ GPU 97% 71° 92W  │ CPU 38% 64°  │ DLSS K 1280×800 · FG 2× · LAT 21ms
 ```
 
-**Standard** (a small block with a frame-time graph; 284×140 logical px in the spike):
+**Standard** (a small block with a frame-time graph; 284×140 logical px in the spike, a fixed
+260×188 as built, section 1.4):
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -197,6 +198,7 @@ format = 1
 name = "DLSS tuning"
 anchor = "top-left"
 background = 0.45
+width = 300            # the card's fixed size, logical px (optional; `height` too)
 
 [[row]]
 cells = [
@@ -218,6 +220,27 @@ cells = [
   { metric = "fg.state", display = "badge" },
 ]
 ```
+
+**Fixed size.** A layout's card has one size, whatever it holds; values changing length,
+`when` cells flipping, or rows appearing and disappearing never resize it (a HUD that jumps
+around is harder to read than one with a gap). The size is in logical px at `scale` 1, so it
+follows the swapchain height and `scale` like the text does:
+
+- `width`: default 260 (block) or 640 (one line); 40–1200. Presets: FPS only 100, Compact
+  780, Standard 260, Full 320, Clock 220.
+- `height`: default from the layout's rows: a 20 px slot per text row, `rows` × 15 px per
+  graph row (30 for the default 2), 4 px between rows, plus padding (6 + a 1 px border top
+  and bottom with a panel, none without); 16–1000. Standard: 188, Full: 308, Compact: 34.
+- Rows the model leaves out (nobody provides them, or everything in them is gated off) don't
+  keep their place: the shown rows pack from the top and the space is left empty at the
+  bottom.
+- Within a row, cells go left to right. Numbers never shrink and keep a reserved width
+  (Geist Mono's tabular digits, right aligned: at least the unit's usual digit count, e.g. 3
+  for fps and %, 4 for ms and GB, and the widest the value has been for this layout), so a
+  value ticking from 99 to 100 doesn't push the cells after it. Short text (≤ 9 characters:
+  `on`, `direct`, `DLSS K`, `2560×1600`) keeps its width too. Longer text and badges shrink
+  with an ellipsis when the row runs out of room (badges first); anything still beyond the
+  edge is clipped.
 
 Selection (stored with revisions like game settings, in quiverd's config):
 
@@ -516,9 +539,17 @@ panel, the app's game page and its layout preview are the same widgets.
   runs on the main thread (rendering, windows, a 250 ms tick for the heartbeat and toast
   expiry), the quiverd connection on one tokio thread. Per session, one off-screen window
   (low-power adapter) at `text_px × scale / 12` device px per logical px; on a new model it
-  renders synchronously (`render_now`), fits the window to the measured card (one more pass
-  when the size changed) and publishes the card's pixels with the descriptor (anchor and
-  safe area resolved in swapchain pixels, the graph placeholders' rectangles, opacity 1).
+  renders synchronously (`render_now`) and publishes the card's pixels with the descriptor
+  (anchor and safe area resolved in swapchain pixels, the graph placeholders' rectangles,
+  opacity 1). The card's size is fixed per layout (section 1.4): quiverd puts it in the
+  model (`HudModel::size`, geometry shared in `quiver_api::perf::hud_card`), so the window,
+  the image and the graph rectangles change only with the layout, the swapchain or `scale`,
+  never with the values (one render pass per model). A card whose image would exceed the
+  layer's 2048 px a side or `hud.image`'s 4 MiB buffer (Compact at 4K, Full at a large
+  `scale`) is drawn at a smaller factor instead of cropped. The desktop surface opens at the
+  card's size the same way. `quiver-sight --demo image --variant long|short` and the
+  `hud_variants` example render the presets with long values and with cells and rows gone;
+  `tests/fixed_card.rs` checks that the published image and graph rectangles don't move.
   Hidden (`on: false`, or the desktop presenter) republishes the last image at opacity 0,
   which the layer treats as "off" at once. The desktop presenter is the same view on a
   `quiver-sight-hud` layer-shell surface that draws the graph from the model's points.

@@ -10,6 +10,11 @@ publish.workspace = true
 name = "quiver-sight"
 path = "src/main.rs"
 
+# GPUI on the main thread: its own main, not libtest's.
+[[test]]
+name = "fixed_card"
+harness = false
+
 [dependencies]
 quiver-api.workspace = true
 quiver-perf.workspace = true

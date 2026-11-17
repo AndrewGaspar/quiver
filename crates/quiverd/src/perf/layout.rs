@@ -6,12 +6,20 @@
 //! cell only while that metric has a value that isn't off (`fg.active` gates the
 //! "base →" part of `79 → 158`).
 //!
+//! Every layout has a fixed card size (logical px at scale 1, so it follows the swapchain
+//! height and the `scale` setting like the text does): `width` (default 260, or 640 for a
+//! one-line layout) and `height` (default: every row's slot stacked, one line per text row
+//! and `rows` × 15 px per graph, [`hud_card`]). The card keeps that size whatever it holds:
+//! rows that are dropped or gated off leave their space empty at the bottom (the rows that
+//! are shown pack from the top), and values that don't fit the width are truncated.
+//!
 //! ```toml
 //! # <data>/hud/layouts/dlss-tuning.toml
 //! format = 1
 //! name = "DLSS tuning"
 //! anchor = "top-left"
 //! background = 0.45
+//! width = 280            # logical px; height = 20 + 30 + padding unless set
 //!
 //! [[row]]
 //! cells = [
@@ -28,7 +36,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use quiver_api::perf::{Anchor, HudLayout, HudLayoutInfo, Level, Orientation, Stat};
+use quiver_api::perf::{Anchor, HudLayout, HudLayoutInfo, Level, Orientation, Stat, hud_card};
 use quiver_perf::descriptor::Display;
 
 pub const LAYOUT_FORMAT: u32 = 1;
@@ -123,6 +131,12 @@ pub struct Layout {
     pub background: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orientation: Option<Orientation>,
+    /// The card's width, logical px at scale 1 (default by orientation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    /// The card's height (default: the rows' slots, [`hud_card::height`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f32>,
     #[serde(default, rename = "row")]
     pub rows: Vec<Row>,
     #[serde(skip)]
@@ -140,6 +154,21 @@ impl Layout {
         self.orientation.unwrap_or(if self.rows.len() <= 1 { Orientation::Row } else { Orientation::Block })
     }
 
+    /// Each row's slot height: one line, or a graph's rows.
+    pub fn slots(&self) -> Vec<f32> {
+        self.rows.iter().map(|r| r.cells.iter().filter(|c| c.graph.is_some()).map(|c| hud_card::slot(Some(c.rows.unwrap_or(2)))).fold(hud_card::LINE, f32::max)).collect()
+    }
+
+    /// The card's fixed size `[w, h]` (logical px at scale 1) with or without a panel.
+    pub fn size(&self, panel: bool) -> [f32; 2] {
+        let o = self.orientation();
+        let w = hud_card::default_width(o);
+        let w = self.width.map_or(w, |v| hud_card::clamp_width(v, w));
+        let h = hud_card::height(o, &self.slots(), panel);
+        let h = self.height.map_or(h, |v| hud_card::clamp_height(v, h));
+        [w, h]
+    }
+
     pub fn to_api(&self) -> HudLayout {
         HudLayout {
             id: self.id.clone(),
@@ -148,6 +177,7 @@ impl Layout {
             orientation: self.orientation(),
             anchor: self.anchor,
             background: self.background,
+            size: self.size(hud_card::panel(self.background.unwrap_or(quiver_api::perf::HudConfig::default().background))),
             rows: self.rows.iter().map(|r| r.cells.iter().map(|c| serde_json::to_value(c).unwrap_or_default()).collect()).collect(),
         }
     }
@@ -166,6 +196,13 @@ impl Layout {
             && !(b.is_finite() && (0.0..=1.0).contains(&b))
         {
             return Err("background must be 0–1".into());
+        }
+        for (name, v, lo, hi) in [("width", self.width, hud_card::MIN_WIDTH, hud_card::MAX_WIDTH), ("height", self.height, hud_card::MIN_HEIGHT, hud_card::MAX_HEIGHT)] {
+            if let Some(v) = v
+                && !(v.is_finite() && (lo..=hi).contains(&v))
+            {
+                return Err(format!("{name} must be {lo}–{hi} (logical px)"));
+            }
         }
         for (i, r) in self.rows.iter().enumerate() {
             if r.cells.len() > MAX_CELLS {
@@ -279,7 +316,9 @@ fn row(cells: Vec<Cell>) -> Row {
 }
 
 pub fn builtin(id: &str) -> Option<Layout> {
-    let mut l = Layout { format: 1, name: String::new(), anchor: None, background: None, orientation: None, rows: Vec::new(), id: id.into(), builtin: true };
+    // Each preset's card width: `hud_card::preset_width`.
+    let width = hud_card::preset_width(id);
+    let mut l = Layout { format: 1, name: String::new(), anchor: None, background: None, orientation: None, width, height: None, rows: Vec::new(), id: id.into(), builtin: true };
     match id {
         "fps" => {
             l.name = "FPS only".into();
@@ -458,6 +497,30 @@ cells = [
         ];
         for (text, want) in bad {
             let e = parse("x", text).unwrap_err();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+    }
+
+    #[test]
+    fn layouts_have_a_fixed_size() {
+        let s = builtin("standard").unwrap();
+        // Seven rows, one of them a two-row graph: 6 × 20 + 30, six gaps of 4, padding 6 and
+        // a 1 px border top and bottom.
+        assert_eq!(s.size(true), [260.0, 188.0]);
+        assert_eq!(s.size(false), [260.0, 174.0]);
+        assert_eq!(builtin("compact").unwrap().size(true), [780.0, 34.0]);
+        assert_eq!(builtin("full").unwrap().size(true)[1], 11.0 * 20.0 + 30.0 + 11.0 * 4.0 + 14.0);
+        // A user layout: defaults by orientation, or what it asks for.
+        let one = parse("x", "[[row]]\ncells = [{ metric = \"fps\" }]").unwrap();
+        assert_eq!(one.size(true), [hud_card::DEFAULT_WIDTH_ROW, 34.0]);
+        let two = parse("x", "[[row]]\ncells = [{ metric = \"fps\" }]\n[[row]]\ncells = [{ graph = \"frametime\", rows = 4 }]").unwrap();
+        assert_eq!(two.size(true), [hud_card::DEFAULT_WIDTH_BLOCK, 20.0 + 60.0 + 4.0 + 14.0]);
+        let sized = parse("x", "width = 300\nheight = 120\n[[row]]\ncells = [{ metric = \"fps\" }]").unwrap();
+        assert_eq!(sized.size(true), [300.0, 120.0]);
+        assert_eq!(sized.to_api().size, [300.0, 120.0]);
+        // Silly sizes are refused with a reason.
+        for (text, want) in [("width = 10", "width must be"), ("width = 5000", "width must be"), ("height = 0", "height must be"), ("width = nan", "width must be")] {
+            let e = parse("x", &format!("{text}\n[[row]]\ncells = [{{ metric = \"fps\" }}]")).unwrap_err();
             assert!(e.contains(want), "{text}: {e}");
         }
     }
