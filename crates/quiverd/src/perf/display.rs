@@ -110,7 +110,10 @@ pub struct DisplayValues {
     pub refresh: f64,
     pub vrr: &'static str,
     pub tearing: &'static str,
+    /// `direct` (scan-out) or `composited`.
     pub path: String,
+    /// What keeps Hyprland from scanning out, in words (`none`); for the app, too long for the HUD.
+    pub blocked: String,
 }
 
 pub fn values(m: &Monitor) -> DisplayValues {
@@ -120,19 +123,15 @@ pub fn values(m: &Monitor) -> DisplayValues {
     // Why Hyprland isn't scanning out, in words ("CANDIDATE", no fullscreen window, is
     // implied by "composited").
     let blockers: Vec<String> = m.direct_scanout_blocked_by.iter().filter(|b| b.as_str() != "CANDIDATE").map(|b| blocker_words(b)).collect();
-    let path = if scanout {
-        "scan-out".to_owned()
-    } else if blockers.is_empty() {
-        "composited".to_owned()
-    } else {
-        format!("composited: {}", blockers.join(", "))
-    };
+    let path = if scanout { "direct" } else { "composited" }.to_owned();
+    let blocked = if scanout || blockers.is_empty() { "none".to_owned() } else { blockers.join(", ") };
     DisplayValues {
         mode: format!("{}×{}@{hz}", m.width, m.height),
         refresh,
         vrr: if m.vrr { "on" } else { "off" },
         tearing: if m.actively_tearing { "on" } else { "off" },
         path,
+        blocked,
     }
 }
 
@@ -180,13 +179,13 @@ mod tests {
         let v = values(&m[0]);
         assert_eq!(v.mode, "2560×1600@165");
         assert_eq!((v.vrr, v.tearing), ("off", "off"));
-        assert_eq!(v.path, "composited: scan-out off in config");
+        assert_eq!((v.path.as_str(), v.blocked.as_str()), ("composited", "scan-out off in config"));
         let mut so = m[0].clone();
         so.direct_scanout_to = "0x55d".into();
         so.vrr = true;
         so.refresh_rate = 59.951;
         let v = values(&so);
-        assert_eq!((v.path.as_str(), v.vrr), ("scan-out", "on"));
+        assert_eq!((v.path.as_str(), v.vrr, v.blocked.as_str()), ("direct", "on", "none"));
         assert_eq!(v.mode, "2560×1600@59.95");
         let st = DisplayState { monitors: m, active: Some(ActiveWindow { pid: 1, monitor: 1, ..Default::default() }) };
         assert_eq!(st.game_monitor(true).unwrap().name, "eDP-2");
@@ -195,7 +194,7 @@ mod tests {
         let solitary = MONITORS.replace(r#"["WINDOWED","CANDIDATE"]"#, "null").replace(r#""directScanoutBlockedBy": ["USER","CANDIDATE"]"#, r#""directScanoutBlockedBy": null"#);
         let m: Vec<Monitor> = serde_json::from_str(&solitary).unwrap();
         assert!(m[0].solitary_blocked_by.is_empty() && m[0].direct_scanout_blocked_by.is_empty());
-        assert_eq!(values(&m[0]).path, "composited");
+        assert_eq!((values(&m[0]).path.as_str(), values(&m[0]).blocked.as_str()), ("composited", "none"));
         assert_eq!(empty.pid, 0);
     }
 

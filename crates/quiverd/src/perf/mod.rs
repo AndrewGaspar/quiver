@@ -850,6 +850,7 @@ pub fn sense_once(h: &PerfHub, sys: &mut system::SystemProducer, sock: Option<&P
             s.store.push_state_value("display.vrr", now, v.vrr);
             s.store.push_state_value("display.tearing", now, v.tearing);
             s.store.push_text("display.path", now, v.path);
+            s.store.push_text("display.blocked", now, v.blocked);
         }
     }
 }

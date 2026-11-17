@@ -94,7 +94,7 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
                         value("display.mode", Some("DISP"), v("2560×1600@165", "", Level::Normal)),
                         value("display.vrr", Some("VRR"), v("on", "", Level::Normal)),
                         value("display.tearing", Some("TEAR"), v("off", "", Level::Normal)),
-                        value("display.path", None, v("scan-out", "", Level::Normal)),
+                        value("display.path", None, v("direct", "", Level::Normal)),
                     ],
                 });
                 rows.push(HudRow { cells: vec![HudCell::Sparkline { metric: "cpu.load".into(), label: Some("CPU".into()), value: v("38", "%", Level::Normal), points: (0..30).map(|k| ((k * 13 + i) % 17) as f32 / 16.0).collect() }] });

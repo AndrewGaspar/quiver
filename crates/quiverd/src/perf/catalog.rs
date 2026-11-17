@@ -231,19 +231,20 @@ pub fn display() -> Vec<MetricDescriptor> {
     vrr.values = on_off();
     let mut tearing = d("display.tearing", MetricKind::State, Unit::None, "Tearing", Some("TEAR"), "The game's monitor is tearing (immediate presents).");
     tearing.values = on_off();
-    let mut path = d(
-        "display.path",
+    let mut path = d("display.path", MetricKind::Text, Unit::None, "Display path", None, "`direct` (scan-out) or `composited`.");
+    let mut blocked = d(
+        "display.blocked",
         MetricKind::Text,
         Unit::None,
-        "Display path",
+        "Scan-out blocked by",
         None,
-        "Direct scan-out or composited, and what blocks scan-out (Hyprland's directScanoutBlockedBy).",
+        "What keeps Hyprland from scanning the game out directly, in words (its directScanoutBlockedBy), or none.",
     );
-    for x in [&mut mode, &mut refresh, &mut vrr, &mut tearing, &mut path] {
+    for x in [&mut mode, &mut refresh, &mut vrr, &mut tearing, &mut path, &mut blocked] {
         x.group = Some("Display".into());
         x.sample = Some(SampleRate::Hz(1.0));
     }
-    vec![mode, refresh, vrr, tearing, path]
+    vec![mode, refresh, vrr, tearing, path, blocked]
 }
 
 #[cfg(test)]
