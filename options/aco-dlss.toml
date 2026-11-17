@@ -378,6 +378,7 @@ type = "enum"
 label = "Generated frame timing"
 help = "When the generated frame is presented."
 values = [
+  { value = "content", label = "Game timeline", help = "Both frames on the game's own timeline: the real frame a fixed lag after the game's Present, the generated one half the actual frame interval before it. Best with VRR." },
   { value = "smooth", label = "Smooth", help = "Not sooner than half an interval after the previous real frame." },
   { value = "ready", label = "When ready", help = "As soon as DLSS-G is done (the original behaviour)." },
   { value = "arrival", label = "Fixed lag", help = "At a fixed lag after the game's Present." },
