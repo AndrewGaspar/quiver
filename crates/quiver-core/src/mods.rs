@@ -517,6 +517,11 @@ impl ModStore {
         self.product_id
     }
 
+    /// `<data>/games/<id>`: settings history, profile and layer histories.
+    fn game_dir(&self) -> PathBuf {
+        crate::paths::game_dir_in(&self.data, &quiver_api::GameRef::ubisoft(self.product_id))
+    }
+
     /// The game's prefix, when the store knows the game ([`Self::with_game`]).
     pub fn game_prefix(&self) -> Option<&Path> {
         self.prefix()
@@ -529,12 +534,12 @@ impl ModStore {
 
     /// The game's current settings (revision 0: defaults).
     fn game_settings(&self) -> GameSettings {
-        let path = self.data.join("games").join(self.product_id.to_string()).join("history.jsonl");
+        let path = self.game_dir().join("history.jsonl");
         read_jsonl::<quiver_api::Revision>(&path).ok().and_then(|h| h.last().map(|r| r.settings.clone())).unwrap_or_default()
     }
 
     fn mods_dir(&self) -> PathBuf {
-        self.data.join("mods").join(self.product_id.to_string())
+        crate::paths::mods_dir_in(&self.data, &quiver_api::GameRef::ubisoft(self.product_id))
     }
 
     pub(crate) fn layers_dir(&self) -> PathBuf {
@@ -555,7 +560,7 @@ impl ModStore {
     }
 
     fn histories_dir(&self) -> PathBuf {
-        self.data.join("games").join(self.product_id.to_string()).join("profiles")
+        self.game_dir().join("profiles")
     }
 
     fn history_path(&self, id: &str) -> PathBuf {
@@ -563,7 +568,7 @@ impl ModStore {
     }
 
     pub(crate) fn layer_history_path(&self, id: &str) -> PathBuf {
-        self.data.join("games").join(self.product_id.to_string()).join("layers").join(format!("{id}.jsonl"))
+        self.game_dir().join("layers").join(format!("{id}.jsonl"))
     }
 
     pub(crate) fn write_layer_meta(&self, layer: &Layer) -> Result<()> {

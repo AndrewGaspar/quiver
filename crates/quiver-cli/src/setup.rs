@@ -199,7 +199,7 @@ pub async fn run(client: &Client) -> Result<()> {
         let missing: Vec<&LibraryEntry> = lib
             .iter()
             .filter(|e| e.installed.is_some())
-            .filter(|e| !exports.iter().any(|x| x.record.kind == ExportKind::Steam && x.record.product_id == e.product_id && x.record.profile_id.is_none()))
+            .filter(|e| !exports.iter().any(|x| x.record.kind == ExportKind::Steam && x.record.game == quiver_api::GameRef::ubisoft(e.product_id) && x.record.profile_id.is_none()))
             .collect();
         if !missing.is_empty() && yes(&format!("Add {} installed game(s) to Steam now?", missing.len()), false)? {
             let user = exports::pick_user(client, None).await?;

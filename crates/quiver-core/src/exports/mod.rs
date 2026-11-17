@@ -30,19 +30,25 @@ use anyhow::{Context, Result, bail};
 pub use quiver_api::exports::{
     ExportKind, ExportRecord, ExportState, ExportStatus, SteamExportResult, SteamUser, SteamUsers,
 };
-use quiver_api::Art;
+use quiver_api::{Art, GameRef};
 
-/// `quiver:<product_id>[/<profile_id>]`.
+/// `quiver:<key>[/<profile_id>]`, where `<key>` is [`GameRef::key`]: `quiver:5059` for a
+/// Ubisoft product (unchanged, so Steam shortcut appids stay put) and `quiver:steam:620` for
+/// other stores. The profile follows the first `/`, so the store is separated by `:`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExportKey {
-    pub product_id: u32,
+    pub game: GameRef,
     /// A mod profile's stable id. Profiles don't exist yet; always `None` for now.
     pub profile_id: Option<String>,
 }
 
 impl ExportKey {
     pub fn game(product_id: u32) -> Self {
-        Self { product_id, profile_id: None }
+        Self::for_game(GameRef::ubisoft(product_id))
+    }
+
+    pub fn for_game(game: GameRef) -> Self {
+        Self { game, profile_id: None }
     }
 
     pub fn parse(s: &str) -> Result<Self> {
@@ -51,7 +57,8 @@ impl ExportKey {
             Some((id, p)) => (id, Some(p.to_owned())),
             None => (rest, None),
         };
-        let key = Self { product_id: id.parse().with_context(|| format!("bad product id in {s}"))?, profile_id: profile };
+        let game = GameRef::parse(id).map_err(|e| anyhow::anyhow!("bad game in {s}: {e}"))?;
+        let key = Self { game, profile_id: profile };
         key.check()?;
         Ok(key)
     }
@@ -68,8 +75,8 @@ impl ExportKey {
     /// `quiver-<product>[-<profile>]`, the stem of the .desktop file and cached icon.
     pub fn file_stem(&self) -> String {
         match &self.profile_id {
-            Some(p) => format!("quiver-{}-{p}", self.product_id),
-            None => format!("quiver-{}", self.product_id),
+            Some(p) => format!("quiver-{}-{p}", self.game.dir_name()),
+            None => format!("quiver-{}", self.game.dir_name()),
         }
     }
 
@@ -83,8 +90,8 @@ impl ExportKey {
 impl fmt::Display for ExportKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.profile_id {
-            Some(p) => write!(f, "quiver:{}/{p}", self.product_id),
-            None => write!(f, "quiver:{}", self.product_id),
+            Some(p) => write!(f, "quiver:{}/{p}", self.game.key()),
+            None => write!(f, "quiver:{}", self.game.key()),
         }
     }
 }
@@ -156,7 +163,7 @@ pub struct Target {
 impl Target {
     /// Arguments for `quiver`: `play <product_id> [--profile-id <id>]`.
     pub fn launch_args(&self) -> Vec<String> {
-        let mut args = vec!["play".to_owned(), self.key.product_id.to_string()];
+        let mut args = vec!["play".to_owned(), self.key.game.key()];
         if let Some(p) = &self.key.profile_id {
             // TODO: `quiver play --profile-id` doesn't exist yet (mod profiles).
             args.extend(["--profile-id".to_owned(), p.clone()]);
@@ -284,6 +291,12 @@ mod tests {
         assert_eq!(ExportKey::parse(&p.to_string()).unwrap(), p);
         assert!(ExportKey::parse("quiver:5059/../x").is_err());
         assert!(ExportKey::parse("steam:1").is_err());
+        // Other stores: the store before a `:`, folders with a `-` (STORES.md §2.2).
+        let s = ExportKey::parse("quiver:steam:620/p1").unwrap();
+        assert_eq!((s.game, s.profile_id.as_deref()), (GameRef::steam(620), Some("p1")));
+        assert_eq!((s.to_string(), s.file_stem()), ("quiver:steam:620/p1".to_owned(), "quiver-steam-620-p1".to_owned()));
+        assert_eq!(ExportKey::parse("quiver:5059").unwrap(), k);
+        assert!(ExportKey::parse("quiver:nope:1").is_err());
         // crc32("quiver:5059") = 0xb4eb15f9 (checked with Python zlib.crc32); top bit set.
         assert_eq!(k.steam_appid(), crc32fast::hash(b"quiver:5059") | 0x8000_0000);
         assert_eq!(k.steam_appid(), 0xb4eb_15f9);
@@ -293,7 +306,7 @@ mod tests {
     #[test]
     fn launch_args_and_wm_class() {
         let t = Target {
-            key: ExportKey { product_id: 5059, profile_id: Some("p1".into()) },
+            key: ExportKey { game: GameRef::ubisoft(5059), profile_id: Some("p1".into()) },
             name: "x".into(),
             art: Art::default(),
             wm_class: None,

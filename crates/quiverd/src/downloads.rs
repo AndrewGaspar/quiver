@@ -719,7 +719,7 @@ fn language_for(product_id: u32) -> String {
 }
 
 fn report_path(product_id: u32) -> PathBuf {
-    launcher::data_dir().join("games").join(product_id.to_string()).join("verify.json")
+    quiver_core::paths::game_dir(&quiver_api::GameRef::ubisoft(product_id)).join("verify.json")
 }
 
 fn save_report(r: &VerifyReport) {

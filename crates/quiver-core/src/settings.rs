@@ -13,7 +13,7 @@ pub use quiver_api::{GameSettings, Revision, SettingOp};
 use crate::launcher::data_dir;
 
 fn history_path(product_id: u32) -> PathBuf {
-    data_dir().join("games").join(product_id.to_string()).join("history.jsonl")
+    crate::paths::game_dir_in(&data_dir(), &quiver_api::GameRef::ubisoft(product_id)).join("history.jsonl")
 }
 
 /// Every entry of a JSON-lines history file (empty if it doesn't exist yet). Shared by

@@ -17,6 +17,7 @@ pub mod art;
 pub mod client;
 pub mod downloads;
 pub mod exports;
+pub mod game;
 pub mod mods;
 pub mod info;
 pub mod options;
@@ -25,6 +26,7 @@ pub mod savestores;
 pub mod setup;
 pub mod steamlib;
 pub use client::Client;
+pub use game::{GameId, GameRef, StoreId};
 pub use mods::{ModsRequest, Profile};
 
 // ---------------------------------------------------------------------------------------

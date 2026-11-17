@@ -1020,7 +1020,7 @@ impl Quiver {
                 rows.push(table_head(th, &names, &widths));
                 for (i, x) in list.clone().iter().enumerate() {
                     let r = &x.record;
-                    let g = self.game(r.product_id).cloned();
+                    let g = r.game.as_ubisoft().and_then(|id| self.game(id)).cloned();
                     let art = match &g {
                         Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                         None => crate::art::ArtState::Failed,
@@ -1039,7 +1039,7 @@ impl Quiver {
                         (ExportKind::Steam, Some(u)) => format!("Steam user {u}"),
                         _ => tilde(&r.path),
                     };
-                    let id = r.product_id;
+                    let id = r.game.as_ubisoft().unwrap_or_default();
                     rows.push(
                         div()
                             .flex()

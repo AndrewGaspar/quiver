@@ -376,7 +376,7 @@ impl Quiver {
             .into_iter()
             .filter(|g| g.installed())
             .map(|g| {
-                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.product_id == g.id() && x.record.profile_id.is_none()).map(|x| x.state);
+                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.game == quiver_api::GameRef::ubisoft(g.id()) && x.record.profile_id.is_none()).map(|x| x.state);
                 (g.id(), clean_name(&g.entry.name), st)
             })
             .collect()

@@ -1119,7 +1119,7 @@ fn record(kind: ExportKind, id: u32, name: &str, path: PathBuf, at: DateTime<Utc
         steam_user: (kind == ExportKind::Steam).then(|| "84211337".into()),
         key,
         kind,
-        product_id: id,
+        game: quiver_api::GameRef::ubisoft(id),
         profile_id: None,
         name: name.to_owned(),
         path,

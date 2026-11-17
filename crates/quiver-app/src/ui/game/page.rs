@@ -216,7 +216,7 @@ impl GamePage {
     pub fn exports_for(&self, id: u32) -> Vec<ExportStatus> {
         self.exports
             .ready()
-            .map(|l| l.iter().filter(|e| e.record.product_id == id && e.record.profile_id.is_none()).cloned().collect())
+            .map(|l| l.iter().filter(|e| e.record.game == quiver_api::GameRef::ubisoft(id) && e.record.profile_id.is_none()).cloned().collect())
             .unwrap_or_default()
     }
 

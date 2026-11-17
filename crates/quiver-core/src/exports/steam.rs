@@ -436,7 +436,7 @@ pub async fn export(paths: &Paths, steam: &Steam, user: &str, target: &Target, r
     let record = ExportRecord {
         key: target.key.to_string(),
         kind: ExportKind::Steam,
-        product_id: target.key.product_id,
+        game: target.key.game,
         profile_id: target.key.profile_id.clone(),
         name: target.name.clone(),
         path: shortcuts.clone(),

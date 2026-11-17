@@ -490,17 +490,18 @@ impl Quiver {
                 let Some(Ok(list)) = &self.ui.exports else { return };
                 let Some(x) = list.get(i).cloned() else { return };
                 let r = &x.record;
+                let Some(product_id) = r.game.as_ubisoft() else { return };
                 let (what, cli, body) = match r.kind {
                     ExportKind::Desktop => (
                         ".desktop entry",
-                        format!("quiver export desktop {} --remove", r.product_id),
+                        format!("quiver export desktop {} --remove", r.game.key()),
                         format!("Deletes {} from your app launcher.", crate::model::tilde(&r.path)),
                     ),
                     ExportKind::Steam => {
                         let running = matches!(&self.ui.steam, Some(Ok(s)) if s.running);
                         (
                             "Steam shortcut",
-                            format!("quiver export steam {} --remove", r.product_id),
+                            format!("quiver export steam {} --remove", r.game.key()),
                             if running {
                                 "Steam is running, so the removal is staged and shows after Steam restarts. Quiver doesn't restart Steam for you.".to_owned()
                             } else {
@@ -514,7 +515,7 @@ impl Quiver {
                     body: body.into(),
                     confirm: "Remove".into(),
                     cli: Some(cli.into()),
-                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id: r.product_id },
+                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id },
                     alt: None,
                     selected: 0,
                 });
