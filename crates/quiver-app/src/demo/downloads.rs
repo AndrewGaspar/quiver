@@ -125,8 +125,8 @@ impl Dl {
             imports: vec![],
             first_run: (!flag("first-run")).then(|| FirstRun { at: Utc::now() - Span::days(12), source: "gui".into(), skipped: false, steam_on_install: true }),
             fixes: (!flag("fixes-undecided") && !flag("first-run")).then_some(true),
-            library: games.join("ubi-library"),
-            prefixes: games.join("ubi-prefixes"),
+            library: games.join("quiver-library"),
+            prefixes: games.join("quiver-prefixes"),
             ticks: 0,
             retry_until: if flag("retrying") { 8 } else { 0 },
         };
@@ -348,7 +348,7 @@ impl Dl {
         let lutris = vec!["Ubisoft Connect".to_owned(), "Assassin's Creed Origins (DLSS)".to_owned(), "Assassin's Creed III Remastered".to_owned()];
         let mk = |path: PathBuf, prefix: &PathBuf, source: InstallSource, label: &str, id: Option<u32>, by: Option<MatchedBy>, size: f64, files: usize, version: Option<&str>, note: Option<String>| {
             let inst = id.is_some_and(installed);
-            let note = if inst { Some(format!("Already in Quiver (~/Games/ubi-library/{})", clean(&name(id.unwrap())))) } else { note };
+            let note = if inst { Some(format!("Already in Quiver (~/Games/quiver-library/{})", clean(&name(id.unwrap())))) } else { note };
             FoundInstall {
                 path,
                 prefix: prefix.clone(),
@@ -386,10 +386,10 @@ impl Dl {
             ),
             mk(in_connect("Assassin's Creed Origins"), &connect, InstallSource::Lutris, "Lutris · Ubisoft Connect", Some(3539), Some(MatchedBy::Registry), 76.4, 411, Some("1.6.0"), None),
             mk(
-                games.join("ubi-recon/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Assassin's Creed Syndicate"),
-                &games.join("ubi-recon"),
+                games.join("ubisoft-connect/drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Assassin's Creed Syndicate"),
+                &games.join("ubisoft-connect"),
                 InstallSource::Wine,
-                "Wine · ~/Games/ubi-recon",
+                "Wine · ~/Games/ubisoft-connect",
                 None,
                 None,
                 0.06,

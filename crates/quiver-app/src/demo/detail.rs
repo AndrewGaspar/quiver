@@ -352,7 +352,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
     Ok(Ok(out))
 }
 
-/// The text of a per-launch log in `<prefix>/ubi-run/` for the demo's games.
+/// The text of a per-launch log in `<prefix>/quiver-run/` for the demo's games.
 pub fn log_text(product_id: u32, file: &str) -> Option<String> {
     let exe = match product_id {
         3539 => "ACOrigins.exe",
@@ -385,7 +385,7 @@ pub fn log_text(product_id: u32, file: &str) -> Option<String> {
             format!("{} INFO session ended after 2 h 14 m; 3 saves to upload", ts(8041)),
         ],
         "game.log" => vec![
-            format!("{} wine: using Proton GE-Proton10-25 (prefix ~/Games/ubi-prefixes/{product_id})", ts(2)),
+            format!("{} wine: using Proton GE-Proton10-25 (prefix ~/Games/quiver-prefixes/{product_id})", ts(2)),
             "fsync: up and running.".into(),
             "0024:fixme:ntdll:NtQuerySystemInformation info_class SYSTEM_PERFORMANCE_INFORMATION".into(),
             format!("info:  Game: {exe}"),

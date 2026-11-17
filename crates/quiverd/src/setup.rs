@@ -585,8 +585,8 @@ mod tests {
         let installed = vec![Game {
             product_id: 1803,
             name: "Far Cry 5".into(),
-            install_dir: home.join("Games/ubi-library/Far Cry 5"),
-            prefix: home.join("Games/ubi-prefixes/far-cry-5"),
+            install_dir: home.join("Games/quiver-library/Far Cry 5"),
+            prefix: home.join("Games/quiver-prefixes/far-cry-5"),
             exe: "FC5.exe".into(),
             args: None,
             language: None,
@@ -607,7 +607,7 @@ mod tests {
         let f = by("Far Cry 5");
         assert_eq!(f.matched_by, Some(MatchedBy::Name));
         assert!(f.installed && !f.importable);
-        assert!(f.note.as_deref().unwrap().starts_with("Already in Quiver (~/Games/ubi-library/Far Cry 5)"));
+        assert!(f.note.as_deref().unwrap().starts_with("Already in Quiver (~/Games/quiver-library/Far Cry 5)"));
 
         let w = by("Watch_Dogs");
         assert_eq!((w.product_id, w.source), (Some(2688), InstallSource::Steam));

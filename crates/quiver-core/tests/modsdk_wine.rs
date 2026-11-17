@@ -231,7 +231,7 @@ async fn mod_sdk_through_the_bridge() {
     let log1 = t.join("bridge1.log");
     let mut b = w
         .cmd(&[&win(&t.join("quiver-bridge.exe")), &win(&t.join("ctx1.json"))])
-        .env("UBI_BRIDGE_LOG", win(&log1))
+        .env("QUIVER_BRIDGE_LOG", win(&log1))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

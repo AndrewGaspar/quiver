@@ -15,7 +15,7 @@ mod mods;
 use crate::{CONTEXT, context, hex};
 
 fn load_context(path: Option<&str>) -> Result<Option<LaunchContext>> {
-    let Some(path) = path.map(str::to_owned).or_else(|| std::env::var("UBI_BRIDGE_CONTEXT").ok()) else {
+    let Some(path) = path.map(str::to_owned).or_else(|| crate::env_var("QUIVER_BRIDGE_CONTEXT", "UBI_BRIDGE_CONTEXT")) else {
         log!("no launch context: serving placeholder data");
         return Ok(None);
     };
@@ -55,7 +55,7 @@ pub async fn run() -> Result<()> {
     let args = BridgeArgs::parse(&argv).map_err(|e| anyhow!(e))?;
     let log_path = match &args {
         BridgeArgs::Run { log: Some(l), .. } => Some(l.clone()),
-        _ => std::env::var("UBI_BRIDGE_LOG").ok(),
+        _ => crate::env_var("QUIVER_BRIDGE_LOG", "UBI_BRIDGE_LOG"),
     };
     if let Some(path) = log_path {
         *crate::LOG.lock().unwrap() = Some(std::fs::OpenOptions::new().create(true).append(true).open(path)?);

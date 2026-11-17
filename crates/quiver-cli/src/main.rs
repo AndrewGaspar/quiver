@@ -1,4 +1,4 @@
-//! `ubi`: command-line front end. Everything except `ubi dev …` goes through the `quiverd`
+//! `quiver`: command-line front end. Everything except `quiver dev …` goes through the `quiverd`
 //! daemon (started on demand), so the CLI, the GUI and agents share one runtime and one
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
@@ -396,7 +396,7 @@ pub(crate) async fn follow(client: &Client, mut events: tokio::sync::mpsc::Unbou
             e = events.recv() => e,
             _ = tokio::signal::ctrl_c() => {
                 if cancelled {
-                    eprintln!("\nleft running in quiverd (ubi cancel <game> to stop it)");
+                    eprintln!("\nleft running in quiverd (quiver cancel <game> to stop it)");
                     return Ok(());
                 }
                 cancelled = true;

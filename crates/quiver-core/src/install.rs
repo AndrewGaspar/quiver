@@ -2,8 +2,8 @@
 //!
 //! Each file in the manifest is a list of slices; a slice is stored on the CDN under the
 //! SHA-1 of its compressed bytes and decompresses to `size` bytes at `fileOffset`.
-//! Progress is resumable: finished files are recorded in `<dest>/.ubi-install/done`, and
-//! finished slices of unfinished files in `<dest>/.ubi-install/slices`.
+//! Progress is resumable: finished files are recorded in `<dest>/.quiver-install/done`, and
+//! finished slices of unfinished files in `<dest>/.quiver-install/slices`.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -454,8 +454,10 @@ pub fn is_cancelled(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Cancelled>())
 }
 
-pub(crate) fn state_dir(dest: &Path) -> PathBuf {
-    dest.join(".ubi-install")
+/// The install's progress state in the game's folder (`.quiver-install`; installs from before
+/// the rename to Quiver have `.ubi-install`, moved here on first use).
+pub fn state_dir(dest: &Path) -> PathBuf {
+    crate::launcher::migrate_renamed(dest.join(".quiver-install"), &dest.join(".ubi-install"))
 }
 
 fn load_done(dest: &Path) -> HashSet<String> {

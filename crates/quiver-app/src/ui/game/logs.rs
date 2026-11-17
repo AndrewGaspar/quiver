@@ -1,4 +1,4 @@
-//! Logs: the per-launch logs in `<prefix>/ubi-run/` (the bridge's own log, the game's
+//! Logs: the per-launch logs in `<prefix>/quiver-run/` (the bridge's own log, the game's
 //! Proton output and the bridge's Proton output), read from disk, in a scrolling
 //! monospace view with copy.
 
@@ -112,7 +112,7 @@ impl Quiver {
             Load::Ready(t) => Some(t.lines.iter().map(|l| l.as_ref()).collect::<Vec<&str>>().join("\n")),
             _ => None,
         };
-        let dir = g.entry.installed.as_ref().map(|i| i.prefix.join("ubi-run").to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = g.entry.installed.as_ref().map(|i| quiver_api::launch_logs_dir(&i.prefix).to_string_lossy().into_owned()).unwrap_or_default();
         let truncated = matches!(&self.gp.log, Load::Ready(t) if t.truncated);
         div()
             .flex()

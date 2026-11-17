@@ -1001,7 +1001,7 @@ for the record.
 15. **Steam copies.** (a) Sight on for Steam copies like Quiver installs; (b) off when Steam's
     overlay is present; (c) toasts only.
     *Recommend (a): different chords, and Sight lives outside the game process.*
-16. **Where Sight's UI code lives.** (a) a new crate/binary `ubi-sight` (`quiver-sight`) with a
+16. **Where Sight's UI code lives.** (a) a new crate/binary `quiver-sight` with a
     shared `quiver-ui` crate extracted from `quiver-app`; (b) a mode of the app binary
     (`quiver-app --sight`); (c) inside quiverd.
     *Recommend (a): separate lifecycle (per session, systemd user unit) without a second copy of

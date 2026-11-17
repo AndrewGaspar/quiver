@@ -2,7 +2,7 @@
 //! previews of what an install or update takes, and verify/repair of an install.
 //!
 //! An install folder records the build its files belong to: `uplay_install.manifest`
-//! once finished, and `.ubi-install/target` (the manifest hash) while a download is under
+//! once finished, and `.quiver-install/target` (the manifest hash) while a download is under
 //! way. Manifests fetched from the CDN are cached in `<data>/manifests/` until the build
 //! is installed, so an install that is interrupted and resumed after Ubisoft published a
 //! newer build can still tell which of its files are right.

@@ -6,8 +6,9 @@
 #
 # Final locations come from the environment (absolute paths, as installed; files land at
 # <staging root><path>):
-#   BINDIR      quiver, quiverd, quiver-app, ubi             (/usr/bin)
-#   LIBDIR      quiver-bridge.exe, sight/<arch>/libquiver_sight_layer.so  (/usr/lib/quiver)
+#   BINDIR      quiver, quiverd, quiver-app, ubi (the CLI's old name)  (/usr/bin)
+#   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
+#               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer (built for i686-unknown-linux-gnu)
@@ -36,6 +37,9 @@ for bin in quiver quiverd quiver-app ubi; do
     install -Dm755 "$target/release/$bin" "$root$BINDIR/$bin"
 done
 install -Dm644 "$target/x86_64-pc-windows-gnu/release/quiver-bridge.exe" "$root$LIBDIR/quiver-bridge.exe"
+# The bridge's name before the rename, for scripts and launch options that still name it.
+# install-user.sh installs it as a copy (its manifest tracks files).
+ln -sfn quiver-bridge.exe "$root$LIBDIR/ubi-bridge.exe"
 
 # The Sight Vulkan layer (crates/quiver-sight-layer), VK_LAYER_QUIVER_sight: an implicit layer
 # the loader enables only with QUIVER_SIGHT=1 (or when VK_INSTANCE_LAYERS names it), which

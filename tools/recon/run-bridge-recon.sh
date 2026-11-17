@@ -8,7 +8,7 @@ R=$1 BRIDGE=$2 ID=${3:-3539} SECS=${4:-8}
 export WINEPREFIX=$R/prefix WINEDEBUG=-all
 cp "$BRIDGE" "$WINEPREFIX/drive_c/game/quiver-bridge.exe"
 exec unshare -r -n bash -c '
-  UBI_BRIDGE_LOG="Z:$0/bridge-ipc.log" wine "C:\\game\\quiver-bridge.exe" ${RECON_CONTEXT:+"$RECON_CONTEXT"} > "$0/bridge.log" 2>&1 &
+  QUIVER_BRIDGE_LOG="Z:$0/bridge-ipc.log" wine "C:\\game\\quiver-bridge.exe" ${RECON_CONTEXT:+"$RECON_CONTEXT"} > "$0/bridge.log" 2>&1 &
   sleep 3
   WINEDEBUG=${HARNESS_DEBUG:--all} wine "C:\\game\\harness.exe" "C:\\game\\uplay_r1_loader64.dll" "$1" "$2"
   sleep 1

@@ -3,18 +3,18 @@
 //! The game's unmodified `uplay_r164.dll` / `uplay_aux_r164.dll` reach Connect over named
 //! pipes (4-byte big-endian length + protobuf). The bridge owns those pipes:
 //! - `terminal_1_uplay_aux_ipc_pipe_` (`uplayauxdll`): init, then Denuvo activation, which
-//!   is relayed to the native broker (`ubi broker`) on the host
+//!   is relayed to the native broker (`quiver broker`) on the host
 //! - `terminal_1_uplay_api_process_ipc_pipe_` (`uplaydll`): per-process handshake
 //! - `terminal_1_uplay_ipc_pipe_` (`uplaydll`): `InitReq`, then the SDK API
 //!
 //! Static data comes from a [`quiver_ipc::LaunchContext`] JSON file (`quiver context`),
-//! given as the first argument or via `UBI_BRIDGE_CONTEXT`.
+//! given as the first argument or via `QUIVER_BRIDGE_CONTEXT` (or `UBI_BRIDGE_CONTEXT`).
 //!
 //! Launcher mode, `quiver-bridge.exe --run <context.json> [--log <file>] -- <game.exe> [args…]`
 //! (used by `quiver steam-run`): own the pipes, start the game with `UPLAY_ARGUMENTS` as
 //! Connect would, exit with its exit code. The context file is deleted once read.
 
-// GUI subsystem: no console window. Logging goes to UBI_BRIDGE_LOG.
+// GUI subsystem: no console window. Logging goes to QUIVER_BRIDGE_LOG.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(win::run())
 }
 
-/// Log to stdout and to `UBI_BRIDGE_LOG` if set (stdout is unreliable under Proton).
+/// Log to stdout and to `QUIVER_BRIDGE_LOG` if set (stdout is unreliable under Proton).
 macro_rules! log {
     ($($t:tt)*) => {{
         let line = format!("{} {}", crate::timestamp(), format!($($t)*));
@@ -77,6 +77,13 @@ pub fn timestamp() -> String {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let s = t.as_secs();
     format!("{:02}:{:02}:{:02}.{:03}", s / 3600 % 24, s / 60 % 60, s % 60, t.subsec_millis())
+}
+
+/// The environment variable `name`, else `legacy` (its `UBI_*` name before the rename to
+/// Quiver, still set by older scripts and containers).
+#[cfg(windows)]
+pub fn env_var(name: &str, legacy: &str) -> Option<String> {
+    std::env::var(name).or_else(|_| std::env::var(legacy)).ok()
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

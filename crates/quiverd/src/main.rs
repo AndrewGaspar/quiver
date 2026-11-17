@@ -1,6 +1,6 @@
 //! quiverd: the launcher's backend. Owns the Ubisoft session, the Denuvo broker, installed
 //! games, per-game settings (with history), install/launch jobs and an activity log.
-//! Front ends (`ubi`, the GUI, scripts and agents) talk to it over a Unix socket; see
+//! Front ends (`quiver`, the GUI, scripts and agents) talk to it over a Unix socket; see
 //! `quiver-api` for the protocol.
 
 mod downloads;

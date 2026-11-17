@@ -289,8 +289,8 @@ fn game_for(id: u32, name: &str, exe: Option<&str>) -> Game {
     Game {
         product_id: id,
         name: name.to_owned(),
-        install_dir: games.join("ubi-library").join(clean(name)),
-        prefix: games.join("ubi-prefixes").join(id.to_string()),
+        install_dir: games.join("quiver-library").join(clean(name)),
+        prefix: games.join("quiver-prefixes").join(id.to_string()),
         exe: exe.unwrap_or("game.exe").replace('\\', "/").trim_start_matches(['\'', '.', '/']).to_owned(),
         args: Some(format!("/appid:{id}")),
         language: Some("en-US".into()),

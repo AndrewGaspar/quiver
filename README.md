@@ -22,7 +22,7 @@ their asset CDN.</sub>
 - `proto/`: Ubisoft Connect protobuf definitions, vendored (see `proto/README.md`)
 - `crates/quiver-proto/`: generated protobuf types
 - `crates/quiver-core/`: UbiServices auth, the demux client, ownership/library and manifest parsing
-- `crates/quiver-cli/`: the `ubi` command
+- `crates/quiver-cli/`: the `quiver` command (and `ubi`, its pre-Quiver name)
 - `crates/quiver-ipc/`: types shared by the native side and the bridge
 - `crates/quiver-bridge/`: a Windows binary that runs inside the game's prefix in place of Connect
 - `mods/<product id>/<mod id>/quiver-mod.toml`: Quiver's built-in mods (audited recipes,
@@ -55,7 +55,7 @@ from the Connect install directory, unmodified. They reach Connect through named
   what the bridge gets wrong. That's how the missing account email (which stops Origins from
   listing saves) was found.
 - `tools/proto-extract/extract.py <binary>`: dump the protobuf schemas embedded in Ubisoft binaries.
-- `UBI_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
+- `QUIVER_TRACE=+file tools/instance.sh run ...` then `tools/instance.sh trace-grep <name> <regex>`.
 
 ## Architecture
 
@@ -213,7 +213,7 @@ copies are designed in [design/STEAM-COPIES.md](design/STEAM-COPIES.md), not bui
 Installs, updates and repairs go through one queue in `quiverd` (`<data>/queue.json`), one at
 a time unless `--max-active` says otherwise. A download refuses to start if what it will write
 plus a margin (1 GiB or 5%) doesn't fit on the library's filesystem. Progress is kept per file
-(`.ubi-install/done`) and per slice (`.ubi-install/slices`), so pausing, a crash or a daemon
+(`.quiver-install/done`) and per slice (`.quiver-install/slices`), so pausing, a crash or a daemon
 restart loses at most the slices in flight; a restarted daemon resumes what was running and
 leaves paused items paused. Each slice is tried up to six times (1 s doubling to 30 s, with
 jitter) on connection errors, timeouts, cut-off bodies, 5xx and 429, and its signed URL is
@@ -462,7 +462,11 @@ Settings keys: `proton`, `language`, `account`, `profile`, `args`, `wrappers`, `
 State lives in `~/.local/share/quiver/` (`config.json`, `games.json`, `accounts.json`,
 `games/<id>/history.jsonl`, `activity.jsonl`, save backups, `quiverd.log`); a pre-Quiver
 `~/.local/share/ubisoft-linux/` and keyring entry are moved there automatically. `ubi` is kept
-as an alias for `quiver`.
+as an alias for `quiver`. Quiver's own files from before its crates were renamed from `ubi-*`
+still work: a prefix's `ubi-run/` and `.ubi-prefix-ready` and an install's `.ubi-install/` move
+to their `quiver-*` names on next use, existing `~/Games/ubi-library` and `~/Games/ubi-prefixes`
+stay the defaults where they exist, and `C:\ubi\ubi-bridge.exe` (in each prefix) and
+`ubi-bridge.exe` (next to `quiver-bridge.exe`) remain as links or copies of the bridge.
 
 ## Roadmap
 

@@ -78,6 +78,54 @@ fn yes() -> bool {
     true
 }
 
+/// `new`, after moving `old` there if only `old` exists: Quiver's own files in a prefix or
+/// install folder that were named `ubi-*` before the rename to Quiver. If the move fails the
+/// old path is used as it is (read old, write new; see [`quiver_api::renamed`]).
+pub fn migrate_renamed(new: PathBuf, old: &Path) -> PathBuf {
+    if new.symlink_metadata().is_err() && old.symlink_metadata().is_ok() {
+        if let Err(e) = std::fs::rename(old, &new) {
+            tracing::warn!("moving {} to {} failed: {e}", old.display(), new.display());
+            return old.to_path_buf();
+        }
+    }
+    new
+}
+
+/// The per-launch logs and state in a game's prefix (`quiver-run`; `ubi-run` before the
+/// rename, moved on first use).
+pub fn run_dir(prefix: &Path) -> PathBuf {
+    migrate_renamed(prefix.join("quiver-run"), &prefix.join("ubi-run"))
+}
+
+/// Where the bridge goes in a prefix (`C:\quiver\quiver-bridge.exe`), relative to the prefix.
+pub const PREFIX_BRIDGE: &str = "drive_c/quiver/quiver-bridge.exe";
+/// The bridge's path in a prefix before the rename (`C:\ubi\ubi-bridge.exe`), kept as a link
+/// to [`PREFIX_BRIDGE`] for existing launch scripts, Steam launch options and containers.
+pub const LEGACY_PREFIX_BRIDGE: &str = "drive_c/ubi/ubi-bridge.exe";
+
+/// Copy the bridge into the prefix at [`PREFIX_BRIDGE`] and point [`LEGACY_PREFIX_BRIDGE`]
+/// at it (a relative symlink, so it holds wherever the prefix is mounted). The link is best
+/// effort: failing it only affects scripts that still name the old path.
+pub fn install_prefix_bridge(prefix: &Path, bridge_exe: &Path) -> Result<PathBuf> {
+    let dst = prefix.join(PREFIX_BRIDGE);
+    std::fs::create_dir_all(dst.parent().unwrap())?;
+    std::fs::copy(bridge_exe, &dst).with_context(|| format!("copy {} to {}", bridge_exe.display(), dst.display()))?;
+    let legacy = prefix.join(LEGACY_PREFIX_BRIDGE);
+    let target = Path::new("../quiver/quiver-bridge.exe");
+    if std::fs::read_link(&legacy).ok().as_deref() != Some(target) {
+        let linked = std::fs::create_dir_all(legacy.parent().unwrap())
+            .and_then(|()| match std::fs::remove_file(&legacy) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            })
+            .and_then(|()| std::os::unix::fs::symlink(target, &legacy));
+        if let Err(e) = linked {
+            tracing::warn!("linking {} to the bridge failed: {e}", legacy.display());
+        }
+    }
+    Ok(dst)
+}
+
 pub fn data_dir() -> PathBuf {
     static MIGRATE: std::sync::Once = std::sync::Once::new();
     let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/share"));
@@ -179,8 +227,9 @@ impl Config {
         }
         let games = home().join("Games");
         let cfg = Self {
-            library: games.join("ubi-library"),
-            prefixes: games.join("ubi-prefixes"),
+            // Folders from before the rename to Quiver are kept when they are there.
+            library: quiver_api::renamed(games.join("quiver-library"), &games.join("ubi-library")),
+            prefixes: quiver_api::renamed(games.join("quiver-prefixes"), &games.join("ubi-prefixes")),
             proton: find_proton().context("no Proton found in ~/.local/share/Steam/compatibilitytools.d")?,
             sdk_source: {
                 // Prefer an existing Connect install; otherwise ensure_sdk() fetches the DLLs.
@@ -425,8 +474,9 @@ pub async fn import_game(
         std::fs::create_dir_all(dest.join(d))?;
     }
     std::fs::write(dest.join("uplay_install.manifest"), &raw)?;
-    std::fs::create_dir_all(dest.join(".ubi-install"))?;
-    std::fs::write(dest.join(".ubi-install/done"), done)?;
+    let state = crate::install::state_dir(&dest);
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(state.join("done"), done)?;
     let mut extras = Vec::new();
     collect_extras(source, source, &listed, &mut extras);
     extras.sort();
@@ -572,7 +622,7 @@ pub async fn ensure_sdk(cfg: &Config) -> Result<()> {
 /// Create the game's prefix if needed: a fresh Proton prefix plus Ubisoft's SDK DLLs in a
 /// Connect-shaped directory and the registry key the SDK loader uses to find them.
 pub async fn ensure_prefix(cfg: &Config, game: &Game) -> Result<()> {
-    let marker = game.prefix.join(".ubi-prefix-ready");
+    let marker = migrate_renamed(game.prefix.join(".quiver-prefix-ready"), &game.prefix.join(".ubi-prefix-ready"));
     if marker.exists() {
         return Ok(());
     }
@@ -584,7 +634,7 @@ pub async fn ensure_prefix(cfg: &Config, game: &Game) -> Result<()> {
     }
     ensure_sdk(cfg).await?;
     let proton = Proton { cfg, prefix: &game.prefix, build: cfg.proton.clone() };
-    let log = game.prefix.join("ubi-setup.log");
+    let log = game.prefix.join("quiver-setup.log");
     proton.run_to_end(&["wineboot", "-u"], &log).await?;
     let upc = game.prefix.join(UPC_REL);
     std::fs::create_dir_all(&upc)?;
@@ -695,7 +745,7 @@ pub async fn play(
     events(LaunchEvent::Status("Preparing prefix…".into()));
     ensure_prefix(cfg, game).await?;
     let bridge_exe = cfg.bridge_exe()?;
-    let run_dir = game.prefix.join("ubi-run");
+    let run_dir = run_dir(&game.prefix);
     std::fs::create_dir_all(&run_dir)?;
 
     events(LaunchEvent::Status("Signing in…".into()));
@@ -770,12 +820,10 @@ pub async fn play(
     };
 
     events(LaunchEvent::Status("Starting…".into()));
-    let bridge_dst = game.prefix.join("drive_c/ubi/quiver-bridge.exe");
-    std::fs::create_dir_all(bridge_dst.parent().unwrap())?;
-    std::fs::copy(&bridge_exe, &bridge_dst)?;
+    install_prefix_bridge(&game.prefix, &bridge_exe)?;
     let bridge_log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&bridge_log);
-    let mut bridge = proton.command(&[r"C:\ubi\quiver-bridge.exe", &win_path(&ctx_path)]);
+    let mut bridge = proton.command(&[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
     if let Some(ns) = &ns {
         // First into the namespace: its wineserver must start in there.
         ns.enter(bridge.as_std_mut(), None)?;
@@ -790,6 +838,8 @@ pub async fn play(
         bridge.env(k, v);
     }
     let mut bridge = bridge
+        .env("QUIVER_BRIDGE_LOG", win_path(&bridge_log))
+        // The name bridges before the rename read (a `bridge_exe` override may be one).
         .env("UBI_BRIDGE_LOG", win_path(&bridge_log))
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(run_dir.join("bridge-proton.log"))?)
@@ -874,7 +924,7 @@ pub async fn play(
 
 /// Where the Proton build of the game's latest session is recorded.
 fn session_build_path(game: &Game) -> PathBuf {
-    game.prefix.join("ubi-run").join("proton-build")
+    run_dir(&game.prefix).join("proton-build")
 }
 
 fn record_session_build(game: &Game, build: &Path) -> Result<()> {
@@ -923,6 +973,7 @@ fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
             let cmd = String::from_utf8_lossy(&cmd).to_lowercase();
             let is_game = cmd.contains(".exe")
                 && !cmd.contains("quiver-bridge")
+                && !cmd.contains("ubi-bridge")
                 && !cmd.contains("\\windows\\")
                 && !cmd.contains("proton");
             (in_prefix && is_game).then_some(pid)
@@ -1079,6 +1130,38 @@ mod tests {
             let saved = serde_json::to_value(&cfg).unwrap();
             assert_eq!(saved["bridge_exe"], p);
         }
+    }
+
+    #[test]
+    fn prefix_bridge_keeps_the_old_path_as_a_link() {
+        let t = tempfile::tempdir().unwrap();
+        let (prefix, src) = (t.path().join("pfx"), t.path().join("quiver-bridge.exe"));
+        std::fs::write(&src, b"MZ new").unwrap();
+        // A prefix from before the rename: a copy of the old bridge at C:\ubi.
+        std::fs::create_dir_all(prefix.join("drive_c/ubi")).unwrap();
+        std::fs::write(prefix.join(LEGACY_PREFIX_BRIDGE), b"MZ old").unwrap();
+        for _ in 0..2 {
+            let dst = install_prefix_bridge(&prefix, &src).unwrap();
+            assert_eq!(dst, prefix.join(PREFIX_BRIDGE));
+            assert_eq!(std::fs::read(&dst).unwrap(), b"MZ new");
+            assert!(prefix.join(LEGACY_PREFIX_BRIDGE).symlink_metadata().unwrap().is_symlink());
+            assert_eq!(std::fs::read(prefix.join(LEGACY_PREFIX_BRIDGE)).unwrap(), b"MZ new");
+        }
+    }
+
+    #[test]
+    fn renamed_state_moves_once() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("ubi-run")).unwrap();
+        std::fs::write(t.path().join("ubi-run/proton-build"), b"x").unwrap();
+        let dir = run_dir(t.path());
+        assert_eq!(dir, t.path().join("quiver-run"));
+        assert_eq!(std::fs::read(dir.join("proton-build")).unwrap(), b"x");
+        assert!(!t.path().join("ubi-run").exists());
+        // Both there (an old build ran after the move): the new one wins, the old is left.
+        std::fs::create_dir(t.path().join("ubi-run")).unwrap();
+        assert_eq!(run_dir(t.path()), t.path().join("quiver-run"));
+        assert!(t.path().join("ubi-run").exists());
     }
 
     #[test]

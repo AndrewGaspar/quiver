@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("e.bin")).unwrap(), data(5, 1_000));
         assert_eq!(std::fs::read(&outside).unwrap(), wrong, "the other end of the hard link is untouched");
         assert_eq!(std::fs::read(dest.join("nvngx_dlss.dll")).unwrap(), b"mod");
-        let done = std::fs::read_to_string(dest.join(".ubi-install/done")).unwrap();
+        let done = std::fs::read_to_string(crate::install::state_dir(&dest).join("done")).unwrap();
         assert_eq!(done.lines().count(), 5);
     }
 

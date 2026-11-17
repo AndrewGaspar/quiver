@@ -1700,7 +1700,7 @@ impl ModStore {
     /// and checked: not the prefix's own machinery (Windows, the Connect folder with the
     /// saves, the bridge), not one inside another.
     pub fn check_config_dirs(&self, dirs: &[String]) -> Result<Vec<String>> {
-        let protected = [crate::launcher::UPC_REL, "drive_c/windows", "drive_c/ubi", "dosdevices", "pfx", "drive_c/users/Public"];
+        let protected = [crate::launcher::UPC_REL, "drive_c/windows", "drive_c/quiver", "drive_c/ubi", "dosdevices", "pfx", "drive_c/users/Public"];
         let mut out: Vec<String> = Vec::new();
         for d in dirs {
             let rel = normalize_path(d, self.prefix()).map_err(|e| anyhow::anyhow!(format!("{e:#}").replace("install folder", "prefix")))?;

@@ -54,7 +54,7 @@ pub struct RemotePlaytime {
     pub seconds: Option<u64>,
 }
 
-/// A per-launch log in `<prefix>/ubi-run/`.
+/// A per-launch log in `<prefix>/quiver-run/`.
 pub const LOG_FILES: [(&str, &str); 3] =
     [("bridge.log", "Bridge"), ("game.log", "Game (Proton)"), ("bridge-proton.log", "Bridge (Proton)")];
 
@@ -563,7 +563,7 @@ impl Quiver {
         });
     }
 
-    /// The selected log of the open game, read from `<prefix>/ubi-run/` (fixtures in demo
+    /// The selected log of the open game, read from `<prefix>/quiver-run/` (fixtures in demo
     /// mode).
     pub fn load_log(&mut self, id: u32, cx: &mut Context<Self>) {
         let Some(prefix) = self.game(id).and_then(|g| g.entry.installed.as_ref()).map(|g| g.prefix.clone()) else {
@@ -571,7 +571,7 @@ impl Quiver {
             return;
         };
         let (file, _) = LOG_FILES[self.gp.log_file.min(LOG_FILES.len() - 1)];
-        let path = prefix.join("ubi-run").join(file);
+        let path = quiver_api::launch_logs_dir(&prefix).join(file);
         self.gp.log = Load::Loading;
         if self.demo {
             self.gp.log = match crate::demo::detail::log_text(id, file) {
@@ -1575,7 +1575,7 @@ impl Quiver {
             ("Install folder", game.install_dir.clone(), "The base install; mod profiles never change it"),
             ("Compatibility folder", game.prefix.clone(), "This game's own Windows setup (its Proton prefix)"),
             ("Save folder", saves, "savegames/<user>/<product> in the compatibility folder"),
-            ("Launch logs", game.prefix.join("ubi-run"), "bridge.log, game.log, bridge-proton.log"),
+            ("Launch logs", quiver_api::launch_logs_dir(&game.prefix), "bridge.log, game.log, bridge-proton.log"),
         ]
     }
 

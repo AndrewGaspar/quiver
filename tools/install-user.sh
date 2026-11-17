@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build Quiver from this checkout and install it into your home directory (no root):
 #
-#   ~/.local/bin/{quiver,quiverd,quiver-app,ubi}
-#   ~/.local/lib/quiver/quiver-bridge.exe
+#   ~/.local/bin/{quiver,quiverd,quiver-app,ubi}  (ubi: the CLI's pre-Quiver name)
+#   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)

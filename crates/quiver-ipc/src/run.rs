@@ -12,7 +12,7 @@ use base64::Engine;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeArgs {
     /// Serve the pipes until killed (`quiver-bridge.exe [context.json]`); the context may also
-    /// come from `UBI_BRIDGE_CONTEXT`.
+    /// come from `QUIVER_BRIDGE_CONTEXT` (or `UBI_BRIDGE_CONTEXT`, its name before the rename).
     Serve { context: Option<String> },
     /// Serve the pipes, start `exe` with `args`, exit with its exit code once it and every
     /// SDK connection are gone.

@@ -682,9 +682,32 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
+/// `new`, or `old` while only `old` exists. Quiver's own files and folders were named `ubi-*`
+/// before the rename to Quiver; existing ones are read under the old name until something
+/// moves them (read old, write new).
+pub fn renamed(new: PathBuf, old: &std::path::Path) -> PathBuf {
+    if new.symlink_metadata().is_err() && old.symlink_metadata().is_ok() { old.to_path_buf() } else { new }
+}
+
+/// The per-launch logs in a game's prefix: `<prefix>/quiver-run`, or a prefix's `ubi-run`
+/// from before the rename until its next launch moves it.
+pub fn launch_logs_dir(prefix: &std::path::Path) -> PathBuf {
+    renamed(prefix.join("quiver-run"), &prefix.join("ubi-run"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_reads_old_until_new_exists() {
+        let t = tempfile::tempdir().unwrap();
+        assert_eq!(launch_logs_dir(t.path()), t.path().join("quiver-run"));
+        std::fs::create_dir(t.path().join("ubi-run")).unwrap();
+        assert_eq!(launch_logs_dir(t.path()), t.path().join("ubi-run"));
+        std::fs::create_dir(t.path().join("quiver-run")).unwrap();
+        assert_eq!(launch_logs_dir(t.path()), t.path().join("quiver-run"));
+    }
 
     fn apply(s: &mut GameSettings, op: &str) -> Result<(), String> {
         s.apply(&SettingOp::parse(op)?)

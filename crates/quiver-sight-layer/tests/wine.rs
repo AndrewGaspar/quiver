@@ -10,7 +10,7 @@
 //! -p quiver-sight-layer --test wine -- --ignored --nocapture`
 //!
 //! Needs `x86_64-w64-mingw32-gcc`. Uses a scratch prefix and HOME (the prefix is kept in
-//! `target/ubi-sight-wine` between runs). `QUIVER_TEST_VK_DEVICE=<name substring>` picks
+//! `target/quiver-sight-wine` between runs). `QUIVER_TEST_VK_DEVICE=<name substring>` picks
 //! DXVK's adapter (`DXVK_FILTER_DEVICE_NAME`); `QUIVER_TEST_SIGHT_PNG=<dir>` saves a
 //! screenshot of the window (grim); `QUIVER_TEST_VALIDATION=1` puts the Khronos validation
 //! layer below Sight and prints what it reports.
@@ -58,7 +58,7 @@ fn dxvk_presents_through_the_layer() {
     }
     write_manifest(&t.join("layer"), &layer_so());
     let session = TestSession::new();
-    let keep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ubi-sight-wine");
+    let keep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/quiver-sight-wine");
     let compat = keep.join("compat");
     std::fs::create_dir_all(&compat).unwrap();
     for d in ["home", "steam"] {

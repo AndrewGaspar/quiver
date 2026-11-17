@@ -319,7 +319,7 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
             let mut updating = false;
             if let Ok(old_raw) = std::fs::read(&installed) {
                 if manifest::manifest_hash(&old_raw)?.eq_ignore_ascii_case(&hash) {
-                    let done = std::fs::read_to_string(dest.join(".ubi-install/done")).unwrap_or_default();
+                    let done = std::fs::read_to_string(quiver_core::install::state_dir(&dest).join("done")).unwrap_or_default();
                     let done: std::collections::HashSet<&str> = done.lines().collect();
                     if dry_run || plan.files.iter().all(|f| done.contains(f.path.as_str())) {
                         println!("already installed and up to date");

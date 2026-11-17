@@ -1,7 +1,7 @@
 //! Writers and readers in different processes over real files in a temporary session dir
 //! under /dev/shm (`QUIVER_PERF_DIR` points the child at it, as it does the layer). The test
 //! binary re-executes itself as the child (`child_entry`, which does nothing unless the
-//! parent set `UBI_PERF_CHILD`).
+//! parent set `QUIVER_PERF_CHILD`).
 
 #![cfg(unix)]
 
@@ -16,8 +16,8 @@ use quiver_perf::record::{LayerPresent, LayerStatus, Record};
 use quiver_perf::ring::RingParams;
 use quiver_perf::session::{ENV_PERF_DIR, FileKind, SessionDir, SessionId, open_ring_writer};
 
-const ROLE: &str = "UBI_PERF_CHILD";
-const COUNT: &str = "UBI_PERF_COUNT";
+const ROLE: &str = "QUIVER_PERF_CHILD";
+const COUNT: &str = "QUIVER_PERF_COUNT";
 
 fn shm_root() -> tempfile::TempDir {
     tempfile::Builder::new().prefix("quiver-perf-test-").tempdir_in("/dev/shm").unwrap()
