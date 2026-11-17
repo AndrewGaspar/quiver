@@ -50,6 +50,11 @@ enum Cmd {
         #[command(subcommand)]
         action: AccountAction,
     },
+    /// The stores Quiver reads games from, whose account each follows, and what each does.
+    Stores {
+        #[arg(long)]
+        json: bool,
+    },
     /// Owned games and their install state, from every store (Ubisoft, and Steam's installed
     /// games), with each game's ref (`3539`, `steam:620`).
     #[command(visible_alias = "list")]
@@ -615,6 +620,39 @@ async fn main() -> Result<()> {
             let () = client.call(Request::AccountDefault { account }).await?;
             let s: Status = client.call(Request::Status).await?;
             println!("default account: {}", s.signed_in.as_deref().unwrap_or("?"));
+        }
+        Cmd::Stores { json } => {
+            let list: Vec<quiver_api::stores::StoreInfo> = client.call(Request::Stores).await?;
+            if json {
+                return print_json(&list);
+            }
+            for s in list {
+                use quiver_api::stores::AccountState as A;
+                let account = match (s.account, &s.account_name) {
+                    (A::SignedIn, Some(n)) => format!("signed in as {n}"),
+                    (A::ClientManaged, Some(n)) => format!("follows the {} client ({n})", s.store.label()),
+                    (A::ClientManaged, None) => format!("follows the {} client", s.store.label()),
+                    (A::SignedInElsewhere, _) => "signed in elsewhere".into(),
+                    (A::NeedsSignIn, _) | (A::SignedIn, None) => "not signed in".into(),
+                };
+                let note = s.note.map(|n| format!(" ({n})")).unwrap_or_default();
+                println!("{:<8} {:>4} game(s)  {account}{note}", s.store.label(), s.games);
+                let c = s.capabilities;
+                let caps = [("library", c.library), ("install", c.install), ("play", c.launch), ("settings", c.settings), ("mods", c.mods), ("cloud saves", c.cloud_saves), ("achievements", c.achievements), ("play time", c.playtime)];
+                let shown: Vec<String> = caps
+                    .iter()
+                    .map(|(k, v)| {
+                        let how = match v {
+                            quiver_api::stores::Support::Quiver => "",
+                            quiver_api::stores::Support::Delegated => " (via the client)",
+                            quiver_api::stores::Support::ReadOnly => " (read-only)",
+                            quiver_api::stores::Support::No => " (no)",
+                        };
+                        format!("{k}{how}")
+                    })
+                    .collect();
+                println!("         {}", shown.join(", "));
+            }
         }
         Cmd::Library { refresh, store, json } => {
             let mut lib: Vec<LibraryEntry> = client.call(Request::Library { refresh, all_stores: true }).await?;

@@ -1007,7 +1007,7 @@ async fn main() -> Result<()> {
         mod_sdk,
         perf,
         achievements: ach,
-        stores: Vec::new(),
+        stores: vec![Arc::new(quiver_core::steamlocal::SteamLocal::new(&quiver_core::exports::Paths::from_env().home))],
     });
     options::test_session(&daemon);
     downloads::start(&daemon);

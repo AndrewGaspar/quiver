@@ -175,6 +175,8 @@ pub struct Quiver {
     link_gen: u64,
     pub side_filter: SideFilter,
     pub lib_filter: crate::ui::library::LibFilter,
+    /// Only one store's games in the grid (`None`: every store).
+    pub store_filter: Option<quiver_api::StoreId>,
     /// What's on screen, as of the last render. Input is resolved against it.
     pub layout: Layout,
     pub viewport: (f32, f32),
@@ -219,6 +221,7 @@ impl Quiver {
             link_gen: 0,
             side_filter: SideFilter::All,
             lib_filter: crate::ui::library::LibFilter::All,
+            store_filter: None,
             layout: Layout::default(),
             viewport: (1440., 900.),
             relaunch: Default::default(),
@@ -545,8 +548,9 @@ impl Quiver {
     }
 
     fn load_settings(&mut self, id: Gid, cx: &mut Context<Self>) {
-        // A Steam copy's settings apply when Steam starts it through Quiver.
-        if !self.game(id).is_some_and(|g| g.installed() || g.steam_only()) {
+        // A Steam copy's settings apply when Steam starts it through Quiver; other stores'
+        // games have no Quiver settings (their client launches them).
+        if !id.is_ubisoft() || !self.game(id).is_some_and(|g| g.installed() || g.steam_only()) {
             return;
         }
         // The daemon replies `{revision, settings}`.
@@ -641,7 +645,7 @@ impl Quiver {
         variant: Variant,
         cx: &mut Context<Self>,
     ) -> (ArtState, Option<crate::art::Candidate>) {
-        let cands = crate::art::candidates(&g.entry, self.custom_art.get(&(&g.id()).pid()), slot, self.art_pref(g));
+        let cands = crate::art::candidates(&g.entry, g.id().ubisoft().and_then(|p| self.custom_art.get(&p)), slot, self.art_pref(g));
         let (state, c) = crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx)));
         (state, c.cloned())
     }
@@ -787,6 +791,26 @@ impl Quiver {
         }
         let Some(g) = self.game(id) else { return vec![] };
         let mut v = vec![self.primary_command(g)];
+        // Another store's game: its client installs and runs it; the page and the command.
+        if g.client().is_some() {
+            v.push(Command {
+                icon: crate::ui::Icon::Info,
+                label: "Game details".into(),
+                detail: None,
+                cli: Some(format!("quiver info {id}").into()),
+                action: Cmd::Open(id),
+                future: false,
+            });
+            v.push(Command {
+                icon: crate::ui::Icon::Copy,
+                label: "Copy play command".into(),
+                detail: Some(format!("{} starts it", g.entry.store().label()).into()),
+                cli: Some(format!("quiver play {id}").into()),
+                action: Cmd::CopyCli(id),
+                future: false,
+            });
+            return v;
+        }
         v.push(Command {
             icon: crate::ui::Icon::Info,
             label: "Game details".into(),
@@ -906,6 +930,12 @@ impl Quiver {
             self.show_toast(format!("{name} is installing ({:.0}%)", (f * 100.).floor()), cx);
         } else if g.queued() {
             self.show_toast(format!("{name} is queued"), cx);
+        } else if let Some(label) = g.client().map(|_| g.entry.store().label()) {
+            // Another store's game: its client starts it.
+            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+                Ok(_) => this.show_toast(format!("Asked {label} to start {name}"), cx),
+                Err(e) => this.show_toast(err_text(&e), cx),
+            });
         } else if g.steam_only() {
             // Steam starts it (through Quiver, once it's switched).
             if self.ui.sessions.iter().any(|s| s.product_id == id) {
@@ -984,6 +1014,8 @@ impl Quiver {
                     self.gp.default_menu &= self.gp.play_menu;
                     self.nav.open_menu(id);
                 }
+                // Shortcuts, files and launch options are for Quiver's own launches.
+                ACTION_STEAM | ACTION_FILES | ACTION_LAUNCH if !id.is_ubisoft() => {}
                 ACTION_STEAM => self.steam_button(id, cx),
                 ACTION_FILES => self.nav.select_tab(Tab::Files),
                 ACTION_LAUNCH => self.nav.select_tab(Tab::LaunchOptions),

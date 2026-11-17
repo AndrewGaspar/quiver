@@ -625,7 +625,7 @@ impl Quiver {
             self.wc.steam_busy.insert(id.pid());
             let user = self.wc.steam_user.clone();
             self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: user }, cx, move |this, r, cx| {
-                this.wc.steam_busy.remove(&(&id).pid());
+                this.wc.steam_busy.remove(&id.pid());
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
                 }
@@ -1433,7 +1433,7 @@ impl Quiver {
             .enumerate()
             .map(|(i, (id, name, st))| {
                 let id = *id;
-                let busy = self.wc.steam_busy.contains(&(&id).pid());
+                let busy = self.wc.steam_busy.contains(&id.pid());
                 let right: AnyElement = match st {
                     _ if busy => pill(th, PillKind::Muted, Some(Icon::LoaderCircle), "Adding…").into_any_element(),
                     Some(ExportState::Ok) => pill(th, PillKind::Ok, Some(Icon::CircleCheck), "In Steam").into_any_element(),

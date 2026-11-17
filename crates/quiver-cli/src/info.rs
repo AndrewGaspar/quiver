@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
 use quiver_api::info::{GameInfo, Progress, RestoreResult, SaveBackup, SavesReport, SlotState};
+use quiver_api::stores::GameDetail;
 use quiver_api::{Client, LibraryEntry, Request, Status};
 
 use crate::{print_json, resolve};
@@ -55,6 +56,48 @@ pub async fn sync(client: &Client, game: &str, profile: Option<String>) -> Resul
     Ok(())
 }
 
+/// Another store's game, as its client's files describe it.
+fn print_detail(d: &GameDetail) -> Result<()> {
+    let store = d.game.store.label();
+    println!("{} ({})", d.name, d.game);
+    let field = |k: &str, v: Option<String>| {
+        if let Some(v) = v.filter(|v| !v.is_empty()) {
+            println!("  {k:<12} {v}");
+        }
+    };
+    field("developer", d.developer.clone());
+    field("publisher", d.publisher.clone());
+    field("released", d.release_date.map(|t| t.format("%Y-%m-%d").to_string()));
+    field("store page", d.store_url.clone());
+    field("account", d.account.clone().map(|a| format!("{a} (the {store} client's)")));
+    if let Some(i) = &d.install {
+        let state = if !i.complete { " (downloading)" } else if i.update_pending { " (update waiting in Steam)" } else { "" };
+        println!("  {:<12} {} · {}{state}", "installed", bytes(i.size_bytes), i.dir.display());
+        field("platforms", (!i.platforms.is_empty()).then(|| i.platforms.join(", ")));
+        field("plays with", i.launch_url.clone());
+    }
+    if let Some(p) = &d.playtime {
+        let two = p.two_weeks_seconds.map(|s| format!(", {}h{:02}m in the last two weeks", s / 3600, s % 3600 / 60)).unwrap_or_default();
+        println!("  {:<12} {}h{:02}m{two}; last {}", "played", p.total_seconds / 3600, p.total_seconds % 3600 / 60, when(p.last_played));
+    }
+    match &d.achievements {
+        Some(a) => println!("  {:<12} {} of {} unlocked", "achievements", a.unlocked, a.total),
+        None => println!("  {:<12} unknown ({store} hasn't cached them here)", "achievements"),
+    }
+    if let Some(c) = &d.cloud {
+        let pending = if c.unsynced > 0 { format!(", {} not synced", c.unsynced) } else { String::new() };
+        println!("  {:<12} {} file(s), {}{pending}; last upload {} (synced by {store})", "cloud", c.files, bytes(c.bytes), when(c.last_upload));
+    }
+    if !d.dlc.is_empty() {
+        let installed = d.dlc.iter().filter(|x| x.installed).count();
+        println!("  {:<12} {} listed, {installed} installed", "DLC", d.dlc.len());
+    }
+    if !d.unavailable.is_empty() {
+        println!("  not available: {}", d.unavailable.join(", "));
+    }
+    Ok(())
+}
+
 fn bytes(n: u64) -> String {
     match n {
         n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
@@ -99,7 +142,12 @@ fn art_line(e: &LibraryEntry, pref: quiver_api::art::ArtPreference) -> String {
 }
 
 pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: bool) -> Result<()> {
-    let e = resolve(client, game).await?;
+    let any = crate::resolve_any(client, game).await?;
+    if !any.game.is_ubisoft() {
+        let d: GameDetail = client.call(Request::GameDetail { game: any.game, refresh }).await?;
+        return if json { print_json(&d) } else { print_detail(&d) };
+    }
+    let e = resolve(client, &crate::game_label(&any.game)).await?;
     let i: GameInfo = client.call(Request::GameInfo { product_id: e.product_id, refresh }).await?;
     if json {
         return print_json(&i);

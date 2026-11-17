@@ -181,12 +181,18 @@ pub fn candidates(entry: &LibraryEntry, slot: ArtSlot, pref: ArtPreference) -> V
         ubisoft.push((ArtOrigin::GamesApi, ArtRef::Url(u.clone())));
     }
     let mut steam = Vec::new();
-    if let Some(g) = &entry.steam {
+    // A Ubisoft game's Steam copy, or a Steam game (its art is all there is).
+    let steam_app = match (&entry.steam, &entry.client, entry.game.as_steam()) {
+        (Some(g), _, _) => Some((g.app_id, &g.art)),
+        (None, Some(c), Some(app_id)) => Some((app_id, &c.art)),
+        _ => None,
+    };
+    if let Some((app_id, art)) = steam_app {
         let cached = match slot {
-            ArtSlot::Tile => &g.art.capsule,
-            ArtSlot::Hero => &g.art.hero,
-            ArtSlot::Logo => &g.art.logo,
-            ArtSlot::Icon => &g.art.icon,
+            ArtSlot::Tile => &art.capsule,
+            ArtSlot::Hero => &art.hero,
+            ArtSlot::Logo => &art.logo,
+            ArtSlot::Icon => &art.icon,
         };
         if let Some(p) = cached {
             steam.push((ArtOrigin::SteamCache, ArtRef::File(p.clone())));
@@ -198,7 +204,7 @@ pub fn candidates(entry: &LibraryEntry, slot: ArtSlot, pref: ArtPreference) -> V
             ArtSlot::Icon => None,
         };
         if let Some(f) = cdn {
-            steam.push((ArtOrigin::SteamCdn, ArtRef::Url(steam_cdn_url(g.app_id, f))));
+            steam.push((ArtOrigin::SteamCdn, ArtRef::Url(steam_cdn_url(app_id, f))));
         }
     }
     match pref {
@@ -274,6 +280,16 @@ mod tests {
         let e = entry(Art { background: Some("b.jpg".into()), ..Default::default() }, None);
         assert_eq!(origins(&candidates(&e, ArtSlot::Hero, ArtPreference::Steam)), [ArtOrigin::Config]);
         assert!(candidates(&e, ArtSlot::Tile, ArtPreference::Ubisoft).is_empty());
+    }
+
+    #[test]
+    fn steam_games_use_steams_art() {
+        let mut e = entry(Art::default(), None);
+        e.game = crate::GameRef::steam(620);
+        e.client = Some(crate::stores::ClientInstall { art: SteamArt { hero: Some("/lc/620/h/library_hero.jpg".into()), ..Default::default() }, ..Default::default() });
+        assert_eq!(origins(&candidates(&e, ArtSlot::Hero, ArtPreference::Ubisoft)), [ArtOrigin::SteamCache, ArtOrigin::SteamCdn]);
+        let tile = candidates(&e, ArtSlot::Tile, ArtPreference::Ubisoft);
+        assert_eq!(tile, [(ArtOrigin::SteamCdn, ArtRef::Url(steam_cdn_url(620, "library_600x900.jpg")))]);
     }
 
     #[test]

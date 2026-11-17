@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 pub mod detail;
 pub mod downloads;
 pub mod perf;
+pub mod stores;
 
 use quiver_api::{
     ActiveSession, ActivityEntry, Art, Event, Game, GameSettings, Job, JobKind, LibraryEntry, PlaySession, Playtime,
@@ -184,6 +185,9 @@ impl Demo {
         if let Request::Perf(p) = req {
             return perf::handle(self, &st, p);
         }
+        if let Some(v) = stores::handle(self, &mut st, &req)? {
+            return Ok(v);
+        }
         let req = match downloads::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         let req = match detail::handle(self, &mut st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = global::handle(self, &mut st, &req)? {
@@ -349,7 +353,8 @@ pub fn library() -> Vec<LibraryEntry> {
 }
 
 fn build_state() -> State {
-    let entries = library();
+    let mut entries = library();
+    entries.extend(stores::entries());
     let mut playtime = BTreeMap::new();
     for fx in FIXTURES {
         let mut sessions = vec![];

@@ -151,6 +151,8 @@ pub struct GamePage {
     /// The game this state belongs to (0: none yet).
     pub id: Gid,
     pub info: Load<GameInfo>,
+    /// Another store's game: its page (`Request::GameDetail`).
+    pub store: Load<quiver_api::stores::GameDetail>,
     pub progress: Load<Progress>,
     pub remote: Load<RemotePlaytime>,
     pub saves: Load<SavesReport>,
@@ -438,6 +440,14 @@ impl Quiver {
             return;
         }
         let fresh = self.gp.id != id;
+        if !id.is_ubisoft() {
+            // Another store's game: one read-only page from its client's files.
+            if fresh {
+                self.gp.reset(id);
+            }
+            self.load_store_detail(id, !fresh, cx);
+            return;
+        }
         if fresh {
             self.gp.reset(id);
             self.load_info(id, false, cx);
@@ -744,7 +754,8 @@ impl Quiver {
     /// The play menu (X, or the Play button's arrow): play once with Vanilla or a profile.
     /// From the profile chip it's the default-profile menu instead.
     pub fn play_menu_commands(&self, id: Gid) -> Option<Vec<Command>> {
-        if !self.gp.play_menu {
+        // Mod profiles are for Quiver's own launches; other stores' games get the game menu.
+        if !self.gp.play_menu || !id.is_ubisoft() {
             return None;
         }
         if self.gp.default_menu {

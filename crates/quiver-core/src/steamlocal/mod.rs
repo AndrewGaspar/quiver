@@ -20,10 +20,12 @@
 pub mod appinfo;
 mod kv;
 pub mod playtime;
+pub mod provider;
 pub mod remotecache;
 pub mod stats;
 
 pub use appinfo::AppInfo;
+pub use provider::SteamLocal;
 
 /// Steamworks Common Redistributables.
 const REDIST: u32 = 228980;

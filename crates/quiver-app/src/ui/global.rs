@@ -1208,6 +1208,8 @@ impl Quiver {
                                 this.open_game(id, cx);
                             }
                         }
+                        // The library's store filter (`store=steam`).
+                        "store" => this.store_filter = quiver_api::StoreId::parse(v),
                         // Unsaved launch-options edits on a game (`unsaved=3539`).
                         "unsaved" => {
                             if let Ok(id) = v.parse() {

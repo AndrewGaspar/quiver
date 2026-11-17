@@ -124,6 +124,11 @@ impl GameRow {
         self.entry.steam.as_ref()
     }
 
+    /// Another store's game, installed and run by its client (a Steam game).
+    pub fn client(&self) -> Option<&quiver_api::stores::ClientInstall> {
+        self.entry.client.as_ref()
+    }
+
     /// Only Steam has it installed: Steam plays, updates and uninstalls it.
     pub fn steam_only(&self) -> bool {
         self.entry.steam_only()
@@ -187,6 +192,18 @@ impl GameRow {
             return format!("{} of {}", gb(j.downloaded), gb(j.total));
         }
         let played = self.playtime.as_ref().map(|p| p.total_seconds).filter(|s| *s > 0);
+        // Another store's game (its badge says which): its client's state and play time.
+        if let Some(c) = self.client() {
+            let label = self.entry.store().label();
+            let played = played.or(c.playtime.map(|p| p.total_seconds).filter(|s| *s > 0));
+            return match (c.complete, c.update_pending, played, self.last_played().or(c.playtime.and_then(|p| p.last_played))) {
+                (false, _, _, _) => format!("Downloading in {label}"),
+                (true, true, _, _) => format!("Update waiting in {label}"),
+                (true, false, Some(s), Some(t)) => format!("{} played · {}", hours(s), day(t)),
+                (true, false, Some(s), None) => format!("{} played", hours(s)),
+                (true, false, None, _) => format!("In {label} · not played yet"),
+            };
+        }
         match (self.installed(), self.entry.update_available, played, self.last_played()) {
             (true, true, Some(s), _) => format!("Update available · {} played", hours(s)),
             (true, true, None, _) => "Update available".into(),
