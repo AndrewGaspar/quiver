@@ -1,6 +1,6 @@
 # Quiver Tweaks: platform-level graphics and latency overrides (design notes)
 
-Status: proposal (2026-11-17), nothing built. Builds on [MOD-CONFIG.md](MOD-CONFIG.md) (the
+Status: phase 1 built (2026-11-17; see "As built" at the end); phases 2–3 proposed. Builds on [MOD-CONFIG.md](MOD-CONFIG.md) (the
 Options engine, built in phase 1), [SIGHT.md](SIGHT.md) and [SIGHT-HUD.md](SIGHT-HUD.md) (the
 Sight Vulkan layer, the session dir, the metrics hub) and [STORES.md](STORES.md) (launch plans
 across stores, the anti-cheat data, the legitimacy policy). Steers are in section 11.
@@ -191,7 +191,10 @@ Found while preparing this (read-only), on the user's machine: Arch, `nvidia-uti
   than a version range.
 - DXVK logs `Found config file:` and `Engaging frame rate limiter.`; dxvk-nvapi logs `Applying
   the following DRS settings when requested by the application (…)`. Those are the evidence
-  lines section 6 uses.
+  lines section 6 uses. *(Corrected by the spikes, see "As built": `Engaging frame rate
+  limiter.` comes only from DXVK's own refresh-rate heuristic, so an explicit cap is confirmed
+  by DXVK's `Effective configuration:` block; dxvk-nvapi's per-request line is `<-NvAPI_DRS_GetSetting
+  (0x…/<name> = 0x…): OK`; `VkNvLowLatency2 implementation` is for native Vulkan games only.)*
 - vkd3d-proton has `VKD3D_FRAME_RATE`, `VKD3D_SWAPCHAIN_LATENCY_FRAMES`,
   `VKD3D_SWAPCHAIN_PRESENT_MODE`, `VKD3D_SWAPCHAIN_IMAGES`, and a swapchain
   `SetTargetFrameRate` that DXVK's `dxgi.dll` calls with `dxgi.maxFrameRate`, so one
@@ -949,6 +952,186 @@ recommendation unless the user says otherwise.
 | SIGHT §3.5, "FPS limiter" row | "set `DXVK_FRAME_RATE` at launch / MangoHud `fps_limit` live via its control socket" | `DXVK_FRAME_RATE` was removed in DXVK 3.0 (GE rewrites it into `DXVK_CONFIG`, Valve's Proton doesn't); MangoHud's `control=` socket handles only `hud`, `logging` and `fcat`, and live limits go through its inotify-watched config file. This document's `fps.cap` replaces the row |
 | `crates/quiverd/src/perf/launch.rs`, `ABOVE_SIGHT` | vkBasalt (`ENABLE_VKBASALT`) and lsfg-vk as `VK_LAYER_LS_frame_generation` (`ENABLE_LSFG`) | lsfg-vk v2's layer is `VK_LAYER_LSFGVK_frame_generation` and it no longer uses `ENABLE_LSFG` (profiles in its config decide; `DISABLE_LSFGVK` vetoes); NVIDIA Smooth Motion's `VK_LAYER_NV_present` (`NVPRESENT_ENABLE_SMOOTH_MOTION`) is missing. Both generate frames, so today a person using either gets an interpolated HUD. **Fixed 2026-11-17** (both kept above Sight; v1 still recognised) |
 | SIGHT §8, "vkBasalt, lsfg-vk" row | | add NVIDIA Smooth Motion and low_latency_layer to the coexistence list |
+
+## As built (phase 1, 2026-11-17)
+
+**Where it lives.** Wire types: `quiver_api::tweaks` (`Scope`, `TweakRow`, `Capabilities`,
+`TweaksPlan`/`Planned`/`Considered`, `Effect`/`TweakEffect`/`SessionTweaks`, `TweaksRequest`)
+and additions to `quiver_api::options` (`SurfaceKind::Platform`, `Schema.kind`/`provides`/
+`conflicts`, `OptionDef.via`/`tweak_page`, `ViaDef`, `Requires`, `ConfirmDef`,
+`ValueSource::Scope`/`::Tweak`, `OptionState.tweak`). Core: `quiver_core::tweaks` (`mod.rs`
+scopes, resolution, ops, providers, the bound layer, state; `caps.rs` the probe; `compile.rs`
+the mechanisms; `evidence.rs` the logs). Daemon: `crates/quiverd/src/tweaks.rs`. CLI:
+`crates/quiver-cli/src/tweaks.rs`. Catalog: `options/quiver-tweaks.toml` (compiled in twice:
+as the platform schema, and in the options catalog with an empty `[match]`, which never
+matches a mod version).
+
+**Requests.** A request family of its own, `Request::Tweaks(TweaksRequest)` (`list`, `set`,
+`prefer`, `history`, `restore`, `plan`, `capabilities`, `status`, `sessions`), not `scope`
+fields on `OptionsRequest` as §8.1 sketched: the global scope has no game to put in an
+Options request, and the Options requests stay as they were. Values and changes reuse the
+Options shapes (`OptionOp`, `OptionsChange` with `product_id` 0 for the global scope and
+non-Ubisoft games, `SurfaceState`, `OptionsRevision`). Explain and plan are one request
+(`plan`); the CLI prints it two ways. Events: `Event::TweaksChanged { scope, revision, source,
+changes }`, `Event::TweaksEffect { session, game, effect }`. `OptionsRequest::List` returns the
+platform surface (profile scope) **last** (existing clients index the mod surfaces from 0;
+the app lists it first), and `OptionsRequest::Set` routes ops on surface `quiver` /
+`quiver/tweaks` to the profile scope.
+
+**Scopes and identity.** Global `<data>/tweaks/global.jsonl`, game
+`games/<dir>/options/@game.jsonl` (`<dir>` from `GameRef::dir_name`, so `steam-620` works),
+profile: the profile's options file under key `quiver/tweaks`. `prefer` choices sit in each
+revision under `quiver/prefer`. Games are `GameRef`s on the wire (`game`, `product_id`
+accepted); `tweaks::game_scope_path` is the one place a game becomes a path. Profile scopes
+exist for Ubisoft products (the options store's `ModStore`); Steam games launched with
+`steam://rungameid` get no tweaks in phase 1 (the plan says so).
+
+**Schema additions as built** (all linted): `kind = "platform"`; `via = [{ mech, set, map,
+requires, apply, at, confirm, phase, also, flags, copy_updater, indicator, label, control,
+wrapper, args }]`. Beyond §3.2: `map` values can be a **table of writes** for that value
+(VSync's per-value DXVK entries), `"@skip"` means "this binding can't do that value, try the
+next" (2× FG on RTX 40, the rest on RTX 50), `also = true` adds a binding's writes to the
+chosen one (Streamline's `SL_DLSS_OVERRIDE`, vkd3d's latency frames), `{<tweak id>}` in a
+template is another tweak's value (`{dlss.sr.ratio}`), `label` is the availability chip.
+`requires` takes `vendor`, `rtx`, `rtx_series` (minimum), `driver`, `nvapi`/`dxvk`/`vkd3d`
+(version ranges), `has`/`lacks` (`dxvk:`, `nvapi:`, `vkd3d:`, `proton:` names found in the
+build), `api` (`dxvk` = D3D8–11 as the Sight layer reports DXVK, `d3d12`, `vulkan`,
+`unknown`), `dxgi = "not-dxvk"`, `layer`, `session`, `route`, `ngx`, `display`, `tweak`,
+`anti_cheat`, `any`. Built-in conflicts are `[[conflicts]]` of the platform schema with `when`
+over the tweaks' own values (Dynamic MFG blocks the cap; DLSS FG blocks Smooth Motion).
+
+**Catalog.** All 16 v1 tweaks of §4.1 plus `dlss.sr.ratio` (the custom render resolution
+percentage, shown when `dlss.sr.scale = custom`); every default is the game's choice / off
+(steer 15, checked by a test). Presets: `competitive`, `vrr`, `quiet`, `dlss-check`. Value
+spellings are dxvk-nvapi's (spike A4): `render_preset_<letter>`, `render_preset_latest`,
+`NGX_DLAA_OVERRIDE = dlaa_on`, `NGX_DLSSG_MODE = dynamic`, target `0x1000000` for "max
+refresh". `latency.mode` has a second DXVK binding for builds that renamed the option
+(`dxvk.enableNvLowLatency2 = False` for off; on is unavailable there, since master removed
+`latencySleep`), and an AMD binding (`ENABLE_LAYER_MESA_ANTI_LAG=1`, D3D12, T9 unverified).
+
+**Resolution and providers.** schema default < global < game < profile (no session layer
+yet: phase 1 has no live tweaks). A tweak is *active* when a scope sets it to something other
+than its default; only active tweaks write anything or flow into providers. Provider order:
+active check, then `prefer = quiver` (the provider's option gets `off`, Quiver's mechanism is
+tried), `mode = own` (shown only), else the mapped value is validated against the provider's
+option: out of range is **Blocked** with the option's own message ("DLSS's reflex.fps_limit
+can't take 500: above the maximum 360") rather than clamped. The bound value is an `Eval.bound`
+layer in option resolution (above config patches, below the profile's value) computed in
+`options::context`, so the mod's form shows it with `ValueSource::Tweak` and launches write
+it into the mod's file; the profile's own value still wins and the tweak row says so. `vrr`
+resolves to refresh − 3 from Hyprland's monitor (read-only `j/monitors`, at list and launch
+time); without it the cap is unavailable with that reason.
+
+**Mechanisms.** `env`, `dxvk`, `vkd3d`, `nvapi-drs`, `ngx` are built; `layer`, `vk-layer`,
+`wrapper`, `mangohud` lint with a note and show in `explain` as "phase 2 (not built yet)".
+The person's environment (Quiver's `env`, the game's settings, mods' `[launch]`, as resolved
+by the launch plan) wins per key: a variable they set, a `DXVK_CONFIG` key, a key inside
+`DXVK_NVAPI_DRS_SETTINGS` (dxvk-nvapi's dedicated variable would otherwise win over it), or
+DXVK's own `dxvk.maxFrameRate` (which DXVK prefers over `dxgi.maxFrameRate`, spike B) makes
+the tweak **superseded** with the setting named. `DXVK_CONFIG` = the person's entries, then
+Quiver's, `; `-separated. dxvk-nvapi is switched on (`PROTON_ENABLE_NVAPI=1`) for a launch
+with a DRS or NGX tweak if the environment doesn't already. GE's mirror switches are never
+set; when the person's settings set one (and `PROTONFIXES_DISABLE_UPSCALERS` isn't on) the
+plan and the Tweaks page warn (steer 5a). The DLSS indicator's registry write is undone once
+(`DLSSIndicator=0,DLSSGIndicator=0,`) at the next launch without it; Quiver records that it
+turned it on in `games/<dir>/tweaks/state.json`. The updater copy (steer 6) goes to the
+prefix's `drive_c/windows/system32/nvngx_update.exe`, only when the driver has the file and
+the build doesn't copy it itself (Proton Experimental does).
+
+**Capability probe.** GPUs from `/proc/driver/nvidia/gpus/*/information` and
+`/sys/class/drm/card*/device/vendor` (NVML isn't needed for the name, the series or the
+driver version, which comes from `/proc/driver/nvidia/version`); the RTX series and
+architecture from the model name. Proton builds: `files/lib/wine/{dxvk,vkd3d-proton,nvapi}/
+version` (`<sha> <component> (<describe>)`) and the names the schema's bindings test, found
+in `dxgi/d3d11/d3d9.dll`, `nvapi64.dll`, `d3d12(core).dll` and the `proton` script plus GE's
+protonfixes; cached in `<data>/tweaks/probe-cache.json` by the build's version file. The
+game's API: the Sight layer's engine name at the end of a session (`DXVK` → `dxvk`, `vkd3d`
+→ `d3d12`, other → `vulkan`), remembered in the game's `tweaks/state.json` for the next
+launch; `unknown` until a session ran with the layer. The anti-cheat flag is always false
+(no anti-cheat data is built yet; every phase-1 mechanism is a configuration mechanism,
+allowed for flagged games anyway, §9). The Steam route (`quiver steam-run`) probes no build
+(Steam picks it): version and name tests are assumed to hold and the plan notes it.
+
+**Evidence and effects** (steer 14). Every Quiver launch with a set tweak gets
+`<data>/games/<dir>/tweaks/sessions/<session>/` (persistent rather than in `/dev/shm`: it
+holds `effects.json`, read for the "Last session" column; the newest 30 are kept).
+`DXVK_LOG_PATH` and `DXVK_NVAPI_LOG_PATH` point there as `Z:/…/` (the form both accept, spike
+A2/B2), `DXVK_NVAPI_LOG_LEVEL=info`, `NVPRESENT_LOG_FILE` for Smooth Motion; a path the
+person set is kept and the plan says evidence isn't read. quiverd scans the logs every 3 s
+while the session runs and once at its end, for fixed lines only:
+
+| Mechanism | Confirmed by | Says |
+|---|---|---|
+| `dxvk` | an entry in DXVK's `Effective configuration:` block of `<exe>_dxgi.log`/`_d3d11.log`/`_d3d9.log` | "DXVK's effective configuration has dxgi.maxFrameRate = 160 (ACOrigins_dxgi.log)" |
+| `nvapi-drs` | `<-NvAPI_DRS_GetSetting (0x10e41df3/Override DLSS-SR presets = 0xb): OK` in `nvapi64.log` (the application asked for that setting and got Quiver's value; ids and NVIDIA's display names in `evidence::drs_name`) | "the game's DLSS asked for Override DLSS-SR presets and got the override (0xb; nvapi64.log)" |
+| `ngx` indicator | `Set ShowDlssIndicator in registry to 0x400` | "dxvk-nvapi switched the indicator on in the prefix's registry" |
+| `ngx` updater | files in the prefix's `drive_c/ProgramData/NVIDIA/NGX/models` at session end | "NVIDIA's updater has models in the prefix" |
+| `confirm` in the schema | a fixed line in the named log (HDR: `Color space: … HDR10_ST2084`; Smooth Motion: `Smooth Motion enabled [1]`, log level unverified) | its `says` |
+
+At the end, what is still `applied` becomes `unconfirmed` with why ("no DXVK log this
+session: DXVK didn't load", "the game didn't ask for this setting (it created no DLSS feature
+this session?)", "vkd3d-proton reports this only on the game's stderr"). `provided`,
+`superseded` and `unavailable` come from the plan. `measured` (the present ring against a
+cap) and `failed` (layer mechanisms) are in the type but not produced yet. Effects go to
+`effects.json`, `Event::TweaksEffect` and the session's perf catalog: producer `tweaks`,
+`tweaks.<id>` (text: "162 fps · dxvk ✓", "160 fps · by DLSS") and `tweaks.<id>.effect`
+(state), plus `tweaks.summary`, the Full preset's new last row (`CAP 162 · DLSS K? · LL on`,
+`?` while unconfirmed, unavailable and superseded ones left out). `PlaySession.tweaks`
+records the three revisions a session launched with.
+
+**Agents** (steer 12): game and profile tweaks Allow; the global scope (set, reset, preset,
+prefer), restores and `danger` tweaks need `confirmed`. **Escape hatch:** `QUIVER_TWEAKS=0` in
+quiverd's environment skips tweaks for every launch; `--options defaults` (safe launch) is
+not built, here or in Options.
+
+**CLI.** `quiver tweaks [list|get|set|reset|preset|prefer|explain|plan|status|sessions|
+history|restore|caps]`, `--json` everywhere, `--global` / GAME / `--profile`. A game ref
+(`3539`, `steam:620`) needs no library (works signed out); names are looked up.
+
+**Not built in phase 1** (beyond phases 2–3): the session layer (in-game changes) and live
+delivery of a bound tweak to a running mod (bound values reach the mod at the next launch);
+`measured` effects; evidence on the Steam route (no session dir there: the plan's env and
+notes go into `quiver steam-run`'s launch lines); providers from catalog game surfaces (the
+code takes any surface with `provides`, but no game surface declares one yet); a per-game
+deny-list; `tweak_page` options are linted but not yet shown on the Tweaks pages by the CLI
+(the app decides); the HUD chip row is one text metric rather than individually dimmed chips.
+
+### Spike results (2026-11-17, read-only and a scratch prefix)
+
+| # | Result |
+|---|---|
+| T1 (partial) | NVIDIA's 620.70.06 `.run` **does** contain `nvngx_update.exe`: Arch's official `nvidia-utils` 620.70.06 PKGBUILD installs it to `/usr/lib/nvidia/wine/` (615.78.08's didn't, so it's new in 620); the AUR `nvidia-utils-beta` package on this machine omits it (and `nvngx_dlssg.dll`) by not listing it. So the updater tweak works with Arch's own package, or once the AUR package adds the line. Proton Experimental's script copies `["_nvngx.dll", "nvngx.dll", "nvngx_update.exe"]` from the driver's wine dir (realpath of `libGLX_nvidia.so.0` + `/nvidia/wine`); GE-Proton11-12, Proton 11.0, 10.0 and UMU-10.0-4 copy only the first two. No Proton script reads `PROTON_ENABLE_NGX_UPDATER`; the driver's `_nvngx.dll` does. Whether the override and the updater take effect in a DLSS game is still open (needs the person). |
+| T2 | **`DXVK_CONFIG` beats `dxvk.conf` per key** (measured with a D3D11 test program in a scratch prefix, GE-Proton11-12's DXVK: env 30 + file 60 → 30.0 fps; file alone → 60.0; uncapped 663.7). `dxvk.conf` is read from the process's current directory. DXVK's `dxvk.maxFrameRate` takes precedence over `dxgi.`/`d3d9.maxFrameRate` (env "dxgi 30; dxvk 45" → 45 fps). D3D12: DXVK's dxgi calls vkd3d-proton's `SetTargetFrameRate` with `maxFrameRate` from Present (read in the source; not run), unless `VKD3D_FRAME_RATE` is set, which takes priority. |
+| T5 | dxvk-nvapi parses the DRS environment once, at the first `NvAPI_DRS_GetSetting`, prints `Applying the following DRS settings when requested by the application (N total):` with one `    0x<id>/<NVIDIA's name> = 0x<value>` line each (once per process), and then logs **every** `GetSetting` with `): OK` for a setting it has and `): Setting not found` otherwise. Values and keys are printed as hex ids and NVIDIA's display names, not the variable names. `DXVK_NVAPI_LOG_PATH` is a directory; the file is `nvapi64.log` (`nvapi.log` for 32-bit), opened in append mode (hence one dir per session). Whether NGX queries per feature creation or once is still open (T1). |
+| T6 | not done (needs a Steam game launched through `steam-run`). |
+| other | DXVK's `Engaging frame rate limiter.` is printed only by its own refresh-rate heuristic, not for an explicit `maxFrameRate` (§2 and §6 assumed otherwise; evidence uses the effective configuration instead). The `VkNvLowLatency2 implementation` lines are for native Vulkan games through dxvk-nvapi's layer; D3D games' Reflex shows as `<-NvAPI_D3D_SetSleepMode (Enabled/<µs>us): OK`. dxvk-nvapi's `DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS` writes `ShowDlssIndicator` and `DLSSG_IndicatorText` (REG_DWORD) under `HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore`, which Proton's default prefix creates (it only opens the key). GE's `PROTON_DLSS_INDICATOR` uses `setdefault`, so Quiver's value survives unless that switch is on. GE's `PROTON_DLSS_UPGRADE`, once it downloaded DLLs, also `setdefault`s `DXVK_NVAPI_DRS_SETTINGS` overrides. UMU-Proton-10.0-4's dxvk-nvapi (0.7.1) has no DRS variables at all; Proton 11.0's (0.9.2) knows FG presets and dynamic MFG but not `SL_DLSS_OVERRIDE`. vkd3d-proton's `VKD3D_SWAPCHAIN_PRESENT_MODE` values are case-sensitive (`IMMEDIATE`, `MAILBOX`, `FIFO`, `FIFO_RELAXED`, `FIFO_LATEST_READY`). NVIDIA's present layer is `VK_LAYER_NV_present` in `nvidia_layers.json` (`NVPRESENT_ENABLE_SMOOTH_MOTION=1`, vetoed by `DISABLE_LAYER_NV_PRESENT_1`); `NVPRESENT_LOG_FILE`/`NVPRESENT_LOG_LEVEL=4` per the README. |
+
+**Spikes that need the person** (with steps):
+
+1. **T1, DLSS override in a real game.** Pick a DLSS game Quiver launches (AC Origins with the
+   DLSS mod works only if the mod is removed from the profile, since it provides the preset).
+   `quiver tweaks set <game> dlss.sr.model=K dlss.indicator=on`, launch, check NVIDIA's
+   indicator in the corner (preset K?), quit, then `quiver tweaks sessions <game>`: the SR
+   effect should be `confirmed` from `nvapi64.log`. Send the session's `nvapi64.log` (its path
+   is printed) so the per-feature query timing (T5) can be read.
+2. **T1, the updater.** Either install Arch's `nvidia-utils` (it ships `nvngx_update.exe`) or
+   add `install -Dm755 nvngx_update.exe "$pkgdir/usr/lib/nvidia/wine/nvngx_update.exe"` to
+   the AUR `nvidia-utils-beta` PKGBUILD; then `quiver tweaks set <game> dlss.runtime=updater`,
+   launch twice, and check `<prefix>/drive_c/ProgramData/NVIDIA/NGX/models` (and the game's
+   stability on the second launch, NVIDIA bug 4776234).
+3. **T6, pressure-vessel.** For a Ubisoft game on Steam started through `quiver steam-run
+   %command%`: `quiver tweaks set <game> tex.anisotropy=16 dlss.sr.model=K`, add
+   `PROTON_LOG=1` to the game's launch settings (`quiver set <game> env.PROTON_LOG=1`), launch
+   from Steam, quit, and look in `~/steam-<appid>.log` (Proton writes the environment it was
+   started with near the top) for `DXVK_CONFIG=…samplerAnisotropy = 16` and
+   `DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on`. Both present: the route works as is; missing:
+   the Steam route needs `PRESSURE_VESSEL_…`-style passthrough or `STEAM_COMPAT_LAUNCHER_SERVICE`.
+4. **Smooth Motion's evidence line.** With an RTX 40/50: `quiver tweaks set <game>
+   fg.smooth_motion=on`, launch a DXVK game, quit, and look at the session's `nvpresent.log`
+   (empty means `NVPRESENT_LOG_LEVEL` is needed for the init lines; then the binding gets a
+   level too).
+5. **Measured caps.** Any game with `fps.cap=60` and the HUD on: compare the Full preset's FPS
+   with the `CAP 60` chip (the `measured` effect is the next step).
 
 ## Sources (tools)
 
