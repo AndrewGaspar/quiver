@@ -946,7 +946,7 @@ Each steer lists the options and a recommendation; none is decided yet.
 | Where | What it says | What's true |
 |---|---|---|
 | SIGHT §3.5, "FPS limiter" row | "set `DXVK_FRAME_RATE` at launch / MangoHud `fps_limit` live via its control socket" | `DXVK_FRAME_RATE` was removed in DXVK 3.0 (GE rewrites it into `DXVK_CONFIG`, Valve's Proton doesn't); MangoHud's `control=` socket handles only `hud`, `logging` and `fcat`, and live limits go through its inotify-watched config file. This document's `fps.cap` replaces the row |
-| `crates/quiverd/src/perf/launch.rs`, `ABOVE_SIGHT` | vkBasalt (`ENABLE_VKBASALT`) and lsfg-vk as `VK_LAYER_LS_frame_generation` (`ENABLE_LSFG`) | lsfg-vk v2's layer is `VK_LAYER_LSFGVK_frame_generation` and it no longer uses `ENABLE_LSFG` (profiles in its config decide; `DISABLE_LSFGVK` vetoes); NVIDIA Smooth Motion's `VK_LAYER_NV_present` (`NVPRESENT_ENABLE_SMOOTH_MOTION`) is missing. Both generate frames, so today a person using either gets an interpolated HUD |
+| `crates/quiverd/src/perf/launch.rs`, `ABOVE_SIGHT` | vkBasalt (`ENABLE_VKBASALT`) and lsfg-vk as `VK_LAYER_LS_frame_generation` (`ENABLE_LSFG`) | lsfg-vk v2's layer is `VK_LAYER_LSFGVK_frame_generation` and it no longer uses `ENABLE_LSFG` (profiles in its config decide; `DISABLE_LSFGVK` vetoes); NVIDIA Smooth Motion's `VK_LAYER_NV_present` (`NVPRESENT_ENABLE_SMOOTH_MOTION`) is missing. Both generate frames, so today a person using either gets an interpolated HUD. **Fixed 2026-11-17** (both kept above Sight; v1 still recognised) |
 | SIGHT §8, "vkBasalt, lsfg-vk" row | | add NVIDIA Smooth Motion and low_latency_layer to the coexistence list |
 
 ## Sources (tools)

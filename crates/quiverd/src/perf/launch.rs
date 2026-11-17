@@ -25,9 +25,18 @@ use quiver_api::perf::{Captures, HudConfig, LaunchPerfPlan};
 pub const ENV_SIGHT: &str = "QUIVER_SIGHT";
 pub const SIGHT_LAYER: &str = "VK_LAYER_QUIVER_sight";
 pub const OBS_LAYER: &str = "VK_LAYER_OBS_vkcapture_64";
-/// Layers that must stay above Sight (closer to the application), and the variable that
-/// turns each on.
-const ABOVE_SIGHT: [(&str, &str); 2] = [("VK_LAYER_VKBASALT_post_processing", "ENABLE_VKBASALT"), ("VK_LAYER_LS_frame_generation", "ENABLE_LSFG")];
+/// Layers that must stay above Sight (closer to the application), the variables that turn each
+/// on (any), and the one that vetoes it. Frame generators belong here, or the HUD gets
+/// interpolated with the game.
+const ABOVE_SIGHT: [(&str, &[&str], Option<&str>); 4] = [
+    ("VK_LAYER_VKBASALT_post_processing", &["ENABLE_VKBASALT"], None),
+    // lsfg-vk v1.
+    ("VK_LAYER_LS_frame_generation", &["ENABLE_LSFG"], None),
+    // lsfg-vk v2: a config (or configless env mode) decides; DISABLE_LSFGVK vetoes.
+    ("VK_LAYER_LSFGVK_frame_generation", &["LSFGVK_CONFIG", "LSFGVK_ENV"], Some("DISABLE_LSFGVK")),
+    // NVIDIA Smooth Motion (the driver's implicit present layer).
+    ("VK_LAYER_NV_present", &["NVPRESENT_ENABLE_SMOOTH_MOTION"], Some("DISABLE_LAYER_NV_PRESENT_1")),
+];
 /// MangoHud's logging key moves here (§1.3).
 pub const MANGOHUD_LOGGING_KEY: &str = "Shift_L+F7";
 
@@ -46,8 +55,9 @@ pub fn uses_obs_capture(env: &BTreeMap<String, String>, wrappers: &[String]) -> 
 /// The Vulkan layer order captures imply, application first.
 pub fn layer_order(captures: Captures, env: &BTreeMap<String, String>, obs: bool) -> Vec<String> {
     let mut out: Vec<String> = env.get("VK_INSTANCE_LAYERS").map(|v| v.split(':').filter(|l| !l.is_empty() && *l != SIGHT_LAYER && *l != OBS_LAYER).map(str::to_owned).collect()).unwrap_or_default();
-    for (layer, var) in ABOVE_SIGHT {
-        if truthy(env, var) && !out.iter().any(|l| l == layer) {
+    for (layer, vars, veto) in ABOVE_SIGHT {
+        let on = vars.iter().any(|v| truthy(env, v)) && !veto.is_some_and(|v| env.contains_key(v));
+        if on && !out.iter().any(|l| l == layer) {
             out.push(layer.into());
         }
     }
@@ -175,6 +185,10 @@ mod tests {
         // Only layers that are on: vkBasalt off, lsfg-vk on.
         let p = plan(&on(), &sess(), &env(&[("ENABLE_VKBASALT", "0"), ("ENABLE_LSFG", "1")]), &[], None);
         assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_LS_frame_generation:VK_LAYER_QUIVER_sight");
+        let p = plan(&on(), &sess(), &env(&[("LSFGVK_CONFIG", "/s/lsfg.toml"), ("NVPRESENT_ENABLE_SMOOTH_MOTION", "1")]), &[], None);
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_LSFGVK_frame_generation:VK_LAYER_NV_present:VK_LAYER_QUIVER_sight");
+        let p = plan(&on(), &sess(), &env(&[("LSFGVK_ENV", "1"), ("DISABLE_LSFGVK", "1")]), &[], None);
+        assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_QUIVER_sight");
         // The user's own list is kept, in front, without duplicates of ours.
         let p = plan(&on(), &sess(), &env(&[("VK_INSTANCE_LAYERS", "VK_LAYER_mine:VK_LAYER_QUIVER_sight:VK_LAYER_VKBASALT_post_processing"), ("ENABLE_VKBASALT", "1")]), &[], None);
         assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_mine:VK_LAYER_VKBASALT_post_processing:VK_LAYER_QUIVER_sight");
