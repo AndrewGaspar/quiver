@@ -12,7 +12,8 @@
 //! it onto a game frame), then prints timings and RSS. `--headless` forces GPUI's headless
 //! platform even when a display server is available; otherwise the platform follows the
 //! environment (Wayland or X11 if `WAYLAND_DISPLAY`/`DISPLAY` is set, else headless). The
-//! off-screen window never uses the display connection either way.
+//! off-screen window never uses the display connection either way. A sample 2x preview is
+//! next to this file (`hud_offscreen-2x.png`).
 
 use std::cell::RefCell;
 use std::path::PathBuf;
