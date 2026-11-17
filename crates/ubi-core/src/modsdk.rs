@@ -362,6 +362,34 @@ impl ModRegistry {
         Ok(n)
     }
 
+    /// Take mod channels on a listener of its own, as the broker would (tests, tools): each
+    /// connection starts with a `BrokerRequest::ModChannel` line, answered `Ok`.
+    pub async fn serve_listener(self: Arc<Self>, listener: tokio::net::TcpListener) -> Result<()> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let this = self.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut r = tokio::io::BufReader::new(r);
+                let first = match read_line_capped(&mut r, 64 * 1024).await {
+                    Ok(Some(l)) => l,
+                    _ => return,
+                };
+                let Ok(ubi_ipc::BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid }) = serde_json::from_slice(&first)
+                else {
+                    return;
+                };
+                if w.write_all(b"\"ok\"\n").await.is_err() {
+                    return;
+                }
+                let origin = ChannelOrigin { product_id: uplay_id, account: account_id, session, profile, bridge_conn: conn, client_pid };
+                if let Err(e) = this.serve(origin, r, w).await {
+                    tracing::info!("mod channel ended: {e:#}");
+                }
+            });
+        }
+    }
+
     /// Serve one mod channel (the broker already answered `Ok`): `hello` → `welcome`, then
     /// messages both ways until either side closes.
     pub async fn serve<R, W>(self: &Arc<Self>, origin: ChannelOrigin, mut reader: R, mut writer: W) -> Result<()>
