@@ -917,9 +917,10 @@ anti-cheat runtimes.
 
 ---
 
-## 11. Steers wanted
+## 11. Steers
 
-Each steer lists the options and a recommendation; none is decided yet.
+**Decided 2026-11-17:** steers 1–7 as recommended (the user's answers); 8–15 follow the
+recommendation unless the user says otherwise.
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
