@@ -5,7 +5,8 @@
 //! through atomics at these offsets, and copies the rest word by word, because the other side
 //! of every mapping is another process (and, for rings, an untrusted one).
 //!
-//! Little-endian x86-64 only, like the rest of the design.
+//! Little-endian x86 only (64-bit, and 32-bit for a 32-bit layer or mod: every 64-bit field
+//! sits at a multiple of 8, so the layouts are the same).
 
 #[cfg(target_endian = "big")]
 compile_error!("ubi-perf's shared-memory formats are little-endian");
