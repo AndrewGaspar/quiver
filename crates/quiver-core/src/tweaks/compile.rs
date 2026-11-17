@@ -131,7 +131,7 @@ pub fn requires(r: &Requires, caps: &Capabilities, tweaks: &BTreeMap<String, Val
         return Err("needs an NVIDIA RTX GPU".into());
     }
     if let Some(s) = r.rtx_series
-        && !gpu.and_then(|g| g.rtx_series).is_some_and(|have| have >= s)
+        && gpu.and_then(|g| g.rtx_series).is_none_or(|have| have < s)
     {
         return Err(format!("needs {}", series_word(s)));
     }

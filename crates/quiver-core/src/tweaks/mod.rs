@@ -475,9 +475,16 @@ pub fn provision(p: &ProviderInfo, r: &Resolved, prefer: Prefer, tweaks: &BTreeM
     }
 }
 
+/// Surface key → option → (where the value comes from, the value).
+pub type Bound = BTreeMap<String, BTreeMap<String, (ValueSource, Value)>>;
+
+/// One op's result: (tweak id, outcome if already decided (`Unchanged`, `Rejected`), value
+/// before, value after).
+pub type OpResult = (String, Option<Outcome>, Option<Value>, Option<Value>);
+
 /// The bound tweak values for a profile's surfaces (surface key → option → (source, value)):
 /// the default layer between mod config patches and the profile's own values (steer 8).
-pub fn bound_for(ctx: &Ctx) -> Result<BTreeMap<String, BTreeMap<String, (ValueSource, Value)>>> {
+pub fn bound_for(ctx: &Ctx) -> Result<Bound> {
     let game = GameRef::ubisoft(ctx.store.product_id());
     let scopes = Scopes::load(ctx.store.data_dir(), Some(&game), Some((&ctx.store, &ctx.profile_id)))?;
     let resolved = resolve(schema(), &scopes, ScopeKind::Profile);
@@ -485,7 +492,7 @@ pub fn bound_for(ctx: &Ctx) -> Result<BTreeMap<String, BTreeMap<String, (ValueSo
     let prefer = scopes.prefer(ScopeKind::Profile);
     let display = display();
     let (provs, _) = providers(ctx);
-    let mut out: BTreeMap<String, BTreeMap<String, (ValueSource, Value)>> = BTreeMap::new();
+    let mut out = Bound::new();
     for p in &provs {
         let Some(r) = resolved.get(&p.tweak) else { continue };
         let (pref, pref_at) = prefer.get(&p.tweak).copied().map_or((Prefer::Provider, None), |(p, k)| (p, Some(k)));
@@ -511,8 +518,7 @@ pub fn bound_for(ctx: &Ctx) -> Result<BTreeMap<String, BTreeMap<String, (ValueSo
 pub struct Applied {
     pub values: BTreeMap<String, Value>,
     pub prefer: BTreeMap<String, Value>,
-    /// (id, outcome if already decided (`Unchanged`, `Rejected`), before, after).
-    pub outcomes: Vec<(String, Option<Outcome>, Option<Value>, Option<Value>)>,
+    pub outcomes: Vec<OpResult>,
     pub changes: Vec<String>,
     pub dangers: Vec<String>,
 }
