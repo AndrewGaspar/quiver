@@ -43,6 +43,6 @@ libc = "0.2"
 tempfile = "3"
 toml = "1"
 # GPUI from Zed's repository, pinned: the newest revision that builds with Rust 1.96 and has
-# layer-shell windows and the wgpu headless renderer (see crates/ubi-ui/README.md).
+# layer-shell windows and the wgpu headless renderer (crates/ubi-ui/src/lib.rs).
 gpui = { git = "https://github.com/zed-industries/zed", rev = "482e76524bd33d8cbdfc352f1fef3eefbf2fad92" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "482e76524bd33d8cbdfc352f1fef3eefbf2fad92", features = ["wayland", "x11"] }

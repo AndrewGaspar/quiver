@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn every_icon_the_ui_names_is_embedded() {
         let mut missing = vec![];
-        for name in crate::ui::Icon::ALL.iter().map(|i| i.path()) {
+        for name in crate::components::Icon::ALL.iter().map(|i| i.path()) {
             if Assets::get(name).is_none() {
                 missing.push(name);
             }

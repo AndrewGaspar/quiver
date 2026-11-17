@@ -172,21 +172,21 @@ impl Palette {
                 "color10", "color11", "color12", "color13", "color14", "color15",
             ];
             for i in 0..8 {
-                if !r.contains_key(NAMES[i]) {
-                    if let Some(v) = raw.get(COLORS[i]) {
-                        r.insert(NAMES[i], v.clone());
-                    }
+                if !r.contains_key(NAMES[i])
+                    && let Some(v) = raw.get(COLORS[i])
+                {
+                    r.insert(NAMES[i], v.clone());
                 }
-                if !r.contains_key(BRIGHT[i]) {
-                    if let Some(v) = raw.get(COLORS[i + 8]) {
-                        r.insert(BRIGHT[i], v.clone());
-                    }
+                if !r.contains_key(BRIGHT[i])
+                    && let Some(v) = raw.get(COLORS[i + 8])
+                {
+                    r.insert(BRIGHT[i], v.clone());
                 }
             }
-            if !r.contains_key("muted") {
-                if let Some(v) = raw.get("color8") {
-                    r.insert("muted", v.clone());
-                }
+            if !r.contains_key("muted")
+                && let Some(v) = raw.get("color8")
+            {
+                r.insert("muted", v.clone());
             }
         }
         let get = |k: &str| -> Option<Color> { r.get(k).and_then(|v| Color::parse(v)) };

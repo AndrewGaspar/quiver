@@ -220,10 +220,8 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) {
             let mut watching = false;
             let mut last = read_generation(&dir);
             loop {
-                if !watching {
-                    if let Some(w) = watcher.as_mut() {
-                        watching = w.watch(&dir, RecursiveMode::NonRecursive).is_ok();
-                    }
+                if !watching && let Some(w) = watcher.as_mut() {
+                    watching = w.watch(&dir, RecursiveMode::NonRecursive).is_ok();
                 }
                 // Wake on an inotify event, or every few seconds regardless.
                 let woke = rx.recv_timeout(Duration::from_secs(3));

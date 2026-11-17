@@ -19,17 +19,16 @@
 
 mod app;
 mod art;
-mod assets;
 mod demo;
 mod gamepad;
 mod model;
 mod nav;
-mod palette;
 mod selfupdate;
 mod source;
-mod text_input;
-mod theme;
 mod ui;
+
+// The design system lives in `ubi-ui`; these keep the `crate::theme::…` paths the screens use.
+use ubi_ui::{assets, text_input, theme};
 
 use std::future::Future;
 use std::sync::OnceLock;

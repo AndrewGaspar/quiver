@@ -488,7 +488,7 @@ needs your own Ubisoft account and only runs games you own.
 - `proto/`: protobuf definitions of Ubisoft Connect's protocols, originally vendored from
   [YoobieRE/ubisoft-demux-node](https://github.com/YoobieRE/ubisoft-demux-node) and refreshed
   from the client's embedded descriptors with `tools/proto-extract` (see `proto/README.md`).
-- `crates/ubi-app/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
+- `crates/ubi-ui/src/text_input.rs`: adapted from GPUI's `examples/input.rs` (Apache-2.0,
   Copyright Zed Industries).
-- `crates/ubi-app/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
+- `crates/ubi-ui/assets`: Geist and Geist Mono (OFL), Archivo (OFL) and Lucide icons (ISC),
   with their license files.
