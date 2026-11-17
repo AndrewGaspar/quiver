@@ -7,6 +7,7 @@ mod achievements;
 mod downloads;
 mod exports;
 mod mods;
+mod perf;
 mod info;
 mod options;
 mod savestores;
@@ -88,6 +89,9 @@ struct Daemon {
     options: options::Options,
     /// Mods connected through the SDK pipe (`quiver_mod.h`), via bridges.
     mod_sdk: Arc<ubi_core::modsdk::ModRegistry>,
+    /// Performance metrics and the HUD (design/SIGHT-HUD.md): per-session registry,
+    /// producers, subscriptions, HUD models.
+    perf: Arc<perf::PerfHub>,
     /// Achievement unlock status and reports (shared with the broker).
     achievements: Arc<ubi_core::achievements::Engine>,
 }
@@ -534,6 +538,9 @@ impl Daemon {
             Request::Mods(req) => self.handle_mods(source, req).await?,
             Request::Options(req) => self.handle_options(source, req).await?,
             Request::ModSdk(ubi_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
+            // The connection loop passes connection-bound perf requests (subscriptions, HUD
+            // attachment) with their connection; this path has none.
+            Request::Perf(req) => self.handle_perf(source, None, req).await?,
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
@@ -633,6 +640,10 @@ impl Daemon {
         plan.session = Some(session_id.clone());
         let mut detail = mods::plan_lines(&plan.api);
         detail.extend(self.options_launch(&game, &mut plan, &session_id));
+        // Perf (design/SIGHT-HUD.md): the session's metrics, and with the HUD enabled for
+        // the game, its session dir, the Sight layer's environment and the MangoHud remap.
+        let perf_profile = plan.api.profile.as_ref().map(|p| p.id.clone());
+        detail.extend(self.perf_launch(&session_id, &game, perf_profile.as_deref(), &mut plan.api.settings));
         if !detail.is_empty() {
             self.update_job(id, |j| j.detail = detail);
         }
@@ -682,7 +693,10 @@ impl Daemon {
                         *exit.lock().unwrap() = code;
                         ev_this.update_job(id, |j| j.status = "Game exited".into())
                     }
-                    LaunchEvent::Pids(pids) => ev_this.options_pids(&sid, pids),
+                    LaunchEvent::Pids(pids) => {
+                        ev_this.perf.set_pids(&sid, pids.clone());
+                        ev_this.options_pids(&sid, pids)
+                    }
                 })
                 .await
             })
@@ -690,6 +704,7 @@ impl Daemon {
             this.running.lock().unwrap().remove(&product_id);
             let code = *exit_code.lock().unwrap();
             this.options_session_end(&session_id, code).await;
+            let perf_summary = this.perf.end(&session_id);
             if let Some(start) = *started_at.lock().unwrap() {
                 let end = chrono::Utc::now();
                 let session = ubi_api::PlaySession {
@@ -703,7 +718,9 @@ impl Daemon {
                 };
                 // Options: the session id and options revision go beside it (PlaySession
                 // gets the fields once every client knows them).
-                if let Err(e) = settings::record_session_with(product_id, &session, json!({ "session": session_id, "options_revision": options_revision })) {
+                // Perf: the session's summary (`PerfRequest::Summaries` reads it back).
+                let extra = json!({ "session": session_id, "options_revision": options_revision, "perf": perf_summary });
+                if let Err(e) = settings::record_session_with(product_id, &session, extra) {
                     tracing::warn!("recording play session: {e:#}");
                 }
             }
@@ -749,7 +766,11 @@ fn record_bridge_session(f: &ubi_core::playsession::Finished) {
     }
 }
 
+/// Connection ids, for per-connection perf state.
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
 async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
+    let conn_id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (r, mut w) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
     let writer = tokio::spawn(async move {
@@ -771,6 +792,21 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
             }
         };
         if matches!(env.request, Request::Subscribe) {
+            let mut perf_events = daemon.perf.broadcast.subscribe();
+            let tx4 = tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match perf_events.recv().await {
+                        Ok(e) => {
+                            if tx4.send(Reply::Perf(e)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
             let mut options = daemon.options.events.subscribe();
             let tx3 = tx.clone();
             tokio::spawn(async move {
@@ -805,13 +841,19 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
         let daemon = daemon.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let reply = match daemon.handle(&env.source, env.request).await {
+            let result = match env.request {
+                // Perf subscriptions and HUD attachments belong to this connection.
+                Request::Perf(req) => daemon.handle_perf(&env.source, Some(perf::ConnCtx { id: conn_id, tx: tx.clone() }), req).await,
+                req => daemon.handle(&env.source, req).await,
+            };
+            let reply = match result {
                 Ok(result) => Reply::Ok { id: env.id, result },
                 Err(e) => Reply::Err { id: env.id, error: format!("{e:#}") },
             };
             let _ = tx.send(reply);
         });
     }
+    daemon.perf.disconnect(conn_id);
     drop(tx);
     let _ = writer.await;
 }
@@ -889,6 +931,9 @@ async fn main() -> Result<()> {
     // Stand-in sinks until the Options backend and the perf hub install theirs
     // (`set_options_sink`, `set_metrics_sink`).
     let mod_sdk = ubi_core::modsdk::ModRegistry::logging();
+    // The perf hub takes mods' metrics.
+    let perf = perf::PerfHub::start(launcher::data_dir(), perf::shm_root());
+    mod_sdk.set_metrics_sink(perf::mods::PerfModSink::new(&perf));
     broker_svc.set_mods(mod_sdk.clone());
     let ach = achievements::engine(accounts.clone(), events.clone());
     broker_svc.set_achievements(ach.clone());
@@ -935,6 +980,7 @@ async fn main() -> Result<()> {
         sessions,
         options: options::Options::default(),
         mod_sdk,
+        perf,
         achievements: ach,
     });
     options::test_session(&daemon);

@@ -1,0 +1,18 @@
+{
+    "file_format_version": "1.2.1",
+    "layer": {
+        "name": "VK_LAYER_QUIVER_sight",
+        "type": "GLOBAL",
+        "library_path": "@LIBRARY_PATH@",
+        "library_arch": "@LIBRARY_ARCH@",
+        "api_version": "1.3.281",
+        "implementation_version": "1",
+        "description": "Quiver Sight: present telemetry and the in-game performance HUD (enabled per launch by Quiver)",
+        "enable_environment": {
+            "QUIVER_SIGHT": "1"
+        },
+        "disable_environment": {
+            "QUIVER_SIGHT_DISABLE": "1"
+        }
+    }
+}

@@ -55,7 +55,9 @@ fn read_request_shape() {
     assert!(!describe_req(&a).to_string().contains("secret"));
 }
 
-fn rsp_blob(entries: &[(&str, &str, &[(u32, Option<u64>)])]) -> uplay::AchievementBlob {
+type BlobEntry<'a> = (&'a str, &'a str, &'a [(u32, Option<u64>)]);
+
+fn rsp_blob(entries: &[BlobEntry]) -> uplay::AchievementBlob {
     uplay::AchievementBlob {
         product_achievements: entries
             .iter()
@@ -262,6 +264,7 @@ struct Fake {
 }
 
 impl Fake {
+    #[allow(clippy::type_complexity)]
     fn with(entries: &[(&str, &str, &[(u32, u64)])]) -> Arc<Self> {
         let f = Self::default();
         for (s, p, items) in entries {

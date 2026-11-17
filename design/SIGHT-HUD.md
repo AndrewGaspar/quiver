@@ -752,8 +752,8 @@ messages added; protocol-1 peers ignore them):
 | ← | `welcome` | + `perf: { session_dir_win, clock: "qpc" }` | where rings live, how to address them |
 | mod → | `metrics` | `defs: [descriptor…]` | declare or update (runtime); static ones come from the version's `quiver-options.toml` |
 | ← | `metrics_ok` | `ids: { name → index }`, `rejected: { name → reason }` | indices used in ring records |
-| mod → | `m` | `t` (QPC), `v: { index → value }` | gauges, states, text, counters; the SDK coalesces to ≤ 10/s |
-| mod → | `mark` | `index`, `t`, `dur`?, `label`? | low-rate events (FG reset, teleport) |
+| mod → | `m` | `ts` (QPC), `v: { index → value }` | gauges, states, text, counters; the SDK coalesces to ≤ 10/s |
+| mod → | `mark` | `index`, `ts`, `dur`?, `label`? | low-rate events (FG reset, teleport) |
 | mod → | `ring_req` | `bytes` (≤ 1 MiB) | ask for a ring |
 | ← | `ring` | `path_win`, `bytes`, `nonce` | the bridge created and sized the file; the SDK maps it |
 | ← | `perf_ctl` | `{ rings: on/off, detail: basic/full }` | quiverd tells mods whether anyone consumes per-frame data (no HUD, no recording: mods can skip work) |
@@ -782,7 +782,16 @@ per-user parent, and passes it to the game:
 ```
 QUIVER_SESSION=s-4kq2
 QUIVER_PERF_DIR=/dev/shm/quiver-1000/s-4kq2              # for the layer (Linux code)
+QUIVER_SIGHT=1                                           # the layer manifest's enable_environment
 ```
+
+As built (quiverd's perf hub, `crates/ubid/src/perf/launch.rs`): these go to a launch only
+while the HUD is enabled for the game (`quiver hud enable GAME`; off by default for now).
+`QUIVER_SESSION` is the launch's one session id (Options and the mod pipe use the same). With
+obs-vkcapture in use (`OBS_VKCAPTURE=1` or the `obs-gamecapture` wrapper) quiverd also sets
+`VK_INSTANCE_LAYERS` to the order of §2.12; with MangoHud, `MANGOHUD_CONFIG` gains
+`toggle_logging=Shift_L+F7` (`read_cfg` first when the user set none). A layer installed under
+Quiver's data dir (`sight/layer/*.json`) is added with `VK_ADD_IMPLICIT_LAYER_PATH`.
 
 Wine copies the Unix environment into the Windows one, so the SDK sees both; it builds the
 Windows path itself (`Z:\dev\shm\quiver-1000\s-4kq2\…`), falling back to Wine's
@@ -837,57 +846,82 @@ One ring per writer process per producer (the layer: one per process; a mod: one
 connection). Fixed-size slots, many writer threads, many readers, readers never write.
 
 ```c
-/* Shared by the SDK (C), the layer (Rust) and quiverd (Rust). Little-endian, x86-64.
- * Offsets are fixed; the header is one 4 KiB page. */
+/* Shared by the SDK (C), the layer (Rust) and quiverd (Rust). Little-endian x86 (32- and
+ * 64-bit lay out the same). Offsets are fixed; the header is one 4 KiB page. As built in
+ * crates/ubi-perf (layout.rs), mirrored and checked by include/quiver_perf.h. */
 #define QV_RING_MAGIC   0x474E495256515551ull   /* "QUQVRING" */
 #define QV_RING_VERSION 1
 
+typedef struct qv_status_block {    /* 2 KiB at offset 192 */
+    uint64_t seq;               /* seqlock: odd while the writer updates it */
+    uint32_t len;               /* valid bytes in data */
+    uint32_t format;            /* 0 none, 1 = qv_layer_status */
+    uint8_t  data[2032];
+} qv_status_block;
+
 typedef struct qv_ring_header {
     uint64_t magic;             /* written last at creation (release) */
-    uint16_t version, header_bytes;
+    uint16_t version, header_bytes;   /* 1, 4096 */
     uint16_t slot_bytes;        /* 128 */
     uint16_t clock;             /* 1 = QPC ticks, 2 = CLOCK_MONOTONIC_RAW ns */
-    uint32_t slot_count;        /* power of two */
+    uint32_t slot_count;        /* power of two, 16..8192 */
     uint32_t producer_kind;     /* 1 layer, 2 mod */
     uint64_t clock_freq;        /* ticks per second (QPC: 10,000,000 under Wine 10) */
     uint8_t  nonce[16];         /* written by the creator, reported out of band */
     uint32_t writer_pid;        /* Linux pid for the layer; Windows pid for mods */
     uint32_t schema_rev;        /* bumps when the producer's metric indices change */
-    _Alignas(64) uint64_t reserve;   /* next slot to reserve (writers: fetch_add) */
-    _Alignas(64) uint64_t heartbeat; /* writer's clock, updated ≥ 1/s even when idle */
-    uint64_t dropped;           /* records the writer discarded (ring disabled, overflow) */
-    _Alignas(64) uint8_t status[2048];  /* producer status block (seqlocked): the layer puts
-                                           swapchain extent/format/colour space, present mode,
-                                           low_latency2 in use, "drawing ok" counter here */
+    uint8_t  _pad0[8];
+    uint64_t reserve;           /* offset 64, own cache line: next slot (writers: fetch_add) */
+    uint8_t  _pad1[56];
+    uint64_t heartbeat;         /* offset 128: writer's clock, updated ≥ 1/s even when idle */
+    uint64_t dropped;           /* records the writer discarded (busy slot, disabled, …) */
+    uint8_t  _pad2[48];
+    qv_status_block status;     /* offset 192: the layer's qv_layer_status (swapchain extent,
+                                   format, colour space, present mode, low_latency2, drawn and
+                                   present counters, draw error, device and engine names) */
+    uint8_t  _pad3[1856];
 } qv_ring_header;
 
 typedef struct qv_record {      /* 128 bytes */
-    uint64_t commit;            /* = slot index + 1, stored last with release ordering */
-    uint32_t metric;            /* index from metrics_ok (or a layer built-in) */
-    uint32_t flags;             /* frame: REAL 1, GENERATED 2, NOFG 4; event: has_label 8 */
-    uint64_t key;               /* correlation key (present seq, frame id) */
+    uint64_t commit;            /* = slot index + 1, stored last with release ordering;
+                                   high bit QV_COMMIT_BUSY while a writer holds the slot */
+    uint16_t metric;            /* index from metrics_ok, 1..64 (layer: 1 = present); 0 invalid */
+    uint8_t  flags;             /* frame: REAL 1, GENERATED 2, NOFG 4; event: HAS_LABEL 8,
+                                   HAS_DURATION 16; layer present: PRESENT_ID 32, PRESENT_HUD 64 */
+    uint8_t  nfields;           /* valid entries in f, ≤ 12 */
     uint32_t swapchain;         /* writer-chosen id; changes on recreate */
-    uint32_t nfields;
+    uint64_t key;               /* correlation key (present seq, frame id, present id) */
     int64_t  t;                 /* the record's own time in the ring's clock */
-    int64_t  f[12];             /* frame fields / series value (f64 bits) / event duration */
+    int64_t  f[12];             /* frame fields / series value (f64 bits in f[0]) / event:
+                                   duration in f[0], 48 label bytes in f[1..6] */
 } qv_record;
 ```
 
-Writer: `i = atomic_fetch_add(&h->reserve, 1)`; slot `i & (n-1)`; copy the record with
-`commit = 0`, then `atomic_store_release(&slot->commit, i + 1)`. No locks, no syscalls, no
-allocation. If the slot still holds an uncommitted record from a full lap ago (a writer thread
-died mid-write), the writer overwrites it; readers detect it by `commit`.
+(The first sketch here had `metric`, `flags`, `swapchain` and `nfields` as four `uint32_t`s,
+which with twelve fields is 136 bytes; narrowing `metric` to 16 bits and `flags`/`nfields` to 8
+keeps both the fields and 128-byte slots.)
+
+Writer: `i = atomic_fetch_add(&h->reserve, 1)`; slot `i & (n-1)`; **claim** the slot with a
+CAS of `commit` from a value below `i + 1` to `(i + 1) | QV_COMMIT_BUSY`; write the other fifteen
+words; `atomic_store_release(&slot->commit, i + 1)`. No locks, no syscalls, no allocation. If the
+CAS fails (another thread of the writer, a full lap behind, is still writing the slot, or it
+already holds a later lap) the record is dropped and counted in `dropped`, so two writers never
+write one slot and a committed record is always one writer's bytes.
 
 Reader (quiverd, the bridge in relay mode, later the layer reading a mod ring for graph tints):
 keeps its own cursor; reads `reserve` (acquire); for each index from its cursor, checks
-`slot.commit == index + 1` (else: not yet committed → stop and retry next tick; or overwritten
-because `reserve - index > n` → count as lost, skip ahead); copies the slot; re-checks `commit`
-after the copy (a writer lapping it mid-copy → discard). That is a per-slot sequence check, the
-seqlock idea applied to a log. 4096 slots × 128 bytes = 512 KiB holds ~13 s of three records per
-frame at 100 fps; quiverd drains every 50 ms.
+`slot.commit == index + 1` (committed: copy the slot, acquire fence, re-check `commit`; a
+writer claiming it for a later lap mid-copy → discard as torn). A later lap's value means
+overwritten → count as lost, skip ahead. Not claimed yet, or busy for this index, means not
+committed yet → stop and retry next poll; a slot that stays so for 4 polls while later slots
+exist (a writer thread that died mid-write) is skipped as lost. That is a per-slot sequence
+check, the seqlock idea applied to a log. 4096 slots × 128 bytes = 512 KiB holds ~13 s of three
+records per frame at 100 fps; quiverd drains every 50 ms and applies `Record::check` (metric
+index in range, ≤ 12 fields, known flags, not real and generated at once) to every record.
 
-The ring's **status block** uses a classic seqlock: the writer increments `seq` to odd, writes,
-increments to even; the reader copies and retries if `seq` changed or is odd.
+The ring's **status block** (`qv_status_block`) uses a classic seqlock in its own 16-byte
+header: the writer increments `seq` to odd, writes `len`, `format` and `data`, increments it to
+even; the reader copies and retries if `seq` changed or is odd.
 
 The **HUD image** (`hud.image`) is written by `quiver-sight` and read only by the layer. quiverd
 creates and sizes the file at session start (a 4 KiB header plus two buffers; tmpfs allocates
@@ -1035,6 +1069,17 @@ Events: `PerfCatalogChanged { session }`, `PerfUpdate` (per subscription only), 
 `Subscribe`r: today's `Subscribe` is a single `broadcast` channel. They need a per-connection
 sender in the connection loop (`crates/ubid/src/main.rs`), which is a small change but a new
 pattern.
+
+As built (phase 1, `crates/ubi-api/src/perf.rs`, `crates/ubid/src/perf/`): the requests are
+`Request::Perf(PerfRequest)` (`Sessions`, `Catalog`, `Subscribe`/`Unsubscribe`, `HudGet`/`HudSet`,
+`HudToggle`, `HudNext`, `HudAttach`, `HudStatus`, `HudLayouts`/`HudLayout`, `HudKeybinds`,
+`LaunchEnv`, `Summaries`, `DevSession`). The events are a `PerfEvent` enum (`Update`, `HudModel`,
+`CatalogChanged`, `HudChanged`, `Session`) sent as `Reply::Perf` beside `Reply::Event`, as Options
+does with `Reply::Options`, so clients built before them skip the line instead of failing on an
+unknown `Event`; `Client::subscribe_perf` receives them. `Update` and `HudModel` go only to the
+connection that subscribed or attached; the rest to every `Subscribe`r. The session summary is
+stored beside the `PlaySession` in `playtime.jsonl` (key `perf`), read with `Summaries`, until
+`PlaySession` can grow the field.
 
 ### 3.12 Consumers
 

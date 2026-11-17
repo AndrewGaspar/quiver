@@ -20,6 +20,7 @@ pub mod exports;
 pub mod mods;
 pub mod info;
 pub mod options;
+pub mod perf;
 pub mod savestores;
 pub mod setup;
 pub mod steamlib;
@@ -346,6 +347,9 @@ pub struct PlaySession {
     /// mod's current version moves on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mods: Vec<mods::ResolvedMod>,
+    // `perf` (a `perf::PerfSummary`, design/SIGHT-HUD.md §3.12) is recorded with the session
+    // in `playtime.jsonl` and read with `PerfRequest::Summaries`; it becomes a field here
+    // once every crate that builds `PlaySession`s by hand can take it.
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -622,6 +626,10 @@ pub enum Request {
     // ---- Mod SDK (appended; build/mod-sdk)
     /// Mods connected through the mod SDK (`quiver_mod.h`) in running games.
     ModSdk(mods::ModSdkRequest),
+    // ---- Performance metrics and the HUD (see [`perf`]); appended
+    /// Perf catalog, subscriptions, the HUD's settings, toggle and renderer attachment
+    /// (design/SIGHT-HUD.md §3.11).
+    Perf(perf::PerfRequest),
     // ---- Achievements (appended; build/achievements)
     /// Unlock status, the report journal, manual resends (see [`achievements`]).
     Achievements(achievements::AchievementsRequest),
@@ -648,6 +656,9 @@ pub enum Reply {
     /// Mod options events (after [`Request::Subscribe`]): on the wire beside [`Event`]s so
     /// that clients built before options ignore them (`{"options": {...}}`).
     Options(options::OptionsEvent),
+    /// Perf events (subscription updates, HUD models, perf broadcasts): beside [`Event`]s
+    /// so that clients built before them ignore them (`{"perf": {...}}`).
+    Perf(perf::PerfEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -709,6 +709,8 @@ pub struct Status {
 
 type ModeFn = Box<dyn Fn(u32) -> ReportMode + Send + Sync>;
 type EventFn = Box<dyn Fn(ubi_api::Event) + Send + Sync>;
+/// One lock per (account, product): journal read-modify-write and its upstream calls.
+type Locks = Mutex<HashMap<(String, u32), Arc<tokio::sync::Mutex<()>>>>;
 
 pub struct Engine {
     up: Arc<dyn Upstream>,
@@ -716,7 +718,7 @@ pub struct Engine {
     mode: ModeFn,
     events: EventFn,
     framing: Framing,
-    locks: Mutex<HashMap<(String, u32), Arc<tokio::sync::Mutex<()>>>>,
+    locks: Locks,
     refs: Mutex<HashMap<u32, AchRefs>>,
     defs: Mutex<HashMap<(u32, String), Achievements>>,
 }
@@ -975,10 +977,11 @@ impl Engine {
             let defs = self.definitions(product_id, &refs, "en-US").await.ok().flatten();
             self.announce(&j, &confirmed, defs.as_ref());
         }
-        if mode == ReportMode::On && j.has_sendable() {
-            if let Err(e) = self.flush(&user, product_id).await {
-                tracing::info!(product_id, achievement_id, "achievement report pending: {e:#}");
-            }
+        if mode == ReportMode::On
+            && j.has_sendable()
+            && let Err(e) = self.flush(&user, product_id).await
+        {
+            tracing::info!(product_id, achievement_id, "achievement report pending: {e:#}");
         }
         Ok(outcome)
     }
