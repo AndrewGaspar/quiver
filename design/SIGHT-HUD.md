@@ -1091,13 +1091,14 @@ pattern.
 As built (phase 1, `crates/quiver-api/src/perf.rs`, `crates/quiverd/src/perf/`): the requests are
 `Request::Perf(PerfRequest)` (`Sessions`, `Catalog`, `Subscribe`/`Unsubscribe`, `HudGet`/`HudSet`,
 `HudToggle`, `HudNext`, `HudAttach`, `HudStatus`, `HudLayouts`/`HudLayout`, `HudKeybinds`,
-`LaunchEnv`, `Summaries`, `DevSession`). The events are a `PerfEvent` enum (`Update`, `HudModel`,
-`CatalogChanged`, `HudChanged`, `Session`) sent as `Reply::Perf` beside `Reply::Event`, as Options
-does with `Reply::Options`, so clients built before them skip the line instead of failing on an
-unknown `Event`; `Client::subscribe_perf` receives them. `Update` and `HudModel` go only to the
-connection that subscribed or attached; the rest to every `Subscribe`r. The session summary is
-stored beside the `PlaySession` in `playtime.jsonl` (key `perf`), read with `Summaries`, until
-`PlaySession` can grow the field. `quiver steam-run` launches get a perf session too: it begins
+`LaunchEnv`, `Summaries`, `DevSession`). The events are `Event::PerfUpdate`, `HudModel`,
+`PerfCatalogChanged`, `HudChanged` and `PerfSession` on the wire (quiverd's perf code hands out a
+`PerfEvent` enum, `Update`, `HudModel`, `CatalogChanged`, `HudChanged`, `Session`, and the
+connection writer folds it into `Event`; daemons from before the fold sent `Reply::Perf`, which
+`Client` still reads). `Client::subscribe_perf` receives them as `PerfEvent`s, `subscribe` as
+`Event`s. `Update` and `HudModel` go only to the connection that subscribed or attached; the rest
+to every `Subscribe`r. The session summary is `PlaySession.perf` (key `perf` in `playtime.jsonl`,
+where it was stored before it was a field), also read with `Summaries`. `quiver steam-run` launches get a perf session too: it begins
 when steam-run asks for `SteamLaunchPlan { perf: true }` (its environment goes into the plan's
 `env`), ends with the Steam copy's play session, whose record carries the summary, and is
 dropped after 10 minutes if the game never starts (`crates/quiverd/src/perf/steam.rs`). Mods'

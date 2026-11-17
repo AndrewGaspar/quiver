@@ -132,6 +132,46 @@ pub fn load_session(store: &ModStore, session: &str) -> Result<SessionOptions> {
     Ok(serde_json::from_slice(&text)?)
 }
 
+/// The game's session records, newest first (unreadable ones skipped).
+pub fn sessions(store: &ModStore) -> Vec<SessionOptions> {
+    let dir = games_dir(store).join("sessions");
+    let mut out: Vec<SessionOptions> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.started));
+    out
+}
+
+/// Files in a version's folder that look like settings (INI-like text): what `options
+/// infer` can read. Install-relative, `/`-separated, sorted; at most `max`.
+pub fn config_files(dir: &Path, max: usize) -> Vec<String> {
+    const EXT: &[&str] = &["ini", "cfg", "conf", "txt", "toml", "json", "xml", "yaml", "yml", "properties"];
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(p);
+            } else if meta.len() <= 1 << 20
+                && p.extension().and_then(|x| x.to_str()).is_some_and(|x| EXT.contains(&x.to_ascii_lowercase().as_str()))
+                && let Ok(rel) = p.strip_prefix(dir)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort_by_key(|p| (p.matches('/').count(), p.to_ascii_lowercase()));
+    out.truncate(max);
+    out
+}
+
 // -- schemas --------------------------------------------------------------------------------
 
 /// Where a version's own schema is kept (beside its metadata).

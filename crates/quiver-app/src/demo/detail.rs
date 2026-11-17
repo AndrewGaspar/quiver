@@ -81,6 +81,10 @@ struct Mods {
     records: Vec<ModRecord>,
 }
 
+/// Mod options (`Request::Options`).
+mod options;
+pub use options::file_text as options_file_text;
+
 static DETAILS: LazyLock<Mutex<HashMap<usize, Detail>>> = LazyLock::new(Mutex::default);
 
 /// Answer a game-page request, or hand it back for `demo.rs` to answer.
@@ -180,6 +184,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }
             json!(d.restore(st, product_id, &backup)?)
         }
+        Request::Options(o) => options::handle(key, d, st, o, &mut events)?,
         Request::Mods(m) => {
             let (v, changed) = d.mods(st, m)?;
             if let Some(product_id) = changed {
@@ -336,7 +341,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 let profile_revision = profile.as_ref().map(|_| 1);
                 pt.sessions.insert(
                     0,
-                    quiver_api::PlaySession { started: ended - Span::seconds(seconds as i64), ended, seconds, settings_revision: rev, profile, profile_revision, mods: Vec::new() },
+                    quiver_api::PlaySession { started: ended - Span::seconds(seconds as i64), ended, seconds, settings_revision: rev, profile, profile_revision, mods: Vec::new(), ..Default::default() },
                 );
                 pt.total_seconds += seconds;
                 pt.last_played = Some(ended);
@@ -350,6 +355,16 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         demo.emit(e);
     }
     Ok(Ok(out))
+}
+
+/// Demo: an in-game options change while AC Origins runs (as Sight would make one).
+pub(super) fn options_in_game(demo: &Demo, st: &mut State) -> Result<Vec<Event>> {
+    let key = demo as *const Demo as usize;
+    let mut all = DETAILS.lock().unwrap();
+    let d = all.entry(key).or_insert_with(|| Detail::new(&st.entries));
+    let mut events = Vec::new();
+    options::simulate_in_game(key, d, st, &mut events)?;
+    Ok(events)
 }
 
 /// The text of a per-launch log in `<prefix>/quiver-run/` for the demo's games.
@@ -462,6 +477,7 @@ pub(super) fn steam_session(product_id: u32, app_id: u32, started: DateTime<Utc>
         holders: vec!["steam".into()],
         reported: true,
         steam_app_id: Some(app_id),
+        ..Default::default()
     }
 }
 

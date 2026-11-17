@@ -1123,7 +1123,7 @@ the overlay can show them next to the options.
     (b) in the MVP alongside aco-dlss (its `render_scale` writes `PixelDensity`); (c) later.
     *Recommend (a).*
 
-## As built (phase 1, except the app UI and the SDK transport)
+## As built (phase 1, except the SDK transport)
 
 - **Types:** `quiver_api::options` (schema, value handling shared with front ends, `SurfaceState`,
   `OptionOp`, `Outcome`, `OptionsChange`, `OptionsRevision`, `KeysReport`, `SessionOptions`,
@@ -1133,16 +1133,45 @@ the overlay can show them next to the options.
   options …` (`crates/quiver-cli/src/options.rs`).
 - **Requests** are `Request::Options(OptionsRequest)` (`list`, `set`, `diff`, `history`,
   `restore`, `revert_session`, `invoke`, `keys`, `schema`, `schema_set`, `infer`, `lint`,
-  `sessions`), not `ModsRequest` variants, and **events** are `Reply::Options(OptionsEvent)`
-  (`changed`, `live`, `crash`) beside `Reply::Event`: the app matches `ModsRequest` and
-  `Event` exhaustively, and it was not to be touched during the GPUI bump. Older clients
-  ignore both. `Client::subscribe_options` receives the events. Fold them into
-  `ModsRequest`/`Event` once the app has wildcard arms.
-- **C1:** `ActiveSession` and `PlaySession` have no new fields yet (the app builds them with
-  struct literals). `Request::Sessions` answers `session`, `profile`, `options_revision` and
-  `pids` on the wire (`SessionDetail`, flattened), and play sessions are stored with
-  `session` and `options_revision` beside them in `playtime.jsonl`. Launches put
-  `QUIVER_SESSION` in the bridge's and the game's environment.
+  `sessions`, and for the app `files` (a mod's INI-like files, for "infer from file") and
+  `session_records` (recent sessions' live changes and crash notes)), not `ModsRequest`
+  variants: they stay a request family of their own.
+- **Events** are `Event::OptionsChanged`, `OptionsLive`, `OptionsCrash` and `OptionsOutcome` (and
+  `ModChannel`, sent once the SDK pipe registers with `Options`), as the design has them.
+  They were `Reply::Options(OptionsEvent)` until the app had wildcard arms; quiverd's options
+  code still hands out `OptionsEvent`s and the connection writer folds them
+  (`Reply::folded`), and `Client` reads both forms (an older daemon's `Reply::Options` too),
+  delivering them to `subscribe()` and, as `OptionsEvent`, to `subscribe_options()`. Perf
+  events were folded the same way (`Event::PerfUpdate`, `HudModel`, `PerfCatalogChanged`,
+  `HudChanged`, `PerfSession`; `subscribe_perf()` unchanged). Clients from before the fold
+  skip the new `Event` lines as they skipped `Reply::Options`.
+- **C1:** `ActiveSession` has `session`, `profile`, `options_revision` and `pids` (filled in
+  by `Request::Sessions` and `OptionsRequest::Sessions`; `SessionDetail` is now an alias with
+  the same wire shape; `Event::SessionsChanged` doesn't fill them yet). `PlaySession` has
+  `session`, `options_revision` and `perf`, under the keys `playtime.jsonl` already used for
+  them, so older lines read into the fields. Launches put `QUIVER_SESSION` in the bridge's
+  and the game's environment.
+- **App** (`crates/quiver-app/src/ui/game/options/`): the Mods tab has views (Mod stack,
+  Options, History & changes, Keys, and Source), under the profile cards, which pick the
+  profile. Options: the stack's surfaces (mods without a schema say so and lead to Source),
+  game and runtime surfaces, the selected surface's pages with changed counts; a form per page
+  generated from the schema (bool, enum as segments or a list, int/float with steps, a track,
+  marks and named sentinels, key with a picker that shows who else uses each key, list, text),
+  the level switch, search, "changed only", `when` evaluated on the staged values, danger and
+  experimental badges, presets; who set each value and when; the profile's changes beside the
+  form with reset. Edits are staged in an unsaved bar (Save, Save for next launch while the
+  game runs, Discard; danger options ask in the bar) and saved as one revision; each row then
+  shows the daemon's outcome, and saved values the running game hasn't picked up show as
+  pending. Events update the page live (a notice says who changed what; unsaved session values
+  show as "in game now"; a crash offers "Revert this session"). History & changes: the newest
+  import (game, file edit, mod's menu) with Keep and Undo, profile comparison against the
+  defaults or another profile, revisions with their actors (agents' marked), restore and
+  revert session (second click confirms), crash notes. Keys: the function keys by owner,
+  conflicts, every binding with where to change it. Source: where the schema came from, its
+  checks and text; for a mod without one, its files, the guess and "Use this description"
+  (`schema_set`). Demo mode serves the aco-dlss catalog schema; `QUIVER_DEMO_DAEMON=1` sends
+  mods and options requests to the daemon at `XDG_RUNTIME_DIR` (a scratch one with
+  `QUIVER_TEST_SESSION`) while the rest stays fixtures.
 - **Catalog:** `options/*.toml` (compiled in by `quiver-core/build.rs`): `aco-dlss.toml` (all 63
   keys of `aco_dlss.ini`, classified from `src/core/config.cpp` and where each key is read;
   matched by product 3539 + a shipped `aco_dlss.ini`) and `acc-china-anisotropy.toml` (the

@@ -879,6 +879,7 @@ mod tests {
                 profile: s.profile.clone(),
                 profile_revision: None,
                 mods: if s.profile.is_some() { vec![m(if i < 2 { "v3" } else { "v2" })] } else { vec![] },
+                ..Default::default()
             })
             .collect();
         let profiles = vec![Profile { id: "p1".into(), name: "DLSS".into(), ..Default::default() }];

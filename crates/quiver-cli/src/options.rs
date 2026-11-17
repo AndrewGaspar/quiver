@@ -544,7 +544,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         }
         OptionsAction::Sessions => {
             let list: Vec<SessionDetail> = serde_json::from_value(call(OptionsRequest::Sessions).await?)?;
-            let list: Vec<&SessionDetail> = list.iter().filter(|s| s.base.product_id == product_id).collect();
+            let list: Vec<&SessionDetail> = list.iter().filter(|s| s.product_id == product_id).collect();
             if json {
                 return json_out(&list);
             }

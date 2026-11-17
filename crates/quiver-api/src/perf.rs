@@ -7,9 +7,9 @@
 //!
 //! Requests go in [`Request::Perf`](crate::Request::Perf). Events that only some connections
 //! get (a subscription's updates, an attached HUD renderer's models) and the perf broadcasts
-//! travel as [`Reply::Perf`](crate::Reply::Perf) beside the ordinary [`Event`](crate::Event)s,
-//! so clients built before them ignore them; [`Client::subscribe_perf`](crate::Client::subscribe_perf)
-//! receives them.
+//! are [`Event`](crate::Event)s on the wire (`Event::PerfUpdate`, `HudModel`, …; daemons from
+//! before that sent [`Reply::Perf`](crate::Reply::Perf), still read);
+//! [`Client::subscribe_perf`](crate::Client::subscribe_perf) receives them as [`PerfEvent`]s.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

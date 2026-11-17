@@ -311,7 +311,7 @@ pub enum LoginResult {
 }
 
 /// A game currently being played, as tracked by the daemon (from any launch path).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActiveSession {
     pub product_id: u32,
     /// User id of the account playing.
@@ -327,10 +327,24 @@ pub struct ActiveSession {
     /// The Steam app it was started from (`quiver steam-run`), if it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<u32>,
+    // ---- Addressing a running game (design/MOD-CONFIG.md C1; appended). Filled in by
+    // `Request::Sessions` and `OptionsRequest::Sessions` for games quiverd launched.
+    /// `s-…`, also `QUIVER_SESSION` in the game's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Mod profile id (`vanilla` for vanilla).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The options revision the game launched with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_revision: Option<u32>,
+    /// The game's processes, once known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pids: Vec<u32>,
 }
 
 /// One play session recorded by the daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaySession {
     pub started: DateTime<Utc>,
     pub ended: DateTime<Utc>,
@@ -347,9 +361,18 @@ pub struct PlaySession {
     /// mod's current version moves on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mods: Vec<mods::ResolvedMod>,
-    // `perf` (a `perf::PerfSummary`, design/SIGHT-HUD.md §3.12) is recorded with the session
-    // in `playtime.jsonl` and read with `PerfRequest::Summaries`; it becomes a field here
-    // once every crate that builds `PlaySession`s by hand can take it.
+    // ---- appended (design/MOD-CONFIG.md §3, SIGHT-HUD.md §3.12). Sessions recorded before
+    // these were fields kept them under the same keys in `playtime.jsonl`, so old lines read
+    // into them unchanged.
+    /// The launch's session id (`s-…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The options revision the session launched with (MOD-CONFIG steer 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_revision: Option<u32>,
+    /// The session's performance summary (also read with `PerfRequest::Summaries`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<perf::PerfSummary>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -660,12 +683,25 @@ pub enum Reply {
     Ok { id: u64, result: serde_json::Value },
     Err { id: u64, error: String },
     Event(Event),
-    /// Mod options events (after [`Request::Subscribe`]): on the wire beside [`Event`]s so
-    /// that clients built before options ignore them (`{"options": {...}}`).
+    /// Mod options events as daemons from before the fold into [`Event`] sent them
+    /// (`{"options": {...}}`). Still read; quiverd now sends [`Event::OptionsChanged`] and its
+    /// siblings (see [`Reply::folded`]).
     Options(options::OptionsEvent),
-    /// Perf events (subscription updates, HUD models, perf broadcasts): beside [`Event`]s
-    /// so that clients built before them ignore them (`{"perf": {...}}`).
+    /// Perf events as daemons from before the fold sent them (`{"perf": {...}}`). Still
+    /// read; quiverd now sends [`Event::PerfUpdate`] and its siblings.
     Perf(perf::PerfEvent),
+}
+
+impl Reply {
+    /// The reply as it goes on the wire: options and perf events as [`Event`]s. (quiverd's
+    /// perf and options code still hands out the `Options`/`Perf` forms internally.)
+    pub fn folded(self) -> Reply {
+        match self {
+            Reply::Options(e) => Reply::Event(e.into()),
+            Reply::Perf(e) => Reply::Event(e.into()),
+            r => r,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -712,6 +748,141 @@ pub enum Event {
         unlocked_at: DateTime<Utc>,
         report: achievements::ReportState,
     },
+    // ---- appended: mod options (design/MOD-CONFIG.md §6, C5). Daemons from before these
+    // sent them as `Reply::Options`; `Client` delivers both forms the same way.
+    /// A new revision of a profile's option values.
+    OptionsChanged {
+        product_id: u32,
+        profile: String,
+        revision: u32,
+        source: String,
+        #[serde(default)]
+        changes: Vec<String>,
+    },
+    /// Values changed for a running session (by anyone; saved or not): option id → value.
+    OptionsLive {
+        session: String,
+        product_id: u32,
+        surface: String,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+        by: String,
+        #[serde(default)]
+        saved: bool,
+    },
+    /// The game exited abnormally soon after a live change: offer `RevertSession` (never
+    /// done automatically, MOD-CONFIG §8).
+    OptionsCrash { product_id: u32, profile: String, note: options::SessionOptions },
+    /// What a change made while the game runs did, one outcome per operation, whoever made
+    /// it (Sight shows it as a toast).
+    OptionsOutcome {
+        session: String,
+        product_id: u32,
+        profile: String,
+        by: String,
+        outcomes: Vec<options::OpOutcome>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<String>,
+    },
+    /// A mod's SDK channel connected or went away in a running session.
+    ModChannel {
+        session: String,
+        #[serde(default)]
+        product_id: u32,
+        surface: String,
+        connected: bool,
+    },
+    // ---- appended: performance metrics (design/SIGHT-HUD.md §3.11). Daemons from before
+    // these sent them as `Reply::Perf`. `PerfUpdate` and `HudModel` go only to the
+    // connection that subscribed or attached; the others to every `Subscribe`r.
+    PerfUpdate(perf::PerfUpdate),
+    HudModel(perf::HudModel),
+    /// A session's catalog changed (a producer came or went, a mod declared metrics).
+    PerfCatalogChanged { session: String, product_id: u32 },
+    /// HUD settings or a running HUD's state changed.
+    HudChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        product_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
+    /// A perf session started or ended (with its summary when it ended).
+    PerfSession {
+        session: String,
+        product_id: u32,
+        ended: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<Box<perf::PerfSummary>>,
+    },
+}
+
+impl From<options::OptionsEvent> for Event {
+    fn from(e: options::OptionsEvent) -> Event {
+        use options::OptionsEvent as O;
+        match e {
+            O::Changed { product_id, profile, revision, source, changes } => Event::OptionsChanged { product_id, profile, revision, source, changes },
+            O::Live { session, product_id, surface, values, by, saved } => Event::OptionsLive { session, product_id, surface, values, by, saved },
+            O::Crash { product_id, profile, note } => Event::OptionsCrash { product_id, profile, note },
+            O::Outcome { session, product_id, profile, by, outcomes, changes } => Event::OptionsOutcome { session, product_id, profile, by, outcomes, changes },
+        }
+    }
+}
+
+impl From<perf::PerfEvent> for Event {
+    fn from(e: perf::PerfEvent) -> Event {
+        use perf::PerfEvent as P;
+        match e {
+            P::Update(u) => Event::PerfUpdate(u),
+            P::HudModel(m) => Event::HudModel(m),
+            P::CatalogChanged { session, product_id } => Event::PerfCatalogChanged { session, product_id },
+            P::HudChanged { product_id, session } => Event::HudChanged { product_id, session },
+            P::Session { session, product_id, ended, summary } => Event::PerfSession { session, product_id, ended, summary },
+        }
+    }
+}
+
+impl Event {
+    /// This event in `OptionsEvent` form, if it is one (for `Client::subscribe_options`).
+    pub fn options(&self) -> Option<options::OptionsEvent> {
+        use options::OptionsEvent as O;
+        Some(match self {
+            Event::OptionsChanged { product_id, profile, revision, source, changes } => {
+                O::Changed { product_id: *product_id, profile: profile.clone(), revision: *revision, source: source.clone(), changes: changes.clone() }
+            }
+            Event::OptionsLive { session, product_id, surface, values, by, saved } => O::Live {
+                session: session.clone(),
+                product_id: *product_id,
+                surface: surface.clone(),
+                values: values.clone(),
+                by: by.clone(),
+                saved: *saved,
+            },
+            Event::OptionsCrash { product_id, profile, note } => O::Crash { product_id: *product_id, profile: profile.clone(), note: note.clone() },
+            Event::OptionsOutcome { session, product_id, profile, by, outcomes, changes } => O::Outcome {
+                session: session.clone(),
+                product_id: *product_id,
+                profile: profile.clone(),
+                by: by.clone(),
+                outcomes: outcomes.clone(),
+                changes: changes.clone(),
+            },
+            _ => return None,
+        })
+    }
+
+    /// This event in `PerfEvent` form, if it is one (for `Client::subscribe_perf`).
+    pub fn perf(&self) -> Option<perf::PerfEvent> {
+        use perf::PerfEvent as P;
+        Some(match self {
+            Event::PerfUpdate(u) => P::Update(u.clone()),
+            Event::HudModel(m) => P::HudModel(m.clone()),
+            Event::PerfCatalogChanged { session, product_id } => P::CatalogChanged { session: session.clone(), product_id: *product_id },
+            Event::HudChanged { product_id, session } => P::HudChanged { product_id: *product_id, session: session.clone() },
+            Event::PerfSession { session, product_id, ended, summary } => {
+                P::Session { session: session.clone(), product_id: *product_id, ended: *ended, summary: summary.clone() }
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// Socket path for the current user.
@@ -882,6 +1053,82 @@ mod tests {
         assert!(g.offers && g.root.is_none());
         assert_eq!(g.games[0].state, exports::PatchState::Other);
         assert!(!g.games[0].patchable && !g.games[0].state.uses_quiver());
+    }
+
+    #[test]
+    fn options_and_perf_events_fold_into_event() {
+        // A daemon from before the fold.
+        let old = r#"{"options":{"type":"changed","product_id":3539,"profile":"p1","revision":4,"source":"gui","changes":["DLSS fg.enabled on → off"]}}"#;
+        let r: Reply = serde_json::from_str(old).unwrap();
+        let Reply::Event(e) = r.folded() else { panic!("not folded") };
+        assert!(matches!(&e, Event::OptionsChanged { revision: 4, profile, .. } if profile == "p1"));
+        assert!(matches!(e.options(), Some(options::OptionsEvent::Changed { revision: 4, .. })));
+        assert!(e.perf().is_none());
+        // Today's wire form, and back.
+        let line = serde_json::to_string(&Reply::Event(e)).unwrap();
+        assert!(line.starts_with(r#"{"event":{"type":"options_changed""#), "{line}");
+        let live = Reply::Options(options::OptionsEvent::Live {
+            session: "s-1".into(),
+            product_id: 1,
+            surface: "m/aco-dlss".into(),
+            values: [("fg.enabled".to_owned(), serde_json::json!(false))].into(),
+            by: "in-game".into(),
+            saved: false,
+        });
+        let v = serde_json::to_value(live.folded()).unwrap();
+        assert_eq!(v["event"]["type"], "options_live");
+        assert_eq!(v["event"]["values"]["fg.enabled"], false);
+        let o = options::OptionsEvent::Outcome {
+            session: "s-1".into(),
+            product_id: 1,
+            profile: "p1".into(),
+            by: "sight".into(),
+            outcomes: vec![options::OpOutcome { surface: "m/aco-dlss".into(), id: "fg.enabled".into(), outcome: options::Outcome::Unchanged, before: None, after: None }],
+            changes: Vec::new(),
+        };
+        let line = serde_json::to_string(&Reply::Options(o.clone()).folded()).unwrap();
+        assert!(line.contains(r#""type":"options_outcome""#), "{line}");
+        let Reply::Event(back) = serde_json::from_str(&line).unwrap() else { panic!() };
+        assert_eq!(back.options(), Some(o));
+        // Perf: per-subscription updates (map keys are stats) survive the tagged form.
+        let u = perf::PerfUpdate {
+            sub: 7,
+            session: "s-1".into(),
+            product_id: 1,
+            at: Utc::now(),
+            values: [("fps".to_owned(), [(perf::Stat::P1low, perf::PerfValue { value: Some(61.0), text: "61".into(), ..Default::default() })].into())].into(),
+        };
+        let line = serde_json::to_string(&Reply::Perf(perf::PerfEvent::Update(u.clone())).folded()).unwrap();
+        assert!(line.contains(r#""type":"perf_update""#), "{line}");
+        let Reply::Event(back) = serde_json::from_str(&line).unwrap() else { panic!() };
+        assert!(matches!(back.perf(), Some(perf::PerfEvent::Update(b)) if b == u));
+        let r: Reply = serde_json::from_str(r#"{"perf":{"type":"catalog_changed","session":"s-1","product_id":5}}"#).unwrap();
+        assert!(matches!(r.folded(), Reply::Event(Event::PerfCatalogChanged { product_id: 5, .. })));
+        // Other events are neither.
+        assert!(Event::LibraryChanged.options().is_none() && Event::LibraryChanged.perf().is_none());
+    }
+
+    #[test]
+    fn sessions_carry_their_addressing() {
+        // A daemon from before the fields, and one from when they came flattened beside it.
+        let s: ActiveSession = serde_json::from_str(r#"{"product_id":1,"started":"2026-11-16T20:00:00Z","holders":["launcher"],"reported":true}"#).unwrap();
+        assert!(s.session.is_none() && s.pids.is_empty());
+        let s: options::SessionDetail = serde_json::from_str(
+            r#"{"product_id":1,"started":"2026-11-16T20:00:00Z","holders":["launcher"],"reported":true,"session":"s-4kq2","profile":"p1","options_revision":7,"pids":[42]}"#,
+        )
+        .unwrap();
+        assert_eq!((s.session.as_deref(), s.profile.as_deref(), s.options_revision, s.pids.as_slice()), (Some("s-4kq2"), Some("p1"), Some(7), &[42][..]));
+        let v = serde_json::to_value(ActiveSession { product_id: 1, ..Default::default() }).unwrap();
+        assert!(v.get("session").is_none() && v.get("pids").is_none(), "{v}");
+        // playtime.jsonl lines written with the side keys read into the fields.
+        let p: PlaySession = serde_json::from_str(
+            r#"{"started":"2026-11-16T20:00:00Z","ended":"2026-11-16T21:00:00Z","seconds":3600,"session":"s-1","options_revision":3,"perf":{"frames":10,"hitches":1}}"#,
+        )
+        .unwrap();
+        assert_eq!((p.session.as_deref(), p.options_revision), (Some("s-1"), Some(3)));
+        assert_eq!(p.perf.as_ref().map(|x| x.frames), Some(10));
+        let v = serde_json::to_value(PlaySession::default()).unwrap();
+        assert!(v.get("perf").is_none() && v.get("session").is_none());
     }
 
     #[test]

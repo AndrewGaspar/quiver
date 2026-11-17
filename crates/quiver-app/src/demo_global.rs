@@ -131,6 +131,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                 holders: vec!["bridge".into()],
                 reported: true,
                 steam_app_id: None,
+                ..Default::default()
             });
         }
         // Black Flag Resynced, started from Steam through Quiver.

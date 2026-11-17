@@ -1497,29 +1497,33 @@ pub enum OptionsRequest {
     Lint { path: PathBuf },
     /// Games being played with their options addressing (`Vec<SessionDetail>`, C1).
     Sessions,
+    // ---- appended (build/app-options)
+    /// The files of a mod's current version that `Infer` can read (INI-like text files,
+    /// install-relative, `/`-separated; `Vec<String>`).
+    Files {
+        product_id: u32,
+        #[serde(rename = "mod")]
+        mod_id: String,
+    },
+    /// Recent play sessions' option records, newest first (`Vec<SessionOptions>`): live
+    /// changes and crash notes, for "Revert this session". `profile` `None`: every profile.
+    SessionRecords {
+        product_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
 }
 
-/// A running game as the in-game overlay and the CLI address it (C1): the session as
-/// `Request::Sessions` lists it, plus the launch's session id, profile, options revision
-/// and processes. `Request::Sessions` answers these fields too (clients that don't know
-/// them ignore them).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDetail {
-    #[serde(flatten)]
-    pub base: crate::ActiveSession,
-    /// `s-…`, also `QUIVER_SESSION` in the game's environment (games quiverd launched).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    /// Profile id (`vanilla`), for games quiverd launched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options_revision: Option<u32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pids: Vec<u32>,
-}
+/// A running game as the in-game overlay and the CLI address it (C1). This was
+/// `ActiveSession` plus the launch's session id, profile, options revision and processes,
+/// flattened; those are `ActiveSession` fields now, with the same wire shape.
+pub type SessionDetail = crate::ActiveSession;
 
-/// Options events, sent to subscribed connections as `Reply::Options` (C5).
+/// Options events in their own enum (C5), as `Client::subscribe_options` delivers them. On
+/// the wire they are [`Event::OptionsChanged`](crate::Event::OptionsChanged),
+/// `OptionsLive` and `OptionsCrash`; daemons from before the fold sent `Reply::Options`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OptionsEvent {

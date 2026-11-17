@@ -203,6 +203,25 @@ async fn options_end_to_end() {
         got.iter().any(|e| matches!(e, OptionsEvent::Outcome { outcomes, by, .. } if by == "cli" && outcomes.len() == 3 && matches!(outcomes[0].outcome, Outcome::AppliedLive { .. }))),
         "{got:?}"
     );
+    // The same events reach `subscribe()` as `Event`s (the wire form since the fold).
+    let mut all = cli.subscribe().await.unwrap();
+    let _: OptionsChange = options(&cli, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_distance", json!(1.5))], live: Live::No, message: None, confirmed: false }).await.unwrap();
+    let mut folded = false;
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), all.recv()).await {
+        if matches!(ev, quiver_api::Event::OptionsChanged { revision: 4, .. }) {
+            folded = true;
+            break;
+        }
+    }
+    assert!(folded, "no Event::OptionsChanged");
+    let _: OptionsChange = options(&cli, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![OptionOp::Reset { surface: "DLSS".into(), id: "world.npc_distance".into() }], live: Live::No, message: None, confirmed: false }).await.unwrap();
+    while tokio::time::timeout(Duration::from_millis(200), events.recv()).await.is_ok_and(|e| e.is_some()) {}
+    // The app's requests: a mod's readable files, and the session records.
+    let files: Vec<String> = options(&cli, OptionsRequest::Files { product_id: 3539, mod_id: "DLSS".into() }).await.unwrap();
+    assert_eq!(files, ["aco_dlss.ini"]);
+    let records: Vec<quiver_api::options::SessionOptions> = options(&cli, OptionsRequest::SessionRecords { product_id: 3539, profile: Some("DLSS".into()), limit: None }).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].live_changes.is_empty());
     // Agents need confirmation for live changes to a running game; --no-live is fine.
     let agent = connect(&e, "agent").await;
     let err = options::<OptionsChange>(&agent, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::IfRunning, message: None, confirmed: false }).await.unwrap_err().to_string();

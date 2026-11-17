@@ -47,6 +47,19 @@ impl Quiver {
         }
         self.ensure_mods_inputs(cx);
 
+        // Options, history, keys and sources have views of their own (`options/`).
+        if self.gp.opt.view != super::options::ModsView::Stack {
+            let view = self.render_options_view(th, g, cx);
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(18.))
+                .child(self.render_profile_cards(th, g, &m, &sel, cx))
+                .child(self.render_mods_views(th, id, cx))
+                .child(view)
+                .into_any_element();
+        }
+
         let left = div()
             .flex()
             .flex_col()
@@ -73,6 +86,7 @@ impl Quiver {
             .flex_col()
             .gap(px(18.))
             .child(self.render_profile_cards(th, g, &m, &sel, cx))
+            .child(self.render_mods_views(th, id, cx))
             .child(crate::ui::responsive::columns(self.pane_bp(), 20., 380., left, right))
             .into_any_element()
     }

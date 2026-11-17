@@ -6,6 +6,7 @@ mod files;
 mod launch;
 mod logs;
 mod mods;
+mod options;
 mod overview;
 mod page;
 mod perf;
@@ -377,7 +378,7 @@ impl Quiver {
             Tab::Logs => self.render_logs(th, &g, cx),
         };
 
-        let pending = if tab == Tab::LaunchOptions { self.render_pending(th, &g, cx) } else { None };
+        let pending = if tab == Tab::LaunchOptions { self.render_pending(th, &g, cx) } else if tab == Tab::Mods { self.render_options_bar(th, &g, cx) } else { None };
         let mut pane = div()
             .flex_1()
             .min_w_0()
