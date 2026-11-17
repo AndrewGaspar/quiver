@@ -1,0 +1,26 @@
+[package]
+name = "ubi-perf"
+description = "Sight HUD shared formats: session dir, shared-memory rings, hud.image, metric descriptors, clocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["std", "descriptor"]
+# Files, mappings, the session dir and clock reads. Without it the crate is `no_std` and
+# works on memory the caller maps (layouts, the ring and hud.image protocols, conversions).
+std = []
+# Metric descriptors and the JSON control-plane payloads (serde types, validation, limits).
+descriptor = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+fastrand = "2"
