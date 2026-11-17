@@ -183,6 +183,7 @@ impl Quiver {
                 SettingsSection::Accounts => (Icon::Users, Some("quiver account list"), "ubisoft sign in out login logout default owners who owns"),
                 SettingsSection::Library => (Icon::HardDrive, Some("quiver library"), "storage folders paths disk compatibility prefixes proton cache"),
                 SettingsSection::Compatibility => (Icon::Cpu, Some("quiver protons"), "proton wine ge runtime builds"),
+                SettingsSection::Performance => (Icon::Activity, Some("quiver hud status"), "hud fps overlay mangohud frame rate latency performance"),
                 SettingsSection::Steam => (Icon::Gamepad, Some("quiver export list"), "shortcuts desktop entries exports restart steam user"),
                 SettingsSection::Appearance => (Icon::Palette, None, "theme omarchy colors controller gamepad hyprpad hints"),
                 SettingsSection::Automation => (Icon::Bot, Some("quiver status"), "cli agents permissions policy socket daemon quiverd"),

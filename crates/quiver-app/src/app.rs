@@ -187,6 +187,8 @@ pub struct Quiver {
     /// Downloads page and dialogs (`ui/downloads.rs`), and the welcome flow (`ui/welcome.rs`).
     pub dl: crate::ui::downloads::DlState,
     pub wc: crate::ui::welcome::Welcome,
+    /// Performance and the HUD (`ui/perf.rs`, `ui/game/perf.rs`).
+    pub perf: crate::ui::perf::PerfUi,
 }
 
 impl Quiver {
@@ -224,6 +226,7 @@ impl Quiver {
             ui: Default::default(),
             dl: Default::default(),
             wc: Default::default(),
+            perf: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
@@ -262,6 +265,7 @@ impl Quiver {
                         Ok(Ok((source, status, events))) => {
                             this.source = Some(source);
                             this.on_status(status, cx);
+                            this.start_perf_events(cx);
                             Some(events)
                         }
                         Ok(Err(e)) => {
@@ -350,6 +354,7 @@ impl Quiver {
     fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
         self.downloads_event(&e, cx);
         self.global_event(&e, cx);
+        self.perf_on_event(&e, cx);
         match e {
             Event::Job(job) => self.apply_job(job),
             Event::GameStarted { product_id } | Event::GameStopped { product_id } => {
