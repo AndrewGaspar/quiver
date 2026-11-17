@@ -40,6 +40,13 @@ pub(crate) async fn with_store_lock<T: Send + 'static>(f: impl FnOnce() -> Resul
     blocking(f).await
 }
 
+/// [`with_store_lock`] on the calling thread (launch preparation, already off the runtime's
+/// hot path).
+pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 /// The "Ask" rule for agents.
 fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
     if is_human_source(source) || confirmed {

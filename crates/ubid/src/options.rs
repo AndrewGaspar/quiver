@@ -531,7 +531,13 @@ impl Daemon {
         }
         if live == Live::No && running.is_some() {
             for o in outcomes.iter_mut().filter(|o| matches!(o.outcome, Outcome::SavedRestart { .. })) {
-                o.outcome = Outcome::SavedRestart { running: true };
+                let apply = ctx.surfaces.iter().find(|s| s.key == o.surface).and_then(|s| s.schema().options.get(&o.id)).map(|d| d.apply);
+                o.outcome = match apply {
+                    Some(ubi_api::options::Apply::Live | ubi_api::options::Apply::At) => {
+                        Outcome::SavedPending { detail: "not sent to the running game (live: no); applies next launch".into() }
+                    }
+                    _ => Outcome::SavedRestart { running: true },
+                };
             }
         }
         out.outcomes = outcomes;
@@ -585,11 +591,11 @@ impl Daemon {
     pub(crate) fn options_launch(&self, game: &ubi_core::launcher::Game, plan: &mut ubi_core::mods::Plan, session: &str) -> Vec<String> {
         let store = store_for(game);
         let profile = plan.api.profile.as_ref().map(|p| p.id.clone());
-        let result = (|| -> Result<(Ctx, opt::LaunchOptions)> {
+        let result = crate::mods::locked(|| -> Result<(Ctx, opt::LaunchOptions)> {
             let ctx = opt::context(&store, profile.as_deref())?;
             let lo = opt::prepare_launch(&ctx, plan)?;
             Ok((ctx, lo))
-        })();
+        });
         match result {
             Ok((ctx, lo)) => {
                 if let Some(r) = &lo.imported {

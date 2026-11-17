@@ -14,6 +14,16 @@ use ubi_api::{Client, Request};
 
 const INI: &str = "; aco-dlss configuration\n[upscaler]\nenabled=1\n; DLSS render preset\npreset=M\n[fg]\nmode=d3d12\nenabled=1\ntoggle_key=F9\npresent_thread=1\n[world]\nnpc_density=1\nnpc_distance=1\n";
 
+/// The scratch daemon, stopped when dropped (also when a test fails).
+struct Daemon(Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 struct Env {
     _tmp: tempfile::TempDir,
     root: PathBuf,
@@ -28,7 +38,7 @@ impl Env {
         self.dir("install")
     }
 
-    fn daemon(&self, test_session: Option<&str>) -> Child {
+    fn daemon(&self, test_session: Option<&str>) -> Daemon {
         let mut c = Command::new(env!("CARGO_BIN_EXE_quiverd"));
         c.env("XDG_DATA_HOME", self.dir("data"))
             .env("XDG_CONFIG_HOME", self.dir("config"))
@@ -45,6 +55,7 @@ impl Env {
             c.env("QUIVER_TEST_SESSION", s);
         }
         let child = c.spawn().unwrap();
+        let child = Daemon(child);
         let sock = self.dir("run").join("quiver/quiverd.sock");
         let t = Instant::now();
         while std::os::unix::net::UnixStream::connect(&sock).is_err() {
@@ -98,7 +109,7 @@ fn set(surface: &str, id: &str, v: Value) -> OptionOp {
 #[tokio::test(flavor = "multi_thread")]
 async fn options_end_to_end() {
     let e = setup();
-    let mut d = e.daemon(None);
+    let d = e.daemon(None);
     let cli = connect(&e, "cli").await;
     let _: Value = cli.call(Request::Mods(ModsRequest::Install { product_id: 3539, builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
     let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { product_id: 3539, name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
@@ -145,12 +156,11 @@ async fn options_end_to_end() {
     let keys: ubi_api::options::KeysReport = options(&cli, OptionsRequest::Keys { product_id: 3539, profile: Some("DLSS".into()) }).await.unwrap();
     assert!(keys.bindings.iter().any(|b| b.key == "F9"));
     drop((cli, agent));
-    let _ = Command::new("kill").arg(d.id().to_string()).status();
-    let _ = d.wait();
+    drop(d);
 
     // "Running": the test hook registers a session whose root is `/`.
     write(&e.install().join("aco_dlss.ini"), INI);
-    let mut d = e.daemon(Some("3539:DLSS:/"));
+    let d = e.daemon(Some("3539:DLSS:/"));
     let cli = connect(&e, "cli").await;
     let mut events = cli.subscribe_options().await.unwrap();
     let sessions: Vec<SessionDetail> = options(&cli, OptionsRequest::Sessions).await.unwrap();
@@ -194,7 +204,7 @@ async fn options_end_to_end() {
     let err = options::<OptionsChange>(&agent, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::IfRunning, message: None, confirmed: false }).await.unwrap_err().to_string();
     assert!(err.contains("is running") && err.contains("--no-live"), "{err}");
     let c: OptionsChange = options(&agent, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::No, message: None, confirmed: false }).await.unwrap();
-    assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: true });
+    assert!(matches!(&c.outcomes[0].outcome, Outcome::SavedPending { detail } if detail.contains("not sent")), "{:?}", c.outcomes);
     assert!(c.live.is_empty());
     // Session only: not saved, written live.
     let before = c.revision;
@@ -221,6 +231,5 @@ async fn options_end_to_end() {
     assert_eq!(r.options, 1);
     assert!(r.undescribed.iter().any(|k| k == "ini:fg/mode"), "{:?}", r.undescribed);
     drop((cli, agent));
-    let _ = Command::new("kill").arg(d.id().to_string()).status();
-    let _ = d.wait();
+    drop(d);
 }
