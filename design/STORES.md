@@ -1,6 +1,7 @@
 # Quiver as a multi-store launcher (synthesis)
 
-Status: design only (2026-11-16). Nothing here is built. This document reconciles the five store
+Status: designed 2026-11-16; R0, R1 (partly), R2-lite and Steam local mode built 2026-11-17 on
+`build/steam-local` (section 11 says what was built and how it differs). This document reconciles the five store
 scopes written in parallel: `STORE-STEAM.md`, `STORE-EPIC.md`, `STORE-GOG.md`, `STORE-EA.md` and
 `STORE-META.md` (the Meta PC VR store). It owns the cross-store architecture. The store docs keep
 their store-specific detail, spikes and store-only steers. Where a store doc disagreed with the
@@ -799,3 +800,79 @@ The "Edit" column is the small correction made to the store doc in this commit.
 | 14 | A separate `gog-galaxy` crate (GOG) vs one crate per store | a `galaxy` module in `gog-core`; `gog-dummy-service` stays a crate (Windows target) | none |
 | 15 | Steam's crate: `store-steam` or `quiver-core::steam` | `steam-local` (files) plus `steam-core` (provider, `cm` feature): shortcut exports need the file layer without the provider | none |
 | 16 | EA phase 1 "Ubisoft paths migrated by reading them in place" vs no migration | follows from #4 | EA section 6 |
+
+---
+
+## 11. As built (2026-11-17, `build/steam-local`)
+
+Steers taken: X1 (a), X2 (a), X13 as tabled; X16 needed no step (the crates were already
+`quiver-*`). Four commits, each reviewable alone: R0, R1, R2-lite, then the Steam parsers and Steam
+local mode.
+
+**R0, identity (built as designed, with one change).**
+
+- `quiver_api::game::{StoreId, GameId, GameRef}`. Forms as in 2.2: `Display` and serde are
+  `ubisoft:3539` and `steam:620`; `key()` is `3539` or `steam:620`; `dir_name()` is `3539` or
+  `steam-620`. A JSON number, `3539`, `ubi:3539` and `ubisoft:3539` all read as Ubisoft. Ubisoft
+  and Steam ids must be `u32`.
+- **Change:** `GameId` holds at most **63** bytes, inline, so `GameRef` is `Copy` (65 bytes) and
+  replaces `u32` in view state, events and map keys without clones. The longest ids in section 2.1
+  are well under that.
+- `game::wire` and `game::persisted` are serde helpers for records that name a game (2.3 rules 3
+  and 4). `wire` writes `game`, plus `product_id` for Ubisoft. `persisted` writes `product_id` alone
+  for Ubisoft and `game` for other stores, so Ubisoft lines stay byte for byte. Both read either.
+- `quiver_core::paths::{game_dir, game_dir_in, mods_dir_in}` replace every
+  `join("games").join(product_id.to_string())` (12 sites).
+- `ExportKey` holds a `GameRef`, so `quiver:5059` and its crc are unchanged and
+  `quiver:steam:620/<profile>` parses. `ExportRecord` carries `game` (persisted form).
+- Golden tests pin `games/3539`, `mods/420`, `quiver:5059`'s appid and an `exports.json` record
+  round-tripping.
+
+**R1, the wire (only what Steam local needs; the rest stays `product_id`).**
+
+- `LibraryEntry` and `Job` carry `game` (wire form). `ActivityEntry` carries `game` (persisted form).
+- `LibraryEntry` gains `client: Option<ClientInstall>`: another store's install as its client
+  keeps it (dir, size, update state, platforms, art, play time, achievement counts, launch URL).
+  It also gains `ubisoft_id()`, `on_disk()` and `stores()` (badges and filters).
+- `Play`, `Stop` and `Playtime` take `game` (`alias = "product_id"`).
+- `Library` gains `all_stores`. Older clients leave it out and get Ubisoft's library unchanged,
+  so an older app never sees an entry without `product_id`.
+- New requests: `Stores`, and `GameDetail { game }` (the store-generic game page).
+- Every other request (settings, mods, saves, Options, perf, achievements, downloads) still takes
+  `product_id`. Its handler refuses other stores' refs with a reason. This is the remaining R1
+  sweep.
+- CLI: `resolve_any` takes refs and names across stores. An exact name wins; a name found in
+  several stores lists the refs to choose from (2.4). Ubisoft-only verbs keep `resolve` and refuse
+  other stores' refs. `quiver library` is also `quiver list` and has `--store`; its id column
+  widens only for other stores' refs.
+- App: view state uses `Gid`, a `GameRef` that prints as its key, so every CLI hint for Ubisoft
+  games reads as before. Ubisoft-only views use `Gid::pid()`. Saved navigation from older builds
+  still reads.
+
+**R2-lite, providers.**
+
+- `quiver_core::stores::StoreProvider` has `capabilities`, `account`, `library` (art included in
+  the entries), `detail`, `playtime` and `launch` (`Launched::Job` or `Launched::Delegated`).
+  Methods return boxed `Send` futures, so providers can be `dyn`.
+- Ubisoft's provider (`quiverd/src/stores.rs`) is the old code behind the trait. It is built per
+  request, so the daemon doesn't hold itself.
+- quiverd routes `Play`, `Playtime`, `GameDetail` and `Stores` by `game.store`, and records
+  delegated launches the same way for every store.
+- `stores::merge_libraries` merges records only on explicit links: today, a Steam app linked to a
+  Ubisoft entry as its Steam copy. A store that fails (Ubisoft signed out) doesn't hide the others'
+  games.
+- Not built yet: `Accounts`, `Installer`, `CloudSaves`, `Progress`, `Entitlements`,
+  `LibraryEntry.records`, `Secret<T>`.
+
+**Steam local mode** (STORE-STEAM section 8 has the detail):
+
+- `quiver_core::steamlocal`: parsers and the `SteamLocal` provider. The module lives in
+  `quiver-core`, ready to move into `steam-local` at R3.
+- `quiver list`, `quiver play steam:<appid>`, `quiver info`, `quiver playtime` and `quiver stores`.
+- In the app: store chips, tile badges, and a Steam game page.
+
+**Ubisoft regression notes.** Library, jobs and activity JSON for Ubisoft games keep `product_id`.
+`exports.json`, `activity.jsonl`, `games.json` and `queue.json` are unchanged for Ubisoft records,
+with golden tests on the first two. The 8.1 regression check (installs, Origins with the bridge,
+modded profiles, `steam-run`, existing shortcuts) still needs a run on the real install after
+merge.
