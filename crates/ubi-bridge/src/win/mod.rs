@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use anyhow::{Result, anyhow};
@@ -9,42 +8,11 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use ubi_ipc::run::BridgeArgs;
 use ubi_ipc::{BrokerRequest, BrokerResponse, LaunchContext};
 
-static LOG: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
-
-/// Log to stdout and to `UBI_BRIDGE_LOG` if set (stdout is unreliable under Proton).
-macro_rules! log {
-    ($($t:tt)*) => {{
-        let line = format!("{} {}", crate::win::timestamp(), format!($($t)*));
-        println!("{line}");
-        if let Some(f) = crate::win::LOG.lock().unwrap().as_mut() {
-            use std::io::Write as _;
-            let _ = writeln!(f, "{line}");
-            let _ = f.flush();
-        }
-    }};
-}
-
-/// Local wall-clock time as HH:MM:SS.mmm, matching the SDK proxy's log.
-pub fn timestamp() -> String {
-    #[repr(C)]
-    #[derive(Default)]
-    struct SystemTime { y: u16, mo: u16, dow: u16, d: u16, h: u16, mi: u16, s: u16, ms: u16 }
-    unsafe extern "system" {
-        fn GetLocalTime(t: *mut SystemTime);
-    }
-    let mut t = SystemTime::default();
-    unsafe { GetLocalTime(&mut t) };
-    format!("{:02}:{:02}:{:02}.{:03}", t.h, t.mi, t.s, t.ms)
-}
-
 mod api;
 mod aux;
+mod mods;
 
-static CONTEXT: OnceLock<Option<LaunchContext>> = OnceLock::new();
-
-pub fn context() -> Option<&'static LaunchContext> {
-    CONTEXT.get().and_then(Option::as_ref)
-}
+use crate::{CONTEXT, context, hex};
 
 fn load_context(path: Option<&str>) -> Result<Option<LaunchContext>> {
     let Some(path) = path.map(str::to_owned).or_else(|| std::env::var("UBI_BRIDGE_CONTEXT").ok()) else {
@@ -77,7 +45,7 @@ fn new_server(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {
     ServerOptions::new().first_pipe_instance(first).pipe_mode(PipeMode::Byte).create(name)
 }
 
-static CONN_IDS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static CONN_IDS: AtomicU32 = AtomicU32::new(0);
 
 /// SDK connections being served right now (all pipes).
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -90,7 +58,7 @@ pub async fn run() -> Result<()> {
         _ => std::env::var("UBI_BRIDGE_LOG").ok(),
     };
     if let Some(path) = log_path {
-        *LOG.lock().unwrap() = Some(std::fs::OpenOptions::new().create(true).append(true).open(path)?);
+        *crate::LOG.lock().unwrap() = Some(std::fs::OpenOptions::new().create(true).append(true).open(path)?);
     }
     match &args {
         BridgeArgs::Serve { context } => CONTEXT.set(load_context(context.as_deref())?).ok(),
@@ -103,6 +71,10 @@ pub async fn run() -> Result<()> {
             CONTEXT.set(ctx).ok()
         }
     };
+    // The mod pipe first: once the Connect pipes are up (what the launcher waits for), the
+    // game may start, and its mods connect early.
+    let mods_pipe = mods::pipe_name();
+    mods::start(&mods_pipe);
     // Own every pipe before anything can look for Connect.
     let mut tasks = Vec::new();
     for (name, kind) in PIPES {
@@ -129,7 +101,7 @@ pub async fn run() -> Result<()> {
         }));
     }
     if let BridgeArgs::Run { exe, args, .. } = args {
-        let code = match run_game(&exe, &args).await {
+        let code = match run_game(&exe, &args, &mods_pipe).await {
             Ok(c) => c,
             Err(e) => {
                 log!("{e:#}");
@@ -146,15 +118,20 @@ pub async fn run() -> Result<()> {
 
 /// Launcher mode: start the game as Connect would, wait for it, then for any process it
 /// handed the SDK connection to (a relaunch), and return its exit code.
-async fn run_game(exe: &str, args: &[String]) -> Result<i32> {
+async fn run_game(exe: &str, args: &[String], mods_pipe: &str) -> Result<i32> {
     let uplay_id = context().map(|c| c.uplay_id).ok_or_else(|| anyhow!("--run needs a launch context"))?;
     let workdir = ubi_ipc::run::win_parent(exe);
     let uplay_args = ubi_ipc::run::uplay_arguments(uplay_id, exe, workdir);
     log!("starting {exe} {args:?} in {workdir} (UPLAY_ARGUMENTS for {uplay_id})");
-    let mut child = tokio::process::Command::new(exe)
-        .args(args)
-        .current_dir(workdir)
-        .env("UPLAY_ARGUMENTS", &uplay_args)
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(args).current_dir(workdir).env("UPLAY_ARGUMENTS", &uplay_args);
+    // Here the bridge is the game's parent: it tells the game (and its mods) where to
+    // connect itself.
+    cmd.env("QUIVER_MODS_PIPE", mods_pipe);
+    if let Some(s) = context().and_then(|c| c.session.as_deref()) {
+        cmd.env("QUIVER_SESSION", s);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("starting {exe}: {e}"))?;
     let status = child.wait().await?;
@@ -167,10 +144,6 @@ async fn run_game(exe: &str, args: &[String]) -> Result<i32> {
     }
     log!("no SDK connections left; exiting");
     Ok(code)
-}
-
-pub fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 pub async fn read_frame(pipe: &mut NamedPipeServer) -> std::io::Result<Vec<u8>> {

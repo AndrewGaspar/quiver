@@ -18,6 +18,7 @@ pub mod downloads;
 pub mod exports;
 pub mod mods;
 pub mod info;
+pub mod options;
 pub mod savestores;
 pub mod setup;
 pub mod steamlib;
@@ -600,6 +601,12 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    // ---- Mod options (see [`options`]); appended
+    /// Mod options: schemas, values per profile, live changes (design/MOD-CONFIG.md).
+    Options(options::OptionsRequest),
+    // ---- Mod SDK (appended; build/mod-sdk)
+    /// Mods connected through the mod SDK (`quiver_mod.h`) in running games.
+    ModSdk(mods::ModSdkRequest),
 }
 
 fn yes() -> bool {
@@ -620,6 +627,9 @@ pub enum Reply {
     Ok { id: u64, result: serde_json::Value },
     Err { id: u64, error: String },
     Event(Event),
+    /// Mod options events (after [`Request::Subscribe`]): on the wire beside [`Event`]s so
+    /// that clients built before options ignore them (`{"options": {...}}`).
+    Options(options::OptionsEvent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

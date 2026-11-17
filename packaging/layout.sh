@@ -70,10 +70,9 @@ chmod 644 "$root$UNITDIR/quiverd.service"
 
 lic=$root$LICENSEDIR
 install -Dm644 "$src/LICENSE" "$lic/LICENSE"
-install -Dm644 "$src/crates/ubi-app/assets/fonts/Geist-OFL.txt" "$lic/fonts/Geist-OFL.txt"
-install -Dm644 "$src/crates/ubi-app/assets/fonts/Archivo-OFL.txt" "$lic/fonts/Archivo-OFL.txt"
-install -Dm644 "$src/crates/ubi-app/assets/icons/LICENSE" "$lic/icons/Lucide-LICENSE"
-install -Dm644 "$src/third_party/xattr-0.2.3/LICENSE-MIT" "$lic/xattr/LICENSE-MIT"
-install -Dm644 "$src/third_party/xattr-0.2.3/LICENSE-APACHE" "$lic/xattr/LICENSE-APACHE"
-# The same Apache-2.0 text covers text_input.rs, adapted from GPUI's examples/input.rs.
-install -Dm644 "$src/third_party/xattr-0.2.3/LICENSE-APACHE" "$lic/gpui/LICENSE-APACHE"
+install -Dm644 "$src/crates/ubi-ui/assets/fonts/Geist-OFL.txt" "$lic/fonts/Geist-OFL.txt"
+install -Dm644 "$src/crates/ubi-ui/assets/fonts/Archivo-OFL.txt" "$lic/fonts/Archivo-OFL.txt"
+install -Dm644 "$src/crates/ubi-ui/assets/icons/LICENSE" "$lic/icons/Lucide-LICENSE"
+# GPUI (vendored and patched under third_party/zed) is Apache-2.0; the same text covers
+# text_input.rs, adapted from GPUI's examples/input.rs.
+install -Dm644 "$src/third_party/zed/gpui/LICENSE-APACHE" "$lic/gpui/LICENSE-APACHE"

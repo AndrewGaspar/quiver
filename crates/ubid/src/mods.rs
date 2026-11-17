@@ -40,6 +40,13 @@ pub(crate) async fn with_store_lock<T: Send + 'static>(f: impl FnOnce() -> Resul
     blocking(f).await
 }
 
+/// [`with_store_lock`] on the calling thread (launch preparation, already off the runtime's
+/// hot path).
+pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 /// The "Ask" rule for agents.
 fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
     if is_human_source(source) || confirmed {
@@ -61,7 +68,7 @@ fn fixes_on_vanilla() -> Option<bool> {
 }
 
 /// The store for an installed game, with its prefix and the app-level settings.
-fn store_for(game: &launcher::Game) -> ModStore {
+pub(crate) fn store_for(game: &launcher::Game) -> ModStore {
     ModStore::open(game.product_id).with_game(game, fixes_on_vanilla())
 }
 
@@ -72,7 +79,7 @@ fn store(product_id: u32) -> Result<ModStore> {
 /// The profile a launch of the store's game runs: `requested` (a name or id; `vanilla`:
 /// unmodded), else the game's default (its `profile` setting). The second value is a
 /// warning when the default can't be used (deleted): the launch runs vanilla instead.
-fn launch_profile(store: &ModStore, product_id: u32, requested: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+pub(crate) fn launch_profile(store: &ModStore, product_id: u32, requested: Option<&str>) -> Result<(Option<String>, Option<String>)> {
     let default = match requested {
         Some(_) => None,
         None => settings::current(product_id)?.0.profile,
@@ -455,13 +462,13 @@ impl Daemon {
                 json!(prefs)
             }
             // -- Mod versions --------------------------------------------------------------
-            ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes } => {
+            ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes, options } => {
                 // A new version is a normal edit for agents too (it's how a mod is updated);
                 // the old versions stay, and rolling back is one request.
                 let store = store(product_id)?;
                 let save_compatible = save_compatible.as_deref().map(parse_save_compatible).transpose()?;
                 let path = (!path.as_os_str().is_empty()).then_some(path);
-                let opts = NewVersion { path, label, notes, no_update, prerelease, save_compatible, deletes };
+                let opts = NewVersion { path, label, notes, no_update, prerelease, save_compatible, deletes, options };
                 let c = blocking(move || store.add_version(&mod_id, &opts, &src)).await?;
                 let label = c.record.label_of(&c.version.id);
                 let current = c.record.current == c.version.id;

@@ -133,7 +133,7 @@ impl Quiver {
             div()
                 .id("search")
                 .flex()
-                .flex_shrink()
+                .flex_shrink_1()
                 .items_center()
                 .gap(px(8.))
                 .h(px(32.))

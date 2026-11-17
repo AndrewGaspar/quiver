@@ -535,7 +535,7 @@ impl Quiver {
             .map(|x| {
                 div()
                     .w(px(300.))
-                    .flex_grow()
+                    .flex_grow_1()
                     .flex()
                     .items_center()
                     .gap(px(10.))

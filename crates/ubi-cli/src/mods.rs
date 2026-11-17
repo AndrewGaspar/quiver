@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use ubi_api::mods::{
-    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision,
+    CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision, ModSdkConnection, ModSdkRequest,
     ModsState, PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, VersionChange, VersionMerge, is_human_source,
 };
 use ubi_api::{Client, ModsRequest, Request, SettingOp};
@@ -114,12 +114,40 @@ pub enum ModsAction {
         #[arg(value_name = "MOD")]
         mod_id: Option<String>,
     },
+    /// Mod options: list, get, set, reset, preset, diff, history, restore, revert, keys,
+    /// schema, infer, lint (design/MOD-CONFIG.md). Values are per profile (--profile,
+    /// default: the game's default profile), saved as changes from the defaults; a running
+    /// game gets them live where the mod allows it, and every change says what happened.
+    Options {
+        #[command(subcommand)]
+        action: Option<crate::options::OptionsAction>,
+        /// Profile name or id, or `vanilla` (default: the game's default profile).
+        #[arg(long, global = true)]
+        profile: Option<String>,
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Give every profile a save store: one with its own saves folder (or separate_saves=on)
     /// gets a store that is that folder, nothing moves; the others use Default. Launches do
     /// this on their own; `--dry-run` shows what it would do.
     Migrate {
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Mods talking to Quiver through the mod SDK (quiver_mod.h) while the game runs.
+    Sdk {
+        #[command(subcommand)]
+        action: SdkAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SdkAction {
+    /// Connected mods: surface, SDK and protocol, capabilities, the options each applies
+    /// live, and its metrics with their latest values.
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -195,6 +223,10 @@ pub enum VersionAction {
         /// Also hide this install path (relative to the install folder).
         #[arg(long = "delete", value_name = "PATH")]
         delete: Vec<String>,
+        /// The version's options schema (default: DIR's quiver-options.toml, else the
+        /// current version's carried forward).
+        #[arg(long, value_name = "FILE")]
+        options: Option<PathBuf>,
     },
     /// A mod's versions, newest first, and which profiles track or pin which.
     List {
@@ -724,10 +756,12 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 prerelease: false,
                 save_compatible: None,
                 delete,
+                options: None,
             };
             return run_version(client, &g, action).await;
         }
         ModsAction::Version { action } => return run_version(client, &g, action).await,
+        ModsAction::Options { action, profile, json } => return crate::options::run(client, source, game, profile, json, action).await,
         ModsAction::MergeVersions { into, from, labels, dry_run, json } => {
             let confirmed = !dry_run && confirm(source, &format!("make {} versions of mod '{into}' of {} (profiles that stack them are rewritten)", from.join(", "), g.name))?;
             let req = ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed };
@@ -961,6 +995,14 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             }
             print_patches(&undone, &|id| id.clone());
         }
+        ModsAction::Sdk { action: SdkAction::Status { json } } => {
+            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: Some(product_id) })).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&conns)?);
+            } else {
+                print_sdk(&g.name, &conns);
+            }
+        }
         ModsAction::Migrate { dry_run } => {
             let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { product_id, dry_run })).await?;
             println!("{}: {}", g.name, if dry_run { "would migrate (dry run)" } else { "migrated" });
@@ -974,6 +1016,47 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
     }
     Ok(())
+}
+
+fn print_sdk(game: &str, conns: &[ModSdkConnection]) {
+    if conns.is_empty() {
+        println!("{game}: no mod is connected through the mod SDK (the game isn't running, or none of its mods uses quiver_mod.h)");
+        return;
+    }
+    println!("{game}: {} mod connection(s) through the mod SDK", conns.len());
+    for c in conns {
+        let since = c.connected.with_timezone(&chrono::Local).format("%H:%M:%S");
+        let mut who = vec![format!("{} protocol {}", if c.sdk.is_empty() { "SDK" } else { &c.sdk }, c.proto)];
+        if let Some(v) = &c.version {
+            who.push(format!("version {v}"));
+        }
+        if let Some(m) = &c.module {
+            who.push(m.clone());
+        }
+        if let Some(p) = c.pid.or(c.client_pid) {
+            who.push(format!("pid {p}"));
+        }
+        println!("  {} (#{}, since {since}): {}", c.surface, c.conn, who.join(", "));
+        println!("    capabilities: {}", if c.caps.is_empty() { "none".into() } else { c.caps.join(", ") });
+        if let Some(s) = &c.session {
+            println!("    session {s}{}", c.profile.as_deref().map(|p| format!(", profile {p}")).unwrap_or_default());
+        }
+        if !c.options.is_empty() {
+            println!("    applies live: {}", c.options.join(", "));
+        }
+        for m in &c.metrics {
+            let value = match &m.value {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => format!("{v}{}", if m.unit.is_empty() { String::new() } else { format!(" {}", m.unit) }),
+                None => "—".into(),
+            };
+            let marks = if m.marks > 0 { format!(" ({} marks)", m.marks) } else { String::new() };
+            println!("    {:<32} {:<8} {value}{marks}", m.id, m.kind);
+        }
+        if c.refused > 0 {
+            println!("    {} message(s) refused (malformed or over a rate limit)", c.refused);
+        }
+    }
 }
 
 fn print_version_change(game: &str, verb: &str, c: &VersionChange) {
@@ -1006,7 +1089,8 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
     let product_id = g.product_id;
     let change = |req: ModsRequest| client.call::<VersionChange>(Request::Mods(req));
     match action {
-        VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete } => {
+        VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete, options } => {
+            let options = options.map(|f| f.canonicalize().with_context(|| format!("{} not found", f.display()))).transpose()?;
             let path = match dir {
                 Some(dir) => {
                     let path = dir.canonicalize().with_context(|| format!("{} not found", dir.display()))?;
@@ -1015,7 +1099,7 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
                 }
                 None => PathBuf::new(),
             };
-            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete };
+            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete, options };
             print_version_change(&g.name, "added", &change(req).await?);
         }
         VersionAction::Use { mod_id, version, message } => {
