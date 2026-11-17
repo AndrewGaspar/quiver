@@ -1,0 +1,16 @@
+[package]
+name = "quiver-proto"
+description = "Generated Ubisoft Connect protobuf types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quiver-perf.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true

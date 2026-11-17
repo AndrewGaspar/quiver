@@ -41,7 +41,7 @@ appids exactly as they are.
 ### 2.1 The type
 
 ```rust
-// quiver-api (today ubi-api)
+// quiver-api
 pub enum StoreId { Ubisoft, Steam, Epic, Gog, Ea, Meta }   // "ubisoft", "steam", "epic", "gog", "ea", "meta"
 
 /// One store's record of a game. Display form "epic:Camellia"; a bare number is Ubisoft.
@@ -86,7 +86,7 @@ Sight, HUD) only ever needs the key, and an enum would make every new store a ch
 | URL (if ever) | `quiver://play/ubisoft:3539?profile=p7f3k2q` | same shape | an `x-scheme-handler/quiver`; the id charset needs no escaping |
 
 The export key keeps `/` for the profile only: `ExportKey::parse` splits on the first `/` today
-(`crates/ubi-core/src/exports/mod.rs`), so the store is separated by `:`. That is why GOG's and EA's
+(`crates/quiver-core/src/exports/mod.rs`), so the store is separated by `:`. That is why GOG's and EA's
 `quiver:gog/<id>` and `quiver:ea/<offer>` were changed (section 10). Data folders use `-`: Ubisoft
 folders are all digits and no store name contains `-`, so they can't collide.
 
@@ -271,7 +271,7 @@ uncompressed MD5 (v1: byte ranges of `main.bin`, whole-file MD5); Epic's are 1 M
 shared across files, with SHA-1 per file; EA's are zip entries fetched by HTTP range, with CRC32
 from the central directory; Meta's are segments with SHA-256 per segment and per file.
 
-**PieceInstaller** (in `quiver-core`) holds what `ubid/downloads.rs` and `ubi-core/install.rs` do
+**PieceInstaller** (in `quiver-core`) holds what `quiverd/downloads.rs` and `quiver-core/install.rs` do
 today: resume records in `.quiver-install/`, parallel fetch with retries and backoff, the bandwidth
 limit, the free-space check with a margin, pause, resume and reorder, piece reuse on update (diff
 the plans, fetch only what's missing), and the rule that **only manifest files are read or
@@ -333,7 +333,7 @@ Epic's exchange-code arguments as a co-licence, only if Epic spike S2 shows a ga
 
 | Store | Runtime service | Where | Lifetime |
 |---|---|---|---|
-| Ubisoft | `ubi-bridge.exe` owns the SDK pipes; Denuvo broker on `127.0.0.1:47810` | prefix + host (built) | per launch, with a lease |
+| Ubisoft | `quiver-bridge.exe` owns the SDK pipes; Denuvo broker on `127.0.0.1:47810` | prefix + host (built) | per launch, with a lease |
 | GOG | **comet**, the Galaxy SDK service on `127.0.0.1:9977`, plus the GalaxyCommunication dummy | host sidecar now, in-process later | first GOG game to last; one account at a time until in-process routing |
 | EA | the **LSX service** (XML over TCP, challenge + AES): `RequestLicense` (Denuvo), `GetAuthCode`, `QueryEntitlements`, config, profile | inside `quiverd` | per launch, own port via `EALsxPort`, 3216 as fallback (unverified, EA S4) |
 | Epic | none: EOS talks to Epic itself, authenticated by an **exchange code** minted per launch (`-AUTH_PASSWORD=<code> -AUTH_TYPE=exchangecode …`), plus `-epicovt` when `OwnershipToken=true` | args + temp file | single use |
@@ -512,6 +512,10 @@ for them to keep working when other stores arrive.
 
 ## 5. Crate layout and rename path
 
+Done for the existing crates: every `ubi-*` crate is now `quiver-*` (`ubi-core` to `quiver-core`,
+`ubid` to `quiverd`, `ubi-bridge` to `quiver-bridge`, and so on), the Ubisoft remainder included,
+in one rename rather than the steps below. The "From" column and the steps keep the old names.
+
 | Crate | From | Holds |
 |---|---|---|
 | `quiver-api` | `ubi-api` | protocol, `GameRef`, `StoreId`, the model |
@@ -668,9 +672,9 @@ deploy (`tools/install-user.sh`).
 
 | Step | What | Size | Ubisoft keeps working because |
 |---|---|---|---|
-| **R0** | `StoreId`, `GameRef`, `GameId` in `ubi-api` (serde from number or string, `key`, `dir_name`, `Display`); `game_dir(&GameRef)` and `mods_dir`; every `join(product_id.to_string())` routed through them. Ubisoft is the only store | S | output is byte-identical (tests pin `games/3539/`, `quiver:5059` and its crc) |
+| **R0** | `StoreId`, `GameRef`, `GameId` in `quiver-api` (serde from number or string, `key`, `dir_name`, `Display`); `game_dir(&GameRef)` and `mods_dir`; every `join(product_id.to_string())` routed through them. Ubisoft is the only store | S | output is byte-identical (tests pin `games/3539/`, `quiver:5059` and its crc) |
 | **R1** | Requests and events take `game` (`alias = "product_id"`); responses carry both; persisted files per section 2.3; `ExportKey` holds a `GameRef`; the CLI resolver takes refs and searches every store by name. About 1,560 `product_id` uses, swept one crate per commit | M | golden tests: old request JSON parses; old `games.json`, `queue.json`, `exports.json` round-trip unchanged |
-| **R2** | Provider traits, with `ubi-core` implementing them by wrapping today's code; `quiverd` routes by store; `LibraryEntry.records` (with `steam` still emitted for a cycle); `Accounts` sign-in steps; `accounts.json` `store` field; `Secret<T>` and launch redaction | M | no behaviour change: the Ubisoft path is the old code behind a trait |
+| **R2** | Provider traits, with `quiver-core` implementing them by wrapping today's code; `quiverd` routes by store; `LibraryEntry.records` (with `steam` still emitted for a cycle); `Accounts` sign-in steps; `accounts.json` `store` field; `Secret<T>` and launch redaction | M | no behaviour change: the Ubisoft path is the old code behind a trait |
 | **R3** | Crate renames and the `quiver-core` / `steam-local` extraction (section 5), in a quiet window | S–M | mechanical; aliases first |
 | **R4** | Generalisations, each landing with the first store that needs it: PieceInstaller (GOG); save locations and tree stores (GOG, Epic); host `RuntimeService` (comet, then LSX); `LaunchMaterial`; Move (any time); `XrRequirement` (Meta) | per store | the Ubisoft implementation stays until the new one has parity |
 
@@ -793,5 +797,5 @@ The "Edit" column is the small correction made to the store doc in this commit.
 | 12 | Prefix models: per game (most), `compatdata` (Steam), shared runtime prefix (Meta) | `PrefixPolicy` with three variants (4) | none |
 | 13 | Effort scales: M is 1–2 weeks (Epic, Steam) vs 1–3 weeks (GOG, EA); L is "several weeks" vs "more than a month" | normalised in this document | none (store docs keep their own) |
 | 14 | A separate `gog-galaxy` crate (GOG) vs one crate per store | a `galaxy` module in `gog-core`; `gog-dummy-service` stays a crate (Windows target) | none |
-| 15 | Steam's crate: `store-steam` or `ubi-core::steam` | `steam-local` (files) plus `steam-core` (provider, `cm` feature): shortcut exports need the file layer without the provider | none |
+| 15 | Steam's crate: `store-steam` or `quiver-core::steam` | `steam-local` (files) plus `steam-core` (provider, `cm` feature): shortcut exports need the file layer without the provider | none |
 | 16 | EA phase 1 "Ubisoft paths migrated by reading them in place" vs no migration | follows from #4 | EA section 6 |

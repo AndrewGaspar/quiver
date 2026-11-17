@@ -65,7 +65,7 @@ isn't listed. It needs the new quiverd, so the exact `state`, `platform` and
 
 A game bought on Steam has no art in its product config (no `thumb_image`,
 `background_image`, `logo_image`). Every front end now takes art from the first source of
-`ubi_api::art::candidates` that loads:
+`quiver_api::art::candidates` that loads:
 
 1. the product config (file names on Ubisoft's asset CDN);
 2. UbiServices' games API, `GET /v1/spaces/global/ubiconnect/games/api?spaceIds=…` (what

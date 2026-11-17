@@ -4438,6 +4438,196 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "quiver-perf",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "quiver-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "gilrs",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "libc",
+ "notify",
+ "quiver-api",
+ "quiver-ui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "quiver-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prost",
+ "quiver-ipc",
+ "quiver-proto",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "quiver-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hex",
+ "quiver-api",
+ "quiver-core",
+ "quiver-ipc",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "quiver-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "crc32fast",
+ "flate2",
+ "futures",
+ "hex",
+ "image",
+ "keyring",
+ "libc",
+ "md5",
+ "prost",
+ "quiver-api",
+ "quiver-ipc",
+ "quiver-perf",
+ "quiver-proto",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha1",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "webpki-roots",
+ "zstd",
+]
+
+[[package]]
+name = "quiver-ipc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "quiver-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "quiver-perf"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "quiver-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "quiver-perf",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "quiver-sight-layer"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "image",
+ "libc",
+ "quiver-perf",
+ "serde_json",
+ "tempfile",
+ "x11rb",
+]
+
+[[package]]
+name = "quiver-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "notify",
+ "rust-embed",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "quiverd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "hex",
+ "libc",
+ "prost",
+ "quiver-api",
+ "quiver-core",
+ "quiver-perf",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha1",
+ "tempfile",
+ "tokio",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6027,196 +6217,6 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "ubi-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "ubi-perf",
-]
-
-[[package]]
-name = "ubi-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "futures",
- "gilrs",
- "gpui",
- "gpui_platform",
- "image",
- "libc",
- "notify",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ubi-api",
- "ubi-ui",
-]
-
-[[package]]
-name = "ubi-bridge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "prost",
- "serde_json",
- "tokio",
- "ubi-ipc",
- "ubi-proto",
-]
-
-[[package]]
-name = "ubi-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "hex",
- "rpassword",
- "serde",
- "serde_json",
- "tokio",
- "tracing-subscriber",
- "ubi-api",
- "ubi-core",
- "ubi-ipc",
-]
-
-[[package]]
-name = "ubi-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "crc32fast",
- "flate2",
- "futures",
- "hex",
- "image",
- "keyring",
- "libc",
- "md5",
- "prost",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha1",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "toml 1.2.1+spec-1.1.0",
- "tracing",
- "ubi-api",
- "ubi-ipc",
- "ubi-perf",
- "ubi-proto",
- "webpki-roots",
- "zstd",
-]
-
-[[package]]
-name = "ubi-ipc"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "tokio",
- "ubi-proto",
-]
-
-[[package]]
-name = "ubi-perf"
-version = "0.1.0"
-dependencies = [
- "fastrand",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "ubi-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "serde",
- "serde_json",
- "ubi-perf",
-]
-
-[[package]]
-name = "ubi-sight-layer"
-version = "0.1.0"
-dependencies = [
- "ash",
- "image",
- "libc",
- "serde_json",
- "tempfile",
- "ubi-perf",
- "x11rb",
-]
-
-[[package]]
-name = "ubi-ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gpui",
- "gpui_platform",
- "image",
- "notify",
- "rust-embed",
- "serde_json",
- "tempfile",
- "tracing",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "ubid"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "flate2",
- "hex",
- "libc",
- "prost",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha1",
- "tempfile",
- "tokio",
- "toml 1.2.1+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "ubi-api",
- "ubi-core",
- "ubi-perf",
-]
 
 [[package]]
 name = "uds_windows"

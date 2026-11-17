@@ -1,6 +1,6 @@
 # Quiver: design proposal
 
-Quiver is a third-party launcher for your Ubisoft library on Linux. It is not affiliated with or endorsed by Ubisoft, and it uses no Ubisoft logos or wordmarks. The app is a front end for the `quiverd` daemon, and the `quiver` command drives the same daemon from a terminal or an agent. Internal crate names (`ubi-core`, `ubi-bridge`) are not changed by this document.
+Quiver is a third-party launcher for your Ubisoft library on Linux. It is not affiliated with or endorsed by Ubisoft, and it uses no Ubisoft logos or wordmarks. The app is a front end for the `quiverd` daemon, and the `quiver` command drives the same daemon from a terminal or an agent. Internal crate names (`quiver-core`, `quiver-bridge`) are not changed by this document.
 
 This document goes with the mock-ups (the "Mock-ups" tab of the same page). Game art in the mock-ups is the real Ubisoft art for this library. Play times, sizes, sessions, achievements, mods, the second account and agent activity are illustrative.
 
@@ -121,7 +121,7 @@ There is no separate big-picture mode. The normal app works with a controller, a
 | Activity | Events, actors, diffs, approvals | Local | append-only event log |
 | Import | Product match, version check | Platform | executable names in product configs, manifests |
 | Import | Found installs, prefixes, saves | Local | filesystem scan |
-| Now playing | Bridge, Denuvo token, ticket refresh | Local | `ubi-bridge` IPC and the broker |
+| Now playing | Bridge, Denuvo token, ticket refresh | Local | `quiver-bridge` IPC and the broker |
 
 ## Accounts
 

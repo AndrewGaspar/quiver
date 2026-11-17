@@ -1,0 +1,25 @@
+[package]
+name = "quiver-sight-layer"
+description = "VK_LAYER_QUIVER_sight: present telemetry and the Sight HUD compositor, a Vulkan layer loaded into game processes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# libquiver_sight_layer.so, named in the layer manifest (manifest/).
+name = "quiver_sight_layer"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No loader: the layer gets every function pointer from the next layer in the chain.
+ash = { version = "0.38", default-features = false, features = ["std", "debug"] }
+quiver-perf = { path = "../quiver-perf", default-features = false, features = ["std"] }
+libc.workspace = true
+
+[dev-dependencies]
+ash = { version = "0.38", features = ["loaded"] }
+image = { workspace = true }
+serde_json.workspace = true
+tempfile.workspace = true
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }

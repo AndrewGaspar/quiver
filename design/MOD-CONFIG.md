@@ -5,7 +5,7 @@ model this extends) and `SIGHT.md` (the in-game overlay, designed separately; it
 the contract in [Contract with the in-game overlay](#contract-with-the-in-game-overlay)).
 
 **Naming.** In this codebase *overlay* already means two things: overlayfs mounts
-(`ubi_core::overlay`) and the app's own dialogs and palette (`ubi-app/src/ui/overlay.rs`).
+(`quiver_core::overlay`) and the app's own dialogs and palette (`quiver-app/src/ui/overlay.rs`).
 *Config* is taken three times: config patches (MODS-V2), `profile_config` folders and the
 launch settings (`quiver get/set`). This document calls the new feature **options** (what
 games call their settings menus), always writes **in-game overlay** in full, and never uses
@@ -612,7 +612,7 @@ Four ways a running program can get a new value, in order of preference:
 ### File rewrite (MVP)
 
 The game's overlayfs mount exists only inside the launch's namespace. quiverd never enters it
-(`ubi_core::overlay`), and writing into an upper folder underneath a live overlayfs mount is
+(`quiver_core::overlay`), and writing into an upper folder underneath a live overlayfs mount is
 undefined behaviour. Instead quiverd writes **through the namespace**: via
 `/proc/<pid>/root/<install path>/…` of a process in the session (same uid, the namespace is a
 child of ours, so the access check passes; Yama only restricts attach), or, as a fallback,
@@ -745,7 +745,7 @@ the protocol on a pipe-equivalent so authors can test without a game.
 
 ## 6. Surfaces
 
-### Daemon requests (`ubi_api::options`, appended to `ModsRequest`)
+### Daemon requests (`quiver_api::options`, appended to `ModsRequest`)
 
 | Request | Reply | Notes |
 |---|---|---|
@@ -764,7 +764,7 @@ Events (after `Subscribe`): `OptionsChanged { product_id, profile, revision, sou
 `OptionsLive { session, surface, values, by }` (session-level changes, including unsaved and
 `changed persist=0`), `ModChannel { session, surface, connected }`. Values a running mod
 reports are metrics: listed with `PerfCatalog` and watched with `PerfSubscribe`
-(`ubi_api::perf`, SIGHT-HUD §3.11), which replaced the `OptionsReadout` event.
+(`quiver_api::perf`, SIGHT-HUD §3.11), which replaced the `OptionsReadout` event.
 
 `ActiveSession` gains `session` (id), `profile`, `options_revision` and `pids`, which the
 in-game overlay and the CLI need to address "the running game".
@@ -998,7 +998,7 @@ in-game overlay can't edit sensibly is marked `overlay = false` by the schema or
 they fit a compact in-game panel.
 
 **C9. Guarantees.** Option ids, surface keys and the shapes above are stable within
-`ubi_api` (appended, never renamed, like the rest of the protocol). The daemon never writes a
+`quiver_api` (appended, never renamed, like the rest of the protocol). The daemon never writes a
 value it didn't validate. The overlay doesn't need to know about files, formats, profiles'
 folders, the SDK or the bridge.
 
@@ -1076,7 +1076,7 @@ the overlay can show them next to the options.
 **Decided 2026-11-16:** the user accepted every recommendation below as written. Each steer's
 *Recommend* is the decision; the other options are kept for the record.
 
-1. **Name of the feature.** (a) Options (`quiver mods <game> options`, `ubi_api::options`);
+1. **Name of the feature.** (a) Options (`quiver mods <game> options`, `quiver_api::options`);
    (b) Config; (c) Settings. *Recommend (a): "config" and "settings" already mean patches,
    `profile_config` and launch settings.*
 2. **Plugin unit.** (a) Declarative schemas + built-in Rust adapters (+ `lines` regex later);
@@ -1101,7 +1101,7 @@ the overlay can show them next to the options.
    keys and defaults never arrive.*
 9. **Live channel in the MVP.** (a) File rewrite through the running namespace (aco-dlss works
    live with no changes); (b) wait for the SDK; (c) no live in the MVP. *Recommend (a).*
-10. **SDK transport.** (a) Named pipe owned by ubi-bridge, relayed to quiverd; (b) mods
+10. **SDK transport.** (a) Named pipe owned by quiver-bridge, relayed to quiverd; (b) mods
     connect to quiverd over TCP with a session token from the environment; (c) shared memory
     plus an event. *Recommend (a): no new port or secret in the game's environment, and every
     launch path already has the bridge.*
@@ -1125,12 +1125,12 @@ the overlay can show them next to the options.
 
 ## As built (phase 1, except the app UI and the SDK transport)
 
-- **Types:** `ubi_api::options` (schema, value handling shared with front ends, `SurfaceState`,
+- **Types:** `quiver_api::options` (schema, value handling shared with front ends, `SurfaceState`,
   `OptionOp`, `Outcome`, `OptionsChange`, `OptionsRevision`, `KeysReport`, `SessionOptions`,
-  `OptionsRequest`, `OptionsEvent`, `SessionDetail`). Core: `ubi_core::options` (`schema`
+  `OptionsRequest`, `OptionsEvent`, `SessionDetail`). Core: `quiver_core::options` (`schema`
   parse/lint, `infer`, `keys`; values store; surface resolution; launch rendering/patching;
-  imports; live rewrite). Daemon: `crates/ubid/src/options.rs`. CLI: `quiver mods <game>
-  options …` (`crates/ubi-cli/src/options.rs`).
+  imports; live rewrite). Daemon: `crates/quiverd/src/options.rs`. CLI: `quiver mods <game>
+  options …` (`crates/quiver-cli/src/options.rs`).
 - **Requests** are `Request::Options(OptionsRequest)` (`list`, `set`, `diff`, `history`,
   `restore`, `revert_session`, `invoke`, `keys`, `schema`, `schema_set`, `infer`, `lint`,
   `sessions`), not `ModsRequest` variants, and **events** are `Reply::Options(OptionsEvent)`
@@ -1143,7 +1143,7 @@ the overlay can show them next to the options.
   `pids` on the wire (`SessionDetail`, flattened), and play sessions are stored with
   `session` and `options_revision` beside them in `playtime.jsonl`. Launches put
   `QUIVER_SESSION` in the bridge's and the game's environment.
-- **Catalog:** `options/*.toml` (compiled in by `ubi-core/build.rs`): `aco-dlss.toml` (all 63
+- **Catalog:** `options/*.toml` (compiled in by `quiver-core/build.rs`): `aco-dlss.toml` (all 63
   keys of `aco_dlss.ini`, classified from `src/core/config.cpp` and where each key is read;
   matched by product 3539 + a shipped `aco_dlss.ini`) and `acc-china-anisotropy.toml` (the
   16x filtering built-in's `PCConsole-ACCSystemSettings.ini`, program-owned prefix file).
@@ -1163,10 +1163,10 @@ the overlay can show them next to the options.
 - **Outcomes:** `applied_live`, `saved_restart { running }`, `saved_at`, `saved_pending`
   (a live option the running game can't be reached for, or `live: no`), `dormant`,
   `rejected`, `unchanged`, `timed_out` (SDK).
-- **SDK hook:** `ubid::options::SdkLink` (`connected`, `push` → `SdkAck`, `invoke`),
+- **SDK hook:** `quiverd::options::SdkLink` (`connected`, `push` → `SdkAck`, `invoke`),
   registered with `Options::set_sdk`; mod-reported values go through
   `Daemon::options_from_mod` (`persist` → a `mod:<surface>` revision, else session state)
-  and `options_sdk_bye`. Static metric declarations: `ubi_core::options::static_metrics`
+  and `options_sdk_bye`. Static metric declarations: `quiver_core::options::static_metrics`
   (pull) or the `PerfCatalogSink` trait (push).
 - **Crash correlation:** a non-zero exit (or an SDK mod without `bye`) within 60 s of a live
   change records a `CrashNote` in the session record and emits `OptionsEvent::Crash`; nothing

@@ -9,7 +9,7 @@ merge only recompiles what changed.
 | Command | `tools/install-user.sh` | `tools/package.sh`, then `sudo pacman -U …` |
 | Root | no | for the install |
 | Binaries | `~/.local/bin` | `/usr/bin` |
-| Bridge | `~/.local/lib/quiver/ubi-bridge.exe` | `/usr/lib/quiver/ubi-bridge.exe` |
+| Bridge | `~/.local/lib/quiver/quiver-bridge.exe` | `/usr/lib/quiver/quiver-bridge.exe` |
 | Desktop entry, icon | `~/.local/share/applications`, `~/.local/share/icons/hicolor` | `/usr/share/…` |
 | systemd user unit (not enabled) | `~/.config/systemd/user/quiverd.service` | `/usr/lib/systemd/user/quiverd.service` |
 | Licenses | `~/.local/share/doc/quiver` | `/usr/share/licenses/quiver` |
@@ -81,8 +81,8 @@ Then, either way:
    `quiver export desktop <game>`; `quiver export list` shows what exists.
 
 `config.json` needs no change. It used to store the bridge path of the time (the repo's
-`target/x86_64-pc-windows-gnu/release/ubi-bridge.exe`); that value now reads as "find it",
-so `quiverd` uses `<its dir>/../lib/quiver/ubi-bridge.exe` (installed) or, for a dev build,
+`target/x86_64-pc-windows-gnu/release/quiver-bridge.exe`); that value now reads as "find it",
+so `quiverd` uses `<its dir>/../lib/quiver/quiver-bridge.exe` (installed) or, for a dev build,
 the checkout's cross build. Set `bridge_exe` only to force a particular bridge.
 
 ## Upgrades

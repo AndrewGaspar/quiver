@@ -1,0 +1,17 @@
+[package]
+name = "quiver-api"
+description = "Protocol and client for the quiverd daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+regex = "1"
+quiver-perf.workspace = true

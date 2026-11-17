@@ -32,7 +32,7 @@ Why:
   pieces, and they map almost one to one onto what Quiver already has for Ubisoft:
   `auth`/`store` → EA Nucleus OAuth, `library` → GraphQL entitlements, `install`/`verify` →
   DiP zip downloads, the Denuvo broker → LSX `RequestLicense`, `savesync` → cloudsync.
-- **It's simpler than ubi-bridge in one important way.** Ubisoft's SDK reaches Connect over
+- **It's simpler than quiver-bridge in one important way.** Ubisoft's SDK reaches Connect over
   named pipes, which is why Quiver needs a Windows binary in the prefix. EA's SDK reaches the
   EA app over **TCP on 127.0.0.1:3216** [M3][W1], and a Wine process's TCP connection reaches
   the host directly. The LSX server can therefore live in `quiverd` on the host. No EA
@@ -92,25 +92,25 @@ and a daemon request exist. "Designed" means a design doc exists and there's no 
 
 | # | Capability | State in Quiver | Where |
 |---|---|---|---|
-| C1 | Accounts and auth: several accounts, a default, 2FA, keyring, "signed in elsewhere" | Built | `ubi-core/auth.rs` (UbiServices sessions, remember-me), `store.rs` (Secret Service, `accounts.json`), `Request::Login/Login2fa/Logout/AccountDefault` |
-| C2 | Library sync, merged across accounts, with art and metadata | Built | `library.rs` (demux ownership), `spaces.rs` and `ubi-api/art.rs` (art candidates), `gameinfo.rs`, `Request::Library/GameInfo` |
-| C3 | Install, download, queue, pause and resume, update preview, verify and repair, uninstall, import | Built | `install.rs`, `builds.rs`, `download.rs`, `verify.rs`, `ubid/downloads.rs`; `Request::Install/Update/Verify/Queue*/Import/ScanInstalls/Uninstall` |
+| C1 | Accounts and auth: several accounts, a default, 2FA, keyring, "signed in elsewhere" | Built | `quiver-core/auth.rs` (UbiServices sessions, remember-me), `store.rs` (Secret Service, `accounts.json`), `Request::Login/Login2fa/Logout/AccountDefault` |
+| C2 | Library sync, merged across accounts, with art and metadata | Built | `library.rs` (demux ownership), `spaces.rs` and `quiver-api/art.rs` (art candidates), `gameinfo.rs`, `Request::Library/GameInfo` |
+| C3 | Install, download, queue, pause and resume, update preview, verify and repair, uninstall, import | Built | `install.rs`, `builds.rs`, `download.rs`, `verify.rs`, `quiverd/downloads.rs`; `Request::Install/Update/Verify/Queue*/Import/ScanInstalls/Uninstall` |
 | C3b | Move an install | Designed only | PROPOSAL lists `quiver move`; there's no request or code |
 | C4 | A Proton prefix per game | Built | `launcher.rs` (`Config.prefixes`, `<prefixes>/<slug>`) |
-| C5 | Launch with licensing: the bridge replaces the client, the Denuvo token broker, ownership and CD keys in `InitReq` | Built | `ubi-bridge` (named pipes, `win/api.rs`, `win/aux.rs`), `broker.rs`, `ubi-ipc` `BrokerRequest::{DenuvoGameToken, PlaySession}` |
+| C5 | Launch with licensing: the bridge replaces the client, the Denuvo token broker, ownership and CD keys in `InitReq` | Built | `quiver-bridge` (named pipes, `win/api.rs`, `win/aux.rs`), `broker.rs`, `quiver-ipc` `BrokerRequest::{DenuvoGameToken, PlaySession}` |
 | C6 | Cloud saves: pull before, push after, backups, save stores, merge | Built | `cloudsave.rs`, `savesync.rs`, `saves.rs`, `savestores.rs` |
-| C7 | Achievements | Partly built: definitions and progress are *read* from UbiServices. The bridge answers `GetAchievements` with an empty list and only logs earns ("not reported to Ubisoft yet") | `progress.rs`, `ubi-bridge/src/win/api.rs:403` |
+| C7 | Achievements | Partly built: definitions and progress are *read* from UbiServices. The bridge answers `GetAchievements` with an empty list and only logs earns ("not reported to Ubisoft yet") | `progress.rs`, `quiver-bridge/src/win/api.rs:403` |
 | C8 | Play time and progression: sessions reported to Ubisoft, local history, stats, Club | Built | `playsession.rs` (POST, then PUT every 330 s, then DELETE), `progress.rs`, `Request::Playtime/RemotePlaytime/GameProgress` |
-| C9 | DLC: add-on ownership passed to the game, the Add-ons tab, store links | Built | the bridge's `InitReq` owned ids and CD keys, `ubi-app/ui/game/addons.rs` |
+| C9 | DLC: add-on ownership passed to the game, the Add-ons tab, store links | Built | the bridge's `InitReq` owned ids and CD keys, `quiver-app/ui/game/addons.rs` |
 | C10 | Mods: layers, versioned mods, profiles, overlayfs, config patches, per-profile prefix folders, save stores | Built (MODS-V2) | `mods.rs`, `modversions.rs`, `overlay.rs`, `confpatch.rs` |
 | C11 | Mod Options (MOD-CONFIG) | Designed only | `design/MOD-CONFIG.md` |
 | C12 | Sight overlay and the pinned HUD | Designed only | `design/SIGHT.md`, `design/SIGHT-HUD.md` |
-| C13 | CLI and agents: source labels, activity, approvals for "Ask" actions, settings history and restore | Built. Scoped tokens and MCP are designed only | `ubi-cli`, `ubid/info.rs::needs_approval`, `Request::Settings*/Activity` |
+| C13 | CLI and agents: source labels, activity, approvals for "Ask" actions, settings history and restore | Built. Scoped tokens and MCP are designed only | `quiver-cli`, `quiverd/info.rs::needs_approval`, `Request::Settings*/Activity` |
 | C14 | Exports: Steam shortcuts, .desktop entries, Steam copies through `steam-run` | Built | `exports/*`, `steamrun.rs`, `design/STEAM-COPIES.md` |
-| C15 | First run: the welcome, install folder, importing, Steam step, fixes | Built | `ubid/setup.rs`, `ubi-app/ui/welcome.rs` |
+| C15 | First run: the welcome, install folder, importing, Steam step, fixes | Built | `quiverd/setup.rs`, `quiver-app/ui/welcome.rs` |
 
 One structural fact matters more than any single capability. **Every daemon request is keyed
-by `product_id: u32`** (`ubi-api/src/lib.rs`, `enum Request`), and so are the on-disk layout
+by `product_id: u32`** (`quiver-api/src/lib.rs`, `enum Request`), and so are the on-disk layout
 (`games/<product>/…`, `mods/<product>/…`), exports (`quiver:<product id>/<profile>`) and
 settings scopes. EA's identifiers are strings: offer ids like `Origin.OFR.50.0002694`, plus a
 content id, a master title id and a multiplayer id [M2][M7]. EA can't land without a store
@@ -121,10 +121,10 @@ qualifier on game ids ([§3.1](#31-store-agnostic-interfaces-brief)).
 ## 3. Architecture
 
 ```
- quiver-app   quiver CLI   agents          (unchanged: ubi-api over quiverd.sock)
+ quiver-app   quiver CLI   agents          (unchanged: quiver-api over quiverd.sock)
         \         |         /
          +---- quiverd ----+
-         |  stores: ubisoft (ubi-core) · ea (ea-core) · …     ← StoreId on every GameKey
+         |  stores: ubisoft (quiver-core) · ea (ea-core) · …     ← StoreId on every GameKey
          |  shared: queue, prefixes, launcher, mods/overlays, save stores, history, activity,
          |          exports, Sight/HUD, play sessions
          |
@@ -359,7 +359,7 @@ touches EA needs the user to sign in themselves, and asks first, per the real-pr
 
 **Phase 1: MVP (one EA account, own-store games).**
 
-- The `GameKey` refactor across `ubi-api`, `quiverd` and storage, with Ubisoft paths left
+- The `GameKey` refactor across `quiver-api`, `quiverd` and storage, with Ubisoft paths left
   unchanged (no migration).
 - `ea-core`: nucleus, gql (library, art, info), content (DiP install, update, verify),
   ooa, and the LSX server (license, auth code, entitlements, config, profile; everything

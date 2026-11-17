@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# instance.sh — run a Ubisoft game against ubi-bridge (no Connect) in a headless container.
+# instance.sh — run a Ubisoft game against quiver-bridge (no Connect) in a headless container.
 #
 #   instance.sh new <name>                   fresh Proton prefix with only Ubisoft's SDK DLLs (no
 #                                            Connect); games are run from the library directory
 #   instance.sh create <name> [src-prefix]   reflink-clone a prefix; strip Connect's login data
 #                                            and disable Connect's executables
-#   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, ubi-bridge,
+#   instance.sh run <name> <uplay-id> <exe>  write a fresh launch context, start Xvfb, quiver-bridge,
 #                                            then the game (<exe> is a Windows path). Extra game
 #                                            environment: UBI_GAME_ENV="K=V K2=V2". Wine trace of
 #                                            the game (kept inside the container): UBI_TRACE=+file
@@ -20,7 +20,7 @@
 # local changes are kept; overwritten files go to $INST_ROOT/save-backups). Uploading happens
 # on `wait`/`stop` and covers only slots the game wrote (<slot>.save.upload markers).
 #
-# Live requests from the game (Denuvo tokens) go from ubi-bridge to `ubi broker` on the host,
+# Live requests from the game (Denuvo tokens) go from quiver-bridge to `ubi broker` on the host,
 # which holds the Ubisoft session; the container shares the host network to reach it.
 #
 # The clone keeps the source prefix's path inside the container so registry paths stay valid.
@@ -100,13 +100,13 @@ cmd_run() {
   [[ -d $dst/prefix ]] || die "no instance $name"
   src=$(cat "$dst/src")
   podman rm -f "$(ctr "$name")" >/dev/null 2>&1 || true
-  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p ubi-cli
-  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p ubi-bridge --target x86_64-pc-windows-gnu
+  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p quiver-cli
+  cargo build -q --manifest-path "$ROOT/Cargo.toml" -p quiver-bridge --target x86_64-pc-windows-gnu
   mkdir -p "$dst/prefix/drive_c/ubi" "$dst/out"
-  cp "$ROOT/target/x86_64-pc-windows-gnu/debug/ubi-bridge.exe" "$dst/prefix/drive_c/ubi/"
+  cp "$ROOT/target/x86_64-pc-windows-gnu/debug/quiver-bridge.exe" "$dst/prefix/drive_c/ubi/"
   # One broker on the host serves every instance; start it if nothing is listening.
   if ! (exec 3<>"/dev/tcp/${BROKER%:*}/${BROKER#*:}") 2>/dev/null; then
-    RUST_LOG=${RUST_LOG:-ubi_core=info} nohup "$ROOT/target/debug/ubi" broker --listen "$BROKER" >>"$INST_ROOT/broker.log" 2>&1 &
+    RUST_LOG=${RUST_LOG:-quiver_core=info} nohup "$ROOT/target/debug/ubi" broker --listen "$BROKER" >>"$INST_ROOT/broker.log" 2>&1 &
     echo "started broker on $BROKER (log: $INST_ROOT/broker.log)"
   fi
   local user_id
@@ -163,7 +163,7 @@ EOF
       Xvfb "$DISPLAY" -screen 0 ${UBI_RES}x24 -nolisten tcp >/out/xvfb.log 2>&1 &
       for i in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
       echo "boot $(date -Is)" >> /out/run.log
-      python3 "$UBI_PROTON/proton" run "C:\\ubi\\ubi-bridge.exe" "Z:\\out\\context.json" >/out/bridge.log 2>&1 &
+      python3 "$UBI_PROTON/proton" run "C:\\ubi\\quiver-bridge.exe" "Z:\\out\\context.json" >/out/bridge.log 2>&1 &
       for i in $(seq 100); do grep -q "listening on .*uplay_ipc_pipe" /out/bridge-ipc.log 2>/dev/null && break; sleep 0.2; done
       echo "game $(date -Is)" >> /out/run.log
       # `run`, not `waitforexitandrun`: the latter waits for the bridge'"'"'s wineserver to exit.
