@@ -718,6 +718,51 @@ mod tests {
         assert!(p.reset);
     }
 
+    /// Model check: random bursts of pushes (some never committed) and polls of random size.
+    /// Delivered records are exactly the pushed ones, in order, minus what the reader was
+    /// told it lost; when fully drained, read + lost covers every index.
+    #[test]
+    fn random_pushes_and_polls() {
+        for _ in 0..200 {
+            let slots = [16, 32, 64][fastrand::usize(..3)];
+            let (w, mut r) = ring(slots);
+            r.set_stuck_polls(1);
+            let mut pushed: Vec<Option<i64>> = vec![];
+            let (mut read, mut lost) = (0u64, 0u64);
+            let mut next = 0usize;
+            for _ in 0..fastrand::usize(1..60) {
+                for _ in 0..fastrand::usize(0..(slots as usize * 2)) {
+                    if fastrand::u8(..) < 4 {
+                        w.claim_without_commit_for_test();
+                        pushed.push(None);
+                    } else {
+                        let t = fastrand::i64(..);
+                        // A slot left busy by a dead writer drops later laps' records.
+                        pushed.push(w.push(&Record::series(1, t, 0.0)).map(|_| t));
+                    }
+                }
+                let p = r.poll(fastrand::usize(0..slots as usize * 2), |i, rec| {
+                    let i = i as usize;
+                    assert!(i >= next);
+                    assert_eq!(Some(rec.t), pushed[i]);
+                    next = i + 1;
+                });
+                read += p.read;
+                lost += p.lost + p.torn;
+            }
+            for _ in 0..pushed.len() + 4 {
+                let p = r.poll(usize::MAX, |i, rec| assert_eq!(Some(rec.t), pushed[i as usize]));
+                read += p.read;
+                lost += p.lost + p.torn;
+            }
+            // A dead slot with nothing after it is waited on, not skipped.
+            let waiting = r.reserve() - r.cursor();
+            assert!(waiting <= 1 && (waiting == 0 || pushed.last() == Some(&None)));
+            assert_eq!(read + lost + waiting, pushed.len() as u64);
+            assert!(read <= pushed.iter().filter(|p| p.is_some()).count() as u64);
+        }
+    }
+
     /// Small ring, a writer lapping it constantly: every record the reader accepts must be
     /// exactly what was written for that index (no torn copies), and indices increase.
     #[test]

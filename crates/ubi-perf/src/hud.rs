@@ -600,6 +600,74 @@ mod tests {
         assert_eq!(read_hud_header(&mem), Err(Error::Version(2)));
     }
 
+    /// Hostile descriptors (random fields, plausible-ish ranges so some pass): the reader never
+    /// panics or reads out of bounds, and whatever validates fits the buffer and the
+    /// swapchain.
+    #[test]
+    fn random_descriptors() {
+        let bb = buffer_bytes_for(256, 256).unwrap();
+        let mem = Arc::new(HeapRegion::new(hud_file_bytes(bb)));
+        init_hud(&mem, bb).unwrap();
+        let mut r = HudReader::new(mem.clone()).unwrap();
+        let mut dst = vec![0u8; bb as usize];
+        // Near the boundaries half the time, anything the other half.
+        let any = |n: u32| if fastrand::bool() { fastrand::u32(..) } else { fastrand::u32(0..n) };
+        let float = || [1.0, 0.0, -1.0, f32::NAN, f32::INFINITY, 0.5, 2.5, 100.0, -0.0][fastrand::usize(..9)];
+        let (mut ok, mut images) = (0, 0);
+        for i in 1..10_000u64 {
+            // A valid descriptor with 0–3 fields replaced by hostile values.
+            let mut d = desc(fastrand::u32(17..=256), fastrand::u32(8..=240), i);
+            for _ in 0..fastrand::usize(0..4) {
+                let g = fastrand::usize(..2);
+                match fastrand::u8(0..19) {
+                    0 => d.width = any(300),
+                    1 => d.height = any(300),
+                    2 => d.stride = any(1300),
+                    3 => d.format = any(3),
+                    4 => d.scale = float(),
+                    5 => d.opacity = float(),
+                    6 => d.extent_w = any(4000),
+                    7 => d.extent_h = any(4000),
+                    8 => d.x = any(4000) as i32,
+                    9 => d.y = any(4000) as i32,
+                    10 => d.ngraphs = any(4),
+                    11 => d.graph[g].x = any(300) as i32,
+                    12 => d.graph[g].y = any(300) as i32,
+                    13 => d.graph[g].w = any(300) as i32,
+                    14 => d.graph[g].h = any(300) as i32,
+                    15 => d.graph[g].span_ms = any(12000),
+                    16 => d.graph[g].min_ms = float(),
+                    17 => d.graph[g].max_ms = float(),
+                    _ => d.graph[g].series = any(9),
+                }
+            }
+            let valid = d.validate(bb, Some((d.extent_w, d.extent_h))).is_ok();
+            if valid {
+                ok += 1;
+                assert!(d.pixel_bytes() + HUD_PIXELS_OFFSET <= bb as usize);
+                assert!(d.x as u64 + d.width as u64 <= d.extent_w as u64);
+                for g in d.graphs() {
+                    assert!(g.x >= 0 && g.y >= 0 && (g.x + g.w) as u32 <= d.width && (g.y + g.h) as u32 <= d.height);
+                }
+            }
+            // Write the raw descriptor as a hostile writer would (bypassing publish's checks).
+            let base = buffer_off(&r.info, i);
+            for (k, w) in d.to_words().iter().enumerate() {
+                mem.u64_at(base + 8 * k).store(*w, Ordering::Relaxed);
+            }
+            mem.u64_at(OFF_PUBLISHED).store(i, Ordering::Release);
+            match r.poll((d.extent_w, d.extent_h), &mut dst) {
+                HudPoll::Image { .. } => {
+                    assert!(valid);
+                    images += 1;
+                }
+                HudPoll::Invalid(_) => assert!(!valid),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(ok > 100 && images == ok, "{ok} valid, {images} taken");
+    }
+
     #[test]
     fn colours() {
         assert_eq!(rgba(1, 2, 3, 4).to_le_bytes(), [1, 2, 3, 4]);

@@ -469,8 +469,8 @@ mod tests {
         // Read-only mapping.
         assert!(!r.region().writable());
         assert!(RingWriter::new(r.region()).is_err());
-        // An existing ring name can't be created over by create_ring for a mod (O_EXCL on
-        // the temp, rename replaces): the layer for a reused pid replaces its old ring.
+        // Creating a ring over an existing name replaces it atomically (a reused pid): a
+        // reader of the old one sees that through is_file_at.
         let w2 = dir.create_layer_ring(777, [2; 16]).unwrap();
         assert!(!r.region().is_file_at(&ring_path));
         drop(w2);
