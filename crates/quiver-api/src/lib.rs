@@ -772,6 +772,17 @@ pub enum Event {
     /// The game exited abnormally soon after a live change: offer `RevertSession` (never
     /// done automatically, MOD-CONFIG §8).
     OptionsCrash { product_id: u32, profile: String, note: options::SessionOptions },
+    /// What a change made while the game runs did, one outcome per operation, whoever made
+    /// it (Sight shows it as a toast).
+    OptionsOutcome {
+        session: String,
+        product_id: u32,
+        profile: String,
+        by: String,
+        outcomes: Vec<options::OpOutcome>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<String>,
+    },
     /// A mod's SDK channel connected or went away in a running session.
     ModChannel {
         session: String,
@@ -811,6 +822,7 @@ impl From<options::OptionsEvent> for Event {
             O::Changed { product_id, profile, revision, source, changes } => Event::OptionsChanged { product_id, profile, revision, source, changes },
             O::Live { session, product_id, surface, values, by, saved } => Event::OptionsLive { session, product_id, surface, values, by, saved },
             O::Crash { product_id, profile, note } => Event::OptionsCrash { product_id, profile, note },
+            O::Outcome { session, product_id, profile, by, outcomes, changes } => Event::OptionsOutcome { session, product_id, profile, by, outcomes, changes },
         }
     }
 }
@@ -845,6 +857,14 @@ impl Event {
                 saved: *saved,
             },
             Event::OptionsCrash { product_id, profile, note } => O::Crash { product_id: *product_id, profile: profile.clone(), note: note.clone() },
+            Event::OptionsOutcome { session, product_id, profile, by, outcomes, changes } => O::Outcome {
+                session: session.clone(),
+                product_id: *product_id,
+                profile: profile.clone(),
+                by: by.clone(),
+                outcomes: outcomes.clone(),
+                changes: changes.clone(),
+            },
             _ => return None,
         })
     }
@@ -1058,6 +1078,18 @@ mod tests {
         let v = serde_json::to_value(live.folded()).unwrap();
         assert_eq!(v["event"]["type"], "options_live");
         assert_eq!(v["event"]["values"]["fg.enabled"], false);
+        let o = options::OptionsEvent::Outcome {
+            session: "s-1".into(),
+            product_id: 1,
+            profile: "p1".into(),
+            by: "sight".into(),
+            outcomes: vec![options::OpOutcome { surface: "m/aco-dlss".into(), id: "fg.enabled".into(), outcome: options::Outcome::Unchanged, before: None, after: None }],
+            changes: Vec::new(),
+        };
+        let line = serde_json::to_string(&Reply::Options(o.clone()).folded()).unwrap();
+        assert!(line.contains(r#""type":"options_outcome""#), "{line}");
+        let Reply::Event(back) = serde_json::from_str(&line).unwrap() else { panic!() };
+        assert_eq!(back.options(), Some(o));
         // Perf: per-subscription updates (map keys are stats) survive the tagged form.
         let u = perf::PerfUpdate {
             sub: 7,

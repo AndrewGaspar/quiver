@@ -1549,6 +1549,20 @@ pub enum OptionsEvent {
     /// The game exited abnormally soon after a live change: offer `RevertSession` (never
     /// done automatically, §8).
     Crash { product_id: u32, profile: String, note: SessionOptions },
+    // ---- appended (build/quiver-sight)
+    /// What a change made while the game runs did, one outcome per operation (applied live,
+    /// saved and applies at …, rejected, …), whoever made it: Sight shows it as a toast.
+    /// Clients that don't know it skip the line.
+    Outcome {
+        session: String,
+        product_id: u32,
+        profile: String,
+        by: String,
+        outcomes: Vec<OpOutcome>,
+        /// In words ("DLSS world.npc_density 4 → 5").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<String>,
+    },
 }
 
 #[cfg(test)]

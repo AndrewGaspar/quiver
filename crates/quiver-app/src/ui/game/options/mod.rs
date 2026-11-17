@@ -625,6 +625,13 @@ impl Quiver {
                     }
                 }
             }
+            // What someone else's change did in the running game (Sight, the CLI, an agent):
+            // the rows say it too. The app's own saves show the reply's outcomes already.
+            Event::OptionsOutcome { product_id, profile, by, outcomes, .. } if by != "gui" && loaded.as_ref() == Some(&(*product_id, profile.clone())) => {
+                for o in outcomes {
+                    self.gp.opt.outcomes.insert((o.surface.clone(), o.id.clone()), o.clone());
+                }
+            }
             Event::OptionsCrash { product_id, profile, note } => {
                 self.gp.opt.crash = Some((*product_id, profile.clone(), note.clone()));
                 if loaded.as_ref().is_some_and(|(g, _)| g == product_id) {

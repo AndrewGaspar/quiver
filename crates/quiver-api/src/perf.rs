@@ -126,6 +126,10 @@ pub enum PerfRequest {
         product_id: u32,
         #[serde(default)]
         stop: bool,
+        /// Also start `quiver-sight` (as a launch would), so the HUD renders and toasts
+        /// show for the dev session. Off by default: tests' dev sessions draw nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sight: bool,
     },
 }
 

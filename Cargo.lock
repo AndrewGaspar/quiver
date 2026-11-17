@@ -4577,6 +4577,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-sight"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "image",
+ "libc",
+ "quiver-api",
+ "quiver-perf",
+ "quiver-ui",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "quiver-sight-layer"
 version = "0.1.0"
 dependencies = [

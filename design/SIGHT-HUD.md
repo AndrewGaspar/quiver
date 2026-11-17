@@ -508,6 +508,20 @@ panel, the app's game page and its layout preview are the same widgets.
   session: quiverd starts it at launch when the HUD (or Sight) is on for the game, and starts
   it on `quiver hud toggle` if it isn't running. It serves every running session (normally one)
   and exits a little after the last one ends (SIGHT §5).
+- **As built** (`crates/quiver-sight`, `crates/quiverd/src/perf/sight.rs`): quiverd starts
+  `quiver-sight` for every Quiver launch (toasts are on for them; the HUD when enabled), on
+  `hud toggle`/`hud next`, and for `perf dev-session --sight`; a lock next to quiverd's socket
+  keeps it to one instance. It connects without starting quiverd, attaches to each session
+  with the HUD enabled, and exits when quiverd goes away or 5 s after the last session. GPUI
+  runs on the main thread (rendering, windows, a 250 ms tick for the heartbeat and toast
+  expiry), the quiverd connection on one tokio thread. Per session, one off-screen window
+  (low-power adapter) at `text_px × scale / 12` device px per logical px; on a new model it
+  renders synchronously (`render_now`), fits the window to the measured card (one more pass
+  when the size changed) and publishes the card's pixels with the descriptor (anchor and
+  safe area resolved in swapchain pixels, the graph placeholders' rectangles, opacity 1).
+  Hidden (`on: false`, or the desktop presenter) republishes the last image at opacity 0,
+  which the layer treats as "off" at once. The desktop presenter is the same view on a
+  `quiver-sight-hud` layer-shell surface that draws the graph from the model's points.
 - **Why not in quiverd.** The rendering cost is small, but the process cost isn't: the RSS of a
   process with a Vulkan device is dominated by the driver, about 100 MiB on the AMD 890M iGPU
   and about 280 MiB on the NVIDIA RTX 5070 in the spike. That belongs in `quiver-sight`, which
@@ -550,7 +564,8 @@ layer, empty input region) on the game's monitor and renders the same HUD view i
 The graph is a GPUI `canvas` fed from the layer's ring through quiverd at ≤ 10 Hz (or absent for
 OpenGL games, where only system and mod metrics exist: "FPS" shows `—` without a frame source).
 Commits are coalesced to the HUD's update rate, and the graph updates at most 10 Hz, to limit
-the extra flips of section 2.1. Built in phase 2.
+the extra flips of section 2.1. Built in phase 1 with `quiver-sight` (commits follow the
+model's revisions, at most the HUD's rate; the graph from the model's `points`).
 
 ### 2.12 The HUD in captures
 
@@ -787,9 +802,12 @@ QUIVER_SIGHT=1                                           # the layer manifest's 
 
 As built (quiverd's perf hub, `crates/quiverd/src/perf/launch.rs`): these go to a launch only
 while the HUD is enabled for the game (`quiver hud enable GAME`; off by default for now).
-`QUIVER_SESSION` is the launch's one session id (Options and the mod pipe use the same). With
-obs-vkcapture in use (`OBS_VKCAPTURE=1` or the `obs-gamecapture` wrapper) quiverd also sets
-`VK_INSTANCE_LAYERS` to the order of §2.12; with MangoHud, `MANGOHUD_CONFIG` gains
+`QUIVER_SESSION` is the launch's one session id (Options and the mod pipe use the same).
+quiverd always sets `VK_INSTANCE_LAYERS` while the HUD is on, listing only the layers the
+launch enables, in the order of §2.4 and §2.12 (the user's own list, then vkBasalt and lsfg-vk
+when their variables turn them on, then Sight, with obs-vkcapture on the side the capture
+setting says), so the loader can't put Sight above a post-processing or frame-generation
+layer; with MangoHud, `MANGOHUD_CONFIG` gains
 `toggle_logging=Shift_L+F7` (`read_cfg` first when the user set none). A layer installed under
 Quiver's data dir (`sight/layer/*.json`) is added with `VK_ADD_IMPLICIT_LAYER_PATH`.
 

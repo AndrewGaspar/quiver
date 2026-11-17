@@ -93,6 +93,13 @@ impl Client {
         Self::connect_at(socket_path(), source, true).await
     }
 
+    /// Connect to a running daemon only: never starts one, now or on a reconnect (after
+    /// [`Event::Disconnected`], reconnects fail until a daemon is up again). For processes
+    /// quiverd starts itself, such as `quiver-sight`.
+    pub async fn connect_running(source: &str) -> Result<Self> {
+        Self::connect_at(socket_path(), source, false).await
+    }
+
     pub(crate) async fn connect_at(path: PathBuf, source: &str, autostart: bool) -> Result<Self> {
         let shared = Arc::new(Shared {
             path,

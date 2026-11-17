@@ -6,6 +6,10 @@
 //!   --frames N --fps F --srgb --device <name substring> --validation
 //!   --window                                 an X11 window instead of headless
 //!   --screenshot <path.png>                  with --window: grim the window after 2.5 s
+//!   --perf-dir <dir>                         a real session dir (quiverd's, with quiver-sight
+//!                                            publishing its hud.image) instead of a test one
+//!   --png <path.png>                         headless: save the last presented image
+//!   --extent WxH                             headless swapchain size (default 1280x720)
 //! ```
 //!
 //! `off`: no layer. `passthrough`: the layer without `QUIVER_PERF_DIR`. `telemetry`: ring and
@@ -26,6 +30,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let (mut mode, mut frames, mut fps, mut srgb, mut device, mut validation, mut window, mut shot) =
         ("hud".to_owned(), 1000u32, 240.0, false, None, false, false, None);
+    let (mut perf_dir, mut png, mut extent): (Option<String>, Option<String>, Option<(u32, u32)>) = (None, None, None);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--layer" => mode = args.next().unwrap(),
@@ -36,6 +41,13 @@ fn main() {
             "--validation" => validation = true,
             "--window" => window = true,
             "--screenshot" => shot = args.next(),
+            "--perf-dir" => perf_dir = args.next(),
+            "--png" => png = args.next(),
+            "--extent" => {
+                let v = args.next().unwrap();
+                let (w, h) = v.split_once('x').unwrap();
+                extent = Some((w.parse().unwrap(), h.parse().unwrap()));
+            }
             _ => panic!("unknown argument {a}"),
         }
     }
@@ -51,7 +63,10 @@ fn main() {
             }
         }
         if mode == "telemetry" || mode == "hud" {
-            std::env::set_var("QUIVER_PERF_DIR", session.dir.path());
+            match &perf_dir {
+                Some(d) => std::env::set_var("QUIVER_PERF_DIR", d),
+                None => std::env::set_var("QUIVER_PERF_DIR", session.dir.path()),
+            }
         }
         if mode == "telemetry" {
             std::env::set_var("QUIVER_SIGHT_DRAW", "0");
@@ -66,13 +81,15 @@ fn main() {
         srgb,
         device: device.or(Opts::default().device),
         surface: if window { Surface::Window { title: title.clone() } } else { Surface::Headless },
-        readback: false,
+        readback: png.is_some() && !window,
+        extent: extent.unwrap_or(Opts::default().extent),
         hitches: (1..frames / 100).map(|k| k * 100 + 37).collect(),
         debug_utils: validation,
         on_frame: Some(Box::new(|_, t, extent| {
             let variant = (t.as_millis() / 500) as u32;
-            // quiver-sight publishes a new image on a model change or a new extent.
-            if (variant, extent) != last {
+            // quiver-sight publishes a new image on a model change or a new extent (with
+            // --perf-dir the real one does).
+            if perf_dir.is_none() && (variant, extent) != last {
                 last = (variant, extent);
                 session.publish(&test_image(extent, (24, 24), (380, 190), variant, 0.92));
             }
@@ -102,7 +119,15 @@ fn main() {
         percentile(present, 0.99) as f64 / 1e3,
         r.messages.len()
     );
-    if let Ok(mut ring) = open_ring_reader(&session.ring_path()) {
+    if let (Some(path), Some(px)) = (&png, &r.pixels) {
+        image::RgbaImage::from_raw(r.extent.0, r.extent.1, px.clone()).unwrap().save(path).unwrap();
+        println!("saved the last presented image ({}x{}) to {path}", r.extent.0, r.extent.1);
+    }
+    let ring_path = match &perf_dir {
+        Some(d) => std::path::Path::new(d).join(format!("layer-{}.ring", std::process::id())),
+        None => session.ring_path(),
+    };
+    if let Ok(mut ring) = open_ring_reader(&ring_path) {
         let mut hud = Vec::new();
         let mut inner = Vec::new();
         let mut n = 0;

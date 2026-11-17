@@ -408,7 +408,9 @@ impl Quiver {
             }
             Event::Reconnected => self.on_reconnected(cx),
             // Mod options (the open game's Mods tab follows them).
-            Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::ModChannel { .. } => self.options_event(&e, cx),
+            Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::OptionsOutcome { .. } | Event::ModChannel { .. } => {
+                self.options_event(&e, cx)
+            }
             // Events this app doesn't show (perf updates, HUD models) and ones added later.
             _ => return,
         }

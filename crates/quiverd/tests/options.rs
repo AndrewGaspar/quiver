@@ -189,16 +189,20 @@ async fn options_end_to_end() {
     assert!(list[0].live.connected);
     assert_eq!(list[0].options["fg.mode"].pending, quiver_api::options::Pending::Restart);
     assert_eq!(list[0].options["world.npc_density"].pending, quiver_api::options::Pending::None);
-    // Events: a new revision and the live values.
+    // Events: a new revision, the live values, and the outcomes (Sight's toasts).
     let mut got = Vec::new();
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
         got.push(ev);
-        if got.len() >= 2 {
+        if got.len() >= 3 {
             break;
         }
     }
     assert!(got.iter().any(|e| matches!(e, OptionsEvent::Changed { revision: 3, .. })), "{got:?}");
     assert!(got.iter().any(|e| matches!(e, OptionsEvent::Live { values, saved: true, .. } if values.contains_key("world.npc_density"))), "{got:?}");
+    assert!(
+        got.iter().any(|e| matches!(e, OptionsEvent::Outcome { outcomes, by, .. } if by == "cli" && outcomes.len() == 3 && matches!(outcomes[0].outcome, Outcome::AppliedLive { .. }))),
+        "{got:?}"
+    );
     // The same events reach `subscribe()` as `Event`s (the wire form since the fold).
     let mut all = cli.subscribe().await.unwrap();
     let _: OptionsChange = options(&cli, OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_distance", json!(1.5))], live: Live::No, message: None, confirmed: false }).await.unwrap();
