@@ -48,6 +48,8 @@ struct Shared {
     /// The current connection; replaced when it has closed.
     conn: tokio::sync::Mutex<Option<Arc<Conn>>>,
     events: Subscriber,
+    /// Mod options events (`Reply::Options`), for clients that asked.
+    options_events: Arc<Mutex<Option<mpsc::UnboundedSender<crate::options::OptionsEvent>>>>,
     supervising: AtomicBool,
 }
 
@@ -97,6 +99,7 @@ impl Client {
             next_id: AtomicU64::new(1),
             conn: tokio::sync::Mutex::new(None),
             events: Arc::default(),
+            options_events: Arc::default(),
             supervising: AtomicBool::new(false),
         });
         let conn = shared.open(Duration::ZERO).await?;
@@ -125,6 +128,15 @@ impl Client {
         if !self.shared.supervising.swap(true, Ordering::SeqCst) {
             tokio::spawn(supervise(Arc::downgrade(&self.shared), conn.closed.subscribe()));
         }
+        Ok(rx)
+    }
+
+    /// Receive mod options events (`OptionsEvent`) on this connection from now on. Call
+    /// [`Self::subscribe`] too to keep receiving them across daemon restarts.
+    pub async fn subscribe_options(&self) -> Result<mpsc::UnboundedReceiver<crate::options::OptionsEvent>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.shared.options_events.lock().unwrap() = Some(tx);
+        self.shared.subscribe_current().await?;
         Ok(rx)
     }
 }
@@ -280,6 +292,7 @@ impl Shared {
         // Weak: dropping the client drops the write half, the daemon hangs up, and this ends.
         let reader = Arc::downgrade(&conn);
         let events = self.events.clone();
+        let options_events = self.options_events.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(r).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -298,6 +311,11 @@ impl Shared {
                     // Only subscribed connections get events.
                     Ok(Reply::Event(e)) => {
                         if let Some(tx) = events.lock().unwrap().as_ref() {
+                            let _ = tx.send(e);
+                        }
+                    }
+                    Ok(Reply::Options(e)) => {
+                        if let Some(tx) = options_events.lock().unwrap().as_ref() {
                             let _ = tx.send(e);
                         }
                     }

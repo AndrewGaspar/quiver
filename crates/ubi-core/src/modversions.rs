@@ -45,6 +45,9 @@ pub struct NewVersion {
     pub save_compatible: Option<Option<bool>>,
     /// More install paths to hide, on top of the current version's.
     pub deletes: Vec<String>,
+    /// The version's options schema, when it isn't in the folder (`quiver-options.toml` at a
+    /// plain folder's root or next to a package's `quiver-mod.toml` is found on its own).
+    pub options: Option<PathBuf>,
 }
 
 /// `on`, `off`, `unknown` (or empty) to a save compatibility.
@@ -210,6 +213,14 @@ impl ModStore {
         if files.is_none() && deletes.is_empty() && manifest.is_none() {
             bail!("a version needs a folder of files, files to delete, or a manifest");
         }
+        // Options: a schema named explicitly, or next to the package's manifest (a plain
+        // folder's own is taken by `add_mod`). Checked before anything is added.
+        let schema_file = opts.options.clone().or_else(|| if from_package { opts.path.as_deref().and_then(crate::options::schema_in) } else { None });
+        if let Some(f) = &schema_file {
+            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            let s = crate::options::schema::parse(&text, f.extension().is_some_and(|e| e == "json")).with_context(|| f.display().to_string())?;
+            crate::options::schema::check(&s).with_context(|| f.display().to_string())?;
+        }
         let change = self.add_mod(&rec.name, files.as_deref(), &deletes, self.install_dir(), source, manifest, cur.builtin && !from_package, Some(&rec.id))?;
         let current = !opts.no_update && !opts.prerelease;
         let msg = opts.notes.clone().map(|n| format!("added {label}: {n}")).or(Some(format!("added {label}")));
@@ -224,6 +235,16 @@ impl ModStore {
             }
         };
         notes.extend(change.warnings);
+        // Options: the version's own schema, else the previous version's carried forward;
+        // linted against the new files, with profiles' values that go dormant.
+        let vid = change.layer.id.clone();
+        if let Some(f) = &schema_file {
+            crate::options::adopt_schema(self, &vid, f)?;
+        } else if crate::options::carry_schema(self, &cur.id, &vid)? {
+            notes.push(format!("options: the schema of {} is carried forward", rec.label_of(&cur.id)));
+        }
+        notes.extend(crate::options::lint_version(self, &rec, &change.layer));
+        notes.extend(crate::options::dormant_in_profiles(self, &rec, &change.layer));
         if !current {
             notes.push(format!(
                 "{label} is not current{}: pin it (profile set PROFILE mods=…,'{}@{label}') or make it current (version use '{}' {label})",

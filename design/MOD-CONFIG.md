@@ -1122,3 +1122,55 @@ the overlay can show them next to the options.
 16. **Game-native options** (ACO.ini graphics as a surface). (a) Phase 2 from the catalog;
     (b) in the MVP alongside aco-dlss (its `render_scale` writes `PixelDensity`); (c) later.
     *Recommend (a).*
+
+## As built (phase 1, except the app UI and the SDK transport)
+
+- **Types:** `ubi_api::options` (schema, value handling shared with front ends, `SurfaceState`,
+  `OptionOp`, `Outcome`, `OptionsChange`, `OptionsRevision`, `KeysReport`, `SessionOptions`,
+  `OptionsRequest`, `OptionsEvent`, `SessionDetail`). Core: `ubi_core::options` (`schema`
+  parse/lint, `infer`, `keys`; values store; surface resolution; launch rendering/patching;
+  imports; live rewrite). Daemon: `crates/ubid/src/options.rs`. CLI: `quiver mods <game>
+  options …` (`crates/ubi-cli/src/options.rs`).
+- **Requests** are `Request::Options(OptionsRequest)` (`list`, `set`, `diff`, `history`,
+  `restore`, `revert_session`, `invoke`, `keys`, `schema`, `schema_set`, `infer`, `lint`,
+  `sessions`), not `ModsRequest` variants, and **events** are `Reply::Options(OptionsEvent)`
+  (`changed`, `live`, `crash`) beside `Reply::Event`: the app matches `ModsRequest` and
+  `Event` exhaustively, and it was not to be touched during the GPUI bump. Older clients
+  ignore both. `Client::subscribe_options` receives the events. Fold them into
+  `ModsRequest`/`Event` once the app has wildcard arms.
+- **C1:** `ActiveSession` and `PlaySession` have no new fields yet (the app builds them with
+  struct literals). `Request::Sessions` answers `session`, `profile`, `options_revision` and
+  `pids` on the wire (`SessionDetail`, flattened), and play sessions are stored with
+  `session` and `options_revision` beside them in `playtime.jsonl`. Launches put
+  `QUIVER_SESSION` in the bridge's and the game's environment.
+- **Catalog:** `options/*.toml` (compiled in by `ubi-core/build.rs`): `aco-dlss.toml` (all 63
+  keys of `aco_dlss.ini`, classified from `src/core/config.cpp` and where each key is read;
+  matched by product 3539 + a shipped `aco_dlss.ini`) and `acc-china-anisotropy.toml` (the
+  16x filtering built-in's `PCConsole-ACCSystemSettings.ini`, program-owned prefix file).
+  `[match]` takes `products`, `mods`, `files`, `sha256`; version ranges are not built.
+- **Precedence** is as specified (author > catalog > local); a surface exists only when one of
+  them has a schema, and "inferred" is used for "Other keys" and `options infer`.
+- **Files:** `owner = "quiver"` install files are rendered into the profile's upper each
+  launch (an unchanged copy is removed so a new version's file shows through); program-owned
+  install files are copied up and patched with `confpatch::reconcile` against the upper
+  (record `profiles/<id>/options-patches.json`); prefix files join the mods' config patches in
+  the one reconcile pass (mod id `options:<surface key>`). Only the `ini` adapter is built;
+  other formats lint with a warning and are not written.
+- **Imports:** hand edits of rendered files (source `file`, a deviation from the doc's list)
+  and program changes to keys with profile values (source `game`) become revisions at launch,
+  every 2 s while a session runs and someone is subscribed (through `/proc/<pid>/root`), and
+  at session end.
+- **Outcomes:** `applied_live`, `saved_restart { running }`, `saved_at`, `saved_pending`
+  (a live option the running game can't be reached for, or `live: no`), `dormant`,
+  `rejected`, `unchanged`, `timed_out` (SDK).
+- **SDK hook:** `ubid::options::SdkLink` (`connected`, `push` → `SdkAck`, `invoke`),
+  registered with `Options::set_sdk`; mod-reported values go through
+  `Daemon::options_from_mod` (`persist` → a `mod:<surface>` revision, else session state)
+  and `options_sdk_bye`. Static metric declarations: `ubi_core::options::static_metrics`
+  (pull) or the `PerfCatalogSink` trait (push).
+- **Crash correlation:** a non-zero exit (or an SDK mod without `bye`) within 60 s of a live
+  change records a `CrashNote` in the session record and emits `OptionsEvent::Crash`; nothing
+  is reverted automatically (`options revert --session S`). Known-good pairs and safe launch
+  are not built.
+- **Test hook:** `QUIVER_TEST_SESSION=<product>:<profile>:<root>` makes quiverd register a
+  running session at startup that writes through `<root>` (integration tests use `/`).

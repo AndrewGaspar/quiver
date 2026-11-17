@@ -19,6 +19,7 @@ pub mod modpkg;
 pub mod mods;
 pub mod modversions;
 pub mod online;
+pub mod options;
 pub mod overlay;
 pub mod playsession;
 pub mod private;

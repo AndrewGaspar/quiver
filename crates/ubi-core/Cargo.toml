@@ -33,6 +33,8 @@ crc32fast.workspace = true
 image.workspace = true
 libc.workspace = true
 toml.workspace = true
+sha2 = "0.10"
+regex = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1308,6 +1308,9 @@ pub enum ModsRequest {
         save_compatible: Option<String>,
         #[serde(default)]
         deletes: Vec<String>,
+        /// Options: the version's schema file, when it isn't in the folder (appended).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<PathBuf>,
     },
     /// Make a version the mod's current one, for every profile that tracks it: a roll back
     /// or forward (`VersionChange`).
