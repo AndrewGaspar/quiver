@@ -76,6 +76,35 @@ Front ends hold no state. Every request carries a source label (`gui`, `cli`, or
 changed what. Clients outlive a daemon restart: they reconnect on their own, renew their event
 subscription, and never resend a request the old daemon may already have run.
 
+### Daemon lifecycle
+
+`quiverd` is started on demand by any client (or by its systemd user unit, if enabled) and
+runs until `quiver daemon stop`. When a new build is installed over the binary it was started
+from (`tools/install-user.sh`, pacman, or a `cargo build` of a dev checkout), it restarts
+itself onto it **once nothing needs it**, for 30 s in a row (`QUIVER_RESTART_IDLE_SECS`;
+`QUIVER_AUTO_RESTART=0` turns this off):
+
+- **Busy:** any game session (launched by Quiver, Steam or a container bridge), a game
+  Quiver is starting, an install, update, repair, verify or import that is running (a
+  paused or waiting queue isn't: the queue is saved and resumes), a perf subscription
+  (`quiver perf watch`) or attached HUD, a sign-in waiting for its 2FA code, a bridge
+  connected to the broker, a request in flight, or a **hold**.
+- **Not busy:** app windows and other event subscribers, and finished one-shot commands.
+- **Holds:** `quiver daemon hold --reason "…"` holds until that command exits (Ctrl-C, or
+  its process dies); `--for 2h` holds for that long (at most 24 h) and returns at once.
+  `quiver daemon release [ID|--all]` ends one early.
+- **The restart:** quiverd stops accepting connections, checks once more and starts
+  refusing requests in one step (so a launch can't slip in), tells subscribers (the app
+  shows "quiverd updated to …"), then execs the new build in the same process, handing
+  over its socket and the broker's port, so nothing that connects meanwhile is turned away.
+  Requests it refused, or never answered, are sent again by the client to the new build
+  (for up to 30 s), so a `quiver play` during a restart still starts the game. One line in
+  the activity log records each restart.
+
+`quiver daemon status` shows the build and commit, whether an update is staged, what the
+restart is waiting on ("waiting on: Assassin's Creed Origins (bridge), 1 perf subscription")
+and the holds.
+
 ## Install
 
 ```sh
@@ -115,6 +144,10 @@ quiver restore origins 2                       # make revision 2 current again (
 quiver --source agent set origins wrappers=gamemoderun,mangohud
 quiver activity                                # recent actions across GUI/CLI/agents
 quiver watch                                   # live daemon events (JSON)
+quiver daemon status                           # build, staged update, what a restart onto it waits on
+quiver daemon hold --reason "benchmark" --for 2h   # keep quiverd from restarting onto a new build
+quiver daemon release 3                        # end hold #3 early (--all: every hold)
+quiver daemon stop                             # exit (refused while a game runs)
 quiver export desktop origins [--remove]       # ~/.local/share/applications/quiver-<id>.desktop
 quiver export steam origins [--user NAME]      # non-Steam shortcut with Ubisoft art (staged while Steam runs)
 quiver export list                             # exports and whether they're still as written

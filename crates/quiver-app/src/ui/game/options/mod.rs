@@ -789,7 +789,7 @@ impl Quiver {
             }
             let _ = this.update(cx, |this, cx| {
                 if running {
-                    this.call::<u64, _>(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }, cx, |_, _, _| {});
+                    this.call::<u64, _>(Request::Play { game: quiver_api::GameRef::ubisoft(3539).into(), profile: None }, cx, |_, _, _| {});
                 }
                 this.open_game(Gid::from(3539), cx);
                 this.nav.tab = Tab::Mods;

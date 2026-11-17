@@ -59,13 +59,15 @@ impl Broker {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
-            tracing::info!(%peer, "bridge connected");
-            let this = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = this.handle_conn(stream).await {
-                    tracing::warn!(%peer, "bridge connection ended: {e:#}");
-                }
-            });
+            tokio::spawn(self.clone().serve_one(stream, peer));
+        }
+    }
+
+    /// Serve one bridge connection until it closes (for callers with their own accept loop).
+    pub async fn serve_one(self: Arc<Self>, stream: TcpStream, peer: std::net::SocketAddr) {
+        tracing::info!(%peer, "bridge connected");
+        if let Err(e) = self.handle_conn(stream).await {
+            tracing::warn!(%peer, "bridge connection ended: {e:#}");
         }
     }
 

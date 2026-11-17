@@ -144,7 +144,7 @@ impl Quiver {
         });
         out.push(Entry {
             group: "Everywhere".into(),
-            cmd: cmd(Icon::Users, "Add a Ubisoft account…", Some("Its games join this library".into()), Some("quiver login".into()), Cmd::Global(GlobalCmd::AddAccount)),
+            cmd: cmd(Icon::Users, if self.ubisoft_signed_in() { "Add a Ubisoft account…" } else { "Sign in to Ubisoft…" }, Some("Its games join this library".into()), Some("quiver login".into()), Cmd::Global(GlobalCmd::AddAccount)),
             game: None,
         });
         out.truncate(MAX_ENTRIES);
@@ -197,7 +197,7 @@ impl Quiver {
             "reload sync",
         );
         add(
-            cmd(Icon::Users, "Add a Ubisoft account…", Some("Its games join this library".into()), Some("quiver login".into()), Cmd::Global(GlobalCmd::AddAccount)),
+            cmd(Icon::Users, if self.ubisoft_signed_in() { "Add a Ubisoft account…" } else { "Sign in to Ubisoft…" }, Some("Its games join this library".into()), Some("quiver login".into()), Cmd::Global(GlobalCmd::AddAccount)),
             "sign in login another second family",
         );
         if let Some(s) = &self.status {

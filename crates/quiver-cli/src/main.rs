@@ -3,6 +3,7 @@
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
 
 mod achievements;
+mod daemon;
 mod dev;
 mod downloads;
 mod exports;
@@ -228,10 +229,10 @@ enum Cmd {
         #[command(subcommand)]
         action: perf::HudAction,
     },
-    /// Control the daemon.
+    /// The daemon: status, holding off its restart onto a new build, stopping it.
     Daemon {
         #[command(subcommand)]
-        action: DaemonAction,
+        action: daemon::DaemonAction,
     },
     /// .desktop entries and Steam shortcuts for games.
     Export {
@@ -328,12 +329,6 @@ enum Cmd {
     /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
     /// game's Steam install script or its prefix's registry).
     SteamRun(steamrun::SteamRunArgs),
-}
-
-#[derive(Subcommand)]
-enum DaemonAction {
-    /// Ask quiverd to exit.
-    Stop,
 }
 
 #[derive(Subcommand)]
@@ -582,9 +577,13 @@ async fn main() -> Result<()> {
     if let Cmd::SteamRun(args) = cli.cmd {
         return steamrun::run(&cli.source, args).await;
     }
+    // Connects on its own (and only `hold` starts the daemon).
+    if let Cmd::Daemon { action } = cli.cmd {
+        return daemon::run(&cli.source, action).await;
+    }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } => {
+        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
@@ -753,7 +752,7 @@ async fn main() -> Result<()> {
                 if profile.is_some() || profile_id.is_some() {
                     bail!("{} games play as {} starts them; mod profiles don't apply", any.store().label(), any.store().label());
                 }
-                let _: u64 = client.call(Request::Play { game: any.game, profile: None }).await?;
+                let _: u64 = client.call(Request::Play { game: any.game.into(), profile: None }).await?;
                 eprintln!("asked {} to start {} ({})", any.store().label(), any.name, c.launch_url.as_deref().unwrap_or("its client"));
                 return Ok(());
             }
@@ -769,7 +768,7 @@ async fn main() -> Result<()> {
                     .map(|s| mods::default_label(&s)),
                 Some(_) => None,
             };
-            let id: u64 = client.call(Request::Play { game: e.game, profile: profile.clone() }).await?;
+            let id: u64 = client.call(Request::Play { game: e.game.into(), profile: profile.clone() }).await?;
             if let Some(g) = e.steam.as_ref().filter(|_| e.steam_only()) {
                 let how = if g.state.uses_quiver() { "it starts through Quiver" } else { "it starts through Ubisoft Connect; `quiver steam patch` switches it" };
                 eprintln!("asked Steam to start {} (steam://rungameid/{}; {how})", e.name, g.app_id);
@@ -798,7 +797,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Stop { game } => {
             let e = resolve(&client, &game).await?;
-            let () = client.call(Request::Stop { game: e.game }).await?;
+            let () = client.call(Request::Stop { game: e.game.into() }).await?;
         }
         Cmd::Get { game } => {
             let e = resolve(&client, &game).await?;
@@ -849,13 +848,13 @@ async fn main() -> Result<()> {
         Cmd::Playtime { game } => {
             let any = resolve_any(&client, &game).await?;
             if any.ubisoft_id().is_none() {
-                let p: quiver_api::Playtime = client.call(Request::Playtime { game: any.game }).await?;
+                let p: quiver_api::Playtime = client.call(Request::Playtime { game: any.game.into() }).await?;
                 let last = p.last_played.map(|t| t.with_timezone(&chrono::Local).format(" (last played %Y-%m-%d %H:%M)").to_string()).unwrap_or_default();
                 println!("{}: {}h{:02}m, as {} recorded it{last}", any.name, p.total_seconds / 3600, p.total_seconds % 3600 / 60, any.store().label());
                 return Ok(());
             }
             let e = resolve(&client, &game_label(&any.game)).await?;
-            let p: quiver_api::Playtime = client.call(Request::Playtime { game: e.game }).await?;
+            let p: quiver_api::Playtime = client.call(Request::Playtime { game: e.game.into() }).await?;
             match client.call::<serde_json::Value>(Request::RemotePlaytime { product_id: e.product_id }).await {
                 Ok(r) => println!("Ubisoft says: {} (raw: {r})", r["seconds"].as_u64().map(|s| format!("{}h{:02}m", s / 3600, s % 3600 / 60)).unwrap_or("?".into())),
                 Err(err) => println!("Ubisoft play time unavailable: {err:#}"),
@@ -965,10 +964,6 @@ async fn main() -> Result<()> {
         Cmd::Saves { game, action: Some(info::SavesAction::Store { action }), .. } => savestores::store(&client, &cli.source, &game, action).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Merge { from, into }), .. } => {
             savestores::merge(&client, &cli.source, &game, from, into).await?
-        }
-        Cmd::Daemon { action: DaemonAction::Stop } => {
-            let () = client.call(Request::Shutdown).await?;
-            println!("quiverd stopping");
         }
     }
     Ok(())

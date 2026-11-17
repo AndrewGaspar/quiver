@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod achievements;
 pub mod art;
 pub mod client;
+pub mod daemon;
 pub mod downloads;
 pub mod exports;
 pub mod game;
@@ -470,14 +471,14 @@ pub enum Request {
     /// setting; vanilla when unset, or with a warning when that profile was deleted).
     /// A game of another store asks its client to start it (Steam: `steam://rungameid`).
     Play {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
     Stop {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
     },
     /// Cancel a job. Installs stop and can be resumed by installing again; `discard`
     /// also deletes the partial files (only for games that weren't installed before).
@@ -506,8 +507,8 @@ pub enum Request {
     /// Play sessions recorded by this launcher; for another store's game, the total and last
     /// played time its client recorded (no sessions).
     Playtime {
-        #[serde(alias = "product_id")]
-        game: GameRef,
+        #[serde(flatten)]
+        game: game::GameField,
     },
     /// Ubisoft's own play-time record for a game (read-only).
     RemotePlaytime { product_id: u32 },
@@ -736,6 +737,9 @@ pub enum Request {
         #[serde(default)]
         refresh: bool,
     },
+    // ---- The daemon's lifecycle (appended; build/daemon-auto-restart)
+    /// Build, staged update, what a restart waits on, holds (see [`daemon`]).
+    Daemon(daemon::DaemonRequest),
     // ---- Quiver Tweaks (appended; design/TWEAKS.md)
     /// Platform-level overrides per scope (global, game, profile), the plan of the next
     /// launch and sessions' effects (see [`tweaks`]).
@@ -758,7 +762,14 @@ pub struct Envelope {
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
     Ok { id: u64, result: serde_json::Value },
-    Err { id: u64, error: String },
+    /// `code`: [`daemon::RESTARTING`] when the request was refused, not run, because the
+    /// daemon is restarting (send it again); none otherwise (and from older daemons).
+    Err {
+        id: u64,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     Event(Event),
     /// Mod options events as daemons from before the fold into [`Event`] sent them
     /// (`{"options": {...}}`). Still read; quiverd now sends [`Event::OptionsChanged`] and its
@@ -767,6 +778,11 @@ pub enum Reply {
     /// Perf events as daemons from before the fold sent them (`{"perf": {...}}`). Still
     /// read; quiverd now sends [`Event::PerfUpdate`] and its siblings.
     Perf(perf::PerfEvent),
+    // ---- appended (build/daemon-auto-restart); older clients skip lines they can't read
+    /// The daemon's last message on a connection before it restarts onto a new build:
+    /// it answers nothing more on it, and requests it hasn't answered did not run (send
+    /// them again; the new daemon picks up new connections at once).
+    Closing { reason: String },
 }
 
 impl Reply {
@@ -889,6 +905,15 @@ pub enum Event {
         ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<Box<perf::PerfSummary>>,
+    },
+    // ---- appended (build/daemon-auto-restart)
+    /// quiverd is restarting onto a newly installed build (`to`: its version, when the
+    /// install manifest says). Subscribers see `Disconnected`, then `Reconnected` once the
+    /// new build is up.
+    DaemonRestarting {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
     },
     // ---- appended: Quiver Tweaks (design/TWEAKS.md §8.1)
     /// A new revision of a tweak scope's values (global, a game, a profile).
@@ -1241,9 +1266,14 @@ mod tests {
         // Older clients ask for the library without `all_stores`, and get Ubisoft's.
         let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
         assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));
+        // Ubisoft games go out as `product_id` numbers: a daemon from before game refs reads them.
+        let v = serde_json::to_value(Request::Playtime { game: GameRef::ubisoft(3539).into() }).unwrap();
+        assert_eq!(v["params"], serde_json::json!({ "product_id": 3539 }));
+        let v = serde_json::to_value(Request::Playtime { game: GameRef::steam(620).into() }).unwrap();
+        assert_eq!(v["params"], serde_json::json!({ "game": "steam:620" }));
         let v = serde_json::to_value(Request::Library { refresh: true, all_stores: false }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "library", "params": { "refresh": true } }));
-        let v = serde_json::to_value(Request::Play { game: GameRef::steam(620), profile: None }).unwrap();
+        let v = serde_json::to_value(Request::Play { game: GameRef::steam(620).into(), profile: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "play", "params": { "game": "steam:620" } }));
 
         // Library entries: Ubisoft ones keep `product_id` beside `game`.

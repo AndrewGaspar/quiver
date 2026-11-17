@@ -164,7 +164,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             let job = Job {
                 id,
                 kind: JobKind::Play,
-                game: *game,
+                game: **game,
                 name: f.name.into(),
                 status: "Asked Steam to start it".into(),
                 downloaded: 0,
@@ -174,16 +174,24 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                 detail: vec![format!("steam://rungameid/{}", f.app_id)],
             };
             st.jobs.push(job.clone());
-            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("play {} from Steam", f.name), game: Some(*game) });
+            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("play {} from Steam", f.name), game: Some(**game) });
             demo.emit(Event::Job(job));
             json!(id)
         }
-        Request::Stores => json!([
-            {"store": "ubisoft", "account": "signed_in", "account_name": "demo", "games": st.entries.iter().filter(|e| e.game.is_ubisoft()).count(),
-             "capabilities": {"library": "quiver", "install": "quiver", "launch": "quiver", "settings": "quiver", "mods": "quiver", "cloud_saves": "quiver", "achievements": "quiver", "playtime": "quiver"}},
-            {"store": "steam", "account": "client_managed", "account_name": "demo", "games": STEAM.len(),
-             "capabilities": {"library": "read_only", "launch": "delegated", "cloud_saves": "read_only", "achievements": "read_only", "playtime": "read_only"}},
-        ]),
+        Request::Stores => {
+            let caps = json!({"library": "quiver", "install": "quiver", "launch": "quiver", "settings": "quiver", "mods": "quiver", "cloud_saves": "quiver", "achievements": "quiver", "playtime": "quiver"});
+            // Signed out, Ubisoft still has a provider; it brings no games.
+            let ubisoft = if super::global::signed_in(st) {
+                json!({"store": "ubisoft", "account": "signed_in", "account_name": "demo", "games": st.entries.iter().filter(|e| e.game.is_ubisoft()).count(), "capabilities": caps})
+            } else {
+                json!({"store": "ubisoft", "account": "needs_sign_in", "games": 0, "capabilities": caps})
+            };
+            json!([
+                ubisoft,
+                {"store": "steam", "account": "client_managed", "account_name": "demo", "games": STEAM.len(),
+                 "capabilities": {"library": "read_only", "launch": "delegated", "cloud_saves": "read_only", "achievements": "read_only", "playtime": "read_only"}},
+            ])
+        }
         _ => return Ok(None),
     }))
 }

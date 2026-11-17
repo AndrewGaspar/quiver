@@ -344,6 +344,11 @@ impl Quiver {
                     self.nav.open_settings(SettingsSection::Accounts);
                     let added = self.ui.login_email.take().unwrap_or_default();
                     self.show_toast(format!("Signed in {added}"), cx);
+                } else if let (Some(name), Conn::Login(_)) = (signed_in, &self.conn) {
+                    // The first account, from the library's card (or Settings): back to where
+                    // the person was, with its games joining the library.
+                    self.ui.login_email = None;
+                    self.show_toast(format!("Signed in to Ubisoft as {name}. Its games are joining the library."), cx);
                 }
             }
             Event::SessionsChanged { sessions } => {
@@ -538,7 +543,7 @@ impl Quiver {
             }
             GlobalCmd::Stop(id) => {
                 let name = self.game_name(id);
-                self.call::<(), _>(Request::Stop { game: id.0 }, cx, move |this, r, cx| match r {
+                self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, move |this, r, cx| match r {
                     Ok(()) => this.show_toast(format!("Stopping {name}"), cx),
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
@@ -710,25 +715,44 @@ impl Quiver {
         self.body_scroll.set_offset(gpui::point(px(0.), px(0.)));
     }
 
+    /// A game's short name; for one not in the library (a Ubisoft game while signed out),
+    /// the name its download or job carries.
     pub fn game_name(&self, id: Gid) -> String {
-        self.game(id).map(|g| short_name(&g.entry.name)).unwrap_or_else(|| format!("Game {id}"))
+        if let Some(g) = self.game(id) {
+            return short_name(&g.entry.name);
+        }
+        let queued = id.ubisoft().and_then(|p| self.dl.queue.iter().find(|e| e.product_id == p)).map(|e| e.name.as_str());
+        let job = || self.status.as_ref().and_then(|s| s.jobs.iter().rev().find(|j| Gid(j.game) == id)).map(|j| j.name.as_str());
+        match queued.or_else(job).filter(|n| !n.is_empty()) {
+            Some(n) => short_name(&clean_name(n)),
+            None => format!("Game {id}"),
+        }
     }
 
     // -----------------------------------------------------------------------------------------
     // Sign in again / another account
 
+    /// The sign-in screen: Ubisoft's first account (from the library's sign-in card,
+    /// Settings or the palette) or another one. A sign-in started elsewhere that waits for
+    /// its code opens at the code.
     pub fn start_add_account(&mut self, cx: &mut Context<Self>) {
         self.nav.close_overlay();
         self.ui.now_playing_open = false;
-        self.ui.login_adding = true;
+        self.ui.login_adding = self.ubisoft_signed_in();
         self.ui.login_email = None;
         self.show_login(None, cx);
+        if self.status.as_ref().is_some_and(|s| s.awaiting_2fa)
+            && let Conn::Login(form) = &mut self.conn
+        {
+            form.needs_code = true;
+        }
         cx.notify();
     }
 
-    /// Leave the add-account screen without signing in.
+    /// Leave the sign-in screen without signing in (back to the library, or wherever the
+    /// person was).
     pub fn cancel_add_account(&mut self, cx: &mut Context<Self>) {
-        if !self.ui.login_adding || self.status.as_ref().is_none_or(|s| s.signed_in.is_none()) {
+        if !matches!(self.conn, Conn::Login(_)) {
             return;
         }
         self.ui.login_adding = false;
@@ -1218,6 +1242,8 @@ impl Quiver {
                         }
                         "palette" => this.nav.open_palette(),
                         "add-account" => this.start_add_account(cx),
+                        // With `signed-out`: sign in from the library's card after N s.
+                        "autosignin" => this.demo_auto_signin(v.parse().unwrap_or(4), cx),
                         "confirm-signout" => this.run_global(GlobalCmd::SignOut(1), cx),
                         "now-playing" => this.ui.now_playing_open = true,
                         "reconnecting" => {
@@ -1240,6 +1266,45 @@ impl Quiver {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Demo (`autosignin=N`): after N seconds, sign in the way a person would from the
+    /// library's card: open the form, type an email and password, continue, type the code,
+    /// verify. Checks the signed-out start end to end (and gives screenshots of both).
+    fn demo_auto_signin(&mut self, after_secs: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(after_secs)).await;
+            let steps: [fn(&mut Self, &mut Context<Self>); 3] = [
+                |this, cx| this.start_add_account(cx),
+                |this, cx| {
+                    if let Conn::Login(f) = &this.conn {
+                        let (e, p) = (f.email.clone(), f.password.clone());
+                        e.update(cx, |i, cx| i.set_text("player.one@example.com", cx));
+                        p.update(cx, |i, cx| i.set_text("hunter2", cx));
+                    }
+                    this.submit_signin(cx);
+                },
+                |this, cx| {
+                    if let Conn::Login(f) = &this.conn {
+                        let c = f.code.clone();
+                        c.update(cx, |i, cx| i.set_text("246810", cx));
+                    }
+                    this.submit_signin(cx);
+                },
+            ];
+            for step in steps {
+                if this.update(cx, |this, cx| {
+                    step(this, cx);
+                    cx.notify();
+                })
+                .is_err()
+                {
+                    return;
+                }
+                cx.background_executor().timer(Duration::from_millis(900)).await;
+            }
         })
         .detach();
     }

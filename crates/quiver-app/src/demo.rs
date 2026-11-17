@@ -85,6 +85,8 @@ struct State {
     activity: Vec<ActivityEntry>,
     sessions: Vec<ActiveSession>,
     next_job: u64,
+    /// Accounts and sign-in (`demo_global.rs`), made on first use.
+    global: Option<global::Global>,
 }
 
 pub struct Demo {
@@ -144,8 +146,18 @@ fn origins_history() -> (GameSettings, Vec<Revision>) {
 
 impl Demo {
     pub fn start() -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_with(build_state())
+    }
+
+    /// No Ubisoft account signed in (the `signed-out` flag, without the environment).
+    #[cfg(test)]
+    pub fn start_signed_out() -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_with(State { global: Some(global::init(true)), ..build_state() })
+    }
+
+    fn start_with(state: State) -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let demo = Arc::new(Demo { state: Mutex::new(build_state()), events: tx, perf: perf::DemoPerf::new() });
+        let demo = Arc::new(Demo { state: Mutex::new(state), events: tx, perf: perf::DemoPerf::new() });
         let weak = Arc::downgrade(&demo);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -439,6 +451,7 @@ fn build_state() -> State {
         activity,
         sessions: vec![],
         next_job: 100,
+        global: None,
     }
 }
 
@@ -463,7 +476,7 @@ mod tests {
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert_eq!(status.signed_in.as_deref(), Some("demo"));
         assert!(status.jobs.iter().filter(|j| j.kind == JobKind::Install && !j.done).count() >= 2);
-        let pt: Playtime = serde_json::from_value(demo.handle(Request::Playtime { game: quiver_api::GameRef::ubisoft(3539) }).unwrap()).unwrap();
+        let pt: Playtime = serde_json::from_value(demo.handle(Request::Playtime { game: quiver_api::GameRef::ubisoft(3539).into() }).unwrap()).unwrap();
         assert_eq!(pt.total_seconds / 3600, 87);
         assert!(pt.sessions[0].started > pt.sessions[1].started, "newest first");
         let hist: Vec<Revision> =
@@ -474,7 +487,7 @@ mod tests {
         let e = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
         assert!(matches!(e, Event::Job(j) if j.game.as_ubisoft() == Some(INSTALLING) && j.downloaded > 31_200_000_000));
         // Play emits a job and GameStarted.
-        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539), profile: None }).unwrap();
+        demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(3539).into(), profile: None }).unwrap();
         let mut started = false;
         for _ in 0..4 {
             if let Ok(Some(Event::GameStarted { product_id: 3539 })) =
@@ -485,6 +498,6 @@ mod tests {
             }
         }
         assert!(started);
-        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(6100), profile: None }).is_err(), "not installed");
+        assert!(demo.handle(Request::Play { game: quiver_api::GameRef::ubisoft(6100).into(), profile: None }).is_err(), "not installed");
     }
 }

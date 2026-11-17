@@ -159,6 +159,8 @@ pub struct Quiver {
     pub conn: Conn,
     pub status: Option<Status>,
     pub games: Vec<GameRow>,
+    /// The library has answered at least once (an empty library isn't "loading").
+    pub library_loaded: bool,
     pub activity: Vec<ActivityEntry>,
     pub nav: Nav,
     pub mode: InputMode,
@@ -173,6 +175,9 @@ pub struct Quiver {
     toast_gen: u64,
     pub link: Link,
     link_gen: u64,
+    /// quiverd said it is restarting onto this build (`Event::DaemonRestarting`): shown
+    /// once it is back.
+    daemon_update: Option<String>,
     pub side_filter: SideFilter,
     pub lib_filter: crate::ui::library::LibFilter,
     /// Only one store's games in the grid (`None`: every store).
@@ -207,6 +212,7 @@ impl Quiver {
             conn: Conn::Connecting,
             status: None,
             games: Vec::new(),
+            library_loaded: false,
             activity: Vec::new(),
             nav: Nav::new(),
             mode: InputMode::Pointer,
@@ -221,6 +227,7 @@ impl Quiver {
             toast_gen: 0,
             link: Link::Up,
             link_gen: 0,
+            daemon_update: None,
             side_filter: SideFilter::All,
             lib_filter: crate::ui::library::LibFilter::All,
             store_filter: None,
@@ -303,15 +310,12 @@ impl Quiver {
         cx.notify();
     }
 
+    /// Connected: the library opens whether or not a Ubisoft account is signed in (other
+    /// stores' games show either way; the library offers Ubisoft's sign-in).
     fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
-        let signed_in = status.signed_in.is_some();
         self.status = Some(status);
-        if signed_in {
-            self.conn = Conn::Ready;
-            self.load_library(false, cx);
-        } else {
-            self.show_login(None, cx);
-        }
+        self.conn = Conn::Ready;
+        self.load_library(false, cx);
         self.global_status(cx);
         self.downloads_status(cx);
     }
@@ -375,21 +379,21 @@ impl Quiver {
                 }
                 self.options_game_state(Gid::from(product_id), running, cx);
             }
+            // Signed in (here, from the CLI, or another account): its games join.
             Event::SessionChanged { signed_in: Some(name) } => {
                 if let Some(s) = &mut self.status {
                     s.signed_in = Some(name);
                 }
-                if !matches!(self.conn, Conn::Ready) {
-                    self.conn = Conn::Ready;
-                    self.load_library(false, cx);
-                }
+                self.conn = Conn::Ready;
+                self.load_library(false, cx);
             }
+            // Signed out of Ubisoft: its games leave the library, the rest stays. A sign-in
+            // form the person has open stays open.
             Event::SessionChanged { signed_in: None } => {
                 if let Some(s) = &mut self.status {
                     s.signed_in = None;
                 }
-                self.games.clear();
-                self.show_login(None, cx);
+                self.load_library(false, cx);
             }
             // Steam games change Steam copies in the library (installed, switched to Quiver).
             Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
@@ -414,6 +418,7 @@ impl Quiver {
                 self.link_gen += 1;
             }
             Event::Reconnected => self.on_reconnected(cx),
+            Event::DaemonRestarting { to, .. } => self.daemon_update = Some(to.unwrap_or_else(|| "a new build".into())),
             // Mod options (the open game's Mods tab follows them).
             Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::OptionsOutcome { .. } | Event::ModChannel { .. } => {
                 self.options_event(&e, cx)
@@ -431,6 +436,9 @@ impl Quiver {
     fn on_reconnected(&mut self, cx: &mut Context<Self>) {
         self.link = Link::Reconnected;
         self.link_gen += 1;
+        if let Some(build) = self.daemon_update.take() {
+            self.show_toast(format!("quiverd updated to {build}"), cx);
+        }
         let generation = self.link_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(3200)).await;
@@ -453,17 +461,15 @@ impl Quiver {
                 g.job = None;
             }
             match (status.signed_in.is_some(), &this.conn) {
-                (true, _) => {
+                // Keep a half-filled sign-in form.
+                (false, Conn::Login(_)) => {
+                    this.status = Some(status);
+                    this.load_library(false, cx);
+                }
+                _ => {
                     this.status = Some(status);
                     this.conn = Conn::Ready;
                     this.load_library(false, cx);
-                }
-                // Keep a half-filled sign-in form.
-                (false, Conn::Login(_)) => this.status = Some(status),
-                (false, _) => {
-                    this.status = Some(status);
-                    this.games.clear();
-                    this.show_login(None, cx);
                 }
             }
         });
@@ -517,8 +523,27 @@ impl Quiver {
                     this.load_settings(id, cx);
                 }
                 if let Page::Game(id) = this.nav.page {
-                    this.load_details(id, cx);
+                    if this.game(id).is_none() && id.is_ubisoft() && !this.ubisoft_signed_in() {
+                        // Signed out of Ubisoft: its games left the library.
+                        this.nav.open_section(Section::Library);
+                    } else {
+                        this.load_details(id, cx);
+                    }
                 }
+                // A store filter whose store left (signed out of Ubisoft) would hide everything,
+                // with no chip left to clear it.
+                if let Some(s) = this.store_filter
+                    && !this.games.iter().any(|g| g.entry.stores().contains(&s))
+                {
+                    this.store_filter = None;
+                }
+                this.library_loaded = true;
+            }
+            // Signed out of Ubisoft with no other store's games, quiverd answers with
+            // Ubisoft's "not signed in": that's an empty library, not a failure.
+            Err(_) if !this.ubisoft_signed_in() => {
+                this.games.clear();
+                this.library_loaded = true;
             }
             Err(e) => this.show_toast(format!("Could not load the library: {}", err_text(&e)), cx),
         });
@@ -534,7 +559,7 @@ impl Quiver {
     }
 
     fn load_playtime(&mut self, id: Gid, cx: &mut Context<Self>) {
-        self.call::<Playtime, _>(Request::Playtime { game: id.0 }, cx, move |this, r, cx| {
+        self.call::<Playtime, _>(Request::Playtime { game: id.0.into() }, cx, move |this, r, cx| {
             if let (Ok(p), Some(g)) = (r, this.game_mut(id)) {
                 g.playtime = Some(p);
             }
@@ -570,6 +595,11 @@ impl Quiver {
                 g.history = Some(h);
             }
         });
+    }
+
+    /// A Ubisoft account is signed in (the default one, as the daemon reports it).
+    pub fn ubisoft_signed_in(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.signed_in.is_some())
     }
 
     pub fn game(&self, id: Gid) -> Option<&GameRow> {
@@ -614,8 +644,11 @@ impl Quiver {
             form.busy = false;
             match result {
                 Ok(LoginResult::SignedIn { name }) => {
+                    if !this.ui.login_adding {
+                        this.show_toast(format!("Signed in to Ubisoft as {name}. Its games are joining the library."), cx);
+                    }
                     if let Some(s) = &mut this.status {
-                        s.signed_in = Some(name);
+                        s.signed_in.get_or_insert(name);
                     }
                     this.conn = Conn::Ready;
                     this.load_library(false, cx);
@@ -927,7 +960,7 @@ impl Quiver {
         if g.running() && g.steam_only() {
             self.show_toast(format!("{name} is running from Steam; quit it from the game or Steam"), cx);
         } else if g.running() {
-            self.call::<(), _>(Request::Stop { game: id.0 }, cx, |this, r, cx| {
+            self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, |this, r, cx| {
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);
                 }
@@ -938,7 +971,7 @@ impl Quiver {
             self.show_toast(format!("{name} is queued"), cx);
         } else if let Some(label) = g.client().map(|_| g.entry.store().label()) {
             // Another store's game: its client starts it.
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Asked {label} to start {name}"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
@@ -952,7 +985,7 @@ impl Quiver {
             if self.launch_guard(id, PlayAfter::Primary, cx) {
                 return;
             }
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
@@ -967,7 +1000,7 @@ impl Quiver {
             }
             // No profile named: the daemon runs the game's default.
             let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
-            self.call::<u64, _>(Request::Play { game: id.0, profile: None }, cx, move |this, r, cx| match r {
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Starting {name}{}…", with.unwrap_or_default()), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });

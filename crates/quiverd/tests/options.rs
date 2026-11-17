@@ -46,6 +46,9 @@ impl Env {
             .env("XDG_RUNTIME_DIR", self.dir("run"))
             .env("HOME", self.dir("home"))
             .env("QUIVER_BROKER", "127.0.0.1:0")
+            // Its own perf session dirs: at start quiverd sweeps every session dir it
+            // doesn't know, which in /dev/shm would include a running daemon's.
+            .env("QUIVER_SHM_ROOT", self.dir("shm"))
             .env("RUST_LOG", "warn")
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("QUIVER_TEST_SESSION")

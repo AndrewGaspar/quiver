@@ -425,6 +425,8 @@ Consequences for code that already exists:
     - (c) Installed plus "played" from `localconfig`.
 
     *Recommendation: (a),* with (c) as a greyed "previously played" collection if wanted.
+
+    **Decided 2026-11-17: (a).** The owned library waits for Quiver's Steam sign-in (phase 3); no Web API key, no "previously played" hints.
     (b) asks users to make profiles public and manage a key, which PROPOSAL avoided
     (SteamGridDB was dropped for the same reason).
 11. **Own-Proton launches outside Steam's launch** (spike S6), with the client still

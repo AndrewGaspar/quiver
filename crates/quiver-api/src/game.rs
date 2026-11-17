@@ -297,6 +297,57 @@ impl Serialize for GameRef {
     }
 }
 
+/// A request's game, as a field that used to be `product_id: u32`: a Ubisoft game goes out
+/// as `"product_id": <number>` (daemons from before game refs read it), any other as
+/// `"game": "<store>:<id>"`; either key is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GameField(pub GameRef);
+
+impl From<GameRef> for GameField {
+    fn from(g: GameRef) -> Self {
+        GameField(g)
+    }
+}
+
+impl PartialEq<GameRef> for GameField {
+    fn eq(&self, o: &GameRef) -> bool {
+        self.0 == *o
+    }
+}
+
+impl std::ops::Deref for GameField {
+    type Target = GameRef;
+    fn deref(&self) -> &GameRef {
+        &self.0
+    }
+}
+
+impl Serialize for GameField {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(1))?;
+        match self.0.as_ubisoft() {
+            Some(n) => m.serialize_entry("product_id", &n)?,
+            None => m.serialize_entry("game", &self.0)?,
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for GameField {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            game: Option<GameRef>,
+            #[serde(default)]
+            product_id: Option<GameRef>,
+        }
+        let r = Raw::deserialize(d)?;
+        r.game.or(r.product_id).map(GameField).ok_or_else(|| de::Error::missing_field("game"))
+    }
+}
+
 impl<'de> Deserialize<'de> for GameRef {
     /// From a JSON number (a Ubisoft product, as `product_id` always was) or any string form.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

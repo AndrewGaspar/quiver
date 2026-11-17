@@ -360,7 +360,15 @@ impl Quiver {
             th,
             "Accounts",
             "Games from every signed-in account show up in one library.",
-            Some(self.action_button(th, actions, SettingsAction::Cmd(GlobalCmd::AddAccount), Kind::Secondary, Some(Icon::Plus), "Add account", cx)),
+            Some(self.action_button(
+                th,
+                actions,
+                SettingsAction::Cmd(GlobalCmd::AddAccount),
+                if accounts.is_empty() { Kind::Primary } else { Kind::Secondary },
+                Some(Icon::Plus),
+                if accounts.is_empty() { "Sign in to Ubisoft" } else { "Add account" },
+                cx,
+            )),
         )];
         if accounts.is_empty() {
             out.push(
@@ -370,7 +378,7 @@ impl Quiver {
                     .child(match self.status.as_ref().and_then(|s| s.signed_in.clone()) {
                         // A daemon from before multiple accounts reports only the name.
                         Some(name) => format!("Signed in as {name}. This quiverd doesn't list accounts; update it to manage several."),
-                        None => "No account is signed in. Add one to see its games.".to_owned(),
+                        None => "No Ubisoft account is signed in. Your other stores' games are in the library either way; sign in to add your Ubisoft games.".to_owned(),
                     })
                     .into_any_element(),
             );
@@ -464,6 +472,10 @@ impl Quiver {
                     .child(buttons)
                     .into_any_element(),
             );
+        }
+        // No Ubisoft account: nothing to own or share yet.
+        if accounts.is_empty() {
+            return out;
         }
         out.push(
             // Block layout (icon placed absolutely) so the wrapped text is measured at its width.
