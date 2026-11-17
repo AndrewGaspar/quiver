@@ -700,11 +700,7 @@ async fn main() -> Result<()> {
             let ctx: serde_json::Value = client
                 .call(Request::LaunchContext { product_id: e.product_id, savegame_path, install_dir, account, steam_app_id: None })
                 .await?;
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&out)?;
-                f.write_all(serde_json::to_string_pretty(&ctx)?.as_bytes())?;
-            }
+            ubi_core::private::write_private(&out, serde_json::to_string_pretty(&ctx)?.as_bytes())?;
             eprintln!("wrote {} (broker {}, ticket valid for a few hours)", out.display(), ctx["broker"]);
         }
         Cmd::Protons => {

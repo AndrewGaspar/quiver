@@ -245,7 +245,7 @@ pub async fn run_dev(cmd: DevCmd) -> Result<()> {
             if let Some(dir) = install_dir {
                 ctx.chunks = ubi_core::launch::installed_chunks(&dir)?;
             }
-            std::fs::write(&out, serde_json::to_vec_pretty(&ctx)?)?;
+            ubi_core::private::write_private(&out, &serde_json::to_vec_pretty(&ctx)?)?;
             eprintln!(
                 "wrote {} (owned ids: {:?}, {} cd key(s), ticket {} chars)",
                 out.display(),

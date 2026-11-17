@@ -352,7 +352,7 @@ fn apply(paths: &Paths, changes: &[Staged]) -> Result<()> {
         if new != old {
             if !old.is_empty() {
                 // One backup of the file as it was before Quiver's last write.
-                let _ = std::fs::write(file.with_extension("vdf.quiver-backup"), &old);
+                let _ = crate::private::write_private(&file.with_extension("vdf.quiver-backup"), &old);
             }
             write_atomic(file, &new)?;
         }
@@ -705,6 +705,10 @@ mod tests {
         let appid = t.key.steam_appid();
         let vdf_path = steam.shortcuts_path("1001");
         let before = std::fs::read(&vdf_path).unwrap();
+        // A world-readable backup left by an older Quiver.
+        let backup = vdf_path.with_extension("vdf.quiver-backup");
+        std::fs::write(&backup, "stale").unwrap();
+        std::fs::set_permissions(&backup, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
 
         let r = export(&paths, &steam, "1001", &t, false).await.unwrap();
         assert!(!r.staged);
@@ -719,7 +723,8 @@ mod tests {
         assert!(f.icon.ends_with("quiver/icons/48edec3d91f23947b02be534159b74d1.png"), "{}", f.icon);
         assert_eq!(sc.fields(0xd6c2_369a).unwrap().app_name, "EA App");
         // Backup of the original.
-        assert_eq!(std::fs::read(vdf_path.with_extension("vdf.quiver-backup")).unwrap(), before);
+        assert_eq!(std::fs::read(&backup).unwrap(), before);
+        assert_eq!(crate::private::tests::mode(&backup), 0o600);
 
         let grid = steam.grid_dir("1001");
         for (name, src) in [

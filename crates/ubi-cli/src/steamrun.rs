@@ -9,7 +9,6 @@
 //! sees); the prefix is left alone unless `--sdk-dir` is given.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
@@ -222,10 +221,7 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     let account = ctx["account_id"].as_str().context("launch context has no account")?.to_owned();
     ctx["savegame_path"] = steamrun::savegame_path(sdk.install_dir.as_deref(), &account, product_id).into();
     let _ = std::fs::remove_file(&log_path);
-    {
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&ctx_path)?;
-        f.write_all(&serde_json::to_vec(&ctx)?)?;
-    }
+    ubi_core::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
     log.line(format!("saves: {}", ctx["savegame_path"].as_str().unwrap_or_default()));
 
     // The game's launch settings (env, DLL overrides, args, wrappers); an older quiverd
