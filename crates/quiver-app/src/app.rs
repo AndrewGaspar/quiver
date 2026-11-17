@@ -232,6 +232,7 @@ impl Quiver {
         this.start_downloads(window, cx);
         if demo {
             this.start_demo_script(window, cx);
+            this.start_options_demo(window, cx);
         }
         this
     }
@@ -360,6 +361,7 @@ impl Quiver {
                 if !running {
                     self.load_details(product_id, cx);
                 }
+                self.options_game_state(product_id, running, cx);
             }
             Event::SessionChanged { signed_in: Some(name) } => {
                 if let Some(s) = &mut self.status {
@@ -400,6 +402,10 @@ impl Quiver {
                 self.link_gen += 1;
             }
             Event::Reconnected => self.on_reconnected(cx),
+            // Mod options (the open game's Mods tab follows them).
+            Event::OptionsChanged { .. } | Event::OptionsLive { .. } | Event::OptionsCrash { .. } | Event::ModChannel { .. } => self.options_event(&e, cx),
+            // Events this app doesn't show (perf updates, HUD models) and ones added later.
+            _ => return,
         }
         cx.notify();
     }

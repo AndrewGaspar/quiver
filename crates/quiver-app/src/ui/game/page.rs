@@ -194,6 +194,8 @@ pub struct GamePage {
     pub side_open: bool,
     /// The hero's art chip menu (Ubisoft's or Steam's art first) is open.
     pub art_menu: bool,
+    /// Mods tab: options, history, keys and schema sources (`options/`).
+    pub opt: super::options::OptionsUi,
 }
 
 impl GamePage {
@@ -206,7 +208,9 @@ impl GamePage {
             launch_drafts.insert(f.game, f);
         }
         let launch_seeds = std::mem::take(&mut self.launch_seeds);
-        *self = GamePage { id, protons, exports, launch_drafts, launch_seeds, ..Default::default() };
+        // Unsaved option edits too (they are kept per game and profile).
+        let opt = super::options::OptionsUi { staged: std::mem::take(&mut self.opt.staged), view: self.opt.view, ..Default::default() };
+        *self = GamePage { id, protons, exports, launch_drafts, launch_seeds, opt, ..Default::default() };
     }
 
     pub fn exports_for(&self, id: u32) -> Vec<ExportStatus> {

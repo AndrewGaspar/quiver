@@ -299,6 +299,8 @@ async fn run(
                     holders: unique_holders(&a.holders),
                     reported: a.reported,
                     steam_app_id: a.steam_app_id,
+                    // The launch's addressing (session, profile, …) is quiverd's to add.
+                    ..Default::default()
                 })
                 .collect();
             list.sort_by_key(|s| s.started);

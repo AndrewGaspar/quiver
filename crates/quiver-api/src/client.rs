@@ -323,19 +323,22 @@ impl Shared {
                             let _ = tx.send(Err(error));
                         }
                     }
-                    // Only subscribed connections get events.
-                    Ok(Reply::Event(e)) => {
+                    // Only subscribed connections get events. Options and perf events come as
+                    // `Event`s (or, from older daemons, as `Reply::Options`/`Reply::Perf`):
+                    // either way they reach `subscribe` and their own channel.
+                    Ok(r @ (Reply::Event(_) | Reply::Options(_) | Reply::Perf(_))) => {
+                        let Reply::Event(e) = r.folded() else { continue };
+                        if let Some(tx) = options_events.lock().unwrap().as_ref()
+                            && let Some(o) = e.options()
+                        {
+                            let _ = tx.send(o);
+                        }
+                        if let Some(tx) = perf_events.lock().unwrap().as_ref()
+                            && let Some(p) = e.perf()
+                        {
+                            let _ = tx.send(p);
+                        }
                         if let Some(tx) = events.lock().unwrap().as_ref() {
-                            let _ = tx.send(e);
-                        }
-                    }
-                    Ok(Reply::Options(e)) => {
-                        if let Some(tx) = options_events.lock().unwrap().as_ref() {
-                            let _ = tx.send(e);
-                        }
-                    }
-                    Ok(Reply::Perf(e)) => {
-                        if let Some(tx) = perf_events.lock().unwrap().as_ref() {
                             let _ = tx.send(e);
                         }
                     }

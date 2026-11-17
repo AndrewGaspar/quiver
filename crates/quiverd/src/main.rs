@@ -715,12 +715,12 @@ impl Daemon {
                     profile: profile_id.clone(),
                     profile_revision,
                     mods: session_mods,
+                    session: Some(session_id.clone()),
+                    options_revision,
+                    // Perf: the session's summary (`PerfRequest::Summaries` reads it back).
+                    perf: perf_summary,
                 };
-                // Options: the session id and options revision go beside it (PlaySession
-                // gets the fields once every client knows them).
-                // Perf: the session's summary (`PerfRequest::Summaries` reads it back).
-                let extra = json!({ "session": session_id, "options_revision": options_revision, "perf": perf_summary });
-                if let Err(e) = settings::record_session_with(product_id, &session, extra) {
+                if let Err(e) = settings::record_session(product_id, &session) {
                     tracing::warn!("recording play session: {e:#}");
                 }
             }
@@ -758,6 +758,7 @@ fn record_bridge_session(f: &quiver_core::playsession::Finished) {
         profile_revision: None,
         // Steam launches don't apply mod profiles (yet).
         mods: Vec::new(),
+        ..Default::default()
     };
     let via = format!("Steam app {app}");
     tracing::info!(product_id = f.product_id, seconds = session.seconds, "recording a play session held by {via}");
@@ -775,7 +776,8 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
     let writer = tokio::spawn(async move {
         while let Some(reply) = rx.recv().await {
-            let mut line = serde_json::to_vec(&reply).unwrap_or_default();
+            // Options and perf events go out as `Event`s (clients read the older forms too).
+            let mut line = serde_json::to_vec(&reply.folded()).unwrap_or_default();
             line.push(b'\n');
             if w.write_all(&line).await.is_err() {
                 break;

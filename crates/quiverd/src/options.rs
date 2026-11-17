@@ -133,15 +133,15 @@ impl Options {
     }
 
     /// The addressing fields for a game being played (C1).
-    pub fn detail(&self, s: quiver_api::ActiveSession) -> SessionDetail {
+    pub fn detail(&self, mut s: quiver_api::ActiveSession) -> SessionDetail {
         let found = self.sessions.lock().unwrap().values().find(|l| l.record.product_id == s.product_id).cloned();
-        SessionDetail {
-            session: found.as_ref().map(|l| l.record.session.clone()),
-            profile: found.as_ref().map(|l| l.record.profile.clone()),
-            options_revision: found.as_ref().map(|l| l.record.launched_revision),
-            pids: found.map(|l| l.pids).unwrap_or_default(),
-            base: s,
+        if let Some(l) = found {
+            s.session = Some(l.record.session.clone());
+            s.profile = Some(l.record.profile.clone());
+            s.options_revision = Some(l.record.launched_revision);
+            s.pids = l.pids;
         }
+        s
     }
 }
 
@@ -358,6 +358,31 @@ impl Daemon {
                 )
             }
             OptionsRequest::Lint { path } => json!(tokio::task::spawn_blocking(move || lint_folder(&path)).await??),
+            OptionsRequest::Files { product_id, mod_id } => {
+                json!(
+                    with_store_lock(move || {
+                        let store = store_for(&game(product_id)?);
+                        let rec = store.find_mod(&mod_id)?;
+                        Ok(opt::config_files(&store.layer_dir(&rec.current), 200))
+                    })
+                    .await?
+                )
+            }
+            OptionsRequest::SessionRecords { product_id, profile, limit } => {
+                json!(
+                    with_store_lock(move || {
+                        let (store, p) = match &profile {
+                            Some(_) => resolve(product_id, profile.as_deref())?,
+                            None => (store_for(&game(product_id)?), None),
+                        };
+                        let want = profile.as_ref().map(|_| p.unwrap_or_else(|| VANILLA.into()));
+                        let mut list: Vec<SessionOptions> = opt::sessions(&store).into_iter().filter(|s| want.as_ref().is_none_or(|w| &s.profile == w)).collect();
+                        list.truncate(limit.unwrap_or(20).max(1));
+                        Ok(list)
+                    })
+                    .await?
+                )
+            }
         })
     }
 

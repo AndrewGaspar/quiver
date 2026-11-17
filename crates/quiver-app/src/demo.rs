@@ -107,7 +107,7 @@ fn at(days: i64, h: u32, m: u32) -> DateTime<Utc> {
 
 fn session(days: i64, (h, m): (u32, u32), minutes: u64, rev: u32) -> PlaySession {
     let started = at(days, h, m);
-    PlaySession { started, ended: started + Span::minutes(minutes as i64), seconds: minutes * 60, settings_revision: rev, profile: None, profile_revision: None, mods: Vec::new() }
+    PlaySession { started, ended: started + Span::minutes(minutes as i64), seconds: minutes * 60, settings_revision: rev, profile: None, profile_revision: None, mods: Vec::new(), ..Default::default() }
 }
 
 fn rev(revision: u32, days: i64, source: &str, message: &str, settings: GameSettings) -> Revision {
@@ -156,6 +156,15 @@ impl Demo {
 
     fn emit(&self, e: Event) {
         let _ = self.events.send(e);
+    }
+
+    /// Demo: change an option in the running game, as the in-game overlay would.
+    pub fn options_in_game(&self) -> Result<()> {
+        let events = detail::options_in_game(self, &mut self.state.lock().unwrap())?;
+        for e in events {
+            self.emit(e);
+        }
+        Ok(())
     }
 
     /// Advance the download queue, verifies and imports (`demo/downloads.rs`).
@@ -234,7 +243,7 @@ impl Demo {
                     detail: vec![],
                 };
                 st.jobs.push(job.clone());
-                st.sessions.push(ActiveSession { product_id, account: "demo".into(), started: Utc::now(), holders: vec!["launcher".into()], reported: true, steam_app_id: None });
+                st.sessions.push(ActiveSession { product_id, account: "demo".into(), started: Utc::now(), holders: vec!["launcher".into()], reported: true, steam_app_id: None, ..Default::default() });
                 if let Some(e) = st.entries.iter_mut().find(|e| e.product_id == product_id) {
                     e.running = true;
                 }

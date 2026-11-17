@@ -618,7 +618,7 @@ mod tests {
         let now = Local.with_ymd_and_hms(2026, 11, 18, 12, 0, 0).unwrap(); // a Wednesday
         let s = |y, m, d, mins: u64| {
             let t = Local.with_ymd_and_hms(y, m, d, 20, 0, 0).unwrap().with_timezone(&Utc);
-            PlaySession { started: t, ended: t, seconds: mins * 60, settings_revision: 0, profile: None, profile_revision: None, mods: Vec::new() }
+            PlaySession { started: t, ended: t, seconds: mins * 60, settings_revision: 0, profile: None, profile_revision: None, mods: Vec::new(), ..Default::default() }
         };
         let v = weekly_hours(&[s(2026, 11, 16, 60), s(2026, 11, 15, 120), s(2026, 11, 9, 30), s(2025, 1, 1, 600)], 4, now);
         assert_eq!(v, vec![0., 0., 2.5, 1.]);
