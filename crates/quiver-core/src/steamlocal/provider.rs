@@ -127,6 +127,7 @@ impl App {
             steam: None,
             space_id: None,
             client: Some(self.client_install()),
+            records: Vec::new(),
         }
     }
 }
@@ -206,7 +207,7 @@ impl Scan {
         let names = if wanted.is_empty() { HashMap::new() } else { appinfo::read(root, |id| wanted.contains(&id)).unwrap_or_default() };
         let dlc = dlc_ids
             .iter()
-            .map(|&id| Dlc { game: GameRef::steam(id), name: names.get(&id).and_then(|i| i.name.clone()), installed: app.manifest.dlc_installed.contains(&id) })
+            .map(|&id| Dlc { game: GameRef::steam(id), name: names.get(&id).and_then(|i| i.name.clone()), installed: app.manifest.dlc_installed.contains(&id), owned: None })
             .collect();
         unavailable.push("description".to_owned());
         Ok(GameDetail {
@@ -227,6 +228,8 @@ impl Scan {
             unavailable,
             // quiverd adds the hook (it knows where `quiver` is installed).
             steam_hook: None,
+            description: None,
+            linked: None,
         })
     }
 }

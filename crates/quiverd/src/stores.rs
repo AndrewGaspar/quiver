@@ -63,6 +63,8 @@ impl StoreProvider for Ubisoft {
                 account: i.account,
                 unavailable: i.unavailable,
                 steam_hook: None,
+                description: None,
+                linked: None,
             })
         })
     }
@@ -186,7 +188,8 @@ impl Daemon {
                     account: a.state,
                     account_name: a.name,
                     capabilities: p.capabilities(),
-                    games: lib.iter().filter(|e| e.store() == p.id()).count(),
+                    // With copies folded into another store's entry (an Epic copy of a Ubisoft game).
+                    games: lib.iter().filter(|e| e.store() == p.id() || e.records.iter().any(|r| r.relation == quiver_api::stores::Relation::CopyOf && r.game.store == p.id())).count(),
                     note: a.note,
                 }
             })

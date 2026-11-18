@@ -537,6 +537,7 @@ mod tests {
             steam: None,
             space_id: None,
             client: None,
+            records: Vec::new(),
         }
     }
 

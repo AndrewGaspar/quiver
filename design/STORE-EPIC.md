@@ -1,6 +1,9 @@
 # Epic Games Store in Quiver (scoping and design notes)
 
-Status: research and design only (2026-11-16). Nothing here is built. This is one of five
+Status: designed 2026-11-16; steers decided and stage 1 (accounts, library, catalog, the Epic
+provider, CLI and the app's sign-in) built 2026-11-17 (section 9 says what was
+built and how it differs; section 8 has the decisions). Stage 2 (native installs and launch)
+waits for the sign-in spike S0 (section 9.4). This is one of five
 parallel store scopes (STORE-STEAM, STORE-GOG, STORE-EA, STORE-META, the last being the Meta VR
 store); the cross-store parts (one title owned in several stores, the shared interfaces, library
 merging) belong to STORES.md, and this document only proposes what Epic needs from them.
@@ -426,6 +429,25 @@ unless you import EGL's session); this is unverified, so it's covered by S0.
 
 ## 8. Open questions and steers
 
+**Decided (2026-11-17).**
+
+| # | Steer | Decision |
+|---|---|---|
+| 1 | Login UX | **(a)** browser plus a pasted authorization code. Agents never sign in |
+| 2 | Posing as EGL's client | **(a)** accepted, as legendary and Heroic do: compiled-in values plus `<data>/epic-client.json`, documented in the README |
+| 3 | egs-api or our own | review it for a day, depend on it if it is good, else a thin client and parser of our own; never shell out to legendary; legendary and Heroic are GPL references only. Reviewed: **(b), our own** (section 9.1) |
+| 4 | MVP scope | **(b)** phases 1 and 2 together (the user wants installs), staged: stage 1 (accounts, library) first, stage 2 (installs, launch) after the sign-in spike |
+| 5 | Library presentation | **(a)** one merged library, store badges |
+| 6 | Who may redeem and sign in | **(b)** for activation (a pending approval for agents); **(a)** for sign-in and sign-out (person only) |
+| 7 | Cloud saves on modded profiles | as recommended: same as Ubisoft |
+| 8 | EOS overlay | **(a)** off by default, per-game switch |
+| 9 | EGL v2 | **(a)** ignored for now |
+| 10 | Anti-cheat runtimes | **(a)** Steam's when present, else Lutris' list |
+| 11 | Play-time reporting | **(a)** on, under `report_playtime`, after S6 confirms the PUT |
+| 12 | Imports | installs only, verified against manifests; never their token files |
+
+The options as they were put:
+
 1. **Login UX.** (a) Browser plus pasted code only; (b) also an optional WebKitGTK helper that
    captures the code; (c) device-code flow with another Epic client.
    *Recommend (a) for phase 1 and (b) when it annoys; never (c).*
@@ -468,6 +490,162 @@ unless you import EGL's session); this is unverified, so it's covered by S0.
     covering both stores, once S6 confirms the PUT works.*
 12. **Importing from Heroic/legendary.** Installs only (verified against manifests), never
     their sessions? *Recommend yes; reading their token files is off the table.*
+
+---
+
+## 9. As built: stage 1, accounts and library (2026-11-17)
+
+Nothing in this stage signed in to Epic, called Epic, or read another launcher's files. Every
+Epic call goes through a transport seam, and the tests run the whole flow on recorded-shape
+fixture JSON (invented ids).
+
+### 9.1 egs-api review (steer 3): not used
+
+egs-api 0.14.0 (MIT, released 2026-02-18; source from crates.io, about 10k lines) was read for
+the four questions the steer asked:
+
+| Question | Finding |
+|---|---|
+| Current manifests (v22+) | The binary parser reads the header, meta, chunk list and file list with `unwrap_or(0)` on every field, so a truncated or newer manifest parses into zeros instead of failing. The chunk-part reader computes `position - start - size` (backwards), which underflows (a panic in debug builds) as soon as Epic adds bytes to a chunk part. The header's stored flag is treated as "compressed" if non-zero, so an **encrypted manifest isn't detected**, let alone decrypted. Chunk paths stop at `ChunksV4` (correct today) |
+| Chunk download | `Chunk::from_vec` indexes the buffer without bounds checks (panics on a short read of untrusted network data), ignores the header's size field, and doesn't check the chunk's SHA-1 or rolling hash. Whole chunks are held in memory; no streaming, resume or reuse |
+| Client config overrides | None. EGL's client id and secret are string literals in two places, the user agent and a fixed `X-Epic-Correlation-ID` are hard-coded in the client builder |
+| API quality, maintenance | One `EpicGames` facade with mutable session state; most calls have a `try_` form and a form that logs and returns `None`. Its session struct derives `Debug` with the tokens in it. It depends on `reqwest` 0.13 with default features (OpenSSL), next to the workspace's rustls `reqwest` 0.12. Six minor releases in four days in Feb 2026, nothing since (17 stars). Built for Epic Asset Manager: Fab, assets, cosmos |
+
+Its endpoint list and JSON shapes were a useful cross-check (MIT). **Decision: (b), a thin
+client and parser of our own** (`epic-core::api`, about 20 calls in all). The stage 1 surface
+is six calls; the manifest parser and chunk downloader are stage 2, written against the
+format with legendary as an oracle in tests (its code read, not copied).
+
+### 9.2 What was built
+
+- **`crates/epic-core`** (the STORES.md section 5 crate):
+  - `config`: EGL's client id, secret, user agent and label compiled in;
+    `<data>/epic-client.json` overrides any field (steer 2).
+  - `http`: a `Transport` trait, `Reqwest` (rustls, 30 s timeout) and `Fake`. Requests carry a
+    label, and only the label and status are logged. Errors from reqwest are reduced to their
+    kind, because the URL can hold a token.
+  - `api`: token (authorization code, refresh), end session, account, `externalAuths`, library
+    items (cursor pages), catalog `bulk/items` (with DLC and main game). Epic's errors parse
+    into `EpicError` (`invalid_grant`, corrective actions with `continuationUrl`). Their
+    messages are scrubbed of token-shaped strings: Epic quotes the refresh token it refused.
+  - `auth`: the sign-in URL; `parse_code` takes the bare code, the redirect page's JSON
+    (whole, pretty-printed or partial) or a URL with `code=`, and explains
+    `"authorizationCode": null` ("sign in on that page first"). `Tokens` use the reply's
+    timestamps (or relative lifetimes), never assumed ones.
+  - `secrets`: the keyring (service `quiver`, entry `epic:<account id>`), and an in-memory
+    store for tests.
+  - `accounts`: `<data>/epic/accounts.json` (ids, names, default, linked Ubisoft account,
+    "needs sign-in"). No secret in it.
+  - `library`: records plus catalog into titles. Left out: UE marketplace items, private
+    sandboxes, engines and plugins, items with no Windows build. DLC and extras mark their
+    main game's DLC list as owned. A record whose catalog item didn't come back stays, named by
+    its app. Caches in `<data>/epic/cache/`: the last good library per account (used, with
+    the date, when Epic can't be reached) and catalog items (3 days).
+  - `Epic`: sign-in (session in the keyring before the account is listed), several accounts
+    and a default, sign-out (ends the session at Epic, best effort; deletes the entry),
+    `access_token` with a single-flight refresh per account that stores the rotated pair
+    before using it. A refused refresh (`invalid_grant`, a corrective action, an expired
+    refresh token or a missing keyring entry) marks the account "sign in again" and deletes
+    the dead entry; nothing retries. The library reads every account (catalog requests 4 at a
+    time, one per namespace, 50 ids per request) and is reused for 15 minutes.
+  - `provider::EpicProvider`: `epic:<app>` entries (art in the new `Art.epic`, owners as Epic
+    account ids, not installable), the game page (developer, description, DLC with owned
+    flags, the owner's name, `linked` for Ubisoft titles), and Play refused with the reason
+    ("isn't installed: … next Quiver build", or "a Ubisoft Connect game: play it as
+    ubisoft:3539").
+- **Merging (STORES.md section 2.4).** `LibraryEntry.records: Vec<StoreRecord>` with
+  `Relation::{CopyOf, Linked}`. An Epic title whose catalog says Ubisoft
+  (`ThirdPartyManagedProvider`/`ThirdPartyManagedApp` naming Ubisoft or Uplay, or
+  `partnerLinkType = ubisoft`) and gives a numeric `GameID` carries a `Linked` record to
+  `ubisoft:<GameID>`. `merge_libraries` folds it into that Ubisoft entry as a `CopyOf` record
+  (Epic badge via `stores()`, Epic art as a fallback) when a signed-in Ubisoft account has the
+  game, and otherwise keeps the Epic entry. Nothing merges on names.
+- **Protocol** (additive): `Request::Epic(EpicRequest::{LoginBegin, LoginComplete, Logout,
+  Accounts, AccountDefault})` (its `Debug` never prints the code), `Event::StoreAccountsChanged`,
+  `GameDetail.{description, linked}`, `Dlc.owned`, `ArtOrigin::Epic`.
+  `quiver_core::secret::Secret<T>` (STORES.md section 3.2) redacts itself when printed.
+- **quiverd**: the Epic provider is in the store list; `epic.rs` handles `Request::Epic`.
+  `LoginComplete` and `Logout` are refused from any source but `cli` and `gui` (agents: Deny).
+  After a sign-in, quiverd reads the library in the background so the catalog is cached
+  before anyone looks. `Stores` counts folded copies toward Epic.
+- **CLI**: `quiver epic login [--code C] [--open]` (prints the URL, reads the pasted code,
+  one line or a block of JSON), `quiver epic logout [account]`, `quiver epic accounts
+  [--json]`, `quiver epic default <account>`. `quiver library --store epic` lists Epic titles
+  and Ubisoft entries with Epic copies, with a note on each ("Epic, not installed", "also
+  bought as epic:…", "a Ubisoft Connect game, not on a signed-in Ubisoft account"). `quiver
+  info epic:<app>` shows the Epic page even when the copy is folded into a Ubisoft entry.
+- **App**: Settings › Accounts has an Epic Games part: accounts (linked Ubisoft account,
+  "sign in again"), Make default, Sign out (asks by relabelling the button), and Sign in to
+  Epic: opens Epic's page in the browser and shows the three steps and a field for the code.
+  An Epic tile's button says "Not installed", and pressing it shows the provider's reason
+  instead of the Ubisoft install dialog. The store page shows the description and the linked
+  Ubisoft game, and says Epic achievements aren't read yet.
+- **README**: the Epic section, including which client Quiver signs in as and the override
+  file (steer 2).
+
+### 9.3 Differences from the design
+
+- **Epic's account index is its own file**, `<data>/epic/accounts.json`, not entries with
+  `store: "epic"` in `accounts.json` (STORES.md section 3.2). That file is Ubisoft's, and a
+  quiverd from before stores rewrites it without fields it doesn't know.
+- **Activation (redeeming Ubisoft codes) isn't built.** The library already says which Epic
+  titles are Ubisoft games and whether a signed-in Ubisoft account has them, which is what
+  activation needs; the redemption itself (store GraphQL, irreversible) waits for its own
+  step with the pending-approval gate (steer 6).
+- **No first-run Stores step** yet (as asked): Settings › Accounts only.
+- **Release dates** aren't shown: the catalog's `releaseInfo.dateAdded` is when the build
+  was added, not the release, so the page lists the date as unavailable.
+- The library's first read after a sign-in makes one catalog request per game namespace
+  (so about 120 for a library like this machine's), 4 at a time, once; later reads use the
+  cache.
+
+### 9.4 Spike S0: your first sign-in (the steps)
+
+What it checks: code login with EGL's client works today (after the EGL v2 preview), the
+library and catalog parse on real data, Alan Wake Remastered is there, and Quiver's session
+doesn't sign Heroic or the Epic Games Launcher out. Nothing is installed or launched, and
+nothing is written to your Epic account.
+
+1. **Install the build** (after merging): `tools/install-user.sh`. `quiver daemon status`
+   should show quiverd on the new build (it restarts onto it on its own once no game runs).
+2. **If you use Heroic or EGL**, note now that they're signed in: Heroic › Settings ›
+   Accounts (or its sidebar) shows your Epic name; `legendary status` prints "Epic account:
+   <name>"; EGL shows your name at the bottom left. Leave them as they are.
+3. **Sign in:** `quiver epic login --open`. It prints and opens
+   `https://www.epicgames.com/id/login?redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Fid%2Fapi%2Fredirect%3FclientId%3D34a02cf8f4414e29b15921876da36f9a%26responseType%3Dcode`.
+   (In the app: Settings › Accounts › Sign in to Epic does the same.)
+4. Sign in on Epic's page (password, 2FA, captcha). It ends on a page of JSON:
+   `{"warning":"Do not share this code…","redirectUrl":"…","authorizationCode":"<32 letters and digits>","exchangeCode":null,"sid":null}`.
+   If `authorizationCode` is `null`, you weren't signed in in that browser: sign in on
+   epicgames.com, then open the link again.
+5. **Paste** the code (or the whole page) at `Code:` and press Enter, within a few minutes (the
+   code works once). Expect `Signed in to Epic as <name> (default account) (linked Ubisoft
+   account: <name>)`. If Epic asks for something first (terms, privacy policy), Quiver prints
+   the page to open; do that on Epic's site, then sign in again.
+6. **Check:**
+   - `quiver epic accounts`: `* <name> <account id>  Ubisoft: <your Ubisoft name>`.
+   - `quiver stores`: `Epic … game(s)  signed in as <name>`.
+   - `quiver library --store epic`: Alan Wake Remastered, with `(Epic, not installed)` and
+     its ref (`epic:<app name>`); your Ubisoft titles from Epic (Origins, Odyssey, Far Cry 4,
+     AC III Remastered, Syndicate) either as their Ubisoft entries with `(also bought as
+     epic:…)`, or as Epic entries "not on a signed-in Ubisoft account".
+   - `quiver info epic:<Alan Wake's app name>`: developer Remedy, description, DLC if any.
+   - `grep -c eg1 ~/.local/share/quiver/epic/accounts.json` prints `0` (no token in the file;
+     the session is in the keyring).
+   - Optional, read-only (spike S1): `quiver ownership 3539 --json` and `quiver ownership
+     420 --json`; `"target_partner": 1` means the copy came through Epic.
+7. **Heroic or EGL still signed in?** Right after, and again tomorrow (Quiver refreshes its
+   session when the access token is near expiry, about every 8 hours): open Heroic and refresh
+   its library, or run `legendary list` (it uses and refreshes legendary's own session); open
+   EGL and its Library. A "please sign in again" there is the answer to S0's second
+   question.
+8. **Send back:** the output of `quiver stores` and `quiver library --store epic` (titles are
+   enough; account ids can be cut), `grep -i epic ~/.local/share/quiver/quiverd.log` (or
+   `journalctl --user -u quiverd | grep -i epic` when quiverd runs as the systemd unit; the
+   log has labels and statuses, never tokens), Alan Wake Remastered's ref, and whether
+   Heroic/EGL stayed signed in.
+9. **Undo**, if you want: `quiver epic logout` (ends Quiver's session at Epic and deletes
+   its keyring entry; other launchers' sessions are separate).
 
 ---
 

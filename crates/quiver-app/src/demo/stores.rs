@@ -112,6 +112,7 @@ pub(super) fn entries() -> Vec<LibraryEntry> {
             steam: None,
             space_id: None,
             client: Some(install(f)),
+            records: Vec::new(),
         })
         .collect()
 }
@@ -166,10 +167,12 @@ fn detail(f: &SteamFixture, hooked: bool) -> GameDetail {
         playtime: Some(playtime(f)),
         achievements: Some(Achievements { unlocked: f.unlocked, total: f.total, list }),
         cloud: Some(CloudState { files: 3 + (f.app_id % 7) as usize, bytes: 4_200_000 + (f.app_id as u64 % 97) * 100_000, last_upload: Some(at(f.last_days, 22, 31)), unsynced: 0 }),
-        dlc: f.dlc.iter().enumerate().map(|(i, n)| Dlc { game: GameRef::steam(f.app_id + 1 + i as u32), name: Some((*n).into()), installed: i == 0 }).collect(),
+        dlc: f.dlc.iter().enumerate().map(|(i, n)| Dlc { game: GameRef::steam(f.app_id + 1 + i as u32), name: Some((*n).into()), installed: i == 0, owned: None }).collect(),
         account: Some("demo".into()),
         unavailable: vec!["description".into()],
         steam_hook: Some(hook_state(f, hooked)),
+        description: None,
+        linked: None,
     }
 }
 
@@ -234,6 +237,9 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
                  "capabilities": {"library": "read_only", "launch": "delegated", "cloud_saves": "read_only", "achievements": "read_only", "playtime": "read_only"}},
             ])
         }
+        // No Epic account in the demo, and no signing in to the real Epic from it.
+        Request::Epic(quiver_api::epic::EpicRequest::Accounts) => json!([]),
+        Request::Epic(_) => anyhow::bail!("The demo doesn't sign in to Epic"),
         _ => return Ok(None),
     }))
 }

@@ -1,0 +1,12 @@
+{
+  "access_token": "eg1~fixture-access-token-2",
+  "expires_in": 28800,
+  "expires_at": "2026-11-18T04:00:00.000Z",
+  "token_type": "bearer",
+  "refresh_token": "eg1~fixture-refresh-token-2",
+  "refresh_expires": 1987200,
+  "refresh_expires_at": "2026-12-10T20:00:00.000Z",
+  "account_id": "8645b4947bbc4c0092a8b7236df169d1",
+  "client_id": "34a02cf8f4414e29b15921876da36f9a",
+  "displayName": "Player One"
+}

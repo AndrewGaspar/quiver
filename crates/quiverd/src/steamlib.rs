@@ -81,6 +81,7 @@ pub(crate) fn entry_for(p: &Product, installed: Option<quiver_api::Game>, update
         steam: None,
         space_id,
         client: None,
+        records: Vec::new(),
     }
 }
 
@@ -125,6 +126,7 @@ pub(crate) fn merge(owned: Vec<LibraryEntry>, steam: &[SteamGame], unowned: &Has
             steam: Some(g.clone()),
             space_id,
             client: None,
+            records: Vec::new(),
         });
     }
     out.sort_by(|a, b| {
@@ -390,6 +392,7 @@ mod tests {
             steam: None,
             space_id: None,
             client: None,
+            records: Vec::new(),
         }
     }
 

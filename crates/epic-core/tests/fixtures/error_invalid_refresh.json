@@ -1,0 +1,10 @@
+{
+  "errorCode": "errors.com.epicgames.account.auth_token.invalid_refresh_token",
+  "errorMessage": "Sorry the refresh token 'eg1~fixture-refresh-token-not-real' is invalid",
+  "messageVars": [],
+  "numericErrorCode": 18036,
+  "originatingService": "com.epicgames.account.public",
+  "intent": "prod",
+  "error_description": "Sorry the refresh token is invalid",
+  "error": "invalid_grant"
+}

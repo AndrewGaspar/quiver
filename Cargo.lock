@@ -1398,6 +1398,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "epic-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "keyring",
+ "quiver-api",
+ "quiver-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4634,6 +4653,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "epic-core",
  "flate2",
  "hex",
  "libc",

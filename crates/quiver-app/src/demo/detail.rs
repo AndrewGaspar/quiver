@@ -516,6 +516,7 @@ fn sync_steam(st: &mut State, games: &[SteamGame]) {
                         steam: Some(g.clone()),
                         space_id: None,
                         client: None,
+                        records: Vec::new(),
                     },
                 );
             }

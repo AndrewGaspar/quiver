@@ -358,6 +358,7 @@ pub fn library() -> Vec<LibraryEntry> {
                 steam: None,
                 space_id: None,
                 client: None,
+                records: Vec::new(),
             };
             (order, entry)
         })

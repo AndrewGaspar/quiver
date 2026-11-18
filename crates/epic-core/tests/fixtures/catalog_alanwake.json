@@ -1,0 +1,34 @@
+{
+  "item-awr": {
+    "id": "item-awr",
+    "title": "Alan Wake Remastered",
+    "description": "A thriller from Remedy: Alan Wake, a best-selling writer, searches for his missing wife in Bright Falls.",
+    "keyImages": [
+      {"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/awr/tall.jpg", "md5": "0", "width": 1200, "height": 1600, "size": 100, "uploadedDate": "2021-10-05T00:00:00.000Z"},
+      {"type": "DieselGameBox", "url": "https://cdn1.epicgames.com/fixture/awr/wide.jpg", "md5": "0", "width": 2560, "height": 1440, "size": 100, "uploadedDate": "2021-10-05T00:00:00.000Z"},
+      {"type": "DieselGameBoxLogo", "url": "https://cdn1.epicgames.com/fixture/awr/logo.png", "md5": "0", "width": 800, "height": 300, "size": 10, "uploadedDate": "2021-10-05T00:00:00.000Z"},
+      {"type": "Thumbnail", "url": "https://cdn1.epicgames.com/fixture/awr/thumb.jpg", "md5": "0", "width": 400, "height": 400, "size": 10, "uploadedDate": "2021-10-05T00:00:00.000Z"}
+    ],
+    "categories": [{"path": "games"}, {"path": "games/edition/base"}, {"path": "games/edition"}, {"path": "applications"}],
+    "namespace": "ns-alanwake",
+    "status": "ACTIVE",
+    "creationDate": "2021-09-01T00:00:00.000Z",
+    "lastModifiedDate": "2026-01-01T00:00:00.000Z",
+    "customAttributes": {
+      "CanRunOffline": {"type": "STRING", "value": "true"},
+      "FolderName": {"type": "STRING", "value": "AlanWakeRemastered"},
+      "CloudSaveFolder": {"type": "STRING", "value": "{AppData}/../Local/Remedy/AlanWake"},
+      "PresenceId": {"type": "STRING", "value": "fixture"}
+    },
+    "entitlementName": "fixture",
+    "entitlementType": "EXECUTABLE",
+    "itemType": "DURABLE",
+    "releaseInfo": [{"id": "rel-awr", "appId": "Kestrel", "platform": ["Windows"], "dateAdded": "2021-10-05T00:00:00.000Z"}],
+    "developer": "Remedy Entertainment",
+    "developerId": "dev-remedy",
+    "eulaIds": [],
+    "endOfSupport": false,
+    "dlcItemList": [],
+    "unsearchable": false
+  }
+}

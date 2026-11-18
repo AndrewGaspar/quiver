@@ -1,0 +1,24 @@
+[package]
+name = "epic-core"
+description = "Epic Games Store provider: accounts, library and catalog (design/STORE-EPIC.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quiver-api.workspace = true
+quiver-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+keyring.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+futures.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

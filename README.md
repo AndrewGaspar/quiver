@@ -241,6 +241,42 @@ from Steam. `steam-run` also applies the game's Quiver launch settings: `env.*`,
 command); Proton and language stay Steam's; `--no-settings` skips them. Mod profiles for Steam
 copies are designed in [design/STEAM-COPIES.md](design/STEAM-COPIES.md), not built.
 
+## Epic Games Store
+
+Epic games are in the same library, with an Epic badge (`quiver library --store epic`,
+`quiver info epic:<app>`). This build lists them as not installed; installing and playing them
+natively comes next (design/STORE-EPIC.md). Ubisoft games bought on Epic (Epic's catalog names
+the Ubisoft product) fold into their Ubisoft entry once your Ubisoft account has them, and
+Quiver plays them as Ubisoft games.
+
+```sh
+quiver epic login            # prints Epic's sign-in page; paste the code it ends on
+quiver epic login --open     # same, and opens the page in your browser
+quiver epic login --code <code or the page's JSON>
+quiver epic accounts         # * marks the default; several accounts are fine
+quiver epic default <name>
+quiver epic logout [<name>]
+```
+
+The app has the same in Settings › Accounts › Epic Games. You sign in on Epic's own page: Quiver
+never sees your password. The session goes into your desktop keyring (Secret Service, service
+`quiver`, entry `epic:<account id>`), never into a file; `<data>/epic/accounts.json` holds only
+ids, display names and the linked Ubisoft account. Epic rotates its refresh tokens, and Quiver
+stores the new one before using it. When Epic ends a session the account is marked "sign in
+again"; Quiver never signs in on its own. Only you can sign in or out: requests from agents and
+scripts are refused. Quiver never reads another launcher's Epic session (legendary's
+`user.json`, Heroic's or the Epic Games Launcher's data).
+
+**Which client Quiver signs in as.** Epic has no OAuth client for third-party launchers, so
+Quiver presents the Epic Games Launcher's public client id and secret, user agent and label,
+as [legendary](https://github.com/legendary-gl/legendary), Heroic and egs-api do. That is
+client impersonation, not DRM circumvention: Epic's servers still decide what your account owns,
+and nothing is unlocked that you didn't buy. The values are built in, and
+`<data>/epic-client.json` overrides any of them without a new build (keys `client_id`,
+`client_secret`, `user_agent`, `label`, `platform`, `country`, `locale`), for when Epic changes
+them. legendary and Heroic (GPL) were read as protocol references only; no code was taken
+from them.
+
 ## Downloads
 
 Installs, updates and repairs go through one queue in `quiverd` (`<data>/queue.json`), one at

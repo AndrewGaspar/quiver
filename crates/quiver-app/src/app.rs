@@ -716,6 +716,7 @@ impl Quiver {
             steam: Some(g.clone()),
             space_id: None,
             client: None,
+            records: Vec::new(),
         };
         let cands = crate::art::candidates(&entry, None, slot, crate::art::ArtPreference::Steam);
         crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx))).0
@@ -998,6 +999,14 @@ impl Quiver {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
+            });
+        } else if !id.is_ubisoft() && !g.entry.on_disk() {
+            // Another store's game that isn't installed: its provider says why it can't
+            // play yet (an Epic game before Epic installs; a Ubisoft game bought on Epic).
+            self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, |this, r, cx| {
+                if let Err(e) = r {
+                    this.show_toast(err_text(&e), cx);
+                }
             });
         } else if !g.installed() {
             self.open_install_dialog(id, cx);

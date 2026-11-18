@@ -1,0 +1,8 @@
+{
+  "responseMetadata": {"nextCursor": null},
+  "records": [
+    {"namespace": "ns-origins", "catalogItemId": "item-aco", "appName": "Camellia", "productId": "prod-aco", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"},
+    {"namespace": "ns-private", "catalogItemId": "item-private", "appName": "PrivateThing", "productId": "prod-private", "sandboxName": "Dev", "sandboxType": "PRIVATE", "recordType": "APPLICATION"},
+    {"namespace": "ns-mystery", "catalogItemId": "item-mystery", "appName": "MysteryApp", "productId": "prod-mystery", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"}
+  ]
+}
