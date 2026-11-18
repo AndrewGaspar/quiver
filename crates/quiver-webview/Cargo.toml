@@ -1,0 +1,20 @@
+[package]
+name = "quiver-webview"
+description = "Quiver's sign-in window: Epic's login page in a WebKitGTK window, loaded at run time (design/STORE-EPIC.md §9.6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quiver-webview"
+path = "src/main.rs"
+
+# WebKitGTK and GTK 3 are opened with dlopen when a window is asked for, so nothing here
+# links them and the workspace builds without their headers (src/ffi.rs).
+[dependencies]
+libc.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

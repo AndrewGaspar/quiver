@@ -5,6 +5,7 @@ use std::io::BufRead;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
+use quiver_api::epic::webview::{self, Outcome};
 use quiver_api::epic::{EpicAccount, EpicRequest, LoginStart};
 use quiver_api::stores::AccountState;
 use quiver_api::{Client, Request};
@@ -13,13 +14,17 @@ use crate::print_json;
 
 #[derive(Subcommand)]
 pub enum EpicAction {
-    /// Sign in to Epic in your browser, then paste the code Epic shows. Each sign-in adds
-    /// an account; the first becomes the default.
+    /// Sign in to Epic in Quiver's sign-in window (or, with --paste, in your browser, then
+    /// paste the code Epic shows). Each sign-in adds an account; the first becomes the
+    /// default.
     Login {
         /// The code (or the whole page of JSON) from Epic, if you already have it.
         #[arg(long)]
         code: Option<String>,
-        /// Also open the sign-in page in your browser.
+        /// Sign in in your browser and paste the code, instead of the sign-in window.
+        #[arg(long)]
+        paste: bool,
+        /// Open the sign-in page in your browser (implies --paste).
         #[arg(long)]
         open: bool,
     },
@@ -75,21 +80,46 @@ fn read_pasted() -> Result<String> {
     Ok(text)
 }
 
+/// Sign in in Quiver's sign-in window. `None`: there's no window here (the reason is
+/// printed), so the caller falls back to pasting.
+async fn window(start: &LoginStart) -> Result<Option<String>> {
+    eprintln!("Opening Epic's sign-in window…");
+    match webview::sign_in(&start.url, webview::DEFAULT_TIMEOUT).await {
+        Outcome::Code(c) => Ok(Some(c.into_inner())),
+        Outcome::Cancelled => bail!("Sign-in cancelled"),
+        Outcome::TimedOut => bail!("The sign-in window timed out; run `quiver epic login` again"),
+        Outcome::Failed(e) => bail!("The sign-in window failed: {e} (`quiver epic login --paste` signs in with your browser instead)"),
+        Outcome::Unavailable(why) => {
+            eprintln!("The sign-in window isn't available ({why}); install webkit2gtk-4.1 for it. Falling back to pasting the code.\n");
+            Ok(None)
+        }
+    }
+}
+
+/// The browser and a pasted code.
+fn paste_flow(start: &LoginStart, open: bool) -> Result<String> {
+    eprintln!("Open this page and sign in to Epic:\n\n  {}\n", start.url);
+    eprintln!("{}\n", start.instructions);
+    if open && let Err(e) = std::process::Command::new("xdg-open").arg(&start.url).spawn() {
+        eprintln!("(couldn't open a browser: {e})");
+    }
+    eprint!("Code: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    read_pasted()
+}
+
 pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
     match action {
-        EpicAction::Login { code, open } => {
+        EpicAction::Login { code, paste, open } => {
             let code = match code {
                 Some(c) => c,
                 None => {
                     let start: LoginStart = client.call(epic(EpicRequest::LoginBegin)).await?;
-                    eprintln!("Open this page and sign in to Epic:\n\n  {}\n", start.url);
-                    eprintln!("{}\n", start.instructions);
-                    if open && let Err(e) = std::process::Command::new("xdg-open").arg(&start.url).spawn() {
-                        eprintln!("(couldn't open a browser: {e})");
+                    let from_window = if paste || open { None } else { window(&start).await? };
+                    match from_window {
+                        Some(c) => c,
+                        None => paste_flow(&start, open)?,
                     }
-                    eprint!("Code: ");
-                    let _ = std::io::Write::flush(&mut std::io::stderr());
-                    read_pasted()?
                 }
             };
             let a: EpicAccount = client.call(epic(EpicRequest::LoginComplete { code })).await?;

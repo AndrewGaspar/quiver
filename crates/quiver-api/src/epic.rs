@@ -1,9 +1,10 @@
 //! Epic Games Store accounts (`Request::Epic`; design/STORE-EPIC.md §5).
 //!
-//! Sign-in is the browser plus a pasted code: [`EpicRequest::LoginBegin`] gives the URL
-//! of Epic's own sign-in page, which ends on a JSON page holding an `authorizationCode`;
-//! the person pastes that code (or the whole page) into [`EpicRequest::LoginComplete`].
-//! Quiver never sees the password. Signing in and out are a person's actions only: quiverd
+//! Sign-in: [`EpicRequest::LoginBegin`] gives the URL of Epic's own sign-in page, which
+//! ends on a JSON page holding an `authorizationCode`. [`webview::sign_in`] opens it in
+//! Quiver's sign-in window (`quiver-webview`) and returns the code; without that window,
+//! the person opens it in a browser and pastes the code (or the whole page). Either way the
+//! code goes to [`EpicRequest::LoginComplete`]. Quiver never sees the password. Signing in and out are a person's actions only: quiverd
 //! refuses them from any source but the app and the terminal (STORES.md §7, item 10).
 //!
 //! Epic's games themselves come through the store-generic requests (`Library`,
@@ -14,6 +15,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::stores::AccountState;
+
+pub mod webview;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
