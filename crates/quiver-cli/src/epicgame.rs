@@ -81,7 +81,7 @@ fn ask(question: &str) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-pub async fn saves(client: &Client, source: &str, game: &str, json: bool, local: bool, action: Option<SavesAction>) -> Result<()> {
+pub async fn saves(client: &Client, game: &str, json: bool, local: bool, action: Option<SavesAction>) -> Result<()> {
     let (name, g) = need_epic(client, game).await?;
     match action {
         None => {
@@ -130,14 +130,7 @@ pub async fn saves(client: &Client, source: &str, game: &str, json: bool, local:
             }
         }
         Some(SavesAction::Restore { backup }) => {
-            let mut confirmed = false;
-            if source.to_ascii_lowercase().starts_with("agent") {
-                confirmed = ask(&format!("An agent ({source}) wants to restore {name}'s save backup {backup:?}. The current saves are backed up first. Allow?"))?;
-                if !confirmed {
-                    bail!("not restored");
-                }
-            }
-            let v: serde_json::Value = client.call(game_req(EpicGameRequest::SavesRestore { game: g, backup, confirmed })).await?;
+            let v: serde_json::Value = client.call(game_req(EpicGameRequest::SavesRestore { game: g, backup })).await?;
             let b: EpicBackup = serde_json::from_value(v["restored"].clone())?;
             println!("{name}: restored backup {} ({} file(s)); it uploads with the next sync", b.id, b.files);
             if let Ok(p) = serde_json::from_value::<EpicBackup>(v["previous"].clone()) {

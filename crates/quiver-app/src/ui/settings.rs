@@ -63,14 +63,15 @@ pub fn section_icon(s: SettingsSection) -> Icon {
     }
 }
 
-/// The agent policy from PROPOSAL.md ("What agents may do"): action, CLI, agents.
+/// The agent policy from PROPOSAL.md ("What agents may do"): action, CLI, agents. Game
+/// changes are Allow for agents too (2026-11-18); only Steam restarts and accounts ask.
 pub const POLICY: [(&str, &str, &str); 8] = [
     ("Read library and status", "Allow", "Allow"),
-    ("Change launch options, mod profiles, exports", "Allow", "Allow"),
+    ("Change launch options, mods, options, tweaks, exports", "Allow", "Allow"),
     ("Launch and stop games", "Allow", "Allow"),
     ("Install and update", "Allow", "Allow"),
-    ("Restore saves or settings", "Allow", "Ask"),
-    ("Uninstall, delete compatibility folders, profiles or saves", "Allow", "Ask"),
+    ("Restore saves or settings", "Allow", "Allow"),
+    ("Uninstall, delete compatibility folders, profiles or saves", "Allow", "Allow"),
     ("Restart Steam", "Ask", "Ask"),
     ("Sign in, sign out, add or remove accounts", "Ask", "Deny"),
 ];

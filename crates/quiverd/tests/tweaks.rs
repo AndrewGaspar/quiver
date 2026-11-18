@@ -1,5 +1,5 @@
 //! Quiver Tweaks against a scratch quiverd (its own XDG dirs and HOME in a temp folder; no
-//! sign-in, no Steam, no game is launched): scopes, the agent policy, the Options entry for
+//! sign-in, no Steam, no game is launched): scopes, agents acting like the person, the Options entry for
 //! the platform surface, providers and the plan of the next launch.
 
 use std::path::{Path, PathBuf};
@@ -114,12 +114,12 @@ async fn tweaks_end_to_end() {
     let agent = Client::connect("tweak-agent").await.unwrap();
     let game = GameRef::ubisoft(3539);
 
-    // Global: Ask for agents, allowed with confirmation, and for people.
-    let err = tweaks::<OptionsChange>(&agent, TweaksRequest::Set { scope: Scope::Global, ops: vec![set("fps.cap", json!(160))], message: None, confirmed: false }).await.unwrap_err();
-    assert!(err.to_string().contains("agent policy: Ask"), "{err}");
-    let c: OptionsChange = tweaks(&cli, TweaksRequest::Set { scope: Scope::Global, ops: vec![set("fps.cap", json!(160)), set("tex.anisotropy", json!("16"))], message: Some("everywhere".into()), confirmed: false }).await.unwrap();
+    // Global: agents act like the person (no Ask, no confirmation); the change records who.
+    let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { scope: Scope::Global, ops: vec![set("fps.cap", json!(160)), set("tex.anisotropy", json!("16"))], message: Some("everywhere".into()), confirmed: false }).await.unwrap();
     assert_eq!(c.revision, 1, "{c:?}");
     assert!(c.changes[0].starts_with("Global: fps.cap"), "{:?}", c.changes);
+    let h: Vec<OptionsRevision> = tweaks(&cli, TweaksRequest::History { scope: Scope::Global }).await.unwrap();
+    assert_eq!(h[0].source, "tweak-agent");
     // Game scope: Allow for agents; bad values rejected per op.
     let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { scope: Scope::Game { game }, ops: vec![set("sync.vsync", json!("off")), set("sync.vsync", json!("maybe"))], message: None, confirmed: false }).await.unwrap();
     assert_eq!(c.revision, 1);
@@ -163,17 +163,16 @@ async fn tweaks_end_to_end() {
     assert_eq!(st.options["tex.anisotropy"].tweak.as_ref().unwrap().overridden_by, None, "the default profile (vanilla) doesn't set it");
 
     // Prefer Quiver's cap for this game: the mod's cap goes off, but its FG blocks DXVK's.
-    let c: OptionsChange = tweaks(&agent, TweaksRequest::Prefer { scope: Scope::Game { game }, id: "fps.cap".into(), prefer: Prefer::Quiver, message: None, confirmed: false }).await.unwrap();
+    let c: OptionsChange = tweaks(&agent, TweaksRequest::Prefer { scope: Scope::Game { game }, id: "fps.cap".into(), prefer: Prefer::Quiver, message: None }).await.unwrap();
     assert!(c.revision > 0);
     let p: TweaksPlan = tweaks(&cli, TweaksRequest::Plan { game, profile: Some("DLSS".into()) }).await.unwrap();
     assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Unavailable { reason } if reason.contains("Pharos: Frame Generation presents two frames")), "{:?}", p.entry("fps.cap"));
     assert!(p.bound.iter().any(|b| b.option == "reflex.fps_limit" && b.value == json!(0)));
 
-    // History and restore (Ask for agents).
+    // History and restore (an agent's restore applies too).
     let h: Vec<OptionsRevision> = tweaks(&cli, TweaksRequest::History { scope: Scope::Global }).await.unwrap();
     assert_eq!(h.len(), 1);
-    assert!(tweaks::<OptionsChange>(&agent, TweaksRequest::Restore { scope: Scope::Global, revision: 0, confirmed: false }).await.is_err());
-    let c: OptionsChange = tweaks(&cli, TweaksRequest::Restore { scope: Scope::Global, revision: 0, confirmed: false }).await.unwrap();
+    let c: OptionsChange = tweaks(&agent, TweaksRequest::Restore { scope: Scope::Global, revision: 0 }).await.unwrap();
     assert_eq!(c.revision, 2);
     let st: SurfaceState = tweaks(&cli, TweaksRequest::List { scope: Scope::Global, level: None }).await.unwrap();
     assert_eq!(st.options["fps.cap"].value, json!(0));

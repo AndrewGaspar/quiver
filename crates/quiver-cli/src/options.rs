@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde_json::Value;
-use quiver_api::mods::is_human_source;
 use quiver_api::options::{
     Apply, InvokeResult, KeysReport, Level, Live, LintReport, OptionDiff, OptionOp, OptionState, OptionsChange, OptionsRequest, OptionsRevision, Outcome,
     Pending, SchemaInfo, SessionDetail, Severity, SurfaceState, ValueSource,
@@ -292,7 +291,7 @@ fn print_change(game: &str, c: &OptionsChange) {
     }
 }
 
-/// Ask the person at the terminal (for danger options and agents' live changes).
+/// Ask the person at the terminal (for danger options).
 fn ask(prompt: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Ok(false);
@@ -314,7 +313,7 @@ fn parse_change(surface: &str, s: &str) -> Result<OptionOp> {
     Ok(if value.is_empty() { OptionOp::Reset { surface: surface.to_owned(), id } } else { OptionOp::Set { surface: surface.to_owned(), id, value: Value::String(value.to_owned()) } })
 }
 
-pub async fn run(client: &Client, source: &str, game: &str, profile: Option<String>, json: bool, action: Option<OptionsAction>) -> Result<()> {
+pub async fn run(client: &Client, game: &str, profile: Option<String>, json: bool, action: Option<OptionsAction>) -> Result<()> {
     let g = resolve_installed(client, game).await?;
     let product_id = crate::mods::GameArg(g.game_ref());
     let call = |req: OptionsRequest| client.call::<Value>(Request::Options(req));
@@ -325,9 +324,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             let req = OptionsRequest::Set { game: product_id.into(), profile: profile.clone(), ops: ops.clone(), live, message: message.clone(), confirmed };
             match client.call::<OptionsChange>(Request::Options(req)).await {
                 Err(e) if !confirmed && e.to_string().contains("confirmation") => {
-                    let what = e.to_string();
-                    let prompt = if is_human_source(source) { what.clone() } else { format!("'{source}' asks: {what}") };
-                    if ask(&prompt)? {
+                    if ask(&e.to_string())? {
                         client.call::<OptionsChange>(Request::Options(OptionsRequest::Set { game: product_id.into(), profile, ops, live, message, confirmed: true })).await
                     } else {
                         Err(e)
@@ -458,16 +455,14 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         }
         OptionsAction::Restore { revision } => {
             let n: u32 = revision.trim_start_matches(['r', 'R']).parse().with_context(|| format!("'{revision}' isn't a revision (rN)"))?;
-            let confirmed = is_human_source(source) || ask(&format!("'{source}' asks to restore options revision r{n} of {}.", g.name))?;
-            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::Restore { game: product_id.into(), profile: profile.clone(), revision: n, confirmed }).await?)?;
+            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::Restore { game: product_id.into(), profile: profile.clone(), revision: n }).await?)?;
             if json {
                 return json_out(&c);
             }
             print_change(&g.name, &c);
         }
         OptionsAction::Revert { session } => {
-            let confirmed = is_human_source(source) || ask(&format!("'{source}' asks to revert session {session}'s option changes in {}.", g.name))?;
-            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::RevertSession { game: product_id.into(), session, confirmed }).await?)?;
+            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::RevertSession { game: product_id.into(), session }).await?)?;
             if json {
                 return json_out(&c);
             }

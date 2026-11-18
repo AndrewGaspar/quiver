@@ -22,7 +22,6 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde_json::Value;
-use quiver_api::mods::is_human_source;
 use quiver_api::options::{Level, OptionOp, OptionState, OptionsChange, OptionsRevision, SurfaceState, ValueSource};
 use quiver_api::tweaks::{Capabilities, Effect, Planned, Prefer, Scope, SessionTweaks, TweaksPlan, TweaksRequest};
 use quiver_api::{Client, GameRef, Request};
@@ -63,7 +62,7 @@ pub enum TweaksAction {
         profile: Option<String>,
         #[arg(short, long, alias = "reason")]
         message: Option<String>,
-        /// Confirm without asking (global and danger tweaks).
+        /// Confirm danger tweaks without asking.
         #[arg(long)]
         yes: bool,
     },
@@ -102,7 +101,8 @@ pub enum TweaksAction {
         global: bool,
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long)]
+        /// Accepted for older scripts; nothing here asks.
+        #[arg(long, hide = true)]
         yes: bool,
     },
     /// Why each tweak does what it does at GAME's next launch: the capabilities, every
@@ -143,7 +143,8 @@ pub enum TweaksAction {
         global: bool,
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long)]
+        /// Accepted for older scripts; nothing here asks.
+        #[arg(long, hide = true)]
         yes: bool,
     },
     /// The capability set: GPU, driver, Proton build, NGX pieces.
@@ -201,13 +202,12 @@ fn ask(prompt: &str) -> Result<bool> {
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// A change request, asking at the terminal when the daemon wants a confirmation.
-async fn change(client: &Client, who: &str, mk: impl Fn(bool) -> TweaksRequest, yes: bool) -> Result<OptionsChange> {
+/// A change request, asking at the terminal when the daemon wants a confirmation (a danger
+/// tweak).
+async fn change(client: &Client, mk: impl Fn(bool) -> TweaksRequest, yes: bool) -> Result<OptionsChange> {
     match client.call::<OptionsChange>(Request::Tweaks(mk(yes))).await {
         Err(e) if !yes && e.to_string().contains("confirmation") => {
-            let what = e.to_string();
-            let prompt = if is_human_source(who) { what.clone() } else { format!("'{who}' asks: {what}") };
-            if ask(&prompt)? { client.call::<OptionsChange>(Request::Tweaks(mk(true))).await } else { Err(e) }
+            if ask(&e.to_string())? { client.call::<OptionsChange>(Request::Tweaks(mk(true))).await } else { Err(e) }
         }
         r => r,
     }
@@ -405,7 +405,7 @@ fn print_session(s: &SessionTweaks) {
     }
 }
 
-pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAction>) -> Result<()> {
+pub async fn run(client: &Client, json: bool, action: Option<TweaksAction>) -> Result<()> {
     let action = action.unwrap_or(TweaksAction::List { game: None, profile: None, all: false, changed: false });
     match action {
         TweaksAction::List { game, profile, all, changed } => {
@@ -456,7 +456,7 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 bail!("give id=value");
             }
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, who, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }
@@ -474,7 +474,7 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 bail!("which tweaks? (or --all)");
             }
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, who, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }
@@ -485,14 +485,14 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
             let id = rest.first().context("which preset?")?.clone();
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
             let ops = vec![OptionOp::Preset { surface: "quiver".into(), id }];
-            let c = change(client, who, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }
             print_change(&c);
             steam_offer(client, &scope).await;
         }
-        TweaksAction::Prefer { args, global, profile, yes } => {
+        TweaksAction::Prefer { args, global, profile, yes: _ } => {
             let (game, rest) = split_game(&args, global, 2);
             let [id, who_impl] = rest else { bail!("give ID provider|quiver") };
             let prefer = match who_impl.to_lowercase().as_str() {
@@ -501,7 +501,7 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 o => bail!("prefer 'provider' or 'quiver', not '{o}'"),
             };
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, who, |confirmed| TweaksRequest::Prefer { scope: scope.clone(), id: id.clone(), prefer, message: None, confirmed }, yes).await?;
+            let c: OptionsChange = client.call(Request::Tweaks(TweaksRequest::Prefer { scope, id: id.clone(), prefer, message: None })).await?;
             if json {
                 return json_out(&c);
             }
@@ -560,12 +560,12 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 }
             }
         }
-        TweaksAction::Restore { args, global, profile, yes } => {
+        TweaksAction::Restore { args, global, profile, yes: _ } => {
             let (game, rest) = split_game(&args, global, 1);
             let rev = rest.first().context("which revision? (rN)")?;
             let revision: u32 = rev.trim_start_matches('r').parse().with_context(|| format!("'{rev}' isn't a revision (rN)"))?;
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, who, |confirmed| TweaksRequest::Restore { scope: scope.clone(), revision, confirmed }, yes).await?;
+            let c: OptionsChange = client.call(Request::Tweaks(TweaksRequest::Restore { scope, revision })).await?;
             if json {
                 return json_out(&c);
             }

@@ -7,9 +7,10 @@
 //! through [`SdkLink`], which the SDK pipe registers with [`Options::set_sdk`]. Values a mod
 //! reports itself come in through [`Daemon::options_from_mod`].
 //!
-//! **Agent policy** (steer 13): setting values on a profile is allowed; live changes to a
-//! running game, restores, session reverts and `danger` options are "Ask" (refused without
-//! `confirmed`). `danger` options need `confirmed` from every source (front ends ask first).
+//! **Agents** act like the person (the user's decision, 2026-11-18, replacing steer 13's
+//! Ask): values, live changes to a running game, restores and session reverts apply the
+//! same way from every source. `danger` options need `confirmed` from every source (front
+//! ends ask first).
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use quiver_api::mods::{VANILLA, is_human_source};
+use quiver_api::mods::VANILLA;
 use quiver_api::options::{
     CrashNote, InvokeResult, KeysReport, Live, LiveChange, LiveChannel, LintReport, OpOutcome, OptionDiff, OptionOp, OptionsChange, OptionsEvent,
     OptionsRequest, Outcome, SchemaInfo, SessionDetail, SessionOptions, Values,
@@ -182,13 +183,6 @@ fn ctx_for(game: GameRef, profile: Option<&str>) -> Result<Ctx> {
     opt::context(&store, p.as_deref())
 }
 
-fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
-    if is_human_source(source) || confirmed {
-        return Ok(());
-    }
-    bail!("{what} needs your confirmation when requested by '{source}' (agent policy: Ask). Run it in a terminal, where quiver asks, or without --source")
-}
-
 /// Test hook: `QUIVER_TEST_SESSION=<product>:<profile>:<root>` registers a running session
 /// whose "process" root is `<root>` (`/` for a plain process), so integration tests can
 /// exercise live changes without a game. Only read at startup.
@@ -292,8 +286,7 @@ impl Daemon {
                     .await?
                 )
             }
-            OptionsRequest::Restore { game: GameField(game), profile, revision, confirmed } => {
-                ask(source, confirmed, "restoring an options revision")?;
+            OptionsRequest::Restore { game: GameField(game), profile, revision } => {
                 let (ops, msg) = with_store_lock(move || {
                     let ctx = ctx_for(game, profile.as_deref())?;
                     let hist = opt::history(&ctx.store, &ctx.profile_id)?;
@@ -308,8 +301,7 @@ impl Daemon {
                 let (pid, m) = msg;
                 json!(self.options_set(&src, game, Some(pid), ops, Live::IfRunning, Some(m), true, None).await?)
             }
-            OptionsRequest::RevertSession { game: GameField(game), session, confirmed } => {
-                ask(source, confirmed, "reverting a session's option changes")?;
+            OptionsRequest::RevertSession { game: GameField(game), session } => {
                 let live = self.options.session(&session);
                 let (ops, pid) = with_store_lock(move || {
                     let store = store_for(&installed_game(game)?);
@@ -472,12 +464,6 @@ impl Daemon {
         }
         if changed && !applied.dangers.is_empty() && !confirmed {
             bail!("needs confirmation (dangerous option): {}. Send it again with confirmation (the CLI asks; agents: confirmed)", applied.dangers.join("; "));
-        }
-        if changed && running.is_some() && live != Live::No && !is_human_source(source) && !confirmed {
-            bail!(
-                "{} is running: changing it live needs your confirmation when requested by '{source}' (agent policy: Ask). Save without touching the running game with --no-live, or confirm",
-                self.name_of(game)
-            );
         }
         let delivering = running.is_some() && live != Live::No && applied.outcomes.iter().any(|o| o.2.is_none());
         let mut out = OptionsChange { product_id: pid(game), profile: ctx.profile_id.clone(), ..Default::default() };

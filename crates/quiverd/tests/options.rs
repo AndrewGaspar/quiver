@@ -151,12 +151,15 @@ async fn options_end_to_end() {
     assert_eq!(c.revision, 2);
     let err = options::<OptionsChange>(&agent, OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("DLSS", "fg.hide_handle64", json!(true))], live: Live::No, message: None, confirmed: false }).await.unwrap_err().to_string();
     assert!(err.contains("dangerous option"), "{err}");
-    // History, diff, restore (Ask for agents).
+    // History, diff, restore (agents too).
     let h: Vec<OptionsRevision> = options(&cli, OptionsRequest::History { game: 3539.into(), profile: Some("DLSS".into()) }).await.unwrap();
     assert_eq!(h.iter().map(|r| r.source.as_str()).collect::<Vec<_>>(), ["cli", "agent"]);
     let diff: Vec<quiver_api::options::OptionDiff> = options(&cli, OptionsRequest::Diff { game: 3539.into(), profile: Some("DLSS".into()), against: Some("vanilla".into()) }).await.unwrap();
     assert_eq!(diff.len(), 2, "{diff:?}");
-    assert!(options::<OptionsChange>(&agent, OptionsRequest::Restore { game: 3539.into(), profile: Some("DLSS".into()), revision: 1, confirmed: false }).await.unwrap_err().to_string().contains("Ask"));
+    // An agent's restore applies like the person's (r2 is current: nothing to change).
+    let _: OptionsChange = options(&agent, OptionsRequest::Restore { game: 3539.into(), profile: Some("DLSS".into()), revision: 2 }).await.unwrap();
+    let h: Vec<OptionsRevision> = options(&cli, OptionsRequest::History { game: 3539.into(), profile: Some("DLSS".into()) }).await.unwrap();
+    assert_eq!(h.len(), 2);
     let keys: quiver_api::options::KeysReport = options(&cli, OptionsRequest::Keys { game: 3539.into(), profile: Some("DLSS".into()) }).await.unwrap();
     assert!(keys.bindings.iter().any(|b| b.key == "F9"));
     drop((cli, agent));
@@ -226,11 +229,13 @@ async fn options_end_to_end() {
     let records: Vec<quiver_api::options::SessionOptions> = options(&cli, OptionsRequest::SessionRecords { game: 3539.into(), profile: Some("DLSS".into()), limit: None }).await.unwrap();
     assert_eq!(records.len(), 1);
     assert!(!records[0].live_changes.is_empty());
-    // Agents need confirmation for live changes to a running game; --no-live is fine.
+    // An agent's live change to a running game applies like the person's (no Ask).
     let agent = connect(&e, "agent").await;
-    let err = options::<OptionsChange>(&agent, OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::IfRunning, message: None, confirmed: false }).await.unwrap_err().to_string();
-    assert!(err.contains("is running") && err.contains("--no-live"), "{err}");
-    let c: OptionsChange = options(&agent, OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::No, message: None, confirmed: false }).await.unwrap();
+    let c: OptionsChange = options(&agent, OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(3))], live: Live::IfRunning, message: None, confirmed: false }).await.unwrap();
+    assert!(matches!(c.outcomes[0].outcome, Outcome::AppliedLive { .. }), "{:?}", c.outcomes);
+    assert!(std::fs::read_to_string(e.install().join("aco_dlss.ini")).unwrap().contains("npc_density=3\n"));
+    // --no-live saves without touching the running game.
+    let c: OptionsChange = options(&agent, OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("DLSS", "world.npc_density", json!(2))], live: Live::No, message: None, confirmed: false }).await.unwrap();
     assert!(matches!(&c.outcomes[0].outcome, Outcome::SavedPending { detail } if detail.contains("not sent")), "{:?}", c.outcomes);
     assert!(c.live.is_empty());
     // Session only: not saved, written live.
@@ -244,7 +249,7 @@ async fn options_end_to_end() {
     // Revert the session: back to the values it launched with (r2), live.
     let list: Vec<SurfaceState> = options(&cli, OptionsRequest::List { game: 3539.into(), profile: Some("DLSS".into()), level: None }).await.unwrap();
     let session = list[0].live.session.clone().unwrap();
-    let c: OptionsChange = options(&cli, OptionsRequest::RevertSession { game: 3539.into(), session, confirmed: false }).await.unwrap();
+    let c: OptionsChange = options(&cli, OptionsRequest::RevertSession { game: 3539.into(), session }).await.unwrap();
     assert!(c.revision > before);
     let text = std::fs::read_to_string(e.install().join("aco_dlss.ini")).unwrap();
     assert!(text.contains("npc_density=4\n") && text.contains("npc_distance=1\n") && text.contains("mode=d3d12\n"), "{text}");

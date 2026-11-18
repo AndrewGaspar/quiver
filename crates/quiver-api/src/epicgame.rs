@@ -47,12 +47,11 @@ pub enum EpicGameRequest {
         confirmed: bool,
     },
     /// Put a backup's files back (the files there now are backed up first). `backup` is a
-    /// backup id, a unique part of one, or `latest`. Agents need `confirmed`.
+    /// backup id, a unique part of one, or `latest`. Local only: what reaches Epic's cloud
+    /// afterwards goes through `SavesSync`'s rules.
     SavesRestore {
         game: GameRef,
         backup: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Epic's play-time total for a game (or every game) and the report queue
     /// ([`EpicPlaytime`]).

@@ -666,15 +666,19 @@ tables (Epic section 4.5, EA section 4.4, Meta "The line"); this section wins wh
     | Read library, status, progress | Allow | Allow |
     | Install, update, verify, play, stop (including through Steam) | Allow | Allow |
     | Settings, profiles, exports; Steam launch-option or Proton-mapping patches (staged, reversible) | Allow | Allow |
-    | Restore saves or settings; resolve a save conflict | Allow | Ask |
-    | Uninstall; delete prefixes, profiles or saves | Allow | Ask |
+    | Restore saves or settings | Allow | Allow |
+    | Resolve a save conflict (can overwrite the store's cloud copy) | Allow | Ask |
+    | Uninstall; delete prefixes, profiles or saves | Allow | Allow |
     | Restart Steam | Ask | Ask |
     | Redeem keys, claim subscription titles (lists exactly what goes onto which account) | Ask | Ask (pending approval) |
     | Sign in, sign out, add or remove accounts, link accounts | Ask | Deny |
     | Spikes that sign in, capture traffic or touch a real prefix | asked first, reverted after | never agent-initiated |
 
     Agents never read credential files or run captures, and are rate-limited on store APIs like
-    any client.
+    any client. Game changes (restores, deletes, uninstalls) are Allow for agents since
+    2026-11-18: they act like the person there, because an agent could pass `--yes` itself
+    anyway and the risk is low (PROPOSAL.md, "What agents may do"). What still asks protects
+    store accounts and other apps.
 11. **Code licences.** legendary, gogdl, Heroic, Maxima and RiftLift's wrapper (GPL) are references
     and test oracles only; no code is copied. MIT or Apache dependencies are fine after review:
     egs-api, comet (as a separately built binary or crate, with its LICENSE), origin-sdk, Revive's

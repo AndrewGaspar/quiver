@@ -1,20 +1,15 @@
 //! `Request::Mods`: mods, layers and profiles (`quiver_core::mods` does the work). None of
 //! these requests reach Ubisoft.
 //!
-//! Agent policy (design/PROPOSAL.md, "What agents may do"): changing profiles, installing
-//! mods, changing a mod's settings and a layer's deletions are allowed for everyone (a
-//! deletion is a whiteout that hides a file inside a launch's private mount; no real file
-//! is deleted); deleting a profile or a layer, restoring a profile or layer revision,
-//! uninstalling a mod that has install files or changed config values, and undoing config
-//! patches are "Ask" for agents. A request from a source other than a person at a front
-//! end (`cli`, `gui`) is refused unless it carries `confirmed`, which front ends set only
-//! after asking the person.
+//! Agents act like the person here (design/PROPOSAL.md, "What agents may do"; the user's
+//! decision, 2026-11-18): every request applies the same way whatever its source, deletes,
+//! restores, uninstalls and patch undos included. Changes still record their source.
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use quiver_api::mods::{GameProfiles, LaunchPlan, ModPrefs, ModsRequest, PatchState, ProfileRevision, is_human_source};
+use quiver_api::mods::{GameProfiles, LaunchPlan, ModPrefs, ModsRequest, PatchState, ProfileRevision};
 use quiver_api::game::GameField;
 use quiver_api::{Event, GameRef, GameSettings, SettingOp};
 use quiver_core::launcher::{self, Config, Games};
@@ -46,17 +41,6 @@ pub(crate) async fn with_store_lock<T: Send + 'static>(f: impl FnOnce() -> Resul
 pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
     let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     f()
-}
-
-/// The "Ask" rule for agents.
-fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
-    if is_human_source(source) || confirmed {
-        return Ok(());
-    }
-    bail!(
-        "{what} needs your confirmation when requested by '{source}' (agent policy: Ask). \
-         Run it in a terminal, where quiver asks, or without --source"
-    )
 }
 
 /// The game a mods request is for, as mods see it: a Quiver install of a Ubisoft game, or a
@@ -250,8 +234,7 @@ impl Daemon {
                 );
                 json!(change)
             }
-            ModsRequest::LayerRemove { game: GameField(game), layer, confirmed } => {
-                ask(source, confirmed, "removing a mod layer")?;
+            ModsRequest::LayerRemove { game: GameField(game), layer } => {
                 let store = store(game)?;
                 self.not_running(game, "removing a layer")?;
                 let (layer, undone) = blocking(move || store.uninstall(&layer)).await?;
@@ -305,8 +288,7 @@ impl Daemon {
                 );
                 with_notes(json!(rev), notes)
             }
-            ModsRequest::ProfileDelete { game: GameField(game), profile, confirmed } => {
-                ask(source, confirmed, "deleting a mod profile")?;
+            ModsRequest::ProfileDelete { game: GameField(game), profile } => {
                 installed(game)?;
                 let rev = blocking(move || ModStore::open(game).delete_profile(&profile, &src)).await?;
                 // The game's default stays pointed at it (restoring brings it back), but
@@ -331,8 +313,7 @@ impl Daemon {
                 let (_, history) = blocking(move || ModStore::open(game).history_of(&profile)).await?;
                 json!(history)
             }
-            ModsRequest::ProfileRestore { game: GameField(game), profile, revision, confirmed } => {
-                ask(source, confirmed, "restoring a mod profile revision")?;
+            ModsRequest::ProfileRestore { game: GameField(game), profile, revision } => {
                 installed(game)?;
                 let rev = blocking(move || ModStore::open(game).restore_profile(&profile, revision, &src)).await?;
                 self.mods_changed(
@@ -363,8 +344,7 @@ impl Daemon {
                 let (_, history) = blocking(move || ModStore::open(game).layer_history_of(&layer)).await?;
                 json!(history)
             }
-            ModsRequest::LayerRestore { game: GameField(game), layer, revision, confirmed } => {
-                ask(source, confirmed, "restoring a mod layer revision")?;
+            ModsRequest::LayerRestore { game: GameField(game), layer, revision } => {
                 installed(game)?;
                 self.not_running(game, "restoring a layer's deletions")?;
                 let change = blocking(move || ModStore::open(game).restore_layer(&layer, revision, &src)).await?;
@@ -400,23 +380,12 @@ impl Daemon {
                 );
                 json!(change)
             }
-            ModsRequest::Uninstall { game: GameField(game), mod_id, confirmed } => {
+            ModsRequest::Uninstall { game: GameField(game), mod_id } => {
                 let store = store(game)?;
-                let (layer, applied, files) = {
+                let layer = {
                     let (store, q) = (store.clone(), mod_id.clone());
-                    blocking(move || {
-                        let l = store.layer(&q)?;
-                        let applied = store.applied_by(&l.id)?;
-                        // Every version goes, so any version's files count.
-                        let rec = store.find_mod(&l.id)?;
-                        let files = store.layers()?.iter().any(|v| rec.has(&v.id) && v.has_files());
-                        Ok((l, applied, files))
-                    })
-                    .await?
+                    blocking(move || store.layer(&q)).await?
                 };
-                if files || !applied.is_empty() {
-                    ask(source, confirmed, "uninstalling a mod with install files or changed config values")?;
-                }
                 self.not_running(game, "uninstalling a mod")?;
                 let (layer, undone) = blocking(move || store.uninstall(&layer.id)).await?;
                 self.mods_changed(
@@ -461,8 +430,7 @@ impl Daemon {
                 })
                 .await?)
             }
-            ModsRequest::PatchesUndo { game: GameField(game), mod_id, confirmed } => {
-                ask(source, confirmed, "undoing config patches")?;
+            ModsRequest::PatchesUndo { game: GameField(game), mod_id } => {
                 let store = store(game)?;
                 self.not_running(game, "undoing config patches")?;
                 let undone = blocking(move || store.undo_patches(mod_id.as_deref())).await?;
@@ -561,10 +529,9 @@ impl Daemon {
                 let (_, history) = blocking(move || ModStore::open(game).mod_history_of(&mod_id)).await?;
                 json!(history)
             }
-            ModsRequest::MergeVersions { game: GameField(game), into, from, labels, dry_run, confirmed } => {
-                // It rewrites profiles (keeping what each runs), so agents ask first.
+            ModsRequest::MergeVersions { game: GameField(game), into, from, labels, dry_run } => {
+                // It rewrites profiles (keeping what each runs): not while one is mounted.
                 if !dry_run {
-                    ask(source, confirmed, "merging mods into versions of one mod")?;
                     self.not_running(game, "merging mods")?;
                 }
                 let store = store(game)?;
@@ -676,16 +643,6 @@ fn undone_note(undone: &[quiver_api::mods::PatchStatus]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn agents_must_confirm() {
-        assert!(ask("cli", false, "x").is_ok());
-        assert!(ask("gui", false, "x").is_ok());
-        assert!(ask("agent", true, "x").is_ok());
-        let e = ask("agent", false, "deleting a mod profile").unwrap_err().to_string();
-        assert!(e.contains("deleting a mod profile") && e.contains("agent"), "{e}");
-        assert!(ask("claude-code", false, "x").is_err());
-    }
 
     #[test]
     fn plan_lines_say_why() {

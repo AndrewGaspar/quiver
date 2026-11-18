@@ -747,11 +747,11 @@ mod tests {
         let c = set(Scope::Global, vec![OptionOp::Set { surface: "quiver".into(), id: "fps.cap".into(), value: json!(9999) }]);
         assert!(matches!(c.outcomes[0].outcome, Outcome::Rejected { .. }) && c.revision == 0);
         let profile = Scope::Profile { game: origins, profile: Some(super::super::ORIGINS_DEFAULT.into()) };
-        let c: OptionsChange = serde_json::from_value(ask(TweaksRequest::Prefer { scope: profile.clone(), id: "fps.cap".into(), prefer: Prefer::Quiver, message: None, confirmed: false }).unwrap()).unwrap();
+        let c: OptionsChange = serde_json::from_value(ask(TweaksRequest::Prefer { scope: profile.clone(), id: "fps.cap".into(), prefer: Prefer::Quiver, message: None }).unwrap()).unwrap();
         assert_eq!(c.revision, 3);
         let p = list(profile.clone());
         assert!(matches!(p.options["fps.cap"].tweak.as_ref().unwrap().planned, Some(Planned::Blocked { .. })), "DXVK's limiter conflicts with DLSS FG");
-        let c: OptionsChange = serde_json::from_value(ask(TweaksRequest::Restore { scope: profile.clone(), revision: 2, confirmed: false }).unwrap()).unwrap();
+        let c: OptionsChange = serde_json::from_value(ask(TweaksRequest::Restore { scope: profile.clone(), revision: 2 }).unwrap()).unwrap();
         assert_eq!(c.revision, 4);
         let h: Vec<OptionsRevision> = serde_json::from_value(ask(TweaksRequest::History { scope: profile }).unwrap()).unwrap();
         assert_eq!(h.len(), 4);

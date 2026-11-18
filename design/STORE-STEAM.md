@@ -437,6 +437,8 @@ Consequences for code that already exists:
 12. **Agent policy for Steam.** *Recommendation:* install, verify and play through Steam:
     Allow. Patch or unpatch launch options and Proton mapping: Allow (reversible, staged).
     Uninstall: Ask. Restart Steam: Ask (as decided). Steam sign-in: Deny.
+    *Revised 2026-11-18:* uninstall and other game changes are Allow for agents (they act like
+    the person; PROPOSAL.md, "What agents may do"). Restart Steam and sign-in are unchanged.
 13. **Flatpak Steam.** It is unsupported for `steam-run` today (its sandbox can't run
     `quiver`). Should read-only library and launch support Flatpak? *Recommendation: yes*
     for reading and `rungameid` (paths under `~/.var/app/com.valvesoftware.Steam`), no hook.

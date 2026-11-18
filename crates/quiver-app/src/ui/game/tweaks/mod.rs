@@ -2,8 +2,7 @@
 //! global scope, with the machine's capabilities in the header) and the game page's
 //! **Tweaks** tab (the game's own scope or one of its profiles). Both draw the platform
 //! surface with the Options form's controls ([`Form::Tweaks`]), stage edits and save them as
-//! one revision of the scope (`TweaksRequest::Set`, source `gui`: the person's own action, so
-//! the agent policy's Ask doesn't apply). Rows say where each value comes from, where the
+//! one revision of the scope (`TweaksRequest::Set`, source `gui`). Rows say where each value comes from, where the
 //! tweak can work at all, what the next launch does with it (and who implements it, with
 //! "Use Quiver's" where a mod provides it) and what the last session showed.
 
@@ -392,7 +391,7 @@ impl Quiver {
     /// Who implements a tweak a mod provides, at the loaded scope.
     fn tweaks_prefer(&mut self, id: String, prefer: Prefer, cx: &mut Context<Self>) {
         let Some(scope) = self.tw.scope.clone() else { return };
-        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Prefer { scope, id, prefer, message: None, confirmed: false }), cx, |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Prefer { scope, id, prefer, message: None }), cx, |this, r, cx| match r {
             Ok(c) => {
                 let what = c.changes.first().cloned().unwrap_or_else(|| "Unchanged".into());
                 this.show_toast(if c.revision > 0 { format!("r{}: {what}", c.revision) } else { what }, cx);
@@ -405,7 +404,7 @@ impl Quiver {
     fn tweaks_restore(&mut self, revision: u32, cx: &mut Context<Self>) {
         let Some(scope) = self.tw.scope.clone() else { return };
         self.tw.restore = None;
-        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Restore { scope, revision, confirmed: false }), cx, move |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Restore { scope, revision }), cx, move |this, r, cx| match r {
             Ok(c) => {
                 let summary = if c.revision == 0 { format!("r{revision} has the same values; nothing to restore") } else { format!("Restored r{revision} as r{}", c.revision) };
                 this.tw.result = Some(SaveResult { summary: summary.clone(), warnings: c.warnings, ..Default::default() });

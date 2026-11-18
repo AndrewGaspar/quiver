@@ -753,7 +753,7 @@ the protocol on a pipe-equivalent so authors can test without a game.
 | `OptionsSet { product_id, profile, ops: Vec<OptionOp>, live: Live, message, confirmed }` | `OptionsChange` (revision, per-op outcome: `applied_live`, `saved_restart`, `saved_at(...)`, `dormant`, `rejected(reason)`) | `OptionOp`: `Set {surface, id, value}`, `Reset {surface, id}`, `Preset {surface, id}`, `Raw {surface, binding, value}`. `Live`: `IfRunning` (default), `No`, `Only` (session, not saved) |
 | `OptionsDiff { product_id, profile, against }` | `Vec<OptionDiff>` | against `default`, another profile, or a revision |
 | `OptionsHistory { product_id, profile }` | `Vec<OptionsRevision>` | |
-| `OptionsRestore { product_id, profile, revision, confirmed }` | `OptionsChange` | agents need `confirmed` |
+| `OptionsRestore { product_id, profile, revision }` | `OptionsChange` | any source (no `confirmed` since 2026-11-18) |
 | `OptionsSchema { product_id, mod, version? }` | `SchemaInfo` | the resolved schema, its source, lint findings |
 | `OptionsSchemaSet { product_id, mod, toml, message }` | `SchemaInfo` | writes a local (c) schema, revisioned |
 | `OptionsInfer { product_id, mod, file }` | TOML text | |
@@ -869,9 +869,11 @@ quiver --source aco-dlss mods origins version add DLSS build/mod --notes "npc_di
   **not** laid over the install (like whiteouts are taken as deletions); in a package folder
   it sits next to `quiver-mod.toml`. `version add --options FILE` names one explicitly.
 - A local schema for an already-installed version: `options schema DLSS --set FILE`.
-- Agents may set options on profiles (the "change mod profiles" row of the policy: Allow);
-  restoring an options revision, changing `danger` options and **live changes to a running
-  game** are Ask (steer 13).
+- Agents act like the person (the user's decision, 2026-11-18, replacing steer 13's Ask):
+  setting options on profiles, restoring an options revision, reverting a session and **live
+  changes to a running game** apply the same way from every source. An agent could pass
+  `--yes` itself anyway, and the risk is low; every change is still a revision with its
+  source. `danger` options need `confirmed` from every source, the person included.
 
 ## 7. Keybindings
 
@@ -1115,6 +1117,7 @@ the overlay can show them next to the options.
     session" available; (b) session-only until "Keep"; (c) choose per change. *Recommend (a).*
 13. **Agents and the running game.** (a) Options on profiles Allow; live changes to a running
     game, restores and `danger` options Ask; (b) all Allow; (c) all Ask. *Recommend (a).*
+    *Revised 2026-11-18:* (b) for agents, with `danger` options still confirmed by everyone.
 14. **Hotkeys.** (a) Detect and show conflicts only; (b) plus SDK delegation to Quiver's input
     layer in phase 2; (c) Quiver rebinds mods' keys to avoid conflicts. *Recommend (b).*
 15. **Crash after a live change.** (a) Offer to revert the session's changes; (b) revert

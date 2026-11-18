@@ -685,7 +685,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
-        Cmd::Epic { action } => epic::run(&client, &cli.source, action).await?,
+        Cmd::Epic { action } => epic::run(&client, action).await?,
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
             println!("quiverd {}", s.version);
@@ -1098,9 +1098,9 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&e)?);
             }
         }
-        Cmd::Mods { game, action } => mods::run(&client, &cli.source, &game, action).await?,
+        Cmd::Mods { game, action } => mods::run(&client, &game, action).await?,
         Cmd::Perf { action } => perf::run(&client, action).await?,
-        Cmd::Tweaks { json, action } => tweaks::run(&client, &cli.source, json, action).await?,
+        Cmd::Tweaks { json, action } => tweaks::run(&client, json, action).await?,
         Cmd::Hud { action } => perf::hud(&client, action).await?,
         Cmd::Sight { action } => sight::run(&client, action).await?,
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
@@ -1117,17 +1117,17 @@ async fn main() -> Result<()> {
             achievements::probe(&client, &game, platform, framing, all_products).await?
         }
         Cmd::Saves { game, json, local, action: None } => match epicgame::epic_game(&client, &game).await? {
-            Some(_) => epicgame::saves(&client, &cli.source, &game, json, local, None).await?,
+            Some(_) => epicgame::saves(&client, &game, json, local, None).await?,
             None => info::saves(&client, &game, json, local).await?,
         },
         Cmd::Saves { game, action: Some(info::SavesAction::Sync { profile }), .. } => info::sync(&client, &game, profile).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
-            info::restore(&client, &cli.source, &game, backup).await?
+            info::restore(&client, &game, backup).await?
         }
         Cmd::Saves { game, action: Some(info::SavesAction::Stores { json }), json: j, .. } => savestores::stores(&client, &game, json || j).await?,
-        Cmd::Saves { game, action: Some(info::SavesAction::Store { action }), .. } => savestores::store(&client, &cli.source, &game, action).await?,
+        Cmd::Saves { game, action: Some(info::SavesAction::Store { action }), .. } => savestores::store(&client, &game, action).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Merge { from, into }), .. } => {
-            savestores::merge(&client, &cli.source, &game, from, into).await?
+            savestores::merge(&client, &game, from, into).await?
         }
     }
     Ok(())

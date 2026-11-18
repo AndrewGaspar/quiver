@@ -11,8 +11,8 @@
 //! [`OptionsRevision`]); what is new is the scope addressing ([`Scope`]), the plan of the next
 //! launch ([`TweaksPlan`]) and what each tweak did in a session ([`Effect`]).
 //!
-//! **Agents** (TWEAKS steer 12): game and profile tweaks are Allow; global tweaks, restores and
-//! `danger` tweaks are Ask (refused without `confirmed`).
+//! **Agents** act like the person (2026-11-18, replacing TWEAKS steer 12's Ask): every scope,
+//! restores included. Only `danger` tweaks need `confirmed`, from every source.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -534,7 +534,7 @@ pub enum TweaksRequest {
         level: Option<Level>,
     },
     /// Change tweak values at a scope (`OptionsChange`; its `product_id` is 0 except for
-    /// Ubisoft games).
+    /// Ubisoft games). `danger` tweaks need `confirmed`, from every source.
     Set {
         #[serde(default)]
         scope: Scope,
@@ -552,8 +552,6 @@ pub enum TweaksRequest {
         prefer: Prefer,
         #[serde(default)]
         message: Option<String>,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// A scope's revisions (`Vec<OptionsRevision>`; a profile scope's are the profile's
     /// options revisions).
@@ -561,14 +559,11 @@ pub enum TweaksRequest {
         #[serde(default)]
         scope: Scope,
     },
-    /// Make an earlier revision of a scope's tweaks current again (`OptionsChange`). Agents
-    /// need `confirmed`.
+    /// Make an earlier revision of a scope's tweaks current again (`OptionsChange`).
     Restore {
         #[serde(default)]
         scope: Scope,
         revision: u32,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// What the next launch gets (`TweaksPlan`): capabilities, per tweak the bindings
     /// considered and the one chosen, the exact environment.

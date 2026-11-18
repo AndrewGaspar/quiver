@@ -1617,8 +1617,8 @@ pub struct CrashNote {
 
 /// Requests about mod options (`Request::Options`). Games are product ids; profiles are
 /// named by id or (case-insensitive) name, `vanilla` for vanilla, `None` for the game's
-/// default profile. Agent policy (MOD-CONFIG steer 13): setting values on profiles is
-/// allowed; live changes to a running game, restores and `danger` options are "Ask".
+/// default profile. Every source's requests apply the same way (agents act like the
+/// person, 2026-11-18); only `danger` options need `confirmed`, from everyone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum OptionsRequest {
@@ -1634,8 +1634,8 @@ pub enum OptionsRequest {
         level: Option<Level>,
     },
     /// Change option values (`OptionsChange`, one outcome per op, C3). Validated by
-    /// the daemon. Agents need `confirmed` for live changes to a running game and for
-    /// `danger` options; everyone needs it for `danger` options.
+    /// the daemon. `danger` options need `confirmed` (front ends ask the person first;
+    /// the CLI's `--yes` says it).
     Set {
         #[serde(flatten)]
         game: crate::game::GameField,
@@ -1667,24 +1667,20 @@ pub enum OptionsRequest {
         profile: Option<String>,
     },
     /// Make an earlier options revision current again, as a new revision (live where the
-    /// game runs). Agents need `confirmed`.
+    /// game runs).
     Restore {
         #[serde(flatten)]
         game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         revision: u32,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Put back the values a session launched with (C4; also after a crash), live where
-    /// possible. Agents need `confirmed`.
+    /// possible.
     RevertSession {
         #[serde(flatten)]
         game: crate::game::GameField,
         session: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Run a mod's action in a running session (SDK; `InvokeResult`).
     Invoke {
