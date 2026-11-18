@@ -22,4 +22,4 @@ ash = { version = "0.38", features = ["loaded"] }
 image = { workspace = true }
 serde_json.workspace = true
 tempfile.workspace = true
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb", "xtest"] }

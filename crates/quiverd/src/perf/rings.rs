@@ -39,6 +39,9 @@ pub struct Drained {
     pub presents: Vec<(u32, i64)>,
     /// One per layer ring.
     pub layers: Vec<LayerRing>,
+    /// HUD chord presses each layer read in the game since the last drain (`keys.rs` in
+    /// quiver-sight-layer): (pid, Shift+F3s, Ctrl+Shift+F3s), only for rings with any.
+    pub keys: Vec<(u32, u32, u32)>,
 }
 
 /// The state of one layer ring, for the registry, the presenter choice and `hud status`.
@@ -70,6 +73,9 @@ struct Ring {
     sec_start: Instant,
     sec_records: u64,
     bad_window: (Instant, u64, u64),
+    /// The status block's key counters at the last drain. The first read is the baseline:
+    /// presses from before quiverd (re)opened the ring aren't replayed.
+    keys_seen: Option<(u16, u16)>,
 }
 
 impl Ring {
@@ -86,12 +92,14 @@ impl Ring {
             sec_start: now,
             sec_records: 0,
             bad_window: (now, 0, 0),
+            keys_seen: None,
         }
     }
 
     fn close(&mut self, why: Option<String>) {
         self.guard = None;
         self.reader = None;
+        self.keys_seen = None;
         if let Some(w) = why {
             tracing::warn!(ring = %self.path.display(), "perf ring disabled: {w}");
             self.state.ring = format!("invalid: {w}");
@@ -173,6 +181,12 @@ impl Ring {
         }
         if let Some(s) = status {
             self.state.status = Some(s);
+            let now = (s.key_toggles, s.key_nexts);
+            if let Some((t, n)) = self.keys_seen.replace(now)
+                && now != (t, n)
+            {
+                out.keys.push((self.state.pid, now.0.wrapping_sub(t) as u32, now.1.wrapping_sub(n) as u32));
+            }
         }
         let n = poll.read;
         self.state.records += n;

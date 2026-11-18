@@ -588,7 +588,8 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
   events for window tagging). Default chord: steer #4. Connect's Shift+F2 is the parity choice;
   aco-dlss uses F9/F10, MangoHud Shift+F12 and Shift+F1 (its `toggle_fps_limit`), Steam
   Shift+Tab. The HUD's keys, bound the same way, are Shift+F3 (toggle) and Ctrl+Shift+F3 (next
-  preset) (SIGHT-HUD §1.3).
+  preset) (SIGHT-HUD §1.3); as built, the Sight layer reads those in the game instead (X11
+  keymap polling), with Hyprland binds only as a printed fallback.
 - Controller: a hyprpad binding, `h.bind("guide+start", "Quiver Sight", h.exec "quiver sight
   toggle")`, live in `game` mode. Quiver ships the snippet; the user owns their hyprpad config.
   Never bare Guide (hyprpad replays a bare tap to Steam) and never Start alone (games use it).
@@ -946,6 +947,10 @@ for the record.
    while a game is focused keeps it out of other apps.*
    *Note:* the HUD's keys are decided as Shift+F3 / Ctrl+Shift+F3, bound the same way, chosen to
    sit next to Shift+F2; with (b) or (c) they'd no longer be next to the panel's chord.
+   *As built (2026-11-17):* the HUD's keys are read in the game by the Sight layer (X11 keymap
+   polling, §4.1's "in-layer key polling"), not bound in Hyprland (SIGHT-HUD §1.3). The panel's
+   Shift+F2 is still planned as a focus-scoped Hyprland bind; the layer's key reader could
+   carry it too once the panel exists, for XWayland games.
 5. **Gamepad while Sight is open.** (a) rely on hyprpad to neutralize the game's pad;
    (b) Quiver grabs the pad (EVIOCGRAB) while open, reversing PROPOSAL's "never grab";
    (c) accept that the game also sees the pad.

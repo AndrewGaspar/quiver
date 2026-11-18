@@ -9,7 +9,9 @@
 //! - **composites the HUD**: a premultiplied RGBA image `quiver-sight` renders into
 //!   `hud.image`, uploaded only when its publish counter changes, blended at the descriptor's
 //!   position and opacity onto the swapchain image just before present, plus the live
-//!   frame-time graph drawn from the layer's own present history.
+//!   frame-time graph drawn from the layer's own present history;
+//! - **reads the HUD's keys** (Shift+F3, Ctrl+Shift+F3) by polling X11's keymap on its own
+//!   connection ([`keys`]) and counts presses in the status block for quiverd to act on.
 //!
 //! **Enabling.** The manifest (manifest/) makes it an *implicit* layer that the loader loads
 //! only when `QUIVER_SIGHT=1` is set (`QUIVER_SIGHT_DISABLE=1` vetoes it), or when
@@ -41,6 +43,7 @@ mod ffi;
 pub mod formats;
 pub mod graph;
 mod hooks;
+pub mod keys;
 mod pipelines;
 mod present;
 mod state;
@@ -81,6 +84,8 @@ pub mod env {
     pub const DRAW: &str = "QUIVER_SIGHT_DRAW";
     /// `1`: log events (not per-present work) to stderr.
     pub const LOG: &str = "QUIVER_SIGHT_LOG";
+    /// `0`: don't read the HUD's keys in the game ([`crate::keys`]).
+    pub const KEYS: &str = "QUIVER_SIGHT_KEYS";
 }
 
 struct Config {
@@ -178,6 +183,17 @@ fn instance_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
     }
 }
 
+/// Instance-level extension functions the layer intercepts: only returned when the next
+/// layer has them (an unsupported extension's function must stay NULL).
+fn instance_ext_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
+    match name.to_bytes() {
+        b"vkCreateXlibSurfaceKHR" => hook!(hooks::create_xlib_surface_khr),
+        b"vkCreateXcbSurfaceKHR" => hook!(hooks::create_xcb_surface_khr),
+        b"vkCreateWaylandSurfaceKHR" => hook!(hooks::create_wayland_surface_khr),
+        _ => None,
+    }
+}
+
 /// Device-level functions the layer intercepts.
 fn device_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
     match name.to_bytes() {
@@ -204,9 +220,9 @@ unsafe extern "system" fn get_instance_proc_addr(instance: vk::Instance, name: *
     let inst = state::instance(instance)?;
     // SAFETY: forwarding a valid query down the chain.
     let next = unsafe { (inst.next_gipa)(instance, name) };
-    // Device functions through the instance: ours, if the chain has them at all.
+    // Extension and device functions through the instance: ours, if the chain has them.
     if next.is_some()
-        && let Some(f) = device_hook(n)
+        && let Some(f) = instance_ext_hook(n).or_else(|| device_hook(n))
     {
         return Some(f);
     }

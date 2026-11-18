@@ -1,5 +1,6 @@
 //! The layer's side of the session dir (SIGHT-HUD §3.6–3.8): its present ring
-//! (`layer-<pid>.ring`) with the status block, the heartbeat thread, and `hud.image`.
+//! (`layer-<pid>.ring`) with the status block, the heartbeat thread, and `hud.image`. The
+//! in-game HUD keys ([`crate::keys`]) start with it and report through the status block.
 //!
 //! Everything that makes a syscall (creating the ring, opening or re-opening `hud.image`,
 //! stat-ing it) happens at swapchain creation or on the heartbeat thread, never in the
@@ -19,7 +20,7 @@ use quiver_perf::ring::RingWriter;
 use quiver_perf::session::{FileKind, SessionDir, open_hud_reader};
 use quiver_perf::shm::Mapping;
 
-use crate::log;
+use crate::{keys, log};
 
 /// How often the thread heartbeats, rewrites the status block and looks for `hud.image`.
 const TICK: Duration = Duration::from_millis(250);
@@ -36,6 +37,10 @@ pub struct Telemetry {
     pub draw_error: AtomicU32,
     /// `LAYER_*` flags the present path sets (DRAWING, PRESENT_ID, PANICKED, HUD_OFF).
     pub flags: AtomicU32,
+    /// In-game HUD keys ([`crate::keys`]): `KEYS_*`, and the presses seen.
+    pub keys: AtomicU32,
+    pub key_toggles: AtomicU32,
+    pub key_nexts: AtomicU32,
 }
 
 /// The current `hud.image` reader. `generation` bumps whenever the thread (re)opens or drops
@@ -91,6 +96,9 @@ pub fn init() -> Option<&'static Telemetry> {
                 hud_published: AtomicU64::new(0),
                 draw_error: AtomicU32::new(0),
                 flags: AtomicU32::new(0),
+                keys: AtomicU32::new(0),
+                key_toggles: AtomicU32::new(0),
+                key_nexts: AtomicU32::new(0),
             })
         })
         .as_ref()
@@ -102,6 +110,7 @@ pub fn init() -> Option<&'static Telemetry> {
                 if let Err(e) = spawned {
                     log!("no heartbeat thread: {e}");
                 }
+                keys::start(t);
             });
         })
 }
@@ -111,11 +120,15 @@ impl Telemetry {
     pub fn write_status(&self) {
         let Ok(base) = self.status.lock().map(|s| *s) else { return };
         let mut s = base;
-        s.flags |= self.flags.load(Ordering::Relaxed);
+        s.flags |= self.flags.load(Ordering::Relaxed) | keys::SURFACES.load(Ordering::Relaxed);
         s.presents = self.presents.load(Ordering::Relaxed);
         s.drawn = self.drawn.load(Ordering::Relaxed);
         s.hud_published = self.hud_published.load(Ordering::Relaxed);
         s.draw_error = self.draw_error.load(Ordering::Relaxed);
+        s.keys = self.keys.load(Ordering::Relaxed);
+        // Wrapping u16s on the wire: quiverd reads every 50 ms, far below 65 536 presses.
+        s.key_toggles = self.key_toggles.load(Ordering::Relaxed) as u16;
+        s.key_nexts = self.key_nexts.load(Ordering::Relaxed) as u16;
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }
@@ -125,6 +138,23 @@ impl Telemetry {
         if let Ok(mut s) = self.status.lock() {
             f(&mut s);
         }
+        self.write_status();
+    }
+
+    /// The key polling state (`KEYS_*`), written now.
+    pub fn set_keys(&self, state: u32) {
+        self.keys.store(state, Ordering::Relaxed);
+        self.write_status();
+    }
+
+    /// A HUD chord was pressed: counted and written now, so quiverd's next drain (≤ 50 ms)
+    /// sees it. A write lost to contention goes out with the next heartbeat (≤ 250 ms).
+    pub fn key_pressed(&self, a: keys::Action) {
+        match a {
+            keys::Action::Toggle => &self.key_toggles,
+            keys::Action::Next => &self.key_nexts,
+        }
+        .fetch_add(1, Ordering::Relaxed);
         self.write_status();
     }
 
