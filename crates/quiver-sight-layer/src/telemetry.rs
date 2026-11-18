@@ -129,6 +129,7 @@ impl Telemetry {
         // Wrapping u16s on the wire: quiverd reads every 50 ms, far below 65 536 presses.
         s.key_toggles = self.key_toggles.load(Ordering::Relaxed) as u16;
         s.key_nexts = self.key_nexts.load(Ordering::Relaxed) as u16;
+        crate::latency::fill_status(&mut s, mono_raw_ns());
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }
@@ -174,6 +175,7 @@ impl Telemetry {
     fn tick(&self) {
         self.ring.heartbeat(mono_raw_ns());
         self.refresh_hud();
+        crate::latency::poll_timings();
         self.write_status();
     }
 

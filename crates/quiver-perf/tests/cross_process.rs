@@ -45,6 +45,7 @@ fn present(seq: u64) -> LayerPresent {
         result: 0,
         hud_drawn: seq.is_multiple_of(5),
         hud_ns: seq as i64 % 1000,
+        app_frame: [None, Some(true), Some(false)][(seq % 3) as usize],
     }
 }
 

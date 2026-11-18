@@ -133,6 +133,8 @@ pub unsafe extern "system" fn create_device(
     // SAFETY: function pointers from the next layer.
     let dev = unsafe { ash::Device::load_with(load, device) };
     let swapchain_fn = ash::khr::swapchain::DeviceFn::load(load);
+    // SAFETY: the next layer's pointers (null when the device lacks the extension).
+    let ll2 = unsafe { crate::latency::Fns::load(load) };
     let mut families = Vec::new();
     let mut memory = vk::PhysicalDeviceMemoryProperties::default();
     let mut props = vk::PhysicalDeviceProperties::default();
@@ -174,15 +176,19 @@ pub unsafe extern "system" fn create_device(
         props,
         low_latency2,
         present_wait,
+        ll2,
     )));
     r
 }
 
 pub unsafe extern "system" fn destroy_device(device: vk::Device, alloc: *const vk::AllocationCallbacks<'_>) {
+    // No Reflex timings query on this device's swapchains from here on (latency.rs).
+    let _q = lock(&crate::latency::QUERY);
     let Some(d) = state::remove_device(device) else { return };
     guard("vkDestroyDevice", || {
         // Swapchains the app didn't destroy, then the per-format pipelines.
         let scs: Vec<_> = state::write(&d.swapchains).drain(..).collect();
+        d.clear_latency();
         let mut done = true;
         for (_, sc) in scs {
             done &= destroy_compositors(&d, &mut lock(&sc));
@@ -294,6 +300,7 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         v
     };
     let id = state::next_swapchain_id();
+    let latency = Arc::new(crate::latency::Latency::default());
     let mut draw_error = 0;
     let comp = match plan {
         Ok(_) if images.is_empty() => {
@@ -335,7 +342,9 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         comp,
         disabled: Vec::new(),
         draw_error,
+        latency: latency.clone(),
     };
+    d.add_latency(handle, latency);
     state::write(&d.swapchains).push((handle, Arc::new(Mutex::new(sc))));
     state::retarget();
 }
@@ -354,7 +363,10 @@ fn destroy_compositors(d: &DeviceData, s: &mut Swapchain) -> bool {
 
 pub unsafe extern "system" fn destroy_swapchain_khr(device: vk::Device, swapchain: vk::SwapchainKHR, alloc: *const vk::AllocationCallbacks<'_>) {
     let Some(d) = state::device(device) else { return };
+    // No Reflex timings query on it from here on (latency.rs).
+    let _q = lock(&crate::latency::QUERY);
     if swapchain != vk::SwapchainKHR::null() {
+        d.remove_latency(swapchain);
         guard("vkDestroySwapchainKHR", || {
             let sc = {
                 let mut v = state::write(&d.swapchains);
