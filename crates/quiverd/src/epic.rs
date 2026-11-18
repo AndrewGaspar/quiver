@@ -381,6 +381,10 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
             }
             Err(_) => None,
         };
+        // The running game shows in `Request::Sessions` (and its perf session) like a hooked
+        // Steam launch's: a local session from "Running" to exit.
+        let local_id: Arc<Mutex<Option<u64>>> = Arc::default();
+        let local = local_id.clone();
         let (cfg, ev, sid, g2) = (this.cfg.clone(), this.clone(), session_id.clone(), g.clone());
         let result = match prefix_ready {
             Err(e) => Err(e),
@@ -389,7 +393,10 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                 LaunchEvent::Detail(lines) => ev.update_job(id, |j| j.detail.extend(lines)),
                 LaunchEvent::Status(msg) => ev.update_job(id, |j| j.status = msg),
                 LaunchEvent::Running => {
-                    *started.lock().unwrap() = Some(chrono::Utc::now());
+                    let now = chrono::Utc::now();
+                    *started.lock().unwrap() = Some(now);
+                    let l = crate::localsessions::Local { game, pid: 0, started: now, perf_session: Some(sid.clone()), settings_revision: rev, tweaks: tweak_revisions, mods: None };
+                    *local.lock().unwrap() = Some(ev.local.insert(l));
                     ev.update_job(id, |j| j.status = "Running".into());
                     ev.emit(Event::LibraryChanged);
                 }
@@ -398,6 +405,9 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                     ev.update_job(id, |j| j.status = "Game exited".into());
                 }
                 LaunchEvent::Pids(pids) => {
+                    if let (Some(id), Some(pid)) = (*local.lock().unwrap(), pids.first()) {
+                        ev.local.set_pid(id, *pid);
+                    }
                     ev.perf.set_pids(&sid, pids.clone());
                     ev.options_pids(&sid, pids)
                 }
@@ -417,6 +427,9 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
         }
         if prereq_marker.as_ref().is_some_and(|m| m.exists()) {
             let _ = this.epic.prereq_done(&a);
+        }
+        if let Some(id) = local_id.lock().unwrap().take() {
+            this.local.remove(id);
         }
         this.running_games.lock().unwrap().remove(&game);
         let code = *exit_code.lock().unwrap();

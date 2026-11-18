@@ -129,7 +129,7 @@ impl Api {
             total_xp: u32,
             achievements: Vec<Wrapped>,
         }
-        let raw: Raw = serde_json::from_value(rec.clone()).context("Epic achievements: unexpected reply")?;
+        let raw: Raw = serde_json::from_value(without_nulls(rec.clone())).context("Epic achievements: unexpected reply")?;
         Ok(Some(Definitions { total_achievements: raw.total_achievements, total_xp: raw.total_xp, achievements: raw.achievements.into_iter().map(|w| w.achievement).collect() }))
     }
 
@@ -151,7 +151,7 @@ impl Api {
             total_unlocked: u32,
             player_achievements: Vec<Wrapped>,
         }
-        let raw: Raw = serde_json::from_value(first.clone()).context("Epic player achievements: unexpected reply")?;
+        let raw: Raw = serde_json::from_value(without_nulls(first.clone())).context("Epic player achievements: unexpected reply")?;
         Ok(PlayerRecord { total_xp: raw.total_xp, total_unlocked: raw.total_unlocked, achievements: raw.player_achievements.into_iter().map(|w| w.player_achievement).collect() })
     }
 }
@@ -326,5 +326,32 @@ impl Epic {
         std::fs::create_dir_all(path.parent()?).ok()?;
         std::fs::write(&path, data).ok()?;
         Some(path)
+    }
+}
+
+/// The value with every `null` object member removed, so `#[serde(default)]` fills it:
+/// Epic sends `"totalProductXP": null` (and the like) for games that award no XP.
+fn without_nulls(mut v: serde_json::Value) -> serde_json::Value {
+    fn walk(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.retain(|_, x| !x.is_null());
+                m.values_mut().for_each(walk);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v
+}
+
+#[cfg(test)]
+mod null_tests {
+    #[test]
+    fn nulls_become_defaults() {
+        let v = serde_json::json!({"totalAchievements": 3, "totalProductXP": null, "achievements": [{"achievement": null}]});
+        let v = super::without_nulls(v);
+        assert_eq!(v, serde_json::json!({"totalAchievements": 3, "achievements": [{}]}));
     }
 }

@@ -543,6 +543,7 @@ fn store_note(e: &LibraryEntry) -> String {
     if e.store() == StoreId::Epic {
         return match e.records.iter().find(|r| r.relation == Relation::Linked) {
             Some(r) if r.game.is_ubisoft() => format!("  (Epic; a Ubisoft Connect game, not on a signed-in Ubisoft account: {})", game_label(&r.game)),
+            _ if e.installed.is_some() => "  (Epic)".into(),
             _ => "  (Epic, not installed)".into(),
         };
     }

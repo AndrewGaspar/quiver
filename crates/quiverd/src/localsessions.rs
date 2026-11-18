@@ -45,7 +45,9 @@ impl Local {
         ActiveSession {
             product_id: 0,
             started: self.started,
-            holders: vec![HOLDER.to_owned()],
+            // A hooked Steam launch is held by Steam's; another store's game Quiver started
+            // itself (Epic) by Quiver's launcher.
+            holders: vec![if self.game.as_steam().is_some() { HOLDER } else { "launcher" }.to_owned()],
             reported: false,
             steam_app_id: self.game.as_steam(),
             session: self.perf_session.clone().or_else(|| self.mods.as_ref().map(|(id, _)| id.clone())),
@@ -81,6 +83,13 @@ impl LocalSessions {
 
     pub fn list(&self) -> Vec<ActiveSession> {
         self.lock().values().map(Local::active).collect()
+    }
+
+    /// The game's process, once the launcher knows it (Epic launches register at start).
+    pub fn set_pid(&self, id: u64, pid: u32) {
+        if let Some(l) = self.lock().get_mut(&id) {
+            l.pid = pid;
+        }
     }
 
     /// The session of `pid`, if one is open (a second registration of the same process).
@@ -128,7 +137,6 @@ pub fn record(l: &Local, ended: DateTime<Utc>, perf: Option<quiver_api::perf::Pe
         mods: l.mods.as_ref().map(|(_, p)| p.mods.clone()).unwrap_or_default(),
         session: l.mods.as_ref().map(|(id, _)| id.clone()).or_else(|| l.perf_session.clone()),
         options_revision: l.mods.as_ref().and_then(|(_, p)| p.options_revision),
-        ..Default::default()
     }
 }
 
