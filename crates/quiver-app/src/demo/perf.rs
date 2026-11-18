@@ -302,6 +302,9 @@ fn update(sub: u64, product: u32, tick: u64) -> PerfUpdate {
         put("latency.render", Stat::Mean, value(lat, format!("{lat:.0}"), "ms", Level::Normal));
         put("fg.ratio", Stat::Last, value(2.0, "2.0".into(), "×", Level::Normal));
         put("upscaler", Stat::Last, PerfValue { text: "DLSS K".into(), ..Default::default() });
+        let pc = 17.0 + 1.5 * w2;
+        put("latency.pc", Stat::Mean, value(pc, format!("{pc:.1}"), "ms", Level::Normal));
+        put("nv.reflex.mode", Stat::Last, PerfValue { text: "boost".into(), level: Level::Good, ..Default::default() });
     }
     let gpu = 87.0 + 3.0 * w2;
     put("gpu.load", Stat::Mean, value(gpu, format!("{gpu:.0}"), "%", Level::Normal));

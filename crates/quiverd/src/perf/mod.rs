@@ -741,7 +741,22 @@ impl PerfHub {
 }
 
 /// The headline metrics a subscription without `select` gets.
-const HEADLINE: [&str; 12] = ["fps", "fps.base", "frametime", "fps.p1low", "latency.render", "gpu.load", "gpu.temp", "gpu.power", "cpu.load", "cpu.temp", "upscaler", "fg.ratio"];
+const HEADLINE: [&str; 14] = [
+    "fps",
+    "fps.base",
+    "frametime",
+    "fps.p1low",
+    "latency.render",
+    "latency.pc",
+    "nv.reflex.mode",
+    "gpu.load",
+    "gpu.temp",
+    "gpu.power",
+    "cpu.load",
+    "cpu.temp",
+    "upscaler",
+    "fg.ratio",
+];
 
 fn update(s: &Session, sub: &Sub, now: i64) -> PerfUpdate {
     let mut ids: Vec<String> = Vec::new();

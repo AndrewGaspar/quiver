@@ -628,6 +628,8 @@ impl Quiver {
         let provided = |metric: &str| match metric {
             "fps.base" => live.as_ref().map(|u| crate::ui::perf::live_has(u, "fps.base")).unwrap_or(latest.as_ref().is_some_and(|p| p.fps_base.is_some())),
             "latency.render" => live.as_ref().map(|u| crate::ui::perf::live_has(u, "latency.render")).unwrap_or(latest.as_ref().is_some_and(|p| p.latency_ms.is_some())),
+            // Reflex and FG through the Sight layer: only while the running game has them.
+            "latency.pc" | "nv.reflex.mode" | "fg.ratio" => live.as_ref().is_some_and(|u| crate::ui::perf::live_has(u, metric)),
             _ => true,
         };
         let k = c.scale.clamp(0.75, 2.5);
@@ -824,12 +826,13 @@ fn preset_rows(layout: &str) -> Vec<Vec<Option<(&'static str, &'static str)>>> {
     let base = Some(("BASE", "fps.base"));
     match layout {
         "fps" => vec![vec![fps]],
-        "compact" => vec![vec![fps, base, Some(("MS", "frametime")), Some(("LAT", "latency.render")), Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))]],
-        "standard" => vec![vec![fps, base], vec![None], vec![Some(("LAT", "latency.render")), Some(("GPU", "gpu.load"))], vec![Some(("CPU", "cpu.load"))]],
+        "compact" => vec![vec![fps, base, Some(("MS", "frametime")), Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))]],
+        "standard" => vec![vec![fps, base], vec![None], vec![Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("GPU", "gpu.load"))], vec![Some(("CPU", "cpu.load"))]],
         "full" => vec![
             vec![fps, Some(("1%", "fps.p1low")), base],
             vec![None],
-            vec![Some(("LAT", "latency.render")), Some(("MS", "frametime"))],
+            vec![Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("MS", "frametime"))],
+            vec![Some(("RFX", "nv.reflex.mode")), Some(("FG", "fg.ratio"))],
             vec![Some(("GPU", "gpu.load")), Some(("°", "gpu.temp")), Some(("W", "gpu.power"))],
             vec![Some(("CPU", "cpu.load")), Some(("°", "cpu.temp"))],
         ],
