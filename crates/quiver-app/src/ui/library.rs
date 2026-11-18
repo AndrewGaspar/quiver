@@ -151,7 +151,7 @@ impl Quiver {
             .filter(|g| match self.lib_filter {
                 LibFilter::All => true,
                 LibFilter::Installed => g.on_disk(),
-                LibFilter::Updates => g.installed() && g.entry.update_available,
+                LibFilter::Updates => g.has_update(),
             })
             .filter(|g| self.store_filter.is_none_or(|s| g.entry.stores().contains(&s)))
             .collect()
@@ -215,7 +215,7 @@ impl Quiver {
     fn render_lib_header(&mut self, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let total = self.games.len();
         let installed = self.games.iter().filter(|g| g.on_disk()).count();
-        let updates = self.games.iter().filter(|g| g.installed() && g.entry.update_available).count();
+        let updates = self.games.iter().filter(|g| g.has_update()).count();
         let stores = self.library_stores();
         let filter_chip = |f: LibFilter, label: &'static str, n: usize, i: Option<Icon>, cx: &mut Context<Self>| {
             let on = self.lib_filter == f;
@@ -609,8 +609,8 @@ impl Quiver {
             tl = tl.child(tag(th, TagKind::Plain, Some(Icon::Pause), "Paused"));
         } else if g.queued() {
             tl = tl.child(tag(th, TagKind::Plain, Some(Icon::Download), "Queued"));
-        } else if g.installed() && g.entry.update_available {
-            tl = tl.child(tag(th, TagKind::Accent, Some(Icon::ArrowDownToLine), "Update"));
+        } else if let Some(t) = g.update_tag() {
+            tl = tl.child(tag(th, TagKind::Accent, Some(Icon::ArrowDownToLine), t));
         }
         let custom = id.ubisoft().and_then(|p| self.custom_art.get(&p)).is_some_and(|c| c.tile.is_some());
         // Store badges ([`tile_badges`]): other stores' games always, Ubisoft's too once a

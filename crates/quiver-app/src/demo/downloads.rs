@@ -424,6 +424,7 @@ impl Dl {
                 added: vec![],
                 removed: vec![],
                 unchanged: 1_412,
+                notes: vec![],
             });
         }
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -440,6 +441,7 @@ impl Dl {
             added: s(&["DataPC_patch_03.forge", "videos/en/legacy_s2.bk2"]),
             removed: s(&["DataPC_hotfix_1_5_4.forge"]),
             unchanged: 1_312,
+            notes: s(&["1.9 GB of the changed files' slices is already on disk and isn't downloaded again"]),
         })
     }
 }

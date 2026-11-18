@@ -242,6 +242,7 @@ mod tests {
             last_played: None,
             dlc_installed: Vec::new(),
             target_build_id: None,
+            download: Default::default(),
         }
     }
 

@@ -14,6 +14,10 @@
 //!   with its SHA-1. A restarted install skips them; an update keeps files whose SHA-1 is
 //!   the same (by the record, or the old manifest) and still on disk at the right size,
 //!   rebuilds the rest, and removes files the new build doesn't have.
+//! - **Smaller updates**: a changed file's parts that its old copy already holds (same
+//!   chunk, same range) are copied from that copy, once it hashes as the old manifest says
+//!   ([`reusable_parts`]); and Epic's delta manifest for the two builds, when it publishes
+//!   one, re-describes changed files mostly in terms of the old build's chunks ([`delta`]).
 //!
 //! [`RetryPolicy`]: quiver_core::install::RetryPolicy
 
@@ -134,6 +138,8 @@ pub struct Report {
     pub files_kept: usize,
     pub files_removed: usize,
     pub bytes_downloaded: u64,
+    /// Bytes of rewritten files copied from their old copies instead of downloaded.
+    pub bytes_reused: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,6 +163,12 @@ pub struct Plan {
     pub write_bytes: u64,
     /// Of `write_bytes`, bytes that replace files already on disk.
     pub replaced_bytes: u64,
+    /// Of `write_bytes`, bytes copied from the old build's copy of the same file instead
+    /// of downloaded ([`reusable_parts`]).
+    pub reused_bytes: u64,
+    /// Files rebuilt partly from their old copy: manifest path → for each part, where its
+    /// bytes start in the old file (`None`: from the chunk).
+    pub(crate) reuse: BTreeMap<String, Vec<Option<u64>>>,
 }
 
 /// A manifest path as a relative path under the install folder, or an error for anything
@@ -230,15 +242,56 @@ fn on_disk(dir: &Path, f: &FileEntry) -> bool {
     std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file() && m.len() == f.size)
 }
 
-/// What [`install`] would do for `manifest` in `dir` (with `old` installed there).
+/// What [`install`] would do for `manifest` in `dir` (with `old` installed there). Old
+/// copies of changed files are trusted by their size here (a preview); [`install`] hashes
+/// them before it reads from them.
 pub fn plan(manifest: &Manifest, old: Option<&Manifest>, dir: &Path, tags: Option<&[String]>) -> Result<Plan> {
     let record = load_state(dir);
-    plan_with(manifest, old, dir, tags, &record)
+    plan_with(manifest, old, dir, tags, &record, None)
 }
 
-fn plan_with(manifest: &Manifest, old: Option<&Manifest>, dir: &Path, tags: Option<&[String]>, record: &State) -> Result<Plan> {
+/// Where each part of `new` can be read from `old` (the previous build's file at the same
+/// path): a part whose chunk range lies inside a part of `old` cut from the same chunk is
+/// the same bytes, because a chunk guid names one immutable window of data. `None` when no
+/// part can be.
+///
+/// Same path only: the old file stays in place until the new one is renamed over it, so
+/// it can be read while its replacement is written. Data another file had is downloaded.
+pub fn reusable_parts(new: &FileEntry, old: &FileEntry) -> Option<Vec<Option<u64>>> {
+    if !new.symlink_target.is_empty() || !old.symlink_target.is_empty() {
+        return None;
+    }
+    let mut by_guid: HashMap<Guid, Vec<&crate::manifest::ChunkPart>> = HashMap::new();
+    for q in &old.parts {
+        by_guid.entry(q.guid).or_default().push(q);
+    }
+    let out: Vec<Option<u64>> = new
+        .parts
+        .iter()
+        .map(|p| {
+            let (s, e) = (p.offset as u64, p.offset as u64 + p.size as u64);
+            by_guid
+                .get(&p.guid)?
+                .iter()
+                .find(|q| q.offset as u64 <= s && e <= q.offset as u64 + q.size as u64 && q.file_offset + q.size as u64 <= old.size)
+                .map(|q| q.file_offset + (s - q.offset as u64))
+        })
+        .collect();
+    out.iter().any(Option::is_some).then_some(out)
+}
+
+/// Whether the old build's copy of a file is on disk as the old manifest describes it (by
+/// size; [`install`] also checks its SHA-1).
+fn old_copy_present(dir: &Path, old: &FileEntry) -> bool {
+    old.size > 0 && old.symlink_target.is_empty() && on_disk(dir, old)
+}
+
+/// `trusted`: the files whose old copies were hashed and match (`None`: a preview, which
+/// trusts every old copy of the right size).
+fn plan_with(manifest: &Manifest, old: Option<&Manifest>, dir: &Path, tags: Option<&[String]>, record: &State, trusted: Option<&HashSet<String>>) -> Result<Plan> {
     let mut p = Plan::default();
     let old_sha: HashMap<&str, [u8; 20]> = old.map(|o| o.files.iter().map(|f| (f.path.as_str(), f.sha1)).collect()).unwrap_or_default();
+    let old_files: HashMap<PathBuf, &FileEntry> = old.map(|o| o.files.iter().filter_map(|f| Some((safe_rel(&f.path).ok()?, f))).collect()).unwrap_or_default();
     let wanted = manifest.files_for(tags);
     let mut keys = HashSet::new();
     let mut chunks = HashSet::new();
@@ -257,10 +310,19 @@ fn plan_with(manifest: &Manifest, old: Option<&Manifest>, dir: &Path, tags: Opti
         if let Ok(m) = std::fs::symlink_metadata(dir.join(&rel)) {
             p.replaced_bytes += m.len().min(f.size);
         }
-        for part in &f.parts {
-            if chunks.insert(part.guid) {
+        let reuse = old_files
+            .get(&rel)
+            .filter(|o| trusted.is_none_or(|t| t.contains(&f.path)) && old_copy_present(dir, o))
+            .and_then(|o| reusable_parts(f, o));
+        for (i, part) in f.parts.iter().enumerate() {
+            if reuse.as_ref().is_some_and(|r| r[i].is_some()) {
+                p.reused_bytes += part.size as u64;
+            } else if chunks.insert(part.guid) {
                 p.download_bytes += manifest.chunk(&part.guid).map_or(0, |c| c.file_size);
             }
+        }
+        if let Some(r) = reuse {
+            p.reuse.insert(f.path.clone(), r);
         }
     }
     let mut gone: Vec<String> = old.map(|o| o.files.iter().map(|f| f.path.clone()).collect()).unwrap_or_default();
@@ -273,6 +335,107 @@ fn plan_with(manifest: &Manifest, old: Option<&Manifest>, dir: &Path, tags: Opti
         }
     }
     Ok(p)
+}
+
+/// An update made smaller by Epic's delta manifest for the two builds.
+#[derive(Debug, Clone)]
+pub struct Delta {
+    /// The new build's manifest with the delta's file entries and chunks folded in: the
+    /// same files (paths and SHA-1s), cut from chunks that mostly repeat the old build's
+    /// data, so more of each changed file is reused from disk.
+    pub manifest: Manifest,
+    /// Files the delta re-describes.
+    pub files: usize,
+}
+
+/// A build id as a path segment (Epic's are base64-like), so it can't steer the URL.
+fn plain_build_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+'))
+}
+
+/// Epic's delta manifest for updating from `old` to `new`, if it publishes one: fetched
+/// from `Deltas/<new build id>/<old build id>.delta` next to the chunks (no session, as
+/// legendary's `get_delta_manifest`), parsed with the build's keys and folded in with
+/// [`combine_delta`]. Most builds have none; any failure means no delta, never a failed
+/// update.
+pub async fn delta(source: &dyn ChunkSource, new: &Manifest, old: &Manifest, secrets: &Secrets) -> Option<Delta> {
+    let (to, from) = (&new.meta.build_id, &old.meta.build_id);
+    if to == from || !plain_build_id(to) || !plain_build_id(from) {
+        return None;
+    }
+    let bytes = match source.fetch(&format!("Deltas/{to}/{from}.delta")).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::info!(app = %new.meta.app_name, "no delta manifest {from} → {to} ({e:#}); updating from the full manifest");
+            return None;
+        }
+    };
+    let d = match crate::manifest::parse(&bytes, secrets) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::info!(app = %new.meta.app_name, "the delta manifest {from} → {to} doesn't read ({e:#}); updating from the full manifest");
+            return None;
+        }
+    };
+    let (manifest, files) = combine_delta(new, old, &d)?;
+    tracing::info!(app = %new.meta.app_name, files, "using Epic's delta manifest {from} → {to}");
+    Some(Delta { manifest, files })
+}
+
+/// `new` with `delta`'s file entries and chunks folded in (legendary's `combine_manifests`,
+/// read as a spec), defensively: a delta entry replaces a file's only when the new build
+/// has that path with the same SHA-1 (so the result is still the new build, checked file
+/// by file as it is written), its parts add up to the file's size and every chunk they cut
+/// is listed (by the delta, the new build, or the old one) with the range inside it.
+/// Chunks are fetched at paths that depend on the manifest version, so a delta from
+/// another chunk folder is not used. `None` when nothing in the delta is usable.
+pub fn combine_delta(new: &Manifest, old: &Manifest, delta: &Manifest) -> Option<(Manifest, usize)> {
+    let dir = crate::manifest::chunk_dir(new.version);
+    if crate::manifest::chunk_dir(delta.version) != dir {
+        tracing::info!("the delta manifest is version {} (chunks under another folder than version {}); not used", delta.version, new.version);
+        return None;
+    }
+    let old_chunks = (crate::manifest::chunk_dir(old.version) == dir).then_some(old);
+    let lookup = |g: &Guid| -> Option<ChunkInfo> {
+        new.chunk(g).or_else(|| delta.chunk(g)).or_else(|| old_chunks.and_then(|o| o.chunk(g))).cloned()
+    };
+    let mut out = new.clone();
+    let by_path: HashMap<String, usize> = out.files.iter().enumerate().map(|(i, f)| (f.path.clone(), i)).collect();
+    let mut known: HashSet<Guid> = out.chunks.iter().map(|c| c.guid).collect();
+    let mut used = 0;
+    for df in &delta.files {
+        let Some(&i) = by_path.get(&df.path) else { continue };
+        let nf = &out.files[i];
+        if df.sha1 != nf.sha1 || nf.sha1 == [0; 20] || !nf.symlink_target.is_empty() || !df.symlink_target.is_empty() || nf.parts == df.parts {
+            continue;
+        }
+        if df.parts.iter().map(|p| p.size as u64).sum::<u64>() != nf.size {
+            continue;
+        }
+        let Some(infos) = df
+            .parts
+            .iter()
+            .map(|p| lookup(&p.guid).filter(|c| p.offset as u64 + p.size as u64 <= c.window_size as u64))
+            .collect::<Option<Vec<ChunkInfo>>>()
+        else {
+            continue;
+        };
+        for c in infos {
+            if known.insert(c.guid) {
+                out.chunks.push(c);
+            }
+        }
+        let mut parts = df.parts.clone();
+        let mut at = 0;
+        for p in &mut parts {
+            p.file_offset = at;
+            at += p.size as u64;
+        }
+        out.files[i].parts = parts;
+        used += 1;
+    }
+    out.reindex();
+    (used > 0).then_some((out, used))
 }
 
 /// Bytes still to write for an install of `manifest` into `dir`.
@@ -291,9 +454,67 @@ pub async fn install(job: Job<'_>) -> Result<Report> {
         record.build_version = job.manifest.meta.build_version.clone();
         record.manifest = fp;
     }
-    let plan = plan_with(job.manifest, job.old, job.dir, job.tags, &record)?;
+    let mut plan = plan_with(job.manifest, job.old, job.dir, job.tags, &record, None)?;
+    if !plan.reuse.is_empty()
+        && let Some(old) = job.old
+    {
+        // Read only from old copies that are what the old manifest says: hash them first
+        // (a damaged or half-replaced one is downloaded instead).
+        let candidates: Vec<(String, PathBuf, [u8; 20])> = plan
+            .reuse
+            .keys()
+            .filter_map(|p| {
+                let rel = safe_rel(p).ok()?;
+                let o = old.files.iter().find(|o| safe_rel(&o.path).ok().as_ref() == Some(&rel))?;
+                (o.sha1 != [0; 20]).then(|| (p.clone(), job.dir.join(&rel), o.sha1))
+            })
+            .collect();
+        let trusted = hash_old_copies(candidates, job.progress).await?;
+        plan = plan_with(job.manifest, job.old, job.dir, job.tags, &record, Some(&trusted))?;
+    }
     let write: HashSet<String> = plan.write.iter().cloned().collect();
     run(&job, plan, record, |f| write.contains(&f.path)).await
+}
+
+/// The paths (of `(path, file, sha1)`) whose file on disk has that SHA-1, hashed on a
+/// blocking thread; stops when the progress is cancelled.
+async fn hash_old_copies(candidates: Vec<(String, PathBuf, [u8; 20])>, progress: &Progress) -> Result<HashSet<String>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let mut task = tokio::task::spawn_blocking(move || -> Result<HashSet<String>> {
+        let mut ok = HashSet::new();
+        let mut buf = vec![0u8; 1 << 20];
+        for (path, file, want) in candidates {
+            let Ok(mut f) = std::fs::File::open(&file) else { continue };
+            let mut sha = Sha1::new();
+            let good = loop {
+                if stop2.load(Ordering::Relaxed) {
+                    return Err(Cancelled.into());
+                }
+                match f.read(&mut buf) {
+                    Ok(0) => break true,
+                    Ok(n) => sha.update(&buf[..n]),
+                    Err(_) => break false,
+                }
+            };
+            if good && <[u8; 20]>::from(sha.finalize()) == want {
+                ok.insert(path);
+            } else {
+                tracing::info!(file = %file.display(), "the old copy doesn't match the installed build; downloading it instead");
+            }
+        }
+        Ok(ok)
+    });
+    loop {
+        tokio::select! {
+            r = &mut task => return r.context("checking old files")?,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if progress.cancelled() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 /// Rebuild only `bad` (manifest paths, from [`verify`]) in `job.dir`.
@@ -346,11 +567,17 @@ async fn run(job: &Job<'_>, plan: Plan, mut record: State, writes: impl Fn(&File
         return Err(Cancelled.into());
     }
     let files: Vec<&FileEntry> = m.files_for(job.tags).into_iter().filter(|f| writes(f)).collect();
+    // Parts read from old copies, by index into `files`.
+    let reuse: HashMap<usize, Vec<Option<u64>>> =
+        files.iter().enumerate().filter_map(|(i, f)| plan.reuse.get(&f.path).filter(|r| r.len() == f.parts.len()).map(|r| (i, r.clone()))).collect();
     // Chunks in the order files first use them, and how many parts use each.
     let mut order: Vec<Guid> = Vec::new();
     let mut refs: HashMap<Guid, usize> = HashMap::new();
-    for f in &files {
-        for p in &f.parts {
+    for (fi, f) in files.iter().enumerate() {
+        for (pi, p) in f.parts.iter().enumerate() {
+            if reuse.get(&fi).is_some_and(|r| r[pi].is_some()) {
+                continue;
+            }
             let n = refs.entry(p.guid).or_insert(0);
             if *n == 0 {
                 ensure!(m.chunk(&p.guid).is_some(), "the manifest lists no chunk {} (used by {})", guid_hex(&p.guid), f.path);
@@ -385,7 +612,7 @@ async fn run(job: &Job<'_>, plan: Plan, mut record: State, writes: impl Fn(&File
 
     let secrets = Arc::new(job.secrets.clone());
     let downloaded = Arc::new(AtomicU64::new(0));
-    let result = fetch_and_build(job, &files, order, refs, &secrets, &downloaded, &mut record).await;
+    let result = fetch_and_build(job, &files, reuse, order, refs, &secrets, &downloaded, &mut record).await;
     let _ = std::fs::remove_dir_all(spill_dir(job.dir));
     let saved = save_state(job.dir, &record);
     let written = result?;
@@ -404,7 +631,13 @@ async fn run(job: &Job<'_>, plan: Plan, mut record: State, writes: impl Fn(&File
     }
     remove_empty_dirs(job.dir, parents);
     save_state(job.dir, &record)?;
-    Ok(Report { files_written: written, files_kept: plan.keep.len(), files_removed: removed, bytes_downloaded: downloaded.load(Ordering::Relaxed) })
+    Ok(Report {
+        files_written: written,
+        files_kept: plan.keep.len(),
+        files_removed: removed,
+        bytes_downloaded: downloaded.load(Ordering::Relaxed),
+        bytes_reused: plan.reused_bytes,
+    })
 }
 
 /// Remove `dirs` (relative) and their parents while empty, never `root` itself.
@@ -427,9 +660,11 @@ fn remove_empty_dirs(root: &Path, dirs: Vec<PathBuf>) {
 /// Download the chunks in `order` and hand them to a [`Builder`], which writes `files` as
 /// their chunks arrive. Finished files go into `record` (saved every few seconds), also
 /// when the install stops early. Returns the files written.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_and_build(
     job: &Job<'_>,
     files: &[&FileEntry],
+    reuse: HashMap<usize, Vec<Option<u64>>>,
     order: Vec<Guid>,
     refs: HashMap<Guid, usize>,
     secrets: &Arc<Secrets>,
@@ -452,6 +687,9 @@ async fn fetch_and_build(
     let builder = Builder {
         dir: job.dir.to_path_buf(),
         files: files.iter().map(|f| (*f).clone()).collect(),
+        reuse,
+        old: None,
+        stop: Arc::new(AtomicBool::new(false)),
         refs,
         held: HashMap::new(),
         in_memory: 0,
@@ -462,9 +700,8 @@ async fn fetch_and_build(
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<(Guid, Arc<Vec<u8>>)>(8);
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let mut writer = tokio::task::spawn_blocking(move || builder.run(rx, done_tx, stop2));
+    let stop = builder.stop.clone();
+    let mut writer = tokio::task::spawn_blocking(move || builder.run(rx, done_tx));
     let mut tx = Some(tx);
     let mut last_save = Instant::now();
     let mut failed: Option<anyhow::Error> = None;
@@ -566,6 +803,12 @@ async fn fetch_chunk(job: &Job<'_>, info: &ChunkInfo, secrets: &Arc<Secrets>, do
 struct Builder {
     dir: PathBuf,
     files: Vec<FileEntry>,
+    /// Parts of `files` (by index) read from the file's old copy: where each starts in it.
+    reuse: HashMap<usize, Vec<Option<u64>>>,
+    /// The old copy of the file being written, while parts are read from it.
+    old: Option<(usize, std::fs::File)>,
+    /// Set when the install stops (cancel or a failed download).
+    stop: Arc<AtomicBool>,
     /// Parts still to be written from each chunk.
     refs: HashMap<Guid, usize>,
     held: HashMap<Guid, Held>,
@@ -585,7 +828,8 @@ struct Open {
 }
 
 impl Builder {
-    fn run(mut self, mut rx: tokio::sync::mpsc::Receiver<(Guid, Arc<Vec<u8>>)>, done: tokio::sync::mpsc::UnboundedSender<usize>, stop: Arc<AtomicBool>) -> Result<usize> {
+    fn run(mut self, mut rx: tokio::sync::mpsc::Receiver<(Guid, Arc<Vec<u8>>)>, done: tokio::sync::mpsc::UnboundedSender<usize>) -> Result<usize> {
+        let stop = self.stop.clone();
         let r = (|| {
             self.advance(&done)?;
             while let Some((g, data)) = rx.blocking_recv() {
@@ -685,6 +929,26 @@ impl Builder {
             loop {
                 let idx = self.open.as_ref().expect("open").idx;
                 let Some(p) = f.parts.get(idx) else { break };
+                if let Some(at) = self.reuse.get(&self.next).and_then(|r| r[idx]) {
+                    // The same bytes from the old copy, which stays in place until this
+                    // file is renamed over it.
+                    if self.stop.load(Ordering::Relaxed) {
+                        return Err(Cancelled.into());
+                    }
+                    if self.old.as_ref().is_none_or(|(i, _)| *i != self.next) {
+                        let file = std::fs::File::open(&dest).with_context(|| format!("open the old {}", dest.display()))?;
+                        self.old = Some((self.next, file));
+                    }
+                    let mut buf = vec![0u8; p.size as usize];
+                    use std::os::unix::fs::FileExt;
+                    self.old.as_ref().expect("opened").1.read_exact_at(&mut buf, at).with_context(|| format!("read the old {}", dest.display()))?;
+                    let o = self.open.as_mut().expect("open");
+                    o.out.write_all(&buf)?;
+                    o.sha.update(&buf);
+                    o.idx += 1;
+                    self.written.fetch_add(p.size as u64, Ordering::Relaxed);
+                    continue;
+                }
                 let Some(data) = self.chunk(&p.guid)? else { return Ok(()) };
                 let (s, e) = (p.offset as usize, p.offset as usize + p.size as usize);
                 ensure!(e <= data.len(), "{}: part {s}..{e} is outside chunk {} ({} bytes)", f.path, guid_hex(&p.guid), data.len());
@@ -696,6 +960,8 @@ impl Builder {
                 self.used(&p.guid);
             }
             let o = self.open.take().expect("open");
+            // Let go of the old copy before the new file replaces it.
+            self.old = None;
             finish_file(o, &dest, &f)?;
             let _ = done.send(self.next);
             self.next += 1;
@@ -1124,5 +1390,177 @@ mod tests {
         let r = install(Job { secrets: &secrets, ..job(&m, None, &dir, &src, &p) }).await.unwrap();
         assert_eq!(r.files_written, 1);
         assert_eq!(read(&dir, "x.bin"), data);
+    }
+
+    fn pattern(seed: u32, len: usize) -> Vec<u8> {
+        (0..len as u32).map(|i| (i.wrapping_mul(2654435761).wrapping_add(seed * 7919) >> 13) as u8).collect()
+    }
+
+    type Build = (Manifest, Mem);
+    type Files = Vec<(&'static str, Vec<u8>, &'static [&'static str])>;
+
+    /// v1 and v2 of a game whose big file changes in one window, and whose small file
+    /// changes completely.
+    fn two_builds() -> (Build, Build, Files) {
+        let big = pattern(1, 20 * 1024);
+        let v1 = vec![("Data/big.pak", big.clone(), &[][..]), ("Data/small.txt", b"small v1".to_vec(), &[][..])];
+        let mut big2 = big;
+        big2[5000..5010].copy_from_slice(b"PATCHED!!!");
+        let v2 = vec![("Data/big.pak", big2, &[][..]), ("Data/small.txt", b"small v2".to_vec(), &[][..])];
+        let (mut m1, s1) = fixture(&v1, 22);
+        let (mut m2, s2) = fixture(&v2, 22);
+        (m1.meta.build_version, m1.meta.build_id) = ("1.0".into(), "b1".into());
+        (m2.meta.build_version, m2.meta.build_id) = ("1.1".into(), "b2".into());
+        ((m1, s1), (m2, s2), v2)
+    }
+
+    #[tokio::test]
+    async fn updates_read_unchanged_parts_from_the_old_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("G");
+        let ((m1, s1), (m2, s2), v2) = two_builds();
+        let p = quick();
+        install(job(&m1, None, &dir, &s1, &p)).await.unwrap();
+        // The preview counts only the changed windows: the big file's patched one and the
+        // last one, which it shares with the small file.
+        let plan = plan(&m2, Some(&m1), &dir, None).unwrap();
+        assert_eq!(plan.write.len(), 2);
+        assert!(plan.reused_bytes >= 18 * 1024 && plan.download_bytes < m2.download_size(None) / 4, "{plan:?}");
+        let r = install(job(&m2, Some(&m1), &dir, &s2, &p)).await.unwrap();
+        assert_eq!((r.files_written, r.bytes_reused), (2, plan.reused_bytes));
+        assert_eq!(r.bytes_downloaded, plan.download_bytes);
+        let fetched = s2.fetched.lock().unwrap().len();
+        assert!(fetched <= 3 && fetched < m2.chunks.len(), "fetched {fetched} of {}", m2.chunks.len());
+        for (path, data, _) in &v2 {
+            assert_eq!(&read(&dir, path), data, "{path}");
+        }
+        assert!(verify(&m2, &dir, None, &p).await.unwrap().bad.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_damaged_old_copy_is_downloaded_instead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("G");
+        let ((m1, s1), (m2, s2), v2) = two_builds();
+        let p = quick();
+        install(job(&m1, None, &dir, &s1, &p)).await.unwrap();
+        // Same size, different bytes where the new build expects the old data.
+        let mut big = read(&dir, "Data/big.pak");
+        big[100] ^= 0xFF;
+        std::fs::write(dir.join("Data/big.pak"), &big).unwrap();
+        // A preview can't tell (it doesn't hash); the install does.
+        assert!(plan(&m2, Some(&m1), &dir, None).unwrap().reused_bytes > 0);
+        let r = install(job(&m2, Some(&m1), &dir, &s2, &p)).await.unwrap();
+        assert_eq!(r.bytes_reused, 0);
+        assert_eq!(s2.fetched.lock().unwrap().len(), m2.chunks.len());
+        for (path, data, _) in &v2 {
+            assert_eq!(&read(&dir, path), data, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_update_resumes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("G");
+        let ((m1, s1), (m2, mut s2), v2) = two_builds();
+        let p = quick();
+        install(job(&m1, None, &dir, &s1, &p)).await.unwrap();
+        let stop = Arc::new(quick());
+        s2.cancel_after = Some((1, stop.clone()));
+        let e = install(Job { workers: 1, ..job(&m2, Some(&m1), &dir, &s2, &stop) }).await.unwrap_err();
+        assert!(quiver_core::install::is_cancelled(&e), "{e:#}");
+        assert!(!dir.join("Data/big.pak.quiver-part").exists());
+        s2.cancel_after = None;
+        let r = install(job(&m2, Some(&m1), &dir, &s2, &p)).await.unwrap();
+        assert_eq!(r.files_written + r.files_kept, 2);
+        for (path, data, _) in &v2 {
+            assert_eq!(&read(&dir, path), data, "{path}");
+        }
+        // Once done, nothing is left to do.
+        let again = plan(&m2, Some(&m1), &dir, None).unwrap();
+        assert!(again.write.is_empty() && again.download_bytes == 0, "{again:?}");
+    }
+
+    /// A v2 whose bytes are all shifted (100 new bytes in front), so its full manifest
+    /// shares no chunk with v1; and Epic's delta, which cuts the same file from v1's chunks
+    /// plus one small new chunk. Returns v1, v2, the delta, its chunks and v2's file.
+    fn shifted() -> (Build, Build, Manifest, HashMap<String, Vec<u8>>, Vec<u8>) {
+        let old = pattern(3, 8 * 1024);
+        let head = pattern(9, 100);
+        let new: Vec<u8> = head.iter().chain(&old).copied().collect();
+        let (mut m1, s1) = fixture(&[("big.pak", old, &[])], 22);
+        let (mut m2, s2) = fixture(&[("big.pak", new.clone(), &[])], 22);
+        (m1.meta.build_version, m1.meta.build_id) = ("1.0".into(), "b1".into());
+        (m2.meta.build_version, m2.meta.build_id) = ("1.1".into(), "b2".into());
+        let (mut d, dchunks) = build(22, &[("big.pak", &head, &[])], 1024, None);
+        let f = &mut d.files[0];
+        f.sha1 = m2.files[0].sha1;
+        f.size = new.len() as u64;
+        f.parts.extend(m1.files[0].parts.iter().map(|q| crate::manifest::ChunkPart { file_offset: q.file_offset + 100, ..q.clone() }));
+        // The delta lists only its own chunk: v1's are found in the old manifest.
+        ((m1, s1), (m2, s2), d, dchunks, new)
+    }
+
+    #[tokio::test]
+    async fn deltas_are_used_when_epic_has_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("G");
+        let ((m1, s1), (m2, mut s2), d, dchunks, new) = shifted();
+        let p = quick();
+        install(job(&m1, None, &dir, &s1, &p)).await.unwrap();
+        // No delta published: the full manifest, every chunk.
+        assert!(delta(&s2, &m2, &m1, &Secrets::new()).await.is_none());
+        assert_eq!(s2.fetched.lock().unwrap().as_slice(), ["Deltas/b2/b1.delta"]);
+        assert_eq!(plan(&m2, Some(&m1), &dir, None).unwrap().reused_bytes, 0);
+        // Published: one small chunk downloaded, the rest copied from the old file.
+        s2.chunks.insert("Deltas/b2/b1.delta".into(), crate::manifest::write(&d, true));
+        s2.chunks.extend(dchunks);
+        s2.fetched.lock().unwrap().clear();
+        let dl = delta(&s2, &m2, &m1, &Secrets::new()).await.expect("delta");
+        assert_eq!(dl.files, 1);
+        assert_eq!(fingerprint(&dl.manifest), fingerprint(&m2), "still the new build");
+        let pl = plan(&dl.manifest, Some(&m1), &dir, None).unwrap();
+        assert_eq!(pl.reused_bytes, 8 * 1024);
+        assert!(pl.download_bytes < m2.download_size(None) / 4, "{pl:?}");
+        let r = install(job(&dl.manifest, Some(&m1), &dir, &s2, &p)).await.unwrap();
+        assert_eq!((r.files_written, r.bytes_reused), (1, 8 * 1024));
+        assert_eq!(s2.fetched.lock().unwrap().len(), 2, "the delta and its one chunk: {:?}", s2.fetched.lock().unwrap());
+        assert_eq!(read(&dir, "big.pak"), new);
+        // A build to itself has no delta (nothing is fetched).
+        assert!(delta(&s2, &m2, &m2, &Secrets::new()).await.is_none());
+        assert_eq!(s2.fetched.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unusable_delta_entries_are_ignored() {
+        let ((m1, _), (m2, _), d, _, _) = shifted();
+        assert!(combine_delta(&m2, &m1, &d).is_some());
+        // Not the new build's file.
+        let mut bad = d.clone();
+        bad.files[0].sha1[0] ^= 1;
+        assert!(combine_delta(&m2, &m1, &bad).is_none());
+        // Parts that don't add up to the file.
+        let mut bad = d.clone();
+        bad.files[0].parts.pop();
+        assert!(combine_delta(&m2, &m1, &bad).is_none());
+        // A chunk nobody lists.
+        let mut bad = d.clone();
+        bad.files[0].parts[1].guid = [1, 2, 3, 4];
+        assert!(combine_delta(&m2, &m1, &bad).is_none());
+        // A range outside its chunk.
+        let mut bad = d.clone();
+        bad.files[0].parts[0].offset = 1000;
+        assert!(combine_delta(&m2, &m1, &bad).is_none());
+        // Chunks under another folder (ChunksV4, not V5): not used.
+        let mut bad = d.clone();
+        bad.version = 21;
+        assert!(combine_delta(&m2, &m1, &bad).is_none());
+        // Without v1's chunk list (an old manifest under another folder), the parts cut
+        // from v1's chunks can't be placed.
+        let mut old = m1.clone();
+        old.version = 18;
+        assert!(combine_delta(&m2, &old, &d).is_none());
+        // Hostile build ids never go into a URL.
+        assert!(plain_build_id("WwT6AI3BHrp4sbmvMF3D-Q==") && !plain_build_id("../x") && !plain_build_id("a/b") && !plain_build_id("a?x") && !plain_build_id(""));
     }
 }

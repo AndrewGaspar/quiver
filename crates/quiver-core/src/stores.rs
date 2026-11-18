@@ -31,6 +31,16 @@ pub enum Launched {
     Delegated { url: String, argv: Vec<String> },
 }
 
+/// A store's client asked to update a game (`StoreProvider::update_in_client`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedClient {
+    /// What was opened (`steam://open/downloads`) and the command line that opened it.
+    pub url: String,
+    pub argv: Vec<String>,
+    /// Where the client's update is, for people ("Update queued in Steam of 3.1 GB").
+    pub note: String,
+}
+
 /// Who a store's games are read for.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AccountInfo {
@@ -60,6 +70,14 @@ pub trait StoreProvider: Send + Sync {
 
     /// Start the game. `profile` is a mod profile (stores whose launches Quiver runs only).
     fn launch<'a>(&'a self, source: &'a str, game: GameRef, profile: Option<String>) -> BoxFuture<'a, Result<Launched>>;
+
+    /// Ask the store's own client to update a game it installed (Steam: open its Downloads
+    /// page, where its update queue is). Games Quiver installs (Ubisoft, Epic) update
+    /// through quiverd's download queue instead, so the default says the client updates it.
+    fn update_in_client(&self, game: GameRef) -> BoxFuture<'_, Result<AskedClient>> {
+        let label = self.id().label();
+        Box::pin(async move { anyhow::bail!("{game}: {label} updates it itself") })
+    }
 }
 
 /// Find a game's provider.

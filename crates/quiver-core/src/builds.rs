@@ -198,6 +198,7 @@ pub fn update_preview(game: &Game, latest: &Latest, language: &str) -> Result<Up
         added: Vec::new(),
         removed: Vec::new(),
         unchanged: 0,
+        notes: Vec::new(),
     };
     if out.up_to_date {
         return Ok(out);
@@ -208,6 +209,12 @@ pub fn update_preview(game: &Game, latest: &Latest, language: &str) -> Result<Up
     out.download_bytes = d.download_bytes;
     out.write_bytes = d.write_bytes;
     out.unchanged = d.unchanged.len();
+    // Slices of changed files already in place aren't downloaded (`install::diff`).
+    let sizes: std::collections::HashMap<&str, &install::PlannedFile> = new.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let kept: u64 = d.reusable.iter().filter_map(|(p, i)| sizes.get(p.as_str())?.slices.get(*i)).map(|s| s.size).sum();
+    if kept > 0 {
+        out.notes.push(format!("{} of the changed files' slices is already on disk and isn't downloaded again", install::human_bytes(kept)));
+    }
     (out.changed, out.added, out.removed) = (d.changed, d.added, d.removed);
     Ok(out)
 }

@@ -2285,10 +2285,17 @@ fn update_body(th: &Theme, p: &UpdatePreview) -> AnyElement {
                 .child(stat("Files", format!("{} of {}", p.changed.len() + p.added.len(), p.changed.len() + p.added.len() + p.unchanged))),
         )
         .child(lists)
-        .child(div().text_size(px(11.5)).text_color(th.tx3).child(format!(
-            "{} files stay as they are. Slices already on disk are reused, so only what changed is downloaded.",
-            p.unchanged
-        )))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .text_size(px(11.5))
+                .text_color(th.tx3)
+                .child(format!("{} files stay as they are; only what changed is downloaded.", p.unchanged))
+                // How this store keeps the download small (data already on disk, Epic's delta patches).
+                .children(p.notes.iter().map(|n| div().child(n.clone()))),
+        )
         .into_any_element()
 }
 

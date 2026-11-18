@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use quiver_api::downloads::{DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, VerifyReport};
-use quiver_api::{Event, GameRef, Job, JobKind, LibraryEntry, Request};
+use quiver_api::{Event, GameRef, Job, JobKind, Request, StoreId};
 use quiver_core::builds::{self, Latest, RepairPhase};
 use quiver_core::install::{Progress, Throttle, human_bytes, is_cancelled};
 use quiver_core::launcher::{self, Config, Games};
@@ -51,8 +51,12 @@ pub(crate) trait Host: Send + Sync + 'static {
     fn log(&self, source: &str, action: String, game: Option<GameRef>);
     /// The game is being played: its install waits until it exits.
     fn playing(&self, game: GameRef) -> bool;
-    /// The library if the daemon has it cached (never fetches).
-    fn library_cache(&self) -> Option<Vec<LibraryEntry>>;
+    /// Installed games of stores Quiver installs (Ubisoft, Epic) with a newer build, as
+    /// the daemon already knows (never asks a store).
+    fn pending_updates(&self) -> Vec<Pending>;
+    /// Ask the stores for new builds (cheap: Ubisoft's library and Epic's build versions).
+    /// Returns whether what [`Host::pending_updates`] says may have changed.
+    fn check_updates(self: Arc<Self>) -> BoxFut<bool>;
     /// An item finished (whatever the outcome): install state may have changed.
     fn changed(self: Arc<Self>);
     /// Delete what a removed download left, if the game was never installed.
@@ -64,6 +68,19 @@ pub(crate) trait Host: Send + Sync + 'static {
         true
     }
 }
+
+/// An installed game with a newer build (see [`Host::pending_updates`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Pending {
+    pub game: GameRef,
+    pub name: String,
+    /// The language to update in (Ubisoft), else the store's own.
+    pub language: Option<String>,
+}
+
+/// How often the upkeep asks the stores for new builds, and how soon after quiverd starts.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+const FIRST_CHECK: Duration = Duration::from_secs(60);
 
 enum Stop {
     Pause,
@@ -626,34 +643,51 @@ impl Downloads {
         self.pump(host);
     }
 
-    /// Queue updates for installed games the cached library shows one for (auto-update).
-    fn auto_update<H: Host>(self: &Arc<Self>, host: &Arc<H>) {
+    /// Queue updates for installed games with a newer build (auto-update), whatever the
+    /// store, as long as Quiver installs it: Ubisoft and Epic games through this queue;
+    /// Steam's client updates its own games, so they never show up here.
+    ///
+    /// Skipped: games already in the queue, updates the user removed from the queue this
+    /// run, and games being played (an update never starts under a running game; the
+    /// queue also holds a queued item until the game exits).
+    pub(crate) fn auto_update<H: Host>(self: &Arc<Self>, host: &Arc<H>) -> Vec<GameRef> {
         if !self.settings.lock().unwrap().auto_update {
-            return;
+            return Vec::new();
         }
-        let Some(lib) = host.library_cache() else { return };
-        let updates = lib.into_iter().filter(|e| e.installed.is_some() && e.update_available).filter_map(|e| Some((GameRef::ubisoft(e.ubisoft_id()?), e)));
-        for (game, e) in updates {
+        let mut queued = Vec::new();
+        for p in host.pending_updates() {
+            let game = p.game;
             if self.get(game).is_some() || self.dismissed.lock().unwrap().contains(&game) || host.playing(game) {
                 continue;
             }
-            let language = e.installed.as_ref().and_then(|g| g.language.clone());
-            if let Err(err) = self.enqueue(host, "auto-update", game, e.name.clone(), QueueKind::Update, language, None) {
-                tracing::warn!(game = %game, "auto-update: {err:#}");
+            match self.enqueue(host, "auto-update", game, p.name.clone(), QueueKind::Update, p.language.clone(), None) {
+                Ok(_) => queued.push(game),
+                Err(err) => tracing::warn!(game = %game, "auto-update: {err:#}"),
             }
         }
+        queued
     }
 
-    /// Background upkeep: start items whose game stopped, auto-update.
+    /// Background upkeep: start items whose game stopped (every 10 s), queue updates the
+    /// daemon knows of (every minute), and ask the stores for new builds a minute after
+    /// start and then every [`CHECK_EVERY`]. The check runs whether or not auto-update is
+    /// on, so the library's update badges stay current without a front end refreshing.
     pub(crate) fn spawn_upkeep<H: Host>(self: &Arc<Self>, host: &Arc<H>) {
         let (this, host) = (self.clone(), host.clone());
         tokio::spawn(async move {
             let mut n = 0u64;
+            let mut next_check = Instant::now() + FIRST_CHECK;
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 this.pump(&host);
                 n += 1;
-                if n % 6 == 0 {
+                if Instant::now() >= next_check {
+                    next_check = Instant::now() + CHECK_EVERY;
+                    if host.clone().check_updates().await {
+                        this.auto_update(&host);
+                    }
+                }
+                if n.is_multiple_of(6) {
                     this.auto_update(&host);
                 }
             }
@@ -692,8 +726,46 @@ impl Host for Daemon {
         }
     }
 
-    fn library_cache(&self) -> Option<Vec<LibraryEntry>> {
-        self.library.try_lock().ok().and_then(|l| l.clone())
+    fn pending_updates(&self) -> Vec<Pending> {
+        // Ubisoft: the cached library (its update flags come from each fetch).
+        let mut out: Vec<Pending> = self
+            .library
+            .try_lock()
+            .ok()
+            .and_then(|l| l.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.installed.is_some() && e.update_available)
+            .filter_map(|e| {
+                let game = GameRef::ubisoft(e.ubisoft_id()?);
+                Some(Pending { game, language: e.installed.as_ref().and_then(|g| g.language.clone()), name: e.name })
+            })
+            .collect();
+        // Epic: installed games behind the last build check.
+        out.extend(self.epic.installed().unwrap_or_default().into_iter().filter(|i| self.epic.update_available(i)).filter_map(|i| {
+            Some(Pending { game: epic_core::provider::game_ref(&i.app_name)?, name: i.title, language: None })
+        }));
+        out
+    }
+
+    fn check_updates(self: Arc<Self>) -> BoxFut<bool> {
+        Box::pin(async move {
+            let before = self.pending_updates();
+            // Ubisoft: a fresh library read (what the app's refresh does) carries each
+            // installed game's latest manifest. Signed out: nothing to check.
+            if let Err(e) = self.owned_library(true).await {
+                tracing::debug!("update check, Ubisoft: {e:#}");
+            }
+            let epic = self.epic.check_updates(epic_core::updates::REFRESH_INTERVAL).await;
+            let after = self.pending_updates();
+            let changed = before != after;
+            if changed || !epic.changed.is_empty() {
+                let names: Vec<&str> = after.iter().map(|p| p.name.as_str()).collect();
+                tracing::info!("update check: {} update(s) available{}", after.len(), if names.is_empty() { String::new() } else { format!(" ({})", names.join(", ")) });
+                self.emit(Event::LibraryChanged);
+            }
+            changed
+        })
     }
 
     fn accepting(&self) -> bool {
@@ -966,6 +1038,12 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             d.remove(daemon, source, game.0, false)?;
             Value::Null
         }
+        // Games their store's client updates (Steam): Quiver shows the client's update and
+        // can open the client's downloads; it never writes the client's files.
+        Request::UpdatePreview { game } if game.store != StoreId::Ubisoft && game.store != StoreId::Epic => {
+            bail!("{}: {} updates it itself; `quiver update` opens its downloads, and the library shows its progress", game.0, game.store.label())
+        }
+        Request::Update { game } if game.store != StoreId::Ubisoft && game.store != StoreId::Epic => json!(daemon.update_in_client(source, game.0).await?),
         Request::InstallPreview { game, .. } if !game.is_ubisoft() => json!(crate::epic::install_preview(daemon, game.0).await?),
         Request::UpdatePreview { game } if !game.is_ubisoft() => json!(crate::epic::update_preview(daemon, game.0).await?),
         Request::Update { game } if !game.is_ubisoft() => json!(crate::epic::install(daemon, source, game.0).await?),

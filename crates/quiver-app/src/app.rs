@@ -1041,6 +1041,16 @@ impl Quiver {
         }
     }
 
+    /// A game its store's client updates (Steam): ask quiverd to open the client's
+    /// downloads, where the update is (Quiver never writes the client's files).
+    pub fn update_in_client(&mut self, id: Gid, cx: &mut Context<Self>) {
+        let label = id.0.store.label();
+        self.call::<u64, _>(Request::Update { game: id.0.into() }, cx, move |this, r, cx| match r {
+            Ok(_) => this.show_toast(format!("Opened {label}'s downloads: {label} updates it"), cx),
+            Err(e) => this.show_toast(err_text(&e), cx),
+        });
+    }
+
     pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.toast = Some(text.into());
         self.toast_gen += 1;

@@ -130,6 +130,11 @@ pub struct ClientInstall {
     /// The store has an update waiting or in progress.
     #[serde(default)]
     pub update_pending: bool,
+    /// What the store's client is doing about that update, when it says (Steam's app
+    /// manifest: state, bytes, target build, last error). The client updates the game;
+    /// Quiver only shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ClientUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_id: Option<String>,
     /// Platforms the store's build supports (`windows`, `linux`, `macos`), when known.
@@ -147,6 +152,80 @@ pub struct ClientInstall {
     /// What Play opens: `steam://rungameid/620`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_url: Option<String>,
+}
+
+/// Where a store client's update of a game is (`ClientInstall::update`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientUpdateState {
+    /// Waiting in the client's queue (or for the client to start, or the game to launch).
+    #[default]
+    Queued,
+    Downloading,
+    Paused,
+    /// Writing the downloaded data into the game's folder (Steam's staging and committing).
+    Installing,
+    /// Checking the game's files.
+    Validating,
+}
+
+/// A store client's update of a game, as far as its files say.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientUpdate {
+    pub state: ClientUpdateState,
+    #[serde(default)]
+    pub bytes_to_download: u64,
+    #[serde(default)]
+    pub bytes_downloaded: u64,
+    #[serde(default)]
+    pub bytes_to_stage: u64,
+    #[serde(default)]
+    pub bytes_staged: u64,
+    /// The build it updates to (Steam's `TargetBuildID`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_build_id: Option<String>,
+    /// The client's code for why its last update attempt failed (Steam's `UpdateResult`),
+    /// when it isn't 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<u32>,
+    /// The client updates it only when the game is started (Steam's per-game "only update
+    /// this game when I launch it").
+    #[serde(default)]
+    pub on_launch: bool,
+    /// What opens the client's own view of its downloads (`steam://open/downloads`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_url: Option<String>,
+}
+
+impl ClientUpdate {
+    /// Done of the download, 0.0–1.0, when the client says how much there is.
+    pub fn fraction(&self) -> Option<f32> {
+        let (done, total) = match self.state {
+            ClientUpdateState::Installing if self.bytes_to_stage > 0 => (self.bytes_staged, self.bytes_to_stage),
+            _ if self.bytes_to_download > 0 => (self.bytes_downloaded, self.bytes_to_download),
+            _ => return None,
+        };
+        Some((done as f64 / total as f64).clamp(0.0, 1.0) as f32)
+    }
+
+    /// One line for people: "Steam is updating it · 42% of 3.1 GB", "Update queued in Steam".
+    pub fn describe(&self, client: &str) -> String {
+        let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+        let pct = self.fraction().map(|f| format!(" · {}%", (f * 100.0).round() as u32)).unwrap_or_default();
+        let size = if self.bytes_to_download > 0 { format!(" of {}", gb(self.bytes_to_download)) } else { String::new() };
+        let mut line = match self.state {
+            ClientUpdateState::Downloading => format!("{client} is updating it{pct}{size}"),
+            ClientUpdateState::Installing => format!("{client} is installing the update{pct}"),
+            ClientUpdateState::Paused => format!("Update paused in {client}{pct}{size}"),
+            ClientUpdateState::Validating => format!("{client} is checking its files"),
+            ClientUpdateState::Queued if self.on_launch => format!("Update waiting: {client} updates it when you play"),
+            ClientUpdateState::Queued => format!("Update queued in {client}{size}"),
+        };
+        if let Some(e) = self.error {
+            line.push_str(&format!(" (last attempt failed, {client} error {e})"));
+        }
+        line
+    }
 }
 
 /// Play time as a store recorded it (Steam: `localconfig.vdf`).

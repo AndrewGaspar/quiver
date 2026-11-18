@@ -181,6 +181,11 @@ pub struct UpdatePreview {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub unchanged: usize,
+    /// How the update keeps the download small, in words for people ("Epic's delta patch
+    /// 1.0 → 1.1 is used", "1.2 GiB of the changed files is copied from their installed
+    /// copies"), shown under the numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

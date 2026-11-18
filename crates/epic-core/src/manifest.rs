@@ -918,10 +918,20 @@ pub(crate) mod tests {
         let mut m = Manifest { version, header_version: version, ..Default::default() };
         m.meta = Meta { app_name: "Fixture".into(), build_version: format!("1.0-v{version}"), launch_exe: "Bin\\Game.exe".into(), launch_command: "-fixture".into(), build_id: "b".into(), ..Default::default() };
         let mut encoded = HashMap::new();
+        // Guids follow the data, as Epic's do: a window with the same bytes is the same
+        // chunk in every build (so updates can find data they already have), and appears
+        // once in the chunk list.
+        let mut window_guids = Vec::new();
         for (i, data) in stream.chunks(window.max(1)).enumerate() {
-            let guid = [0x1000 + i as u32, 0x2000, 0x3000, 0x4000 + version];
             let mut padded = data.to_vec();
             padded.resize(window, 0);
+            let d: [u8; 20] = Sha1::digest(&padded).into();
+            let word = |k: usize| u32::from_le_bytes(d[k * 4..k * 4 + 4].try_into().unwrap());
+            let guid = [word(0), word(1), word(2), word(3)];
+            window_guids.push(guid);
+            if m.chunks.iter().any(|c| c.guid == guid) {
+                continue;
+            }
             let raw = crate::chunk::encode(guid, &padded, i % 2 == 0, secret.as_ref().map(|(g, k)| (*g, k)));
             let mut info = crate::chunk::chunk_info(guid, &padded, &raw);
             info.secret_guid = secret.map(|(g, _)| g);
@@ -941,7 +951,7 @@ pub(crate) mod tests {
                 let ci = pos / window;
                 let off = pos % window;
                 let n = (window - off).min(start + len - pos);
-                f.parts.push(ChunkPart { guid: m.chunks[ci].guid, offset: off as u32, size: n as u32, file_offset: (pos - start) as u64 });
+                f.parts.push(ChunkPart { guid: window_guids[ci], offset: off as u32, size: n as u32, file_offset: (pos - start) as u64 });
                 pos += n;
             }
             m.files.push(f);

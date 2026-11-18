@@ -5,7 +5,7 @@
 //! leaves them out. Hades starts through `quiver steam-run` (the hook); the others don't,
 //! and `SteamHook` turns it on or off (Steam isn't running in the demo, so nothing waits).
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use chrono::{TimeZone, Utc};
 use quiver_api::exports::{PatchState, SteamHook};
 use quiver_api::stores::{Achievement, AchievementCount, Achievements, ClientInstall, CloudState, Dlc, GameDetail, StorePlaytime};
@@ -84,6 +84,15 @@ fn install(f: &SteamFixture) -> ClientInstall {
         size_bytes: (f.gb * GB as f64) as u64,
         complete: true,
         update_pending: f.app_id == 1086940,
+        // Steam downloading an update, as its app manifest says.
+        update: (f.app_id == 1086940).then(|| quiver_api::stores::ClientUpdate {
+            state: quiver_api::stores::ClientUpdateState::Downloading,
+            bytes_to_download: 1_800_000_000,
+            bytes_downloaded: 720_000_000,
+            target_build_id: Some(format!("{}", 19_000_001 + f.app_id % 1_000_000)),
+            open_url: Some("steam://open/downloads".into()),
+            ..Default::default()
+        }),
         build_id: Some(format!("{}", 19_000_000 + f.app_id % 1_000_000)),
         platforms: if f.linux { vec!["windows".into(), "linux".into()] } else { vec!["windows".into()] },
         art: Default::default(),
@@ -220,6 +229,31 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Optio
             };
             st.jobs.push(job.clone());
             st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("play {} from Steam", f.name), game: Some(**game) });
+            demo.emit(Event::Job(job));
+            json!(id)
+        }
+        // Steam updates its own games: quiverd opens Steam's downloads (a finished job).
+        Request::Update { game } if game.store == StoreId::Steam => {
+            let f = steam(game)?;
+            if f.app_id != 1086940 {
+                bail!("Steam has no update waiting for {}; Steam checks for updates itself", f.name);
+            }
+            let id = st.next_job;
+            st.next_job += 1;
+            let job = Job {
+                id,
+                kind: JobKind::Install,
+                game: **game,
+                name: f.name.into(),
+                status: "Opened Steam's Downloads: Steam is updating it · 40% of 1.8 GB".into(),
+                downloaded: 0,
+                total: 0,
+                done: true,
+                error: None,
+                detail: vec!["steam://open/downloads".into()],
+            };
+            st.jobs.push(job.clone());
+            st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("asked Steam to update {}", f.name), game: Some(**game) });
             demo.emit(Event::Job(job));
             json!(id)
         }

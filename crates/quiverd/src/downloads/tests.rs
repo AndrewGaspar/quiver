@@ -93,6 +93,8 @@ struct TestHost {
     cdn: Arc<Cdn>,
     root: PathBuf,
     runs: AtomicUsize,
+    /// What `pending_updates` answers.
+    pending: Mutex<Vec<Pending>>,
 }
 
 impl TestHost {
@@ -105,6 +107,7 @@ impl TestHost {
             cdn,
             root,
             runs: AtomicUsize::new(0),
+            pending: Mutex::default(),
         })
     }
     fn job(&self, id: Option<u64>) -> Job {
@@ -114,9 +117,8 @@ impl TestHost {
 
 impl Host for TestHost {
     fn new_job(&self, kind: JobKind, game: quiver_api::GameRef, name: String) -> u64 {
-        let product_id = game.as_ubisoft().unwrap();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let job = Job { id, kind, game: quiver_api::GameRef::ubisoft(product_id), name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None, detail: Vec::new() };
+        let job = Job { id, kind, game, name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None, detail: Vec::new() };
         self.jobs.lock().unwrap().insert(id, job);
         id
     }
@@ -129,8 +131,11 @@ impl Host for TestHost {
     fn playing(&self, game: quiver_api::GameRef) -> bool {
         game.as_ubisoft().is_some_and(|p| self.playing.lock().unwrap().contains(&p))
     }
-    fn library_cache(&self) -> Option<Vec<LibraryEntry>> {
-        None
+    fn pending_updates(&self) -> Vec<Pending> {
+        self.pending.lock().unwrap().clone()
+    }
+    fn check_updates(self: Arc<Self>) -> BoxFut<bool> {
+        Box::pin(async { false })
     }
     fn changed(self: Arc<Self>) {}
     fn discard(&self, _: quiver_api::GameRef, _: &str) -> bool {
@@ -139,6 +144,10 @@ impl Host for TestHost {
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>> {
         Box::pin(async move {
             self.runs.fetch_add(1, Ordering::Relaxed);
+            // Another store's game (an Epic update): nothing to download here.
+            if !item.game_ref().is_ubisoft() {
+                return Ok(Outcome { status: format!("Updated {}", item.name), detail: Vec::new() });
+            }
             let plan = self.plans[&item.product_id].clone();
             let dest = self.root.join(item.product_id.to_string());
             let cdn = self.cdn.clone();
@@ -402,5 +411,62 @@ fn retries_show_in_the_job() {
         let j = host.job(Some(job));
         assert!(j.done && j.error.is_none() && j.status == "Installed", "{j:?}");
         assert!(files_ok(&root, A, &contents));
+    });
+}
+
+/// Auto-update queues every store's pending updates through the one queue, honours the
+/// setting, never queues a game being played, and leaves alone what the user removed.
+#[test]
+fn auto_update_across_stores() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let mut cdn = Cdn::default();
+    let mut plans = HashMap::new();
+    let mut contents = HashMap::new();
+    for id in [A, C] {
+        let (p, c) = fixture(id, 1, 3, &mut cdn);
+        plans.insert(id, p);
+        contents.insert(id, c);
+    }
+    let cdn = Arc::new(cdn);
+    let epic = quiver_api::GameRef::new(quiver_api::StoreId::Epic, "Kestrel").unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings { auto_update: false, ..Default::default() });
+        d.start(&host);
+        let pending = |game: quiver_api::GameRef, name: &str| Pending { game, name: name.into(), language: Some("en-US".into()).filter(|_| game.is_ubisoft()) };
+        *host.pending.lock().unwrap() = vec![pending(A.into(), "A"), pending(epic, "Alan Wake Remastered"), pending(C.into(), "C")];
+        host.playing.lock().unwrap().insert(C);
+
+        // Off: nothing is queued.
+        assert!(d.auto_update(&host).is_empty() && d.list().is_empty());
+        // On: Ubisoft and Epic updates queue; C waits for its game to exit.
+        d.set_settings(&host, DownloadSettings { auto_update: true, ..d.settings() });
+        assert_eq!(d.auto_update(&host), vec![quiver_api::GameRef::from(A), epic]);
+        let a = d.get(A).unwrap();
+        assert_eq!((a.kind, a.source.as_str(), a.language.as_deref()), (QueueKind::Update, "auto-update", Some("en-US")));
+        assert_eq!(d.get(epic).map(|e| (e.kind, e.game)), Some((QueueKind::Update, Some(epic))));
+        // Already queued: not queued twice.
+        assert!(d.auto_update(&host).is_empty());
+        cdn.open();
+        until("both updated", || d.list().is_empty()).await;
+        assert!(files_ok(&root, A, &contents[&A]));
+        assert!(host.jobs.lock().unwrap().values().any(|j| j.game == epic && j.done && j.status == "Updated Alan Wake Remastered"));
+
+        // The store now says A and Kestrel are current; C's game exits.
+        *host.pending.lock().unwrap() = vec![pending(C.into(), "C")];
+        host.playing.lock().unwrap().clear();
+        cdn.gate.forget_permits(1 << 30);
+        assert_eq!(d.auto_update(&host), vec![quiver_api::GameRef::from(C)]);
+        // The user takes it out of the queue: auto-update leaves it alone this run.
+        d.remove(&host, "gui", C, false).unwrap();
+        until("C removed", || d.get(C).is_none()).await;
+        assert!(d.auto_update(&host).is_empty());
+        // Queuing it by hand clears that.
+        d.enqueue(&host, "cli", C, "C".into(), QueueKind::Update, None, None).unwrap();
+        cdn.open();
+        until("C updated", || d.list().is_empty()).await;
+        assert!(files_ok(&root, C, &contents[&C]));
     });
 }

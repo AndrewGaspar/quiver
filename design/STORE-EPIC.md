@@ -1008,6 +1008,25 @@ spec only):
   (SHA-1) on a blocking task, `repair` rebuilds only the bad and missing ones, and
   `uninstall` removes only the manifest's files and the folders they leave empty. Install
   tags are supported (`None`: everything).
+- **Updates: reuse and deltas** (added with update polling, 2026-11-18). A chunk guid names
+  one immutable window of data, so a part of a changed file cut from a chunk the old
+  build's copy of the *same path* also used is read from that old copy instead of
+  downloaded (`content::reusable_parts`); the old file stays in place until the new one is
+  renamed over it. Before reading from an old copy the install hashes it against the
+  installed manifest's SHA-1 (a damaged or half-replaced copy is downloaded instead); the
+  preview trusts sizes only. Data another file held is still downloaded (no cross-file
+  reuse). When the old and new builds have different build ids, `Deltas/<new build id>/<old
+  build id>.delta` is fetched next to the chunks (no session, as legendary's
+  `get_delta_manifest`); any failure means no delta. Its file entries replace the new
+  manifest's only where the path and SHA-1 match, the parts add up to the file and every
+  chunk they cut is listed (by the delta, the new build or the old one) with the range
+  inside it; a delta whose chunks live under another `Chunks*` folder is not used. The
+  combination is still the new build (same files and SHA-1s, so the resume record carries
+  over), every file is checked as it is written, and if an update through the delta fails
+  for any reason but a cancel it runs again from the full manifest. The installed manifest
+  saved afterwards is Epic's plain one. DLC updates take the same path. `UpdatePreview`
+  says what a delta and reuse save (`notes`), and its download is what the update will
+  really fetch.
 
 **Epic calls** (`epic-core::api`): the build (`launcher …/assets/v2/platform/Windows/
 namespace/<ns>/catalogItem/<id>/app/<app>/label/Live`: manifest locations, SHA-1, keys),
@@ -1089,15 +1108,17 @@ stay out of the library (§9.8).
   encrypted section and the encrypted-chunk nonce have never met a real encrypted build,
   and the JSON manifest reader is from the format as remembered (no real JSON manifest
   here). `quiver epic manifest` on a real game is the first check.
-- Delta manifests (`…/Deltas/<old>/<new>.delta`) aren't used: updates fetch every chunk a
-  changed file needs.
+- Delta manifests and reuse (above) are built against fixtures only: no real Epic delta has
+  been fetched, so its URL (`Deltas/<new>/<old>.delta` under the chunk base, legendary's
+  order), whether real deltas list the old build's chunks, and their manifest version are
+  unverified. Most builds have no delta; reuse from the old copies works without one.
 - The exchange code is minted before the prerequisites run. Codes last minutes, so a
   prerequisite installer that takes longer than that would leave the game with an expired
   code (start it again; the prerequisites don't run twice).
 - No anti-cheat runtime handling yet (EAC/BattlEye), no EOS overlay, no install-tag picker
   in the app (everything installs), no move.
-- Auto-update for Epic games isn't on (Quiver doesn't poll Epic's builds); `quiver update
-  epic:<app>` or Install on the game updates to the current build.
+- ~~Auto-update for Epic games isn't on~~: built in §9.12 (build checks, the update badge,
+  auto-update through the queue).
 
 ### 9.11 Installing and playing Alan Wake Remastered (the steps)
 
@@ -1126,6 +1147,63 @@ to mint an exchange code (as EGL does at every launch).
    ~/.local/share/quiver/quiverd.log | tail -50`.
 7. **Undo:** `quiver uninstall epic:7315f614b0504081bcdceef138075c9c [--prefix]` removes the
    game's files (only the manifest's) and, with `--prefix`, its prefix.
+
+### 9.12 As built: updates (2026-11-18)
+
+Epic doesn't tell a launcher a build changed; EGL asks. Quiver now asks too, and an Epic
+game with a new build behaves like a Ubisoft one: the Update badge, the Updates filter, the
+update preview, `quiver update`, and auto-update through the shared queue.
+
+**Build checks** (`epic-core::updates`):
+
+- One request per installed game: the build API Quiver already calls to install
+  (`assets/v2/platform/Windows/namespace/<ns>/catalogItem/<item>/app/<app>/label/Live`),
+  through the account that installed it (else another signed-in owner). Only
+  `buildVersion` and the manifest's SHA-1 are kept; the keys and signed manifest URLs in
+  the same reply are dropped at once.
+- Cached in `<data>/epic/builds.json` (versions, hashes, when checked; nothing secret),
+  so badges survive a restart without asking Epic, and a library read never waits on it.
+  Uninstalled games are forgotten at the next check.
+- **When:** quiverd's upkeep checks a minute after start and then every hour
+  (`downloads::CHECK_EVERY`); a library refresh (the app's refresh, `quiver library
+  --refresh`) checks when the last check is older than 5 minutes
+  (`updates::REFRESH_INTERVAL`). One check runs at a time. A failure (account signed out,
+  Epic unreachable) is per game and keeps that game's last answer.
+- **An update is available** when the `Live` build's manifest SHA-1 differs from the one
+  the game was installed from (`installed.json` `manifest_hash`): a new build, or one rebuilt
+  under the same version. The hash decides, not the version string, because the record's
+  version comes from the manifest and the check's from the build API; spelled differently,
+  a version comparison would show an update forever. Records without a hash compare
+  versions. Installing writes the new hash, so the badge clears by itself.
+- The library entry's `update_available` and the game page's `install.update_pending` come
+  from the cache.
+
+**Auto-update** (`quiverd::downloads::auto_update`, the same code for every store Quiver
+installs): when `auto_update` is on, every minute the queue takes the daemon's pending
+updates (`Host::pending_updates`: Ubisoft's cached library flags, Epic's installed games
+behind the last check) and queues an `Update` (source `auto-update`) for each that is
+not already queued, not removed from the queue by the user this run, and not being played.
+A queued update also waits while its game runs, and Play refuses while it downloads. The
+hourly check refreshes Ubisoft's library too (what the app's refresh does), so Ubisoft
+updates are noticed without the app open; it runs whether or not auto-update is on, so the
+badges stay current.
+
+**What an update changes:** `quiver update epic:<app> --preview` and the app's update dialog
+show changed, added and removed files, the download (with reuse from disk and Epic's delta
+manifest when it has one, §9.10) and notes saying which of those applied.
+`quiver epic manifest <game> --json` includes `reused_bytes` and `latest_checked`.
+
+**Not verified against a real account:** the build-version check is the same request an
+install makes, so its shape is the one stage 2 recorded; whether Epic rate-limits an hourly
+check per game hasn't been seen (EGL checks more often). Legendary compares versions only;
+Quiver's SHA-1 rule assumes Epic serves one manifest file per build (it has in every reply
+recorded so far). DLC is checked
+only through its game (DLC updates with it).
+
+**How to check it** (after `tools/install-user.sh`, quiverd restarted): with an Epic game
+installed, `quiver library --refresh --updates` lists it only when Epic has a newer build;
+`cat ~/.local/share/quiver/epic/builds.json` shows the versions checked (no keys);
+`grep "update check\|Epic build check\|new builds" ~/.local/share/quiver/quiverd.log`.
 
 ---
 

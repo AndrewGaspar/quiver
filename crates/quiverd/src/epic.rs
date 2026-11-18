@@ -285,7 +285,8 @@ async fn manifest_summary(d: &Arc<Daemon>, game: GameRef) -> Result<Value> {
         "install_tags": m.install_tags(),
         "chunk_hosts": b.element.base_urls().iter().filter_map(|u| u.split('/').nth(2).map(str::to_owned)).collect::<Vec<_>>(),
         "first_chunk": m.chunks.first().map(|c| c.path(m.version)),
-        "update": plan.map(|p| json!({"write": p.write.len(), "keep": p.keep.len(), "remove": p.remove.len(), "download_bytes": p.download_bytes, "write_bytes": p.write_bytes})),
+        "update": plan.map(|p| json!({"write": p.write.len(), "keep": p.keep.len(), "remove": p.remove.len(), "download_bytes": p.download_bytes, "write_bytes": p.write_bytes, "reused_bytes": p.reused_bytes})),
+        "latest_checked": d.epic.latest_build(&a).map(|b| json!({"version": b.version, "checked_at": b.checked_at})),
     }))
 }
 
