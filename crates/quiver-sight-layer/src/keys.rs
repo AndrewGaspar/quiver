@@ -469,12 +469,38 @@ fn run(t: &'static Telemetry) {
     };
     let mut wl_state = u32::MAX;
     let mut presents = t.presents.load(Ordering::Relaxed);
+    // The game's window in front (crate::focus): X11's active window on a connection of its
+    // own, opened when the game makes its first X11 surface.
+    let mut x11_focus: Option<crate::focus::X11Focus> = None;
+    let mut x11_focus_tried = false;
     loop {
         std::thread::sleep(POLL_EVERY);
-        // Only while the game presents: a game that stopped presenting has no HUD to change
-        // and, usually, no focus.
+        // Keys only while the game presents: a game that stopped presenting has no HUD to
+        // change and, usually, no focus. Focus every tick (a hidden game may stop presenting
+        // right as it loses focus).
         let p = t.presents.load(Ordering::Relaxed);
-        if p != presents {
+        let presenting = p != presents;
+        if SURFACES.load(Ordering::Relaxed) & LAYER_X11_SURFACE != 0 && !x11_focus_tried && presenting {
+            x11_focus_tried = true;
+            x11_focus = crate::focus::X11Focus::open(None);
+            log!("focus: X11 {}", if x11_focus.is_some() { "reading _NET_ACTIVE_WINDOW" } else { "unavailable (no libxcb, server or _NET_ACTIVE_WINDOW)" });
+        }
+        let x11_front = match &mut x11_focus {
+            Some(f) if f.broken() => {
+                x11_focus = None;
+                None
+            }
+            Some(f) => f.focused(&crate::focus::x11_windows()),
+            None => None,
+        };
+        // Wayland key events are each a step, so they count whenever they come (once the
+        // keyboard is bound, also on a loading screen that doesn't present).
+        for a in crate::wayland::service(std::time::Instant::now(), presenting) {
+            log!("keys: {a:?} (Wayland)");
+            t.key_pressed(a);
+        }
+        t.set_focus(crate::focus::combine(crate::wayland::focused(), x11_front));
+        if presenting {
             presents = p;
             if let Some((x, chords)) = &mut x11 {
                 match x.keymap() {
@@ -490,10 +516,6 @@ fn run(t: &'static Telemetry) {
                         t.set_keys_x11(KEYS_IO_ERROR);
                     }
                 }
-            }
-            for a in crate::wayland::service(std::time::Instant::now()) {
-                log!("keys: {a:?} (Wayland)");
-                t.key_pressed(a);
             }
         }
         // Surfaces come and go on the app's threads; follow their state either way.

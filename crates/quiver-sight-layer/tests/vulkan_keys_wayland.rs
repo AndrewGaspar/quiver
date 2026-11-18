@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use ash::vk;
 use harness::*;
-use quiver_perf::layout::{KEYS_NO_DISPLAY, KEYS_WL_ACTIVE, KEYS_WL_STOPPED, LAYER_WAYLAND_SURFACE};
+use quiver_perf::layout::{KEYS_NO_DISPLAY, KEYS_WL_ACTIVE, KEYS_WL_STOPPED, LAYER_FOCUS_KNOWN, LAYER_FOCUSED, LAYER_WAYLAND_SURFACE};
 use quiver_perf::session::open_ring_reader;
 use quiver_sight_layer::keys::evdev::{KEY_F3, KEY_LEFTCTRL, KEY_LEFTSHIFT};
 use wayland::{Cmd, Game, Server, ServerOpts, socketpair, wait_for};
@@ -71,6 +71,7 @@ fn wayland_chords_reach_the_status_block() {
 
     // Present (headless) so the layer's telemetry and keys thread run; the compositor types.
     let status = std::cell::RefCell::new(None);
+    let in_front = std::cell::RefCell::new(None);
     let frames = 180;
     let r = run(Opts {
         frames,
@@ -84,6 +85,9 @@ fn wayland_chords_reach_the_status_block() {
             // Bare F3 does nothing.
             110 => server.keys(&[(KEY_F3, true)]),
             125 => server.keys(&[(KEY_F3, false)]),
+            // The game's window in front (SIGHT §14), then the keyboard goes elsewhere.
+            135 => *in_front.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status()),
+            140 => server.send(Cmd::Leave),
             f if f == frames - 1 => *status.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status()),
             _ => {}
         })),
@@ -97,6 +101,9 @@ fn wayland_chords_reach_the_status_block() {
     assert_eq!((s.key_toggles, s.key_nexts), (1, 1), "one Shift+F3, one Ctrl+Shift+F3");
     assert_eq!(server.stats.keyboards_live.load(Ordering::Relaxed), 2, "the game's keyboard and the layer's");
     assert_eq!(game.seen.keys.load(Ordering::Relaxed), 12, "the game still got every key");
+    let f = in_front.into_inner().expect("a status block").flags;
+    assert_eq!(f & (LAYER_FOCUS_KNOWN | LAYER_FOCUSED), LAYER_FOCUS_KNOWN | LAYER_FOCUSED, "in front while it has the keyboard");
+    assert_eq!(s.flags & (LAYER_FOCUS_KNOWN | LAYER_FOCUSED), LAYER_FOCUS_KNOWN, "not after leave");
 
     // vkDestroySurfaceKHR: the layer lets go of the display first.
     unsafe { ash::khr::surface::Instance::new(&entry, &instance).destroy_surface(surface, None) };
@@ -107,6 +114,7 @@ fn wayland_chords_reach_the_status_block() {
     std::thread::sleep(Duration::from_millis(400));
     let s = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status()).unwrap();
     assert_eq!(s.keys_wayland(), KEYS_WL_STOPPED);
+    assert_eq!(s.flags & LAYER_FOCUS_KNOWN, 0, "no keyboard of the layer's: unknown");
     unsafe { instance.destroy_instance(None) };
     assert!(!game.seen.wrong_thread.load(Ordering::Relaxed));
 

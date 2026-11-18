@@ -602,8 +602,10 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
 
 **While open.**
 
-- Keyboard and mouse: the panel surface has exclusive keyboard interactivity and a full-output
-  input region, so the game gets no keys or clicks. XWayland pointer locks and constraints are
+- Keyboard and mouse: the panel surface has the keyboard and a full-output input region, so
+  the game gets no keys or clicks (as built it is on-demand keyboard interactivity, so the
+  compositor can still move focus away, which hides the panel: §14, "Tied to the game
+  window"). XWayland pointer locks and constraints are
   released when the game loses pointer focus; the cursor is drawn normally over Sight.
 - Gamepad: hyprpad's mode rule `ctx.layers:has("quiver-sight")` switches to a mode with no
   forwarding, so the game's virtual pad goes neutral (hyprpad already does a clean handoff on
@@ -1059,10 +1061,11 @@ Shift+F2, hyprpad holding the game's pad neutral (5a), and the panel taking keyb
 **The surface** (`quiver-sight/src/panel/mod.rs`)
 
 - Namespace `quiver-sight`, overlay layer, anchored to all four edges at the monitor's
-  logical size, `exclusive_zone = -1` (over bars), keyboard interactivity **exclusive**. The
-  toast lane moved to `quiver-sight-toast` (it shared `quiver-sight` before), so hyprpad's
-  mode rule and the blur rule match only the panel; the desktop HUD stays
-  `quiver-sight-hud`.
+  logical size, `exclusive_zone = -1` (over bars), keyboard interactivity **on demand**
+  (*2026-11-18*; it was exclusive: see "Tied to the game window" below for why, and the
+  exclusive fallback). The toast lane moved to `quiver-sight-toast` (it shared
+  `quiver-sight` before), so hyprpad's mode rule and the blur rule match only the panel; the
+  desktop HUD stays `quiver-sight-hud`.
 - Monitor: the command's (quiverd's game monitor), else the focused window's, else the
   focused one. Before opening it records Hyprland's active window (focus goes back there on
   close, `focuswindow`) and finds the game's window (a client whose process, or a parent a
@@ -1157,6 +1160,124 @@ frame there, under the HUD, and the compositor draws the panel over an already-b
   direct scan-out is already off while any Sight surface is on the game's monitor (§4.1 (c)).
   (The first version noted the in-game blur above as a possible phase 3 alternative; it is now
   the first choice.)
+
+**Tied to the game window** (*2026-11-18*; `quiver-sight/src/front.rs`, `toplevels.rs`,
+`panel/mod.rs`; the layer's `focus.rs`)
+
+A layer surface belongs to an output, not a workspace, so the first panel stayed up over the
+user's other workspaces and windows, and held the keyboard there. Now the panel is tied to the
+game's window: when the game isn't what the user is looking at (another workspace on that
+monitor, another window active, the game minimised or closed) the panel **hides without
+closing**, and when the game is in front again it comes back in the same state (section,
+selection, drafts, scroll: the view outlives its surfaces). Hidden means no surface at all, so
+no keyboard grab, and hyprpad's `quiver-sight` mode (`ctx.layers:has("quiver-sight")`) ends,
+giving the pad back; gilrs input is ignored while hidden. Closing a hidden panel doesn't pull
+focus back to the game. `quiver sight status` says `open, hidden` and why, and which toplevel
+the panel is tied to and how it was found (`PanelReport.hidden`, `front`, `game_window`).
+
+*Measured first* (a test client in a nested Hyprland 0.56.2, the same build as the desktop's,
+switching workspaces and focus there; the user's session untouched):
+
+| With a layer surface on the game's monitor | exclusive keyboard | on-demand keyboard |
+|---|---|---|
+| mapping it | the layer gets the keyboard; the game's foreign toplevel stays `activated` | the same (Hyprland focuses on-demand overlay surfaces on map) |
+| workspace switch | **nothing**: no `activewindow` event, the game stays `activated`, the layer keeps the keyboard on the new workspace; only `workspace` events (socket2, ext-workspace) | the layer gets `leave`, the game loses `activated`, the new workspace's window gets it |
+| switch to an empty workspace | — | the game loses `activated`, nothing gets it; Hyprland hands the keyboard straight back to the layer (`leave` + `enter`) |
+| `focuswindow` / alt-tab to another window | refused ("exclusive ls") | the other window is `activated` |
+| moving the game to a special workspace (Omarchy's minimise) | — | the game loses `activated` (transient states inside one batch) |
+| switching exclusive → on demand after mapping | — | Hyprland drops the layer's keyboard at once |
+| XWayland game (`glxgears`), fullscreen or not | — | same as native; `_NET_ACTIVE_WINDOW` stays the game while the layer has the keyboard, `0` when a Wayland window is focused |
+
+So an exclusive panel can't be tied to anything but Hyprland's workspace events, and it is
+what kept the keyboard on other workspaces. On demand, every case shows up as the game's
+toplevel losing `activated`.
+
+*Signals chosen*, in this order (`front::Front::verdict`):
+
+1. **wlr-foreign-toplevel-management** (`zwlr_foreign_toplevel_manager_v1`, on a Wayland
+   connection of `quiver-sight`'s own, its own thread; Hyprland, Sway, labwc, river, niri,
+   Wayfire have it): the game is in front while its toplevel is `activated` and not
+   `minimized`; a `closed` toplevel unbinds. Snapshots go out after each batch of events, so a
+   compositor's transient states inside one change collapse. Compositor-agnostic and
+   event-driven. ext-foreign-toplevel-list was ruled out (no state), ext-workspace too (no
+   window ↔ workspace mapping).
+2. **The panel's own keyboard**: a compositor may deactivate the game when a layer surface
+   takes the keyboard, so "the panel has the keyboard and no other toplevel is activated" also
+   counts as in front. Whether this compositor keeps the game `activated` under the panel is
+   observed once the panel has had the keyboard 250 ms (`observe_panel`); Hyprland does, and
+   then the same situation means an empty workspace (Hyprland gives the keyboard back to the
+   panel there), so it counts as away. A just-mapped panel counts as having the keyboard for
+   700 ms or until its first `enter` (two connections, no ordering between them), and hiding
+   waits 120 ms of "away" so a change seen in two steps doesn't flicker. If an on-demand panel
+   gets no keyboard within 700 ms (a compositor that doesn't focus on-demand surfaces on map),
+   it is mapped again exclusive.
+3. **Which toplevel is the game's** (the protocol has no pids): Hyprland's window for the
+   session when Hyprland is there (the client whose process has `QUIVER_SESSION`, matched by
+   class and title, the activated one of twins; optional, at most once a second); else the
+   toplevel activated when the game's own Shift+F2 summoned the panel (`by: "keys"`; the
+   key came from the focused game, and if the list isn't there yet the first snapshot within
+   2 s decides); else learned: the toplevel that stays the only activated one for 400 ms
+   while the game's Sight layer says the game is in front (one session claiming it, never
+   overriding Hyprland's match). Learning runs whatever is shown, so a panel summoned later
+   from a terminal (`quiver sight open`) knows the game: it opens hidden and shows when the
+   game is in front.
+4. **The Sight layer's word** (`LAYER_FOCUS_KNOWN` / `LAYER_FOCUSED` in its status block,
+   flags bits 10–11, no size change; `HudModel::game_focus`, sent at once on a change): for
+   Wayland windows its `wl_keyboard`'s `enter`/`leave` (keyboard focus: the panel taking the
+   keyboard reads as "not in front"); for X11 windows `_NET_ACTIVE_WINDOW` against the game's
+   Vulkan surface windows and their ancestors (Wine renders into a child of its toplevel),
+   else the active window's `_NET_WM_PID`. The X11 side is a plain XCB connection, because an
+   Xlib request on a just-destroyed window raises an X error that goes to Wine's process-wide
+   handler (which asserts); XCB returns errors as replies. Both are read every 50 ms tick,
+   also while the game doesn't present (a hidden game may stop), and the Wayland queue is
+   now serviced every tick once attached (attaching still waits for presents). Used for
+   learning (3), and as the signal when there's no toplevel list (KDE has layer shell but
+   not the wlr protocol): then the game is in front while the layer says so or the panel has
+   the keyboard.
+5. **Nothing to go on** (no toplevel list and no layer word, as for an OpenGL game on such a
+   compositor): unknown, and things stay shown as before. Hiding only happens when a signal
+   can say when to show again.
+
+Hyprland IPC stays optional: only the window lookup in (3) and what the panel did before
+(monitor, return focus, Quit, the blur rule). No socket2 subscription was needed: on demand,
+foreign-toplevel already reports everything socket2 would.
+
+*Per case* (Hyprland, measured in the nested compositor with the real panel, `--demo panel`):
+
+| Case | Panel | Desktop HUD |
+|---|---|---|
+| Workspace switch on the game's monitor (to a window or an empty workspace) | hides within ~130 ms; back in ~250–300 ms (a new surface) when the game's workspace is shown | hides, shows again |
+| Alt-tab / focus another window on the same workspace | hides; shows when the game is focused again | hides; shows |
+| Minimise (Omarchy: moved to `special:minimized`) | hides; shows if the special workspace is toggled up with the game focused, or when it's restored | same |
+| Game closed (its window) | the binding drops; the session's end closes the panel | the session's end removes it |
+| Fullscreen vs windowed | the same (overlay layers draw over fullscreen windows; `activated` is independent of fullscreen) | same |
+| XWayland vs native Wayland game | the same through the toplevel list; the layer's word differs (X11: the active window, which stays the game under the panel; Wayland: keyboard focus, which the panel takes) | same |
+| Focus on another monitor (multi-monitor) | hides (the game isn't the active window); comes back when the game is focused | hides too, though the game may still be visible there (known: activation, not visibility) |
+
+*Toasts stay global*: they take no input, are click-through, last a few seconds and are
+about moments (an achievement unlocked, a mod setting's outcome); hiding them on another
+workspace would drop the news or show it late and stale, and a stray toast covers nothing
+the user is working on. They stay on the game's monitor. *The desktop HUD* (the presenter for
+games whose layer can't draw) follows the panel's rule, without the keyboard part: a frozen
+or irrelevant FPS counter over other windows is the same bug; it's hidden before its first
+model shows if the game isn't in front. *The in-game HUD* needs nothing: it's in the game's
+frames.
+
+*Verification*: `front::tests` (the Hyprland sequences above as fixtures, compositors that
+deactivate the game, minimised/closed, twins, learning only from settled signals and
+correcting a key binding, the list arriving late or going away, the no-protocol fallback),
+`toplevels::tests` (state arrays), the layer's `focus::tests`, `tests/focus_x11.rs`
+(Xvfb: Wine's client-window layout, the pid fallback, destroyed windows are answers, a dead
+server is unknown), `keys_wayland` (enter/leave serviced without presents, unknown after the
+surface goes), the opt-in Vulkan tests through the real layer (`vulkan_keys_wayland`:
+`FOCUS_KNOWN|FOCUSED` then `FOCUS_KNOWN` after `leave`; `vulkan_keys`: an XCB window made
+active and inactive on Xvfb), quiverd's `game_focus_from_the_layer`. In the nested Hyprland:
+the real panel through workspace switches (to windows and empty ones), focus changes, the
+special workspace, an XWayland fullscreen "game"; the desktop HUD through focus changes,
+bound through Hyprland's window for the session (a `vkgears` with `QUIVER_SESSION`); and
+`vkgears` with the real layer, native Wayland and XWayland, its status block following
+focus. Not verified: a real game (Wine/DXVK on winewayland and XWayland), a compositor
+other than Hyprland, the exclusive fallback on a compositor that needs it, multi-monitor.
 
 **Sections** (`panel/state.rs` builds rows from `PanelData`; `panel/view.rs` draws them)
 

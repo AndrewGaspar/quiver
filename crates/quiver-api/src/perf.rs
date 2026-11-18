@@ -803,6 +803,13 @@ pub struct HudModel {
     /// §14). `None` without a `hud.image` (nowhere to ask), or from a quiverd before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backdrop: Option<Box<LayerBackdrop>>,
+    /// Whether the game's window is in front as its Sight layer sees it (design/SIGHT.md §14:
+    /// a Wayland window has the keyboard, an X11 window is `_NET_ACTIVE_WINDOW`). `None` when
+    /// the layer can't tell (no layer, an older one, no keyboard or window manager to ask).
+    /// `quiver-sight` uses it to find the game's toplevel and, on compositors without a
+    /// toplevel protocol, to tie the panel and the desktop HUD to the game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_focus: Option<bool>,
 }
 
 /// The Sight layer's backdrop blur for one session, from its status block (SIGHT §14).

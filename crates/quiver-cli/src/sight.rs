@@ -149,9 +149,20 @@ fn print_status(s: &SightStatus) {
     println!("quiver-sight: {}", if s.running { "running" } else { "not running (quiverd starts it with a game)" });
     match &s.panel {
         Some(p) => {
-            println!("panel:    {}{}", if p.open { "open" } else { "closed" }, p.session.as_deref().map(|x| format!(" over {x}")).unwrap_or_default());
+            let state = match (&p.hidden, p.open) {
+                (Some(_), true) => "open, hidden",
+                (None, true) => "open",
+                _ => "closed",
+            };
+            println!("panel:    {state}{}", p.session.as_deref().map(|x| format!(" over {x}")).unwrap_or_default());
             if p.open {
                 println!("section:  {}", p.section.label());
+            }
+            if let Some(h) = p.hidden.as_ref().filter(|_| p.open) {
+                println!("hidden:   {h} (it comes back when the game is in front)");
+            }
+            if p.open && !p.front.is_empty() {
+                println!("game:     {}{}", p.front, p.game_window.as_deref().map(|w| format!(" · tied to {w}")).unwrap_or_default());
             }
             if let Some(m) = &p.monitor {
                 println!("monitor:  {m}");

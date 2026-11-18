@@ -87,6 +87,8 @@ extern "C" {
 #define QV_LAYER_X11_SURFACE      0x80 /* ... an Xlib or XCB one */
 #define QV_LAYER_BLUR_READY       0x100 /* the layer can blur the game behind the Sight panel */
 #define QV_LAYER_BLURRING         0x200 /* it blurred a present within the last 0.5 s */
+#define QV_LAYER_FOCUS_KNOWN      0x400 /* the layer can tell whether the game's window is in front */
+#define QV_LAYER_FOCUSED          0x800 /* ... and it is: Wayland keyboard focus / X11 _NET_ACTIVE_WINDOW */
 
 /* qv_layer_status.backdrop_error: why the layer can't blur behind the Sight panel. */
 #define QV_BACKDROP_ERR_NONE        0

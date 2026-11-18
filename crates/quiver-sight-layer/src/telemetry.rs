@@ -15,7 +15,7 @@ use std::time::Duration;
 use quiver_perf::LayerStatus;
 use quiver_perf::clock::mono_raw_ns;
 use quiver_perf::hud::HudReader;
-use quiver_perf::layout::{BACKDROP_ERR_OFF, HUD_HEADER_BYTES, KEYS_WL_SHIFT, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_PANICKED};
+use quiver_perf::layout::{BACKDROP_ERR_OFF, HUD_HEADER_BYTES, KEYS_WL_SHIFT, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_FOCUS_KNOWN, LAYER_FOCUSED, LAYER_PANICKED};
 use quiver_perf::ring::RingWriter;
 use quiver_perf::session::{FileKind, SessionDir, open_hud_reader};
 use quiver_perf::shm::Mapping;
@@ -42,6 +42,8 @@ pub struct Telemetry {
     pub key_toggles: AtomicU32,
     pub key_nexts: AtomicU32,
     pub key_panels: AtomicU32,
+    /// `LAYER_FOCUS_KNOWN` | `LAYER_FOCUSED` ([`crate::focus`]), from the keys thread.
+    pub focus: AtomicU32,
     /// The backdrop blur (crate::blur): the last blurred present (CLOCK_MONOTONIC_RAW ns), its
     /// GPU time (running mean, ns), and an error found at present time (`BACKDROP_ERR_*`)
     /// that overrides the target swapchain's readiness until the target changes.
@@ -119,6 +121,7 @@ pub fn init() -> Option<&'static Telemetry> {
                 key_toggles: AtomicU32::new(0),
                 key_nexts: AtomicU32::new(0),
                 key_panels: AtomicU32::new(0),
+                focus: AtomicU32::new(0),
                 blur_last_ns: AtomicI64::new(0),
                 backdrop_gpu_ns: AtomicU32::new(0),
                 blur_error: AtomicU32::new(0),
@@ -143,7 +146,7 @@ impl Telemetry {
     pub fn write_status(&self) {
         let Ok(base) = self.status.lock().map(|s| *s) else { return };
         let mut s = base;
-        s.flags |= self.flags.load(Ordering::Relaxed) | keys::SURFACES.load(Ordering::Relaxed);
+        s.flags |= self.flags.load(Ordering::Relaxed) | keys::SURFACES.load(Ordering::Relaxed) | self.focus.load(Ordering::Relaxed);
         s.presents = self.presents.load(Ordering::Relaxed);
         s.drawn = self.drawn.load(Ordering::Relaxed);
         s.hud_published = self.hud_published.load(Ordering::Relaxed);
@@ -204,6 +207,24 @@ impl Telemetry {
         }
         .fetch_add(1, Ordering::Relaxed);
         self.write_status();
+    }
+
+    /// Whether the game's window is in front (`None`: the layer can't tell); written at once
+    /// on a change, so quiverd's next drain (≤ 50 ms) sees it.
+    pub fn set_focus(&self, f: Option<bool>) {
+        let v = match f {
+            None => 0,
+            Some(false) => LAYER_FOCUS_KNOWN,
+            Some(true) => LAYER_FOCUS_KNOWN | LAYER_FOCUSED,
+        };
+        if self.focus.swap(v, Ordering::Relaxed) != v {
+            log!("focus: {}", match f {
+                None => "unknown",
+                Some(false) => "the game's window isn't in front",
+                Some(true) => "the game's window is in front",
+            });
+            self.write_status();
+        }
     }
 
     pub fn mark_panicked(&self) {

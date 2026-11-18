@@ -486,7 +486,12 @@ pub unsafe extern "system" fn create_xlib_surface_khr(
     out: *mut vk::SurfaceKHR,
 ) -> vk::Result {
     // SAFETY: the app's arguments.
-    unsafe { create_surface(c"vkCreateXlibSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) }
+    let r = unsafe { create_surface(c"vkCreateXlibSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) };
+    if r == vk::Result::SUCCESS {
+        // SAFETY: the app's create info. The window, for whether it's in front (focus.rs).
+        guard("vkCreateXlibSurfaceKHR", || unsafe { crate::focus::note_x11_window((*ci).window) });
+    }
+    r
 }
 
 pub unsafe extern "system" fn create_xcb_surface_khr(
@@ -496,7 +501,12 @@ pub unsafe extern "system" fn create_xcb_surface_khr(
     out: *mut vk::SurfaceKHR,
 ) -> vk::Result {
     // SAFETY: the app's arguments.
-    unsafe { create_surface(c"vkCreateXcbSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) }
+    let r = unsafe { create_surface(c"vkCreateXcbSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) };
+    if r == vk::Result::SUCCESS {
+        // SAFETY: as for Xlib.
+        guard("vkCreateXcbSurfaceKHR", || unsafe { crate::focus::note_x11_window(u64::from((*ci).window)) });
+    }
+    r
 }
 
 pub unsafe extern "system" fn create_wayland_surface_khr(

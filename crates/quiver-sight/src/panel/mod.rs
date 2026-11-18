@@ -1,6 +1,6 @@
 //! The Sight panel (design/SIGHT.md §6, §9; as built in §14): a full-output wlr-layer-shell
-//! surface on the game's monitor (overlay layer, namespace [`NAMESPACE`], exclusive keyboard
-//! focus while open), summoned with Shift+F2 in the game (read by the Sight layer), a
+//! surface on the game's monitor (overlay layer, namespace [`NAMESPACE`], on-demand keyboard
+//! focus while shown), summoned with Shift+F2 in the game (read by the Sight layer), a
 //! hyprpad chord or `quiver sight toggle`, and driven with the controller.
 //!
 //! - **Opening**: remembers the focused window (to give focus back on close) and finds the
@@ -16,6 +16,13 @@
 //!   hyprpad's `quiver-sight` mode types keys into the surface while the game's pad is held
 //!   neutral (`tools/hyprpad/quiver-sight.lua`), and gilrs reads pads directly where it can
 //!   (no hyprpad, or a pad hyprpad doesn't own). Both end up as the same [`Input`]s.
+//! - **Tied to the game** (SIGHT §14): while the game isn't in front ([`crate::front`]:
+//!   another workspace, another window active, minimised) the panel is hidden: its surface
+//!   goes (no keyboard grab, hyprpad's mode ends, the blur request is dropped) but the view
+//!   and its state stay, and a new surface around the same view comes back when the game is.
+//!   On-demand keyboard focus is what lets the compositor move focus away at all (an exclusive
+//!   surface keeps it on every workspace); if it doesn't arrive, the panel is mapped again
+//!   exclusive.
 //! - **Closing**: B at the top, Escape, Shift+F2, the chord again: the surface goes, the
 //!   layer's blur request is cleared (it fades out) or the blur rule turned off, focus goes back
 //!   to the game's window (Hyprland `focuswindow`).
@@ -30,7 +37,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-use gpui::{App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size};
+use gpui::{App, AppContext, Bounds, Entity, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size};
 use quiver_api::perf::LayerBackdrop;
 use quiver_api::sight::{Backdrop, PanelAction, PanelCommand, PanelReport, PanelSection};
 use quiver_perf::hud::{BackdropRequest, HudWriter};
@@ -38,6 +45,7 @@ use quiver_perf::shm::Mapping;
 use quiver_ui::gamepad::PadEvent;
 use quiver_ui::input::Input;
 
+use crate::front::Verdict;
 use crate::hypr::{self, Hypr};
 use crate::link::{LinkReq, Loaded, Msg};
 use data::Part;
@@ -75,10 +83,35 @@ pub fn hyprpad_running() -> bool {
     pid.is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
 }
 
+/// The open panel. Its view outlives its windows: while the game isn't in front the panel is
+/// hidden (no surface) but stays open, and comes back in the same state (section, selection,
+/// drafts, scroll).
 struct Open {
-    handle: WindowHandle<PanelView>,
+    view: Entity<PanelView>,
+    /// The layer surface while shown.
+    window: Option<WindowHandle<PanelView>>,
     session: String,
+    /// The game's monitor (output name) and its logical size.
+    monitor: Option<String>,
+    logical: (f32, f32),
+    /// When the current surface was mapped.
+    mapped_at: Option<Instant>,
+    /// Since when the surface has had the keyboard (`None`: it hasn't now); whether it has had
+    /// it at all since it was mapped.
+    keyboard: Option<Instant>,
+    had_keyboard: bool,
+    /// Numbers the surfaces, so a late activation event from an old one is ignored.
+    map_gen: u64,
+    /// The game has been away since (hiding waits [`HIDE_AFTER`]).
+    away_since: Option<Instant>,
+    interactivity: KeyboardInteractivity,
 }
+
+/// The game must be away this long before the panel hides: a focus change that comes in
+/// two steps on two connections (the panel's keyboard, the toplevel list) doesn't flicker it.
+pub const HIDE_AFTER: Duration = Duration::from_millis(120);
+/// A freshly mapped panel counts as having the keyboard until its first `enter` or this long.
+pub const KEYBOARD_GRACE: Duration = Duration::from_millis(700);
 
 /// How long the request lasts without renewal: quiver-sight renews it every half second
 /// while the panel is open, so a quiver-sight that dies stops the blur within this.
@@ -270,7 +303,39 @@ impl PanelCtl {
         self.open.is_some()
     }
 
-    pub fn command(&mut self, c: PanelCommand, cx: &mut App) {
+    /// Open and on screen.
+    pub fn is_shown(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.window.is_some())
+    }
+
+    /// The open panel's session (shown or hidden).
+    pub fn session(&self) -> Option<&str> {
+        self.open.as_ref().map(|o| o.session.as_str())
+    }
+
+    /// The panel is shown and has the keyboard, or was just mapped and hasn't had its first
+    /// `enter` yet ([`KEYBOARD_GRACE`]): for the "is the game in front" verdict.
+    pub fn has_keyboard(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.window.is_some() && (o.keyboard.is_some() || (!o.had_keyboard && o.mapped_at.is_some_and(|t| t.elapsed() < KEYBOARD_GRACE))))
+    }
+
+    /// Since when the shown panel has had the keyboard.
+    pub fn keyboard_since(&self) -> Option<Instant> {
+        self.open.as_ref().filter(|o| o.window.is_some()).and_then(|o| o.keyboard)
+    }
+
+    /// Hyprland's window for `session` (the one whose process has `QUIVER_SESSION`), when
+    /// Hyprland is there: what ties the session to its toplevel most surely.
+    pub fn hypr_game_window(&mut self, session: &str) -> Option<hypr::Window> {
+        let h = self.hypr()?;
+        let active = h.active_window();
+        let clients = h.clients();
+        hypr::game_window(&clients, active.as_ref(), session, &[], std::path::Path::new("/proc")).cloned()
+    }
+
+    /// `show`: whether the game is in front when the command comes (else the panel opens
+    /// hidden, and shows when the game is in front).
+    pub fn command(&mut self, c: PanelCommand, show: Option<String>, cx: &mut App) {
         if c.seq > 0 {
             self.report.handled_seq = self.report.handled_seq.max(c.seq);
         }
@@ -292,7 +357,7 @@ impl PanelCtl {
             // Already open: switch section (or session).
             if o.session == session {
                 if let Some(s) = c.section {
-                    let _ = o.handle.update(cx, |v, _, cx| {
+                    o.view.update(cx, |v, cx| {
                         v.nav.select_section(s);
                         cx.notify();
                     });
@@ -301,14 +366,37 @@ impl PanelCtl {
             }
             self.close(cx);
         }
-        if let Err(e) = self.open(&session, c.section, c.monitor.as_deref(), cx) {
+        if let Err(e) = self.open(&session, c.section, c.monitor.as_deref(), show, cx) {
             tracing::warn!("panel: {e:#}");
             self.report.last_error = Some(format!("{e:#}"));
             self.report_now();
         }
     }
 
-    fn open(&mut self, session: &str, section: Option<PanelSection>, monitor: Option<&str>, cx: &mut App) -> Result<()> {
+    /// The backdrop: the Sight layer blurs the game's own frames when it can (any compositor);
+    /// else the compositor's blur, else the dim. Starts the layer's request.
+    fn pick_backdrop(&mut self, session: &str) -> (Backdrop, String) {
+        self.game_blur = None;
+        match self.layers.get(session) {
+            Some(l) if l.ready => match GameBlur::start(session, &l.image) {
+                Ok(g) => {
+                    self.game_blur = Some(g);
+                    (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
+                }
+                Err(e) => {
+                    let (b, d) = self.compositor_backdrop();
+                    (b, format!("asking the Sight layer to blur failed ({e:#}); {d}"))
+                }
+            },
+            l => {
+                let why = l.map_or_else(|| "no Sight layer state for this session".to_owned(), |l| format!("the Sight layer can't blur: {}", l.reason));
+                let (b, d) = self.compositor_backdrop();
+                (b, format!("{why}; {d}"))
+            }
+        }
+    }
+
+    fn open(&mut self, session: &str, section: Option<PanelSection>, monitor: Option<&str>, hidden: Option<String>, cx: &mut App) -> Result<()> {
         if !self.layer_shell {
             anyhow::bail!("no layer-shell here (not a Wayland session, or headless)");
         }
@@ -329,28 +417,6 @@ impl PanelCtl {
                 (active.map(|a| a.address), game, mon)
             }
         };
-        // The backdrop: the Sight layer blurs the game's own frames when it can (any
-        // compositor); else the compositor's blur, else the dim.
-        self.game_blur = None;
-        let (backdrop, detail) = match self.layers.get(session) {
-            Some(l) if l.ready => match GameBlur::start(session, &l.image) {
-                Ok(g) => {
-                    self.game_blur = Some(g);
-                    (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
-                }
-                Err(e) => {
-                    let (b, d) = self.compositor_backdrop();
-                    (b, format!("asking the Sight layer to blur failed ({e:#}); {d}"))
-                }
-            },
-            l => {
-                let why = l.map_or_else(|| "no Sight layer state for this session".to_owned(), |l| format!("the Sight layer can't blur: {}", l.reason));
-                let (b, d) = self.compositor_backdrop();
-                (b, format!("{why}; {d}"))
-            }
-        };
-        let logical = mon.as_ref().map(|m| m.logical()).unwrap_or((1920.0, 1080.0));
-        let display_id = mon.as_ref().and_then(|m| crate::desktop::display_named(cx, &m.name));
         let flavor = self.hypr.as_ref().map(|h| h.flavor);
         let quit: Option<std::rc::Rc<dyn Fn() -> Result<(), String>>> = game_addr.clone().zip(flavor).map(|(addr, flavor)| {
             let f: std::rc::Rc<dyn Fn() -> Result<(), String>> = std::rc::Rc::new(move || match Hypr::with_flavor(flavor) {
@@ -364,65 +430,210 @@ impl PanelCtl {
         nav.open(section);
         let footer = Footer { pad: self.pad_name.clone().unwrap_or_default(), pad_shared: self.pad_name.is_some() && !hyprpad_running() };
         let sid = session.to_owned();
-        let namespace = self.namespace.clone();
-        let opts = WindowOptions {
-            titlebar: None,
-            window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(logical.0), px(logical.1)) })),
-            app_id: Some("quiver-sight".into()),
-            focus: true,
-            window_background: WindowBackgroundAppearance::Transparent,
-            display_id,
-            kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace,
-                layer: Layer::Overlay,
-                anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
-                // Over bars' exclusive zones too: the whole output is the panel's.
-                exclusive_zone: Some(px(-1.)),
-                keyboard_interactivity: KeyboardInteractivity::Exclusive,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let handle = cx.open_window(opts, move |window, cx| {
-            cx.new(|cx| {
-                let mut v = PanelView::new(sid, PanelData::default(), nav, backdrop, wiring, cx);
-                v.footer = footer;
-                window.focus(&v.focus, cx);
-                v
-            })
-        })?;
-        tracing::info!(session, monitor = ?mon.as_ref().map(|m| &m.name), backdrop = backdrop.as_str(), %detail, return_to = ?return_to, game_window = ?game_addr, "panel opened");
-        self.open = Some(Open { handle, session: session.to_owned() });
+        // The view outlives its windows: hiding the panel drops the surface, not this.
+        let view = cx.new(|cx| {
+            let mut v = PanelView::new(sid, PanelData::default(), nav, Backdrop::Dim, wiring, cx);
+            v.footer = footer;
+            v
+        });
+        let logical = mon.as_ref().map(|m| m.logical()).unwrap_or((1920.0, 1080.0));
+        self.open = Some(Open {
+            view,
+            window: None,
+            session: session.to_owned(),
+            monitor: mon.as_ref().map(|m| m.name.clone()),
+            logical,
+            mapped_at: None,
+            keyboard: None,
+            had_keyboard: false,
+            map_gen: 0,
+            away_since: None,
+            interactivity: KeyboardInteractivity::OnDemand,
+        });
         self.report = PanelReport {
             open: true,
-            section: self.nav.section,
+            section: section.unwrap_or(self.nav.section),
             session: Some(session.to_owned()),
             monitor: mon.map(|m| m.name),
-            backdrop,
-            backdrop_detail: detail,
             return_to,
             handled_seq: self.report.handled_seq,
             ..Default::default()
         };
-        if let Some(s) = section {
-            self.report.section = s;
+        tracing::info!(session, monitor = ?self.report.monitor, return_to = ?self.report.return_to, game_window = ?game_addr, hidden = ?hidden, "panel opened");
+        match hidden {
+            None => self.map(cx)?,
+            Some(why) => {
+                self.report.hidden = Some(why);
+                self.report_now();
+            }
         }
-        self.report_now();
         self.send(LinkReq::Load { session: session.to_owned(), part: Part::All, view: None });
         self.send(LinkReq::Subscribe { session: session.to_owned() });
         Ok(())
     }
 
+    /// Puts the open panel on screen (at open, and each time the game is in front again):
+    /// a new layer surface around the same view, the backdrop picked anew.
+    fn map(&mut self, cx: &mut App) -> Result<()> {
+        let Some(o) = &self.open else { return Ok(()) };
+        if o.window.is_some() {
+            return Ok(());
+        }
+        let session = o.session.clone();
+        let (backdrop, detail) = self.pick_backdrop(&session);
+        let Some(o) = &mut self.open else { return Ok(()) };
+        let display_id = o.monitor.as_deref().and_then(|m| crate::desktop::display_named(cx, m));
+        let view = o.view.clone();
+        view.update(cx, |v, cx| {
+            v.backdrop = backdrop;
+            cx.notify();
+        });
+        o.map_gen += 1;
+        let map_gen = o.map_gen;
+        let ui = self.ui.clone();
+        let opts = WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(o.logical.0), px(o.logical.1)) })),
+            app_id: Some("quiver-sight".into()),
+            focus: true,
+            window_background: WindowBackgroundAppearance::Transparent,
+            display_id,
+            kind: WindowKind::LayerShell(LayerShellOptions {
+                namespace: self.namespace.clone(),
+                layer: Layer::Overlay,
+                anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+                // Over bars' exclusive zones too: the whole output is the panel's.
+                exclusive_zone: Some(px(-1.)),
+                // On demand, not exclusive: the compositor focuses it when it maps (Hyprland
+                // does), and can still take the keyboard away on a workspace switch or a
+                // focus change, which is what hides the panel (an exclusive surface keeps the
+                // keyboard on every workspace, and Hyprland then refuses every focus change,
+                // so the game's toplevel never stops being active). If the keyboard doesn't
+                // come, the panel is mapped again exclusive (`front`).
+                keyboard_interactivity: o.interactivity,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let root = view.clone();
+        let handle = cx.open_window(opts, move |window, cx| {
+            let focus = root.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            root.update(cx, |_, cx| {
+                // Keyboard focus comes and goes with the compositor's: tell the controller.
+                cx.observe_window_activation(window, move |_, window, _| {
+                    if let Some(ui) = &ui {
+                        let _ = ui.unbounded_send(Msg::PanelKeyboard { map_gen, active: window.is_window_active() });
+                    }
+                })
+                .detach();
+            });
+            root
+        })?;
+        o.window = Some(handle);
+        o.mapped_at = Some(Instant::now());
+        o.keyboard = None;
+        o.had_keyboard = false;
+        o.away_since = None;
+        tracing::info!(session = %o.session, monitor = ?o.monitor, backdrop = backdrop.as_str(), %detail, interactivity = ?o.interactivity, "panel shown");
+        self.report.backdrop = backdrop;
+        self.report.backdrop_detail = detail;
+        self.report.hidden = None;
+        self.report_now();
+        Ok(())
+    }
+
+    /// Takes the open panel off screen without closing it: the surface goes (and with it the
+    /// keyboard and hyprpad's `quiver-sight` mode), the layer's blur request is dropped (the
+    /// game isn't visible), the view and its state stay.
+    fn hide(&mut self, why: String, cx: &mut App) {
+        let Some(o) = &mut self.open else { return };
+        let Some(h) = o.window.take() else { return };
+        let _ = h.update(cx, |_, w, _| w.remove_window());
+        o.mapped_at = None;
+        o.keyboard = None;
+        o.away_since = None;
+        self.game_blur = None;
+        tracing::info!(session = %o.session, %why, "panel hidden: the game isn't in front");
+        self.report.hidden = Some(why);
+        self.report_now();
+    }
+
+    /// The window's keyboard focus changed (from the map numbered `map_gen`).
+    pub fn keyboard(&mut self, map_gen: u64, active: bool) {
+        let Some(o) = &mut self.open else { return };
+        if o.map_gen != map_gen || o.window.is_none() {
+            return;
+        }
+        o.keyboard = if active { Some(o.keyboard.unwrap_or_else(Instant::now)) } else { None };
+        o.had_keyboard |= active;
+        tracing::debug!(active, "panel keyboard");
+    }
+
+    /// Is the game in front ([`crate::front`])? Hides the panel when it isn't for
+    /// [`HIDE_AFTER`], shows it again when it is (or when nothing can tell any more). Returns
+    /// when to ask again, if a timer is pending.
+    pub fn front(&mut self, v: &Verdict, game_window: Option<String>, cx: &mut App) -> Option<Duration> {
+        let o = self.open.as_mut()?;
+        let now = Instant::now();
+        let changed = self.report.front != v.why() || self.report.game_window != game_window;
+        self.report.front = v.why().to_owned();
+        self.report.game_window = game_window;
+        let shown = o.window.is_some();
+        let recheck = match (shown, v.away()) {
+            (true, true) => {
+                let since = *o.away_since.get_or_insert(now);
+                let left = HIDE_AFTER.saturating_sub(now.saturating_duration_since(since));
+                if left.is_zero() {
+                    self.hide(v.why().to_owned(), cx);
+                    return None;
+                }
+                Some(left)
+            }
+            (true, false) => {
+                o.away_since = None;
+                // Mapped on demand, and the keyboard never came: map it again exclusive (a
+                // compositor that doesn't focus on-demand surfaces when they map).
+                let waited = o.mapped_at.map(|t| now.saturating_duration_since(t));
+                if !o.had_keyboard && o.interactivity == KeyboardInteractivity::OnDemand && waited.is_some_and(|w| w >= KEYBOARD_GRACE) && matches!(v, Verdict::Front(_)) {
+                    tracing::info!("the panel didn't get the keyboard on demand: mapping it again with exclusive keyboard focus");
+                    o.interactivity = KeyboardInteractivity::Exclusive;
+                    if let Some(h) = o.window.take() {
+                        let _ = h.update(cx, |_, w, _| w.remove_window());
+                    }
+                    self.game_blur = None;
+                    if let Err(e) = self.map(cx) {
+                        tracing::warn!("panel: {e:#}");
+                    }
+                    return None;
+                }
+                // Until the first `enter` the grace counts as having the keyboard: ask again
+                // when it ends.
+                waited.filter(|w| !o.had_keyboard && *w < KEYBOARD_GRACE).map(|w| KEYBOARD_GRACE - w + Duration::from_millis(10))
+            }
+            (false, false) => {
+                if let Err(e) = self.map(cx) {
+                    tracing::warn!("panel: {e:#}");
+                    self.report.last_error = Some(format!("{e:#}"));
+                }
+                return None;
+            }
+            (false, true) => None,
+        };
+        if changed {
+            self.report_now();
+        }
+        recheck
+    }
+
     pub fn close(&mut self, cx: &mut App) {
         let Some(o) = self.open.take() else { return };
-        if let Ok(nav) = o.handle.update(cx, |v, w, _| {
-            let nav = v.nav.clone();
-            w.remove_window();
-            nav
-        }) {
-            self.nav = nav;
-            self.nav.confirm = None;
+        let shown = o.window.is_some();
+        if let Some(h) = &o.window {
+            let _ = h.update(cx, |_, w, _| w.remove_window());
         }
+        self.nav = o.view.read(cx).nav.clone();
+        self.nav.confirm = None;
         self.send(LinkReq::Unsubscribe);
         // The layer fades the blur out over the game's next frames.
         self.game_blur = None;
@@ -432,14 +643,18 @@ impl PanelCtl {
             if rule {
                 h.blur_off();
             }
-            if let Some(a) = &back
+            // Only from on screen: closing a hidden panel (the user is elsewhere) mustn't
+            // pull focus back to the game.
+            if shown
+                && let Some(a) = &back
                 && let Err(e) = h.focus(a)
             {
                 tracing::info!("giving focus back to {a}: {e}");
             }
         }
-        tracing::info!(session = %o.session, "panel closed");
+        tracing::info!(session = %o.session, hidden = !shown, "panel closed");
         self.report.open = false;
+        self.report.hidden = None;
         self.report.section = self.nav.section;
         self.report_now();
     }
@@ -453,7 +668,7 @@ impl PanelCtl {
 
     fn with_view(&self, cx: &mut App, f: impl FnOnce(&mut PanelView, &mut gpui::Context<PanelView>)) {
         if let Some(o) = &self.open {
-            let _ = o.handle.update(cx, |v, _, cx| {
+            o.view.update(cx, |v, cx| {
                 f(v, cx);
                 cx.notify();
             });
@@ -486,7 +701,9 @@ impl PanelCtl {
 
     pub fn pad(&mut self, e: PadEvent, cx: &mut App) {
         match e {
-            PadEvent::Input(i) if self.is_open() => self.with_view(cx, |v, cx| v.input(i, cx)),
+            // Only on screen: a hidden panel's input isn't grabbed (the pad is the game's or
+            // the desktop's again).
+            PadEvent::Input(i) if self.is_shown() => self.with_view(cx, |v, cx| v.input(i, cx)),
             PadEvent::Scroll(_) | PadEvent::Input(_) => {}
             PadEvent::Chord => {
                 tracing::info!("controller chord: toggling the panel");
@@ -514,7 +731,9 @@ impl PanelCtl {
 
     /// Redraws the clock and play time (called once a second while open).
     pub fn tick(&mut self, cx: &mut App) {
-        self.with_view(cx, |_, _| {});
+        if self.is_shown() {
+            self.with_view(cx, |_, _| {});
+        }
     }
 
     /// Feeds an input as if from the keyboard (tests, demo).
@@ -524,7 +743,7 @@ impl PanelCtl {
 
     /// Shows `data` without quiverd (the demo).
     pub fn open_with(&mut self, session: &str, section: Option<PanelSection>, data: PanelData, cx: &mut App) -> Result<()> {
-        self.open(session, section, None, cx)?;
+        self.open(session, section, None, None, cx)?;
         self.with_view(cx, |v, _| v.data = data);
         Ok(())
     }

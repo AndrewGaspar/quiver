@@ -35,7 +35,7 @@ use wayland::{Cmd, Game, Server, ServerOpts, keymap_fds_open, socketpair, wait_f
 fn tick_until(want: u32) -> Vec<Action> {
     let mut presses = Vec::new();
     let ok = wait_for(3.0, || {
-        presses.extend(layer::service(Instant::now()));
+        presses.extend(layer::service(Instant::now(), true));
         layer::state() == want
     });
     assert!(ok, "state {} (wanted {want})", layer::state());
@@ -48,11 +48,11 @@ fn tick_until(want: u32) -> Vec<Action> {
 fn presses(n: usize) -> Vec<Action> {
     let mut got = Vec::new();
     wait_for(2.0, || {
-        got.extend(layer::service(Instant::now()));
+        got.extend(layer::service(Instant::now(), true));
         got.len() >= n
     });
     std::thread::sleep(Duration::from_millis(30));
-    got.extend(layer::service(Instant::now()));
+    got.extend(layer::service(Instant::now(), true));
     got
 }
 
@@ -83,7 +83,7 @@ fn keys_on_the_games_own_wayland_connection() {
     server.sync();
     assert!(wait_for(2.0, || game.seen.enters.load(Ordering::Relaxed) == 1));
     assert_eq!(layer::state(), KEYS_WL_NONE);
-    assert!(layer::service(Instant::now()).is_empty(), "no surface: nothing to do");
+    assert!(layer::service(Instant::now(), true).is_empty(), "no surface: nothing to do");
 
     // vkCreateWaylandSurfaceKHR: noted; the next ticks bind seat and keyboard.
     layer::surface_created(1, 10, game.display);
@@ -118,6 +118,22 @@ fn keys_on_the_games_own_wayland_connection() {
     assert!(wait_for(2.0, || game.seen.keys.load(Ordering::Relaxed) == 18));
     assert_eq!(presses(2), [Action::Next, Action::Toggle]);
 
+    // Focus (SIGHT §14): our keyboard's enter/leave, serviced also while the game doesn't
+    // present (a game hidden on another workspace may stop).
+    assert_eq!(layer::focused(), Some(true));
+    server.send(Cmd::Leave);
+    server.sync();
+    assert!(wait_for(2.0, || {
+        layer::service(Instant::now(), false);
+        layer::focused() == Some(false)
+    }));
+    server.send(Cmd::Focus(vec![]));
+    server.sync();
+    assert!(wait_for(2.0, || {
+        layer::service(Instant::now(), false);
+        layer::focused() == Some(true)
+    }));
+
     // Focus leaves; it comes back with Shift+F3 held (the alt-tab chord): no press. F3 again
     // with Shift still held: a press.
     server.send(Cmd::Leave);
@@ -125,18 +141,19 @@ fn keys_on_the_games_own_wayland_connection() {
     server.keys(&[(KEY_F3, false), (KEY_F3, true), (KEY_F3, false), (KEY_LEFTSHIFT, false)]);
     assert!(wait_for(2.0, || game.seen.keys.load(Ordering::Relaxed) == 22));
     assert_eq!(presses(1), [Action::Toggle]);
-    assert_eq!(game.seen.enters.load(Ordering::Relaxed), 2);
+    assert_eq!(game.seen.enters.load(Ordering::Relaxed), 3);
 
     // vkDestroySurfaceKHR of the last surface: our keyboard and seat are released at once;
     // the game's stay and keep getting keys.
     layer::surface_destroyed(1, 10);
     assert_eq!(layer::state(), KEYS_WL_STOPPED);
+    assert_eq!(layer::focused(), None, "no keyboard of ours: unknown");
     server.sync();
     assert!(wait_for(2.0, || st.keyboards_live.load(Ordering::Relaxed) == 1 && st.seats_live.load(Ordering::Relaxed) == 1));
     assert_eq!((st.keyboards_released.load(Ordering::Relaxed), st.seats_released.load(Ordering::Relaxed)), (1, 1));
     server.keys(&[(KEY_LEFTSHIFT, true), (KEY_F3, true), (KEY_F3, false), (KEY_LEFTSHIFT, false)]);
     assert!(wait_for(2.0, || game.seen.keys.load(Ordering::Relaxed) == 26));
-    assert!(layer::service(Instant::now()).is_empty());
+    assert!(layer::service(Instant::now(), true).is_empty());
 
     // A new surface attaches again; vkDestroyInstance with it still alive releases too.
     layer::surface_created(1, 11, game.display);
@@ -157,13 +174,13 @@ fn keys_on_the_games_own_wayland_connection() {
     let (server, game) = pair(ServerOpts { seat: true, keyboard_cap: false }).unwrap();
     layer::surface_created(2, 20, game.display);
     assert!(wait_for(2.0, || {
-        layer::service(Instant::now());
+        layer::service(Instant::now(), true);
         server.stats.seats_bound.load(Ordering::Relaxed) == 2
     }));
     std::thread::sleep(Duration::from_millis(50));
-    layer::service(Instant::now());
+    layer::service(Instant::now(), true);
     assert_eq!(layer::state(), KEYS_WL_STARTING);
-    layer::service(Instant::now() + layer::SETUP_TIMEOUT + Duration::from_secs(1));
+    layer::service(Instant::now() + layer::SETUP_TIMEOUT + Duration::from_secs(1), true);
     assert_eq!(layer::state(), KEYS_WL_NO_KEYBOARD);
     layer::surface_destroyed(2, 20);
     assert_eq!(layer::state(), KEYS_WL_STOPPED);
@@ -174,11 +191,11 @@ fn keys_on_the_games_own_wayland_connection() {
     let (server, game) = pair(ServerOpts { seat: false, keyboard_cap: false }).unwrap();
     layer::surface_created(3, 30, game.display);
     for _ in 0..10 {
-        layer::service(Instant::now());
+        layer::service(Instant::now(), true);
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(layer::state(), KEYS_WL_STARTING);
-    layer::service(Instant::now() + layer::SETUP_TIMEOUT + Duration::from_secs(1));
+    layer::service(Instant::now() + layer::SETUP_TIMEOUT + Duration::from_secs(1), true);
     assert_eq!(layer::state(), KEYS_WL_NO_SEAT);
     layer::surface_destroyed(3, 30);
     close(server, game);
@@ -191,7 +208,7 @@ fn keys_on_the_games_own_wayland_connection() {
     server.sync();
     tick_until(KEYS_WL_DISPLAY_ERROR);
     for _ in 0..5 {
-        layer::service(Instant::now());
+        layer::service(Instant::now(), true);
     }
     assert_eq!(layer::state(), KEYS_WL_DISPLAY_ERROR);
     layer::surface_destroyed(4, 40);

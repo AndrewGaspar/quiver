@@ -797,6 +797,12 @@ impl PerfHub {
                 s.store.note_presenter(shown, now);
                 s.noted = shown;
             }
+            // The game's window in front (SIGHT §14): quiver-sight ties the panel and the
+            // desktop HUD to it, so a change goes out at once, not with the next model.
+            let game_focus = hud::game_focus(s.key_layer().or(s.live_layer()), now);
+            if s.model.as_ref().is_some_and(|m| m.game_focus != game_focus) {
+                s.dirty = true;
+            }
             if !s.dirty && now < s.next_model_ns {
                 continue;
             }
@@ -823,6 +829,7 @@ impl PerfHub {
                 image: image.as_deref().filter(|_| p == Presenter::Game),
                 monitor: s.monitor.as_deref(),
                 backdrop,
+                game_focus,
             };
             let mut m = hud::build_model(&inp, &s.store, now);
             if s.model.as_ref().is_some_and(|old| hud::same(old, &m)) {

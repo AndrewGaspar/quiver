@@ -33,6 +33,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # Wayland outputs are identified by a v5 UUID of their name (gpui_linux's WaylandDisplay).
 uuid = { version = "1", features = ["v5"] }
+# The compositor's toplevels (wlr-foreign-toplevel-management), on a connection of our own,
+# to tie the panel and the desktop HUD to the game's window (design/SIGHT.md §14). The same
+# versions gpui_linux already uses.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [dev-dependencies]
 image.workspace = true

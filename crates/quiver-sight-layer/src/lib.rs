@@ -50,6 +50,7 @@
 pub mod blur;
 mod compositor;
 mod ffi;
+pub mod focus;
 pub mod formats;
 pub mod graph;
 mod hooks;

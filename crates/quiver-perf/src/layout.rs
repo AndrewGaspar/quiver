@@ -274,6 +274,16 @@ pub const LAYER_BLUR_READY: u32 = 1 << 8;
 /// The layer blurred a present within the last half second (the panel's request is live and
 /// the game is presenting).
 pub const LAYER_BLURRING: u32 = 1 << 9;
+/// The layer can tell whether the game's window is the one the user has in front
+/// ([`LAYER_FOCUSED`] means something): its `wl_keyboard` on the game's Wayland connection is
+/// bound, or its X connection can read `_NET_ACTIVE_WINDOW`. Zero from a layer before it
+/// (SIGHT §14: the panel tied to the game window).
+pub const LAYER_FOCUS_KNOWN: u32 = 1 << 10;
+/// With [`LAYER_FOCUS_KNOWN`]: Wayland windows have the keyboard focus (the layer's
+/// `wl_keyboard` got `enter`, not `leave`); X11 windows are the active window
+/// (`_NET_ACTIVE_WINDOW` is one of the game's windows or an ancestor of its Vulkan surface's).
+/// Rewritten at once on a change, also while the game isn't presenting.
+pub const LAYER_FOCUSED: u32 = 1 << 11;
 
 /// `LayerStatus::backdrop_error`: why the layer can't blur behind the panel.
 pub const BACKDROP_ERR_NONE: u32 = 0;
@@ -662,6 +672,8 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_LAYER_X11_SURFACE", LAYER_X11_SURFACE as u64),
     ("QV_LAYER_BLUR_READY", LAYER_BLUR_READY as u64),
     ("QV_LAYER_BLURRING", LAYER_BLURRING as u64),
+    ("QV_LAYER_FOCUS_KNOWN", LAYER_FOCUS_KNOWN as u64),
+    ("QV_LAYER_FOCUSED", LAYER_FOCUSED as u64),
     ("QV_BACKDROP_ERR_NONE", BACKDROP_ERR_NONE as u64),
     ("QV_BACKDROP_ERR_FORMAT", BACKDROP_ERR_FORMAT as u64),
     ("QV_BACKDROP_ERR_USAGE", BACKDROP_ERR_USAGE as u64),

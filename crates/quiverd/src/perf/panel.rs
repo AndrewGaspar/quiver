@@ -70,8 +70,8 @@ impl PerfHub {
 
     pub fn panel_report(&self, report: PanelReport) {
         let mut p = self.panel_lock();
-        if p.report.as_ref().is_none_or(|(r, _)| r.open != report.open || r.backdrop != report.backdrop) {
-            tracing::info!(open = report.open, section = ?report.section, backdrop = report.backdrop.as_str(), detail = %report.backdrop_detail, "Sight panel reported");
+        if p.report.as_ref().is_none_or(|(r, _)| r.open != report.open || r.backdrop != report.backdrop || r.hidden != report.hidden) {
+            tracing::info!(open = report.open, hidden = ?report.hidden, section = ?report.section, backdrop = report.backdrop.as_str(), detail = %report.backdrop_detail, "Sight panel reported");
         }
         p.report = Some((report, Utc::now()));
     }
