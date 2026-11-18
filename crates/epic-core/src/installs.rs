@@ -121,7 +121,7 @@ impl Installs {
         let mut all = self.list()?;
         all.retain(|g| g.app_name != game.app_name);
         all.push(game);
-        all.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        all.sort_by_key(|g| g.title.to_lowercase());
         self.save(all)
     }
 

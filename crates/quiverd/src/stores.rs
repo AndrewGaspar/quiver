@@ -122,7 +122,15 @@ impl Daemon {
         }
         match first_err {
             Some(e) if parts.iter().all(Vec::is_empty) => Err(e),
-            _ => Ok(quiver_core::stores::merge_libraries(parts)),
+            _ => {
+                let mut lib = quiver_core::stores::merge_libraries(parts);
+                // Other stores' games Quiver is running (Epic).
+                let running = self.running_games.lock().unwrap().clone();
+                for e in lib.iter_mut().filter(|e| running.contains(&e.game)) {
+                    e.running = true;
+                }
+                Ok(lib)
+            }
         }
     }
 

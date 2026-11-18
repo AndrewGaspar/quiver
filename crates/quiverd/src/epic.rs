@@ -361,8 +361,30 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
         let options_revision = this.options.launched_revision(&session_id);
         this.options_watch(session_id.clone());
         this.tweaks_watch(session_id.clone());
+        // The prefix first, so cloud saves pulled before the launch land in a real one;
+        // then phase 3's session: saves pulled, achievements watched (never fails a launch).
+        let build = plan.api.settings.proton.as_ref().and_then(|n| quiver_core::launcher::resolve_proton(n).ok()).unwrap_or_else(|| this.cfg.proton.clone());
+        this.update_job(id, |j| j.status = "Preparing prefix…".into());
+        let prefix_ready = {
+            let (cfg, prefix) = (this.cfg.clone(), g.prefix.clone());
+            crate::run_local(move || async move { quiver_core::launcher::ensure_plain_prefix(&cfg, &prefix, &build).await }).await
+        };
+        let epic_session = match &prefix_ready {
+            Ok(()) => {
+                this.update_job(id, |j| j.status = "Syncing cloud saves…".into());
+                let s = crate::epicgame::begin(&this, &a, &g.prefix, Some(&g.install_dir), Some(session_id.clone())).await;
+                let note = s.note().to_owned();
+                if !note.is_empty() {
+                    this.update_job(id, |j| j.detail.push(format!("cloud saves: {note}")));
+                }
+                Some(s)
+            }
+            Err(_) => None,
+        };
         let (cfg, ev, sid, g2) = (this.cfg.clone(), this.clone(), session_id.clone(), g.clone());
-        let result = crate::run_local(move || async move {
+        let result = match prefix_ready {
+            Err(e) => Err(e),
+            Ok(()) => crate::run_local(move || async move {
             quiver_core::launcher::play_store_game(&cfg, &g2, &plan, store, |e| match e {
                 LaunchEvent::Detail(lines) => ev.update_job(id, |j| j.detail.extend(lines)),
                 LaunchEvent::Status(msg) => ev.update_job(id, |j| j.status = msg),
@@ -381,8 +403,15 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                 }
             })
             .await
-        })
-        .await;
+            })
+            .await,
+        };
+        if let Some(s) = epic_session {
+            let note = crate::epicgame::end(&this, s).await;
+            if !note.is_empty() {
+                this.update_job(id, |j| j.detail.push(note.clone()));
+            }
+        }
         if let Some(p) = &ovt_file {
             let _ = std::fs::remove_file(p);
         }

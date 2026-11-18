@@ -333,6 +333,10 @@ impl Epic {
         };
         anyhow::ensure!(!record.exe.is_empty(), "the manifest names no launch executable");
         self.installs.upsert(record.clone())?;
+        // The Saves tab knows where the game lives before its first launch.
+        if let Err(e) = self.remember_place(app, &record.prefix, Some(&record.dir)) {
+            tracing::info!(app, "remembering the install's place: {e:#}");
+        }
         let mut notes = vec![format!(
             "{} files written, {} kept, {} removed ({} downloaded)",
             report.files_written,
@@ -372,7 +376,7 @@ impl Epic {
         if build.manifest.files.is_empty() {
             return Ok(None);
         }
-        status(format!("Installing DLC {}…", if t.title.is_empty() { dlc_app } else { dlc_app }));
+        status(format!("Installing DLC {}…", t.dlc.iter().find(|d| d.app_name.as_deref() == Some(dlc_app)).map_or(dlc_app, |d| d.title.as_str())));
         let old = self.installed_manifest(dlc_app).ok();
         let source = build.source(&self.api.config.user_agent)?;
         content::install(content::Job {
@@ -526,6 +530,9 @@ impl Epic {
             adopted: true,
         };
         self.installs.upsert(record.clone())?;
+        if let Err(e) = self.remember_place(app, &record.prefix, Some(&record.dir)) {
+            tracing::info!(app, "remembering the install's place: {e:#}");
+        }
         let mut report = self.verify(app, progress).await?;
         report.repaired_files = repaired.0;
         report.repaired_bytes = repaired.1;

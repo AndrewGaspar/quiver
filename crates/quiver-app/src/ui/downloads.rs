@@ -368,17 +368,17 @@ impl Quiver {
             let Ok(q) = r else { return };
             let now = Instant::now();
             for e in q.iter().filter(|e| e.state.is_active()) {
-                let due = this.dl.last_sample.get(&Gid::from(e.product_id)).is_none_or(|t| now.duration_since(*t) >= Duration::from_millis(900));
+                let due = this.dl.last_sample.get(&Gid(e.game_ref())).is_none_or(|t| now.duration_since(*t) >= Duration::from_millis(900));
                 if due {
-                    this.dl.last_sample.insert(Gid::from(e.product_id), now);
-                    let s = this.dl.speeds.entry(Gid::from(e.product_id)).or_default();
+                    this.dl.last_sample.insert(Gid(e.game_ref()), now);
+                    let s = this.dl.speeds.entry(Gid(e.game_ref())).or_default();
                     s.push_back(e.speed);
                     while s.len() > SAMPLES {
                         s.pop_front();
                     }
                 }
             }
-            this.dl.speeds.retain(|id, _| q.iter().any(|e| e.product_id == *id));
+            this.dl.speeds.retain(|id, _| q.iter().any(|e| Gid(e.game_ref()) == *id));
             this.dl.queue = q;
         });
     }
@@ -441,7 +441,7 @@ impl Quiver {
             Btn::PauseAll => {
                 for e in self.dl.queue.clone() {
                     if e.state == QueueState::Queued || e.state.is_active() {
-                        self.queue_req(Request::QueuePause { game: e.product_id.into()}, None, cx);
+                        self.queue_req(Request::QueuePause { game: e.game_ref().into()}, None, cx);
                     }
                 }
                 self.show_toast("Pausing every download (each stops at a slice boundary)", cx);
@@ -449,7 +449,7 @@ impl Quiver {
             Btn::ResumeAll => {
                 for e in self.dl.queue.clone() {
                     if e.state == QueueState::Paused {
-                        self.queue_req(Request::QueueResume { game: e.product_id.into()}, None, cx);
+                        self.queue_req(Request::QueueResume { game: e.game_ref().into()}, None, cx);
                     }
                 }
                 self.show_toast("Resuming downloads", cx);
@@ -457,25 +457,25 @@ impl Quiver {
             Btn::Import => self.open_import(cx),
             Btn::Pause(id) => {
                 let m = format!("Pausing {}: it keeps its place", name(self, id));
-                self.queue_req(Request::QueuePause { game: id.pid().into()}, Some(m), cx);
+                self.queue_req(Request::QueuePause { game: id.0.into()}, Some(m), cx);
             }
-            Btn::Resume(id) => self.queue_req(Request::QueueResume { game: id.pid().into()}, Some(format!("Resuming {}", name(self, id))), cx),
-            Btn::Retry(id) => self.queue_req(Request::QueueResume { game: id.pid().into()}, Some(format!("Retrying {}", name(self, id))), cx),
+            Btn::Resume(id) => self.queue_req(Request::QueueResume { game: id.0.into()}, Some(format!("Resuming {}", name(self, id))), cx),
+            Btn::Retry(id) => self.queue_req(Request::QueueResume { game: id.0.into()}, Some(format!("Retrying {}", name(self, id))), cx),
             Btn::Remove(id) => {
                 let m = format!("Removed {} from the queue; its files stay, so installing again resumes", name(self, id));
-                self.queue_req(Request::QueueRemove { game: id.pid().into()}, Some(m), cx);
+                self.queue_req(Request::QueueRemove { game: id.0.into()}, Some(m), cx);
             }
             Btn::Up(id) | Btn::Down(id) => {
                 let to = if matches!(b, Btn::Up(_)) { QueueMove::Up } else { QueueMove::Down };
                 // Move now, so focus can follow; the daemon's order comes back with the reply.
-                if let Some(i) = self.dl.queue.iter().position(|e| e.product_id == id) {
+                if let Some(i) = self.dl.queue.iter().position(|e| Gid(e.game_ref()) == id) {
                     let j = if to == QueueMove::Up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < self.dl.queue.len()) };
                     if let Some(j) = j {
                         self.dl.queue.swap(i, j);
                         self.follow_row(Row::Queued(id));
                     }
                 }
-                self.call::<Vec<QueueEntry>, _>(Request::QueueMove { game: id.pid().into(), to }, cx, |this, r, cx| match r {
+                self.call::<Vec<QueueEntry>, _>(Request::QueueMove { game: id.0.into(), to }, cx, |this, r, cx| match r {
                     Ok(q) => this.dl.queue = q,
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
@@ -562,20 +562,20 @@ impl Quiver {
         head.push(Btn::Import);
         rows.push((Row::Header, head));
         for e in &active {
-            let id = e.product_id;
-            rows.push((Row::Active(Gid::from(id)), vec![Btn::Pause(Gid::from(id)), Btn::Remove(Gid::from(id)), Btn::Open(Gid::from(id))]));
+            let id = Gid(e.game_ref());
+            rows.push((Row::Active(id), vec![Btn::Pause(id), Btn::Remove(id), Btn::Open(id)]));
             if e.kind == QueueKind::Install {
-                rows.push((Row::Finish(Gid::from(id)), vec![Btn::FinishSteam(Gid::from(id)), Btn::FinishDesktop(Gid::from(id))]));
+                rows.push((Row::Finish(id), vec![Btn::FinishSteam(id), Btn::FinishDesktop(id)]));
             }
         }
         for e in &waiting {
-            let id = e.product_id;
-            let toggle = if e.state == QueueState::Paused { Btn::Resume(Gid::from(id)) } else { Btn::Pause(Gid::from(id)) };
-            rows.push((Row::Queued(Gid::from(id)), vec![Btn::Up(Gid::from(id)), Btn::Down(Gid::from(id)), toggle, Btn::Remove(Gid::from(id))]));
+            let id = Gid(e.game_ref());
+            let toggle = if e.state == QueueState::Paused { Btn::Resume(id) } else { Btn::Pause(id) };
+            rows.push((Row::Queued(id), vec![Btn::Up(id), Btn::Down(id), toggle, Btn::Remove(id)]));
         }
         for e in &failed {
-            let id = e.product_id;
-            rows.push((Row::Failed(Gid::from(id)), vec![Btn::Retry(Gid::from(id)), Btn::Remove(Gid::from(id))]));
+            let id = Gid(e.game_ref());
+            rows.push((Row::Failed(id), vec![Btn::Retry(id), Btn::Remove(id)]));
         }
         for (i, j) in self.recent_jobs().iter().enumerate() {
             let mut b = vec![Btn::Open(Gid(j.game))];
@@ -772,8 +772,8 @@ impl Quiver {
 
         // What's running.
         for e in &active {
-            let r = row_ix(Row::Active(Gid::from(e.product_id)));
-            let fr = row_ix(Row::Finish(Gid::from(e.product_id)));
+            let r = row_ix(Row::Active(Gid(e.game_ref())));
+            let fr = row_ix(Row::Finish(Gid(e.game_ref())));
             let el = self.render_active(th, e, main_w, r, fr, &rows, cx);
             if r < row_child.len() {
                 row_child[r] = Some(children.len());
@@ -835,7 +835,7 @@ impl Quiver {
                     .into_any_element(),
             );
             for (i, e) in waiting.iter().enumerate() {
-                let r = row_ix(Row::Queued(Gid::from(e.product_id)));
+                let r = row_ix(Row::Queued(Gid(e.game_ref())));
                 let el = self.render_queued(th, e, i + 1 == waiting.len(), r, &rows, cx);
                 if r < row_child.len() {
                     row_child[r] = Some(children.len());
@@ -861,7 +861,7 @@ impl Quiver {
                     .into_any_element(),
             );
             for (i, e) in failed.iter().enumerate() {
-                let r = row_ix(Row::Failed(Gid::from(e.product_id)));
+                let r = row_ix(Row::Failed(Gid(e.game_ref())));
                 let el = self.render_failed(th, e, i + 1 == failed.len(), r, &rows, cx);
                 if r < row_child.len() {
                     row_child[r] = Some(children.len());
@@ -953,8 +953,8 @@ impl Quiver {
 
     #[allow(clippy::too_many_arguments)]
     fn render_active(&mut self, th: &Theme, e: &QueueEntry, w: f32, r: usize, fr: usize, rows: &[(Row, Vec<Btn>)], cx: &mut Context<Self>) -> AnyElement {
-        let id = e.product_id;
-        let g = self.game(Gid::from(id)).cloned();
+        let id = Gid(e.game_ref());
+        let g = self.game(id).cloned();
         let job = self.job(e.job_id).cloned();
         let (done, total) = match &job {
             Some(j) if j.total > 0 => (j.downloaded, j.total),
@@ -1025,19 +1025,19 @@ impl Quiver {
 
         let btns = rows.get(r).map(|x| x.1.clone()).unwrap_or_default();
         let pausing = status.starts_with("Pausing") || status.starts_with("Cancelling");
-        let pause = button(("dl-pause", id as usize), th, Kind::OnArt, Size::Medium, Some(Icon::Pause), if pausing { "Pausing…" } else { "Pause" })
+        let pause = button(("dl-pause", id.ix()), th, Kind::OnArt, Size::Medium, Some(Icon::Pause), if pausing { "Pausing…" } else { "Pause" })
             .focus_ring(self.btn_focused(r, 0, btns.len()), th, 8.)
-            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Pause(Gid::from(id)), cx)));
-        let remove = button(("dl-x", id as usize), th, Kind::OnArt, Size::Medium, Some(Icon::X), "")
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Pause(id), cx)));
+        let remove = button(("dl-x", id.ix()), th, Kind::OnArt, Size::Medium, Some(Icon::X), "")
             .w(px(34.))
             .px(px(0.))
             .focus_ring(self.btn_focused(r, 1, btns.len()), th, 8.)
-            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(Gid::from(id)), cx)));
-        let open = button(("dl-open", id as usize), th, Kind::OnArt, Size::Medium, Some(Icon::ChevronRight), "")
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx)));
+        let open = button(("dl-open", id.ix()), th, Kind::OnArt, Size::Medium, Some(Icon::ChevronRight), "")
             .w(px(34.))
             .px(px(0.))
             .focus_ring(self.btn_focused(r, 2, btns.len()), th, 8.)
-            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Open(Gid::from(id)), cx)));
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Open(id), cx)));
 
         // Phases, like the installer reports them.
         let steps: Vec<(String, u8)> = match e.kind {
@@ -1072,7 +1072,7 @@ impl Quiver {
             v
         }));
 
-        let chart = self.render_throughput(th, Gid::from(id), w - 44., verifying);
+        let chart = self.render_throughput(th, id, w - 44., verifying);
         let mut body = div()
             .relative()
             .flex()
@@ -1131,12 +1131,12 @@ impl Quiver {
             .child(phase_row)
             .child(chart);
         if e.kind == QueueKind::Install {
-            let after = self.dl.after.get(&Gid::from(id)).copied().unwrap_or_default();
+            let after = self.dl.after.get(&id).copied().unwrap_or_default();
             let steam_running = matches!(&self.ui.steam, Some(Ok(s)) if s.running && s.root.is_some());
             let fb = rows.get(fr).map(|x| x.1.len()).unwrap_or(2);
             let check = |key: &'static str, on: bool, label: &str, f: bool, b: Btn, cx: &mut Context<Self>| {
                 div()
-                    .id((key, id as usize))
+                    .id((key, id.ix()))
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -1164,8 +1164,8 @@ impl Quiver {
                     .border_color(th.line1)
                     .text_size(px(12.5))
                     .child(caption("When it finishes", th.tx3))
-                    .child(check("dl-f-steam", after.steam, "Add to Steam", self.btn_focused(fr, 0, fb), Btn::FinishSteam(Gid::from(id)), cx))
-                    .child(check("dl-f-desk", after.desktop, "Create .desktop entry", self.btn_focused(fr, 1, fb), Btn::FinishDesktop(Gid::from(id)), cx))
+                    .child(check("dl-f-steam", after.steam, "Add to Steam", self.btn_focused(fr, 0, fb), Btn::FinishSteam(id), cx))
+                    .child(check("dl-f-desk", after.desktop, "Create .desktop entry", self.btn_focused(fr, 1, fb), Btn::FinishDesktop(id), cx))
                     .when(!tight, |d| d.child(div().flex_1()))
                     .child(div().text_size(px(11.5)).text_color(th.tx3).min_w_0().when(!tight, |d| d.truncate()).child(if after.steam && steam_running {
                         "Steam is running: the shortcut shows after it restarts, and Quiver asks first"
@@ -1255,7 +1255,7 @@ impl Quiver {
     }
 
     fn render_queued(&mut self, th: &Theme, e: &QueueEntry, last: bool, r: usize, rows: &[(Row, Vec<Btn>)], cx: &mut Context<Self>) -> AnyElement {
-        let id = e.product_id;
+        let id = Gid(e.game_ref());
         let btns = rows.get(r).map(|x| x.1.clone()).unwrap_or_default();
         let n = btns.len();
         let paused = e.state == QueueState::Paused;
@@ -1276,22 +1276,22 @@ impl Quiver {
         } else {
             pill(th, PillKind::Muted, None, format!("Queued · #{}", e.position))
         };
-        let thumb = self.thumb(th, Gid::from(id), 34., 40., cx);
+        let thumb = self.thumb(th, id, 34., 40., cx);
         let tight = self.dl_tight();
-        let first_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| x.product_id).next() == Some(id);
-        let last_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| x.product_id).last() == Some(id);
-        let up = ibtn(("q-up", id as usize), th, Icon::ChevronUp, None, self.btn_focused(r, 0, n))
+        let first_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| Gid(x.game_ref())).next() == Some(id);
+        let last_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| Gid(x.game_ref())).next_back() == Some(id);
+        let up = ibtn(("q-up", id.ix()), th, Icon::ChevronUp, None, self.btn_focused(r, 0, n))
             .when(first_q, |d| d.opacity(0.4))
-            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Up(Gid::from(id)), cx)));
-        let down = ibtn(("q-down", id as usize), th, Icon::ChevronDown, None, self.btn_focused(r, 1, n))
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Up(id), cx)));
+        let down = ibtn(("q-down", id.ix()), th, Icon::ChevronDown, None, self.btn_focused(r, 1, n))
             .when(last_q, |d| d.opacity(0.4))
-            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Down(Gid::from(id)), cx)));
-        let tb = if paused { Btn::Resume(Gid::from(id)) } else { Btn::Pause(Gid::from(id)) };
-        let toggle = ibtn(("q-pp", id as usize), th, if paused { Icon::Play } else { Icon::Pause }, None, self.btn_focused(r, 2, n))
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Down(id), cx)));
+        let tb = if paused { Btn::Resume(id) } else { Btn::Pause(id) };
+        let toggle = ibtn(("q-pp", id.ix()), th, if paused { Icon::Play } else { Icon::Pause }, None, self.btn_focused(r, 2, n))
             .on_click(cx.listener(move |this, _, _, cx| this.press(tb, cx)));
-        let remove = ibtn(("q-x", id as usize), th, Icon::X, None, self.btn_focused(r, 3, n)).on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(Gid::from(id)), cx)));
+        let remove = ibtn(("q-x", id.ix()), th, Icon::X, None, self.btn_focused(r, 3, n)).on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx)));
         seg(th, false, last)
-            .id(("q-row", id as usize))
+            .id(("q-row", id.ix()))
             .when(tight, |d| d.flex_wrap())
             .items_center()
             .gap_x(px(if tight { 10. } else { 14. }))
@@ -1309,7 +1309,7 @@ impl Quiver {
                     .flex_1()
                     .min_w(px(if tight { 140. } else { 0. }))
                     .gap(px(2.))
-                    .child(div().font_weight(SEMIBOLD).truncate().child(self.game_name(Gid::from(id))))
+                    .child(div().font_weight(SEMIBOLD).truncate().child(self.game_name(id)))
                     .child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(what.join(" · "))),
             )
             .child(state)
@@ -1321,9 +1321,9 @@ impl Quiver {
     }
 
     fn render_failed(&mut self, th: &Theme, e: &QueueEntry, last: bool, r: usize, rows: &[(Row, Vec<Btn>)], cx: &mut Context<Self>) -> AnyElement {
-        let id = e.product_id;
+        let id = Gid(e.game_ref());
         let n = rows.get(r).map(|x| x.1.len()).unwrap_or(2);
-        let thumb = self.thumb(th, Gid::from(id), 34., 40., cx);
+        let thumb = self.thumb(th, id, 34., 40., cx);
         let err = e.error.clone().unwrap_or_else(|| "Failed".into());
         let progress_txt = (e.total_bytes > 0).then(|| format!(" · stopped at {} of {}", gb(e.done_bytes), gb(e.total_bytes)));
         let tight = self.dl_tight();
@@ -1351,22 +1351,22 @@ impl Quiver {
                             .flex_wrap()
                             .items_center()
                             .gap_x(px(8.))
-                            .child(div().font_weight(SEMIBOLD).child(self.game_name(Gid::from(id))))
+                            .child(div().font_weight(SEMIBOLD).child(self.game_name(id)))
                             .child(div().text_color(th.tx3).text_size(px(12.)).child(format!("{} failed{}", kind_word(e.kind), progress_txt.unwrap_or_default()))),
                     )
                     .child(div().text_size(px(12.)).text_color(th.bad).truncate().child(err)),
             )
             .when(!tight, |d| d.child(who(th, &e.source)))
             .child(
-                button(("f-retry", id as usize), th, Kind::Secondary, Size::Small, Some(Icon::RotateCcw), "Retry")
+                button(("f-retry", id.ix()), th, Kind::Secondary, Size::Small, Some(Icon::RotateCcw), "Retry")
                     .when(tight, |d| d.ml_auto())
                     .focus_ring(self.btn_focused(r, 0, n), th, 6.)
-                    .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Retry(Gid::from(id)), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Retry(id), cx))),
             )
             .child(
-                button(("f-x", id as usize), th, Kind::Ghost, Size::Small, None, "Remove")
+                button(("f-x", id.ix()), th, Kind::Ghost, Size::Small, None, "Remove")
                     .focus_ring(self.btn_focused(r, 1, n), th, 6.)
-                    .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(Gid::from(id)), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx))),
             )
             .into_any_element()
     }
@@ -1586,7 +1586,7 @@ impl Quiver {
     }
 
     fn request_install_preview(&mut self, id: Gid, language: Option<String>, cx: &mut Context<Self>) {
-        self.call::<InstallPreview, _>(Request::InstallPreview { game: id.pid().into(), language: language.clone() }, cx, move |this, r, _| {
+        self.call::<InstallPreview, _>(Request::InstallPreview { game: id.0.into(), language: language.clone() }, cx, move |this, r, _| {
             if let Some(DlDialog::Install { id: did, preview, language: lang, .. }) = &mut this.dl.dialog
                 && *did == id
                 && *lang == language
@@ -1604,7 +1604,7 @@ impl Quiver {
         self.nav.close_overlay();
         self.dl.dialog = Some(DlDialog::Update { id, preview: None });
         self.dl.dsel = usize::MAX;
-        self.call::<UpdatePreview, _>(Request::UpdatePreview { game: id.pid().into()}, cx, move |this, r, _| {
+        self.call::<UpdatePreview, _>(Request::UpdatePreview { game: id.0.into()}, cx, move |this, r, _| {
             if let Some(DlDialog::Update { id: did, preview }) = &mut this.dl.dialog
                 && *did == id
             {
@@ -1624,7 +1624,7 @@ impl Quiver {
     }
 
     fn load_verify_report(&mut self, id: Gid, cx: &mut Context<Self>) {
-        self.call::<Option<VerifyReport>, _>(Request::VerifyResult { game: id.pid().into()}, cx, move |this, r, _| {
+        self.call::<Option<VerifyReport>, _>(Request::VerifyResult { game: id.0.into()}, cx, move |this, r, _| {
             if let Some(DlDialog::Verify { id: did, report, .. }) = &mut this.dl.dialog
                 && *did == id
             {
@@ -1733,7 +1733,7 @@ impl Quiver {
                 let name = self.game_name(id);
                 let busy = self.dl.queue.iter().any(|e| e.state.is_active());
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Install { game: id.pid().into(), language }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Install { game: id.0.into(), language }, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         if after != After::default() {
                             this.dl.after.insert(id, after);
@@ -1747,7 +1747,7 @@ impl Quiver {
             Do::Update(id) => {
                 let name = self.game_name(id);
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Update { game: id.pid().into()}, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Update { game: id.0.into()}, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         this.show_toast(format!("Updating {name}"), cx);
                         this.load_queue(cx);
@@ -1757,7 +1757,7 @@ impl Quiver {
             }
             Do::OpenVerify(id) => self.open_verify_dialog(id, cx),
             Do::Verify(id) => {
-                self.call::<u64, _>(Request::Verify { game: id.pid().into(), repair: false }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Verify { game: id.0.into(), repair: false }, cx, move |this, r, cx| match r {
                     Ok(j) => {
                         if let Some(DlDialog::Verify { id: did, job, .. }) = &mut this.dl.dialog
                             && *did == id
@@ -1772,7 +1772,7 @@ impl Quiver {
             Do::Repair(id) => {
                 let name = self.game_name(id);
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Verify { game: id.pid().into(), repair: true }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Verify { game: id.0.into(), repair: true }, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         this.show_toast(format!("Repair of {name} queued: it re-downloads only the slices that failed"), cx);
                         this.nav.open_section(Section::Downloads);

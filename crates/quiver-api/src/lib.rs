@@ -1474,6 +1474,17 @@ mod tests {
         assert!(matches!(r, Request::Stop { game } if game == GameRef::ubisoft(1)));
         let r: Request = serde_json::from_str(r#"{"method":"playtime","params":{"product_id":1}}"#).unwrap();
         assert!(matches!(r, Request::Playtime { game } if game == GameRef::ubisoft(1)));
+        // Install, verify and the queue take any store's game; Ubisoft's still go out as
+        // `product_id`, so a daemon from before reads them.
+        let v = serde_json::to_value(Request::Install { game: GameRef::ubisoft(3539).into(), language: None }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "install", "params": {"product_id": 3539, "language": null}}));
+        let epic = GameRef::new(StoreId::Epic, "Kestrel").unwrap();
+        let v = serde_json::to_value(Request::QueuePause { game: epic.into() }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "queue_pause", "params": {"game": "epic:Kestrel"}}));
+        let r: Request = serde_json::from_str(r#"{"method":"verify","params":{"product_id":420,"repair":true}}"#).unwrap();
+        assert!(matches!(r, Request::Verify { game, repair: true } if game == GameRef::ubisoft(420)));
+        let q: downloads::QueueEntry = serde_json::from_value(serde_json::json!({"product_id": 0, "game": "epic:Kestrel", "name": "AW", "kind": "install", "state": "queued", "source": "cli", "added": "2026-11-18T00:00:00Z"})).unwrap();
+        assert_eq!(q.game_ref(), epic);
         // Older clients ask for the library without `all_stores`, and get Ubisoft's.
         let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
         assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));

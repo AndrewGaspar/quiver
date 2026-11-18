@@ -759,7 +759,7 @@ pub fn primary_label(g: &GameRow) -> (&'static str, Icon) {
         ("Queued", Icon::Download)
     } else if g.steam_only() {
         ("Play", Icon::Play)
-    } else if !g.entry.game.is_ubisoft() && !g.entry.on_disk() {
+    } else if !g.entry.game.is_ubisoft() && !g.entry.on_disk() && !g.entry.installable {
         // Another store's game Quiver can't install yet (Epic before phase 2).
         ("Not installed", Icon::Info)
     } else if !g.installed() {

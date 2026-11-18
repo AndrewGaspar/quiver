@@ -2,8 +2,10 @@
 
 Status: designed 2026-11-16; steers decided and stage 1 (accounts, library, catalog, the Epic
 provider, CLI and the app's sign-in) built 2026-11-17 (section 9 says what was
-built and how it differs; section 8 has the decisions). Stage 2 (native installs and launch)
-waits for the sign-in spike S0 (section 9.4). This is one of five
+built and how it differs; section 8 has the decisions). The sign-in spike S0 passed
+2026-11-18; phase 3 (cloud saves, play time, achievements, section 9.5), the library cleanup
+and sign-in window (9.8, 9.9) and stage 2 (installs and launch, 9.10; the steps to try it in
+9.11) were built 2026-11-18. This is one of five
 parallel store scopes (STORE-STEAM, STORE-GOG, STORE-EA, STORE-META, the last being the Meta VR
 store); the cross-store parts (one title owned in several stores, the shared interfaces, library
 merging) belong to STORES.md, and this document only proposes what Epic needs from them.
@@ -972,6 +974,158 @@ window itself, but `quiver epic login` talks to quiverd as before):
    quiver-webview` prints nothing afterwards.
 3. Fallback: `QUIVER_WEBVIEW=/nonexistent quiver epic login` prints the "isn't available …
    Falling back to pasting the code" line and the old prompt (Ctrl+C to leave).
+
+### 9.10 As built: stage 2, installs and launch (2026-11-18)
+
+Nothing in this stage downloaded a real build or launched a real game. Every path ran
+against built manifests and chunks on a local HTTP server, behind the recorded API shapes,
+and parsed manifests were checked against legendary 0.21.1 (run with a scratch config).
+
+**Content engine** (`epic-core::{manifest, chunk, content}`, our own, legendary read as a
+spec only):
+
+- **Manifests.** Binary manifests (magic `0x44BEC00C`, zlib, SHA-1 of the body checked),
+  versions up to the v22+ fields (per-chunk secret guids, compressed window sizes,
+  encryption tags, `ChunksV5/<secret or plain>/<group>/<hash>_<guid>.chunk` paths) and the
+  v24 encrypted section, which is decrypted with the build's keys (AES-GCM). JSON manifests
+  (first byte `{`) are read too. Every read is bounds-checked: a truncated or hostile
+  manifest is an error, never a panic or a huge allocation (a fuzz loop over truncations is
+  a test). `manifest::write` serializes, for tests and for keeping the installed manifest.
+- **Chunks.** Header v1–v4, AES-GCM for encrypted chunks (nonce: the first 12 bytes of the
+  chunk's SHA-1, as legendary does), zlib, then the SHA-1 checked against the header and
+  the manifest, and the guid against the manifest. A bad chunk is refused and fetched again.
+- **Engine.** `content::install` downloads each needed chunk once (8 at a time, in the order
+  files first use them), through the queue's bandwidth limit, with the queue's retry policy
+  (backoff, `retries` counted). One writer thread assembles files part by part into
+  `<path>.quiver-part`, checks each file's SHA-1 and renames it. Chunks over a 256 MiB
+  budget wait in `.quiver-install/epic-chunks/`, so a large game never holds GBs in memory.
+  Executables get 0755. A resume record (`.quiver-install/epic-state.json`: build,
+  manifest fingerprint, finished files with their SHA-1, saved every 2 s and on any stop)
+  means a pause, a crash or a daemon restart resumes without fetching finished files. Free
+  space is checked before downloading (`check_space`, with the usual margin). Only
+  manifest paths are written (no `..`, no absolute paths). Updates keep unchanged files,
+  rebuild changed ones and remove files the new build dropped. `verify` hashes every file
+  (SHA-1) on a blocking task, `repair` rebuilds only the bad and missing ones, and
+  `uninstall` removes only the manifest's files and the folders they leave empty. Install
+  tags are supported (`None`: everything).
+
+**Epic calls** (`epic-core::api`): the build (`launcher …/assets/v2/platform/Windows/
+namespace/<ns>/catalogItem/<id>/app/<app>/label/Live`: manifest locations, SHA-1, keys),
+the manifest file (no session; signed URLs never logged; SHA-1 checked), the exchange code
+(`GET account …/oauth/exchange`) and the ownership token (`POST ecommerceintegration
+…/ownershipToken`). Keys and tokens are `Secret`s and live for one operation.
+
+**Installs** (`epic-core::{ops, installs}`):
+
+- A game installs to `<library>/<FolderName or title slug>` (Alan Wake Remastered:
+  `~/Games/AlanWakeRemastered` with the default library) and gets its own prefix
+  `<prefixes>/<title slug>` (`-epic` appended when a Ubisoft game already uses the name).
+- Records: `<data>/epic/installed.json` (folder, prefix, build, launch executable and
+  arguments, prerequisites and whether they ran, installed DLC, the account, adopted or
+  not) and `<data>/epic/manifests/<app>.manifest`, the installed build's manifest kept
+  decrypted. Neither holds a key, a signed URL or a token.
+- **DLC:** owned DLC whose catalog item has a build of its own installs into the game's
+  folder after the game, and is listed on the record; DLC without one is an entitlement
+  the game checks with Epic itself.
+- **Adopt** (`quiver import epic:<app> <folder>`): an existing folder (another launcher's
+  install, a copy) becomes Quiver's install in place after its files are checked against
+  the current build's manifest; only missing or different files are downloaded. A folder
+  with none of the game's files is refused. No other launcher's records or sessions are read.
+- Phase 3's `remember_place` is called at install and adoption, so the Saves tab knows the
+  folders before the first launch.
+
+**The queue and the protocol** (the R1 sweep for downloads, STORES.md §11):
+
+- `Install`, `Import`, `Uninstall`, `Update`, `Verify`, `VerifyResult`, `InstallPreview`,
+  `UpdatePreview` and the `Queue*` requests take a game ref (`GameField`, so Ubisoft games
+  still go out as `product_id` and older daemons and clients read them). Ubisoft requests
+  behave exactly as before; `epic:` refs go to `quiverd/src/epic.rs`.
+- `QueueEntry`, `InstallPreview`, `UpdatePreview` and `VerifyReport` carry `game` for
+  other stores' games (`product_id` is then 0). The queue (`downloads.rs`) is keyed by
+  `GameRef`; Ubisoft queue lines in `queue.json` are unchanged.
+- Epic items run on the same queue as Ubisoft's (`max_active`, bandwidth limit, pause,
+  resume, reorder, remove with discard, restart resume, auto-start after a game exits).
+  Verify-only jobs share the Ubisoft job plumbing (`begin_verify`/`end_verify`) and their
+  reports go to `<data>/games/epic-<app>/verify.json`.
+- `EpicRequest::Manifest { game }` (`quiver epic manifest <game> [--json]`) fetches the
+  current build's manifest without installing anything: version, files, sizes, launch
+  executable, prerequisites, whether it is encrypted, and what an update would change. It
+  is the cheap real-data check before a large download.
+
+**Launch** (`quiver_core::launcher::play_store_game`, `quiverd/src/epic.rs::play`):
+
+- An installed Epic game plays through Quiver with the plan every Quiver launch gets:
+  `mods::launch_plan` (profiles, fixes, overlays in a user + mount namespace, config
+  patches), the game's settings (Proton build, env, DLL overrides, arguments, wrappers),
+  Options, Tweaks, the perf session and the HUD. Mods and settings key on
+  `games/epic-<app>/`, `mods/epic-<app>/`.
+- Before the game: the prefix (plain Proton, no Ubisoft SDK), then phase 3's
+  `epicgame::begin` (cloud saves pulled, achievements watched), then the build's
+  prerequisite installer once per prefix (a marker in `quiver-run/`; the record notes it
+  ran). After it exits: `epicgame::end` (play time to Epic, saves up), the local play
+  session (`settings::record_session` for `epic:<app>`), and the ownership token file
+  removed.
+- Licence: a fresh exchange code per launch, and EGL's arguments in legendary's order: the
+  manifest's launch command, the catalog's `AdditionalCommandLine`, `-AUTH_LOGIN=unused
+  -AUTH_PASSWORD=<code> -AUTH_TYPE=exchangecode -epicapp=<app> -epicenv=Prod`,
+  `-epicovt=<file>` when the catalog says `OwnershipToken` (the token written 0600 to the
+  prefix's `quiver-run/`, deleted at exit), `-EpicPortal -epicusername= -epicuserid=
+  -epiclocale= -epicsandboxid=<namespace>`. The job's detail shows the arguments with
+  `-AUTH_PASSWORD=<redacted>`; the code is never logged or written.
+- `Stop` shuts the prefix down; the library marks the game running; quiverd counts it as a
+  running game (it doesn't restart onto a new build under it).
+
+**CLI and app.** `quiver install|update|verify [--repair]|uninstall|import|pause|resume|
+cancel|stop|play epic:<app>` (or the game's name), `quiver install epic:<app> --dry-run`
+(the preview), `quiver queue`. In the app an Epic tile's button is **Install** (the same
+install dialog: destination, download and install sizes, free space), then **Play**; the
+Downloads view lists Epic items with the same controls. Ubisoft games sold on Epic still
+say to install them as their Ubisoft product, and games of launchers Quiver doesn't run
+stay out of the library (§9.8).
+
+**Not done or unverified.**
+
+- The real formats are checked only against legendary's reading of them: the v24
+  encrypted section and the encrypted-chunk nonce have never met a real encrypted build,
+  and the JSON manifest reader is from the format as remembered (no real JSON manifest
+  here). `quiver epic manifest` on a real game is the first check.
+- Delta manifests (`…/Deltas/<old>/<new>.delta`) aren't used: updates fetch every chunk a
+  changed file needs.
+- The exchange code is minted before the prerequisites run. Codes last minutes, so a
+  prerequisite installer that takes longer than that would leave the game with an expired
+  code (start it again; the prerequisites don't run twice).
+- No anti-cheat runtime handling yet (EAC/BattlEye), no EOS overlay, no install-tag picker
+  in the app (everything installs), no move.
+- Auto-update for Epic games isn't on (Quiver doesn't poll Epic's builds); `quiver update
+  epic:<app>` or Install on the game updates to the current build.
+
+### 9.11 Installing and playing Alan Wake Remastered (the steps)
+
+After merging and `tools/install-user.sh` (quiverd restarts onto the new build when no game
+runs). Steps 1 and 2 only read; step 3 downloads about 40 GB; step 5 uses your Epic session
+to mint an exchange code (as EGL does at every launch).
+
+1. **The build, read-only:** `quiver epic manifest epic:7315f614b0504081bcdceef138075c9c`.
+   Expect a build version, a manifest version, a file count in the thousands, the install
+   and download sizes, `launches …/AlanWake.exe` (or similar) and maybe prerequisites. An
+   error here (manifest version, decryption, a missing key) is worth sending back before
+   downloading anything; `--json` has everything.
+2. **The preview:** `quiver install epic:7315f614b0504081bcdceef138075c9c --dry-run`: the
+   destination (`~/Games/AlanWakeRemastered` unless your library folder is elsewhere), sizes
+   and whether it fits.
+3. **Install:** `quiver install epic:7315f614b0504081bcdceef138075c9c` (or **Install** on the
+   tile in the app). It follows the job; `quiver queue` and the Downloads view show speed,
+   pause and resume. Try `quiver pause` and `quiver resume` on it once: finished files
+   aren't fetched again.
+4. **Verify:** `quiver verify epic:7315f614b0504081bcdceef138075c9c`: every file OK.
+5. **Play:** `quiver play epic:7315f614b0504081bcdceef138075c9c` (or **Play** in the app). The
+   first launch creates the prefix and may run the prerequisites; the job's detail lists the
+   arguments with the code redacted. Phase 3's steps (§9.7) apply from here.
+6. **Send back** the output of steps 1–4, whether the game started and reached its menu, the
+   job detail (`quiver status --json` or the Activity view), and `grep -i epic
+   ~/.local/share/quiver/quiverd.log | tail -50`.
+7. **Undo:** `quiver uninstall epic:7315f614b0504081bcdceef138075c9c [--prefix]` removes the
+   game's files (only the manifest's) and, with `--prefix`, its prefix.
 
 ---
 
