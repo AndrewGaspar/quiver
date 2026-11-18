@@ -78,7 +78,8 @@ pub const IDLE_GRACE: Duration = Duration::from_secs(5);
 pub const START_GRACE: Duration = Duration::from_secs(20);
 
 struct Known {
-    product_id: u32,
+    /// The session's game (another store's too).
+    game: GameRef,
     attached: bool,
 }
 
@@ -91,7 +92,7 @@ async fn refresh(client: &Client, known: &mut HashMap<String, Known>, tx: &Unbou
     let sessions: Vec<PerfSessionInfo> = client.call(perf(PerfRequest::Sessions)).await.context("listing perf sessions")?;
     known.retain(|id, _| sessions.iter().any(|s| &s.session == id));
     for s in sessions {
-        let k = known.entry(s.session.clone()).or_insert(Known { product_id: s.product_id, attached: false });
+        let k = known.entry(s.session.clone()).or_insert(Known { game: s.game_ref(), attached: false });
         if k.attached || !(s.hud_enabled && s.dir.is_some()) {
             continue;
         }
@@ -138,9 +139,11 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
             e = events.recv() => match e {
                 None => return Ok("event stream closed".into()),
                 Some(Event::Disconnected) => return Ok("quiverd went away".into()),
-                Some(e @ Event::AchievementUnlocked { product_id, .. }) => {
-                    // Quiver launches only: containers' and agents' bridges earn too.
-                    if known.values().any(|k| k.product_id == product_id)
+                Some(e @ Event::AchievementUnlocked { product_id, game, .. }) => {
+                    // Quiver launches only: containers' and agents' bridges earn too. An
+                    // Epic game's unlocks (`game`) are its session's.
+                    let of = game.unwrap_or(GameRef::ubisoft(product_id));
+                    if known.values().any(|k| k.game == of)
                         && let Some(t) = toasts::from_event(&e)
                     {
                         let _ = tx.unbounded_send(Msg::Toast(t));

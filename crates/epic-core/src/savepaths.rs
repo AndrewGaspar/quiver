@@ -62,10 +62,8 @@ pub fn resolve(template: &str, vars: Vars<'_>) -> Result<PathBuf, String> {
     let mut text = t.replace('\\', "/");
     // `{Var}` → a path relative to the prefix (or absolute, for the install folder).
     let mut base: Option<PathBuf> = None;
-    if let Some(open) = text.find('{') {
-        if open != 0 {
-            return Err(format!("the catalog's save folder ({t}) doesn't start with a known place"));
-        }
+    if text.find('{').is_some_and(|open| open != 0) {
+        return Err(format!("the catalog's save folder ({t}) doesn't start with a known place"));
     }
     while let Some(open) = text.find('{') {
         let close = text[open..].find('}').map(|c| open + c).ok_or_else(|| format!("the catalog's save folder ({t}) has an unclosed {{"))?;

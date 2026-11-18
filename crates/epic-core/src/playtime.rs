@@ -281,7 +281,7 @@ impl Epic {
         }
         let mut q = Queue::load(&self.dir)?.sessions;
         q.retain(|s| game.is_none_or(|g| s.game == *g));
-        q.sort_by(|a, b| b.ended.cmp(&a.ended));
+        q.sort_by_key(|s| std::cmp::Reverse(s.ended));
         out.queue = q;
         Ok(out)
     }

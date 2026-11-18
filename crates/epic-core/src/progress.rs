@@ -28,6 +28,9 @@ use crate::Epic;
 use crate::api::CatalogItem;
 use crate::library::Title;
 
+/// Epic's play-time totals for an account (app → seconds), and when they were read.
+pub(crate) type Totals = (DateTime<Utc>, HashMap<String, u64>);
+
 /// Phase 3's state inside [`Epic`].
 pub struct Phase3 {
     /// Where save backups go (`launcher::Config::save_backups`, under `epic-<app>/`).
@@ -38,7 +41,7 @@ pub struct Phase3 {
     pub(crate) queue: tokio::sync::Mutex<()>,
     pub(crate) unlocks: tokio::sync::Mutex<()>,
     /// Epic's play-time totals per account, and when they were read.
-    pub(crate) totals: tokio::sync::Mutex<HashMap<String, (DateTime<Utc>, HashMap<String, u64>)>>,
+    pub(crate) totals: tokio::sync::Mutex<HashMap<String, Totals>>,
     /// The player's achievement records (`<account>/<sandbox>`), and when they were read.
     pub(crate) players: tokio::sync::Mutex<HashMap<String, (DateTime<Utc>, crate::achievements::PlayerRecord)>>,
 }

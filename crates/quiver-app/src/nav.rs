@@ -130,12 +130,15 @@ impl Tab {
     /// Steam games: also Mods (with their Options), as the Steam store's capabilities say
     /// (`mods: quiver`); they reach the game when it starts through `quiver steam-run`.
     pub const STEAM: [Tab; 3] = [Tab::Overview, Tab::Mods, Tab::Tweaks];
+    /// Epic games: also Saves & progress (cloud saves, play time, achievements; phase 3).
+    pub const EPIC: [Tab; 3] = [Tab::Overview, Tab::Tweaks, Tab::Saves];
 
     /// The tabs a game's page has.
     pub fn of(id: Gid) -> &'static [Tab] {
         match id.store() {
             quiver_api::StoreId::Ubisoft => &Self::ALL,
             quiver_api::StoreId::Steam => &Self::STEAM,
+            quiver_api::StoreId::Epic => &Self::EPIC,
             _ => &Self::STORE,
         }
     }
@@ -931,7 +934,7 @@ mod tests {
         assert_eq!(n.tab, Tab::Overview);
         assert_eq!(Tab::of(Gid::from(3539)).len(), Tab::ALL.len());
         let epic = Gid(quiver_api::GameRef::new(quiver_api::StoreId::Epic, "fn").unwrap());
-        assert_eq!(Tab::of(epic), &Tab::STORE);
+        assert_eq!(Tab::of(epic), &Tab::EPIC, "Epic games also have Saves & progress");
     }
 
     #[test]

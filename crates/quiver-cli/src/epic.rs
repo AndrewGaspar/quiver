@@ -36,6 +36,30 @@ pub enum EpicAction {
     },
     /// Make an Epic account the default.
     Default { account: String },
+    /// An Epic game's cloud saves here and in Epic's cloud, and its backups; `sync`
+    /// downloads and uploads now, `restore` brings a backup back.
+    Saves {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        /// Only what's on this machine (don't ask the cloud).
+        #[arg(long)]
+        local: bool,
+        #[command(subcommand)]
+        action: Option<crate::epicgame::SavesAction>,
+    },
+    /// Epic's play time (for a game, or every game) and the sessions Quiver reports;
+    /// `--send` reports queued sessions now.
+    Playtime {
+        game: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        send: bool,
+        /// With `--send`: yes to the first report to your Epic account.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn epic(r: EpicRequest) -> Request {
@@ -75,7 +99,7 @@ fn read_pasted() -> Result<String> {
     Ok(text)
 }
 
-pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
+pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()> {
     match action {
         EpicAction::Login { code, open } => {
             let code = match code {
@@ -115,6 +139,8 @@ pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
             let a: EpicAccount = client.call(epic(EpicRequest::AccountDefault { account })).await?;
             println!("default Epic account: {}", a.display_name);
         }
+        EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, source, &game, json, local, action).await?,
+        EpicAction::Playtime { game, json, send, yes } => crate::epicgame::playtime(client, game, json, send, yes).await?,
     }
     Ok(())
 }

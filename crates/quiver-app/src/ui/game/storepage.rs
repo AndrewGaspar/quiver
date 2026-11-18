@@ -44,7 +44,8 @@ impl Quiver {
     pub(super) fn store_stats(&self, g: &GameRow) -> Vec<(&'static str, String)> {
         let label = g.entry.store().label();
         let c = g.entry.client.as_ref();
-        let pt = c.and_then(|c| c.playtime);
+        // Steam's client records play time; Epic's comes with the page (Epic's own total).
+        let pt = c.and_then(|c| c.playtime).or_else(|| self.store_detail(g.id()).and_then(|d| d.playtime));
         let ach = self.store_detail(g.id()).and_then(|d| d.achievements.as_ref()).map(|a| (a.unlocked, a.total)).or_else(|| c.and_then(|c| c.achievements).map(|a| (a.unlocked, a.total)));
         vec![
             ("Last played", g.last_played().map(day).unwrap_or_else(|| "Never".into())),
@@ -91,11 +92,14 @@ impl Quiver {
         div().flex().when(!two, |d| d.flex_col()).gap(px(20.)).child(left).child(right).into_any_element()
     }
 
-    fn render_store_achievements(&self, th: &Theme, d: &GameDetail) -> AnyElement {
+    pub(super) fn render_store_achievements(&self, th: &Theme, d: &GameDetail) -> AnyElement {
         let label = d.game.store.label();
         // Epic's achievements aren't read yet (STORE-EPIC phase 3).
         if d.achievements.is_none() && !d.capabilities.achievements.available() && d.game.store != quiver_api::StoreId::Steam {
             return card(th).child(card_header(th, "Achievements")).child(note(th, format!("Quiver doesn't read {label} achievements yet."))).into_any_element();
+        }
+        if d.achievements.is_none() && d.game.store == quiver_api::StoreId::Epic {
+            return card(th).child(card_header(th, "Achievements")).child(note(th, "Epic's store couldn't be read for this game's achievements just now.")).into_any_element();
         }
         let Some(a) = &d.achievements else {
             return card(th)

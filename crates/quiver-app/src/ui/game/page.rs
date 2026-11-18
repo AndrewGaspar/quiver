@@ -199,6 +199,10 @@ pub struct GamePage {
     pub art_menu: bool,
     /// Mods tab: options, history, keys and schema sources (`options/`).
     pub opt: super::options::OptionsUi,
+    /// An Epic game's Saves & progress tab (`epicsaves.rs`).
+    pub epic_saves: Load<quiver_api::epicgame::EpicSaves>,
+    pub epic_pt: Load<quiver_api::epicgame::EpicPlaytime>,
+    pub epic_confirm: Option<super::epicsaves::EpicConfirm>,
 }
 
 impl GamePage {

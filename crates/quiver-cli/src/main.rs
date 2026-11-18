@@ -7,6 +7,7 @@ mod daemon;
 mod dev;
 mod downloads;
 mod epic;
+mod epicgame;
 mod exports;
 mod mods;
 mod perf;
@@ -286,7 +287,7 @@ enum Cmd {
         all: bool,
     },
     /// A game's Ubisoft progression (play time, stats, challenges, rewards) and your
-    /// Ubisoft Connect level and units.
+    /// Ubisoft Connect level and units; for an Epic game, Epic's play time and achievements.
     Progress {
         game: String,
         #[arg(long)]
@@ -333,7 +334,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: dev::DevCmd,
     },
-    /// Epic Games Store accounts: `quiver epic login|logout|accounts|default`.
+    /// Epic Games Store: `quiver epic login|logout|accounts|default`, and an Epic game's
+    /// cloud saves and play time (`quiver epic saves|playtime`).
     Epic {
         #[command(subcommand)]
         action: epic::EpicAction,
@@ -639,7 +641,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
-        Cmd::Epic { action } => epic::run(&client, action).await?,
+        Cmd::Epic { action } => epic::run(&client, &cli.source, action).await?,
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
             println!("quiverd {}", s.version);
@@ -932,6 +934,12 @@ async fn main() -> Result<()> {
         }
         Cmd::Playtime { game } => {
             let any = resolve_any(&client, &game).await?;
+            if let Some((name, g)) = epicgame::epic_game(&client, &game).await? {
+                let p: quiver_api::epicgame::EpicPlaytime =
+                    client.call(Request::Epic(quiver_api::epic::EpicRequest::Game(quiver_api::epicgame::EpicGameRequest::Playtime { game: Some(g), refresh: false }))).await?;
+                epicgame::print_playtime(Some(&name), &p);
+                return Ok(());
+            }
             if any.ubisoft_id().is_none() {
                 let p: quiver_api::Playtime = client.call(Request::Playtime { game: any.game.into() }).await?;
                 let last = p.last_played.map(|t| t.with_timezone(&chrono::Local).format(" (last played %Y-%m-%d %H:%M)").to_string()).unwrap_or_default();
@@ -1037,7 +1045,10 @@ async fn main() -> Result<()> {
         Cmd::Sight { action } => sight::run(&client, action).await?,
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
-        Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,
+        Cmd::Progress { game, json, refresh } => match epicgame::epic_game(&client, &game).await? {
+            Some((name, g)) => epicgame::progress(&client, &name, g, json, refresh).await?,
+            None => info::progress(&client, &game, json, refresh).await?,
+        },
         Cmd::Achievements { game, json, refresh, action: None } => achievements::list(&client, &game, json, refresh).await?,
         Cmd::Achievements { game, action: Some(achievements::AchAction::Report { id, dry_run, json }), json: j, .. } => {
             achievements::report(&client, &cli.source, &game, id, dry_run, json || j).await?
@@ -1045,7 +1056,10 @@ async fn main() -> Result<()> {
         Cmd::Achievements { game, action: Some(achievements::AchAction::Probe { platform, framing, all_products }), .. } => {
             achievements::probe(&client, &game, platform, framing, all_products).await?
         }
-        Cmd::Saves { game, json, local, action: None } => info::saves(&client, &game, json, local).await?,
+        Cmd::Saves { game, json, local, action: None } => match epicgame::epic_game(&client, &game).await? {
+            Some(_) => epicgame::saves(&client, &cli.source, &game, json, local, None).await?,
+            None => info::saves(&client, &game, json, local).await?,
+        },
         Cmd::Saves { game, action: Some(info::SavesAction::Sync { profile }), .. } => info::sync(&client, &game, profile).await?,
         Cmd::Saves { game, action: Some(info::SavesAction::Restore { backup }), .. } => {
             info::restore(&client, &cli.source, &game, backup).await?

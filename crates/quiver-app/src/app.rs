@@ -418,6 +418,13 @@ impl Quiver {
             }
             Event::ModsChanged { product_id, game: None } => self.load_page(Gid::from(product_id), cx),
             // The open page's achievements show it (Sight will toast it).
+            // Another store's game (Epic): its page reloads its achievements.
+            Event::AchievementUnlocked { game: Some(g), .. } => {
+                let id = Gid(g);
+                if self.nav.page == Page::Game(id) && self.gp.id == id {
+                    self.load_store_detail(id, true, cx);
+                }
+            }
             Event::AchievementUnlocked { product_id, .. } => {
                 if self.nav.page == Page::Game(Gid::from(product_id)) && self.gp.id == product_id {
                     self.load_progress(Gid::from(product_id), false, cx);
