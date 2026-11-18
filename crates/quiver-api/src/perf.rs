@@ -114,8 +114,8 @@ pub enum PerfRequest {
     HudLayouts,
     /// A layout resolved to its rows (`HudLayout`): a built-in id or a user layout's id.
     HudLayout { id: String },
-    /// The HUD's Hyprland binds, as data and as config text (`HudKeybinds`). quiverd
-    /// doesn't apply them in this version.
+    /// The HUD's keys (`HudKeybinds`): read in the game by the Sight layer, each running
+    /// game's state, and the Hyprland binds fallback as data and config text (never applied).
     HudKeybinds,
     /// What a launch of the game would get from the HUD (`LaunchPerfPlan`): environment,
     /// layer order, MangoHud remap. Read-only; for launchers (`quiver steam-run`) and tests.
@@ -1015,23 +1015,61 @@ pub struct LayerInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device: String,
     pub vendor_id: u32,
+    /// The HUD's keys in this game ([`HudKeysState::keys`]): `active`, or why the layer
+    /// can't read them. Empty from a quiverd before in-game keys.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub keys: String,
+    /// The same as a sentence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub keys_detail: String,
+    /// Chord presses the layer read (Shift+F3, Ctrl+Shift+F3), wrapping at 65 536.
+    #[serde(default)]
+    pub key_toggles: u32,
+    #[serde(default)]
+    pub key_nexts: u32,
 }
 
-/// The HUD's keys (§1.3, decision 4) as Hyprland binds.
+/// The HUD's keys (§1.3, decision 4). The Sight layer reads them inside the game (X11
+/// keymap polling); the Hyprland binds are the fallback for games without the layer (the
+/// desktop presenter), never applied by quiverd.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct HudKeybinds {
     pub binds: Vec<Keybind>,
-    /// `hyprctl keyword …` commands quiverd would run when a Quiver game gains focus, and
-    /// the ones that undo them when it loses it.
+    /// Who reads the keys: `layer` (the Sight layer, in the game). Empty from a quiverd
+    /// before in-game keys (it only described Hyprland binds).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub handler: String,
+    /// One per running game with a Sight layer: whether it reads the keys, or why not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub games: Vec<HudKeysState>,
+    /// `hyprctl keyword …` commands that would bind the keys while a Quiver game has focus
+    /// (fallback; not run), and the ones that undo them.
     pub on_focus: Vec<String>,
     pub on_blur: Vec<String>,
-    /// Hyprland config text for the same binds, for people who'd rather bind them
-    /// statically (then they fire everywhere, not only over Quiver games).
+    /// Hyprland config text for the same binds, for binding them statically for games the
+    /// layer can't read keys in (then they fire everywhere, not only over Quiver games).
     pub conf: String,
-    /// A Quiver game is focused right now, so the binds would be active.
+    /// A Quiver game is focused right now.
     pub game_focused: bool,
-    /// Whether quiverd applies them (not in this version).
+    /// Whether quiverd applies the Hyprland binds (it doesn't: the layer reads the keys).
     pub applied: bool,
+}
+
+/// A running game's in-game HUD keys.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HudKeysState {
+    pub session: String,
+    pub product_id: u32,
+    /// Another store's game (Ubisoft sessions leave it out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+    /// The game process the layer is in.
+    pub pid: u32,
+    /// `active` (polling X11), `wayland` (a Wayland-native window: XWayland never sees its
+    /// keys), `no_display`, `no_libx11`, `open_failed`, `no_keycodes`, `io_error`, `off`
+    /// (`QUIVER_SIGHT_KEYS=0`), `internal`, `unknown` (not reported yet, or an older layer).
+    pub keys: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

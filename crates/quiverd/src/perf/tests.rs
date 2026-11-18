@@ -56,6 +56,12 @@ fn fake_layer(dir: &SessionDir, secs: i64) -> quiver_perf::ring::RingWriter<quiv
         let t = end - (n - i) * 8_333_333;
         w.push(&LayerPresent { swapchain: 1, seq: i as u64 + 1, entry_ns: t, return_ns: t + 100_000, ..Default::default() }.to_record());
     }
+    w.set_layer_status(&fake_status());
+    w.heartbeat(mono_raw_ns());
+    w
+}
+
+fn fake_status() -> LayerStatus {
     let mut s = LayerStatus::ZERO;
     s.extent_w = 2560;
     s.extent_h = 1600;
@@ -63,9 +69,7 @@ fn fake_layer(dir: &SessionDir, secs: i64) -> quiver_perf::ring::RingWriter<quiv
     s.vendor_id = 0x10de;
     s.draw_error = DRAW_ERR_NO_IMAGE;
     LayerStatus::set_str(&mut s.engine_name, "DXVK");
-    w.set_layer_status(&s);
-    w.heartbeat(mono_raw_ns());
-    w
+    s
 }
 
 fn dev_session(hub: &PerfHub, product: u32) -> (String, SessionDir) {
@@ -153,6 +157,110 @@ fn hud_attach_toggle_next_with_a_fake_renderer() {
     // The renderer goes away: no more models; ending the session tells nobody.
     e.hub.disconnect(9);
     assert!(!e.hub.status(None, Some(GameRef::ubisoft(7))).unwrap().renderer_attached);
+    e.hub.end(&sid);
+}
+
+/// The layer's key counters (status block) become toggles and preset steps, as the CLI's
+/// would, remembered for the game; the first value read is a baseline.
+#[test]
+fn in_game_keys_from_the_layer_status() {
+    use quiver_perf::layout::{KEYS_ACTIVE, KEYS_NO_DISPLAY, LAYER_WAYLAND_SURFACE};
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 8);
+    let w = fake_layer(&dir, 1);
+    let status = std::cell::RefCell::new(fake_status());
+    let set = |f: &dyn Fn(&mut LayerStatus)| {
+        f(&mut status.borrow_mut());
+        assert!(w.set_layer_status(&status.borrow()));
+    };
+    // Presses from before quiverd read the ring aren't replayed.
+    set(&|s| {
+        s.keys = KEYS_ACTIVE;
+        s.key_toggles = u16::MAX;
+        s.key_nexts = 2;
+    });
+    let mut watched = HashMap::new();
+    drain_once(&e.hub, &mut watched);
+    let st = e.hub.status(Some(&sid), None).unwrap();
+    assert!(!st.on && st.layout == "compact");
+    let l = st.layer.unwrap();
+    assert_eq!((l.keys.as_str(), l.key_toggles, l.key_nexts), ("active", 65535, 2));
+    let k = e.hub.keybinds();
+    assert_eq!(k.handler, "layer");
+    assert!(!k.applied);
+    assert_eq!(k.games.len(), 1);
+    assert_eq!((k.games[0].session.as_str(), k.games[0].keys.as_str(), k.games[0].pid), (sid.as_str(), "active", std::process::id()));
+
+    // Shift+F3 in the game (the u16 counter wraps): shown, and remembered like
+    // `quiver hud toggle`.
+    set(&|s| s.key_toggles = 0);
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
+    assert!(e.hub.hud.for_launch(&GameRef::ubisoft(8), None).on);
+    // Nothing new: nothing happens.
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
+    // Ctrl+Shift+F3: the next preset (and only that: still shown).
+    set(&|s| s.key_nexts = 3);
+    drain_once(&e.hub, &mut watched);
+    let st = e.hub.status(Some(&sid), None).unwrap();
+    assert!(st.on);
+    assert_eq!(st.layout, "standard");
+    assert_eq!(e.hub.hud.for_launch(&GameRef::ubisoft(8), None).layout, "standard");
+    // Shift+F3 twice between two drains: hidden and shown again.
+    set(&|s| s.key_toggles = 2);
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
+    set(&|s| s.key_toggles = 3);
+    drain_once(&e.hub, &mut watched);
+    assert!(!e.hub.status(Some(&sid), None).unwrap().on);
+    assert!(!e.hub.hud.for_launch(&GameRef::ubisoft(8), None).on);
+
+    // Why a layer can't read keys shows in the status.
+    set(&|s| s.keys = KEYS_NO_DISPLAY);
+    drain_once(&e.hub, &mut watched);
+    assert_eq!(e.hub.status(Some(&sid), None).unwrap().layer.unwrap().keys, "no_display");
+    set(&|s| {
+        s.keys = KEYS_ACTIVE;
+        s.flags |= LAYER_WAYLAND_SURFACE;
+    });
+    drain_once(&e.hub, &mut watched);
+    assert_eq!(e.hub.keybinds().games[0].keys, "wayland");
+    e.hub.end(&sid);
+}
+
+/// Every layer polls the same X keymap, so a launcher with the layer sees the game's presses
+/// too: only the layer on the largest swapchain counts for the session.
+#[test]
+fn in_game_keys_count_once_with_two_layers() {
+    use quiver_perf::layout::KEYS_ACTIVE;
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 9);
+    let game = fake_layer(&dir, 1);
+    // A small launcher window in another (live) process: pid 1 is always there.
+    let launcher = dir.create_layer_ring(1, [6; 16]).unwrap();
+    launcher.heartbeat(mono_raw_ns());
+    let status = |w: &quiver_perf::ring::RingWriter<quiver_perf::shm::Mapping>, area: (u32, u32), toggles: u16| {
+        let mut s = fake_status();
+        (s.extent_w, s.extent_h) = area;
+        s.keys = KEYS_ACTIVE;
+        s.key_toggles = toggles;
+        assert!(w.set_layer_status(&s));
+    };
+    status(&game, (2560, 1600), 0);
+    status(&launcher, (1280, 720), 0);
+    let mut watched = HashMap::new();
+    drain_once(&e.hub, &mut watched);
+    assert_eq!(e.hub.lock().sessions[&sid].key_layer().map(|l| l.pid), Some(std::process::id()));
+    // Both see Shift+F3: one toggle.
+    status(&game, (2560, 1600), 1);
+    status(&launcher, (1280, 720), 1);
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
+    // The launcher alone (its own window focused, say) doesn't count.
+    status(&launcher, (1280, 720), 2);
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
     e.hub.end(&sid);
 }
 

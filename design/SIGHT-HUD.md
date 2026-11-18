@@ -186,6 +186,64 @@ Decided (decision 4):
 - The HUD registers its keys as a runtime surface (MOD-CONFIG C7), so `options keys` shows them
   and flags conflicts with mods' keys.
 
+**As built (2026-11-17): the keys are read in the game by the Sight layer**, MangoHud/vkBasalt
+style (SIGHT §4.1 input option "in-layer key polling"), not bound in Hyprland. The user chose
+this over the focus-scoped Hyprland binds above, which quiverd never applied.
+
+- **Reading** (`crates/quiver-sight-layer/src/keys.rs`). When the layer's telemetry starts
+  (a Quiver session, first swapchain), and `DISPLAY` is set, a `quiver-sight-keys` thread
+  `dlopen`s `libX11.so.6` (no link-time dependency: the layer still loads with no X11 and in
+  pressure-vessel), opens its **own** Display connection, maps F3, Shift_L/R, Control_L/R,
+  Alt_L/R and Super_L/R once with `XKeysymToKeycode`, and polls `XQueryKeymap` every 50 ms
+  while the game presents (no poll when the present counter hasn't moved). XWayland only
+  reports keys while one of its windows has keyboard focus, so this is focus-scoped by
+  construction (to XWayland as a whole: Shift+F3 in another focused XWayland window would
+  count too).
+- **Not in `vkQueuePresentKHR`.** The brief said "from the present path"; the poll runs on its
+  own thread, gated on presents, because an X round trip can block (a stalled XWayland, an
+  unreachable `DISPLAY`) and the layer's present path makes no syscalls beyond Vulkan's. The
+  cadence is the same (≤ 20 Hz, only while presenting).
+- **Chords.** A press counts on the trigger key's up → down edge between two polls, with
+  **exactly** the chord's modifiers held: Shift+F3 toggles, Ctrl+Shift+F3 steps to the next
+  preset (never also toggles), Alt or Super held matches neither, holding repeats nothing, and
+  a chord already held when polling starts isn't a press. A tap shorter than one poll (50 ms)
+  can be missed, as with MangoHud.
+- **To quiverd: counters in the status block.** The layer counts presses in its ring's status
+  block (`qv_layer_status.key_toggles` / `key_nexts`, wrapping u16, in what was `_reserved`)
+  and rewrites the block at once. quiverd's ring thread already reads that block every 50 ms;
+  it diffs the counters per ring (the first read is the baseline, so a quiverd restart replays
+  nothing) and calls `PerfHub::hud_keys`, which runs exactly what `quiver hud toggle` /
+  `quiver hud next` run for that session: the change, `remember` (the game keeps its last
+  state and preset), a new model, `HudChanged`, starting `quiver-sight` if needed. Why
+  counters rather than a ring record or a socket message: the status block is already the
+  layer → quiverd channel, it's idempotent (a lost or contended write is caught up by the next
+  heartbeat, ≤ 250 ms), it needs no new file, socket or protocol in the game process, and it
+  can't flood (bursts are capped at 4 per drain). Order within one 50 ms drain is lost (steps
+  go before toggles). `XQueryKeymap` is server-wide, so every process with the layer (a game
+  and its launcher) sees each press: only one layer per session counts, the live one on the
+  largest swapchain (`Session::key_layer`), whose state `hud status` shows.
+- **Status.** `qv_layer_status.keys` (`QV_KEYS_*`) says whether polling runs or why not:
+  `active`, `no_display`, `no_libx11`, `open_failed`, `no_keycodes`, `io_error` (the
+  connection broke; an `XSetIOErrorExitHandler` keeps Xlib from exiting the game where libX11
+  ≥ 1.7 has it), `off` (`QUIVER_SIGHT_KEYS=0`), `internal`. The layer also hooks
+  `vkCreate{Xlib,Xcb,Wayland}SurfaceKHR` to flag the surface kinds (`QV_LAYER_X11_SURFACE`,
+  `QV_LAYER_WAYLAND_SURFACE`); a game with only Wayland surfaces reports `wayland`.
+  `quiver hud status` prints a `keys:` line with the presses seen; `quiver hud keybinds` says
+  the layer reads the keys and lists each running game's state.
+- **Hyprland binds stay as the fallback** for games without the layer (anti-cheat-flagged,
+  OpenGL, Wayland-native windows), which is the desktop presenter's audience:
+  `quiver hud keybinds --conf` prints them; quiverd still never applies them (the `Binder` keeps
+  its dry-run applier). The app's HUD settings say the same.
+- **Not configurable yet.** `quiver_api::perf::Keybind` only describes the binds; there is no
+  user setting, so the chords are fixed in the layer (`DEFAULT_BINDINGS`) and in quiverd
+  (`perf::keybinds::binds`). The layer's matching works on (keysym, exact modifiers) pairs, so a
+  setting only needs a way to hand them to the layer (an env var at launch).
+- **Follow-ups.** Native Wayland and winewayland games: the layer would need a `wl_keyboard`
+  listener on the game's own Wayland connection (MangoHud hooks `wl_display_connect` and the
+  seat for this); out of scope here, reported as `wayland`. MOD-CONFIG C7 registration of the
+  keys. The hyprpad controller snippet. Spike H7's MangoHud question now only matters when both
+  HUDs run.
+
 ### 1.4 Layouts and scopes
 
 A layout is data. Built-in presets are layouts shipped with Quiver. The user's layouts resolve
@@ -927,7 +985,8 @@ typedef struct qv_ring_header {
     uint8_t  _pad2[48];
     qv_status_block status;     /* offset 192: the layer's qv_layer_status (swapchain extent,
                                    format, colour space, present mode, low_latency2, drawn and
-                                   present counters, draw error, device and engine names) */
+                                   present counters, draw error, device and engine names, HUD
+                                   key polling state and chord press counters, §1.3) */
     uint8_t  _pad3[1856];
 } qv_ring_header;
 
@@ -1509,7 +1568,7 @@ the app.
 | H4 | **Clocks and correlation** | QPC = `CLOCK_MONOTONIC_RAW`/100 on the Proton builds in use (GE-Proton10, Proton 9/10, Experimental); DXVK's `VkPresentIdKHR` vs the mod's present sequence with FG on; offset fit stability across resize and alt-tab | per-frame views, latency to present |
 | H5 | **Reflex reports** | `NvAPI_D3D_GetLatency` through dxvk-nvapi with aco-dlss's injected Reflex: fields filled, units, clock domain vs QPC; and `vkGetLatencyTimingsNV` from the layer for the same frames | latency metrics |
 | H6 | **Sensors** | = SIGHT S9: NVML on the laptop without waking the dGPU outside sessions; hwmon CPU package temp; battery | system producer |
-| H7 | **Keys** | Shift+F3 / Ctrl+Shift+F3 as Hyprland binds over XWayland and Wine-Wayland games; does a consumed Hyprland bind hide Shift_L+F2 from MangoHud's key polling; remapping MangoHud's `toggle_logging` via `MANGOHUD_CONFIG` | key plan |
+| H7 | **Keys** | Shift+F3 / Ctrl+Shift+F3 as Hyprland binds over XWayland and Wine-Wayland games; does a consumed Hyprland bind hide Shift_L+F2 from MangoHud's key polling; remapping MangoHud's `toggle_logging` via `MANGOHUD_CONFIG`. *Superseded for the HUD by in-layer polling (§1.3, as built); left: a Wine-Wayland key path* | key plan |
 | H8 | **GPUI off-screen on the bumped GPUI** | The GPUI 0.2.2 half is done (2.10). Port it onto upstream's wgpu `WgpuHeadlessRenderer`: transparent, premultiplied output; readback through a mappable buffer without the 4.6 ms penalty seen with blade's shared memory; timings against the spike; RSS; adapter choice (the iGPU under Wayland and headless); Geist Mono legibility at 0.75× on 1080p | how the HUD is drawn |
 | H9 | **Capture switching** | With Hidden: a portal screencast of the game's monitor and of its window (OBS, gpu-screen-recorder in portal mode); time from `screencastv2>>1` to the HUD leaving the game image, and how many captured frames still show it; the black box in monitor captures; obs-vkcapture with both layer orders | decision 15 |
 
@@ -1628,6 +1687,9 @@ Decided by the user, 2026-11-16. Each: the decision, why, and what was rejected.
    focused, plus a hyprpad snippet; MangoHud's `toggle_logging` is moved off Shift_L+F2 when
    Quiver launches MangoHud. Why: free of every known default and next to Sight's chord.
    Rejected: an always-bound Super chord; taking over MangoHud's Shift_R+F12; no default.
+   *Revised 2026-11-17:* the chords stand, but the Sight layer reads them in the game (X11
+   keymap polling) instead of Hyprland binds; the binds are only a printed fallback (§1.3, as
+   built).
 5. **Quiver's HUD by default, MangoHud a per-game option**, with MangoHud-compatible CSV export.
    Why: own HUD where it matters, MangoHud for OpenGL, gamescope and existing setups. Rejected:
    MangoHud as the default; dropping MangoHud integration.

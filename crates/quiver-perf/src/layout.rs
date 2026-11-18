@@ -188,7 +188,12 @@ pub struct LayerStatus {
     pub engine_name: [u8; 32],
     pub app_name: [u8; 64],
     pub device_name: [u8; 64],
-    pub _reserved: [u8; 8],
+    /// The layer's in-game HUD key polling (`KEYS_*`, SIGHT-HUD §1.3).
+    pub keys: u32,
+    /// Shift+F3 and Ctrl+Shift+F3 presses the layer saw, wrapping. quiverd acts on the
+    /// difference from the last value it read (the first value it reads is the baseline).
+    pub key_toggles: u16,
+    pub key_nexts: u16,
 }
 
 pub const LAYER_DRAWING: u32 = 1 << 0;
@@ -199,6 +204,30 @@ pub const LAYER_PRESENT_WAIT: u32 = 1 << 3;
 pub const LAYER_PANICKED: u32 = 1 << 4;
 /// The HUD is toggled off (pass-through).
 pub const LAYER_HUD_OFF: u32 = 1 << 5;
+/// The game created a Wayland `VkSurfaceKHR` (winewayland, a native Wayland game): XWayland
+/// never sees that window's keys.
+pub const LAYER_WAYLAND_SURFACE: u32 = 1 << 6;
+/// The game created an Xlib or XCB `VkSurfaceKHR`.
+pub const LAYER_X11_SURFACE: u32 = 1 << 7;
+
+/// `LayerStatus::keys`: not reported (polling not started yet, or a layer from before it).
+pub const KEYS_UNKNOWN: u32 = 0;
+/// Polling the X server's keymap (`XQueryKeymap`) for the HUD's chords.
+pub const KEYS_ACTIVE: u32 = 1;
+/// `QUIVER_SIGHT_KEYS=0`.
+pub const KEYS_OFF: u32 = 2;
+/// `DISPLAY` isn't set in the game.
+pub const KEYS_NO_DISPLAY: u32 = 3;
+/// `libX11.so.6` couldn't be loaded (or lacks a function the layer needs).
+pub const KEYS_NO_LIBX11: u32 = 4;
+/// `XOpenDisplay` failed.
+pub const KEYS_OPEN_FAILED: u32 = 5;
+/// F3 or Shift has no keycode in the X keymap.
+pub const KEYS_NO_KEYCODES: u32 = 6;
+/// The X connection broke; polling stopped.
+pub const KEYS_IO_ERROR: u32 = 7;
+/// A panic or no thread for polling.
+pub const KEYS_INTERNAL: u32 = 8;
 
 pub const DRAW_ERR_NONE: u32 = 0;
 /// Swapchain format/colour space the compositor can't handle (HDR before phase 2, exotic).
@@ -384,6 +413,9 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, engine_name),
     o!("qv_layer_status", LayerStatus, app_name),
     o!("qv_layer_status", LayerStatus, device_name),
+    o!("qv_layer_status", LayerStatus, keys),
+    o!("qv_layer_status", LayerStatus, key_toggles),
+    o!("qv_layer_status", LayerStatus, key_nexts),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
@@ -474,6 +506,17 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_LAYER_PRESENT_WAIT", LAYER_PRESENT_WAIT as u64),
     ("QV_LAYER_PANICKED", LAYER_PANICKED as u64),
     ("QV_LAYER_HUD_OFF", LAYER_HUD_OFF as u64),
+    ("QV_LAYER_WAYLAND_SURFACE", LAYER_WAYLAND_SURFACE as u64),
+    ("QV_LAYER_X11_SURFACE", LAYER_X11_SURFACE as u64),
+    ("QV_KEYS_UNKNOWN", KEYS_UNKNOWN as u64),
+    ("QV_KEYS_ACTIVE", KEYS_ACTIVE as u64),
+    ("QV_KEYS_OFF", KEYS_OFF as u64),
+    ("QV_KEYS_NO_DISPLAY", KEYS_NO_DISPLAY as u64),
+    ("QV_KEYS_NO_LIBX11", KEYS_NO_LIBX11 as u64),
+    ("QV_KEYS_OPEN_FAILED", KEYS_OPEN_FAILED as u64),
+    ("QV_KEYS_NO_KEYCODES", KEYS_NO_KEYCODES as u64),
+    ("QV_KEYS_IO_ERROR", KEYS_IO_ERROR as u64),
+    ("QV_KEYS_INTERNAL", KEYS_INTERNAL as u64),
     ("QV_DRAW_ERR_NONE", DRAW_ERR_NONE as u64),
     ("QV_DRAW_ERR_FORMAT", DRAW_ERR_FORMAT as u64),
     ("QV_DRAW_ERR_USAGE", DRAW_ERR_USAGE as u64),

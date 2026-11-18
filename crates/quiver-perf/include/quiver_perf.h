@@ -83,6 +83,19 @@ extern "C" {
 #define QV_LAYER_PRESENT_WAIT     0x08
 #define QV_LAYER_PANICKED         0x10
 #define QV_LAYER_HUD_OFF          0x20
+#define QV_LAYER_WAYLAND_SURFACE  0x40 /* the game made a Wayland VkSurfaceKHR */
+#define QV_LAYER_X11_SURFACE      0x80 /* ... an Xlib or XCB one */
+
+/* qv_layer_status.keys: the layer's in-game HUD key polling (X11 XQueryKeymap). */
+#define QV_KEYS_UNKNOWN           0 /* not reported (not started, or an older layer) */
+#define QV_KEYS_ACTIVE            1
+#define QV_KEYS_OFF               2 /* QUIVER_SIGHT_KEYS=0 */
+#define QV_KEYS_NO_DISPLAY        3
+#define QV_KEYS_NO_LIBX11         4
+#define QV_KEYS_OPEN_FAILED       5
+#define QV_KEYS_NO_KEYCODES       6
+#define QV_KEYS_IO_ERROR          7
+#define QV_KEYS_INTERNAL          8
 
 #define QV_DRAW_ERR_NONE          0
 #define QV_DRAW_ERR_FORMAT        1
@@ -172,7 +185,9 @@ typedef struct qv_layer_status {
     char     engine_name[32];   /* NUL-padded UTF-8 ("DXVK", "vkd3d") */
     char     app_name[64];
     char     device_name[64];
-    uint8_t  _reserved[8];
+    uint32_t keys;              /* QV_KEYS_* */
+    uint16_t key_toggles;       /* HUD toggle / next-preset chord presses, wrapping */
+    uint16_t key_nexts;
 } qv_layer_status;
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
@@ -285,6 +300,9 @@ QV_ASSERT_OFFSET(qv_layer_status, swapchain_count, 84);
 QV_ASSERT_OFFSET(qv_layer_status, engine_name, 88);
 QV_ASSERT_OFFSET(qv_layer_status, app_name, 120);
 QV_ASSERT_OFFSET(qv_layer_status, device_name, 184);
+QV_ASSERT_OFFSET(qv_layer_status, keys, 248);
+QV_ASSERT_OFFSET(qv_layer_status, key_toggles, 252);
+QV_ASSERT_OFFSET(qv_layer_status, key_nexts, 254);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

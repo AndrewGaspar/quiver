@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use quiver_perf::LayerStatus;
-use quiver_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_USAGE};
+use quiver_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_USAGE, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE};
 
 use crate::compositor::Compositor;
 use crate::ffi::{self, LayerDeviceCreateInfo, LayerInstanceCreateInfo, find_in_chain};
@@ -366,4 +366,55 @@ pub unsafe extern "system" fn destroy_swapchain_khr(device: vk::Device, swapchai
     }
     // SAFETY: the app's arguments.
     unsafe { (d.swapchain_fn.destroy_swapchain_khr)(device, swapchain, alloc) };
+}
+
+/// `vkCreate{Xlib,Xcb,Wayland}SurfaceKHR` share this shape (their create infos differ).
+type PfnCreateSurface = unsafe extern "system" fn(vk::Instance, *const c_void, *const vk::AllocationCallbacks<'_>, *mut vk::SurfaceKHR) -> vk::Result;
+
+/// Calls `name` down the chain and notes the surface kind for the HUD keys (`keys.rs`:
+/// XWayland never sees a Wayland window's keys).
+unsafe fn create_surface(name: &CStr, flag: u32, instance: vk::Instance, ci: *const c_void, alloc: *const vk::AllocationCallbacks<'_>, out: *mut vk::SurfaceKHR) -> vk::Result {
+    let Some(inst) = state::instance(instance) else { return vk::Result::ERROR_INITIALIZATION_FAILED };
+    // SAFETY: a valid query down the chain; GetInstanceProcAddr only returned our hook
+    // because the next layer has this function.
+    let next = unsafe { load_fn(inst.next_gipa, instance, name) };
+    if next.is_null() {
+        return vk::Result::ERROR_EXTENSION_NOT_PRESENT;
+    }
+    // SAFETY: the function's real type is PfnCreateSurface's shape; the app's arguments.
+    let r = unsafe { std::mem::transmute::<*const c_void, PfnCreateSurface>(next)(instance, ci, alloc, out) };
+    if r == vk::Result::SUCCESS {
+        crate::keys::note_surface(flag);
+    }
+    r
+}
+
+pub unsafe extern "system" fn create_xlib_surface_khr(
+    instance: vk::Instance,
+    ci: *const vk::XlibSurfaceCreateInfoKHR<'_>,
+    alloc: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::SurfaceKHR,
+) -> vk::Result {
+    // SAFETY: the app's arguments.
+    unsafe { create_surface(c"vkCreateXlibSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) }
+}
+
+pub unsafe extern "system" fn create_xcb_surface_khr(
+    instance: vk::Instance,
+    ci: *const vk::XcbSurfaceCreateInfoKHR<'_>,
+    alloc: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::SurfaceKHR,
+) -> vk::Result {
+    // SAFETY: the app's arguments.
+    unsafe { create_surface(c"vkCreateXcbSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) }
+}
+
+pub unsafe extern "system" fn create_wayland_surface_khr(
+    instance: vk::Instance,
+    ci: *const vk::WaylandSurfaceCreateInfoKHR<'_>,
+    alloc: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::SurfaceKHR,
+) -> vk::Result {
+    // SAFETY: the app's arguments.
+    unsafe { create_surface(c"vkCreateWaylandSurfaceKHR", LAYER_WAYLAND_SURFACE, instance, ci.cast(), alloc, out) }
 }

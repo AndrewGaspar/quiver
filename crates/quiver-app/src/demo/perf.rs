@@ -417,6 +417,8 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
             conf: "bindd = SHIFT, F3, Show or hide the HUD, exec, quiver hud toggle\nbindd = CTRL SHIFT, F3, Next HUD preset, exec, quiver hud next\n".into(),
             game_focused: false,
             applied: false,
+            handler: "layer".into(),
+            games: vec![],
         }),
         PerfRequest::HudStatus { game, session } => {
             let product_id = game.and_then(|g| g.as_ubisoft());

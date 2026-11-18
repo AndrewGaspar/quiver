@@ -984,7 +984,7 @@ impl Quiver {
                 .child(title("All games", summary.as_deref().unwrap_or("")))
                 .child(form)
                 .into_any_element(),
-            card(th).px(px(16.)).pt(px(4.)).pb(px(12.)).child(title("Keys", "While a Quiver game has focus")).child(keys).into_any_element(),
+            card(th).px(px(16.)).pt(px(4.)).pb(px(12.)).child(title("Keys", "Read in the game by the Sight layer")).child(keys).into_any_element(),
             div()
                 .flex()
                 .child(crate::ui::command_line(th, "quiver hud set enabled=true layout=compact captures=shown"))
@@ -992,7 +992,8 @@ impl Quiver {
         ]
     }
 
-    /// The HUD's keys (`HudKeybinds`), as information: quiverd doesn't bind them yet.
+    /// The HUD's keys (`HudKeybinds`): the Sight layer reads them in the game; the Hyprland
+    /// lines are the fallback for games without the layer (quiverd never applies them).
     pub fn render_hud_keys(&self, th: &Theme) -> AnyElement {
         let Some(k) = self.perf.keybinds.ready() else {
             return div().text_size(px(12.)).text_color(th.tx3).child("Loading the HUD's keys…").into_any_element();
@@ -1006,11 +1007,9 @@ impl Quiver {
                 .child(crate::ui::kbd(th, keys_label(&b.mods, &b.key)))
                 .child(div().text_size(px(12.5)).child(b.description.clone()))
         });
-        let state = match (k.applied, k.game_focused) {
-            (true, true) => "Bound now: a Quiver game has focus.",
-            (true, false) => "Bound while a Quiver game has focus.",
-            (false, _) => "quiverd doesn't bind these yet: add the Hyprland lines below to use them (they then work over every window).",
-        };
+        let state = "The Sight layer reads these inside the game while its window has focus: no compositor binds needed. \
+                     Games without the layer (anti-cheat, OpenGL, Wayland-native windows) can use the Hyprland lines below instead; \
+                     they then work over every window.";
         div()
             .flex()
             .flex_col()
@@ -1083,11 +1082,14 @@ impl Quiver {
                     sub.push(format!("layer: {} of {} presents drawn", l.drawn, l.presents));
                 }
                 let sub = sub.into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                // The keys only need a word when the layer can't read them.
+                let keys = s.layer.as_ref().filter(|l| !l.keys.is_empty() && l.keys != "active").map(|l| l.keys_detail.clone());
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.))
                     .child(line(ic, color, format!("{who} · {}", s.layout), sub))
+                    .when_some(keys, |d, why| d.child(line(Icon::CircleDot, th.tx3, "Shift+F3 doesn't reach this game".into(), format!("{why}; `quiver hud toggle` still works"))))
                     .when_some(s.last_error.clone(), |d, e| d.child(line(Icon::TriangleAlert, th.warn, "Last error".into(), e)))
                     .into_any_element()
             }

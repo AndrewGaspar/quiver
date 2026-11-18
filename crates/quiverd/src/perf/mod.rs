@@ -139,9 +139,19 @@ impl Session {
         self.layers.iter().rev().find(|l| l.alive && !l.ring.starts_with("invalid")).or_else(|| self.layers.last())
     }
 
+    /// The layer whose key presses count for the session: of the live ones, the one drawing
+    /// on the largest swapchain (the game rather than a launcher), newest on ties.
+    pub fn key_layer(&self) -> Option<&LayerRing> {
+        let live = self.layers.iter().filter(|l| l.alive && !l.ring.starts_with("invalid") && l.status.is_some());
+        live.max_by_key(|l| l.status.map_or(0, |s| s.extent_w as u64 * s.extent_h as u64))
+    }
+
     pub fn layer_info(&self, now: i64) -> Option<LayerInfo> {
         let l = self.live_layer()?;
         let s = l.status.unwrap_or(quiver_perf::layout::LayerStatus::ZERO);
+        // The keys from the layer that reads them for the session.
+        let key_status = self.key_layer().and_then(|k| k.status).or(l.status);
+        let (keys, keys_detail) = key_status.as_ref().map_or(("", ""), keybinds::layer_keys);
         Some(LayerInfo {
             pid: l.pid,
             alive: l.alive,
@@ -158,6 +168,10 @@ impl Session {
             engine: quiver_perf::layout::LayerStatus::get_str(&s.engine_name).map(|x| quiver_perf::descriptor::sanitize_text(x, 32)).unwrap_or_default(),
             device: quiver_perf::layout::LayerStatus::get_str(&s.device_name).map(|x| quiver_perf::descriptor::sanitize_text(x, 64)).unwrap_or_default(),
             vendor_id: s.vendor_id,
+            keys: keys.into(),
+            keys_detail: keys_detail.into(),
+            key_toggles: key_status.map_or(0, |k| k.key_toggles as u32),
+            key_nexts: key_status.map_or(0, |k| k.key_nexts as u32),
         })
     }
 
@@ -566,8 +580,39 @@ impl PerfHub {
         Ok(st.sessions[id].status(mono_raw_ns()))
     }
 
+    /// The HUD's keys and, per running game with a layer, whether the layer reads them.
     pub fn keybinds(&self) -> quiver_api::perf::HudKeybinds {
-        self.lock().binder.describe()
+        let st = self.lock();
+        let games = st
+            .sessions
+            .values()
+            .filter_map(|s| {
+                let l = s.key_layer().or_else(|| s.live_layer())?;
+                let status = l.status.unwrap_or(quiver_perf::layout::LayerStatus::ZERO);
+                Some(keybinds::keys_state(&s.id, s.product_id(), s.other_store(), l.pid, &status))
+            })
+            .collect();
+        st.binder.describe(games)
+    }
+
+    /// HUD chords the session's layer read in the game (`drain_once`): the same as
+    /// `quiver hud toggle` / `quiver hud next` for that session, remembered as the game's
+    /// last state. A burst is capped (the counters are a press count, not a queue); within
+    /// one 50 ms drain, preset steps go before toggles.
+    pub fn hud_keys(&self, session: &str, toggles: u32, nexts: u32) {
+        const MAX_PER_DRAIN: u32 = 4;
+        for _ in 0..nexts.min(MAX_PER_DRAIN) {
+            match self.next(Some(session), None) {
+                Ok(s) => tracing::info!(session, layout = %s.layout, "HUD key: next preset"),
+                Err(e) => tracing::info!(session, "HUD key: next preset ignored: {e:#}"),
+            }
+        }
+        for _ in 0..toggles.min(MAX_PER_DRAIN) {
+            match self.toggle(Some(session), None) {
+                Ok(s) => tracing::info!(session, on = s.on, "HUD key: toggle"),
+                Err(e) => tracing::info!(session, "HUD key: toggle ignored: {e:#}"),
+            }
+        }
     }
 
     /// One publish pass: presenters, HUD models to attached renderers, subscription updates.
@@ -793,10 +838,17 @@ pub fn drain_once(h: &PerfHub, watched: &mut HashMap<String, rings::SessionRings
         p.info.detail = detail;
         s.layers = drained.layers;
         s.image_view = image;
+        let key_source = s.key_layer().map(|l| l.pid);
         let product = s.product_id();
         drop(st);
         if changed {
             h.catalog_changed(&id, product);
+        }
+        // One layer per session reads the keys for it: every layer polls the same X server
+        // keymap, so a launcher and its game would both count each press.
+        if let Some(pid) = key_source {
+            let (t, n) = drained.keys.iter().filter(|k| k.0 == pid).fold((0, 0), |a, k| (a.0 + k.1, a.1 + k.2));
+            h.hud_keys(&id, t, n);
         }
     }
 }

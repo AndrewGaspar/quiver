@@ -132,8 +132,8 @@ pub enum HudAction {
         #[arg(long)]
         json: bool,
     },
-    /// The HUD's Hyprland binds (bound only while a Quiver game is focused; not applied by
-    /// this version). `--conf` prints config lines for binding them statically.
+    /// The HUD's keys: read in the game by the Sight layer, and whether each running game's
+    /// layer can. `--conf` prints Hyprland binds, the fallback for games without the layer.
     Keybinds {
         #[arg(long)]
         conf: bool,
@@ -623,6 +623,9 @@ fn print_status(s: &HudStatus) {
             l.extent.map(|[w, h]| format!("{w}×{h}")).unwrap_or_default(),
             [l.engine.as_str(), l.device.as_str()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" on ")
         );
+        if !l.keys.is_empty() {
+            println!("  keys: {} — {}  (presses: {} toggle, {} next)", l.keys, l.keys_detail, l.key_toggles, l.key_nexts);
+        }
     } else {
         println!("  layer: not seen");
     }
@@ -719,18 +722,15 @@ pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
             for b in &k.binds {
                 println!("  {:<12} {:<4} {}  ({})", b.mods, b.key, b.description, b.command);
             }
-            println!("While a Quiver game is focused quiverd would run:");
-            for c in &k.on_focus {
-                println!("  hyprctl {c}");
+            println!("The Sight layer reads these keys inside the game (X11/XWayland keymap polling); no compositor binds needed.");
+            if k.games.is_empty() {
+                println!("No running game has the layer.");
             }
-            println!("and when it loses focus:");
-            for c in &k.on_blur {
-                println!("  hyprctl {c}");
+            for g in &k.games {
+                println!("  {} (pid {}): {} — {}", g.game.map(|r| r.to_string()).unwrap_or_else(|| format!("product {}", g.product_id)), g.pid, g.keys, g.detail);
             }
-            println!(
-                "A Quiver game is {}focused now. This version doesn't apply them; `quiver hud keybinds --conf` prints static binds.",
-                if k.game_focused { "" } else { "not " }
-            );
+            println!("Games without the layer (anti-cheat, OpenGL, Wayland-native windows) can use Hyprland binds instead;");
+            println!("quiverd never applies them. `quiver hud keybinds --conf` prints them for your Hyprland config.");
         }
         HudAction::Env { game, profile, json } => {
             let game = game_ref(client, &game).await?;

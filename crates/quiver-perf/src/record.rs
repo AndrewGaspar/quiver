@@ -244,7 +244,9 @@ impl LayerStatus {
         engine_name: [0; 32],
         app_name: [0; 64],
         device_name: [0; 64],
-        _reserved: [0; 8],
+        keys: 0,
+        key_toggles: 0,
+        key_nexts: 0,
     };
 
     pub fn as_bytes(&self) -> &[u8] {
