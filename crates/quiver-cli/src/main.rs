@@ -424,6 +424,29 @@ pub(crate) async fn resolve(client: &Client, game: &str) -> Result<UbiEntry> {
     Ok(UbiEntry { product_id, entry })
 }
 
+/// A Steam game's launch settings (applied by `quiver steam-run`): `Some` for a Steam ref, or
+/// a name no Ubisoft game matches but a Steam game does; `None` means a Ubisoft game (resolve
+/// it as before, so Ubisoft names resolve exactly as they always did).
+pub(crate) async fn resolve_steam_settings(client: &Client, game: &str) -> Result<Option<(String, GameRef)>> {
+    if let Some(r) = GameRef::parse_ref(game) {
+        if r.is_ubisoft() {
+            return Ok(None);
+        }
+        if r.as_steam().is_none() {
+            bail!("{r}: {} games have no Quiver launch settings yet", r.store.label());
+        }
+        let name = resolve_any(client, game).await.map(|e| e.name).unwrap_or_else(|_| r.to_string());
+        return Ok(Some((name, r)));
+    }
+    if resolve(client, game).await.is_ok() {
+        return Ok(None);
+    }
+    match resolve_any(client, game).await {
+        Ok(e) if e.game.as_steam().is_some() => Ok(Some((e.name, e.game))),
+        _ => Ok(None),
+    }
+}
+
 /// Resolve a game argument across every store: a ref (`3539`, `ubi:3539`, `steam:620`)
 /// or a unique case-insensitive name match. A name in several stores lists the matches
 /// with their refs; a full ref picks one.
@@ -800,8 +823,15 @@ async fn main() -> Result<()> {
             let () = client.call(Request::Stop { game: e.game.into() }).await?;
         }
         Cmd::Get { game } => {
+            if let Some((name, g)) = resolve_steam_settings(&client, &game).await? {
+                let v: serde_json::Value = client.call(Request::SettingsGet { game: g.into() }).await?;
+                println!("{name} ({g})");
+                print_settings(&v);
+                exports::hook_offer(&client, g, "its launch settings").await;
+                return Ok(());
+            }
             let e = resolve(&client, &game).await?;
-            let v: serde_json::Value = client.call(Request::SettingsGet { product_id: e.product_id }).await?;
+            let v: serde_json::Value = client.call(Request::SettingsGet { game: e.product_id.into() }).await?;
             println!("{}", e.name);
             print_settings(&v);
             if let Some(id) = v["settings"]["account"].as_str() {
@@ -818,16 +848,28 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Set { game, changes, message } => {
-            let e = resolve(&client, &game).await?;
             let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
-            let rev: Revision = client.call(Request::SettingsSet { product_id: e.product_id, ops, message }).await?;
+            if let Some((name, g)) = resolve_steam_settings(&client, &game).await? {
+                let rev: Revision = client.call(Request::SettingsSet { game: g.into(), ops, message }).await?;
+                println!("{name} ({g}): settings revision {}", rev.revision);
+                exports::hook_offer(&client, g, "its launch settings").await;
+                return Ok(());
+            }
+            let e = resolve(&client, &game).await?;
+            let rev: Revision = client.call(Request::SettingsSet { game: e.product_id.into(), ops, message }).await?;
             println!("{}: settings revision {}", e.name, rev.revision);
         }
         Cmd::History { game } => {
-            let e = resolve(&client, &game).await?;
-            let revs: Vec<Revision> = client.call(Request::SettingsHistory { product_id: e.product_id }).await?;
+            let (name, g) = match resolve_steam_settings(&client, &game).await? {
+                Some(x) => x,
+                None => {
+                    let e = resolve(&client, &game).await?;
+                    (e.name.clone(), e.game)
+                }
+            };
+            let revs: Vec<Revision> = client.call(Request::SettingsHistory { game: g.into() }).await?;
             if revs.is_empty() {
-                println!("{}: no changes (defaults)", e.name);
+                println!("{name}: no changes (defaults)");
             }
             for r in revs {
                 println!(
@@ -841,9 +883,15 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Restore { game, revision } => {
-            let e = resolve(&client, &game).await?;
-            let rev: Revision = client.call(Request::SettingsRestore { product_id: e.product_id, revision }).await?;
-            println!("{}: restored r{revision} as revision {}", e.name, rev.revision);
+            let (name, g) = match resolve_steam_settings(&client, &game).await? {
+                Some(x) => x,
+                None => {
+                    let e = resolve(&client, &game).await?;
+                    (e.name.clone(), e.game)
+                }
+            };
+            let rev: Revision = client.call(Request::SettingsRestore { game: g.into(), revision }).await?;
+            println!("{name}: restored r{revision} as revision {}", rev.revision);
         }
         Cmd::Playtime { game } => {
             let any = resolve_any(&client, &game).await?;
@@ -917,21 +965,25 @@ async fn main() -> Result<()> {
             } else if list.is_empty() {
                 println!("nothing running");
             } else {
-                let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: false }).await.unwrap_or_default();
+                // Steam games played through `quiver steam-run` need every store's names.
+                let all = list.iter().any(|s| s.game.is_some());
+                let lib: Vec<LibraryEntry> = client.call(Request::Library { refresh: false, all_stores: all }).await.unwrap_or_default();
                 for s in list {
                     let mins = (chrono::Utc::now() - s.started).num_minutes();
-                    let name = lib.iter().find(|e| e.ubisoft_id() == Some(s.product_id)).map(|e| e.name.clone()).unwrap_or_default();
+                    let g = s.game_ref();
+                    let name = lib.iter().find(|e| e.game == g).map(|e| e.name.clone()).unwrap_or_default();
                     let via = match s.steam_app_id {
+                        Some(app) if s.game.is_some() => format!("Steam (app {app})"),
                         Some(app) => format!("Steam app {app}"),
                         None => s.holders.join("+"),
                     };
-                    println!(
-                        "{:<6} {:>4} min  via {:<16} {:<20} {name}",
-                        s.product_id,
-                        mins,
-                        via,
-                        if s.reported { "reported to Ubisoft" } else { "not reported" }
-                    );
+                    let reported = match (s.game.is_some(), s.reported) {
+                        (true, _) => "local history",
+                        (false, true) => "reported to Ubisoft",
+                        (false, false) => "not reported",
+                    };
+                    let id = if g.is_ubisoft() { s.product_id.to_string() } else { g.to_string() };
+                    println!("{:<6} {:>4} min  via {:<16} {:<20} {name}", id, mins, via, reported);
                 }
             }
         }

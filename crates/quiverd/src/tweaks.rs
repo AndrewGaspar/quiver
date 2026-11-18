@@ -82,6 +82,16 @@ fn refresh_display() -> Option<DisplayCaps> {
     Some(d)
 }
 
+/// What the plan of a game Quiver doesn't launch itself says about whether its tweaks reach it.
+pub(crate) fn route_note(game: &GameRef, hooked: Option<bool>) -> String {
+    match (game.as_steam(), hooked) {
+        (Some(_), Some(true)) => format!("{game} starts from Steam through quiver steam-run: these tweaks apply to its Steam launch (Steam picks the Proton build)"),
+        (Some(_), Some(false)) => format!("{game} isn't hooked: Steam starts it without Quiver, so these tweaks don't reach it. Turn the hook on with `quiver steam hook {game} on`"),
+        (Some(_), None) => format!("{game}: these tweaks reach it only when it starts through quiver steam-run (`quiver steam hook {game} status`)"),
+        (None, _) => format!("{game} starts through its store's client: Quiver Tweaks don't reach it yet"),
+    }
+}
+
 /// A scope addressed by a request, resolved: where it's stored, the scopes it sees, the
 /// game and profile.
 struct Resolved {
@@ -235,7 +245,7 @@ impl Daemon {
         };
         let mut c = tw::plan_for(&data(), game, ctx.as_ref(), caps, &env, None)?;
         if g.is_none() {
-            c.plan.notes.push("this game starts through its store's client: Quiver Tweaks apply to games Quiver launches (and quiver steam-run) for now".into());
+            c.plan.notes.push(route_note(game, crate::steamhook::hooked(*game)));
         }
         Ok(c.plan)
     }
@@ -548,19 +558,25 @@ fn chip_value(v: &str) -> String {
 
 /// Tweaks for a `quiver steam-run` launch: the compiled environment (Steam picks the Proton
 /// build, so build-dependent bindings are assumed to hold and the notes say so).
-pub(crate) fn steam_plan(cfg: &launcher::Config, plan: &mut quiver_api::steamlib::SteamLaunchPlan) {
+pub(crate) fn steam_plan(cfg: &launcher::Config, plan: &mut quiver_api::steamlib::SteamLaunchPlan, steam_env: &BTreeMap<String, String>) {
     if std::env::var("QUIVER_TWEAKS").is_ok_and(|v| v == "0") {
         return;
     }
-    let game = GameRef::ubisoft(plan.product_id);
+    // A Ubisoft game's Steam copy (its profile scope comes from a Quiver install of the same
+    // product, if any), or any other Steam game (game and global scopes).
+    let game = plan.game_ref();
+    // The person's environment: Quiver's `env`, what Steam set (their launch options before
+    // `%command%`), then the game's settings (`steam-run` sets those over Steam's).
     let mut user: BTreeMap<String, String> = cfg.env.iter().cloned().collect();
+    user.extend(steam_env.clone());
     user.extend(plan.env.clone());
     refresh_display();
     let d = data();
     let caps = tw::capabilities(&d, None, "steam");
-    let ctx = installed(plan.product_id).and_then(|g| quiver_core::options::context(&store_for(&g), None).ok());
+    let ctx = game.as_ubisoft().and_then(installed).and_then(|g| quiver_core::options::context(&store_for(&g), None).ok());
     match locked(|| tw::plan_for(&d, &game, ctx.as_ref(), caps, &user, None)) {
         Ok(c) => {
+            plan.tweaks = Some(c.plan.revisions);
             plan.env.extend(c.plan.env.clone());
             for e in c.plan.entries.iter().filter(|e| e.planned != Planned::Default) {
                 plan.perf_notes.push(format!("tweaks: {} {} — {}", e.id, e.display, e.planned.describe()));

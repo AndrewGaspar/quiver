@@ -125,13 +125,15 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }
             json!(id)
         }
-        Request::SettingsGet { product_id } => {
+        Request::SettingsGet { game } => {
+            let Some(product_id) = game.as_ubisoft() else { bail!("{}: the demo keeps settings for Ubisoft games", game.0) };
             // The daemon's shape: the settings and their revision.
             let settings = st.settings.get(&product_id).cloned().unwrap_or_default();
             let revision = st.history.get(&product_id).and_then(|h| h.iter().map(|r| r.revision).max()).unwrap_or(0);
             json!({ "revision": revision, "settings": settings })
         }
-        Request::SettingsSet { product_id, ops, message } => {
+        Request::SettingsSet { game, ops, message } => {
+            let Some(product_id) = game.as_ubisoft() else { bail!("{}: the demo keeps settings for Ubisoft games", game.0) };
             // As quiverd: a Steam copy's settings apply when Steam starts it through Quiver.
             if entry(st, product_id)?.steam.is_none() {
                 installed(st, product_id)?;
@@ -158,7 +160,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.push(Event::SettingsChanged { product_id, revision: rev.revision, source: "gui".into() });
             json!(rev)
         }
-        Request::SettingsRestore { product_id, revision } => {
+        Request::SettingsRestore { game, revision } => {
+            let Some(product_id) = game.as_ubisoft() else { bail!("{}: the demo keeps settings for Ubisoft games", game.0) };
             let old = st
                 .history
                 .get(&product_id)
@@ -1756,19 +1759,19 @@ mod tests {
     #[tokio::test]
     async fn settings_edit_and_restore() {
         let (demo, _events) = Demo::start();
-        let v: Value = call(&demo, Request::SettingsGet { product_id: 3539 });
+        let v: Value = call(&demo, Request::SettingsGet { game: 3539.into() });
         assert_eq!(v["revision"], 15);
         assert_eq!(v["settings"]["proton"], "GE-Proton10-25");
         let ops = vec![SettingOp::parse("env.DXVK_HUD=fps").unwrap(), SettingOp::parse("proton=").unwrap()];
-        let r: Revision = call(&demo, Request::SettingsSet { product_id: 3539, ops, message: Some("HUD".into()) });
+        let r: Revision = call(&demo, Request::SettingsSet { game: 3539.into(), ops, message: Some("HUD".into()) });
         assert_eq!(r.revision, 16);
         assert_eq!(r.settings.env["DXVK_HUD"], "fps");
         assert_eq!(r.settings.proton, None);
-        assert!(demo.handle(Request::SettingsSet { product_id: 3539, ops: vec![SettingOp::parse("proton=nope").unwrap()], message: None }).is_err());
-        let r: Revision = call(&demo, Request::SettingsRestore { product_id: 3539, revision: 13 });
+        assert!(demo.handle(Request::SettingsSet { game: 3539.into(), ops: vec![SettingOp::parse("proton=nope").unwrap()], message: None }).is_err());
+        let r: Revision = call(&demo, Request::SettingsRestore { game: 3539.into(), revision: 13 });
         assert_eq!(r.revision, 17);
         assert_eq!(r.settings.proton.as_deref(), Some("GE-Proton10-25"));
-        let h: Vec<Revision> = call(&demo, Request::SettingsHistory { product_id: 3539 });
+        let h: Vec<Revision> = call(&demo, Request::SettingsHistory { game: 3539.into() });
         assert_eq!(h[0].revision, 17);
     }
 
@@ -1790,7 +1793,7 @@ mod tests {
             assert_eq!(session_profile(&demo).as_deref(), ran, "{asked:?}");
         }
         // Set by name, stored as the id; unknown names are refused; `vanilla` clears it.
-        let set = |v: &str| Request::SettingsSet { product_id: 3539, ops: vec![SettingOp::parse(&format!("profile={v}")).unwrap()], message: None };
+        let set = |v: &str| Request::SettingsSet { game: 3539.into(), ops: vec![SettingOp::parse(&format!("profile={v}")).unwrap()], message: None };
         let r: Revision = call(&demo, set("ReShade"));
         assert_eq!(r.settings.profile.as_deref(), Some("pz6c4uf"));
         assert!(demo.handle(set("nope")).is_err());

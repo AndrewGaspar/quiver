@@ -212,6 +212,41 @@ pub fn set_string(text: &str, path: &[&str], value: &str) -> Result<String> {
     unreachable!("the loop returns at the last key")
 }
 
+/// Take the entry at `path` (a value or a whole section) out of the text, with its line when
+/// it has one to itself; every other byte stays. The inverse of [`set_string`] adding it.
+/// `None`: there's no such entry.
+pub fn remove(text: &str, path: &[&str]) -> Result<Option<String>> {
+    if path.is_empty() {
+        bail!("empty VDF path");
+    }
+    let bom = if text.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let (head, body) = text.split_at(bom);
+    let toks = spanned(body)?;
+    let (mut lo, mut hi) = (0, toks.len());
+    for (depth, key) in path.iter().enumerate() {
+        let last = depth + 1 == path.len();
+        let found = entries(&toks, lo, hi)?
+            .into_iter()
+            .find(|(k, _, _)| matches!(&toks[*k].0, Tok::Str(s) if s.eq_ignore_ascii_case(key)));
+        match found {
+            None => return Ok(None),
+            Some((k, v, close)) if last => {
+                let mut start = toks[k].1.start;
+                let mut end = close.map_or(toks[v].1.end, |c| toks[c].1.end);
+                let line = body[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let eol = body[end..].find('\n').map(|i| end + i + 1).unwrap_or(body.len());
+                if body[line..start].trim().is_empty() && body[end..eol].trim().is_empty() {
+                    (start, end) = (line, eol);
+                }
+                return Ok(Some(format!("{head}{}{}", &body[..start], &body[end..])));
+            }
+            Some((_, _, None)) => bail!("\"{key}\" is a value, not a section"),
+            Some((_, open, Some(c))) => (lo, hi) = (open + 1, c),
+        }
+    }
+    unreachable!("the loop returns at the last key")
+}
+
 /// `keys` (a section path ending in a value's key) as new text at `indent` tabs.
 fn block(keys: &[&str], value: &str, indent: usize) -> String {
     let tabs = "\t".repeat(indent);
@@ -319,6 +354,27 @@ mod tests {
         // And back, byte for byte.
         let back = set_string(&out, &path("1478500", "LaunchOptions"), "DXVK_CONFIG=\"dxgi.maxFrameRate=240\" %command%").unwrap();
         assert_eq!(back, LOCALCONFIG);
+    }
+
+    #[test]
+    fn removing_what_set_string_added_restores_the_text() {
+        // A key added to an existing app's section, then taken out: byte for byte.
+        let out = set_string(LOCALCONFIG, &path("3751950", "LaunchOptions"), "q %command%").unwrap();
+        assert_eq!(remove(&out, &path("3751950", "LaunchOptions")).unwrap().unwrap(), LOCALCONFIG);
+        // A whole app section added, then taken out.
+        let out = set_string(LOCALCONFIG, &path("870780", "LaunchOptions"), "q %command%").unwrap();
+        let mut sec = APP.to_vec();
+        sec.push("870780");
+        assert_eq!(remove(&out, &sec).unwrap().unwrap(), LOCALCONFIG);
+        // An existing entry: only its line goes.
+        let gone = remove(LOCALCONFIG, &path("1478500", "LaunchOptions")).unwrap().unwrap();
+        assert_eq!(get(&gone, "1478500"), None);
+        assert_eq!(gone.lines().count() + 1, LOCALCONFIG.lines().count());
+        // Not there: nothing to do. A value on the way: an error.
+        assert_eq!(remove(LOCALCONFIG, &path("42", "LaunchOptions")).unwrap(), None);
+        assert!(remove(LOCALCONFIG, &["UserLocalConfigStore", "Broadcast", "Permissions", "x"]).is_err());
+        // Several entries on one line: only the entry's own text goes.
+        assert_eq!(remove("\"a\" { \"b\" \"1\" \"c\" \"2\" }\n", &["a", "b"]).unwrap().unwrap(), "\"a\" {  \"c\" \"2\" }\n");
     }
 
     #[test]

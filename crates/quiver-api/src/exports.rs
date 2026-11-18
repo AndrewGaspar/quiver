@@ -222,6 +222,72 @@ pub struct SteamPatchResult {
     pub dropped_staged: bool,
 }
 
+// ---------------------------------------------------------------------------------------
+// Any Steam game through `quiver steam-run` (design/STORE-STEAM.md §9)
+
+/// Whether a Steam game starts through `quiver steam-run` ("the hook"), for
+/// `Request::SteamHookStatus`, `Request::SteamHook` and the Steam game page. `state` reads as
+/// for Steam copies: `Off` = Steam starts it without Quiver, `On`/`ByHand` = through
+/// `steam-run`, `Waiting`/`WaitingUndo` = staged until Steam closes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SteamHook {
+    pub app_id: u32,
+    pub name: String,
+    pub state: PatchState,
+    /// The Steam user whose launch options these are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_user: Option<String>,
+    /// The launch options now (or once Steam closes, after a staged change).
+    #[serde(default)]
+    pub launch_options: String,
+    /// What turning it on puts in front of `%command%` (empty when it can't be hooked).
+    #[serde(default)]
+    pub command: String,
+    /// It can be turned on or off from Quiver (native Steam, `quiver` found, user known,
+    /// launch options without a quoted `%command%`).
+    #[serde(default)]
+    pub hookable: bool,
+    /// Why not hookable, or something to know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// A Ubisoft game's Steam copy: the hook is the Connect switch (`--product`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<u32>,
+    /// Steam is running (changes are staged until it closes).
+    #[serde(default)]
+    pub steam_running: bool,
+    // After `Request::SteamHook`:
+    /// The change waits for Steam to close or restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
+    /// Nothing needed changing (already so).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
+    /// A change waiting for Steam was dropped instead (e.g. off before Steam restarted).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped_staged: bool,
+}
+
+impl SteamHook {
+    /// The game starts (or will, once Steam closes) through `quiver steam-run`, so its
+    /// tweaks, HUD and launch settings reach it.
+    pub fn hooked(&self) -> bool {
+        self.state.uses_quiver()
+    }
+
+    /// One line for people: "starts through Quiver", "Steam starts it without Quiver", …
+    pub fn describe(&self) -> &'static str {
+        match self.state {
+            PatchState::On | PatchState::ByHand => "starts through Quiver (quiver steam-run)",
+            PatchState::Waiting => "starts through Quiver once Steam closes or restarts",
+            PatchState::WaitingUndo => "stops starting through Quiver once Steam closes or restarts",
+            PatchState::Off => "Steam starts it without Quiver",
+            PatchState::Unknown => "unknown: several Steam users, none chosen",
+            PatchState::Other => "unknown",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

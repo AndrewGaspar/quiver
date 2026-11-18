@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use quiver_api::GameRef;
 use quiver_api::perf::{HudConfig, HudScope, HudScopeRef, HudSettingsView};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -19,8 +20,9 @@ pub struct Settings {
     pub revision: u32,
     #[serde(default)]
     pub global: HudScope,
+    /// By `GameRef::key`: `3539` (as these files always had it), `steam:620`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub games: BTreeMap<u32, HudScope>,
+    pub games: BTreeMap<String, HudScope>,
     /// `"<product>/<profile id>"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, HudScope>,
@@ -37,8 +39,9 @@ pub struct Last {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
+    /// By `GameRef::key`, as `Settings::games`.
     #[serde(default)]
-    games: BTreeMap<u32, Last>,
+    games: BTreeMap<String, Last>,
 }
 
 #[derive(Serialize)]
@@ -61,8 +64,8 @@ const KEYS: [&str; 14] = [
     "enabled", "on", "layout", "presenter", "captures", "anchor", "offset", "scale", "background", "text_opacity", "level_colors", "graph_span_ms", "safe_area", "rate_hz",
 ];
 
-fn profile_key(product: u32, profile: &str) -> String {
-    format!("{product}/{profile}")
+fn profile_key(game: &GameRef, profile: &str) -> String {
+    format!("{}/{profile}", game.key())
 }
 
 fn merge(into: &mut HudScope, set: &HudScope) {
@@ -133,10 +136,10 @@ impl HudSettings {
     }
 
     fn scope_of<'a>(s: &'a Settings, scope: &HudScopeRef) -> Option<&'a HudScope> {
-        match (scope.product_id, &scope.profile) {
+        match (&scope.game, &scope.profile) {
             (None, None) => Some(&s.global),
-            (Some(p), None) => s.games.get(&p),
-            (Some(p), Some(prof)) => s.profiles.get(&profile_key(p, prof)),
+            (Some(g), None) => s.games.get(&g.key()),
+            (Some(g), Some(prof)) => s.profiles.get(&profile_key(g, prof)),
             (None, Some(_)) => None,
         }
     }
@@ -145,8 +148,8 @@ impl HudSettings {
     /// toggle state.
     pub fn resolve_scope(&self, s: &Settings, scope: &HudScopeRef) -> HudConfig {
         let mut c = HudConfig::default().with(&s.global);
-        if let Some(p) = scope.product_id {
-            if let Some(g) = s.games.get(&p) {
+        if let Some(p) = &scope.game {
+            if let Some(g) = s.games.get(&p.key()) {
                 c = c.with(g);
             }
             if let Some(prof) = &scope.profile
@@ -160,10 +163,10 @@ impl HudSettings {
 
     /// What a launch of the game (with this profile) starts with: the settings, then the
     /// game's last toggle state and preset.
-    pub fn for_launch(&self, product_id: u32, profile: Option<&str>) -> HudConfig {
+    pub fn for_launch(&self, game: &GameRef, profile: Option<&str>) -> HudConfig {
         let s = self.load();
-        let mut c = self.resolve_scope(&s, &HudScopeRef { product_id: Some(product_id), profile: profile.map(str::to_owned) });
-        if let Some(last) = self.load_state().games.get(&product_id) {
+        let mut c = self.resolve_scope(&s, &HudScopeRef { game: Some(*game), profile: profile.map(str::to_owned) });
+        if let Some(last) = self.load_state().games.get(&game.key()) {
             if let Some(on) = last.on {
                 c.on = on;
             }
@@ -175,7 +178,7 @@ impl HudSettings {
     }
 
     pub fn view(&self, scope: &HudScopeRef) -> Result<HudSettingsView> {
-        if scope.profile.is_some() && scope.product_id.is_none() {
+        if scope.profile.is_some() && scope.game.is_none() {
             bail!("a profile scope needs a game");
         }
         let s = self.load();
@@ -190,15 +193,15 @@ impl HudSettings {
     /// Stores `set` and removes `unset` at `scope`, as a new revision. Setting `on` or
     /// `layout` for a game forgets the game's last toggle state for that field.
     pub fn apply(&self, scope: &HudScopeRef, set: &HudScope, unset_keys: &[String], source: &str, message: Option<&str>) -> Result<HudSettingsView> {
-        if scope.profile.is_some() && scope.product_id.is_none() {
+        if scope.profile.is_some() && scope.game.is_none() {
             bail!("a profile scope needs a game");
         }
         let mut s = self.load();
         {
-            let target = match (scope.product_id, &scope.profile) {
+            let target = match (&scope.game, &scope.profile) {
                 (None, _) => &mut s.global,
-                (Some(p), None) => s.games.entry(p).or_default(),
-                (Some(p), Some(prof)) => s.profiles.entry(profile_key(p, prof)).or_default(),
+                (Some(g), None) => s.games.entry(g.key()).or_default(),
+                (Some(g), Some(prof)) => s.profiles.entry(profile_key(g, prof)).or_default(),
             };
             merge(target, set);
             for k in unset_keys {
@@ -212,7 +215,7 @@ impl HudSettings {
         let line = HistoryLine { revision: s.revision, at: Utc::now(), source, scope, set, unset: unset_keys, message };
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join("history.jsonl")).context("HUD history")?;
         writeln!(f, "{}", serde_json::to_string(&line)?)?;
-        if let Some(p) = scope.product_id {
+        if let Some(p) = scope.game.map(|g| g.key()) {
             let touches = |k: &str| unset_keys.iter().any(|u| u == k);
             let (on, layout) = (set.on.is_some() || touches("on"), set.layout.is_some() || touches("layout"));
             if on || layout {
@@ -232,9 +235,9 @@ impl HudSettings {
     }
 
     /// Remembers a game's toggle state or preset (the chord, `quiver hud toggle|next`).
-    pub fn remember(&self, product_id: u32, on: Option<bool>, layout: Option<&str>) -> Result<()> {
+    pub fn remember(&self, game: &GameRef, on: Option<bool>, layout: Option<&str>) -> Result<()> {
         let mut st = self.load_state();
-        let last = st.games.entry(product_id).or_default();
+        let last = st.games.entry(game.key()).or_default();
         if on.is_some() {
             last.on = on;
         }
@@ -254,37 +257,58 @@ mod tests {
     fn scopes_resolve_profile_over_game_over_global() {
         let t = tempfile::tempdir().unwrap();
         let h = HudSettings::new(t.path().to_owned());
-        assert!(!h.for_launch(1, None).enabled, "off by default");
+        assert!(!h.for_launch(&GameRef::ubisoft(1), None).enabled, "off by default");
         h.apply(&HudScopeRef::global(), &HudScope { layout: Some("compact".into()), ..Default::default() }, &[], "cli", None).unwrap();
         h.apply(&HudScopeRef::game(1), &HudScope { enabled: Some(true), layout: Some("standard".into()), ..Default::default() }, &[], "cli", None).unwrap();
-        let prof = HudScopeRef { product_id: Some(1), profile: Some("p-dlss".into()) };
+        let prof = HudScopeRef { game: Some(GameRef::ubisoft(1)), profile: Some("p-dlss".into()) };
         let v = h.apply(&prof, &HudScope { layout: Some("dlss-tuning".into()), on: Some(true), captures: Some(Captures::Hidden), ..Default::default() }, &[], "cli", Some("tuning")).unwrap();
         assert_eq!(v.revision, 3);
         assert_eq!(v.effective.layout, "dlss-tuning");
         assert!(v.effective.enabled && v.effective.on);
-        let vanilla = h.for_launch(1, None);
+        let vanilla = h.for_launch(&GameRef::ubisoft(1), None);
         assert_eq!((vanilla.layout.as_str(), vanilla.on, vanilla.captures), ("standard", false, Captures::Shown));
-        assert_eq!(h.for_launch(2, None).layout, "compact");
+        assert_eq!(h.for_launch(&GameRef::ubisoft(2), None).layout, "compact");
         // Unset a key; an unknown key is an error.
         let v = h.apply(&prof, &HudScope::default(), &["layout".into()], "cli", None).unwrap();
         assert_eq!(v.effective.layout, "standard");
         assert!(h.apply(&prof, &HudScope::default(), &["colour".into()], "cli", None).is_err());
-        assert!(h.view(&HudScopeRef { product_id: None, profile: Some("x".into()) }).is_err());
+        assert!(h.view(&HudScopeRef { game: None, profile: Some("x".into()) }).is_err());
         let hist = std::fs::read_to_string(t.path().join("history.jsonl")).unwrap();
         assert_eq!(hist.lines().count(), 4);
         assert!(hist.contains("\"message\":\"tuning\""));
     }
 
     #[test]
+    fn steam_games_have_a_scope_and_ubisoft_files_stay_as_they_were() {
+        let t = tempfile::tempdir().unwrap();
+        // A file an older quiverd wrote: numeric keys.
+        std::fs::write(t.path().join("settings.json"), r#"{"revision":1,"global":{},"games":{"3539":{"enabled":true}}}"#).unwrap();
+        let h = HudSettings::new(t.path().to_owned());
+        assert!(h.for_launch(&GameRef::ubisoft(3539), None).enabled);
+        let control = GameRef::steam(870780);
+        assert!(!h.for_launch(&control, None).enabled);
+        h.apply(&HudScopeRef::of(control), &HudScope { enabled: Some(true), ..Default::default() }, &[], "cli", None).unwrap();
+        assert!(h.for_launch(&control, None).enabled);
+        assert!(h.for_launch(&GameRef::ubisoft(3539), None).enabled);
+        assert!(!h.for_launch(&GameRef::steam(620), None).enabled);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(t.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(v["games"]["3539"]["enabled"], true, "Ubisoft keys unchanged");
+        assert_eq!(v["games"]["steam:870780"]["enabled"], true);
+        h.remember(&control, Some(true), None).unwrap();
+        assert!(h.for_launch(&control, None).on);
+    }
+
+    #[test]
     fn last_state_is_remembered_until_set_explicitly() {
         let t = tempfile::tempdir().unwrap();
         let h = HudSettings::new(t.path().to_owned());
-        h.remember(5, Some(true), Some("full")).unwrap();
-        let c = h.for_launch(5, None);
+        let five = GameRef::ubisoft(5);
+        h.remember(&five, Some(true), Some("full")).unwrap();
+        let c = h.for_launch(&five, None);
         assert_eq!((c.on, c.layout.as_str()), (true, "full"));
         // A setting for the game's `on` wins over (and clears) the remembered state.
         h.apply(&HudScopeRef::game(5), &HudScope { on: Some(false), ..Default::default() }, &[], "cli", None).unwrap();
-        let c = h.for_launch(5, None);
+        let c = h.for_launch(&five, None);
         assert_eq!((c.on, c.layout.as_str()), (false, "full"));
     }
 }

@@ -9,7 +9,7 @@ use quiver_api::perf::{
     Anchor, Captures, HudKeybinds, HudLayout, HudLayoutInfo, HudScope, HudScopeRef, HudSettingsView, HudStatus, LaunchPerfPlan, MetricInfo, MetricState, PerfEvent, PerfRequest,
     PerfSessionInfo, PerfSummary, PerfUpdate, PerfValue, PresenterSetting, SessionSummary, Stat,
 };
-use quiver_api::{Client, Event, Request};
+use quiver_api::{Client, Event, GameRef, Request};
 
 use crate::print_json;
 
@@ -175,19 +175,35 @@ async fn product(client: &Client, game: &str) -> Result<u32> {
     Ok(crate::mods::resolve_installed(client, game).await?.product_id)
 }
 
-async fn product_opt(client: &Client, game: Option<&str>) -> Result<Option<u32>> {
+/// A game from an argument: a ref as is (`3539`, `steam:870780`), else an installed Ubisoft
+/// game's name, else a Steam game's (the HUD works for Steam games started through
+/// `quiver steam-run`).
+pub(crate) async fn game_ref(client: &Client, game: &str) -> Result<GameRef> {
+    if let Some(r) = GameRef::parse_ref(game) {
+        return Ok(r);
+    }
+    match crate::mods::resolve_installed(client, game).await {
+        Ok(g) => Ok(GameRef::ubisoft(g.product_id)),
+        Err(e) => match crate::resolve_any(client, game).await {
+            Ok(x) if x.game.as_steam().is_some() => Ok(x.game),
+            _ => Err(e),
+        },
+    }
+}
+
+async fn game_opt(client: &Client, game: Option<&str>) -> Result<Option<GameRef>> {
     match game {
-        Some(g) => Ok(Some(product(client, g).await?)),
+        Some(g) => Ok(Some(game_ref(client, g).await?)),
         None => Ok(None),
     }
 }
 
 async fn scope(client: &Client, game: Option<&str>, profile: Option<String>) -> Result<HudScopeRef> {
-    let product_id = product_opt(client, game).await?;
-    if profile.is_some() && product_id.is_none() {
+    let game = game_opt(client, game).await?;
+    if profile.is_some() && game.is_none() {
         bail!("--profile needs --game");
     }
-    Ok(HudScopeRef { product_id, profile })
+    Ok(HudScopeRef { game, profile })
 }
 
 fn perf(r: PerfRequest) -> Request {
@@ -215,19 +231,18 @@ pub async fn run(client: &Client, action: PerfAction) -> Result<()> {
             let stats = stats.iter().map(|s| Stat::parse(s).with_context(|| format!("unknown stat '{s}'"))).collect::<Result<Vec<_>>>()?;
             let every_ms = millis(&every)?.max(100);
             let window_ms = if window == "session" { 0 } else { millis(&window)? };
-            let product_id = product_opt(client, game.as_deref()).await?;
-            watch(client, product_id, metrics, stats, every_ms, window_ms, count, json).await?
+            let game = game_opt(client, game.as_deref()).await?;
+            watch(client, game, metrics, stats, every_ms, window_ms, count, json).await?
         }
         PerfAction::Catalog { game, all, json } => {
-            let product_id = product_opt(client, game.as_deref()).await?;
-            let product_id = match product_id {
-                Some(p) => Some(p),
+            let game = match game_opt(client, game.as_deref()).await? {
+                Some(g) => Some(g),
                 None => {
                     let s: Vec<PerfSessionInfo> = client.call(perf(PerfRequest::Sessions)).await?;
-                    s.first().map(|s| s.product_id).or(Some(0))
+                    s.first().map(|s| s.game_ref()).or(Some(GameRef::ubisoft(0)))
                 }
             };
-            let cat: Vec<MetricInfo> = client.call(perf(PerfRequest::Catalog { session: None, product_id })).await?;
+            let cat: Vec<MetricInfo> = client.call(perf(PerfRequest::Catalog { session: None, game })).await?;
             if json {
                 return print_json(&cat);
             }
@@ -243,9 +258,12 @@ pub async fn run(client: &Client, action: PerfAction) -> Result<()> {
             }
             for x in s {
                 println!(
-                    "{}  product {}  started {}{}{}",
+                    "{}  {}  started {}{}{}",
                     x.session,
-                    x.product_id,
+                    match x.game {
+                        Some(g) => g.to_string(),
+                        None => format!("product {}", x.product_id),
+                    },
                     x.started.with_timezone(&chrono::Local).format("%H:%M:%S"),
                     if x.hud_enabled { format!("  HUD ({})", x.presenter.map(|p| format!("{p:?}").to_lowercase()).unwrap_or_else(|| "pending".into())) } else { "  HUD off".into() },
                     if x.dev { "  [dev]" } else { "" }
@@ -272,8 +290,8 @@ pub async fn run(client: &Client, action: PerfAction) -> Result<()> {
             }
         }
         PerfAction::History { game, n, json } => {
-            let product_id = product(client, &game).await?;
-            let v: Vec<SessionSummary> = client.call(perf(PerfRequest::Summaries { product_id, limit: n })).await?;
+            let game = game_ref(client, &game).await?;
+            let v: Vec<SessionSummary> = client.call(perf(PerfRequest::Summaries { game: game.into(), limit: n })).await?;
             if json {
                 return print_json(&v);
             }
@@ -445,17 +463,17 @@ pub fn summary_line(s: &PerfSummary) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn watch(client: &Client, product_id: Option<u32>, select: Vec<String>, stats: Vec<Stat>, every_ms: u32, window_ms: u32, count: Option<usize>, json: bool) -> Result<()> {
+async fn watch(client: &Client, game: Option<GameRef>, select: Vec<String>, stats: Vec<Stat>, every_ms: u32, window_ms: u32, count: Option<usize>, json: bool) -> Result<()> {
     let mut events = client.subscribe().await?;
     let mut perf_rx = client.subscribe_perf().await?;
     let subscribe = || async {
         client
-            .call::<u64>(perf(PerfRequest::Subscribe { session: None, product_id, select: select.clone(), every_ms, window_ms, stats: stats.clone() }))
+            .call::<u64>(perf(PerfRequest::Subscribe { session: None, game, select: select.clone(), every_ms, window_ms, stats: stats.clone() }))
             .await
     };
     let mut sub = match subscribe().await {
         Ok(s) => Some(s),
-        Err(e) if product_id.is_some() && e.to_string().contains("isn't running") => {
+        Err(e) if game.is_some() && e.to_string().contains("isn't running") => {
             eprintln!("waiting for the game to start…");
             None
         }
@@ -486,7 +504,7 @@ async fn watch(client: &Client, product_id: Option<u32>, select: Vec<String>, st
                         return Ok(());
                     }
                 }
-                Some(PerfEvent::Session { product_id: p, ended: false, .. }) if sub.is_none() && product_id.is_none_or(|x| x == p) => {
+                Some(PerfEvent::Session { product_id: p, game: g, ended: false, .. }) if sub.is_none() && game.is_none_or(|x| x == g.unwrap_or(GameRef::ubisoft(p))) => {
                     sub = subscribe().await.ok();
                 }
                 Some(PerfEvent::Session { session: s, ended: true, summary, .. }) if session.as_deref() == Some(s.as_str()) => {
@@ -625,18 +643,18 @@ fn print_status(s: &HudStatus) {
 pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
     match action {
         HudAction::Toggle { game } => {
-            let product_id = product_opt(client, game.as_deref()).await?;
-            let s: HudStatus = client.call(perf(PerfRequest::HudToggle { session: None, product_id })).await?;
+            let game = game_opt(client, game.as_deref()).await?;
+            let s: HudStatus = client.call(perf(PerfRequest::HudToggle { session: None, game })).await?;
             println!("HUD {} ({})", if s.on { "shown" } else { "hidden" }, s.layout);
         }
         HudAction::Next { game } => {
-            let product_id = product_opt(client, game.as_deref()).await?;
-            let s: HudStatus = client.call(perf(PerfRequest::HudNext { session: None, product_id })).await?;
+            let game = game_opt(client, game.as_deref()).await?;
+            let s: HudStatus = client.call(perf(PerfRequest::HudNext { session: None, game })).await?;
             println!("HUD: {}", s.layout);
         }
         HudAction::Status { game, json } => {
-            let product_id = product_opt(client, game.as_deref()).await?;
-            let s: HudStatus = client.call(perf(PerfRequest::HudStatus { session: None, product_id })).await?;
+            let game = game_opt(client, game.as_deref()).await?;
+            let s: HudStatus = client.call(perf(PerfRequest::HudStatus { session: None, game })).await?;
             if json {
                 return print_json(&s);
             }
@@ -715,8 +733,8 @@ pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
             );
         }
         HudAction::Env { game, profile, json } => {
-            let product_id = product(client, &game).await?;
-            let p: LaunchPerfPlan = client.call(perf(PerfRequest::LaunchEnv { product_id, profile })).await?;
+            let game = game_ref(client, &game).await?;
+            let p: LaunchPerfPlan = client.call(perf(PerfRequest::LaunchEnv { game: game.into(), profile })).await?;
             if json {
                 return print_json(&p);
             }
@@ -736,10 +754,15 @@ pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
 
 async fn set_enabled(client: &Client, game: Option<String>, profile: Option<String>, on: bool) -> Result<()> {
     let scope = scope(client, game.as_deref(), profile).await?;
+    let game = scope.game;
     let v: HudSettingsView = client.call(perf(PerfRequest::HudSet { scope, set: HudScope { enabled: Some(on), ..Default::default() }, unset: vec![], message: None })).await?;
     print_view(&v);
     if on {
         println!("The next launch gets the Sight layer and the HUD; Shift+F3 shows it, Ctrl+Shift+F3 cycles presets.");
+    }
+    // A Steam game gets the HUD only through `quiver steam-run` (opt-in per game).
+    if let Some(g) = game.filter(|g| g.as_steam().is_some()) {
+        crate::exports::hook_offer(client, g, "the HUD").await;
     }
     Ok(())
 }

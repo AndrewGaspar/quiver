@@ -2,10 +2,12 @@
 //! with Steam's art from its public CDN, made-up play time and achievement progress, and a
 //! page per game (`Request::GameDetail`). Play answers as quiverd does for a Steam game: a
 //! finished Play job ("Asked Steam to start it"). `QUIVER_DEMO_GLOBAL=steam-library=none`
-//! leaves them out.
+//! leaves them out. Hades starts through `quiver steam-run` (the hook); the others don't,
+//! and `SteamHook` turns it on or off (Steam isn't running in the demo, so nothing waits).
 
 use anyhow::{Result, anyhow};
 use chrono::{TimeZone, Utc};
+use quiver_api::exports::{PatchState, SteamHook};
 use quiver_api::stores::{Achievement, AchievementCount, Achievements, ClientInstall, CloudState, Dlc, GameDetail, StorePlaytime};
 use quiver_api::{ActivityEntry, Art, Event, GameRef, Job, JobKind, LibraryEntry, Playtime, Request, StoreId};
 use serde_json::{Value, json};
@@ -35,6 +37,28 @@ const STEAM: &[SteamFixture] = &[
     SteamFixture { app_id: 504230, name: "Celeste", developer: "Maddy Makes Games", released: (2018, 1, 25), gb: 1.2, linux: true, hours: 19, last_days: 75, unlocked: 18, total: 32, dlc: &[] },
     SteamFixture { app_id: 1091500, name: "Cyberpunk 2077", developer: "CD PROJEKT RED", released: (2020, 12, 10), gb: 71.4, linux: false, hours: 96, last_days: 140, unlocked: 30, total: 57, dlc: &["Phantom Liberty", "REDmod"] },
 ];
+
+/// Demo Steam games hooked from the start.
+pub(super) const HOOKED: &[u32] = &[1145360];
+
+fn hook_state(f: &SteamFixture, hooked: bool) -> SteamHook {
+    let command = format!("{}/.local/bin/quiver --source steam steam-run --app {}", super::home().display(), f.app_id);
+    SteamHook {
+        app_id: f.app_id,
+        name: f.name.into(),
+        state: if hooked { PatchState::On } else { PatchState::Off },
+        steam_user: Some("1001".into()),
+        launch_options: if hooked { format!("{command} %command%") } else { String::new() },
+        command,
+        hookable: true,
+        note: None,
+        product_id: None,
+        steam_running: false,
+        staged: false,
+        unchanged: false,
+        dropped_staged: false,
+    }
+}
 
 fn fixture(app_id: u32) -> Option<&'static SteamFixture> {
     STEAM.iter().find(|f| f.app_id == app_id)
@@ -104,7 +128,7 @@ const NAMES: &[(&str, &str)] = &[
     ("Perfectionist", "Finish everything"),
 ];
 
-fn detail(f: &SteamFixture) -> GameDetail {
+fn detail(f: &SteamFixture, hooked: bool) -> GameDetail {
     let list = (0..f.total.min(20))
         .map(|i| {
             let (name, description) = NAMES[i % NAMES.len()];
@@ -145,6 +169,7 @@ fn detail(f: &SteamFixture) -> GameDetail {
         dlc: f.dlc.iter().enumerate().map(|(i, n)| Dlc { game: GameRef::steam(f.app_id + 1 + i as u32), name: Some((*n).into()), installed: i == 0 }).collect(),
         account: Some("demo".into()),
         unavailable: vec!["description".into()],
+        steam_hook: Some(hook_state(f, hooked)),
     }
 }
 
@@ -152,7 +177,24 @@ fn detail(f: &SteamFixture) -> GameDetail {
 pub(super) fn handle(demo: &Demo, st: &mut State, req: &Request) -> Result<Option<Value>> {
     let steam = |g: &GameRef| g.as_steam().and_then(fixture).ok_or_else(|| anyhow!("{g} is not installed in Steam"));
     Ok(Some(match req {
-        Request::GameDetail { game, .. } if game.store == StoreId::Steam => json!(detail(steam(game)?)),
+        Request::GameDetail { game, .. } if game.store == StoreId::Steam => {
+            let f = steam(game)?;
+            json!(detail(f, st.steam_hooked.contains(&f.app_id)))
+        }
+        Request::SteamHookStatus { app_id, .. } => {
+            let f = steam(&GameRef::steam(*app_id))?;
+            json!(hook_state(f, st.steam_hooked.contains(app_id)))
+        }
+        Request::SteamHook { app_id, on, .. } => {
+            let f = steam(&GameRef::steam(*app_id))?;
+            let changed = if *on { st.steam_hooked.insert(*app_id) } else { st.steam_hooked.remove(app_id) };
+            let what = if *on { "now starts through Quiver (quiver steam-run)" } else { "starts without Quiver again" };
+            if changed {
+                st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("Steam: {} {what} (Steam user 1001)", f.name), game: Some(GameRef::steam(*app_id)) });
+                demo.emit(Event::SteamGamesChanged { offer: vec![] });
+            }
+            json!(SteamHook { unchanged: !changed, ..hook_state(f, *on) })
+        }
         Request::Playtime { game } if game.store == StoreId::Steam => {
             let p = playtime(steam(game)?);
             json!(Playtime { total_seconds: p.total_seconds, last_played: p.last_played, sessions: vec![] })

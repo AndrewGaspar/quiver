@@ -213,6 +213,16 @@ async fn change(client: &Client, who: &str, mk: impl Fn(bool) -> TweaksRequest, 
     }
 }
 
+/// A Steam game's tweaks reach it only through `quiver steam-run`: say so when it isn't
+/// hooked (with the command that hooks it).
+async fn steam_offer(client: &Client, scope: &Scope) {
+    if let Scope::Game { game } = scope
+        && game.as_steam().is_some()
+    {
+        crate::exports::hook_offer(client, *game, "these tweaks").await;
+    }
+}
+
 fn print_change(c: &OptionsChange) {
     if c.revision > 0 {
         println!("r{}: {}", c.revision, c.changes.join(", "));
@@ -451,6 +461,7 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 return json_out(&c);
             }
             print_change(&c);
+            steam_offer(client, &scope).await;
         }
         TweaksAction::Reset { args, global, profile, all, message, yes } => {
             let (game, rest) = split_game(&args, global, if all { 0 } else { 1 });
@@ -479,6 +490,7 @@ pub async fn run(client: &Client, who: &str, json: bool, action: Option<TweaksAc
                 return json_out(&c);
             }
             print_change(&c);
+            steam_offer(client, &scope).await;
         }
         TweaksAction::Prefer { args, global, profile, yes } => {
             let (game, rest) = split_game(&args, global, 2);

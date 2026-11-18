@@ -225,6 +225,8 @@ impl Scan {
             dlc,
             account: self.user_name(user),
             unavailable,
+            // quiverd adds the hook (it knows where `quiver` is installed).
+            steam_hook: None,
         })
     }
 }
@@ -340,7 +342,10 @@ impl StoreProvider for SteamLocal {
             let id = app_id(&game)?;
             let s = self.scan_async(false).await?;
             let p = s.app(id).and_then(App::store_playtime).unwrap_or_default();
-            Ok(Playtime { total_seconds: p.total_seconds, last_played: p.last_played, sessions: Vec::new() })
+            // Steam's totals (they count launches through `quiver steam-run` too), with the
+            // sessions Quiver recorded for those launches.
+            let sessions = crate::settings::playtime(game).map(|p| p.sessions).unwrap_or_default();
+            Ok(Playtime { total_seconds: p.total_seconds, last_played: p.last_played, sessions })
         })
     }
 

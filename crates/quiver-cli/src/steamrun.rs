@@ -1,12 +1,21 @@
-//! `quiver steam-run %command%`: a Steam launch option that runs a Steam copy of a Ubisoft
-//! game against Quiver instead of Ubisoft Connect (see `quiver_core::steamrun`).
+//! `quiver steam-run %command%`: a Steam launch option that runs a Steam game with Quiver's
+//! launch plan (see `quiver_core::steamrun`).
 //!
-//! Steam runs this with its Proton command line and compat environment. It finds the game
-//! in the command, gets a launch context from quiverd (its existing login: no new Ubisoft
-//! session), and execs Steam's own command with the game swapped for
+//! **A Ubisoft game's Steam copy** (`--product`, or a product its files name): Steam runs
+//! this with its Proton command line and compat environment. It finds the game in the
+//! command, gets a launch context from quiverd (its existing login: no new Ubisoft session),
+//! and execs Steam's own command with the game swapped for
 //! `quiver-bridge.exe --run <context> -- <game.exe> <args>`. Files go to
 //! `<data>/steam-run/<appid>/` (under the home folder, which Steam's runtime container
 //! sees); the prefix is left alone unless `--sdk-dir` is given.
+//!
+//! **Any other Steam game** (`--app <appid>`, or no product found; design/STORE-STEAM.md §9):
+//! nothing is swapped. It asks quiverd for `steam:<appid>`'s launch plan (settings, tweaks,
+//! the HUD's session and Sight layer), registers itself as the game's local play session, and
+//! execs Steam's command with the plan's wrappers in front, its arguments after the game's
+//! and its environment set. The exec keeps the pid, so quiverd sees the launch end when
+//! Steam's command does; Steam's process tree, Stop, overlay and Steam Input are as without
+//! the hook. When quiverd can't be reached the game starts anyway, without the plan.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -23,8 +32,12 @@ use quiver_ipc::run::BridgeArgs;
 #[derive(clap::Args)]
 pub struct SteamRunArgs {
     /// Ubisoft product id (default: from the game's Steam install script or its prefix).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "app")]
     product: Option<u32>,
+    /// A Steam game that isn't a Ubisoft copy: its app id (default: `SteamAppId` from Steam).
+    /// Nothing is swapped; the game's launch plan is applied to Steam's command.
+    #[arg(long)]
+    app: Option<u32>,
     /// Account to launch as (username or user id); default: the game's launch account.
     #[arg(long)]
     account: Option<String>,
@@ -142,6 +155,88 @@ fn redirect_sdk(env: &SteamEnv, dir: &Path, log: &mut Log) -> Result<()> {
 }
 
 pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
+    let route = steamrun::route(a.product, a.app, |k| std::env::var(k).ok(), |p| std::fs::read_to_string(p).ok())?;
+    match route {
+        steamrun::Route::Ubisoft => run_ubisoft(source, a).await,
+        steamrun::Route::Steam { app_id } => run_steam_game(source, a, app_id).await,
+    }
+}
+
+/// Any Steam game (not a Ubisoft copy): Steam's command with the game's launch plan.
+async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()> {
+    let game = quiver_api::GameRef::steam(app_id);
+    let run_dir = launcher::data_dir().join("steam-run").join(app_id.to_string());
+    let mut log = Log(None);
+    if !a.dry_run {
+        std::fs::create_dir_all(&run_dir)?;
+        log.0 = std::fs::OpenOptions::new().create(true).append(true).open(run_dir.join("steam-run.log")).ok();
+    }
+    log.line(format!("{game} (a Steam game: nothing swapped) command: {}", a.command.join(" ")));
+    for (set, flag) in [(a.account.is_some(), "--account"), (a.no_guard, "--no-guard"), (a.sdk_dir.is_some(), "--sdk-dir")] {
+        if set {
+            log.line(format!("{flag} is for Steam copies of Ubisoft games; ignored"));
+        }
+    }
+    let mut argv = a.command.clone();
+    let mut env: Vec<(String, String)> = Vec::new();
+    if a.dry_run {
+        println!("game: {game} (Steam game; Steam's command runs as it is, with the game's launch plan from quiverd)");
+        println!("{}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" "));
+        return Ok(());
+    }
+    ensure_daemon_outside_steam(&mut log);
+    match Client::connect(source).await {
+        Err(e) => log.line(format!("quiverd unreachable ({e:#}); starting the game without Quiver's launch plan")),
+        Ok(client) => {
+            let mut plan = None;
+            if a.no_settings {
+                log.line("--no-settings: the game's Quiver launch plan is not applied");
+            } else {
+                let steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: game.into(), perf: true, env: steam_env }).await {
+                    Ok(p) => {
+                        for l in steamplan::describe(&p) {
+                            log.line(format!("settings r{}: {l}", p.revision));
+                        }
+                        if let Some(s) = &p.perf_session {
+                            log.line(format!("perf session {s}"));
+                        }
+                        for l in &p.perf_notes {
+                            log.line(l);
+                        }
+                        argv = steamplan::steam_command(&p, &a.command);
+                        env = steamplan::steam_env(&p, |k| std::env::var(k).ok());
+                        plan = Some(p);
+                    }
+                    Err(e) => log.line(format!("no launch plan from quiverd ({e:#}); starting without it")),
+                }
+            }
+            // The local play session: quiverd watches this pid, which the exec keeps.
+            let req = Request::SteamSession {
+                app_id,
+                pid: std::process::id(),
+                perf_session: plan.as_ref().and_then(|p| p.perf_session.clone()),
+                settings_revision: plan.as_ref().map_or(0, |p| p.revision),
+            };
+            match client.call::<quiver_api::ActiveSession>(req).await {
+                Ok(_) => log.line(format!("play session held for {game} (pid {})", std::process::id())),
+                Err(e) => log.line(format!("no play session from quiverd ({e:#}); the game starts anyway")),
+            }
+        }
+    }
+    log.line(format!("exec: {}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" ")));
+    for (k, v) in &env {
+        log.line(format!("env {k}={v}"));
+    }
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.envs(env);
+    let err = cmd.exec();
+    bail!("exec {}: {err}", argv[0])
+}
+
+/// A Ubisoft game's Steam copy: the bridge swapped in for the game (as before).
+async fn run_ubisoft(source: &str, a: SteamRunArgs) -> Result<()> {
     let env = SteamEnv::from_vars(|k| std::env::var(k).ok())?;
     let run_dir = launcher::data_dir().join("steam-run").join(env.app_id.to_string());
     let mut log = Log(None);
@@ -228,7 +323,7 @@ pub async fn run(source: &str, a: SteamRunArgs) -> Result<()> {
     // doesn't have them, and the launch goes on without. With them comes the launch's perf
     // session (its environment is in the plan's env; quiverd ends it with the play session).
     let mut plan_env = Vec::new();
-    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { product_id, perf: !a.no_settings }).await {
+    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: product_id.into(), perf: !a.no_settings, env: Default::default() }).await {
         Ok(plan) if !a.no_settings => {
             for l in steamplan::describe(&plan) {
                 log.line(format!("settings r{}: {l}", plan.revision));

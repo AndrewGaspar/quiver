@@ -62,6 +62,7 @@ impl StoreProvider for Ubisoft {
                 dlc: Vec::new(),
                 account: i.account,
                 unavailable: i.unavailable,
+                steam_hook: None,
             })
         })
     }
@@ -150,7 +151,7 @@ impl Daemon {
         }
     }
 
-    async fn game_name(self: &Arc<Self>, game: GameRef) -> String {
+    pub(crate) async fn game_name(self: &Arc<Self>, game: GameRef) -> String {
         match game.as_ubisoft() {
             Some(id) => self.product_name(id),
             None => self.library_all(false).await.ok().and_then(|l| l.into_iter().find(|e| e.game == game)).map(|e| e.name).unwrap_or_else(|| game.to_string()),
@@ -164,7 +165,12 @@ impl Daemon {
 
     pub(crate) async fn game_detail(self: &Arc<Self>, game: GameRef, refresh: bool) -> Result<GameDetail> {
         let providers = self.providers();
-        provider_for(&providers, &game)?.detail(game, refresh).await
+        let mut d = provider_for(&providers, &game)?.detail(game, refresh).await?;
+        // A Steam game: whether it starts through `quiver steam-run` (read-only).
+        if let Some(app_id) = game.as_steam() {
+            d.steam_hook = tokio::task::spawn_blocking(move || crate::steamhook::status(app_id, None)).await?.map_err(|e| tracing::debug!(%game, "hook status: {e:#}")).ok();
+        }
+        Ok(d)
     }
 
     /// `Request::Stores`: each provider, its account and how many games it brings.

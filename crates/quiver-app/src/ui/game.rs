@@ -596,7 +596,7 @@ impl Quiver {
             ArtPreference::Steam => "Steam's art first".to_owned(),
             ArtPreference::Ubisoft => "Ubisoft's art first".to_owned(),
         });
-        self.call::<quiver_api::Revision, _>(quiver_api::Request::SettingsSet { product_id: id.pid(), ops: vec![op], message }, cx, move |this, r, cx| match r {
+        self.call::<quiver_api::Revision, _>(quiver_api::Request::SettingsSet { game: id.pid().into(), ops: vec![op], message }, cx, move |this, r, cx| match r {
             Ok(_) => this.load_details(id, cx),
             Err(e) => this.show_toast(crate::err_text(&e), cx),
         });

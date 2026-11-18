@@ -585,12 +585,12 @@ impl Quiver {
             return;
         }
         // The daemon replies `{revision, settings}`.
-        self.call::<serde_json::Value, _>(Request::SettingsGet { product_id: id.pid() }, cx, move |this, r, _| {
+        self.call::<serde_json::Value, _>(Request::SettingsGet { game: id.pid().into() }, cx, move |this, r, _| {
             if let (Ok(v), Some(g)) = (r, this.game_mut(id)) {
                 g.settings = Some(crate::ui::game::settings_from_reply(v).0);
             }
         });
-        self.call::<Vec<Revision>, _>(Request::SettingsHistory { product_id: id.pid() }, cx, move |this, r, _| {
+        self.call::<Vec<Revision>, _>(Request::SettingsHistory { game: id.pid().into() }, cx, move |this, r, _| {
             if let (Ok(h), Some(g)) = (r, this.game_mut(id)) {
                 g.history = Some(h);
             }

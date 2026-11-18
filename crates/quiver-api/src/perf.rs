@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::GameRef;
 pub use quiver_perf::descriptor::{Level, MetricDescriptor, MetricKind, Unit, Visibility};
 
 // ---------------------------------------------------------------------------------------
@@ -33,8 +34,10 @@ pub enum PerfRequest {
     Catalog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        product_id: Option<u32>,
+        /// The game: a Ubisoft product goes out as `product_id` (as always), another
+        /// store's game as `game` (`steam:620`).
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
     },
     /// Receive [`PerfEvent::Update`] on this connection every `every_ms` (≥ 100) for the
     /// metrics `select` names (ids, roles, or globs such as `gpu.*`; empty: the headline
@@ -42,8 +45,10 @@ pub enum PerfRequest {
     Subscribe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        product_id: Option<u32>,
+        /// The game: a Ubisoft product goes out as `product_id` (as always), another
+        /// store's game as `game` (`steam:620`).
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
         #[serde(default)]
         select: Vec<String>,
         #[serde(default = "default_every_ms")]
@@ -79,15 +84,19 @@ pub enum PerfRequest {
     HudToggle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        product_id: Option<u32>,
+        /// The game: a Ubisoft product goes out as `product_id` (as always), another
+        /// store's game as `game` (`steam:620`).
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
     },
     /// Next preset for a running game (`HudStatus`); shows the HUD if it was hidden.
     HudNext {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        product_id: Option<u32>,
+        /// The game: a Ubisoft product goes out as `product_id` (as always), another
+        /// store's game as `game` (`steam:620`).
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
     },
     /// `quiver-sight` only: this connection receives [`PerfEvent::HudModel`] for the
     /// session from now on. Returns the current `HudModel`.
@@ -96,8 +105,10 @@ pub enum PerfRequest {
     HudStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        product_id: Option<u32>,
+        /// The game: a Ubisoft product goes out as `product_id` (as always), another
+        /// store's game as `game` (`steam:620`).
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
     },
     /// Built-in presets and the user's layout files (`Vec<HudLayoutInfo>`).
     HudLayouts,
@@ -109,14 +120,16 @@ pub enum PerfRequest {
     /// What a launch of the game would get from the HUD (`LaunchPerfPlan`): environment,
     /// layer order, MangoHud remap. Read-only; for launchers (`quiver steam-run`) and tests.
     LaunchEnv {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
     /// A game's play sessions with their performance summaries, newest first
     /// (`Vec<SessionSummary>`, at most `limit`).
     Summaries {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default = "default_limit")]
         limit: usize,
     },
@@ -205,6 +218,8 @@ pub enum PerfEvent {
     CatalogChanged { session: String, product_id: u32 },
     /// HUD settings or a running HUD's state changed.
     HudChanged {
+        /// The Ubisoft product whose settings changed (`None`: the global scope, or another
+        /// store's game).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         product_id: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,10 +228,14 @@ pub enum PerfEvent {
     /// A perf session started or ended (with its summary when it ended).
     Session {
         session: String,
+        /// 0 for another store's game (then `game` names it).
         product_id: u32,
         ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<Box<PerfSummary>>,
+        /// Another store's game (appended; Ubisoft sessions leave it out).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<GameRef>,
     },
 }
 
@@ -269,6 +288,7 @@ impl PerfValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerfSessionInfo {
     pub session: String,
+    /// 0 for another store's game (then `game` names it).
     pub product_id: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -283,6 +303,15 @@ pub struct PerfSessionInfo {
     /// Started with `DevSession` (no game).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dev: bool,
+    /// Another store's game (appended; Ubisoft sessions leave it out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+}
+
+impl PerfSessionInfo {
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// A producer of a session's metrics.
@@ -434,9 +463,11 @@ pub struct MeanMax {
 /// Where a HUD setting lives: global (no product), per game, or per profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HudScopeRef {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub product_id: Option<u32>,
-    /// A profile id (the daemon resolves names). Needs `product_id`.
+    /// The game (none: the global scope). A Ubisoft product is written `product_id`, as
+    /// before; another store's game `game` (`steam:620`).
+    #[serde(flatten, with = "crate::game::persisted::option")]
+    pub game: Option<GameRef>,
+    /// A profile id (the daemon resolves names). Needs a game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }
@@ -446,15 +477,27 @@ impl HudScopeRef {
         Self::default()
     }
 
+    /// A Ubisoft product's scope.
     pub fn game(product_id: u32) -> Self {
-        Self { product_id: Some(product_id), profile: None }
+        Self::of(GameRef::ubisoft(product_id))
+    }
+
+    /// A game's scope, any store.
+    pub fn of(game: GameRef) -> Self {
+        Self { game: Some(game), profile: None }
+    }
+
+    /// The Ubisoft product, for a Ubisoft game's scope.
+    pub fn product_id(&self) -> Option<u32> {
+        self.game.and_then(|g| g.as_ubisoft())
     }
 
     pub fn label(&self) -> String {
-        match (&self.product_id, &self.profile) {
+        let name = |g: &GameRef| g.as_ubisoft().map(|p| p.to_string()).unwrap_or_else(|| g.to_string());
+        match (&self.game, &self.profile) {
             (None, _) => "global".into(),
-            (Some(p), None) => format!("game {p}"),
-            (Some(p), Some(prof)) => format!("game {p} profile {prof}"),
+            (Some(g), None) => format!("game {}", name(g)),
+            (Some(g), Some(prof)) => format!("game {} profile {prof}", name(g)),
         }
     }
 }
@@ -908,6 +951,7 @@ pub struct HudLayoutInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HudStatus {
     pub session: String,
+    /// 0 for another store's game (then `game` names it).
     pub product_id: u32,
     pub enabled: bool,
     pub on: bool,
@@ -925,6 +969,15 @@ pub struct HudStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub captures: Captures,
+    /// Another store's game (appended; Ubisoft sessions leave it out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+}
+
+impl HudStatus {
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1011,7 +1064,7 @@ mod tests {
     #[test]
     fn requests_wire() {
         let r: Request = serde_json::from_str(r#"{"method":"perf","params":{"op":"catalog","product_id":3539}}"#).unwrap();
-        assert!(matches!(r, Request::Perf(PerfRequest::Catalog { session: None, product_id: Some(3539) })));
+        assert!(matches!(r, Request::Perf(PerfRequest::Catalog { session: None, game: Some(g) }) if g == GameRef::ubisoft(3539)));
         let r: Request = serde_json::from_str(r#"{"method":"perf","params":{"op":"subscribe","session":"s-1"}}"#).unwrap();
         let Request::Perf(PerfRequest::Subscribe { every_ms, window_ms, select, stats, .. }) = r else { panic!() };
         assert_eq!((every_ms, window_ms), (1000, 1000));
@@ -1021,8 +1074,27 @@ mod tests {
         assert_eq!(scope, HudScopeRef::game(1));
         assert_eq!(set.captures, Some(Captures::Hidden));
         assert_eq!(set.anchor, Some(Anchor::BottomRight));
-        let v = serde_json::to_value(Request::Perf(PerfRequest::HudToggle { session: None, product_id: None })).unwrap();
+        let v = serde_json::to_value(Request::Perf(PerfRequest::HudToggle { session: None, game: None })).unwrap();
         assert_eq!(v, serde_json::json!({"method": "perf", "params": {"op": "hud_toggle"}}));
+        // A Ubisoft game is written as before; another store's game by its ref.
+        let v = serde_json::to_value(Request::Perf(PerfRequest::HudStatus { session: None, game: Some(GameRef::ubisoft(3539)) })).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "perf", "params": {"op": "hud_status", "product_id": 3539}}));
+        let v = serde_json::to_value(Request::Perf(PerfRequest::HudStatus { session: None, game: Some(GameRef::steam(870780)) })).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "perf", "params": {"op": "hud_status", "game": "steam:870780"}}));
+        let back: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, Request::Perf(PerfRequest::HudStatus { game: Some(g), .. }) if g == GameRef::steam(870780)));
+        // HUD scopes: Ubisoft as before, Steam by ref; both read back.
+        assert_eq!(serde_json::to_value(HudScopeRef::game(1)).unwrap(), serde_json::json!({"product_id": 1}));
+        assert_eq!(serde_json::to_value(HudScopeRef::global()).unwrap(), serde_json::json!({}));
+        let steam = HudScopeRef::of(GameRef::steam(620));
+        assert_eq!(serde_json::to_value(&steam).unwrap(), serde_json::json!({"game": "steam:620"}));
+        assert_eq!(serde_json::from_value::<HudScopeRef>(serde_json::json!({"game": "steam:620"})).unwrap(), steam);
+        assert_eq!(steam.label(), "game steam:620");
+        let r: Request = serde_json::from_str(r#"{"method":"perf","params":{"op":"hud_set","scope":{"game":"steam:620"},"set":{"enabled":true}}}"#).unwrap();
+        let Request::Perf(PerfRequest::HudSet { scope, .. }) = r else { panic!() };
+        assert_eq!(scope, steam);
+        let r: Request = serde_json::from_str(r#"{"method":"perf","params":{"op":"launch_env","game":"steam:620"}}"#).unwrap();
+        assert!(matches!(r, Request::Perf(PerfRequest::LaunchEnv { game, .. }) if game == GameRef::steam(620)));
         assert_eq!(Stat::parse("p1low"), Some(Stat::P1low));
         assert_eq!(Stat::P01low.as_str(), "p01low");
     }

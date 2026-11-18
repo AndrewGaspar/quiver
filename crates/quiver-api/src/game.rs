@@ -309,6 +309,13 @@ impl From<GameRef> for GameField {
     }
 }
 
+impl From<u32> for GameField {
+    /// A Ubisoft product id.
+    fn from(product_id: u32) -> Self {
+        GameField(GameRef::ubisoft(product_id))
+    }
+}
+
 impl PartialEq<GameRef> for GameField {
     fn eq(&self, o: &GameRef) -> bool {
         self.0 == *o

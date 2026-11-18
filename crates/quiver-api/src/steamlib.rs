@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::GameRef;
+
 /// One product as `ownership_service` reports it (`Request::Ownership`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OwnedProduct {
@@ -83,4 +85,26 @@ pub struct SteamLaunchPlan {
     /// Lines about the perf session ("hud: …"), for the launch log.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub perf_notes: Vec<String>,
+    // ---- Any Steam game (appended; design/STORE-STEAM.md §9)
+    /// The game, when it isn't a Ubisoft product (`steam:620`; `product_id` is then 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+    /// The tweak revisions the plan was compiled from (recorded with the play session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tweaks: Option<crate::tweaks::TweakRevisions>,
+}
+
+impl SteamLaunchPlan {
+    /// An empty plan for `game`: a Ubisoft product, or another Steam game.
+    pub fn for_game(game: GameRef) -> Self {
+        match game.as_ubisoft() {
+            Some(product_id) => Self { product_id, ..Default::default() },
+            None => Self { game: Some(game), ..Default::default() },
+        }
+    }
+
+    /// The game the plan is for.
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
 }

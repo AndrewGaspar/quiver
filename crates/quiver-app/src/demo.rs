@@ -87,6 +87,8 @@ struct State {
     next_job: u64,
     /// Accounts and sign-in (`demo_global.rs`), made on first use.
     global: Option<global::Global>,
+    /// Demo Steam games that start through `quiver steam-run` (`demo/stores.rs`).
+    steam_hooked: std::collections::BTreeSet<u32>,
 }
 
 pub struct Demo {
@@ -218,8 +220,8 @@ impl Demo {
             }),
             Request::Library { .. } => json!(st.entries),
             Request::Playtime { game } => json!(game.as_ubisoft().and_then(|id| st.playtime.get(&id)).cloned().unwrap_or_default()),
-            Request::SettingsGet { product_id } => json!(st.settings.get(&product_id).cloned().unwrap_or_default()),
-            Request::SettingsHistory { product_id } => json!(st.history.get(&product_id).cloned().unwrap_or_default()),
+            Request::SettingsGet { game } => json!(game.as_ubisoft().and_then(|id| st.settings.get(&id)).cloned().unwrap_or_default()),
+            Request::SettingsHistory { game } => json!(game.as_ubisoft().and_then(|id| st.history.get(&id)).cloned().unwrap_or_default()),
             Request::Activity { limit } => json!(st.activity.iter().take(limit).collect::<Vec<_>>()),
             Request::Sessions => json!(st.sessions),
             Request::ProtonList => json!(["GE-Proton10-26", "GE-Proton10-25", "Proton 9.0 (Beta)"]),
@@ -452,6 +454,7 @@ fn build_state() -> State {
         sessions: vec![],
         next_job: 100,
         global: None,
+        steam_hooked: stores::HOOKED.iter().copied().collect(),
     }
 }
 
@@ -480,7 +483,7 @@ mod tests {
         assert_eq!(pt.total_seconds / 3600, 87);
         assert!(pt.sessions[0].started > pt.sessions[1].started, "newest first");
         let hist: Vec<Revision> =
-            serde_json::from_value(demo.handle(Request::SettingsHistory { product_id: 3539 }).unwrap()).unwrap();
+            serde_json::from_value(demo.handle(Request::SettingsHistory { game: 3539.into() }).unwrap()).unwrap();
         assert_eq!(hist[0].revision, 15);
         assert!(demo.handle(Request::Login { email: "a".into(), password: "b".into() }).is_err());
         // The install job advances on its own.

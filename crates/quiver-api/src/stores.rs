@@ -177,6 +177,10 @@ pub struct GameDetail {
     /// Detail no source provides (shown as "not available", not invented).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable: Vec<String>,
+    /// Steam: whether the game starts through `quiver steam-run`, so Quiver's tweaks, HUD
+    /// and launch settings reach it (appended; design/STORE-STEAM.md §9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_hook: Option<crate::exports::SteamHook>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
