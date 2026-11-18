@@ -83,6 +83,43 @@ impl SteamEnv {
     }
 }
 
+/// Which way a `quiver steam-run` launch goes (design/STORE-STEAM.md §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// A Ubisoft game's Steam copy: the bridge is swapped in for the game (as before).
+    Ubisoft,
+    /// Any other Steam game: Steam's command runs as it is, with the game's launch plan.
+    Steam { app_id: u32 },
+}
+
+/// The route: `--product` means a Ubisoft copy; `--app` a plain Steam game (nothing is
+/// looked for); otherwise a Proton launch whose install script or prefix names a Ubisoft
+/// product is a Ubisoft copy (what a hand-typed `quiver steam-run %command%` always did),
+/// and anything else, Proton or native, is the Steam game in Steam's environment. `read`
+/// reads a file (the install script and `system.reg`, only on the last path).
+pub fn route(product: Option<u32>, app: Option<u32>, var: impl Fn(&str) -> Option<String>, read: impl Fn(&Path) -> Option<String>) -> Result<Route> {
+    if product.is_some() {
+        return Ok(Route::Ubisoft);
+    }
+    if let Some(app_id) = app.filter(|&a| a != 0) {
+        return Ok(Route::Steam { app_id });
+    }
+    if let Ok(env) = SteamEnv::from_vars(&var) {
+        let script = env.installscript().and_then(|p| read(&p));
+        let reg = read(&env.prefix().join("system.reg"));
+        if detect_product(env.app_id, script.as_deref(), reg.as_deref()).is_some() {
+            return Ok(Route::Ubisoft);
+        }
+        return Ok(Route::Steam { app_id: env.app_id });
+    }
+    // A native game: no compatibility tool, only the app id.
+    ["SteamAppId", "STEAM_COMPAT_APP_ID", "SteamGameId"]
+        .iter()
+        .find_map(|k| var(k).and_then(|v| v.parse::<u32>().ok()).filter(|&n| n != 0))
+        .map(|app_id| Route::Steam { app_id })
+        .context("no Steam app id (SteamAppId) in the environment: run this from a Steam game's launch options, as `quiver steam-run %command%`, or pass --app <appid>")
+}
+
 /// Where a product id came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductSource {
@@ -484,6 +521,37 @@ mod tests {
         let e = SteamEnv::from_vars(|k| (k == "STEAM_COMPAT_DATA_PATH").then(|| "/x/compatdata/42".into())).unwrap();
         assert_eq!((e.app_id, e.install), (42, None));
         assert!(SteamEnv::from_vars(|_| None).unwrap_err().to_string().contains("steam-run %command%"));
+    }
+
+    #[test]
+    fn routes() {
+        let none = |_: &Path| None;
+        let proton = |k: &str| match k {
+            "STEAM_COMPAT_DATA_PATH" => Some("/s/steamapps/compatdata/870780".into()),
+            "SteamAppId" => Some("870780".into()),
+            "STEAM_COMPAT_INSTALL_PATH" => Some("/s/steamapps/common/Control".into()),
+            _ => None,
+        };
+        // --product: a Ubisoft copy; --app: that Steam game, without looking for a product.
+        assert_eq!(route(Some(66088), None, proton, none).unwrap(), Route::Ubisoft);
+        assert_eq!(route(None, Some(3751950), proton, |_| Some(BF_SCRIPT.into())).unwrap(), Route::Steam { app_id: 3751950 });
+        // A Proton game whose files name no Ubisoft product: the Steam game.
+        assert_eq!(route(None, None, proton, none).unwrap(), Route::Steam { app_id: 870780 });
+        // One whose install script does: a Ubisoft copy (as a hand-typed hook always was).
+        let script = |p: &Path| p.ends_with("installscript_870780.vdf").then(|| BF_SCRIPT.to_owned());
+        assert_eq!(route(None, None, proton, script).unwrap(), Route::Ubisoft);
+        let reg = |p: &Path| p.ends_with("system.reg").then(|| BF_REG.to_owned());
+        assert_eq!(route(None, None, proton, reg).unwrap(), Route::Ubisoft);
+        // The table knows Black Flag Resynced.
+        let bf = |k: &str| match k {
+            "STEAM_COMPAT_DATA_PATH" => Some("/s/compatdata/3751950".into()),
+            _ => None,
+        };
+        assert_eq!(route(None, None, bf, none).unwrap(), Route::Ubisoft);
+        // A native game: only the app id.
+        let native = |k: &str| (k == "SteamAppId").then(|| "620".to_owned());
+        assert_eq!(route(None, None, native, none).unwrap(), Route::Steam { app_id: 620 });
+        assert!(route(None, None, |_| None, none).unwrap_err().to_string().contains("--app"));
     }
 
     #[test]

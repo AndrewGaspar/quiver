@@ -3,13 +3,13 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use quiver_api::exports::{
-    ExportRecord, ExportState, ExportStatus, PatchState, RestartReport, SteamExportResult, SteamGame, SteamGames, SteamPatchResult,
-    SteamUsers,
+    ExportRecord, ExportState, ExportStatus, PatchState, RestartReport, SteamExportResult, SteamGame, SteamGames, SteamHook,
+    SteamPatchResult, SteamUsers,
 };
-use quiver_api::{Client, Request};
+use quiver_api::{Client, GameRef, Request};
 use quiver_core::exports::{Paths, steam};
 
 use crate::{dev, print_json, resolve};
@@ -86,6 +86,21 @@ pub enum SteamAction {
     Offers {
         /// `on` or `off`; without it, show the setting.
         state: Option<String>,
+    },
+    /// Start any Steam game through Quiver, so its tweaks, HUD and launch settings reach it:
+    /// `on` puts `quiver … steam-run --app <appid>` in front of `%command%` in its launch
+    /// options (keeping yours), `off` puts them back exactly as they were, `status` shows
+    /// where it stands. Staged while Steam runs; nothing else of Steam's changes.
+    Hook {
+        /// The game: `steam:<appid>`, a Steam app id, or its name.
+        game: String,
+        /// `on`, `off` or `status` (default).
+        state: Option<String>,
+        /// Steam user (id or name) whose launch options to change (default: who installed it).
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -332,9 +347,91 @@ pub async fn steam(client: &Client, action: SteamAction) -> Result<()> {
                 println!("Off: Quiver doesn't offer anything for new Steam installs (quiver steam patch still works)");
             }
         }
+        SteamAction::Hook { game, state, user, json } => hook(client, &game, state.as_deref(), user, json).await?,
         SteamAction::Restart { .. } => unreachable!("handled on its own (it may not need the daemon)"),
     }
     Ok(())
+}
+
+/// A Steam app id from a game argument: `steam:<appid>`, a bare number (a Steam app id
+/// here), or a name in the library (a Ubisoft game's Steam copy names its app).
+async fn steam_app(client: &Client, game: &str) -> Result<u32> {
+    let g = game.trim();
+    if let Some(r) = GameRef::parse_ref(g).filter(|r| !r.is_ubisoft()) {
+        return r.as_steam().with_context(|| format!("{r} isn't a Steam game"));
+    }
+    if let Ok(n) = g.parse::<u32>() {
+        return Ok(n);
+    }
+    let e = crate::resolve_any(client, g).await?;
+    e.game.as_steam().or_else(|| e.steam.as_ref().map(|s| s.app_id)).with_context(|| format!("{} isn't installed through Steam", e.name))
+}
+
+fn print_hook(s: &SteamHook) {
+    let game = GameRef::steam(s.app_id);
+    println!("{} ({game}): {}", s.name, s.describe());
+    if let Some(u) = &s.steam_user {
+        println!("  Steam user {u}; launch options: {}", if s.launch_options.is_empty() { "(none)" } else { &s.launch_options });
+    }
+    if let Some(p) = s.product_id {
+        println!("  a Ubisoft game's Steam copy (product {p}): the hook is the Connect switch (quiver steam patch)");
+    }
+    if let Some(n) = &s.note {
+        println!("  {n}");
+    }
+    if !s.hooked() && s.hookable {
+        println!("  `quiver steam hook {game} on` adds: {} %command%", s.command);
+    }
+}
+
+/// `quiver steam hook <game> [on|off|status]`.
+async fn hook(client: &Client, game: &str, state: Option<&str>, user: Option<String>, json: bool) -> Result<()> {
+    let app_id = steam_app(client, game).await?;
+    let on = match state.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("status") => None,
+        Some("on" | "yes" | "true") => Some(true),
+        Some("off" | "no" | "false") => Some(false),
+        Some(s) => bail!("expected on, off or status, got '{s}'"),
+    };
+    let s: SteamHook = match on {
+        None => client.call(Request::SteamHookStatus { app_id, steam_user: user }).await?,
+        // The Steam user who installed it, unless --user says otherwise (quiverd lists the
+        // users when it can't tell).
+        Some(on) => client.call(Request::SteamHook { app_id, on, steam_user: user }).await?,
+    };
+    if json {
+        return print_json(&s);
+    }
+    match on {
+        Some(_) if s.dropped_staged && s.unchanged => println!("{}: the change waiting for Steam was dropped; nothing else to do", s.name),
+        Some(_) if s.unchanged => println!("{}: already so", s.name),
+        _ => {}
+    }
+    print_hook(&s);
+    if s.staged || matches!(s.state, PatchState::Waiting | PatchState::WaitingUndo) {
+        println!("{}", restart_hint());
+    }
+    Ok(())
+}
+
+/// After changing something that reaches a Steam game only through `quiver steam-run` (its
+/// tweaks, HUD or launch settings): say so plainly when the game isn't hooked, with the
+/// command that hooks it (STORE-STEAM steer 3b: offered, never done unasked).
+pub(crate) async fn hook_offer(client: &Client, game: GameRef, what: &str) {
+    let Some(app_id) = game.as_steam() else { return };
+    match client.call::<SteamHook>(Request::SteamHookStatus { app_id, steam_user: None }).await {
+        Ok(s) if s.hooked() => {
+            if s.state == PatchState::Waiting {
+                println!("{} starts through Quiver once Steam closes or restarts; {what} applies from then.", s.name);
+            }
+        }
+        Ok(s) if s.hookable => println!(
+            "{} isn't hooked: Steam starts it without Quiver, so {what} doesn't reach it. To start it through Quiver: quiver steam hook {game} on",
+            s.name
+        ),
+        Ok(s) => println!("{} isn't hooked, so {what} doesn't reach it ({}).", s.name, s.note.as_deref().unwrap_or("it can't be hooked from Quiver")),
+        Err(e) => println!("(couldn't tell whether {game} starts through Quiver: {e:#}; {what} reaches it only through quiver steam-run)"),
+    }
 }
 
 /// The daemon, unless it's unreachable (then the CLI does it itself).

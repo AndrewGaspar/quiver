@@ -714,7 +714,7 @@ impl Quiver {
         }
         let ops = vec![SettingOp::Set { key: "profile".into(), value: value.unwrap_or_else(|| VANILLA.into()) }];
         let message = Some(format!("Default for Play: {label}"));
-        self.call::<Revision, _>(Request::SettingsSet { product_id: id.pid(), ops, message }, cx, move |this, r, cx| match r {
+        self.call::<Revision, _>(Request::SettingsSet { game: id.pid().into(), ops, message }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Play now uses {label} (launch options r{})", rev.revision), cx);
                 this.load_details(id, cx);
@@ -1138,7 +1138,7 @@ impl Quiver {
         }
         let message = self.launch_message(id, cx);
         self.gp.busy = true;
-        self.call::<Revision, _>(Request::SettingsSet { product_id: id.pid(), ops, message }, cx, move |this, r, cx| {
+        self.call::<Revision, _>(Request::SettingsSet { game: id.pid().into(), ops, message }, cx, move |this, r, cx| {
             this.gp.busy = false;
             match r {
                 Ok(rev) => {
@@ -1157,7 +1157,7 @@ impl Quiver {
     }
 
     pub fn restore_settings(&mut self, id: u32, revision: u32, cx: &mut Context<Self>) {
-        self.call::<Revision, _>(Request::SettingsRestore { product_id: id, revision }, cx, move |this, r, cx| match r {
+        self.call::<Revision, _>(Request::SettingsRestore { game: id.into(), revision }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Restored r{revision} as r{}", rev.revision), cx);
                 this.launch_discard(Gid::from(id));

@@ -10,11 +10,13 @@ mod mods;
 mod perf;
 mod info;
 mod lifecycle;
+mod localsessions;
 mod options;
 mod tweaks;
 mod savestores;
 mod setup;
 mod steamgames;
+mod steamhook;
 mod spaces;
 mod steamlib;
 mod stores;
@@ -88,6 +90,8 @@ struct Daemon {
     events: broadcast::Sender<Event>,
     /// Games being played, from any launch path; reports play time to Ubisoft.
     sessions: Arc<PlaySessions>,
+    /// Steam games (not Ubisoft copies) played through `quiver steam-run`: local only.
+    local: Arc<localsessions::LocalSessions>,
     /// Mod options: running sessions as options see them, the SDK link, options events.
     options: options::Options,
     tweaks: tweaks::Tweaks,
@@ -115,6 +119,15 @@ type ConnHandle = (mpsc::UnboundedSender<Reply>, Arc<tokio::sync::Notify>);
 /// The Ubisoft product a request names; other stores' games can't do what it asks (yet).
 fn ubisoft_only(game: GameRef) -> Result<u32> {
     game.as_ubisoft().with_context(|| format!("{game}: {} games can't do that in Quiver yet", game.store.label()))
+}
+
+/// A game Quiver keeps launch settings for: a Ubisoft product, or a Steam game (applied to
+/// its Steam launch by `quiver steam-run`).
+fn settings_game(game: GameRef) -> Result<GameRef> {
+    match game.store {
+        quiver_api::StoreId::Ubisoft | quiver_api::StoreId::Steam => Ok(game),
+        s => bail!("{game}: {} games have no Quiver launch settings yet", s.label()),
+    }
 }
 
 /// Run a (possibly non-`Send`) core future to completion on a blocking thread.
@@ -441,11 +454,16 @@ impl Daemon {
                 self.log_activity(source, format!("stopped {}", game.name), Some(product_id));
                 Value::Null
             }
-            Request::SettingsGet { product_id } => {
-                let (s, revision) = settings::current(product_id)?;
+            Request::SettingsGet { game } => {
+                let game = settings_game(*game)?;
+                let (s, revision) = settings::current(game)?;
                 json!({ "revision": revision, "settings": s })
             }
-            Request::SettingsSet { product_id, ops, message } => {
+            Request::SettingsSet { game, ops, message } => {
+                let game = settings_game(*game)?;
+                let Some(product_id) = game.as_ubisoft() else {
+                    return self.steam_settings_set(source, game, ops, message);
+                };
                 // `account=<name|id|prefix>` is stored as the account's user id, and
                 // `profile=<name|id>` (the default profile) as the profile's id.
                 let ops = ops
@@ -471,8 +489,14 @@ impl Daemon {
                 self.emit(Event::SettingsChanged { product_id, revision: rev.revision, source: source.to_owned() });
                 json!(rev)
             }
-            Request::SettingsHistory { product_id } => json!(settings::history(product_id)?),
-            Request::SettingsRestore { product_id, revision } => {
+            Request::SettingsHistory { game } => json!(settings::history(settings_game(*game)?)?),
+            Request::SettingsRestore { game, revision } => {
+                let game = settings_game(*game)?;
+                let Some(product_id) = game.as_ubisoft() else {
+                    let rev = settings::restore(game, revision, source)?;
+                    self.log_activity_game(source, format!("restored settings r{revision} as r{} for {game}", rev.revision), Some(game));
+                    return Ok(json!(rev));
+                };
                 let rev = settings::restore(product_id, revision, source)?;
                 self.log_activity(source, format!("restored settings r{revision} as r{} for {}", rev.revision, self.product_name(product_id)), Some(product_id));
                 self.emit(Event::SettingsChanged { product_id, revision: rev.revision, source: source.to_owned() });
@@ -529,7 +553,8 @@ impl Daemon {
                 json!(a.iter().rev().take(limit).cloned().collect::<Vec<_>>())
             }
             // With the options addressing fields (C1); older clients ignore them.
-            Request::Sessions => json!(self.sessions.list().into_iter().map(|s| self.options.detail(s)).collect::<Vec<_>>()),
+            // Then Steam games played through `quiver steam-run` (with `game`).
+            Request::Sessions => json!(self.sessions.list().into_iter().map(|s| self.options.detail(s)).chain(self.local.list()).collect::<Vec<_>>()),
             r @ (Request::ExportList | Request::ExportDesktop { .. } | Request::ExportSteam { .. } | Request::SteamUsers | Request::SteamApplyStaged | Request::SteamRestart { .. }) => exports::handle(self, source, r).await?,
             r @ (Request::GameInfo { .. } | Request::GameProgress { .. } | Request::Saves { .. } | Request::SavesRestore { .. } | Request::SavesSync { .. }) => info::handle(self, source, r).await?,
             r @ (Request::Queue
@@ -549,6 +574,8 @@ impl Daemon {
             | Request::SteamUnpatch { .. }
             | Request::SteamDismissOffer { .. }
             | Request::SteamOffers { .. }) => steamgames::handle(self, source, r).await?,
+            r @ (Request::SteamHook { .. } | Request::SteamHookStatus { .. }) => steamhook::handle(self, source, r).await?,
+            Request::SteamSession { app_id, pid, perf_session, settings_revision } => json!(self.steam_session(source, app_id, pid, perf_session, settings_revision).await?),
             r @ (Request::Ownership { .. } | Request::SteamLaunchPlan { .. }) => steamlib::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {
@@ -1016,22 +1043,26 @@ async fn main() -> Result<()> {
     // The perf hub takes mods' metrics, and ends Steam launches' perf sessions with their
     // play sessions.
     let perf = perf::PerfHub::start(launcher::data_dir(), perf::shm_root());
+    let local = Arc::new(localsessions::LocalSessions::default());
     let sessions = {
         let finished_perf = perf.clone();
         let events = events.clone();
         let list: Arc<Mutex<Option<Arc<PlaySessions>>>> = Arc::default();
         let l = list.clone();
+        let local = local.clone();
         let finished_events = events.clone();
         let s = PlaySessions::new(
             accounts.clone(),
             cfg.report_playtime,
             move || {
                 if let Some(s) = &*l.lock().unwrap() {
-                    let _ = events.send(Event::SessionsChanged { sessions: s.list() });
+                    let mut sessions = s.list();
+                    sessions.extend(local.list());
+                    let _ = events.send(Event::SessionsChanged { sessions });
                 }
             },
             move |f| {
-                let summary = f.steam_app_id.and_then(|_| finished_perf.end_steam(f.product_id));
+                let summary = f.steam_app_id.and_then(|_| finished_perf.end_steam(&GameRef::ubisoft(f.product_id)));
                 record_bridge_session(&f, summary);
                 let _ = finished_events.send(Event::GameStopped { product_id: f.product_id });
             },
@@ -1087,6 +1118,7 @@ async fn main() -> Result<()> {
         activity: Mutex::new(activity),
         events,
         sessions,
+        local,
         options: options::Options::default(),
         tweaks: tweaks::Tweaks::default(),
         mod_sdk,

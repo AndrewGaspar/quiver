@@ -305,13 +305,17 @@ pub(crate) fn steam_save_dir(g: &SteamGame, user_id: &str, product_id: u32) -> O
     quiver_core::steamrun::host_path(&prefix, &win)
 }
 
-/// The launch settings `quiver steam-run` applies (see `SteamLaunchPlan`).
-pub(crate) fn launch_plan(product_id: u32) -> Result<SteamLaunchPlan> {
-    let (s, revision) = settings::current(product_id)?;
-    Ok(plan_from(product_id, s, revision))
+/// The launch settings `quiver steam-run` applies (see `SteamLaunchPlan`): a Ubisoft
+/// game's Steam copy's, or any other Steam game's (`steam:<appid>`, its own settings).
+pub(crate) fn launch_plan(game: GameRef) -> Result<SteamLaunchPlan> {
+    if game.as_ubisoft().is_none() && game.as_steam().is_none() {
+        anyhow::bail!("{game} isn't a Steam game: Steam launches only Steam games and Steam copies of Ubisoft games");
+    }
+    let (s, revision) = settings::current(game)?;
+    Ok(plan_from(game, s, revision))
 }
 
-fn plan_from(product_id: u32, s: quiver_api::GameSettings, revision: u32) -> SteamLaunchPlan {
+fn plan_from(game: GameRef, s: quiver_api::GameSettings, revision: u32) -> SteamLaunchPlan {
     let mut ignored = Vec::new();
     if let Some(p) = &s.proton {
         ignored.push(format!("proton={p} (Steam's compatibility setting picks Proton)"));
@@ -319,22 +323,51 @@ fn plan_from(product_id: u32, s: quiver_api::GameSettings, revision: u32) -> Ste
     if let Some(l) = &s.language {
         ignored.push(format!("language={l} (Steam's language setting decides)"));
     }
-    SteamLaunchPlan { product_id, revision, env: s.env, dll_overrides: s.dll_overrides, args: s.args, wrappers: s.wrappers, ignored, ..Default::default() }
+    SteamLaunchPlan { revision, env: s.env, dll_overrides: s.dll_overrides, args: s.args, wrappers: s.wrappers, ignored, ..SteamLaunchPlan::for_game(game) }
+}
+
+/// The plan of a Steam launch: settings, then tweaks (they see the settings' environment
+/// and lose to it per key), then with `perf` the HUD's session and Sight layer (which see
+/// both, so the layer order accounts for vkBasalt or lsfg-vk the settings turn on). Shared by
+/// Steam copies of Ubisoft games and every other Steam game.
+///
+/// `steam_env`: the environment Steam set for the launch (`SteamLaunchPlan`'s `env`), which
+/// `steam-run` keeps: tweaks yield to it per key, and the layer order counts its layers.
+pub(crate) fn full_plan(daemon: &Daemon, game: GameRef, perf: bool, steam_env: &std::collections::BTreeMap<String, String>) -> Result<SteamLaunchPlan> {
+    let mut plan = launch_plan(game)?;
+    // Quiver Tweaks: the same compiled environment a Quiver launch gets (Steam picks the
+    // Proton build; design/TWEAKS.md §8.1).
+    crate::tweaks::steam_plan(&daemon.cfg, &mut plan, steam_env);
+    if perf {
+        daemon.perf_steam_launch(&mut plan, steam_env);
+    }
+    Ok(plan)
+}
+
+impl Daemon {
+    /// `SettingsSet` for a Steam game (not a Ubisoft product): the settings `quiver steam-run`
+    /// applies to its Steam launch. Ubisoft-only keys are refused.
+    pub(crate) fn steam_settings_set(&self, source: &str, game: GameRef, ops: Vec<quiver_api::SettingOp>, message: Option<String>) -> Result<Value> {
+        for op in &ops {
+            let key = match op {
+                quiver_api::SettingOp::Set { key, .. } | quiver_api::SettingOp::Unset { key } => key.as_str(),
+            };
+            if matches!(key, "account" | "profile") {
+                anyhow::bail!("{game}: `{key}` is for Ubisoft games (Steam plays it with the Steam account, without mod profiles)");
+            }
+        }
+        let rev = settings::apply(game, &ops, source, message)?;
+        let hooked = crate::steamhook::hooked(game).unwrap_or(false);
+        let note = if hooked { "" } else { " (not hooked: they apply once it starts through quiver steam-run)" };
+        self.log_activity_game(source, format!("settings r{} for {game}{note}", rev.revision), Some(game));
+        Ok(json!(rev))
+    }
 }
 
 pub(crate) async fn handle(daemon: &Arc<Daemon>, _source: &str, req: Request) -> Result<Value> {
     Ok(match req {
         Request::Ownership { product_id, account } => json!(ownership(daemon, product_id, account).await?),
-        Request::SteamLaunchPlan { product_id, perf } => {
-            let mut plan = launch_plan(product_id)?;
-            // Quiver Tweaks: the same compiled environment a Quiver launch gets (Steam picks
-            // the Proton build; design/TWEAKS.md §8.1).
-            crate::tweaks::steam_plan(&daemon.cfg, &mut plan);
-            if perf {
-                daemon.perf_steam_launch(&mut plan);
-            }
-            json!(plan)
-        }
+        Request::SteamLaunchPlan { game, perf, env } => json!(full_plan(daemon, *game, perf, &env)?),
         other => anyhow::bail!("not a Steam library request: {other:?}"),
     })
 }
@@ -434,7 +467,7 @@ mod tests {
         for op in ["proton=GE-Proton10-34", "env.DXVK_HUD=fps", "dll.dxgi=n,b", "args=-skipintro", "wrappers=gamemoderun", "account=x"] {
             s.apply(&quiver_api::SettingOp::parse(op).unwrap()).unwrap();
         }
-        let p = plan_from(66088, s, 4);
+        let p = plan_from(GameRef::ubisoft(66088), s, 4);
         assert_eq!((p.product_id, p.revision), (66088, 4));
         assert_eq!(p.env["DXVK_HUD"], "fps");
         assert_eq!(p.dll_overrides["dxgi"], "n,b");
@@ -442,6 +475,17 @@ mod tests {
         assert_eq!(p.wrappers, ["gamemoderun"]);
         assert_eq!(p.ignored.len(), 1);
         assert!(p.ignored[0].starts_with("proton=GE-Proton10-34"));
-        assert!(plan_from(1, Default::default(), 0).ignored.is_empty());
+        assert!(plan_from(GameRef::ubisoft(1), Default::default(), 0).ignored.is_empty());
+        // Any other Steam game: the same plan from its own settings, product 0.
+        let mut s = quiver_api::GameSettings::default();
+        for op in ["env.PROTON_LOG=1", "wrappers=gamemoderun", "args=-dx12"] {
+            s.apply(&quiver_api::SettingOp::parse(op).unwrap()).unwrap();
+        }
+        let p = plan_from(GameRef::steam(870780), s, 2);
+        assert_eq!((p.product_id, p.game, p.game_ref()), (0, Some(GameRef::steam(870780)), GameRef::steam(870780)));
+        assert_eq!((p.env["PROTON_LOG"].as_str(), p.wrappers.as_slice(), p.args.as_slice()), ("1", &["gamemoderun".to_owned()][..], &["-dx12".to_owned()][..]));
+        let wire = serde_json::to_value(&p).unwrap();
+        assert_eq!(wire["game"], "steam:870780");
+        assert!(launch_plan(GameRef::parse("epic:Camellia").unwrap()).is_err());
     }
 }

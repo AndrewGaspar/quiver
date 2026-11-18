@@ -41,8 +41,8 @@ pub enum ScopePick {
 impl ScopePick {
     pub fn scope(&self, product: Gid) -> HudScopeRef {
         match self {
-            ScopePick::Game => HudScopeRef::game(product.pid()),
-            ScopePick::Profile(p) => HudScopeRef { product_id: Some(product.pid()), profile: Some(p.clone()) },
+            ScopePick::Game => HudScopeRef::of(product.0),
+            ScopePick::Profile(p) => HudScopeRef { game: Some(product.0), profile: Some(p.clone()) },
             ScopePick::Global => HudScopeRef::global(),
         }
     }
@@ -266,9 +266,9 @@ pub fn keys_label(mods: &str, key: &str) -> String {
 pub fn scope_chain(scope: &HudScopeRef) -> Vec<HudScopeRef> {
     let mut v = vec![scope.clone()];
     if scope.profile.is_some() {
-        v.push(HudScopeRef { product_id: scope.product_id, profile: None });
+        v.push(HudScopeRef { game: scope.game, profile: None });
     }
-    if scope.product_id.is_some() {
+    if scope.game.is_some() {
         v.push(HudScopeRef::global());
     }
     v
@@ -278,7 +278,7 @@ pub fn scope_chain(scope: &HudScopeRef) -> Vec<HudScopeRef> {
 pub fn origin_label(f: HudField, chain: &[(HudScopeRef, Option<&HudScope>)]) -> (bool, &'static str) {
     for (i, (s, set)) in chain.iter().enumerate() {
         if set.is_some_and(|x| f.is_set(x)) {
-            let label = match (i, s.product_id, &s.profile) {
+            let label = match (i, s.game, &s.profile) {
                 (0, None, _) => "Set for all games",
                 (0, Some(_), None) => "Set for this game",
                 (0, Some(_), Some(_)) => "Set for this profile",
@@ -405,7 +405,7 @@ impl Quiver {
             }
             PerfEvent::HudChanged { product_id, .. } => {
                 // Reload what's on screen; the rest reloads when shown.
-                let keep: Vec<HudScopeRef> = self.perf.hud.keys().filter(|s| product_id.is_none() || s.product_id.is_none() || s.product_id == product_id).cloned().collect();
+                let keep: Vec<HudScopeRef> = self.perf.hud.keys().filter(|s| product_id.is_none() || s.game.is_none() || s.product_id() == product_id).cloned().collect();
                 for s in keep {
                     self.load_hud(s, cx);
                 }
@@ -455,7 +455,7 @@ impl Quiver {
             self.perf.sel = 0;
             self.perf.compare = None;
         }
-        self.call::<Vec<SessionSummary>, _>(Request::Perf(PerfRequest::Summaries { product_id: id.pid(), limit: 30 }), cx, move |this, r, _| {
+        self.call::<Vec<SessionSummary>, _>(Request::Perf(PerfRequest::Summaries { game: id.0.into(), limit: 30 }), cx, move |this, r, _| {
             if this.perf.summaries_for != id {
                 return;
             }
@@ -484,7 +484,7 @@ impl Quiver {
 
     /// The running perf session of a game.
     pub fn perf_session(&self, id: Gid) -> Option<&PerfSessionInfo> {
-        self.perf.sessions.ready()?.iter().find(|s| s.product_id == id)
+        self.perf.sessions.ready()?.iter().find(|s| s.game_ref() == id.0)
     }
 
     pub fn load_hud(&mut self, scope: HudScopeRef, cx: &mut Context<Self>) {
@@ -528,7 +528,7 @@ impl Quiver {
 
     pub fn load_hud_status(&mut self, id: Gid, cx: &mut Context<Self>) {
         self.perf.status.insert(id, Load::Loading);
-        self.call::<HudStatus, _>(Request::Perf(PerfRequest::HudStatus { session: None, product_id: Some(id.pid()) }), cx, move |this, r, _| {
+        self.call::<HudStatus, _>(Request::Perf(PerfRequest::HudStatus { session: None, game: Some(id.0) }), cx, move |this, r, _| {
             this.perf.status.insert(
                 id,
                 match r {
@@ -548,7 +548,7 @@ impl Quiver {
             self.call::<serde_json::Value, _>(Request::Perf(PerfRequest::Unsubscribe { sub }), cx, |_, _, _| {});
         }
         self.perf.live = Some(Live { product: id, sub: None, last: None, error: None });
-        let req = PerfRequest::Subscribe { session: None, product_id: Some(id.pid()), select: vec![], every_ms: 1000, window_ms: 1000, stats: vec![] };
+        let req = PerfRequest::Subscribe { session: None, game: Some(id.0), select: vec![], every_ms: 1000, window_ms: 1000, stats: vec![] };
         self.call::<u64, _>(Request::Perf(req), cx, move |this, r, cx| match (r, &mut this.perf.live) {
             (Ok(sub), Some(l)) if l.product == id => l.sub = Some(sub),
             (Ok(sub), _) => this.call::<serde_json::Value, _>(Request::Perf(PerfRequest::Unsubscribe { sub }), cx, |_, _, _| {}),
@@ -577,8 +577,8 @@ impl Quiver {
                     for s in inner {
                         this.load_hud(s, cx);
                     }
-                    if let Some(p) = key.product_id {
-                        this.perf.status.remove(&Gid::from(p));
+                    if let Some(g) = key.game {
+                        this.perf.status.remove(&Gid(g));
                     } else {
                         this.perf.status.clear();
                     }
@@ -1215,7 +1215,7 @@ mod tests {
     fn origins_and_labels() {
         assert_eq!(keys_label("CTRL SHIFT", "F3"), "Ctrl+Shift+F3");
         assert_eq!(keys_label("SHIFT", "F3"), "Shift+F3");
-        let prof = HudScopeRef { product_id: Some(1), profile: Some("p".into()) };
+        let prof = HudScopeRef { game: Some(quiver_api::GameRef::ubisoft(1)), profile: Some("p".into()) };
         let chain = scope_chain(&prof);
         assert_eq!(chain, [prof.clone(), HudScopeRef::game(1), HudScopeRef::global()]);
         let game = HudScope { layout: Some("full".into()), ..Default::default() };

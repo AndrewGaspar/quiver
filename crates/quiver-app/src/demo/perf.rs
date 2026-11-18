@@ -51,7 +51,7 @@ impl DemoPerf {
                 (HudScope { enabled: Some(true), on: Some(true), background: Some(0.62), ..Default::default() }, 5),
             );
             i.hud.insert(
-                HudScopeRef { product_id: Some(ORIGINS), profile: Some(super::detail::ORIGINS_DEFAULT.into()) },
+                HudScopeRef { game: Some(quiver_api::GameRef::ubisoft(ORIGINS)), profile: Some(super::detail::ORIGINS_DEFAULT.into()) },
                 (HudScope { layout: Some("standard".into()), rate_hz: Some(4), ..Default::default() }, 2),
             );
         }
@@ -74,8 +74,8 @@ impl DemoPerf {
         let i = self.inner.lock().unwrap();
         let mut c = HudConfig::default();
         let mut chain = vec![HudScopeRef::global()];
-        if let Some(p) = scope.product_id {
-            chain.push(HudScopeRef::game(p));
+        if let Some(p) = scope.game {
+            chain.push(HudScopeRef::of(p));
             if scope.profile.is_some() {
                 chain.push(scope.clone());
             }
@@ -267,6 +267,7 @@ fn session_info(st: &State, product: u32) -> PerfSessionInfo {
     PerfSessionInfo {
         session: session_id(product),
         product_id: product,
+        game: None,
         profile: (product == ORIGINS).then(|| super::detail::ORIGINS_DEFAULT.into()),
         started,
         dir: Some(format!("/dev/shm/quiver-1000/{}", session_id(product)).into()),
@@ -339,16 +340,16 @@ pub(super) fn session_event(demo: &Demo, product_id: u32, ended: bool) {
     if ended {
         demo.perf.inner.lock().unwrap().subs.retain(|_, (p, _, _)| *p != product_id);
     }
-    demo.perf.emit(PerfEvent::Session { session: session_id(product_id), product_id, ended, summary: None });
+    demo.perf.emit(PerfEvent::Session { session: session_id(product_id), product_id, ended, summary: None, game: None });
 }
 
 pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value> {
     let perf = &demo.perf;
     Ok(match req {
         PerfRequest::Sessions => json!(st.sessions.iter().map(|s| session_info(st, s.product_id)).collect::<Vec<_>>()),
-        PerfRequest::Summaries { product_id, limit } => json!(summaries(st, product_id, limit)),
-        PerfRequest::Subscribe { product_id, session, every_ms, .. } => {
-            let product = session.as_deref().and_then(|s| s.strip_prefix("s-demo")).and_then(|p| p.parse().ok()).or(product_id);
+        PerfRequest::Summaries { game, limit } => json!(game.as_ubisoft().map(|p| summaries(st, p, limit)).unwrap_or_default()),
+        PerfRequest::Subscribe { game, session, every_ms, .. } => {
+            let product = session.as_deref().and_then(|s| s.strip_prefix("s-demo")).and_then(|p| p.parse().ok()).or(game.and_then(|g| g.as_ubisoft()));
             let Some(product) = running(st, product) else { bail!("no game is running") };
             let mut i = perf.inner.lock().unwrap();
             let sub = i.next_sub;
@@ -389,7 +390,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                 }
                 e.1 += 1;
             }
-            perf.emit(PerfEvent::HudChanged { product_id: scope.product_id, session: None });
+            perf.emit(PerfEvent::HudChanged { product_id: scope.product_id(), session: None });
             json!(perf.view(&scope))
         }
         PerfRequest::HudLayouts => json!([
@@ -417,7 +418,8 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
             game_focused: false,
             applied: false,
         }),
-        PerfRequest::HudStatus { product_id, session } => {
+        PerfRequest::HudStatus { game, session } => {
+            let product_id = game.and_then(|g| g.as_ubisoft());
             let product = session.as_deref().and_then(|s| s.strip_prefix("s-demo")).and_then(|p| p.parse().ok()).or(product_id);
             let Some(product) = running(st, product) else {
                 bail!("{}", match product_id {
@@ -425,7 +427,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                     None => "no game is running".into(),
                 })
             };
-            let cfg = perf.resolve(&HudScopeRef { product_id: Some(product), profile: (product == ORIGINS).then(|| super::detail::ORIGINS_DEFAULT.into()) });
+            let cfg = perf.resolve(&HudScopeRef { game: Some(quiver_api::GameRef::ubisoft(product)), profile: (product == ORIGINS).then(|| super::detail::ORIGINS_DEFAULT.into()) });
             let desktop = cfg.presenter == PresenterSetting::Desktop;
             json!(HudStatus {
                 session: session_id(product),

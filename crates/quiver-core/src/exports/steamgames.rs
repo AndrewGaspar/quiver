@@ -24,6 +24,12 @@
 //! State (`<data>/steam-games.json`): what Quiver patched (and the options it replaced),
 //! staged changes, the app ids seen so far (only games installed later are offered), and
 //! the offers made and declined.
+//!
+//! **Any Steam game** (design/STORE-STEAM.md §9): [`hook`] and [`unhook`] do the same for a
+//! game that isn't a Ubisoft copy, with `<quiver> --source steam steam-run --app <appid>`
+//! ([`hook_command`]): `steam-run` then applies the game's launch plan (tweaks, HUD, settings)
+//! without swapping anything. Opt-in per game. Undoing a hook is exact: a `LaunchOptions` key
+//! (or app section) the hook added is taken out again rather than left empty.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -417,6 +423,20 @@ pub struct PatchRecord {
     pub original: String,
     pub written: String,
     pub at: DateTime<Utc>,
+    /// A hook added the `LaunchOptions` key (or the app's whole section): undoing it takes
+    /// that out again. Older records (and Ubisoft patches) leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<Added>,
+}
+
+/// What a hook added to `localconfig.vdf` that wasn't there.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Added {
+    /// `LaunchOptions` in the app's section.
+    Key,
+    /// The app's section under `apps`.
+    Section,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -437,13 +457,17 @@ pub struct StagedPatch {
     pub name: String,
     #[serde(flatten)]
     pub op: StagedOp,
+    /// Any Steam game's hook ([`hook`]), not a Ubisoft copy's Connect switch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hook: bool,
 }
 
 impl StagedPatch {
     pub fn describe(&self) -> String {
-        let what = match self.op {
-            StagedOp::Patch { .. } => "start through Quiver:",
-            StagedOp::Unpatch => "start through Ubisoft Connect again:",
+        let what = match (&self.op, self.hook) {
+            (StagedOp::Patch { .. }, _) => "start through Quiver:",
+            (StagedOp::Unpatch, false) => "start through Ubisoft Connect again:",
+            (StagedOp::Unpatch, true) => "start without Quiver again:",
         };
         format!("{what} \"{}\" (Steam app {}) for Steam user {}", self.name, self.app_id, self.user)
     }
@@ -524,8 +548,52 @@ pub struct Change {
     pub dropped_staged: bool,
 }
 
+/// Whether an app's section and its `LaunchOptions` key are in a `localconfig.vdf` text.
+fn presence(text: &str, app_id: u32) -> Option<Added> {
+    let Ok(root) = textvdf::parse(text) else { return None };
+    let mut n = &root;
+    for k in APPS {
+        match n.get(k) {
+            Some(c) => n = c,
+            None => return Some(Added::Section),
+        }
+    }
+    match n.get(&app_id.to_string()) {
+        None => Some(Added::Section),
+        Some(a) if a.get("LaunchOptions").is_none() => Some(Added::Key),
+        Some(_) => None,
+    }
+}
+
+/// The text with what a hook added for `app_id` taken out again (`None`: nothing to take
+/// out, or the app's section has more in it now than the hook put there).
+fn remove_added(text: &str, app_id: u32, added: Added) -> Result<Option<String>> {
+    let id = app_id.to_string();
+    let mut section = APPS.to_vec();
+    section.push(id.as_str());
+    let mut key = section.clone();
+    key.push("LaunchOptions");
+    if added == Added::Section {
+        let only_ours = textvdf::parse(text).ok().is_some_and(|root| {
+            let mut n = &root;
+            for k in &section {
+                match n.get(k) {
+                    Some(c) => n = c,
+                    None => return false,
+                }
+            }
+            n.entries().len() == 1 && n.get("LaunchOptions").is_some()
+        });
+        if only_ours {
+            return textvdf::remove(text, &section);
+        }
+    }
+    textvdf::remove(text, &key)
+}
+
 /// Apply one op to `file` (Steam closed; caller holds the lock). Returns the new options.
-fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp) -> Result<String> {
+/// `hook`: any Steam game's hook, undone exactly ([`Added`]).
+fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp, hook: bool) -> Result<String> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -541,8 +609,24 @@ fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp)
         }
         StagedOp::Unpatch => unpatched(&current, st.record(user, app_id)),
     };
+    let added = match op {
+        StagedOp::Patch { .. } if hook => presence(&text, app_id),
+        _ => None,
+    };
+    // Undoing a hook that added the key (or section), with the options still as written:
+    // take it out again.
+    let removal = match (op, st.record(user, app_id)) {
+        (StagedOp::Unpatch, Some(r)) if r.written == current && new.is_empty() => match r.added {
+            Some(a) => remove_added(&text, app_id, a).with_context(|| format!("edit {}", file.display()))?,
+            None => None,
+        },
+        _ => None,
+    };
     if new != current {
-        let out = set_launch_options_in(&text, app_id, &new).with_context(|| format!("edit {}", file.display()))?;
+        let out = match removal {
+            Some(out) => out,
+            None => set_launch_options_in(&text, app_id, &new).with_context(|| format!("edit {}", file.display()))?,
+        };
         // Check the edit reads back before replacing Steam's file.
         if launch_options_in(&out, app_id) != new {
             bail!("editing {} didn't read back; left it alone", file.display());
@@ -556,12 +640,13 @@ fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp)
     if let StagedOp::Patch { .. } = op
         && new != current
     {
-        st.patches.push(PatchRecord { user: user.to_owned(), app_id, original: current, written: new.clone(), at: Utc::now() });
+        st.patches.push(PatchRecord { user: user.to_owned(), app_id, original: current, written: new.clone(), at: Utc::now(), added });
     }
     Ok(new)
 }
 
-fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op: StagedOp, running: bool) -> Result<Change> {
+#[allow(clippy::too_many_arguments)]
+fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op: StagedOp, running: bool, hook: bool) -> Result<Change> {
     let _lock = lock(paths)?;
     let mut st = load(paths);
     let file = localconfig(steam, user);
@@ -586,12 +671,12 @@ fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op:
         return Ok(Change { launch_options: current, staged: false, unchanged: true, dropped_staged });
     }
     if running {
-        st.staged.push(StagedPatch { file, user: user.to_owned(), app_id, name: name.to_owned(), op });
+        st.staged.push(StagedPatch { file, user: user.to_owned(), app_id, name: name.to_owned(), op, hook });
         save(paths, &st)?;
         return Ok(Change { launch_options: wanted, staged: true, unchanged: false, dropped_staged });
     }
     // Steam is closed: write this, and anything staged before.
-    let new = write_op(&mut st, &file, user, app_id, &op)?;
+    let new = write_op(&mut st, &file, user, app_id, &op, hook)?;
     apply_list(&mut st)?;
     save(paths, &st)?;
     Ok(Change { launch_options: new, staged: false, unchanged: false, dropped_staged })
@@ -603,14 +688,91 @@ pub fn patch(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, 
     if steam.flatpak {
         bail!("Steam from Flatpak can't start Quiver from inside its sandbox; this needs Steam installed natively");
     }
-    change(paths, steam, user, app_id, name, StagedOp::Patch { command: cmd.to_owned() }, running)
+    change(paths, steam, user, app_id, name, StagedOp::Patch { command: cmd.to_owned() }, running, false)
 }
 
 /// Put the launch options back the way they were before Quiver (or a hand edit) added
 /// `quiver … steam-run`.
 pub fn unpatch(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, running: bool) -> Result<Change> {
-    change(paths, steam, user, app_id, name, StagedOp::Unpatch, running)
+    change(paths, steam, user, app_id, name, StagedOp::Unpatch, running, false)
 }
+
+// ---------------------------------------------------------------------------------------
+// Any Steam game: the hook (design/STORE-STEAM.md §9)
+
+/// The hook's part of the launch options: `<quiver> --source steam steam-run --app <appid>`.
+/// `--app` tells `steam-run` the game is a plain Steam game (no Ubisoft product to look for).
+pub fn hook_command(quiver: &Path, app_id: u32) -> String {
+    format!("{} --app {app_id}", command(quiver, None))
+}
+
+/// Make any Steam game start through `quiver steam-run` (`cmd`: [`hook_command`]). Staged
+/// while Steam runs; [`unhook`] undoes it exactly.
+pub fn hook(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, cmd: &str, running: bool) -> Result<Change> {
+    if steam.flatpak {
+        bail!("Steam from Flatpak can't start Quiver from inside its sandbox; this needs Steam installed natively");
+    }
+    change(paths, steam, user, app_id, name, StagedOp::Patch { command: cmd.to_owned() }, running, true)
+}
+
+/// Undo [`hook`] (or a hand-typed `quiver steam-run`): the launch options as they were,
+/// byte for byte while they're still as the hook wrote them.
+pub fn unhook(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, running: bool) -> Result<Change> {
+    change(paths, steam, user, app_id, name, StagedOp::Unpatch, running, true)
+}
+
+/// An installed (or installing) Steam app, from any library.
+pub fn find_app(steam: &Steam, app_id: u32) -> Option<AppManifest> {
+    library_folders(steam).iter().flat_map(|l| app_manifests(l)).find(|a| a.app_id == app_id)
+}
+
+/// Where a Steam game's hook stands (`Request::SteamHookStatus`), from Steam's files
+/// (read-only). `user`: whose launch options (`None`: several users, none chosen).
+/// `quiver`: the `quiver` to write ([`quiver_for_steam`]). `product`: a Ubisoft copy's
+/// product, when known (its hook is the Connect switch, with `--product`).
+pub fn hook_status(paths: &Paths, steam: &Steam, app: &AppManifest, user: Option<&str>, quiver: Option<&Path>, product: Option<u32>, running: bool) -> quiver_api::exports::SteamHook {
+    let launch_options = user.map(|u| launch_options(steam, u, app.app_id)).unwrap_or_default();
+    let hookable = !steam.flatpak && quiver.is_some() && user.is_some() && check_patchable(&launch_options).is_ok();
+    let st = load(paths);
+    let state = match user {
+        Some(u) => st.patch_state(u, app.app_id, &launch_options),
+        None => PatchState::Unknown,
+    };
+    let command = match (quiver, product) {
+        (Some(q), Some(id)) => command(q, Some(id)),
+        (Some(q), None) => hook_command(q, app.app_id),
+        (None, _) => String::new(),
+    };
+    let note = if steam.flatpak {
+        Some("Steam from Flatpak can't start Quiver from inside its sandbox".to_owned())
+    } else if quiver.is_none() {
+        Some("The quiver command wasn't found (install Quiver to ~/.local/bin)".to_owned())
+    } else if user.is_none() {
+        Some("Several Steam users: choose which one plays it (--user)".to_owned())
+    } else if !app.installed {
+        Some("Steam is still downloading it".to_owned())
+    } else if let Err(e) = check_patchable(&launch_options) {
+        Some(format!("{e:#}"))
+    } else {
+        None
+    };
+    quiver_api::exports::SteamHook {
+        app_id: app.app_id,
+        name: app.name.clone(),
+        state,
+        steam_user: user.map(str::to_owned),
+        launch_options,
+        hookable,
+        note,
+        command,
+        product_id: product,
+        steam_running: running,
+        staged: false,
+        unchanged: false,
+        dropped_staged: false,
+    }
+}
+
 
 /// Write the staged list (Steam closed). Returns how many were written; a change that
 /// fails stays staged (its error is logged).
@@ -618,7 +780,7 @@ fn apply_list(st: &mut State) -> Result<usize> {
     let list = std::mem::take(&mut st.staged);
     let mut n = 0;
     for s in list {
-        match write_op(st, &s.file, &s.user, s.app_id, &s.op) {
+        match write_op(st, &s.file, &s.user, s.app_id, &s.op, s.hook) {
             Ok(_) => n += 1,
             Err(e) => {
                 tracing::warn!("{}: {e:#}", s.describe());
@@ -763,6 +925,7 @@ mod tests {
             original: original.into(),
             written: written.into(),
             at: Utc::now(),
+            added: None,
         };
         for original in ["", "FOO=1 %command% -bar", "-skipvideos", "gamemoderun %command%", "  odd  spacing %command%"] {
             // As Quiver wrote it (now, or before --product was always added): exactly what was there.
@@ -1008,6 +1171,109 @@ mod tests {
         patch(&paths, &steam, "1001", 3751950, "BF", Q, false).unwrap();
         assert_eq!(launch_options(&steam, "1001", 552520), "PROTON_LOG=1 %command% -skipintro");
         assert!(load(&paths).staged.is_empty());
+    }
+
+    /// The hook for any Steam game, on fixture copies only.
+    const HQ: &str = "/h/.local/bin/quiver --source steam steam-run --app 620";
+
+    #[test]
+    fn hooks_any_steam_game_and_undoes_it_byte_for_byte() {
+        let (_tmp, paths, steam) = fixture();
+        let file = localconfig(&steam, "1001");
+        let before = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(hook_command(Path::new("/h/.local/bin/quiver"), 620), HQ);
+        let portal = find_app(&steam, 620).unwrap();
+        let q = Path::new("/h/.local/bin/quiver");
+        let s = hook_status(&paths, &steam, &portal, Some("1001"), Some(q), None, false);
+        assert_eq!((s.state, s.hookable, s.command.as_str(), s.name.as_str()), (PatchState::Off, true, HQ, "Portal 2"));
+        assert!(!s.hooked());
+
+        // No section for the app yet: the hook adds one, and undoing takes it out again.
+        let c = hook(&paths, &steam, "1001", 620, "Portal 2", HQ, false).unwrap();
+        assert_eq!(c.launch_options, format!("{HQ} %command%"));
+        assert_eq!(load(&paths).record("1001", 620).unwrap().added, Some(Added::Section));
+        let s = hook_status(&paths, &steam, &portal, Some("1001"), Some(q), None, false);
+        assert!(s.hooked() && s.state == PatchState::On);
+        let c = unhook(&paths, &steam, "1001", 620, "Portal 2", false).unwrap();
+        assert_eq!(c.launch_options, "");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "exactly as before");
+        assert!(load(&paths).patches.is_empty());
+
+        // Options of the user's own: kept around the hook, and back exactly.
+        hook(&paths, &steam, "1001", 552520, "Far Cry 5", HQ, false).unwrap();
+        assert_eq!(launch_options(&steam, "1001", 552520), format!("PROTON_LOG=1 {HQ} %command% -skipintro"));
+        unhook(&paths, &steam, "1001", 552520, "Far Cry 5", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+
+        // A section without LaunchOptions (Steam keeps play time there): only the key comes
+        // and goes.
+        let with_section = before.replace(
+            "\t\t\t\t\t\"552520\"\n",
+            "\t\t\t\t\t\"620\"\n\t\t\t\t\t{\n\t\t\t\t\t\t\"Playtime\"\t\t\"60\"\n\t\t\t\t\t}\n\t\t\t\t\t\"552520\"\n",
+        );
+        std::fs::write(&file, &with_section).unwrap();
+        hook(&paths, &steam, "1001", 620, "Portal 2", HQ, false).unwrap();
+        assert_eq!(load(&paths).record("1001", 620).unwrap().added, Some(Added::Key));
+        unhook(&paths, &steam, "1001", 620, "Portal 2", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), with_section);
+
+        // Steam wrote more into the section the hook added: undoing leaves Steam's part.
+        std::fs::write(&file, &before).unwrap();
+        hook(&paths, &steam, "1001", 620, "Portal 2", HQ, false).unwrap();
+        let grown = std::fs::read_to_string(&file).unwrap().replace(
+            &format!("\t\t\t\t\t\t\"LaunchOptions\"\t\t\"{HQ} %command%\"\n"),
+            &format!("\t\t\t\t\t\t\"LastPlayed\"\t\t\"1\"\n\t\t\t\t\t\t\"LaunchOptions\"\t\t\"{HQ} %command%\"\n"),
+        );
+        std::fs::write(&file, &grown).unwrap();
+        unhook(&paths, &steam, "1001", 620, "Portal 2", false).unwrap();
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("\"LastPlayed\"\t\t\"1\"") && !after.contains("steam-run"), "{after}");
+        assert_eq!(launch_options_in(&after, 620), "");
+
+        // Quoted %command%: not hookable, and refused.
+        std::fs::write(&file, &before).unwrap();
+        hook(&paths, &steam, "1001", 620, "Portal 2", HQ, false).unwrap();
+        unhook(&paths, &steam, "1001", 620, "Portal 2", false).unwrap();
+        let quoted = set_launch_options_in(&before, 620, r#"bash -c "exec %command%""#).unwrap();
+        std::fs::write(&file, &quoted).unwrap();
+        let s = hook_status(&paths, &steam, &portal, Some("1001"), Some(q), None, false);
+        assert!(!s.hookable && s.note.as_deref().unwrap_or_default().contains("quotes"));
+        assert!(hook(&paths, &steam, "1001", 620, "Portal 2", HQ, false).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), quoted);
+        // No quiver, or no user: not hookable; a Ubisoft copy gets the --product command.
+        let s = hook_status(&paths, &steam, &portal, None, None, None, false);
+        assert!(!s.hookable && s.state == PatchState::Unknown && s.command.is_empty());
+        let bf = find_app(&steam, 3751950).unwrap();
+        let s = hook_status(&paths, &steam, &bf, Some("1001"), Some(q), Some(66088), false);
+        assert_eq!(s.command, Q);
+    }
+
+    #[test]
+    fn hooks_wait_for_steam_to_close() {
+        let (_tmp, paths, steam) = fixture();
+        let file = localconfig(&steam, "1001");
+        let before = std::fs::read_to_string(&file).unwrap();
+        let c = hook(&paths, &steam, "1001", 620, "Portal 2", HQ, true).unwrap();
+        assert!(c.staged);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "nothing written while Steam runs");
+        assert_eq!(load(&paths).patch_state("1001", 620, ""), PatchState::Waiting);
+        assert_eq!(staged_descriptions(&paths), ["start through Quiver: \"Portal 2\" (Steam app 620) for Steam user 1001"]);
+        // Off before Steam closed: the staged change is dropped, nothing was ever written.
+        let c = unhook(&paths, &steam, "1001", 620, "Portal 2", true).unwrap();
+        assert!(c.unchanged && c.dropped_staged);
+        // On, written once Steam closed; off staged, then written: exactly as before.
+        hook(&paths, &steam, "1001", 620, "Portal 2", HQ, true).unwrap();
+        assert_eq!(super::super::steam::apply_staged(&paths, false).unwrap(), 1);
+        assert_eq!(launch_options(&steam, "1001", 620), format!("{HQ} %command%"));
+        let c = unhook(&paths, &steam, "1001", 620, "Portal 2", true).unwrap();
+        assert!(c.staged);
+        assert_eq!(load(&paths).patch_state("1001", 620, &launch_options(&steam, "1001", 620)), PatchState::WaitingUndo);
+        assert_eq!(staged_descriptions(&paths), ["start without Quiver again: \"Portal 2\" (Steam app 620) for Steam user 1001"]);
+        assert_eq!(super::super::steam::apply_staged(&paths, false).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        // A state file from before hooks (no `hook`, no `added`) still reads.
+        let st: State = serde_json::from_str(r#"{"patches":[{"user":"1","app_id":2,"original":"","written":"x","at":"2026-11-01T00:00:00Z"}],"staged":[{"file":"/f","user":"1","app_id":2,"name":"n","op":"unpatch"}]}"#).unwrap();
+        assert_eq!((st.patches[0].added, st.staged[0].hook), (None, false));
     }
 
     #[test]

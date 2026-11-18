@@ -192,7 +192,7 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         row("released", r);
     }
     let art_setting = client
-        .call::<serde_json::Value>(Request::SettingsGet { product_id: e.product_id })
+        .call::<serde_json::Value>(Request::SettingsGet { game: e.product_id.into() })
         .await
         .ok()
         .and_then(|v| v["settings"]["art"].as_str().map(str::to_owned));

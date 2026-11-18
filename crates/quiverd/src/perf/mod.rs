@@ -41,7 +41,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use tokio::sync::{broadcast, mpsc};
-use quiver_api::Reply;
+use quiver_api::{GameRef, Reply};
 use quiver_api::perf::{
     HudConfig, HudModel, HudStatus, LayerInfo, MetricInfo, PerfEvent, PerfSessionInfo, PerfSummary, PerfUpdate, Presenter, Stat,
 };
@@ -91,7 +91,8 @@ pub struct ConnCtx {
 
 pub struct Session {
     pub id: String,
-    pub product_id: u32,
+    /// The game: a Ubisoft product, or a Steam game started through `quiver steam-run`.
+    pub game: GameRef,
     pub profile: Option<String>,
     pub dev: bool,
     pub dir: Option<SessionDir>,
@@ -123,6 +124,16 @@ pub struct Session {
 }
 
 impl Session {
+    /// The Ubisoft product (0 for another store's game), as the wire's `product_id`.
+    pub fn product_id(&self) -> u32 {
+        self.game.as_ubisoft().unwrap_or(0)
+    }
+
+    /// `game` for the wire when it isn't a Ubisoft product (Ubisoft JSON stays as it was).
+    fn other_store(&self) -> Option<GameRef> {
+        (!self.game.is_ubisoft()).then_some(self.game)
+    }
+
     /// The layer ring that's alive (the newest), for the presenter and status.
     pub fn live_layer(&self) -> Option<&LayerRing> {
         self.layers.iter().rev().find(|l| l.alive && !l.ring.starts_with("invalid")).or_else(|| self.layers.last())
@@ -153,7 +164,8 @@ impl Session {
     fn info(&self) -> PerfSessionInfo {
         PerfSessionInfo {
             session: self.id.clone(),
-            product_id: self.product_id,
+            product_id: self.product_id(),
+            game: self.other_store(),
             profile: self.profile.clone(),
             started: self.store.started_at,
             dir: self.dir.as_ref().map(|d| d.path().to_owned()),
@@ -167,7 +179,8 @@ impl Session {
     fn status(&self, now: i64) -> HudStatus {
         HudStatus {
             session: self.id.clone(),
-            product_id: self.product_id,
+            product_id: self.product_id(),
+            game: self.other_store(),
             enabled: self.cfg.enabled,
             on: self.on,
             layout: self.layout.clone(),
@@ -260,7 +273,7 @@ impl PerfHub {
     pub fn begin(
         &self,
         session_id: &str,
-        product_id: u32,
+        game: GameRef,
         profile: Option<&str>,
         prefix: Option<&Path>,
         env: &BTreeMap<String, String>,
@@ -268,7 +281,7 @@ impl PerfHub {
         dev: bool,
     ) -> Result<Began> {
         let id = SessionId::parse(session_id).with_context(|| format!("bad session id {session_id:?}"))?;
-        let mut cfg = self.hud.for_launch(product_id, profile);
+        let mut cfg = self.hud.for_launch(&game, profile);
         // A dev session plays a launch with the HUD on (its env is what a fake layer needs).
         cfg.enabled |= dev;
         let mut notes = Vec::new();
@@ -305,7 +318,7 @@ impl PerfHub {
         }
         let s = Session {
             id: session_id.to_owned(),
-            product_id,
+            game,
             profile: profile.map(str::to_owned),
             dev,
             dir,
@@ -337,8 +350,9 @@ impl PerfHub {
             }
             st.sessions.insert(session_id.to_owned(), s);
         }
-        tracing::info!(session = session_id, product_id, hud = plan.hud.as_ref().is_some_and(|h| h.enabled), "perf session started");
-        self.emit(PerfEvent::Session { session: session_id.to_owned(), product_id, ended: false, summary: None });
+        tracing::info!(session = session_id, %game, hud = plan.hud.as_ref().is_some_and(|h| h.enabled), "perf session started");
+        let other = (!game.is_ubisoft()).then_some(game);
+        self.emit(PerfEvent::Session { session: session_id.to_owned(), product_id: game.as_ubisoft().unwrap_or(0), ended: false, summary: None, game: other });
         Ok(Began { plan })
     }
 
@@ -362,7 +376,7 @@ impl PerfHub {
         }
         tracing::info!(session = session_id, frames = summary.frames, "perf session ended");
         let summary = has_data.then_some(summary);
-        self.emit(PerfEvent::Session { session: session_id.to_owned(), product_id: s.product_id, ended: true, summary: summary.clone().map(Box::new) });
+        self.emit(PerfEvent::Session { session: session_id.to_owned(), product_id: s.product_id(), ended: true, summary: summary.clone().map(Box::new), game: s.other_store() });
         summary
     }
 
@@ -381,12 +395,13 @@ impl PerfHub {
         }
     }
 
-    fn pick<'a>(st: &'a State, session: Option<&str>, product_id: Option<u32>) -> Result<&'a str> {
+    fn pick<'a>(st: &'a State, session: Option<&str>, game: Option<GameRef>) -> Result<&'a str> {
         if let Some(id) = session {
             return st.sessions.get_key_value(id).map(|(k, _)| k.as_str()).with_context(|| format!("no perf session {id}"));
         }
-        if let Some(p) = product_id {
-            return st.sessions.values().rev().find(|s| s.product_id == p).map(|s| s.id.as_str()).with_context(|| format!("product {p} isn't running"));
+        if let Some(g) = game {
+            let what = g.as_ubisoft().map(|p| format!("product {p}")).unwrap_or_else(|| g.to_string());
+            return st.sessions.values().rev().find(|s| s.game == g).map(|s| s.id.as_str()).with_context(|| format!("{what} isn't running"));
         }
         if let Some(f) = &st.focused
             && st.sessions.contains_key(f)
@@ -401,14 +416,19 @@ impl PerfHub {
     }
 
     pub fn product_running(&self, product_id: u32) -> bool {
-        self.lock().sessions.values().any(|s| s.product_id == product_id)
+        self.running(&GameRef::ubisoft(product_id))
+    }
+
+    /// The game has a perf session.
+    pub fn running(&self, game: &GameRef) -> bool {
+        self.lock().sessions.values().any(|s| s.game == *game)
     }
 
     pub fn sessions(&self) -> Vec<PerfSessionInfo> {
         self.lock().sessions.values().map(Session::info).collect()
     }
 
-    pub fn catalog(&self, session: Option<&str>, product_id: Option<u32>) -> Result<Vec<MetricInfo>> {
+    pub fn catalog(&self, session: Option<&str>, product_id: Option<GameRef>) -> Result<Vec<MetricInfo>> {
         let now = mono_raw_ns();
         let st = self.lock();
         match Self::pick(&st, session, product_id) {
@@ -444,7 +464,7 @@ impl PerfHub {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn subscribe(&self, c: &ConnCtx, session: Option<&str>, product_id: Option<u32>, select: Vec<String>, every_ms: u32, window_ms: u32, stats: Vec<Stat>) -> Result<u64> {
+    pub fn subscribe(&self, c: &ConnCtx, session: Option<&str>, product_id: Option<GameRef>, select: Vec<String>, every_ms: u32, window_ms: u32, stats: Vec<Stat>) -> Result<u64> {
         self.connect(c);
         let id = self.next_sub.fetch_add(1, Ordering::Relaxed);
         let mut st = self.lock();
@@ -495,7 +515,7 @@ impl PerfHub {
 
     /// Shows or hides a running game's HUD; remembered as the game's last state. Starts
     /// `quiver-sight` when the HUD comes on and it isn't running (§2.9).
-    pub fn toggle(&self, session: Option<&str>, product_id: Option<u32>) -> Result<HudStatus> {
+    pub fn toggle(&self, session: Option<&str>, product_id: Option<GameRef>) -> Result<HudStatus> {
         let st = self.change(session, product_id, |s| {
             s.on = !s.on;
             (Some(s.on), None)
@@ -507,7 +527,7 @@ impl PerfHub {
     }
 
     /// The next preset; shows the HUD if it was hidden.
-    pub fn next(&self, session: Option<&str>, product_id: Option<u32>) -> Result<HudStatus> {
+    pub fn next(&self, session: Option<&str>, product_id: Option<GameRef>) -> Result<HudStatus> {
         let st = self.change(session, product_id, |s| {
             let was_on = s.on;
             s.on = true;
@@ -520,27 +540,27 @@ impl PerfHub {
         Ok(st)
     }
 
-    fn change(&self, session: Option<&str>, product_id: Option<u32>, f: impl FnOnce(&mut Session) -> (Option<bool>, Option<String>)) -> Result<HudStatus> {
+    fn change(&self, session: Option<&str>, product_id: Option<GameRef>, f: impl FnOnce(&mut Session) -> (Option<bool>, Option<String>)) -> Result<HudStatus> {
         let (product, remember, status, sid) = {
             let mut st = self.lock();
             let id = Self::pick(&st, session, product_id)?.to_owned();
             let s = st.sessions.get_mut(&id).unwrap();
             if !s.cfg.enabled && !s.dev {
-                bail!("the HUD isn't enabled for this game (quiver hud enable {})", s.product_id);
+                bail!("the HUD isn't enabled for this game (quiver hud enable {})", s.game.key());
             }
             let remember = f(s);
             s.dirty = true;
-            (s.product_id, remember, s.status(mono_raw_ns()), id)
+            (s.game, remember, s.status(mono_raw_ns()), id)
         };
-        if let Err(e) = self.hud.remember(product, remember.0, remember.1.as_deref()) {
+        if let Err(e) = self.hud.remember(&product, remember.0, remember.1.as_deref()) {
             tracing::warn!("remembering the HUD state: {e:#}");
         }
         self.publish(mono_raw_ns());
-        self.emit(PerfEvent::HudChanged { product_id: Some(product), session: Some(sid) });
+        self.emit(PerfEvent::HudChanged { product_id: product.as_ubisoft(), session: Some(sid) });
         Ok(status)
     }
 
-    pub fn status(&self, session: Option<&str>, product_id: Option<u32>) -> Result<HudStatus> {
+    pub fn status(&self, session: Option<&str>, product_id: Option<GameRef>) -> Result<HudStatus> {
         let st = self.lock();
         let id = Self::pick(&st, session, product_id)?;
         Ok(st.sessions[id].status(mono_raw_ns()))
@@ -590,7 +610,7 @@ impl PerfHub {
             let image = s.image.clone();
             let inp = hud::ModelInput {
                 session: &s.id,
-                product_id: s.product_id,
+                product_id: s.product_id(),
                 cfg: &s.cfg,
                 on: s.on,
                 layout: &layout,
@@ -648,7 +668,7 @@ impl PerfHub {
         let mut st = self.lock();
         let id = match session.filter(|s| st.sessions.contains_key(*s)) {
             Some(s) => s.to_owned(),
-            None => st.sessions.values().rev().find(|s| s.product_id == product_id)?.id.clone(),
+            None => st.sessions.values().rev().find(|s| s.game == GameRef::ubisoft(product_id))?.id.clone(),
         };
         st.sessions.get_mut(&id).map(f)
     }
@@ -688,7 +708,7 @@ fn update(s: &Session, sub: &Sub, now: i64) -> PerfUpdate {
         }
         values.insert(id, per);
     }
-    PerfUpdate { sub: sub.id, session: s.id.clone(), product_id: s.product_id, at: Utc::now(), values }
+    PerfUpdate { sub: sub.id, session: s.id.clone(), product_id: s.product_id(), at: Utc::now(), values }
 }
 
 /// Built-in metrics, for a game that isn't running.
@@ -773,7 +793,7 @@ pub fn drain_once(h: &PerfHub, watched: &mut HashMap<String, rings::SessionRings
         p.info.detail = detail;
         s.layers = drained.layers;
         s.image_view = image;
-        let product = s.product_id;
+        let product = s.product_id();
         drop(st);
         if changed {
             h.catalog_changed(&id, product);

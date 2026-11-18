@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use quiver_api::Reply;
+use quiver_api::{GameRef, Reply};
 use quiver_api::mods::ModSdkConnection;
 use quiver_api::perf::{Captures, HudCell, HudScope, HudScopeRef, PerfEvent, Presenter, Stat};
 use quiver_core::modsdk::{DeclaredMetric, ModMetricsSink, Sample};
@@ -70,7 +70,7 @@ fn fake_layer(dir: &SessionDir, secs: i64) -> quiver_perf::ring::RingWriter<quiv
 
 fn dev_session(hub: &PerfHub, product: u32) -> (String, SessionDir) {
     let id = quiver_core::modsdk::new_session_id();
-    let b = hub.begin(&id, product, None, None, &BTreeMap::new(), &[], true).unwrap();
+    let b = hub.begin(&id, GameRef::ubisoft(product), None, None, &BTreeMap::new(), &[], true).unwrap();
     let dir = SessionDir::open(std::path::Path::new(&b.plan.env.get("QUIVER_PERF_DIR").cloned().unwrap_or_default())).ok();
     // A dev session always has a dir, even with the HUD off for the product.
     let dir = dir.unwrap_or_else(|| hub.lock().sessions[&id].dir.clone().unwrap());
@@ -85,7 +85,7 @@ fn watch_sees_a_synthetic_layer_ring() {
     let mut watched = HashMap::new();
     drain_once(&e.hub, &mut watched);
     let (c, mut rx) = conn(1);
-    let sub = e.hub.subscribe(&c, None, Some(3539), vec!["fps".into(), "frametime".into(), "fps.p1low".into(), "gpu.*".into()], 500, 1000, vec![]).unwrap();
+    let sub = e.hub.subscribe(&c, None, Some(GameRef::ubisoft(3539)), vec!["fps".into(), "frametime".into(), "fps.p1low".into(), "gpu.*".into()], 500, 1000, vec![]).unwrap();
     e.hub.publish(mono_raw_ns());
     let ev = perf_events(&mut rx);
     let u = ev.iter().find_map(|e| match e {
@@ -144,15 +144,15 @@ fn hud_attach_toggle_next_with_a_fake_renderer() {
     assert!(models[0].on && models[0].rev == 2);
     // Ctrl+Shift+F3: next preset.
     assert_eq!(e.hub.next(Some(&sid), None).unwrap().layout, "standard");
-    assert_eq!(e.hub.hud.for_launch(7, None).layout, "standard");
-    assert!(e.hub.hud.for_launch(7, None).on);
+    assert_eq!(e.hub.hud.for_launch(&GameRef::ubisoft(7), None).layout, "standard");
+    assert!(e.hub.hud.for_launch(&GameRef::ubisoft(7), None).on);
     // Nothing changed: no model.
     perf_events(&mut rx);
     e.hub.publish(mono_raw_ns());
     assert!(perf_events(&mut rx).iter().all(|e| !matches!(e, PerfEvent::HudModel(_))));
     // The renderer goes away: no more models; ending the session tells nobody.
     e.hub.disconnect(9);
-    assert!(!e.hub.status(None, Some(7)).unwrap().renderer_attached);
+    assert!(!e.hub.status(None, Some(GameRef::ubisoft(7))).unwrap().renderer_attached);
     e.hub.end(&sid);
 }
 
@@ -160,12 +160,12 @@ fn hud_attach_toggle_next_with_a_fake_renderer() {
 fn hud_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
     let e = env();
     let id = quiver_core::modsdk::new_session_id();
-    let b = e.hub.begin(&id, 11, None, Some(std::path::Path::new("/p")), &BTreeMap::new(), &["mangohud".into()], false).unwrap();
+    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, Some(std::path::Path::new("/p")), &BTreeMap::new(), &["mangohud".into()], false).unwrap();
     assert!(b.plan.env.is_empty(), "off by default: {:?}", b.plan.env);
     assert!(e.hub.lock().sessions[&id].dir.is_none());
     let (c, _rx) = conn(1);
     assert!(e.hub.attach(&c, &id).is_err());
-    assert!(e.hub.toggle(None, Some(11)).is_err());
+    assert!(e.hub.toggle(None, Some(GameRef::ubisoft(11))).is_err());
     // System metrics still run, so the session still gets a (sensor-only) summary.
     e.hub.with_session(Some(&id), 11, |s| s.store.push_num("cpu.load", mono_raw_ns(), 40.0));
     assert!(e.hub.end(&id).unwrap().cpu_load.is_some());
@@ -173,7 +173,7 @@ fn hud_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
     e.hub.hud.apply(&HudScopeRef::game(11), &HudScope { enabled: Some(true), captures: Some(Captures::Hidden), ..Default::default() }, &[], "test", None).unwrap();
     let id = quiver_core::modsdk::new_session_id();
     let env_in: BTreeMap<String, String> = [("OBS_VKCAPTURE".to_string(), "1".to_string())].into();
-    let b = e.hub.begin(&id, 11, None, None, &env_in, &["mangohud".into()], false).unwrap();
+    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, None, &env_in, &["mangohud".into()], false).unwrap();
     let dir = std::path::PathBuf::from(&b.plan.env["QUIVER_PERF_DIR"]);
     assert!(dir.join("hud.image").is_file());
     assert_eq!(b.plan.env["QUIVER_SESSION"], id);
@@ -236,7 +236,7 @@ fn mod_metrics_through_the_registry_sink() {
 #[test]
 fn static_catalog_and_session_picking() {
     let e = env();
-    let cat = e.hub.catalog(None, Some(1)).unwrap();
+    let cat = e.hub.catalog(None, Some(GameRef::ubisoft(1))).unwrap();
     assert!(cat.iter().any(|m| m.descriptor.id == "fps.p1low"));
     assert!(cat.iter().any(|m| m.descriptor.id == "gpu.load"));
     assert!(e.hub.status(None, None).is_err());
@@ -244,7 +244,7 @@ fn static_catalog_and_session_picking() {
     assert_eq!(e.hub.status(None, None).unwrap().session, a, "the only session");
     let (b, _) = dev_session(&e.hub, 2);
     assert!(e.hub.status(None, None).is_err(), "two sessions, none focused");
-    assert_eq!(e.hub.status(None, Some(2)).unwrap().session, b);
+    assert_eq!(e.hub.status(None, Some(GameRef::ubisoft(2))).unwrap().session, b);
     let (c, _rx) = conn(1);
     for _ in 0..8 {
         e.hub.subscribe(&c, Some(&a), None, vec![], 100, 1000, vec![]).unwrap();

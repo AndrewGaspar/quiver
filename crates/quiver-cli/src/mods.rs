@@ -733,7 +733,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         ModsAction::Default { profile, message } => {
             if let Some(p) = profile {
                 let ops = vec![SettingOp::Set { key: "profile".into(), value: p }];
-                let rev: quiver_api::Revision = client.call(Request::SettingsSet { product_id, ops, message }).await?;
+                let rev: quiver_api::Revision = client.call(Request::SettingsSet { game: product_id.into(), ops, message }).await?;
                 eprintln!("{}: settings revision {} (quiver history {product_id} lists every change)", g.name, rev.revision);
             }
             let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;

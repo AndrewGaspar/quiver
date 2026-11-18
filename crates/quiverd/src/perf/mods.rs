@@ -62,7 +62,7 @@ impl ModMetricsSink for PerfModSink {
             if refused > 0 {
                 s.store.producer(&pid, &label, true).info.rejected += refused;
             }
-            (s.id.clone(), s.product_id)
+            (s.id.clone(), s.product_id())
         });
         match r {
             Some((sid, product)) => hub.catalog_changed(&sid, product),
@@ -126,7 +126,7 @@ impl ModMetricsSink for PerfModSink {
             if last {
                 s.store.disconnect(&pid);
             }
-            (s.id.clone(), s.product_id)
+            (s.id.clone(), s.product_id())
         });
         if let Some((sid, product)) = r {
             hub.catalog_changed(&sid, product);

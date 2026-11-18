@@ -128,6 +128,8 @@ reported as not applied (Steam picks Proton and the language). `steam-run`:
 - sets `env` (except `WINEDLLOVERRIDES`).
 
 `--no-settings` skips all of it; an older quiverd without the request just logs and goes on.
+Any other Steam game gets the same plan (its own settings, tweaks and HUD) through `steam-run
+--app <appid>`, without the bridge: STORE-STEAM.md §9.
 The settings are edited in the app's Launch options tab, which is now open for Steam copies,
 with a note saying what Steam decides.
 

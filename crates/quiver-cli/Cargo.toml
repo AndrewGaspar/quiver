@@ -28,3 +28,6 @@ hex.workspace = true
 quiver-api.workspace = true
 quiver-ipc.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

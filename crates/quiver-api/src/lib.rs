@@ -384,6 +384,18 @@ pub struct ActiveSession {
     /// The game's processes, once known.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pids: Vec<u32>,
+    // ---- Other stores (appended; design/STORE-STEAM.md §9). A Steam game started through
+    // `quiver steam-run` (no Ubisoft product) has `product_id` 0 and its ref here; Ubisoft
+    // sessions leave it out, so their JSON is as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+}
+
+impl ActiveSession {
+    /// The game being played: `game` when set, else the Ubisoft product.
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// One play session recorded by the daemon.
@@ -484,10 +496,27 @@ pub enum Request {
     /// also deletes the partial files (only for games that weren't installed before).
     /// Launches stop the game.
     Cancel { job_id: u64, discard: bool },
-    SettingsGet { product_id: u32 },
-    SettingsSet { product_id: u32, ops: Vec<SettingOp>, message: Option<String> },
-    SettingsHistory { product_id: u32 },
-    SettingsRestore { product_id: u32, revision: u32 },
+    /// A game's launch settings. Ubisoft games go out as `product_id` (as always); a Steam
+    /// game's (`game: "steam:620"`) are what `quiver steam-run` applies to its Steam launch.
+    SettingsGet {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
+    SettingsSet {
+        #[serde(flatten)]
+        game: game::GameField,
+        ops: Vec<SettingOp>,
+        message: Option<String>,
+    },
+    SettingsHistory {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
+    SettingsRestore {
+        #[serde(flatten)]
+        game: game::GameField,
+        revision: u32,
+    },
     /// A launch context for running a game's bridge outside this launcher (e.g. in a
     /// container): account, fresh ticket, owned ids, CD keys, broker address.
     /// `account` (user id or name) overrides the game's launch account.
@@ -645,6 +674,41 @@ pub enum Request {
     },
     /// "Not now" on the offer for a newly installed game: it isn't offered again.
     SteamDismissOffer { app_id: u32 },
+    // ---- Any Steam game through `quiver steam-run` (appended; design/STORE-STEAM.md §9)
+    /// Whether a Steam game starts through `quiver steam-run` (`exports::SteamHook`): its
+    /// launch options for the Steam user who plays it, and what `SteamHook` would write.
+    /// Read-only.
+    SteamHookStatus {
+        app_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// Start a Steam game through Quiver (`on`) or not: its launch options get
+    /// `<quiver> --source steam steam-run --app <appid>` in front of `%command%`, keeping the
+    /// user's own, or go back to exactly what they were. A Ubisoft game's Steam copy gets
+    /// `SteamPatch`/`SteamUnpatch` instead (with `--product`). Staged while Steam runs;
+    /// opt-in per game (STORE-STEAM steer 3b). Returns `exports::SteamHook`.
+    SteamHook {
+        app_id: u32,
+        on: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam_user: Option<String>,
+    },
+    /// `quiver steam-run` for a Steam game: hold a local play session for Steam app `app_id`
+    /// while process `pid` lives (`steam-run` registers itself, then execs Steam's command,
+    /// so the pid becomes Steam's own command). quiverd watches the pid; when it exits, the
+    /// session goes into the game's play history with its perf summary. Returns the
+    /// `ActiveSession`.
+    SteamSession {
+        app_id: u32,
+        pid: u32,
+        /// The perf session `SteamLaunchPlan { perf: true }` began for this launch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        perf_session: Option<String>,
+        /// The settings revision the plan came from.
+        #[serde(default)]
+        settings_revision: u32,
+    },
     /// Read (and with `enabled`, change) whether quiverd offers the switch for Ubisoft
     /// games newly installed in Steam. Returns `{ "enabled": bool }`.
     SteamOffers {
@@ -678,10 +742,22 @@ pub enum Request {
     /// With `perf`, quiverd also starts the launch's perf session (design/SIGHT-HUD.md):
     /// its environment is in the plan's `env` and its id in `perf_session`; it ends with the
     /// Steam copy's play session (or, if the game never starts, after a while).
+    ///
+    /// The game is a Ubisoft product (a Steam copy; `product_id` on the wire, as always) or,
+    /// for any other Steam game, `game: "steam:<appid>"`: the same plan from that game's
+    /// settings, its game and global tweaks, and its HUD (design/STORE-STEAM.md §9).
     SteamLaunchPlan {
-        product_id: u32,
+        #[serde(flatten)]
+        game: game::GameField,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         perf: bool,
+        /// The launch's environment as Steam set it (what the person typed before
+        /// `%command%`, Steam's own variables), limited to the keys tweaks and the HUD look
+        /// at (`DXVK_*`, `VK_*`, `PROTON_*`, …): tweaks yield to the person's values per key
+        /// and the Sight layer goes below their vkBasalt or lsfg-vk. Only sent for Steam
+        /// games that aren't Ubisoft copies.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
     },
     // ---- Save stores (see [`savestores`]); appended
     /// A game's save stores, who uses each, slot counts (`savestores::SaveStoresReport`).
@@ -905,6 +981,9 @@ pub enum Event {
         ended: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<Box<perf::PerfSummary>>,
+        /// Another store's game (`product_id` is then 0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<GameRef>,
     },
     // ---- appended (build/daemon-auto-restart)
     /// quiverd is restarting onto a newly installed build (`to`: its version, when the
@@ -953,7 +1032,7 @@ impl From<perf::PerfEvent> for Event {
             P::HudModel(m) => Event::HudModel(m),
             P::CatalogChanged { session, product_id } => Event::PerfCatalogChanged { session, product_id },
             P::HudChanged { product_id, session } => Event::HudChanged { product_id, session },
-            P::Session { session, product_id, ended, summary } => Event::PerfSession { session, product_id, ended, summary },
+            P::Session { session, product_id, ended, summary, game } => Event::PerfSession { session, product_id, ended, summary, game },
         }
     }
 }
@@ -995,8 +1074,8 @@ impl Event {
             Event::HudModel(m) => P::HudModel(m.clone()),
             Event::PerfCatalogChanged { session, product_id } => P::CatalogChanged { session: session.clone(), product_id: *product_id },
             Event::HudChanged { product_id, session } => P::HudChanged { product_id: *product_id, session: session.clone() },
-            Event::PerfSession { session, product_id, ended, summary } => {
-                P::Session { session: session.clone(), product_id: *product_id, ended: *ended, summary: summary.clone() }
+            Event::PerfSession { session, product_id, ended, summary, game } => {
+                P::Session { session: session.clone(), product_id: *product_id, ended: *ended, summary: summary.clone(), game: *game }
             }
             _ => return None,
         })
@@ -1275,6 +1354,20 @@ mod tests {
         assert_eq!(v, serde_json::json!({ "method": "library", "params": { "refresh": true } }));
         let v = serde_json::to_value(Request::Play { game: GameRef::steam(620).into(), profile: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "play", "params": { "game": "steam:620" } }));
+
+        // Settings and Steam launch plans: Ubisoft games on the wire exactly as before.
+        let v = serde_json::to_value(Request::SettingsGet { game: 3539.into() }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "settings_get", "params": { "product_id": 3539 } }));
+        let v = serde_json::to_value(Request::SteamLaunchPlan { game: 66088.into(), perf: true, env: BTreeMap::new() }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_launch_plan", "params": { "product_id": 66088, "perf": true } }));
+        let r: Request = serde_json::from_str(r#"{"method":"steam_launch_plan","params":{"product_id":66088}}"#).unwrap();
+        assert!(matches!(r, Request::SteamLaunchPlan { game, perf: false, .. } if game == GameRef::ubisoft(66088)));
+        let r: Request = serde_json::from_str(r#"{"method":"settings_set","params":{"game":"steam:870780","ops":[],"message":null}}"#).unwrap();
+        assert!(matches!(r, Request::SettingsSet { game, .. } if game == GameRef::steam(870780)));
+        let s = ActiveSession { game: Some(GameRef::steam(870780)), ..Default::default() };
+        assert_eq!((s.game_ref(), ActiveSession { product_id: 3539, ..Default::default() }.game_ref()), (GameRef::steam(870780), GameRef::ubisoft(3539)));
+        let v = serde_json::to_value(ActiveSession { product_id: 3539, ..Default::default() }).unwrap();
+        assert!(v.get("game").is_none(), "Ubisoft sessions as before");
 
         // Library entries: Ubisoft ones keep `product_id` beside `game`.
         let old = r#"{"product_id":3539,"name":"Origins","installed":null,"update_available":false,"running":false,"art":{"thumb":null,"background":null,"logo":null,"icon":null},"owned_by":["u"],"installable":true}"#;

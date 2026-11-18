@@ -567,8 +567,14 @@ impl crate::Daemon {
                 })
                 .clone()
         };
+        // Steam games played through `quiver steam-run` count as running games too.
+        let local = self.local.list();
         let mut busy = Busy {
-            sessions: sessions.iter().map(|s| format!("{} ({})", name(s.product_id), s.holders.join(", "))).collect(),
+            sessions: sessions
+                .iter()
+                .map(|s| format!("{} ({})", name(s.product_id), s.holders.join(", ")))
+                .chain(local.iter().map(|s| format!("{} ({})", s.game_ref(), s.holders.join(", "))))
+                .collect(),
             starting: running.iter().filter(|p| !sessions.iter().any(|s| s.product_id == **p)).map(|p| name(*p)).collect(),
             ..Default::default()
         };
@@ -586,8 +592,8 @@ impl crate::Daemon {
             .perf
             .sessions()
             .into_iter()
-            .filter(|p| !sessions.iter().any(|s| s.product_id == p.product_id) && !running.contains(&p.product_id))
-            .map(|p| name(p.product_id))
+            .filter(|p| !sessions.iter().chain(&local).any(|s| s.game_ref() == p.game_ref()) && !running.contains(&p.product_id))
+            .map(|p| if p.product_id == 0 { p.game_ref().to_string() } else { name(p.product_id) })
             .collect();
         busy.awaiting_2fa = self.pending_2fa.lock().unwrap().is_some()
             && self.pending_2fa_at.lock().unwrap().is_some_and(|t| t.elapsed() < TWO_FA_BUSY);

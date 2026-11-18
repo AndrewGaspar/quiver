@@ -40,6 +40,49 @@ pub fn env(plan: &SteamLaunchPlan) -> Vec<(String, String)> {
     plan.env.iter().filter(|(k, _)| k.as_str() != "WINEDLLOVERRIDES").map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+// ---------------------------------------------------------------------------------------
+// Any Steam game (not a Ubisoft copy): nothing is swapped (design/STORE-STEAM.md §9)
+
+/// Prefixes of the variables `steam-run` tells quiverd about (`SteamLaunchPlan`'s `env`): the
+/// ones tweaks yield to and the HUD's layer order looks at. Nothing else of Steam's
+/// environment leaves the process.
+const PLAN_ENV_PREFIXES: &[&str] = &[
+    "DXVK_", "VKD3D_", "PROTON_", "WINE", "VK_", "ENABLE_", "DISABLE_", "LSFG", "NVPRESENT_", "MANGOHUD", "OBS_VKCAPTURE", "__GL_", "NGX_", "SL_", "PROTONFIXES_",
+];
+
+/// The part of Steam's environment quiverd plans against (see [`PLAN_ENV_PREFIXES`]).
+pub fn plan_env<'a>(vars: impl IntoIterator<Item = (&'a str, &'a str)>) -> std::collections::BTreeMap<String, String> {
+    vars.into_iter().filter(|(k, _)| PLAN_ENV_PREFIXES.iter().any(|p| k.starts_with(p))).map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+}
+
+/// Steam's command with the plan applied: wrappers in front (as if typed before
+/// `%command%`), the plan's arguments after the game's own. Nothing else changes: the
+/// reaper, the runtime, Proton and the game stay Steam's.
+pub fn steam_command(plan: &SteamLaunchPlan, argv: &[String]) -> Vec<String> {
+    let mut out = argv.to_vec();
+    out.extend(plan.args.iter().cloned());
+    wrap(plan, out)
+}
+
+/// The variables to set on Steam's command, given what Steam set (`inherited`): the plan's
+/// `env`, `WINEDLLOVERRIDES` merged with Steam's, and `LD_PRELOAD` kept after Steam's (its
+/// overlay rides on it), so a setting never drops Steam's overlay.
+pub fn steam_env(plan: &SteamLaunchPlan, inherited: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = env(plan)
+        .into_iter()
+        .map(|(k, v)| match (k.as_str(), inherited(&k).filter(|s| !s.is_empty())) {
+            ("LD_PRELOAD", Some(steam)) if !steam.split([' ', ':']).any(|x| x == v) => (k, format!("{steam}:{v}")),
+            ("LD_PRELOAD", Some(steam)) => (k, steam),
+            _ => (k, v),
+        })
+        .collect();
+    if !plan.dll_overrides.is_empty() {
+        let base = inherited("WINEDLLOVERRIDES").unwrap_or_default();
+        out.push(("WINEDLLOVERRIDES".into(), merge_dll_overrides(&base, &plan.dll_overrides)));
+    }
+    out
+}
+
 /// What the plan changes, one line each (for the steam-run log).
 pub fn describe(plan: &SteamLaunchPlan) -> Vec<String> {
     let mut out = Vec::new();
@@ -88,5 +131,45 @@ mod tests {
         assert_eq!(env(&p), [("DXVK_HUD".to_owned(), "fps".to_owned())]);
         assert!(describe(&p).iter().any(|l| l == "wrappers gamemoderun mangohud --dlsym"));
         assert!(wrap(&SteamLaunchPlan::default(), vec!["a".into()]) == ["a"]);
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn any_steam_game_keeps_steams_command() {
+        let mut p = SteamLaunchPlan::for_game(quiver_api::GameRef::steam(870780));
+        // Steam's `%command%`: the reaper, the runtime, Proton, the game and its arguments.
+        let argv = s(&["/s/ubuntu12_32/reaper", "SteamLaunch", "AppId=870780", "--", "/s/proton", "waitforexitandrun", "/g/Control_DX12.exe", "-steam"]);
+        assert_eq!(steam_command(&p, &argv), argv, "an empty plan changes nothing");
+        p.wrappers = vec!["gamemoderun".into()];
+        p.args = vec!["-dx12".into()];
+        let out = steam_command(&p, &argv);
+        assert_eq!(out[0], "gamemoderun");
+        assert_eq!(out[1..9], argv[..]);
+        assert_eq!(out[9], "-dx12");
+        // A native game the same way.
+        assert_eq!(steam_command(&p, &s(&["/g/game.x86_64"])), s(&["gamemoderun", "/g/game.x86_64", "-dx12"]));
+
+        // The environment: Steam's overlay preload kept, DLL overrides merged with Steam's.
+        p.env.insert("LD_PRELOAD".into(), "/x/libmine.so".into());
+        p.env.insert("PROTON_LOG".into(), "1".into());
+        p.dll_overrides.insert("dxgi".into(), "n,b".into());
+        let steam = |k: &str| match k {
+            "LD_PRELOAD" => Some("/s/gameoverlayrenderer.so".to_owned()),
+            "WINEDLLOVERRIDES" => Some("steam.exe=b".to_owned()),
+            _ => None,
+        };
+        let env: std::collections::BTreeMap<String, String> = steam_env(&p, steam).into_iter().collect();
+        assert_eq!(env["LD_PRELOAD"], "/s/gameoverlayrenderer.so:/x/libmine.so");
+        assert_eq!(env["WINEDLLOVERRIDES"], "steam.exe=b;dxgi=n,b");
+        assert_eq!(env["PROTON_LOG"], "1");
+        let env: std::collections::BTreeMap<String, String> = steam_env(&p, |_| None).into_iter().collect();
+        assert_eq!((env["LD_PRELOAD"].as_str(), env["WINEDLLOVERRIDES"].as_str()), ("/x/libmine.so", "dxgi=n,b"));
+
+        // Only the variables the plan needs go to quiverd.
+        let sent = plan_env([("DXVK_CONFIG", "a=1"), ("HOME", "/h"), ("STEAM_COMPAT_DATA_PATH", "/c"), ("VK_INSTANCE_LAYERS", "x"), ("ENABLE_VKBASALT", "1"), ("SSH_AUTH_SOCK", "/s")]);
+        assert_eq!(sent.keys().map(String::as_str).collect::<Vec<_>>(), ["DXVK_CONFIG", "ENABLE_VKBASALT", "VK_INSTANCE_LAYERS"]);
     }
 }
