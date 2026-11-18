@@ -263,13 +263,33 @@ pub async fn playtime(client: &Client, game: Option<String>, json: bool, send: b
             if json {
                 return print_json(&p);
             }
-            print_playtime(g.as_ref().map(|g| g.0.as_str()), &p);
+            let names = if g.is_none() { game_names(client, &p).await } else { Default::default() };
+            print_playtime_named(g.as_ref().map(|g| g.0.as_str()), &p, &names);
         }
     }
     Ok(())
 }
 
+/// Game names for Epic's per-app totals (app names are ids like `Tautog` or a 32-hex
+/// item id): the title the library knows, else the app name as Epic gave it.
+async fn game_names(client: &Client, p: &EpicPlaytime) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for (app, _) in p.games.iter().take(25) {
+        let Ok(g) = GameRef::new(StoreId::Epic, app) else { continue };
+        if let Ok(d) = client.call::<quiver_api::stores::GameDetail>(Request::GameDetail { game: g, refresh: false }).await
+            && !d.name.is_empty()
+        {
+            out.insert(app.clone(), d.name);
+        }
+    }
+    out
+}
+
 pub fn print_playtime(name: Option<&str>, p: &EpicPlaytime) {
+    print_playtime_named(name, p, &Default::default());
+}
+
+fn print_playtime_named(name: Option<&str>, p: &EpicPlaytime, names: &std::collections::HashMap<String, String>) {
     match (name, p.total_seconds) {
         (Some(n), Some(s)) => println!("{n}: {} on Epic", hours(s)),
         (Some(n), None) => println!("{n}: Epic's play time unavailable{}", p.error.as_deref().map(|e| format!(" ({e})")).unwrap_or_default()),
@@ -278,7 +298,10 @@ pub fn print_playtime(name: Option<&str>, p: &EpicPlaytime) {
                 println!("Epic's play time unavailable: {e}");
             }
             for (app, s) in p.games.iter().take(25) {
-                println!("  {:>8}  {app}", hours(*s));
+                match names.get(app) {
+                    Some(n) => println!("  {:>8}  {n}  (epic:{app})", hours(*s)),
+                    None => println!("  {:>8}  epic:{app}", hours(*s)),
+                }
             }
         }
     }
