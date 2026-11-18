@@ -1,5 +1,6 @@
-//! What a launch gets from the HUD (SIGHT-HUD §3.7, §2.4, §2.12, §1.3), only when the HUD
-//! is enabled for the game (off by default for now):
+//! What a launch gets from the HUD (SIGHT-HUD §3.7, §2.4, §2.12, §1.3) when it has the Sight
+//! layer: every launch by default, with the HUD hidden until Shift+F3 (`PerfHub::launch_config`
+//! leaves it out where the setting turns it off or anti-cheat is in the install folder):
 //!
 //! | Variable | Value | For |
 //! |---|---|---|
@@ -89,7 +90,7 @@ pub fn mangohud_config(existing: Option<&str>) -> Option<String> {
 pub fn plan(cfg: &HudConfig, session_env: &[(&str, String)], env: &BTreeMap<String, String>, wrappers: &[String], layer_dir: Option<&Path>) -> LaunchPerfPlan {
     let mut p = LaunchPerfPlan { hud: Some(cfg.clone()), ..Default::default() };
     if !cfg.enabled {
-        p.notes.push("HUD off for this game (quiver hud enable GAME): the launch is unchanged".into());
+        p.notes.push("no Sight layer (turned off; quiver hud enable GAME): the launch is unchanged".into());
         return p;
     }
     for (k, v) in session_env {
@@ -158,6 +159,10 @@ mod tests {
         HudConfig { enabled: true, ..Default::default() }
     }
 
+    fn off() -> HudConfig {
+        HudConfig { enabled: false, ..Default::default() }
+    }
+
     const SESSION: [(&str, &str); 2] = [("QUIVER_SESSION", "s-1"), ("QUIVER_PERF_DIR", "/dev/shm/quiver-1000/s-1")];
 
     fn sess() -> Vec<(&'static str, String)> {
@@ -166,8 +171,9 @@ mod tests {
 
     #[test]
     fn off_changes_nothing() {
-        let p = plan(&HudConfig::default(), &sess(), &env(&[("MANGOHUD", "1")]), &[], None);
+        let p = plan(&off(), &sess(), &env(&[("MANGOHUD", "1")]), &[], None);
         assert!(p.env.is_empty() && p.layer_order.is_empty());
+        assert!(HudConfig::default().enabled, "the layer is in launches by default");
     }
 
     #[test]
@@ -207,8 +213,8 @@ mod tests {
         // The user's own list is kept, in front, without duplicates of ours.
         let p = plan(&on(), &sess(), &env(&[("VK_INSTANCE_LAYERS", "VK_LAYER_mine:VK_LAYER_QUIVER_sight:VK_LAYER_VKBASALT_post_processing"), ("ENABLE_VKBASALT", "1")]), &[], None);
         assert_eq!(p.env["VK_INSTANCE_LAYERS"], "VK_LAYER_mine:VK_LAYER_VKBASALT_post_processing:VK_LAYER_QUIVER_sight");
-        // HUD off: untouched.
-        let p = plan(&HudConfig::default(), &sess(), &e, &[], None);
+        // Layer off: untouched.
+        let p = plan(&off(), &sess(), &e, &[], None);
         assert!(!p.env.contains_key("VK_INSTANCE_LAYERS"));
     }
 

@@ -61,10 +61,15 @@ impl PerfHub {
         let session = plan.mods.as_ref().map(|m| m.launch.clone()).unwrap_or_else(quiver_core::modsdk::new_session_id);
         let mut env = steam_env.clone();
         env.extend(plan.env.clone());
-        let b = self.begin(&session, game, None, None, &env, &plan.wrappers, false)?;
-        if b.plan.hud.as_ref().is_some_and(|h| h.enabled) {
-            plan.perf_notes.extend(b.plan.notes.into_iter().map(|n| if n.starts_with("hud:") { n } else { format!("hud: {n}") }));
-        }
+        // The install folder, for the anti-cheat rule: Steam's own variable (`steam-run`
+        // passes it on), else the app's manifest (not in unit tests: that's the host's Steam).
+        let install = steam_env
+            .get(quiver_core::steamplan::STEAM_INSTALL_VAR)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| game.as_steam().filter(|_| !cfg!(test)).and_then(|_| crate::mods::installed(game).ok()).map(|g| g.install_dir));
+        let b = self.begin(&session, game, None, None, install.as_deref(), &env, &plan.wrappers, false)?;
+        plan.perf_notes.extend(b.plan.notes.into_iter().map(|n| if n.starts_with("hud:") { n } else { format!("hud: {n}") }));
         plan.env.extend(b.plan.env);
         plan.perf_session = Some(session.clone());
         self.steam.lock().insert(game, Pending { session, since: Instant::now(), started: false });
@@ -129,8 +134,9 @@ mod tests {
         let first = plan.perf_session.clone().unwrap();
         assert!(hub.product_running(7));
         assert_eq!(hub.steam_session(&GameRef::ubisoft(7)).as_deref(), Some(first.as_str()));
-        // The HUD is off by default: no session dir, so nothing added to the environment.
-        assert!(plan.env.is_empty(), "{:?}", plan.env);
+        // The layer is in by default (the HUD hidden): the session's environment.
+        assert_eq!(plan.env.get("QUIVER_SESSION"), Some(&first));
+        assert_eq!(plan.env.get("QUIVER_SIGHT").map(String::as_str), Some("1"));
 
         // A second launch replaces a session still waiting.
         let mut again = SteamLaunchPlan { product_id: 7, ..Default::default() };
@@ -191,10 +197,21 @@ mod tests {
         let info = hub.sessions().pop().unwrap();
         assert_eq!((info.product_id, info.game), (0, Some(control)));
         assert_eq!(hub.status(None, Some(control)).unwrap().game_ref(), control);
-        // Another Steam game without the HUD: a session, no environment.
+        // Another Steam game with the layer turned off: a session, no environment.
+        let off = quiver_api::perf::HudScope { enabled: Some(false), ..Default::default() };
+        hub.hud.apply(&quiver_api::perf::HudScopeRef::of(GameRef::steam(620)), &off, &[], "test", None).unwrap();
         let mut other = SteamLaunchPlan::for_game(GameRef::steam(620));
         hub.begin_steam(&mut other, &Default::default()).unwrap();
         assert!(other.env.is_empty());
+        assert!(other.perf_notes.iter().any(|n| n.contains("no Sight layer")), "{:?}", other.perf_notes);
+        // A game with anti-cheat in Steam's install folder: no layer either.
+        let install = tempfile::tempdir().unwrap();
+        std::fs::write(install.path().join("start_protected_game.exe"), b"").unwrap();
+        let eac_env: std::collections::BTreeMap<String, String> = [(quiver_core::steamplan::STEAM_INSTALL_VAR.to_owned(), install.path().display().to_string())].into();
+        let mut eac = SteamLaunchPlan::for_game(GameRef::steam(1172470));
+        hub.begin_steam(&mut eac, &eac_env).unwrap();
+        assert!(!eac.env.contains_key("QUIVER_SIGHT"), "{:?}", eac.env);
+        assert!(eac.perf_notes.iter().any(|n| n.contains("anti-cheat: EasyAntiCheat (start_protected_game.exe)")), "{:?}", eac.perf_notes);
         // Layers the person turned on in Steam's launch options stay above Sight; their own
         // list stays first. Steam's variables aren't copied into the plan.
         let cp = GameRef::steam(1091500);

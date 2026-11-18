@@ -681,7 +681,7 @@ no embedded web pages (steer #8).
 | **hyprpad OSK / cheatsheet** | Layer-shell surfaces too | They stack above Sight (hyprpad's namespaces); hyprpad rules decide which mode wins; Sight's namespace is `quiver-sight` |
 | **gamescope** | Nested: a normal window; session compositor: no layer-shell | Nested works now; the in-layer HUD works in both; the panel and toasts as session compositor need phase 3 |
 | **Connect itself** | Must not run (pipes) | Unchanged; the bridge's guards stay |
-| **Anti-cheat titles** | Ubisoft titles with kernel/user anti-cheat mostly don't run on Proton anyway | Sight layer off for games flagged with anti-cheat (game info / a curated list); the compositor panel is safe everywhere, and the HUD uses its layer-shell fallback there (SIGHT-HUD decision 16) |
+| **Anti-cheat titles** | Ubisoft titles with kernel/user anti-cheat mostly don't run on Proton anyway | Sight layer off for games flagged with anti-cheat (as built: EasyAntiCheat, BattlEye and other markers in the install folder, SIGHT-HUD §1.8; `quiver hud enable GAME` overrides); the compositor panel is safe everywhere (`quiver sight toggle`), and the HUD is to use its layer-shell fallback there (SIGHT-HUD decision 16; not wired yet) |
 
 ---
 
@@ -999,6 +999,7 @@ for the record.
     *Recommend (a): the panel never touches the game process.*
     *Note:* SIGHT-HUD decided the matching HUD behaviour: layer off for flagged games, HUD on the
     layer-shell fallback. Under (b) those games would get no HUD either.
+    *As built 2026-11-18:* (a), with the flag from install-folder markers (SIGHT-HUD §1.8).
 14. **Agents in Sight.** (a) agents may post toasts/cards (Allow, rate-limited) and request
     approvals; asking an agent from Sight comes later; (b) also let agents open the panel on
     any section; (c) no agent surface in Sight.
@@ -1020,6 +1021,10 @@ for the record.
 ---
 
 ## 14. As built: the panel MVP (2026-11-17)
+
+*2026-11-18:* every game Quiver starts (Ubisoft, Epic, Steam through `quiver steam-run`) gets
+the Sight layer by default with the HUD hidden, so Shift+F2 and Shift+F3 work in any game with
+no per-game step; anti-cheat games are the exception (SIGHT-HUD §1.8).
 
 Phase 1's panel, built on the HUD's `quiver-sight` process (SIGHT-HUD §2.9) with the steers of
 §13 as decided: a compositor panel on a wlr-layer-shell surface, GPUI in `quiver-sight`,

@@ -553,7 +553,8 @@ can ride on Steam's command:
   `language` are reported as not applied, because Steam picks them;
 - Quiver Tweaks at the global and game scopes (Steam games have no profiles), compiled by the
   same code as a Quiver launch (`quiver_core::tweaks::plan_for`);
-- the HUD when it's enabled for the game (`quiver hud enable steam:<appid>`): the perf
+- the HUD (the Sight layer in every hooked launch since 2026-11-18, hidden until Shift+F3;
+  not for games with anti-cheat in their folder, SIGHT-HUD §1.8): the perf
   session, its `/dev/shm` session dir and `hud.image`, `QUIVER_SIGHT=1` and the explicit
   `VK_INSTANCE_LAYERS` order (`perf/launch.rs`, ABOVE_SIGHT), from the same `PerfHub::begin`;
 - a local play session: it shows in `quiver sessions` (`game: "steam:<appid>"`), keeps

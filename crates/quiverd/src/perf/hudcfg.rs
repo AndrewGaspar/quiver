@@ -3,6 +3,13 @@
 //! last toggle state and preset (decision 12), which isn't a revision.
 //!
 //! `<data>/hud/settings.json`, `<data>/hud/history.jsonl`, `<data>/hud/state.json`.
+//!
+//! **Version 2** (2026-11): the Sight layer is in every launch (`enabled` on by default) and
+//! the HUD hidden until Shift+F3 (`on` off). Files from before ([`migrate_v1`]): a scope
+//! that had `enabled = true` (the person turned the HUD on there) keeps the HUD shown at
+//! launch (`on = true`, unless `on` was set); a game's or profile's `enabled = false` stays
+//! (launches unchanged, as asked); the global scope's `enabled` goes, being the old
+//! default either way (off) or the new one (on).
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -14,8 +21,14 @@ use serde::{Deserialize, Serialize};
 use quiver_api::GameRef;
 use quiver_api::perf::{HudConfig, HudScope, HudScopeRef, HudSettingsView};
 
+/// The settings file's version ([`Settings::version`]).
+pub const VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
+    /// 0/1: before the layer was on by default ([`migrate_v1`]); [`VERSION`] now.
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub revision: u32,
     #[serde(default)]
@@ -76,6 +89,32 @@ fn merge(into: &mut HudScope, set: &HudScope) {
     take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz, ngx_log, reflex_timings);
 }
 
+/// A version 1 file as version 2 (module docs). Returns the scopes whose meaning had to
+/// change (shown at launch now), for the history.
+pub fn migrate_v1(s: &mut Settings) -> Vec<(HudScopeRef, HudScope)> {
+    let mut changed = Vec::new();
+    let mut shown = |scope: &mut HudScope, at: HudScopeRef| {
+        if scope.enabled == Some(true) && scope.on.is_none() {
+            scope.on = Some(true);
+            changed.push((at, HudScope { on: Some(true), ..Default::default() }));
+        }
+    };
+    shown(&mut s.global, HudScopeRef::global());
+    s.global.enabled = None;
+    for (k, v) in s.games.iter_mut() {
+        if let Ok(g) = GameRef::parse(k) {
+            shown(v, HudScopeRef::of(g));
+        }
+    }
+    for (k, v) in s.profiles.iter_mut() {
+        if let Some((g, prof)) = k.split_once('/').and_then(|(g, p)| Some((GameRef::parse(g).ok()?, p))) {
+            shown(v, HudScopeRef { game: Some(g), profile: Some(prof.to_owned()) });
+        }
+    }
+    s.version = VERSION;
+    changed
+}
+
 fn unset(into: &mut HudScope, key: &str) -> Result<()> {
     match key {
         "enabled" => into.enabled = None,
@@ -116,14 +155,53 @@ impl HudSettings {
         self.dir.join("state.json")
     }
 
+    /// The settings, as version 2 whatever the file's version (written back by the next
+    /// change, or by [`Self::migrate`]).
     pub fn load(&self) -> Settings {
-        match std::fs::read_to_string(self.path()) {
+        let mut s = match std::fs::read_to_string(self.path()) {
             Ok(t) => serde_json::from_str(&t).unwrap_or_else(|e| {
                 tracing::warn!("{}: {e}; using HUD defaults", self.path().display());
                 Settings::default()
             }),
-            Err(_) => Settings::default(),
+            Err(_) => return Settings { version: VERSION, ..Settings::default() },
+        };
+        if s.version < VERSION {
+            migrate_v1(&mut s);
         }
+        s
+    }
+
+    /// Writes a version 1 file back as version 2, with a history line per scope whose
+    /// meaning changed. Once, at startup; a file that is already current is left alone.
+    pub fn migrate(&self) -> Result<()> {
+        let Ok(t) = std::fs::read_to_string(self.path()) else { return Ok(()) };
+        let Ok(mut s) = serde_json::from_str::<Settings>(&t) else { return Ok(()) };
+        if s.version >= VERSION {
+            return Ok(());
+        }
+        let changed = migrate_v1(&mut s);
+        s.revision += 1;
+        self.write_json(&self.path(), &s)?;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join("history.jsonl")).context("HUD history")?;
+        let msg = "the Sight layer is in every launch now, the HUD hidden until Shift+F3; a scope that had the HUD on keeps it shown at launch";
+        for (scope, set) in &changed {
+            let line = HistoryLine { revision: s.revision, at: Utc::now(), source: "migration", scope, set, unset: &[], message: Some(msg) };
+            writeln!(f, "{}", serde_json::to_string(&line)?)?;
+        }
+        if changed.is_empty() {
+            let line = HistoryLine { revision: s.revision, at: Utc::now(), source: "migration", scope: &HudScopeRef::global(), set: &HudScope::default(), unset: &[], message: Some(msg) };
+            writeln!(f, "{}", serde_json::to_string(&line)?)?;
+        }
+        tracing::info!(scopes = changed.len(), "HUD settings migrated to version {VERSION}");
+        Ok(())
+    }
+
+    /// `enabled` as set at the game's own scope or its profile's (the profile's wins): only
+    /// these put the layer into a game with anti-cheat.
+    pub fn layer_set_for_game(&self, game: &GameRef, profile: Option<&str>) -> Option<bool> {
+        let s = self.load();
+        let prof = profile.and_then(|p| s.profiles.get(&profile_key(game, p))).and_then(|x| x.enabled);
+        prof.or_else(|| s.games.get(&game.key()).and_then(|x| x.enabled))
     }
 
     fn load_state(&self) -> State {
@@ -190,6 +268,7 @@ impl HudSettings {
             set: Self::scope_of(&s, scope).cloned().unwrap_or_default(),
             effective: self.resolve_scope(&s, scope),
             revision: s.revision,
+            anti_cheat: None,
         })
     }
 
@@ -260,7 +339,8 @@ mod tests {
     fn scopes_resolve_profile_over_game_over_global() {
         let t = tempfile::tempdir().unwrap();
         let h = HudSettings::new(t.path().to_owned());
-        assert!(!h.for_launch(&GameRef::ubisoft(1), None).enabled, "off by default");
+        let d = h.for_launch(&GameRef::ubisoft(1), None);
+        assert!(d.enabled && !d.on, "the layer by default, the HUD hidden");
         h.apply(&HudScopeRef::global(), &HudScope { layout: Some("compact".into()), ..Default::default() }, &[], "cli", None).unwrap();
         h.apply(&HudScopeRef::game(1), &HudScope { enabled: Some(true), layout: Some("standard".into()), ..Default::default() }, &[], "cli", None).unwrap();
         let prof = HudScopeRef { game: Some(GameRef::ubisoft(1)), profile: Some("p-dlss".into()) };
@@ -289,16 +369,65 @@ mod tests {
         let h = HudSettings::new(t.path().to_owned());
         assert!(h.for_launch(&GameRef::ubisoft(3539), None).enabled);
         let control = GameRef::steam(870780);
+        assert_eq!(h.layer_set_for_game(&control, None), None);
+        h.apply(&HudScopeRef::of(control), &HudScope { enabled: Some(false), ..Default::default() }, &[], "cli", None).unwrap();
         assert!(!h.for_launch(&control, None).enabled);
-        h.apply(&HudScopeRef::of(control), &HudScope { enabled: Some(true), ..Default::default() }, &[], "cli", None).unwrap();
-        assert!(h.for_launch(&control, None).enabled);
+        assert_eq!(h.layer_set_for_game(&control, None), Some(false));
         assert!(h.for_launch(&GameRef::ubisoft(3539), None).enabled);
-        assert!(!h.for_launch(&GameRef::steam(620), None).enabled);
+        assert!(h.for_launch(&GameRef::steam(620), None).enabled);
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(t.path().join("settings.json")).unwrap()).unwrap();
         assert_eq!(v["games"]["3539"]["enabled"], true, "Ubisoft keys unchanged");
-        assert_eq!(v["games"]["steam:870780"]["enabled"], true);
+        assert_eq!(v["version"], VERSION, "written back as the current version");
+        assert_eq!(v["games"]["steam:870780"]["enabled"], false);
         h.remember(&control, Some(true), None).unwrap();
         assert!(h.for_launch(&control, None).on);
+    }
+
+    #[test]
+    fn version_1_files_keep_enabled_games_shown() {
+        let t = tempfile::tempdir().unwrap();
+        // Before: the HUD off by default; 3539 turned on, 5 on and set hidden, 7 turned off,
+        // a profile of 3539 turned on, and `quiver hud disable` once for every game.
+        std::fs::write(
+            t.path().join("settings.json"),
+            r#"{"revision":4,"global":{"enabled":false,"layout":"standard"},
+               "games":{"3539":{"enabled":true},"5":{"enabled":true,"on":false},"7":{"enabled":false},"steam:620":{"enabled":true}},
+               "profiles":{"3539/p-1":{"enabled":true}}}"#,
+        )
+        .unwrap();
+        let h = HudSettings::new(t.path().to_owned());
+        let shown = |g: GameRef| {
+            let c = h.for_launch(&g, None);
+            (c.enabled, c.on)
+        };
+        assert_eq!(shown(GameRef::ubisoft(3539)), (true, true), "turned on before: shown at launch");
+        assert_eq!(shown(GameRef::steam(620)), (true, true));
+        assert_eq!(shown(GameRef::ubisoft(5)), (true, false), "its own `on` stays");
+        assert_eq!(shown(GameRef::ubisoft(7)), (false, false), "turned off: launches stay unchanged");
+        assert_eq!(shown(GameRef::ubisoft(9)), (true, false), "the rest: the layer, hidden (the global `enabled = false` was the old default)");
+        assert_eq!(h.for_launch(&GameRef::ubisoft(9), None).layout, "standard");
+        assert!(h.for_launch(&GameRef::ubisoft(3539), Some("p-1")).on);
+        // Written back once, with history.
+        h.migrate().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(t.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!((v["version"].as_u64(), v["revision"].as_u64()), (Some(VERSION as u64), Some(5)));
+        assert!(v["global"].get("enabled").is_none());
+        assert_eq!(v["games"]["3539"], serde_json::json!({"enabled": true, "on": true}));
+        assert_eq!(v["games"]["7"], serde_json::json!({"enabled": false}));
+        let hist = std::fs::read_to_string(t.path().join("history.jsonl")).unwrap();
+        assert_eq!(hist.lines().count(), 3, "3539, steam:620 and the profile: {hist}");
+        assert!(hist.lines().all(|l| l.contains(r#""source":"migration""#)));
+        h.migrate().unwrap();
+        assert_eq!(std::fs::read_to_string(t.path().join("history.jsonl")).unwrap().lines().count(), 3, "once");
+        // Explicit at the game (or profile) scope: what overrides anti-cheat.
+        assert_eq!(h.layer_set_for_game(&GameRef::ubisoft(3539), None), Some(true));
+        assert_eq!(h.layer_set_for_game(&GameRef::ubisoft(9), None), None);
+        h.apply(&HudScopeRef::global(), &HudScope { enabled: Some(true), ..Default::default() }, &[], "cli", None).unwrap();
+        assert_eq!(h.layer_set_for_game(&GameRef::ubisoft(9), None), None, "the global scope doesn't count");
+        // No file at all: nothing to migrate.
+        let empty = tempfile::tempdir().unwrap();
+        HudSettings::new(empty.path().to_owned()).migrate().unwrap();
+        assert!(!empty.path().join("settings.json").exists());
     }
 
     #[test]

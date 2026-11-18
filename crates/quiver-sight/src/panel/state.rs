@@ -144,7 +144,7 @@ pub struct PanelData {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HudRow {
-    /// "Use Quiver's HUD" for the next launch (shown while it isn't set up).
+    /// The Sight layer in the game's launches (shown while this launch has none).
     Enable,
     Shown,
     Preset,
@@ -325,7 +325,8 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
             if let Some(h) = d.hud.ready() {
                 out.push(Row::Heading { title: "HUD".into(), detail: Some(if h.live() { "live".into() } else { "next launch".into() }) });
                 if !h.live() {
-                    out.push(Row::Note("Quiver's HUD isn't set up for this launch: these settings apply when the game next starts.".into()));
+                    let why = h.status.as_ref().and_then(|s| s.layer_off.clone()).map(|w| format!(" ({w})")).unwrap_or_default();
+                    out.push(Row::Note(format!("No Sight layer in this launch{why}: these settings apply when the game next starts.")));
                     out.push(Row::Hud(HudRow::Enable));
                 } else {
                     out.push(Row::Hud(HudRow::Shown));
@@ -779,6 +780,7 @@ mod tests {
             set: Default::default(),
             effective: quiver_api::perf::HudConfig::default(),
             revision: 1,
+            anti_cheat: None,
         };
         let d = PanelData { hud: Load::Ready(HudState { status: None, settings: view }), ..Default::default() };
         let r = rows(PanelSection::Performance, &d, Utc::now());

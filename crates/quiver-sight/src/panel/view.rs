@@ -609,7 +609,7 @@ impl PanelView {
         let v = self.hud_value(h);
         let live = self.data.hud.ready().is_some_and(|x| x.live());
         let (label, help, text, on) = match h {
-            HudRow::Enable => ("Use Quiver's HUD".to_owned(), Some("Sets the game's launches up for the HUD".to_owned()), v.clone(), Some(v == "on")),
+            HudRow::Enable => ("Sight layer".to_owned(), Some("In the game's launches (on unless turned off or anti-cheat)".to_owned()), v.clone(), Some(v == "on")),
             HudRow::Shown => ("Show the HUD".into(), Some("Shift+F3 in game".into()), v.clone(), Some(v == "on")),
             HudRow::Preset => ("Preset".into(), Some("Ctrl+Shift+F3 in game".into()), PRESETS.iter().find(|p| p.0 == v).map(|p| p.1.to_owned()).unwrap_or(v.clone()), None),
             HudRow::Position => {

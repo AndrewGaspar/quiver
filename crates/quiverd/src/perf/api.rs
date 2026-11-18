@@ -26,7 +26,10 @@ impl Daemon {
                 hub.unsubscribe(need_conn()?.id, sub)?;
                 Value::Null
             }
-            PerfRequest::HudGet { scope } => json!(hub.hud.view(&self.perf_scope(scope)?)?),
+            PerfRequest::HudGet { scope } => {
+                let scope = self.perf_scope(scope)?;
+                json!(self.with_anti_cheat(hub.hud.view(&scope)?))
+            }
             PerfRequest::HudSet { scope, set, unset, message } => {
                 let scope = self.perf_scope(scope)?;
                 if let Some(l) = &set.layout {
@@ -39,7 +42,7 @@ impl Daemon {
                 hub.broadcast.send(quiver_api::perf::PerfEvent::HudChanged { product_id: scope.product_id(), session: None }).ok();
                 // Running games take the new look now, not at their next launch.
                 hub.settings_changed(&scope, &set);
-                json!(v)
+                json!(self.with_anti_cheat(v))
             }
             PerfRequest::HudToggle { session, game } => json!(hub.toggle(session.as_deref(), game)?),
             PerfRequest::HudNext { session, game } => json!(hub.next(session.as_deref(), game)?),
@@ -55,12 +58,18 @@ impl Daemon {
                     (Some(_), None) => bail!("{game} has no mod profiles"),
                     (None, _) => None,
                 };
-                let cfg = hub.hud.for_launch(&game, profile.as_deref());
                 // A dry run: the session dir a launch would get, without creating it.
                 let dir = super::shm_root().join(format!("quiver-{}", quiver_perf::session::current_uid())).join("s-example");
                 let env = [("QUIVER_SESSION", "s-example".to_owned()), ("QUIVER_PERF_DIR", dir.display().to_string())];
                 let s = quiver_core::settings::current(game).map(|(s, _)| s).unwrap_or_default();
-                json!(super::launch::plan(&cfg, &env, &s.env, &s.wrappers, super::launch::installed_layer_dir(hub.data_dir()).as_deref()))
+                let install = crate::mods::installed(game).ok().map(|g| g.install_dir);
+                let (cfg, off, _) = hub.launch_config(&game, profile.as_deref(), install.as_deref(), &s.env, true);
+                let mut plan = super::launch::plan(&cfg, &env, &s.env, &s.wrappers, super::launch::installed_layer_dir(hub.data_dir()).as_deref());
+                if let Some(why) = off {
+                    plan.notes = vec![format!("no Sight layer: {why}; the launch is unchanged")];
+                    plan.layer_off = Some(why);
+                }
+                json!(plan)
             }
             PerfRequest::Summaries { game, limit } => json!(summaries(&game, limit)),
             PerfRequest::DevSession { product_id, stop, sight } => {
@@ -76,7 +85,7 @@ impl Daemon {
                         bail!("product {product_id} already has a perf session");
                     }
                     let id = quiver_core::modsdk::new_session_id();
-                    let began = hub.begin(&id, quiver_api::GameRef::ubisoft(product_id), None, None, &Default::default(), &[], true)?;
+                    let began = hub.begin(&id, quiver_api::GameRef::ubisoft(product_id), None, None, None, &Default::default(), &[], true)?;
                     let mut info = hub.sessions().into_iter().find(|s| s.session == id).context("session vanished")?;
                     info.dev = true;
                     self.log_activity(source, format!("perf dev session {id} for {product_id}"), Some(product_id));
@@ -107,6 +116,17 @@ impl Daemon {
         })
     }
 
+    /// A game scope's view with the anti-cheat found in the game's install folder (looked
+    /// at again at most once a minute).
+    fn with_anti_cheat(&self, mut v: quiver_api::perf::HudSettingsView) -> quiver_api::perf::HudSettingsView {
+        if let Some(g) = v.scope.game
+            && let Ok(game) = crate::mods::installed(g)
+        {
+            v.anti_cheat = self.perf.anti_cheat_in(&game.install_dir, false).map(|d| d.describe());
+        }
+        v
+    }
+
     /// A scope with its profile name resolved to an id.
     fn perf_scope(&self, mut scope: HudScopeRef) -> Result<HudScopeRef> {
         if scope.profile.is_some() && scope.game.is_some_and(|g| !g.is_ubisoft()) {
@@ -123,20 +143,22 @@ impl Daemon {
         Ok(scope)
     }
 
-    /// The perf part of a launch: the session's registry and, with the HUD on for the game,
-    /// its session dir and the launch's environment (added to `env`). Returns lines for
-    /// the job's detail. A failure leaves the launch as it was.
+    /// The perf part of a launch: the session's registry and, when the launch gets the Sight
+    /// layer (by default; not with anti-cheat in the install folder), its session dir and the
+    /// launch's environment (added to `env`). Returns lines for the job's detail. A failure
+    /// leaves the launch as it was.
     pub(crate) fn perf_launch(&self, session_id: &str, game: &launcher::Game, profile: Option<&str>, settings: &mut quiver_api::GameSettings) -> Vec<String> {
         if std::env::var("QUIVER_PERF").is_ok_and(|v| v == "0") {
             return Vec::new();
         }
-        match self.perf.begin(session_id, game.game_ref(), profile, Some(&game.prefix), &settings.env, &settings.wrappers, false) {
+        match self.perf.begin(session_id, game.game_ref(), profile, game.prefix(), Some(&game.install_dir), &settings.env, &settings.wrappers, false) {
             Ok(b) => {
                 let enabled = b.plan.hud.as_ref().is_some_and(|h| h.enabled);
                 settings.env.extend(b.plan.env);
-                // Toasts are on for Quiver launches, and the HUD (when enabled) needs it.
-                self.perf.sight.ensure(self.perf.data_dir(), if enabled { "launch with the HUD" } else { "launch (toasts)" });
-                if enabled { b.plan.notes.into_iter().map(|n| format!("hud: {n}")).collect() } else { Vec::new() }
+                // Toasts are on for Quiver launches; the HUD renders in the same process
+                // (nothing while it's hidden).
+                self.perf.sight.ensure(self.perf.data_dir(), if enabled { "launch with the Sight layer" } else { "launch (toasts)" });
+                b.plan.notes.into_iter().map(|n| format!("hud: {n}")).collect()
             }
             Err(e) => {
                 tracing::warn!("perf: {e:#}");

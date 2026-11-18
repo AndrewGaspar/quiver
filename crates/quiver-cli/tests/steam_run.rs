@@ -154,8 +154,9 @@ fn any_steam_game_gets_its_launch_plan_and_a_local_session() {
     // Settings, the HUD and a tweak for a Steam game: each says it isn't hooked.
     let out = e.stdout(&["set", &game, "env.PROTON_LOG=1", "wrappers=env QUIVER_TEST_WRAPPED=1", "args=-dx12"]);
     assert!(out.contains("settings revision 1") && out.contains("isn't hooked") && out.contains(&format!("quiver steam hook {game} on")), "{out}");
-    let out = e.stdout(&["hud", "enable", &game]);
-    assert!(out.contains("isn't hooked"), "{out}");
+    // The Sight layer needs no step (it's in every launch); showing the HUD at launch does.
+    let out = e.stdout(&["hud", "show", &game]);
+    assert!(out.contains("isn't hooked") && out.contains("HUD at launch shown"), "{out}");
     let out = e.stdout(&["tweaks", "set", &game, "tex.anisotropy=16"]);
     assert!(out.contains("isn't hooked"), "{out}");
     let plan = e.stdout(&["tweaks", "plan", &game]);
@@ -215,6 +216,9 @@ fn any_steam_game_gets_its_launch_plan_and_a_local_session() {
     assert!(line.contains(&game) && line.contains("Control") && line.contains("local history"), "{line}");
     let hud = e.json(&["hud", "status", &game, "--json"]);
     assert_eq!((hud["session"].as_str(), hud["enabled"].as_bool(), hud["game"].as_str()), (Some(perf_session.as_str()), Some(true), Some(game.as_str())), "{hud}");
+    assert_eq!(hud["on"].as_bool(), Some(true), "shown at launch, as set: {hud}");
+    let sight = e.stdout(&["sight", "status"]);
+    assert!(sight.contains(&format!("{perf_session} {game} — Sight layer in; HUD shown")), "{sight}");
 
     assert!(launch.wait().unwrap().success());
     let env = std::fs::read_to_string(record.with_extension("env")).unwrap();

@@ -90,7 +90,7 @@ impl DemoPerf {
 
     fn view(&self, scope: &HudScopeRef) -> HudSettingsView {
         let (set, revision) = self.inner.lock().unwrap().hud.get(scope).cloned().unwrap_or_default();
-        HudSettingsView { scope: scope.clone(), set, effective: self.resolve(scope), revision }
+        HudSettingsView { scope: scope.clone(), set, effective: self.resolve(scope), revision, anti_cheat: None }
     }
 }
 
@@ -275,6 +275,8 @@ fn session_info(st: &State, product: u32) -> PerfSessionInfo {
         producers,
         presenter: Some(Presenter::Game),
         dev: false,
+        hud_on: true,
+        layer_off: None,
     }
 }
 
@@ -315,7 +317,7 @@ fn update(sub: u64, product: u32, tick: u64) -> PerfUpdate {
     put("cpu.load", Stat::Mean, value(cpu, format!("{cpu:.0}"), "%", Level::Normal));
     let ct = 86.0 + w2;
     put("cpu.temp", Stat::Last, value(ct, format!("{ct:.0}"), "°", if ct > 85.0 { Level::Warn } else { Level::Normal }));
-    PerfUpdate { sub, session: session_id(product), product_id: product, at: Utc::now(), values }
+    PerfUpdate { sub, session: session_id(product), product_id: product, at: Utc::now(), values, game: None }
 }
 
 /// Every 500 ms (demo.rs): subscriptions that are due get an update.
