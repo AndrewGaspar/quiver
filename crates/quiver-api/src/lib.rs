@@ -754,8 +754,8 @@ pub enum Request {
         /// The launch's environment as Steam set it (what the person typed before
         /// `%command%`, Steam's own variables), limited to the keys tweaks and the HUD look
         /// at (`DXVK_*`, `VK_*`, `PROTON_*`, …): tweaks yield to the person's values per key
-        /// and the Sight layer goes below their vkBasalt or lsfg-vk. Only sent for Steam
-        /// games that aren't Ubisoft copies.
+        /// and the Sight layer goes below their vkBasalt or lsfg-vk. Sent for every Steam
+        /// launch, Ubisoft copies included (STORE-STEAM §9, G4).
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
     },

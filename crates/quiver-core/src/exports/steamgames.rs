@@ -28,8 +28,9 @@
 //! **Any Steam game** (design/STORE-STEAM.md §9): [`hook`] and [`unhook`] do the same for a
 //! game that isn't a Ubisoft copy, with `<quiver> --source steam steam-run --app <appid>`
 //! ([`hook_command`]): `steam-run` then applies the game's launch plan (tweaks, HUD, settings)
-//! without swapping anything. Opt-in per game. Undoing a hook is exact: a `LaunchOptions` key
-//! (or app section) the hook added is taken out again rather than left empty.
+//! without swapping anything. Opt-in per game. Undoing a hook or a patch is exact: a
+//! `LaunchOptions` key (or app section) Quiver added is taken out again rather than left empty.
+//! (Patches recorded before that have no `added` and are undone as before.)
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -592,8 +593,8 @@ fn remove_added(text: &str, app_id: u32, added: Added) -> Result<Option<String>>
 }
 
 /// Apply one op to `file` (Steam closed; caller holds the lock). Returns the new options.
-/// `hook`: any Steam game's hook, undone exactly ([`Added`]).
-fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp, hook: bool) -> Result<String> {
+/// Undone exactly ([`Added`]), for hooks and Ubisoft copies' patches alike (STORE-STEAM §9, G5).
+fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp) -> Result<String> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -610,7 +611,7 @@ fn write_op(st: &mut State, file: &Path, user: &str, app_id: u32, op: &StagedOp,
         StagedOp::Unpatch => unpatched(&current, st.record(user, app_id)),
     };
     let added = match op {
-        StagedOp::Patch { .. } if hook => presence(&text, app_id),
+        StagedOp::Patch { .. } => presence(&text, app_id),
         _ => None,
     };
     // Undoing a hook that added the key (or section), with the options still as written:
@@ -676,7 +677,7 @@ fn change(paths: &Paths, steam: &Steam, user: &str, app_id: u32, name: &str, op:
         return Ok(Change { launch_options: wanted, staged: true, unchanged: false, dropped_staged });
     }
     // Steam is closed: write this, and anything staged before.
-    let new = write_op(&mut st, &file, user, app_id, &op, hook)?;
+    let new = write_op(&mut st, &file, user, app_id, &op)?;
     apply_list(&mut st)?;
     save(paths, &st)?;
     Ok(Change { launch_options: new, staged: false, unchanged: false, dropped_staged })
@@ -780,7 +781,7 @@ fn apply_list(st: &mut State) -> Result<usize> {
     let list = std::mem::take(&mut st.staged);
     let mut n = 0;
     for s in list {
-        match write_op(st, &s.file, &s.user, s.app_id, &s.op, s.hook) {
+        match write_op(st, &s.file, &s.user, s.app_id, &s.op) {
             Ok(_) => n += 1,
             Err(e) => {
                 tracing::warn!("{}: {e:#}", s.describe());
@@ -1175,6 +1176,18 @@ mod tests {
 
     /// The hook for any Steam game, on fixture copies only.
     const HQ: &str = "/h/.local/bin/quiver --source steam steam-run --app 620";
+
+    #[test]
+    fn ubisoft_patches_are_undone_byte_for_byte_too() {
+        let (_tmp, paths, steam) = fixture();
+        let file = localconfig(&steam, "1001");
+        let before = std::fs::read_to_string(&file).unwrap();
+        // No section for the app yet: the patch adds one (G5), and undoing takes it out again.
+        patch(&paths, &steam, "1001", 620, "Portal 2", HQ, false).unwrap();
+        assert_eq!(load(&paths).record("1001", 620).unwrap().added, Some(Added::Section));
+        unpatch(&paths, &steam, "1001", 620, "Portal 2", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "exactly as before");
+    }
 
     #[test]
     fn hooks_any_steam_game_and_undoes_it_byte_for_byte() {

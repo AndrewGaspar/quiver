@@ -327,7 +327,10 @@ async fn run_ubisoft(source: &str, a: SteamRunArgs) -> Result<()> {
     // doesn't have them, and the launch goes on without. With them comes the launch's perf
     // session (its environment is in the plan's env; quiverd ends it with the play session).
     let mut plan_env = Vec::new();
-    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: product_id.into(), perf: !a.no_settings, env: Default::default() }).await {
+    // Steam's environment goes along (as for any Steam game): tweaks yield to what the
+    // person typed in Steam's launch options, and the Sight layer goes below their layers.
+    let steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: product_id.into(), perf: !a.no_settings, env: steam_env }).await {
         Ok(plan) if !a.no_settings => {
             for l in steamplan::describe(&plan) {
                 log.line(format!("settings r{}: {l}", plan.revision));
@@ -343,7 +346,8 @@ async fn run_ubisoft(source: &str, a: SteamRunArgs) -> Result<()> {
                 let base = overrides.clone().or_else(|| std::env::var("WINEDLLOVERRIDES").ok()).unwrap_or_default();
                 overrides = Some(steamplan::merge_dll_overrides(&base, &plan.dll_overrides));
             }
-            plan_env = steamplan::env(&plan);
+            // LD_PRELOAD kept after Steam's (its overlay); WINEDLLOVERRIDES is set below.
+            plan_env = steamplan::steam_env(&plan, |k| std::env::var(k).ok());
         }
         Ok(_) => log.line("--no-settings: the game's Quiver launch settings are not applied"),
         Err(e) => log.line(format!("no launch settings from quiverd ({e:#}); starting without them")),

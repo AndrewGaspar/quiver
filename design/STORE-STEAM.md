@@ -662,19 +662,18 @@ hook_status}`):
 - **G1.** `exec`, not spawn-and-wait. The play session follows the pid through a pidfd, so
   Steam's process tree, Stop and signal handling are exactly Steam's. Cost: the namespace
   child mode that mod overlays need (STEAM-COPIES §4) will have to spawn. That waits for the
-  mods work and its S1 checks.
+  mods work and its S1 checks. *Decided 2026-11-17: keep `exec` until the mods work needs spawning.*
 - **G2.** `--app` means "a plain Steam game": nothing is looked up, so a hook written for a
   game never turns into a bridge launch later. Bare `quiver steam-run %command%` still
   detects Ubisoft products.
 - **G3.** If quiverd can't be reached, the game starts as Steam would start it. quiverd is
   never started from inside Steam's launch.
-- **G4.** Only allowlisted prefixes of Steam's environment go to quiverd, and only for plain
-  Steam games. Ubisoft copies send none, so their plans are unchanged. Doing the same for them
-  would fix tweaks overriding a `DXVK_CONFIG` typed in Steam's launch options; that is left
-  for the person to decide, because it changes the copies' behaviour.
-- **G5.** An exact undo removes an added key or section, but only for the new hook. Ubisoft
-  patches keep today's undo (an empty value is left), per the STORES §8.1 regression rule.
-  They could adopt it later.
+- **G4.** Only allowlisted prefixes of Steam's environment go to quiverd. *Decided
+  2026-11-17: Ubisoft copies send it too,* so tweaks yield to a `DXVK_CONFIG` (or other key)
+  typed in Steam's launch options for them as well, and their `LD_PRELOAD` is kept after
+  Steam's.
+- **G5.** An exact undo removes an added key or section. *Decided 2026-11-17: Ubisoft
+  patches use it too.* Patches recorded before that (no `added`) are undone as before.
 - **G6.** A launch-setting `LD_PRELOAD` is appended after Steam's, so the overlay always
   loads.
 - **G7.** Local sessions are local only: nothing is reported to Steam or anyone. `quiver
