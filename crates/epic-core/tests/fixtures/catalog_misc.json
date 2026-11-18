@@ -1,0 +1,23 @@
+{
+  "item-celeste": {
+    "id": "item-celeste",
+    "title": "Celeste",
+    "description": "Help Madeline survive her inner demons on her journey to the top of Celeste Mountain.",
+    "keyImages": [
+      {"type": "OfferImageTall", "url": "https://cdn1.epicgames.com/fixture/celeste/offer-tall.jpg"},
+      {"type": "DieselStoreFrontWide", "url": "https://cdn1.epicgames.com/fixture/celeste/wide.jpg"}
+    ],
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "namespace": "ns-celeste",
+    "customAttributes": {"CanRunOffline": {"type": "STRING", "value": "false"}, "OwnershipToken": {"type": "STRING", "value": "true"}},
+    "releaseInfo": [{"id": "rel-c1", "appId": "Salt", "platform": ["Windows", "Mac"]}],
+    "developer": "Maddy Makes Games"
+  },
+  "item-mobile": {
+    "id": "item-mobile",
+    "title": "A Phone Game",
+    "namespace": "ns-mobile",
+    "categories": [{"path": "games"}],
+    "releaseInfo": [{"id": "rel-m", "appId": "MobileOnly", "platform": ["Android", "iOS"]}]
+  }
+}

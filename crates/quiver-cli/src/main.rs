@@ -6,6 +6,7 @@ mod achievements;
 mod daemon;
 mod dev;
 mod downloads;
+mod epic;
 mod exports;
 mod mods;
 mod perf;
@@ -57,14 +58,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Owned games and their install state, from every store (Ubisoft, and Steam's installed
-    /// games), with each game's ref (`3539`, `steam:620`).
+    /// Owned games and their install state, from every store (Ubisoft, Steam's installed
+    /// games, Epic), with each game's ref (`3539`, `steam:620`, `epic:<app>`).
     #[command(visible_alias = "list")]
     Library {
         /// Re-fetch from Ubisoft instead of using the daemon's cache.
         #[arg(long)]
         refresh: bool,
-        /// Only one store's games (`ubisoft`, `steam`).
+        /// Only one store's games (`ubisoft`, `steam`, `epic`).
         #[arg(long, value_parser = parse_store)]
         store: Option<StoreId>,
         #[arg(long)]
@@ -324,6 +325,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: dev::DevCmd,
     },
+    /// Epic Games Store accounts: `quiver epic login|logout|accounts|default`.
+    Epic {
+        #[command(subcommand)]
+        action: epic::EpicAction,
+    },
     /// Run a Steam copy of a Ubisoft game against Quiver instead of Ubisoft Connect. Set it
     /// as the game's Steam launch options: `quiver steam-run --product <id> %command%`
     /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
@@ -459,7 +465,8 @@ pub(crate) async fn resolve_any(client: &Client, game: &str) -> Result<LibraryEn
 fn pick(lib: Vec<LibraryEntry>, game: &str) -> Result<LibraryEntry> {
     if let Some(r) = GameRef::parse_ref(game) {
         let what = if r.is_ubisoft() { format!("product {}", r.id) } else { r.to_string() };
-        return lib.into_iter().find(|e| e.game == r).with_context(|| format!("{what} is not in your library"));
+        // An Epic copy folded into its Ubisoft entry is found by its own ref too.
+        return lib.into_iter().find(|e| e.is_or_has(&r)).with_context(|| format!("{what} is not in your library"));
     }
     let norm = |s: &str| s.to_lowercase().replace(['®', '™', '’', '\''], "");
     let needle = norm(game);
@@ -484,7 +491,20 @@ fn pick(lib: Vec<LibraryEntry>, game: &str) -> Result<LibraryEntry> {
 
 /// `--store` values.
 fn parse_store(s: &str) -> std::result::Result<StoreId, String> {
-    StoreId::parse(s).ok_or_else(|| format!("unknown store '{s}' (ubisoft, steam)"))
+    StoreId::parse(s).ok_or_else(|| format!("unknown store '{s}' (ubisoft, steam, epic)"))
+}
+
+/// The list's note for an Epic game, or a game also bought on Epic.
+fn store_note(e: &LibraryEntry) -> String {
+    use quiver_api::stores::Relation;
+    if e.store() == StoreId::Epic {
+        return match e.records.iter().find(|r| r.relation == Relation::Linked) {
+            Some(r) if r.game.is_ubisoft() => format!("  (Epic; a Ubisoft Connect game, not on a signed-in Ubisoft account: {})", game_label(&r.game)),
+            _ => "  (Epic, not installed)".into(),
+        };
+    }
+    let copies: Vec<String> = e.records.iter().filter(|r| r.relation == Relation::CopyOf).map(|r| r.game.to_string()).collect();
+    if copies.is_empty() { String::new() } else { format!("  (also bought as {})", copies.join(", ")) }
 }
 
 /// The list's note for another store's game: "(Steam · 12.4 GB · 41 h played · 12/50 achievements)".
@@ -611,6 +631,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
+        Cmd::Epic { action } => epic::run(&client, action).await?,
         Cmd::Status => {
             let s: Status = client.call(Request::Status).await?;
             println!("quiverd {}", s.version);
@@ -695,10 +716,18 @@ async fn main() -> Result<()> {
                 return print_json(&lib);
             }
             let accounts = client.call::<Status>(Request::Status).await?.accounts;
+            // Epic owners are Epic account ids (an older daemon has no Epic accounts).
+            let epic: Vec<quiver_api::epic::EpicAccount> = if lib.iter().any(|e| e.store() == StoreId::Epic) {
+                client.call(Request::Epic(quiver_api::epic::EpicRequest::Accounts)).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let owners = |e: &LibraryEntry| {
                 e.owned_by
                     .iter()
-                    .map(|id| accounts.iter().find(|a| &a.user_id == id).map_or(id.as_str(), |a| a.name.as_str()))
+                    .map(|id| {
+                        accounts.iter().find(|a| &a.user_id == id).map(|a| a.name.as_str()).or(epic.iter().find(|a| &a.account_id == id).map(|a| a.display_name.as_str())).unwrap_or(id.as_str())
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -724,7 +753,7 @@ async fn main() -> Result<()> {
                     (Some(g), _) if !e.installable => format!("  (owned on Steam, app {})", g.app_id),
                     (Some(g), _) if e.installed.is_none() => format!("  (Steam app {})", g.app_id),
                     (None, Some(c)) => client_note(c),
-                    _ => String::new(),
+                    _ => store_note(e),
                 };
                 let id = game_label(&e.game);
                 if accounts.len() > 1 {
@@ -1056,5 +1085,23 @@ mod tests {
         assert!(pick(lib(), "Portal: 2").is_err());
         assert_eq!(game_label(&GameRef::ubisoft(5)), "5");
         assert_eq!(game_label(&GameRef::steam(5)), "steam:5");
+    }
+
+    #[test]
+    fn epic_copies_resolve_and_say_where_they_are() {
+        let camellia = GameRef::parse("epic:Camellia").unwrap();
+        let mut origins = entry(GameRef::ubisoft(3539), "Assassin's Creed® Origins");
+        origins.records.push(quiver_api::stores::StoreRecord { game: camellia, relation: quiver_api::stores::Relation::CopyOf, owned_by: vec![], note: None });
+        let mut fc = entry(GameRef::parse("epic:Fc4").unwrap(), "Far Cry 4");
+        fc.records.push(quiver_api::stores::StoreRecord { game: GameRef::ubisoft(420), relation: quiver_api::stores::Relation::Linked, owned_by: vec![], note: None });
+        let aw = entry(GameRef::parse("epic:Kestrel").unwrap(), "Alan Wake Remastered");
+        let lib = || vec![origins.clone(), fc.clone(), aw.clone()];
+        // The folded copy's own ref finds its Ubisoft entry.
+        assert_eq!(pick(lib(), "epic:Camellia").unwrap().game, GameRef::ubisoft(3539));
+        assert_eq!(pick(lib(), "alan wake").unwrap().game.to_string(), "epic:Kestrel");
+        assert_eq!(store_note(&origins), "  (also bought as epic:Camellia)");
+        assert!(store_note(&fc).contains("not on a signed-in Ubisoft account: 420"));
+        assert_eq!(store_note(&aw), "  (Epic, not installed)");
+        assert_eq!(parse_store("Epic"), Ok(StoreId::Epic));
     }
 }

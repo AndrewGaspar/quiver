@@ -1,0 +1,8 @@
+{
+  "responseMetadata": {"nextCursor": null, "stateToken": "st-1"},
+  "records": [
+    {"namespace": "ns-celeste", "catalogItemId": "item-celeste", "appName": "Salt", "productId": "prod-celeste", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"},
+    {"namespace": "ns-mobile", "catalogItemId": "item-mobile", "appName": "MobileOnly", "productId": "prod-mobile", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"},
+    {"namespace": "ns-origins", "catalogItemId": "item-aco-ost", "appName": "CamelliaOST", "productId": "prod-aco", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"}
+  ]
+}

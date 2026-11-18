@@ -893,3 +893,17 @@ local mode.
 with golden tests on the first two. The 8.1 regression check (installs, Origins with the bridge,
 modded profiles, `steam-run`, existing shortcuts) still needs a run on the real install after
 merge.
+
+**Epic stage 1 (2026-11-17; STORE-EPIC.md section 9).** The second provider with an account
+of its own, in `crates/epic-core`.
+
+- `LibraryEntry.records: Vec<StoreRecord>` (section 2.4), with `Relation::CopyOf` and
+  `Relation::Linked`. A provider marks a vendor-declared link (Epic's `GameID` for a Ubisoft
+  game) as `Linked`; `merge_libraries` folds the entry into the one it names, as a `CopyOf`
+  record, when that entry is in the library. `stores()` includes `CopyOf` records' stores.
+- `Art.epic` and `ArtOrigin::Epic`; `GameDetail.{description, linked}`; `Dlc.owned`;
+  `Event::StoreAccountsChanged { store }`; `quiver_core::secret::Secret<T>` (section 3.2).
+- Accounts (section 3.2) as designed except the index: Epic's is `<data>/epic/accounts.json`,
+  because `accounts.json` is Ubisoft's and older daemons rewrite it without unknown fields.
+  Keyring entries are `epic:<account id>`. The `Accounts` trait itself isn't extracted yet:
+  Epic's sign-in is `Request::Epic(..)`, a nested enum as section 3.1 allows.

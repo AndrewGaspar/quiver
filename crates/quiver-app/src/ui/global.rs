@@ -235,6 +235,8 @@ pub struct GlobalUi {
     pub lib_advanced: bool,
     /// hyprpad seen running (checked when Appearance is shown).
     pub hyprpad: Option<(bool, Instant)>,
+    /// Settings › Accounts › Epic Games.
+    pub epic: super::settings::epic::EpicUi,
 }
 
 impl GlobalUi {
@@ -331,6 +333,7 @@ impl Quiver {
             self.load_protons(cx);
             self.load_global_exports(cx);
             self.reload_activity(cx);
+            self.load_epic_accounts(cx);
         }
     }
 
@@ -358,6 +361,7 @@ impl Quiver {
                 }
             }
             Event::GameStarted { .. } | Event::GameStopped { .. } => self.load_sessions(cx),
+            Event::StoreAccountsChanged { .. } => self.load_epic_accounts(cx),
             Event::Disconnected => {
                 self.ui.down_since = Some(Instant::now());
                 self.ui.confirm = None;

@@ -1,0 +1,44 @@
+{
+  "item-aco": {
+    "id": "item-aco",
+    "title": "Assassin's Creed Origins",
+    "description": "Ancient Egypt, a land of majesty and intrigue.",
+    "keyImages": [
+      {"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/aco/tall.jpg", "width": 1200, "height": 1600},
+      {"type": "DieselGameBox", "url": "https://cdn1.epicgames.com/fixture/aco/wide.jpg", "width": 2560, "height": 1440}
+    ],
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "namespace": "ns-origins",
+    "customAttributes": {
+      "ThirdPartyManagedProvider": {"type": "STRING", "value": "UbisoftConnect"},
+      "ThirdPartyManagedApp": {"type": "STRING", "value": "Uplay"},
+      "partnerLinkType": {"type": "STRING", "value": "ubisoft"},
+      "partnerLinkId": {"type": "STRING", "value": "fixture-partner-link"},
+      "GameID": {"type": "STRING", "value": "3539"},
+      "NeverUpdate": {"type": "STRING", "value": "true"}
+    },
+    "releaseInfo": [{"id": "rel-aco", "appId": "Camellia", "platform": ["Windows"]}],
+    "developer": "Ubisoft Montreal",
+    "dlcItemList": [
+      {"id": "item-aco-dlc1", "namespace": "ns-origins", "title": "The Hidden Ones", "categories": [{"path": "addons"}]},
+      {"id": "item-aco-dlc2", "namespace": "ns-origins", "title": "The Curse of the Pharaohs", "categories": [{"path": "addons"}]}
+    ]
+  },
+  "item-aco-dlc1": {
+    "id": "item-aco-dlc1",
+    "title": "The Hidden Ones",
+    "namespace": "ns-origins",
+    "categories": [{"path": "addons"}, {"path": "applications"}],
+    "customAttributes": {"ThirdPartyManagedApp": {"type": "STRING", "value": "Uplay"}},
+    "releaseInfo": [{"id": "rel-dlc1", "appId": "CamelliaDLC1", "platform": ["Windows"]}],
+    "mainGameItem": {"id": "item-aco", "namespace": "ns-origins", "title": "Assassin's Creed Origins"}
+  },
+  "item-aco-ost": {
+    "id": "item-aco-ost",
+    "title": "Origins Soundtrack",
+    "namespace": "ns-origins",
+    "categories": [{"path": "digitalextras/soundtrack"}],
+    "releaseInfo": [{"id": "rel-ost", "appId": "CamelliaOST", "platform": ["Windows"]}],
+    "mainGameItem": {"id": "item-aco", "namespace": "ns-origins", "title": "Assassin's Creed Origins"}
+  }
+}

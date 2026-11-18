@@ -28,6 +28,7 @@ pub mod playsession;
 pub mod private;
 pub mod progress;
 pub mod saves;
+pub mod secret;
 pub mod savestores;
 pub mod savesync;
 pub mod settings;

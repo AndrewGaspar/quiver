@@ -92,6 +92,10 @@ impl Quiver {
 
     fn render_store_achievements(&self, th: &Theme, d: &GameDetail) -> AnyElement {
         let label = d.game.store.label();
+        // Epic's achievements aren't read yet (STORE-EPIC phase 3).
+        if d.achievements.is_none() && !d.capabilities.achievements.available() && d.game.store != quiver_api::StoreId::Steam {
+            return card(th).child(card_header(th, "Achievements")).child(note(th, format!("Quiver doesn't read {label} achievements yet."))).into_any_element();
+        }
         let Some(a) = &d.achievements else {
             return card(th)
                 .child(card_header(th, "Achievements"))
@@ -167,7 +171,9 @@ fn render_store_about(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
                 .children(row("Developer", d.developer.clone()))
                 .children(row("Publisher", d.publisher.clone()))
                 .children(row("Released", d.release_date.map(|t| t.format("%b %-d, %Y").to_string())))
-                .children(row("Account", d.account.clone().map(|a| format!("{a} · the {label} client's"))))
+                .children(row("Account", d.account.clone().map(|a| if d.game.store == quiver_api::StoreId::Steam { format!("{a} · the {label} client's") } else { a })))
+                .children(row("Plays as", d.linked.map(|u| format!("{u}: {} manages it, and Quiver plays it there once it's on your account", if u.is_ubisoft() { "Ubisoft Connect" } else { u.store.label() }))))
+                .children(d.description.clone().map(|t| div().text_size(px(12.5)).line_height(px(18.)).text_color(th.tx2).child(t)))
                 .children(d.store_url.clone().map(|u| kv(th, "Store page", mono(12., th.tx2).truncate().child(u))))
                 .when(!d.unavailable.is_empty(), |c| c.child(div().text_size(px(11.5)).text_color(th.tx4).child(format!("Not available from {label}'s files: {}", d.unavailable.join(", "))))),
         )
@@ -175,7 +181,16 @@ fn render_store_about(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
 }
 
 fn render_store_install(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
-    let Some(i) = &d.install else { return div().into_any_element() };
+    let Some(i) = &d.install else {
+        // An Epic game: Quiver installs it itself from the next build on.
+        if d.game.store == quiver_api::StoreId::Epic && d.linked.is_none() {
+            return card(th)
+                .child(card_header(th, "Install").child(div().flex_1()).child(pill(th, PillKind::Muted, None, "Not installed")))
+                .child(div().p(px(16.)).text_size(px(12.)).text_color(th.tx3).child("Installing and playing Epic games comes in the next Quiver build."))
+                .into_any_element();
+        }
+        return div().into_any_element();
+    };
     let state = if !i.complete {
         pill(th, PillKind::Warn, Some(Icon::Download), format!("Downloading in {label}"))
     } else if i.update_pending {

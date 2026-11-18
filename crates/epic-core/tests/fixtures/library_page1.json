@@ -1,0 +1,9 @@
+{
+  "responseMetadata": {"nextCursor": "page2", "stateToken": "st-1"},
+  "records": [
+    {"namespace": "ns-alanwake", "catalogItemId": "item-awr", "appName": "Kestrel", "productId": "prod-awr", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION", "acquisitionDate": "2022-10-20T15:00:00.000Z"},
+    {"namespace": "ns-origins", "catalogItemId": "item-aco", "appName": "Camellia", "productId": "prod-aco", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION", "acquisitionDate": "2021-01-01T00:00:00.000Z"},
+    {"namespace": "ue", "catalogItemId": "item-ue-forest", "appName": "ForestPack", "productId": "prod-ue", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"},
+    {"namespace": "ns-origins", "catalogItemId": "item-aco-dlc1", "appName": "CamelliaDLC1", "productId": "prod-aco", "sandboxName": "Live", "sandboxType": "PUBLIC", "recordType": "APPLICATION"}
+  ]
+}

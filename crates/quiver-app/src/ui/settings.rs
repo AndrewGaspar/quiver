@@ -19,6 +19,8 @@ use crate::model::{GameRow, ago, clean_name, initials, tilde};
 use crate::nav::{Page, SettingsSection, Target, Zone};
 use crate::theme::{Theme, rgba};
 
+pub mod epic;
+
 /// The repository, for About.
 const SOURCE_URL: &str = "https://github.com/AndrewGaspar/quiver";
 
@@ -36,6 +38,8 @@ pub enum SettingsAction {
     Hud(crate::ui::perf::HudField),
     /// Tweaks: the global scope's focusable controls, in order (`ui/game/tweaks/`).
     Tweak(usize),
+    /// Accounts › Epic Games (`settings/epic.rs`).
+    Epic(epic::EpicAction),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -86,6 +90,7 @@ impl Quiver {
                         v.push(SettingsAction::Cmd(GlobalCmd::SignOut(i)));
                     }
                 }
+                v.extend(self.epic_actions());
             }
             SettingsSection::Library => v.extend([SettingsAction::Welcome, SettingsAction::Advanced]),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
@@ -156,6 +161,7 @@ impl Quiver {
             SettingsAction::Advanced => self.ui.lib_advanced = !self.ui.lib_advanced,
             SettingsAction::Hud(f) => self.hud_cycle(quiver_api::perf::HudScopeRef::global(), f, cx),
             SettingsAction::Tweak(i) => self.tweaks_activate(None, i, cx),
+            SettingsAction::Epic(a) => self.epic_action(a, cx),
         }
     }
 
@@ -199,7 +205,11 @@ impl Quiver {
         let section = self.nav.settings;
         let actions = self.settings_actions();
         let body = match section {
-            SettingsSection::Accounts => self.settings_accounts(th, &actions, cx),
+            SettingsSection::Accounts => {
+                let mut v = self.settings_accounts(th, &actions, cx);
+                v.extend(self.settings_epic(th, &actions, cx));
+                v
+            }
             SettingsSection::Library => {
                 let mut v = self.settings_library(th, &actions, cx);
                 let f = self.action_focused(&actions, &SettingsAction::Welcome);
@@ -506,6 +516,7 @@ impl Quiver {
         let mut games: Vec<GameRow> = self
             .games
             .iter()
+            .filter(|g| g.entry.game.is_ubisoft())
             .filter(|g| g.entry.owned_by.len() > 1 || g.entry.owned_by.first().map(String::as_str) != default_id)
             .cloned()
             .collect();

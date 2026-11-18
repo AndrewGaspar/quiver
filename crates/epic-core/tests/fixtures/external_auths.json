@@ -1,0 +1,20 @@
+[
+  {
+    "accountId": "8645b4947bbc4c0092a8b7236df169d1",
+    "type": "github",
+    "externalAuthId": "1234",
+    "externalAuthIdType": "github_id",
+    "externalDisplayName": "player-one",
+    "authIds": [{"id": "1234", "type": "github_id"}],
+    "dateAdded": "2020-01-01T00:00:00.000Z"
+  },
+  {
+    "accountId": "8645b4947bbc4c0092a8b7236df169d1",
+    "type": "ubisoft",
+    "externalAuthId": "a1b2c3d4-0000-4000-8000-0000fixture0",
+    "externalAuthIdType": "ubisoft_profile_id",
+    "externalDisplayName": "PlayerOneUbi",
+    "authIds": [{"id": "a1b2c3d4-0000-4000-8000-0000fixture0", "type": "ubisoft_profile_id"}],
+    "dateAdded": "2021-03-01T00:00:00.000Z"
+  }
+]

@@ -16,6 +16,7 @@ quiver-core = { path = "crates/quiver-core" }
 quiver-ipc = { path = "crates/quiver-ipc" }
 quiver-api = { path = "crates/quiver-api" }
 quiver-perf = { path = "crates/quiver-perf" }
+epic-core = { path = "crates/epic-core" }
 anyhow = "1"
 thiserror = "2"
 prost = "0.14"

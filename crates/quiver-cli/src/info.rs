@@ -69,7 +69,14 @@ fn print_detail(d: &GameDetail) -> Result<()> {
     field("publisher", d.publisher.clone());
     field("released", d.release_date.map(|t| t.format("%Y-%m-%d").to_string()));
     field("store page", d.store_url.clone());
-    field("account", d.account.clone().map(|a| format!("{a} (the {store} client's)")));
+    let client_managed = d.game.store == quiver_api::StoreId::Steam;
+    field("account", d.account.clone().map(|a| if client_managed { format!("{a} (the {store} client's)") } else { a }));
+    if let Some(u) = d.linked {
+        println!("  {:<12} {u} ({} manages it; Quiver installs and plays it as {})", "plays as", if u.is_ubisoft() { "Ubisoft Connect" } else { u.store.label() }, crate::game_label(&u));
+    }
+    if d.install.is_none() && d.linked.is_none() && d.game.store == quiver_api::StoreId::Epic {
+        println!("  {:<12} not installed (installing Epic games comes in the next Quiver build)", "installed");
+    }
     if let Some(i) = &d.install {
         let state = if !i.complete { " (downloading)" } else if i.update_pending { " (update waiting in Steam)" } else { "" };
         println!("  {:<12} {} · {}{state}", "installed", bytes(i.size_bytes), i.dir.display());
@@ -82,7 +89,8 @@ fn print_detail(d: &GameDetail) -> Result<()> {
     }
     match &d.achievements {
         Some(a) => println!("  {:<12} {} of {} unlocked", "achievements", a.unlocked, a.total),
-        None => println!("  {:<12} unknown ({store} hasn't cached them here)", "achievements"),
+        None if client_managed => println!("  {:<12} unknown ({store} hasn't cached them here)", "achievements"),
+        None => println!("  {:<12} not read from {store} yet", "achievements"),
     }
     if let Some(c) = &d.cloud {
         let pending = if c.unsynced > 0 { format!(", {} not synced", c.unsynced) } else { String::new() };
@@ -90,7 +98,19 @@ fn print_detail(d: &GameDetail) -> Result<()> {
     }
     if !d.dlc.is_empty() {
         let installed = d.dlc.iter().filter(|x| x.installed).count();
-        println!("  {:<12} {} listed, {installed} installed", "DLC", d.dlc.len());
+        match d.dlc.iter().filter(|x| x.owned.is_some()).count() {
+            0 => println!("  {:<12} {} listed, {installed} installed", "DLC", d.dlc.len()),
+            _ => {
+                println!("  {:<12} {} listed, {} owned", "DLC", d.dlc.len(), d.dlc.iter().filter(|x| x.owned == Some(true)).count());
+                for x in &d.dlc {
+                    println!("    {} {}", if x.owned == Some(true) { "owned  " } else { "       " }, x.name.as_deref().unwrap_or(x.game.id.as_str()));
+                }
+            }
+        }
+    }
+    if let Some(desc) = d.description.as_deref() {
+        let short: String = desc.chars().take(240).collect();
+        println!("  {}{}", short.replace('\n', " "), if short.len() < desc.len() { "…" } else { "" });
     }
     if !d.unavailable.is_empty() {
         println!("  not available: {}", d.unavailable.join(", "));
@@ -143,8 +163,11 @@ fn art_line(e: &LibraryEntry, pref: quiver_api::art::ArtPreference) -> String {
 
 pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: bool) -> Result<()> {
     let any = crate::resolve_any(client, game).await?;
-    if !any.game.is_ubisoft() {
-        let d: GameDetail = client.call(Request::GameDetail { game: any.game, refresh }).await?;
+    // Another store's game, or another store's copy asked for by its ref (`epic:<app>`,
+    // folded into its Ubisoft entry).
+    let asked = quiver_api::GameRef::parse_ref(game).filter(|r| !r.is_ubisoft() && *r != any.game);
+    if let Some(g) = asked.or((!any.game.is_ubisoft()).then_some(any.game)) {
+        let d: GameDetail = client.call(Request::GameDetail { game: g, refresh }).await?;
         return if json { print_json(&d) } else { print_detail(&d) };
     }
     let e = resolve(client, &crate::game_label(&any.game)).await?;

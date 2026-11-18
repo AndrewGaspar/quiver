@@ -17,6 +17,7 @@ pub mod art;
 pub mod client;
 pub mod daemon;
 pub mod downloads;
+pub mod epic;
 pub mod exports;
 pub mod game;
 pub mod mods;
@@ -244,6 +245,11 @@ pub struct LibraryEntry {
     /// them. `None` for Ubisoft games.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<stores::ClientInstall>,
+    /// Other stores' records of this game, linked by an id the vendor declared (an Epic
+    /// copy of a Ubisoft game, folded into its Ubisoft entry; or, on an entry not folded
+    /// yet, the game it links to). See `stores::StoreRecord` and design/STORES.md §2.4.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<stores::StoreRecord>,
 }
 
 impl LibraryEntry {
@@ -274,7 +280,17 @@ impl LibraryEntry {
         if self.steam.is_some() && !out.contains(&StoreId::Steam) {
             out.push(StoreId::Steam);
         }
+        for r in self.records.iter().filter(|r| r.relation == stores::Relation::CopyOf) {
+            if !out.contains(&r.game.store) {
+                out.push(r.game.store);
+            }
+        }
         out
+    }
+
+    /// The entry is this game's home record, or carries `game` as a folded copy.
+    pub fn is_or_has(&self, game: &GameRef) -> bool {
+        self.game == *game || self.records.iter().any(|r| r.relation == stores::Relation::CopyOf && r.game == *game)
     }
 }
 
@@ -290,6 +306,10 @@ pub struct Art {
     /// Steam have no config art).
     #[serde(default, skip_serializing_if = "art::SpaceArt::is_empty")]
     pub space: art::SpaceArt,
+    /// Epic's catalog art (`keyImages`: `DieselGameBoxTall`, `DieselGameBox`,
+    /// `DieselGameBoxLogo`), for Epic games and Epic copies of Ubisoft games.
+    #[serde(default, skip_serializing_if = "art::SpaceArt::is_empty")]
+    pub epic: art::SpaceArt,
 }
 
 /// A signed-in Ubisoft account.
@@ -820,6 +840,9 @@ pub enum Request {
     /// Platform-level overrides per scope (global, game, profile), the plan of the next
     /// launch and sessions' effects (see [`tweaks`]).
     Tweaks(tweaks::TweaksRequest),
+    // ---- Epic Games Store (appended; design/STORE-EPIC.md)
+    /// Epic accounts: sign in with a pasted code, sign out, list (see [`epic`]).
+    Epic(epic::EpicRequest),
 }
 
 fn yes() -> bool {
@@ -1010,6 +1033,10 @@ pub enum Event {
         game: GameRef,
         effect: tweaks::TweakEffect,
     },
+    // ---- appended: stores (design/STORES.md §3.2)
+    /// A store's accounts changed (signed in, signed out, default, or Epic ended a
+    /// session): reload `Request::Stores` and that store's account list.
+    StoreAccountsChanged { store: StoreId },
 }
 
 impl From<options::OptionsEvent> for Event {

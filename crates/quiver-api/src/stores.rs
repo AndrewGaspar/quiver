@@ -83,6 +83,35 @@ pub struct StoreInfo {
     pub note: Option<String>,
 }
 
+/// How another store's record relates to the entry carrying it (design/STORES.md §2.4).
+/// Records are linked only by an id the vendor declared, never by a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// The same game bought in another store, folded into this entry, which installs,
+    /// launches and keys its data (an Epic copy of a Ubisoft game in its Ubisoft entry).
+    CopyOf,
+    /// On an entry that wasn't folded: the game the vendor says it is, which isn't in the
+    /// library (an Epic copy of a Ubisoft game not on a signed-in Ubisoft account yet).
+    Linked,
+    /// A relation a newer daemon knows.
+    #[serde(other)]
+    Other,
+}
+
+/// Another store's record of a library entry's game.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreRecord {
+    pub game: GameRef,
+    pub relation: Relation,
+    /// That store's accounts that own it (Epic account ids), when known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_by: Vec<String>,
+    /// For people: "Bought on Epic", "Managed by Ubisoft Connect".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// A game installed and run by its store's own client (a Steam game in local mode), as the
 /// library lists it (`LibraryEntry::client`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -181,6 +210,13 @@ pub struct GameDetail {
     /// and launch settings reach it (appended; design/STORE-STEAM.md §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_hook: Option<crate::exports::SteamHook>,
+    /// The store's description of the game (appended; Epic's catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The game this store record links to (an Epic copy of a Ubisoft game:
+    /// `ubisoft:3539`), which installs and plays it (appended; STORES.md §2.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked: Option<GameRef>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -234,6 +270,9 @@ pub struct Dlc {
     pub name: Option<String>,
     #[serde(default)]
     pub installed: bool,
+    /// Whether the account owns it, when the store says (appended; Epic's library).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned: Option<bool>,
 }
 
 #[cfg(test)]
@@ -251,7 +290,9 @@ mod tests {
         assert_eq!(s.account, AccountState::ClientManaged);
         let i: ClientInstall = serde_json::from_str(r#"{"dir":"/s/common/Portal 2"}"#).unwrap();
         assert!(!i.complete && i.art.is_empty());
-        let v = serde_json::to_value(Dlc { game: GameRef::steam(1), name: None, installed: true }).unwrap();
+        let v = serde_json::to_value(Dlc { game: GameRef::steam(1), name: None, installed: true, owned: None }).unwrap();
         assert_eq!(v, serde_json::json!({"game": "steam:1", "installed": true}));
+        let r: StoreRecord = serde_json::from_str(r#"{"game":"epic:Camellia","relation":"merged_somehow"}"#).unwrap();
+        assert_eq!((r.game.to_string(), r.relation), ("epic:Camellia".to_owned(), Relation::Other));
     }
 }

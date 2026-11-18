@@ -105,6 +105,8 @@ pub enum ArtOrigin {
     SteamCache,
     /// Steam's public CDN.
     SteamCdn,
+    /// Epic's catalog (`keyImages`, on Epic's CDN).
+    Epic,
 }
 
 impl ArtOrigin {
@@ -112,9 +114,13 @@ impl ArtOrigin {
         matches!(self, Self::SteamCache | Self::SteamCdn)
     }
 
-    /// For people: "Ubisoft" or "Steam".
+    /// For people: "Ubisoft", "Steam" or "Epic".
     pub fn vendor(self) -> &'static str {
-        if self.is_steam() { "Steam" } else { "Ubisoft" }
+        match self {
+            Self::Epic => "Epic",
+            o if o.is_steam() => "Steam",
+            _ => "Ubisoft",
+        }
     }
 
     pub fn describe(self) -> &'static str {
@@ -123,6 +129,7 @@ impl ArtOrigin {
             Self::GamesApi => "Ubisoft games API",
             Self::SteamCache => "Steam library cache",
             Self::SteamCdn => "Steam CDN",
+            Self::Epic => "Epic catalog",
         }
     }
 }
@@ -180,6 +187,17 @@ pub fn candidates(entry: &LibraryEntry, slot: ArtSlot, pref: ArtPreference) -> V
     if let Some(u) = space.as_ref().filter(|u| u.starts_with("https://")) {
         ubisoft.push((ArtOrigin::GamesApi, ArtRef::Url(u.clone())));
     }
+    // Epic's catalog art: all an Epic game has, and after Ubisoft's for an Epic copy
+    // folded into its Ubisoft entry.
+    let epic = match slot {
+        ArtSlot::Tile => &art.epic.tile,
+        ArtSlot::Hero => &art.epic.hero,
+        ArtSlot::Logo => &art.epic.logo,
+        ArtSlot::Icon => &art.epic.icon,
+    };
+    if let Some(u) = epic.as_ref().filter(|u| u.starts_with("https://")) {
+        ubisoft.push((ArtOrigin::Epic, ArtRef::Url(u.clone())));
+    }
     let mut steam = Vec::new();
     // A Ubisoft game's Steam copy, or a Steam game (its art is all there is).
     let steam_app = match (&entry.steam, &entry.client, entry.game.as_steam()) {
@@ -235,6 +253,7 @@ mod tests {
             installable: false,
             space_id: None,
             client: None,
+            records: Vec::new(),
             steam: steam.map(|art| SteamGame {
                 app_id: 3751950,
                 name: "BF".into(),

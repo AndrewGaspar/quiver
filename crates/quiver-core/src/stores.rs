@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-pub use quiver_api::stores::{AccountState, Capabilities, GameDetail, Support};
+pub use quiver_api::stores::{AccountState, Capabilities, GameDetail, Relation, StoreRecord, Support};
 use quiver_api::{GameRef, LibraryEntry, Playtime, StoreId};
 
 /// A boxed, sendable future, so providers can be used as `dyn StoreProvider`.
@@ -73,8 +73,11 @@ pub fn provider_for<'a>(providers: &'a [std::sync::Arc<dyn StoreProvider>], game
 
 /// The library across stores. Records merge only on explicit links (STORES.md §2.4, steer
 /// X2): a Ubisoft game bought on Steam is already one Ubisoft entry with its Steam install
-/// in `steam`, so the Steam provider's entry for that app is dropped. Nothing merges on
-/// names. Installed games first, then by name, as before.
+/// in `steam`, so the Steam provider's entry for that app is dropped. An entry carrying a
+/// [`Relation::Linked`] record (an Epic copy of a Ubisoft game, `GameID` from Epic's
+/// catalog) is folded into the entry it names, as a [`Relation::CopyOf`] record, when that
+/// entry is in the library; otherwise it stays as it is. Nothing merges on names.
+/// Installed games first, then by name, as before.
 pub fn merge_libraries(mut parts: Vec<Vec<LibraryEntry>>) -> Vec<LibraryEntry> {
     let linked: std::collections::HashSet<GameRef> =
         parts.iter().flatten().filter_map(|e| e.steam.as_ref()).map(|s| GameRef::steam(s.app_id)).collect();
@@ -82,6 +85,26 @@ pub fn merge_libraries(mut parts: Vec<Vec<LibraryEntry>>) -> Vec<LibraryEntry> {
     for part in parts.drain(..) {
         out.extend(part.into_iter().filter(|e| e.game.is_ubisoft() || !linked.contains(&e.game)));
     }
+    let homes: std::collections::HashMap<GameRef, usize> = out.iter().enumerate().map(|(i, e)| (e.game, i)).collect();
+    let mut folded = vec![false; out.len()];
+    for i in 0..out.len() {
+        let Some(target) = out[i].records.iter().find(|r| r.relation == Relation::Linked).map(|r| r.game) else { continue };
+        let Some(&home) = homes.get(&target).filter(|&&h| h != i && !folded[h]) else { continue };
+        let copy = out[i].clone();
+        let h = &mut out[home];
+        h.records.push(StoreRecord {
+            game: copy.game,
+            relation: Relation::CopyOf,
+            owned_by: copy.owned_by,
+            note: Some(format!("Bought on {}", copy.game.store.label())),
+        });
+        // The copy's store art backs up the home store's.
+        if h.art.epic.is_empty() {
+            h.art.epic = copy.art.epic;
+        }
+        folded[i] = true;
+    }
+    let mut out: Vec<LibraryEntry> = out.into_iter().zip(folded).filter(|(_, f)| !f).map(|(e, _)| e).collect();
     out.sort_by(|a, b| b.on_disk().cmp(&a.on_disk()).then_with(|| a.name.cmp(&b.name)));
     out
 }

@@ -20,6 +20,7 @@ mod steamhook;
 mod spaces;
 mod steamlib;
 mod stores;
+mod epic;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -104,6 +105,8 @@ struct Daemon {
     achievements: Arc<quiver_core::achievements::Engine>,
     /// Providers of stores other than Ubisoft (see `stores`; Ubisoft's wraps the daemon).
     stores: Vec<Arc<dyn quiver_core::stores::StoreProvider>>,
+    /// Epic accounts and library (its provider is in `stores`).
+    epic: Arc<epic_core::Epic>,
     /// Restarting onto new builds: what it waits on, holds, refusing work meanwhile.
     lifecycle: Arc<lifecycle::Lifecycle>,
     /// Open client connections (their reply channel, and a signal once a
@@ -406,6 +409,7 @@ impl Daemon {
             }
             Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
             Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
+            Request::Epic(r) => epic::handle(self, source, r).await?,
             Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
             Request::Play { game, profile } => json!(self.play(source, game.0, profile).await?),
             Request::Import { product_id, path, language } => {
@@ -1102,6 +1106,7 @@ async fn main() -> Result<()> {
         .rev()
         .collect();
     let queue = downloads::load(&cfg);
+    let epic = Arc::new(epic_core::Epic::open(&launcher::data_dir())?);
     let daemon = Arc::new(Daemon {
         accounts,
         auth: Arc::new(Auth::default()),
@@ -1124,7 +1129,11 @@ async fn main() -> Result<()> {
         mod_sdk,
         perf,
         achievements: ach,
-        stores: vec![Arc::new(quiver_core::steamlocal::SteamLocal::new(&quiver_core::exports::Paths::from_env().home))],
+        stores: vec![
+            Arc::new(quiver_core::steamlocal::SteamLocal::new(&quiver_core::exports::Paths::from_env().home)),
+            Arc::new(epic_core::provider::EpicProvider::new(epic.clone())),
+        ],
+        epic,
         lifecycle,
         conns: Mutex::new(HashMap::new()),
         pending_2fa_at: Mutex::new(None),
