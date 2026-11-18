@@ -22,6 +22,7 @@ mod steamlib;
 mod steammods;
 mod stores;
 mod epic;
+mod epicgame;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -1159,6 +1160,7 @@ async fn main() -> Result<()> {
     downloads::start(&daemon);
     steamgames::start(&daemon);
     achievements::start(&daemon);
+    epicgame::start(&daemon);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);

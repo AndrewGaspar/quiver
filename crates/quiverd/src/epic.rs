@@ -68,6 +68,7 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicRequest) -> Res
             changed(d);
             json!(a)
         }
+        EpicRequest::Game(r) => crate::epicgame::handle(d, source, r).await?,
     })
 }
 

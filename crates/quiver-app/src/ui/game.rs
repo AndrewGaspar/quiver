@@ -2,6 +2,7 @@
 //! Each tab is its own module; `page` holds the page's state and daemon calls.
 
 mod addons;
+mod epicsaves;
 mod files;
 mod launch;
 mod logs;
@@ -379,6 +380,7 @@ impl Quiver {
             Tab::Mods => self.render_mods(th, &g, cx),
             Tab::Tweaks => self.render_tweaks_tab(th, &g, cx),
             Tab::Performance => self.render_perf(th, &g, cx),
+            Tab::Saves if store_page => self.render_epic_saves(th, &g, cx),
             Tab::Saves => self.render_saves(th, &g, cx),
             Tab::AddOns => self.render_addons(th, &g, cx),
             Tab::Files => self.render_files(th, &g, cx),

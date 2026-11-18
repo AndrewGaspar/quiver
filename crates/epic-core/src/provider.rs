@@ -29,7 +29,18 @@ impl EpicProvider {
 }
 
 pub fn capabilities() -> Capabilities {
-    Capabilities { library: Support::Quiver, install: Support::Quiver, launch: Support::Quiver, settings: Support::Quiver, mods: Support::Quiver, ..Capabilities::default() }
+    // Quiver installs and launches Epic games, syncs launcher cloud saves and reports play
+    // time; achievements are read.
+    Capabilities {
+        library: Support::Quiver,
+        install: Support::Quiver,
+        launch: Support::Quiver,
+        settings: Support::Quiver,
+        mods: Support::Quiver,
+        cloud_saves: Support::Quiver,
+        achievements: Support::ReadOnly,
+        playtime: Support::Quiver,
+    }
 }
 
 /// `epic:<app>`, when the app name is a valid game id.
@@ -150,7 +161,8 @@ impl StoreProvider for EpicProvider {
                 })
                 .collect();
             let unavailable = vec!["release date".to_owned(), "play time".to_owned(), "achievements".to_owned(), "cloud saves".to_owned()];
-            Ok(GameDetail {
+            let third_party = t.third_party.is_some();
+            let mut d = GameDetail {
                 game,
                 name: t.title.clone(),
                 capabilities: capabilities(),
@@ -178,7 +190,13 @@ impl StoreProvider for EpicProvider {
                 steam_hook: None,
                 description: t.description.clone(),
                 linked: ubisoft_of(&t),
-            })
+            };
+            // Play time, achievements and cloud saves (phase 3; `progress`). A game another
+            // store's client manages keeps its progress there.
+            if !third_party {
+                self.epic.fill_detail(&mut d, refresh).await;
+            }
+            Ok(d)
         })
     }
 

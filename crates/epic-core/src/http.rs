@@ -18,6 +18,7 @@ pub enum Method {
     Get,
     Post,
     Delete,
+    Put,
 }
 
 #[derive(Clone)]
@@ -28,6 +29,8 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     /// `application/x-www-form-urlencoded` body.
     pub form: Option<Vec<(String, String)>>,
+    /// Any other body, with its content type (JSON, a save's chunk).
+    pub body: Option<(String, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for Request {
@@ -38,7 +41,7 @@ impl std::fmt::Debug for Request {
 
 impl Request {
     pub fn new(label: &'static str, method: Method, url: impl Into<String>) -> Self {
-        Request { label, method, url: url.into(), headers: Vec::new(), form: None }
+        Request { label, method, url: url.into(), headers: Vec::new(), form: None, body: None }
     }
 
     pub fn header(mut self, k: &str, v: impl Into<String>) -> Self {
@@ -52,6 +55,16 @@ impl Request {
 
     pub fn form(mut self, pairs: &[(&str, &str)]) -> Self {
         self.form = Some(pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect());
+        self
+    }
+
+    /// A JSON body.
+    pub fn json(self, v: &serde_json::Value) -> Self {
+        self.body("application/json", v.to_string().into_bytes())
+    }
+
+    pub fn body(mut self, content_type: &str, data: Vec<u8>) -> Self {
+        self.body = Some((content_type.to_owned(), data));
         self
     }
 }
@@ -97,12 +110,16 @@ impl Transport for Reqwest {
                 Method::Get => self.client.get(&req.url),
                 Method::Post => self.client.post(&req.url),
                 Method::Delete => self.client.delete(&req.url),
+                Method::Put => self.client.put(&req.url),
             };
             for (k, v) in &req.headers {
                 b = b.header(k, v);
             }
             if let Some(form) = &req.form {
                 b = b.form(form);
+            }
+            if let Some((ct, data)) = req.body {
+                b = b.header(reqwest::header::CONTENT_TYPE, ct).body(data);
             }
             // reqwest's errors name the URL, which can hold a token: keep only the kind.
             let r = b.send().await.map_err(|e| anyhow::anyhow!("Epic {label}: {}", describe(&e)))?;
@@ -144,7 +161,7 @@ impl Fake {
         self
     }
 
-    /// [`Fake::reply`] with a binary body (a manifest file).
+    /// [`Fake::reply`] with a binary body (a save's manifest or chunk).
     pub fn reply_bytes(&self, url_part: &str, status: u16, body: Vec<u8>) -> &Self {
         self.replies.lock().unwrap().push_back((url_part.to_owned(), Response { status, body }));
         self

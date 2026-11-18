@@ -32,6 +32,14 @@ pub mod manifest;
 pub mod ops;
 pub mod provider;
 pub mod secrets;
+// Phase 3: cloud saves, play time, achievements (design/STORE-EPIC.md §9.5).
+pub mod achievements;
+pub mod playtime;
+pub mod progress;
+pub mod savefmt;
+pub mod savepaths;
+pub mod saves;
+pub mod session;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -94,6 +102,8 @@ pub struct Epic {
     library: tokio::sync::Mutex<Option<(Instant, Arc<Library>)>>,
     /// Installed games (`<data>/epic/installed.json`, `manifests/`).
     installs: installs::Installs,
+    /// Cloud saves, play time and achievements ([`progress`]).
+    p3: progress::Phase3,
 }
 
 impl Epic {
@@ -106,6 +116,7 @@ impl Epic {
 
     pub fn with_config(data_dir: &Path, config: ClientConfig, transport: Arc<dyn http::Transport>, secrets: Arc<dyn SecretStore>) -> Self {
         let dir = data_dir.join("epic");
+        let p3 = progress::Phase3::new(&dir);
         Epic {
             cache: Cache::new(&dir),
             installs: installs::Installs::new(&dir),
@@ -115,6 +126,7 @@ impl Epic {
             tokens: Default::default(),
             refreshing: Default::default(),
             library: Default::default(),
+            p3,
         }
     }
 
@@ -450,3 +462,5 @@ fn explain_login(e: anyhow::Error) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod phase3_tests;

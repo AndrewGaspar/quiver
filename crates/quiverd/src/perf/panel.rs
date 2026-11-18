@@ -99,6 +99,11 @@ impl PerfHub {
         }
     }
 
+    /// The panel is open, as `quiver-sight` last reported (a renderer swap waits for it).
+    pub fn panel_open(&self) -> bool {
+        self.panel_lock().report.as_ref().is_some_and(|(r, _)| r.open)
+    }
+
     /// A session ended: an open panel for it closes (`quiver-sight` also sees the session
     /// end; this keeps the status honest if it doesn't).
     pub fn panel_session_ended(&self, session: &str) {
