@@ -22,9 +22,12 @@
 pub mod accounts;
 pub mod api;
 pub mod auth;
+pub mod chunk;
 pub mod config;
+pub mod content;
 pub mod http;
 pub mod library;
+pub mod manifest;
 pub mod provider;
 pub mod secrets;
 
