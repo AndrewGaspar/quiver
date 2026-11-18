@@ -130,8 +130,9 @@ impl Tab {
     /// Steam games: also Mods (with their Options), as the Steam store's capabilities say
     /// (`mods: quiver`); they reach the game when it starts through `quiver steam-run`.
     pub const STEAM: [Tab; 3] = [Tab::Overview, Tab::Mods, Tab::Tweaks];
-    /// Epic games: also Saves & progress (cloud saves, play time, achievements; phase 3).
-    pub const EPIC: [Tab; 3] = [Tab::Overview, Tab::Tweaks, Tab::Saves];
+    /// Epic games: also Mods (with their Options) and Saves & progress (cloud saves, play
+    /// time, achievements).
+    pub const EPIC: [Tab; 4] = [Tab::Overview, Tab::Mods, Tab::Tweaks, Tab::Saves];
 
     /// The tabs a game's page has.
     pub fn of(id: Gid) -> &'static [Tab] {

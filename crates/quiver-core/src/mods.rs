@@ -1495,9 +1495,9 @@ impl ModStore {
         let layers = self.resolve_layers(layers)?;
         let mut advice = self.saves_advice(&layers)?;
         if !self.has_save_stores() {
-            // Steam games: the real saves, whatever the mods (and say so).
+            // Steam and Epic games: the real saves, whatever the mods (and say so).
             advice.share_default = true;
-            advice.reason = crate::savestores::REAL_SAVES.into();
+            advice.reason = crate::savestores::real_saves(self.game_ref()).0.into();
         }
         let wanted = saves.unwrap_or(if advice.share_default { crate::savestores::DEFAULT_STORE } else { crate::savestores::NEW_STORE });
         let store = self.resolve_store(wanted, name, source)?;
