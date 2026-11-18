@@ -1008,6 +1008,25 @@ spec only):
   (SHA-1) on a blocking task, `repair` rebuilds only the bad and missing ones, and
   `uninstall` removes only the manifest's files and the folders they leave empty. Install
   tags are supported (`None`: everything).
+- **Updates: reuse and deltas** (added with update polling, 2026-11-18). A chunk guid names
+  one immutable window of data, so a part of a changed file cut from a chunk the old
+  build's copy of the *same path* also used is read from that old copy instead of
+  downloaded (`content::reusable_parts`); the old file stays in place until the new one is
+  renamed over it. Before reading from an old copy the install hashes it against the
+  installed manifest's SHA-1 (a damaged or half-replaced copy is downloaded instead); the
+  preview trusts sizes only. Data another file held is still downloaded (no cross-file
+  reuse). When the old and new builds have different build ids, `Deltas/<new build id>/<old
+  build id>.delta` is fetched next to the chunks (no session, as legendary's
+  `get_delta_manifest`); any failure means no delta. Its file entries replace the new
+  manifest's only where the path and SHA-1 match, the parts add up to the file and every
+  chunk they cut is listed (by the delta, the new build or the old one) with the range
+  inside it; a delta whose chunks live under another `Chunks*` folder is not used. The
+  combination is still the new build (same files and SHA-1s, so the resume record carries
+  over), every file is checked as it is written, and if an update through the delta fails
+  for any reason but a cancel it runs again from the full manifest. The installed manifest
+  saved afterwards is Epic's plain one. DLC updates take the same path. `UpdatePreview`
+  says what a delta and reuse save (`notes`), and its download is what the update will
+  really fetch.
 
 **Epic calls** (`epic-core::api`): the build (`launcher …/assets/v2/platform/Windows/
 namespace/<ns>/catalogItem/<id>/app/<app>/label/Live`: manifest locations, SHA-1, keys),
@@ -1089,8 +1108,10 @@ stay out of the library (§9.8).
   encrypted section and the encrypted-chunk nonce have never met a real encrypted build,
   and the JSON manifest reader is from the format as remembered (no real JSON manifest
   here). `quiver epic manifest` on a real game is the first check.
-- Delta manifests (`…/Deltas/<old>/<new>.delta`) aren't used: updates fetch every chunk a
-  changed file needs.
+- Delta manifests and reuse (above) are built against fixtures only: no real Epic delta has
+  been fetched, so its URL (`Deltas/<new>/<old>.delta` under the chunk base, legendary's
+  order), whether real deltas list the old build's chunks, and their manifest version are
+  unverified. Most builds have no delta; reuse from the old copies works without one.
 - The exchange code is minted before the prerequisites run. Codes last minutes, so a
   prerequisite installer that takes longer than that would leave the game with an expired
   code (start it again; the prerequisites don't run twice).

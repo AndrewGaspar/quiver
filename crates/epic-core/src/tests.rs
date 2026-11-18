@@ -441,6 +441,85 @@ async fn install_verify_repair_update_launch_uninstall() {
     assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
 }
 
+/// An update through Epic's delta manifest: v2 shifts every byte of a big file (so its
+/// full manifest shares no chunk with v1), and the delta cuts it from v1's chunks plus one
+/// small new chunk. The preview says so and counts only that chunk; the update copies the
+/// rest from the installed file. With the delta's chunk missing from the CDN, the update
+/// falls back to the full manifest and still lands on v2.
+async fn update_through_a_delta(delta_chunk_served: bool) {
+    let r = rig();
+    r.login("eg1~a1", "eg1~r1", ID, "Player One").await;
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_page1.json"), Some(include_str!("../tests/fixtures/library_page2.json")));
+    script_catalog(&r.fake);
+    let old: Vec<u8> = (0..8192u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let head: Vec<u8> = (0..100u32).map(|i| (i * 31 % 251) as u8).collect();
+    let new: Vec<u8> = head.iter().chain(&old).copied().collect();
+    let build = |files: &[(&str, &[u8], &[&str])], version: &str, id: &str| {
+        let (mut m, chunks) = crate::manifest::tests::build(18, files, 1024, None);
+        (m.meta.app_name, m.meta.build_version, m.meta.build_id) = ("Kestrel".into(), version.into(), id.into());
+        (m, chunks)
+    };
+    let (m1, mut chunks1) = build(&[("Bin/Game.exe", b"MZ the game", &[]), ("Data/big.pak", &old, &[])], "1.0", "b1");
+    let (m2, mut chunks2) = build(&[("Bin/Game.exe", b"MZ the game", &[]), ("Data/big.pak", &new, &[])], "2.0", "b2");
+    let (mut d, dchunks) = crate::manifest::tests::build(18, &[("Data/big.pak", &head, &[])], 1024, None);
+    let big1 = m1.files.iter().find(|f| f.path == "Data/big.pak").unwrap();
+    let f = &mut d.files[0];
+    f.sha1 = m2.files[1].sha1;
+    f.size = new.len() as u64;
+    f.parts.extend(big1.parts.iter().map(|q| crate::manifest::ChunkPart { file_offset: q.file_offset + 100, ..q.clone() }));
+    let bytes1 = crate::manifest::write(&m1, true);
+    let bytes2 = crate::manifest::write(&m2, true);
+    chunks1.insert("m.manifest".into(), bytes1.clone());
+    chunks2.insert("m.manifest".into(), bytes2.clone());
+    chunks2.insert("Deltas/b2/b1.delta".into(), crate::manifest::write(&d, true));
+    if delta_chunk_served {
+        chunks2.extend(dchunks);
+    }
+    let api_part = "/assets/v2/platform/Windows/namespace/ns-alanwake/catalogItem/item-awr/app/Kestrel/label/Live";
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = ops::Roots { library: tmp.path().join("Games"), prefixes: tmp.path().join("Prefixes"), taken_prefixes: Vec::new() };
+    let mut progress = quiver_core::install::Progress::default();
+    progress.retry.attempts = 2;
+    progress.retry.base_delay = std::time::Duration::from_millis(1);
+    progress.retry.max_delay = std::time::Duration::from_millis(2);
+    let base1 = cdn(chunks1).await;
+    r.fake.reply(api_part, 200, &build_reply(&base1, &bytes1, "1.0"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes1);
+    let (rec, _) = r.epic.install("Kestrel", &roots, &progress, &|_| {}).await.unwrap();
+
+    let base2 = cdn(chunks2).await;
+    let script = || {
+        r.fake.reply(api_part, 200, &build_reply(&base2, &bytes2, "2.0"));
+        r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes2.clone());
+    };
+    script();
+    let up = r.epic.update_preview("Kestrel").await.unwrap();
+    assert_eq!((up.changed.clone(), up.unchanged), (vec!["Data/big.pak".to_owned()], 1));
+    assert!(up.notes.iter().any(|n| n.starts_with("Epic's delta patch 1.0 → 2.0 is used")), "{:?}", up.notes);
+    assert!(up.notes.iter().any(|n| n.contains("copied from their installed copies")), "{:?}", up.notes);
+    assert!(up.download_bytes < m2.download_size(None) / 4, "{} of {}", up.download_bytes, m2.download_size(None));
+    script();
+    let (rec2, notes) = r.epic.install("Kestrel", &roots, &progress, &|_| {}).await.unwrap();
+    assert_eq!(rec2.version, "2.0");
+    assert_eq!(std::fs::read(rec.dir.join("Data/big.pak")).unwrap(), new);
+    assert_eq!(notes.iter().any(|n| n.contains("delta patch from 1.0")), delta_chunk_served, "{notes:?}");
+    assert_eq!(notes[0].contains("reused from the installed files"), delta_chunk_served, "{notes:?}");
+    // The installed manifest is Epic's v2 manifest, not the combination.
+    assert_eq!(r.epic.installed_manifest("Kestrel").unwrap().files, m2.files);
+    assert!(r.epic.verify("Kestrel", &progress).await.unwrap().is_ok());
+    assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
+}
+
+#[tokio::test]
+async fn updates_use_epics_delta_manifest() {
+    update_through_a_delta(true).await;
+}
+
+#[tokio::test]
+async fn a_broken_delta_falls_back_to_the_full_manifest() {
+    update_through_a_delta(false).await;
+}
+
 /// An existing folder (say, another launcher's install) adopted in place: matching files
 /// are kept, the rest downloaded.
 #[tokio::test]

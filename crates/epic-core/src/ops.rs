@@ -187,7 +187,7 @@ impl Epic {
         let install = m.install_size(tags.as_deref());
         let download = m.download_size(tags.as_deref());
         let update = match &installed {
-            Some(i) => Some(self.diff(i, m, tags.as_deref())?),
+            Some(i) => Some(self.diff(i, &build, tags.as_deref()).await?),
             None => None,
         };
         let (remaining_download, required) = match &update {
@@ -215,8 +215,11 @@ impl Epic {
         })
     }
 
-    /// What updating an installed game to `latest` changes.
-    fn diff(&self, i: &Installed, latest: &Manifest, tags: Option<&[String]>) -> Result<UpdatePreview> {
+    /// What updating an installed game to `build` changes. The download is what the
+    /// update will really fetch: with Epic's delta manifest when there is one, less what
+    /// the changed files' installed copies already hold (`content::plan`).
+    async fn diff(&self, i: &Installed, build: &Build, tags: Option<&[String]>) -> Result<UpdatePreview> {
+        let latest = &build.manifest;
         let old = self.installed_manifest(&i.app_name)?;
         let old_files: HashMap<&str, &manifest::FileEntry> = old.files_for(tags).into_iter().map(|f| (f.path.as_str(), f)).collect();
         let (mut changed, mut added, mut unchanged, mut write, mut chunks) = (Vec::new(), Vec::new(), 0usize, 0u64, std::collections::HashSet::new());
@@ -234,7 +237,24 @@ impl Epic {
         }
         let new_paths: std::collections::HashSet<&str> = new_files.iter().map(|f| f.path.as_str()).collect();
         let removed: Vec<String> = old_files.keys().filter(|p| !new_paths.contains(**p)).map(|p| (*p).to_owned()).collect();
-        let download = chunks.iter().filter_map(|g| latest.chunk(g)).map(|c| c.file_size).sum();
+        let mut download = chunks.iter().filter_map(|g| latest.chunk(g)).map(|c| c.file_size).sum();
+        let mut notes = Vec::new();
+        if !changed.is_empty() || !added.is_empty() {
+            let delta = match build.source(&self.api.config.user_agent) {
+                Ok(source) => content::delta(&source, latest, &old, &build.secrets).await,
+                Err(_) => None,
+            };
+            if let Some(d) = &delta {
+                notes.push(format!("Epic's delta patch {} → {} is used ({} changed file(s))", i.version, latest.meta.build_version, d.files));
+            }
+            let effective = delta.as_ref().map_or(latest, |d| &d.manifest);
+            if let Ok(p) = content::plan(effective, Some(&old), &i.dir, tags) {
+                download = p.download_bytes;
+                if p.reused_bytes > 0 {
+                    notes.push(format!("{} of the changed files is copied from their installed copies instead of downloaded", quiver_core::install::human_bytes(p.reused_bytes)));
+                }
+            }
+        }
         Ok(UpdatePreview {
             product_id: 0,
             game: Some(game_ref(&i.app_name)?),
@@ -248,6 +268,7 @@ impl Epic {
             added,
             removed,
             unchanged,
+            notes,
         })
     }
 
@@ -257,7 +278,29 @@ impl Epic {
         let t = self.owned(app).await?;
         let account = self.account_for(&t, Some(&i))?;
         let build = self.fetch_build(&account, &t.namespace, &t.catalog_item_id, app).await?;
-        self.diff(&i, &build.manifest, i.tags.as_deref())
+        self.diff(&i, &build, i.tags.as_deref()).await
+    }
+
+    /// Write `build` into `dir` over `old` (an update), through Epic's delta manifest when
+    /// it publishes one for the two builds. Should the delta's files not come out as the
+    /// new build's (a file's SHA-1 is checked as it is written), the update is done again
+    /// from the full manifest, keeping every file already finished. Returns the report and
+    /// whether the delta was used.
+    async fn write_build(&self, build: &Build, old: Option<&Manifest>, dir: &Path, tags: Option<&[String]>, progress: &Progress) -> Result<(content::Report, bool)> {
+        let source = build.source(&self.api.config.user_agent)?;
+        let job = |manifest| content::Job { manifest, old, dir, tags, secrets: &build.secrets, source: &source, progress, workers: WORKERS };
+        let delta = match old {
+            Some(o) => content::delta(&source, &build.manifest, o, &build.secrets).await,
+            None => None,
+        };
+        if let Some(d) = &delta {
+            match content::install(job(&d.manifest)).await {
+                Ok(r) => return Ok((r, true)),
+                Err(e) if quiver_core::install::is_cancelled(&e) => return Err(e),
+                Err(e) => tracing::warn!(app = %build.manifest.meta.app_name, "updating through the delta manifest failed ({e:#}); using the full manifest"),
+            }
+        }
+        Ok((content::install(job(&build.manifest)).await?, false))
     }
 
     /// Install `app`, or update it to the current build, then its owned DLC that has a
@@ -282,18 +325,7 @@ impl Epic {
         let tags = existing.as_ref().and_then(|i| i.tags.clone());
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         status(if existing.is_some() { format!("Updating to {}…", build.manifest.meta.build_version) } else { "Downloading…".into() });
-        let source = build.source(&self.api.config.user_agent)?;
-        let report = content::install(content::Job {
-            manifest: &build.manifest,
-            old: old.as_ref(),
-            dir: &dir,
-            tags: tags.as_deref(),
-            secrets: &build.secrets,
-            source: &source,
-            progress,
-            workers: WORKERS,
-        })
-        .await?;
+        let (report, used_delta) = self.write_build(&build, old.as_ref(), &dir, tags.as_deref(), progress).await?;
         let m = &build.manifest;
         self.installs.save_manifest(app, &manifest::write(m, true))?;
         let prereq = (!m.meta.prereq_path.trim().is_empty()).then(|| Prereq {
@@ -337,13 +369,17 @@ impl Epic {
         if let Err(e) = self.remember_place(app, &record.prefix, Some(&record.dir)) {
             tracing::info!(app, "remembering the install's place: {e:#}");
         }
+        let reused = if report.bytes_reused > 0 { format!(", {} reused from the installed files", quiver_core::install::human_bytes(report.bytes_reused)) } else { String::new() };
         let mut notes = vec![format!(
-            "{} files written, {} kept, {} removed ({} downloaded)",
+            "{} files written, {} kept, {} removed ({} downloaded{reused})",
             report.files_written,
             report.files_kept,
             report.files_removed,
             quiver_core::install::human_bytes(report.bytes_downloaded)
         )];
+        if used_delta {
+            notes.push(format!("updated with Epic's delta patch from {}", existing.as_ref().map_or("?", |i| i.version.as_str())));
+        }
         // DLC with content of its own goes into the game's folder.
         for d in t.dlc.iter().filter(|d| d.owned) {
             let Some(dlc_app) = d.app_name.clone() else { continue };
@@ -378,18 +414,7 @@ impl Epic {
         }
         status(format!("Installing DLC {}…", t.dlc.iter().find(|d| d.app_name.as_deref() == Some(dlc_app)).map_or(dlc_app, |d| d.title.as_str())));
         let old = self.installed_manifest(dlc_app).ok();
-        let source = build.source(&self.api.config.user_agent)?;
-        content::install(content::Job {
-            manifest: &build.manifest,
-            old: old.as_ref(),
-            dir,
-            tags: None,
-            secrets: &build.secrets,
-            source: &source,
-            progress,
-            workers: WORKERS,
-        })
-        .await?;
+        self.write_build(&build, old.as_ref(), dir, None, progress).await?;
         self.installs.save_manifest(dlc_app, &manifest::write(&build.manifest, true))?;
         Ok(Some(build.manifest.meta.build_version.clone()))
     }

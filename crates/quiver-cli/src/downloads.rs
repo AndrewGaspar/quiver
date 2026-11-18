@@ -171,6 +171,9 @@ fn print_update(u: &UpdatePreview, files: bool) {
         u.removed.len(),
         u.unchanged
     );
+    for n in &u.notes {
+        println!("  {n}");
+    }
     if files {
         for (label, list) in [("changed", &u.changed), ("added", &u.added), ("removed", &u.removed)] {
             for p in list {
