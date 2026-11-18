@@ -15,7 +15,7 @@ use std::time::Duration;
 use quiver_perf::LayerStatus;
 use quiver_perf::clock::mono_raw_ns;
 use quiver_perf::hud::HudReader;
-use quiver_perf::layout::{HUD_HEADER_BYTES, LAYER_PANICKED};
+use quiver_perf::layout::{HUD_HEADER_BYTES, KEYS_WL_SHIFT, LAYER_PANICKED};
 use quiver_perf::ring::RingWriter;
 use quiver_perf::session::{FileKind, SessionDir, open_hud_reader};
 use quiver_perf::shm::Mapping;
@@ -37,7 +37,7 @@ pub struct Telemetry {
     pub draw_error: AtomicU32,
     /// `LAYER_*` flags the present path sets (DRAWING, PRESENT_ID, PANICKED, HUD_OFF).
     pub flags: AtomicU32,
-    /// In-game HUD keys ([`crate::keys`]): `KEYS_*`, and the presses seen.
+    /// In-game HUD keys ([`crate::keys`]): `KEYS_*` | `KEYS_WL_*` << 8, and the presses seen.
     pub keys: AtomicU32,
     pub key_toggles: AtomicU32,
     pub key_nexts: AtomicU32,
@@ -141,9 +141,18 @@ impl Telemetry {
         self.write_status();
     }
 
-    /// The key polling state (`KEYS_*`), written now.
-    pub fn set_keys(&self, state: u32) {
-        self.keys.store(state, Ordering::Relaxed);
+    /// The X11 key polling state (`KEYS_*`), written now.
+    pub fn set_keys_x11(&self, state: u32) {
+        self.set_keys_byte(0, state);
+    }
+
+    /// The Wayland keyboard's state (`KEYS_WL_*`), written now.
+    pub fn set_keys_wayland(&self, state: u32) {
+        self.set_keys_byte(KEYS_WL_SHIFT, state);
+    }
+
+    fn set_keys_byte(&self, shift: u32, state: u32) {
+        let _ = self.keys.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some((k & !(0xff << shift)) | ((state & 0xff) << shift)));
         self.write_status();
     }
 

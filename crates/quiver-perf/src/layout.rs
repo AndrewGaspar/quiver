@@ -188,7 +188,9 @@ pub struct LayerStatus {
     pub engine_name: [u8; 32],
     pub app_name: [u8; 64],
     pub device_name: [u8; 64],
-    /// The layer's in-game HUD key polling (`KEYS_*`, SIGHT-HUD §1.3).
+    /// The layer's in-game HUD keys (SIGHT-HUD §1.3): the X11 keymap polling's state
+    /// (`KEYS_*`) in the low byte, the Wayland keyboard's (`KEYS_WL_*`) in the next one
+    /// ([`KEYS_WL_SHIFT`]); see `LayerStatus::keys_x11` / `keys_wayland`.
     pub keys: u32,
     /// Shift+F3 and Ctrl+Shift+F3 presses the layer saw, wrapping. quiverd acts on the
     /// difference from the last value it read (the first value it reads is the baseline).
@@ -210,7 +212,8 @@ pub const LAYER_WAYLAND_SURFACE: u32 = 1 << 6;
 /// The game created an Xlib or XCB `VkSurfaceKHR`.
 pub const LAYER_X11_SURFACE: u32 = 1 << 7;
 
-/// `LayerStatus::keys`: not reported (polling not started yet, or a layer from before it).
+/// `LayerStatus::keys & 0xff` (X11 keymap polling): not reported (polling not started yet,
+/// or a layer from before it).
 pub const KEYS_UNKNOWN: u32 = 0;
 /// Polling the X server's keymap (`XQueryKeymap`) for the HUD's chords.
 pub const KEYS_ACTIVE: u32 = 1;
@@ -228,6 +231,28 @@ pub const KEYS_NO_KEYCODES: u32 = 6;
 pub const KEYS_IO_ERROR: u32 = 7;
 /// A panic or no thread for polling.
 pub const KEYS_INTERNAL: u32 = 8;
+
+/// `LayerStatus::keys >> KEYS_WL_SHIFT & 0xff`: the layer's `wl_keyboard` on the game's own
+/// Wayland connection (Wayland-native windows: winewayland, native Wayland games).
+pub const KEYS_WL_SHIFT: u32 = 8;
+/// No Wayland surface yet, or a layer from before Wayland keys.
+pub const KEYS_WL_NONE: u32 = 0;
+/// A `wl_keyboard` on the game's connection reads the keys while the game has focus.
+pub const KEYS_WL_ACTIVE: u32 = 1;
+/// A Wayland surface exists; the seat and keyboard are being bound.
+pub const KEYS_WL_STARTING: u32 = 2;
+/// `libwayland-client.so.0` isn't loaded in the game (or lacks a function the layer needs).
+pub const KEYS_WL_NO_LIBWAYLAND: u32 = 3;
+/// The compositor advertised no `wl_seat`.
+pub const KEYS_WL_NO_SEAT: u32 = 4;
+/// The seat has no keyboard capability.
+pub const KEYS_WL_NO_KEYBOARD: u32 = 5;
+/// The game's Wayland connection had a fatal error; stopped.
+pub const KEYS_WL_DISPLAY_ERROR: u32 = 6;
+/// The game destroyed its Wayland surfaces; stopped.
+pub const KEYS_WL_STOPPED: u32 = 7;
+/// A panic or failed setup in the layer.
+pub const KEYS_WL_INTERNAL: u32 = 8;
 
 pub const DRAW_ERR_NONE: u32 = 0;
 /// Swapchain format/colour space the compositor can't handle (HDR before phase 2, exotic).
@@ -517,6 +542,16 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_KEYS_NO_KEYCODES", KEYS_NO_KEYCODES as u64),
     ("QV_KEYS_IO_ERROR", KEYS_IO_ERROR as u64),
     ("QV_KEYS_INTERNAL", KEYS_INTERNAL as u64),
+    ("QV_KEYS_WL_SHIFT", KEYS_WL_SHIFT as u64),
+    ("QV_KEYS_WL_NONE", KEYS_WL_NONE as u64),
+    ("QV_KEYS_WL_ACTIVE", KEYS_WL_ACTIVE as u64),
+    ("QV_KEYS_WL_STARTING", KEYS_WL_STARTING as u64),
+    ("QV_KEYS_WL_NO_LIBWAYLAND", KEYS_WL_NO_LIBWAYLAND as u64),
+    ("QV_KEYS_WL_NO_SEAT", KEYS_WL_NO_SEAT as u64),
+    ("QV_KEYS_WL_NO_KEYBOARD", KEYS_WL_NO_KEYBOARD as u64),
+    ("QV_KEYS_WL_DISPLAY_ERROR", KEYS_WL_DISPLAY_ERROR as u64),
+    ("QV_KEYS_WL_STOPPED", KEYS_WL_STOPPED as u64),
+    ("QV_KEYS_WL_INTERNAL", KEYS_WL_INTERNAL as u64),
     ("QV_DRAW_ERR_NONE", DRAW_ERR_NONE as u64),
     ("QV_DRAW_ERR_FORMAT", DRAW_ERR_FORMAT as u64),
     ("QV_DRAW_ERR_USAGE", DRAW_ERR_USAGE as u64),

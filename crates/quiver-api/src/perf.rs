@@ -1015,7 +1015,7 @@ pub struct LayerInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device: String,
     pub vendor_id: u32,
-    /// The HUD's keys in this game ([`HudKeysState::keys`]): `active`, or why the layer
+    /// The HUD's keys in this game ([`HudKeysState::keys`]): `active` or `active_wayland`, or why the layer
     /// can't read them. Empty from a quiverd before in-game keys.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub keys: String,
@@ -1030,7 +1030,7 @@ pub struct LayerInfo {
 }
 
 /// The HUD's keys (§1.3, decision 4). The Sight layer reads them inside the game (X11
-/// keymap polling); the Hyprland binds are the fallback for games without the layer (the
+/// keymap polling, or a keyboard on a Wayland-native game's own connection); the Hyprland binds are the fallback for games without the layer (the
 /// desktop presenter), never applied by quiverd.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct HudKeybinds {
@@ -1065,11 +1065,20 @@ pub struct HudKeysState {
     pub game: Option<GameRef>,
     /// The game process the layer is in.
     pub pid: u32,
-    /// `active` (polling X11), `wayland` (a Wayland-native window: XWayland never sees its
-    /// keys), `no_display`, `no_libx11`, `open_failed`, `no_keycodes`, `io_error`, `off`
+    /// `active` (polling X11), `active_wayland` (a keyboard on the game's own Wayland
+    /// connection, for Wayland-native windows), or why not: for a Wayland-native window
+    /// `starting`, `no_libwayland`, `no_seat`, `no_keyboard`, `wayland_error`, `stopped`, or
+    /// `wayland` (an older layer that can't read Wayland keys); otherwise `no_display`,
+    /// `no_libx11`, `open_failed`, `no_keycodes`, `io_error`; and `off`
     /// (`QUIVER_SIGHT_KEYS=0`), `internal`, `unknown` (not reported yet, or an older layer).
     pub keys: String,
     pub detail: String,
+}
+
+/// Whether a `keys` value ([`HudKeysState::keys`], `LayerInfo::keys`) means the layer
+/// reads the HUD's keys in the game.
+pub fn keys_read_in_game(keys: &str) -> bool {
+    matches!(keys, "active" | "active_wayland")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

@@ -2,34 +2,60 @@
 //! presets.
 //!
 //! **In the game** (as built): the Sight layer polls X11's keymap on its own connection
-//! (quiver-sight-layer `keys.rs`) and counts chord presses in its ring's status block; the
+//! (quiver-sight-layer `keys.rs`) and, for Wayland-native windows, reads a `wl_keyboard` of
+//! its own on the game's Wayland connection (`wayland.rs`), and counts chord presses in its
+//! ring's status block; the
 //! ring thread turns new presses into [`super::PerfHub::hud_keys`], which does what
 //! `quiver hud toggle` / `quiver hud next` do. [`layer_keys`] says whether a layer reads
 //! them, or why not.
 //!
-//! **Hyprland binds** are the fallback for games without the layer (anti-cheat, OpenGL,
-//! Wayland-native windows; the desktop presenter): this module generates them and tracks
+//! **Hyprland binds** are the fallback for games without the layer (anti-cheat, OpenGL;
+//! the desktop presenter): this module generates them and tracks
 //! when they would apply (SIGHT §6: `hyprctl keyword bind` / `unbind` on focus changes),
 //! but never runs `hyprctl keyword` (the binder's applier only records what it would do).
 //! The chords are fixed here and in the layer: there's no user setting for them yet.
 
 use quiver_api::perf::{HudKeybinds, HudKeysState, Keybind};
 use quiver_perf::layout::{
-    KEYS_ACTIVE, KEYS_INTERNAL, KEYS_IO_ERROR, KEYS_NO_DISPLAY, KEYS_NO_KEYCODES, KEYS_NO_LIBX11, KEYS_OFF, KEYS_OPEN_FAILED, KEYS_UNKNOWN, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE,
-    LayerStatus,
+    KEYS_ACTIVE, KEYS_INTERNAL, KEYS_IO_ERROR, KEYS_NO_DISPLAY, KEYS_NO_KEYCODES, KEYS_NO_LIBX11, KEYS_OFF, KEYS_OPEN_FAILED, KEYS_UNKNOWN, KEYS_WL_ACTIVE, KEYS_WL_DISPLAY_ERROR,
+    KEYS_WL_INTERNAL, KEYS_WL_NO_KEYBOARD, KEYS_WL_NO_LIBWAYLAND, KEYS_WL_NO_SEAT, KEYS_WL_STARTING, KEYS_WL_STOPPED, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE, LayerStatus,
 };
 
 /// `HudKeybinds::handler`.
 pub const HANDLER_LAYER: &str = "layer";
 
 /// Whether a layer reads the HUD's keys, from its status block: (`HudKeysState::keys`, a
-/// sentence).
+/// sentence). The layer has two sources: X11 keymap polling (`keys_x11`) and, for
+/// Wayland-native windows, a `wl_keyboard` on the game's own connection (`keys_wayland`).
 pub fn layer_keys(s: &LayerStatus) -> (&'static str, &'static str) {
-    let wayland_only = s.flags & LAYER_WAYLAND_SURFACE != 0 && s.flags & LAYER_X11_SURFACE == 0;
-    if wayland_only && s.keys != KEYS_OFF {
-        return ("wayland", "the game's window is Wayland-native, so XWayland never sees its keys; use `quiver hud toggle` / `next`");
+    let (x11, wl) = (s.keys_x11(), s.keys_wayland());
+    if x11 == KEYS_OFF {
+        return ("off", "turned off in the game (QUIVER_SIGHT_KEYS=0)");
     }
-    match s.keys {
+    if wl == KEYS_WL_ACTIVE {
+        return if x11 == KEYS_ACTIVE && s.flags & LAYER_X11_SURFACE != 0 {
+            ("active_wayland", "read in the game by the Sight layer, from the game's own Wayland connection and X11 keymap polling")
+        } else {
+            ("active_wayland", "read in the game by the Sight layer, from a keyboard on the game's own Wayland connection")
+        };
+    }
+    let wayland_only = s.flags & LAYER_WAYLAND_SURFACE != 0 && s.flags & LAYER_X11_SURFACE == 0;
+    if wayland_only {
+        return match wl {
+            KEYS_WL_STARTING => ("starting", "the game's window is Wayland-native; the layer is binding a keyboard on the game's connection"),
+            KEYS_WL_NO_LIBWAYLAND => {
+                ("no_libwayland", "the game's window is Wayland-native, but libwayland-client.so.0 isn't loaded in the game, so the layer can't share its connection")
+            }
+            KEYS_WL_NO_SEAT => ("no_seat", "the game's window is Wayland-native, but the compositor offers no wl_seat"),
+            KEYS_WL_NO_KEYBOARD => ("no_keyboard", "the game's window is Wayland-native, but the compositor's seat has no keyboard"),
+            KEYS_WL_DISPLAY_ERROR => ("wayland_error", "the game's Wayland connection failed; key reading stopped"),
+            KEYS_WL_STOPPED => ("stopped", "the game destroyed its Wayland surfaces; key reading stopped"),
+            KEYS_WL_INTERNAL => ("internal", "key reading on the game's Wayland connection failed in the layer"),
+            // A layer from before Wayland keys.
+            _ => ("wayland", "the game's window is Wayland-native and this Sight layer can't read keys there (it predates Wayland keys), and XWayland never sees them"),
+        };
+    }
+    match x11 {
         KEYS_ACTIVE => ("active", "read in the game by the Sight layer (X11 keymap polling)"),
         KEYS_OFF => ("off", "turned off in the game (QUIVER_SIGHT_KEYS=0)"),
         KEYS_NO_DISPLAY => ("no_display", "DISPLAY isn't set in the game, so there's no X11 to read keys from"),
@@ -197,5 +223,46 @@ mod tests {
         assert_eq!(layer_keys(&s).0, "no_libx11");
         s.keys = 99;
         assert_eq!(layer_keys(&s).0, "unknown");
+    }
+
+    #[test]
+    fn wayland_key_states() {
+        use quiver_perf::layout::KEYS_WL_SHIFT;
+        let wl = |x11: u32, w: u32, flags: u32| {
+            let mut s = LayerStatus::ZERO;
+            s.keys = x11 | w << KEYS_WL_SHIFT;
+            s.flags = flags;
+            layer_keys(&s).0
+        };
+        let (w, x, both) = (LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE, LAYER_WAYLAND_SURFACE | LAYER_X11_SURFACE);
+        // AC Origins under GE-Proton on winewayland: DISPLAY set (X11 polling runs, useless),
+        // only Wayland surfaces; the layer's keyboard reads them.
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_ACTIVE, w), "active_wayland");
+        assert_eq!(wl(KEYS_NO_DISPLAY, KEYS_WL_ACTIVE, w), "active_wayland");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_ACTIVE, both), "active_wayland");
+        assert!(layer_keys(&{
+            let mut s = LayerStatus::ZERO;
+            s.keys = KEYS_ACTIVE | KEYS_WL_ACTIVE << KEYS_WL_SHIFT;
+            s.flags = both;
+            s
+        })
+        .1
+        .contains("X11"));
+        // Why not, when the window is Wayland-only.
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_STARTING, w), "starting");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_NO_LIBWAYLAND, w), "no_libwayland");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_NO_SEAT, w), "no_seat");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_NO_KEYBOARD, w), "no_keyboard");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_DISPLAY_ERROR, w), "wayland_error");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_STOPPED, w), "stopped");
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_INTERNAL, w), "internal");
+        // An older layer (no Wayland byte): it truly can't.
+        assert_eq!(wl(KEYS_ACTIVE, 0, w), "wayland");
+        // An X11 surface as well: X11 polling may have the focus, so its state shows.
+        assert_eq!(wl(KEYS_ACTIVE, KEYS_WL_NO_SEAT, both), "active");
+        assert_eq!(wl(KEYS_ACTIVE, 0, x), "active");
+        // Off is off for both.
+        assert_eq!(wl(KEYS_OFF, 0, w), "off");
+        assert_eq!(wl(KEYS_OFF, KEYS_WL_ACTIVE, w), "off");
     }
 }

@@ -1,8 +1,15 @@
 //! The HUD's keys, read in the game (SIGHT-HUD §1.3, as built): Shift+F3 shows or hides the
-//! HUD, Ctrl+Shift+F3 steps to the next preset. Like MangoHud and vkBasalt, the layer polls
-//! the X server's keymap (`XQueryKeymap`) on its own Display connection, about every 50 ms
-//! while the game presents. XWayland only reports keys while one of its windows has
-//! keyboard focus, so the keys only work while an X11 (Wine/XWayland) window is focused.
+//! HUD, Ctrl+Shift+F3 steps to the next preset. Two sources, serviced by one thread at the
+//! same cadence (about every 50 ms while the game presents):
+//!
+//! - **X11**: like MangoHud and vkBasalt, the layer polls the X server's keymap
+//!   (`XQueryKeymap`) on its own Display connection. XWayland only reports keys while one of
+//!   its windows has keyboard focus, so this works while an X11 (Wine/XWayland) window is
+//!   focused.
+//! - **Wayland** ([`crate::wayland`]): for Wayland-native windows (winewayland, native
+//!   Wayland games), a `wl_keyboard` of the layer's own on the game's own `wl_display`, on a
+//!   private event queue. The compositor sends it keys only while the game has focus. Raw
+//!   evdev codes ([`EvdevKeys`]), matched by the same [`Chords`].
 //!
 //! A press counts on the trigger key's edge (up → down) with exactly the chord's modifiers
 //! held: Ctrl+Shift+F3 is "next", never also "toggle", and holding a chord doesn't repeat.
@@ -16,13 +23,13 @@
 //!
 //! **Loading.** `libX11.so.6` is `dlopen`ed when polling starts: no link-time dependency, so
 //! the layer loads where X11 isn't installed (and in pressure-vessel, whose runtime has its
-//! own copy). Any failure turns polling off for the process and says why in the status
-//! block's `keys` (`KEYS_*`), which `quiver hud status` and `quiver hud keybinds` show.
+//! own copy); `libwayland-client.so.0` likewise, and only the copy the game already loaded.
+//! Any failure turns that source off for the process and says why in the status block's
+//! `keys` (`KEYS_*` in the low byte, `KEYS_WL_*` in the next), which `quiver hud status` and
+//! `quiver hud keybinds` show.
 //!
-//! **Not covered** (follow-ups): Wayland-native windows (winewayland, native Wayland games)
-//! need a `wl_keyboard` listener on the game's own connection, as MangoHud does; the layer
-//! only notes that such a surface exists (`LAYER_WAYLAND_SURFACE`). The chords are fixed
-//! ([`DEFAULT_BINDINGS`]); there's no user setting for the HUD's keys yet.
+//! **Not covered:** the chords are fixed ([`DEFAULT_BINDINGS`]); there's no user setting for
+//! the HUD's keys yet.
 
 use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -112,11 +119,20 @@ impl Keymap {
         code != 0 && self.0[code as usize / 8] & (1 << (code % 8)) != 0
     }
 
+    pub fn set(&mut self, code: u8, down: bool) {
+        let (byte, bit) = (code as usize / 8, 1 << (code % 8));
+        if down {
+            self.0[byte] |= bit;
+        } else {
+            self.0[byte] &= !bit;
+        }
+    }
+
     /// A keymap with these keycodes down (tests).
     pub fn with(codes: &[u8]) -> Keymap {
         let mut k = Keymap::default();
         for &c in codes {
-            k.0[c as usize / 8] |= 1 << (c % 8);
+            k.set(c, true);
         }
         k
     }
@@ -175,6 +191,114 @@ impl Chords {
         }
         self.primed = true;
         out
+    }
+
+    /// Records what's held in `km` without acting on it (keys already down when the window
+    /// gains focus are no press).
+    pub fn prime(&mut self, km: &Keymap) {
+        for (i, &(code, _, _)) in self.codes.bindings.iter().enumerate() {
+            self.was_down[i] = km.down(code);
+        }
+        self.primed = true;
+    }
+}
+
+// ---- Wayland keys: raw evdev codes (no xkbcommon) -----------------------------------------
+
+/// Linux input event codes (linux/input-event-codes.h) of the keys the chords use. Wayland's
+/// `wl_keyboard.key` sends these; X keycodes under evdev are the same plus 8, which is how
+/// they go into a [`Keymap`] (so the chords are matched by exactly the same code as X11's).
+pub mod evdev {
+    pub const KEY_LEFTCTRL: u32 = 29;
+    pub const KEY_LEFTSHIFT: u32 = 42;
+    pub const KEY_RIGHTSHIFT: u32 = 54;
+    pub const KEY_LEFTALT: u32 = 56;
+    pub const KEY_F3: u32 = 61;
+    pub const KEY_RIGHTCTRL: u32 = 97;
+    pub const KEY_RIGHTALT: u32 = 100;
+    pub const KEY_LEFTMETA: u32 = 125;
+    pub const KEY_RIGHTMETA: u32 = 126;
+
+    /// The evdev code of a keysym the chords use, as on any PC keyboard. Physical keys, not
+    /// the layout's: like XKB's default evdev mapping, F3 is the key labelled F3.
+    pub fn code_of(sym: u64) -> Option<u32> {
+        use super::keysym as k;
+        Some(match sym {
+            k::F3 => KEY_F3,
+            k::SHIFT_L => KEY_LEFTSHIFT,
+            k::SHIFT_R => KEY_RIGHTSHIFT,
+            k::CONTROL_L => KEY_LEFTCTRL,
+            k::CONTROL_R => KEY_RIGHTCTRL,
+            k::ALT_L => KEY_LEFTALT,
+            k::ALT_R => KEY_RIGHTALT,
+            k::SUPER_L => KEY_LEFTMETA,
+            k::SUPER_R => KEY_RIGHTMETA,
+            _ => return None,
+        })
+    }
+
+    /// The [`super::Keymap`] keycode for an evdev code (X's evdev offset), if it fits.
+    pub fn keycode(code: u32) -> Option<u8> {
+        u8::try_from(code.checked_add(8)?).ok()
+    }
+}
+
+/// `wl_keyboard.key` states.
+pub const WL_KEY_RELEASED: u32 = 0;
+pub const WL_KEY_PRESSED: u32 = 1;
+
+/// The held keys of one `wl_keyboard`, from its `enter` (keys already down), `key` and
+/// `leave` events, fed through the same [`Chords`] as X11 polling. Each key event is a
+/// step, so a tap shorter than the 50 ms dispatch cadence still counts.
+pub struct EvdevKeys {
+    km: Keymap,
+    chords: Chords,
+}
+
+impl Default for EvdevKeys {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EvdevKeys {
+    pub fn new() -> EvdevKeys {
+        let codes = Keycodes::resolve(&DEFAULT_BINDINGS, |s| evdev::code_of(s).and_then(evdev::keycode).unwrap_or(0));
+        // Every key the bindings use has an evdev code.
+        let codes = codes.unwrap_or(Keycodes { bindings: Vec::new(), modifiers: Vec::new() });
+        EvdevKeys { km: Keymap::default(), chords: Chords::new(codes) }
+    }
+
+    /// `wl_keyboard.enter`: the window gained focus with `keys` held; they're no press.
+    pub fn enter(&mut self, keys: &[u32]) {
+        self.km = Keymap::default();
+        for &k in keys {
+            if let Some(c) = evdev::keycode(k) {
+                self.km.set(c, true);
+            }
+        }
+        self.chords.prime(&self.km);
+    }
+
+    /// `wl_keyboard.leave`: no keys reach the window until the next `enter`.
+    pub fn leave(&mut self) {
+        self.km = Keymap::default();
+        self.chords.prime(&self.km);
+    }
+
+    /// `wl_keyboard.key`. Repeats (`wl_keyboard` v10's `repeated` state) change nothing.
+    pub fn key(&mut self, key: u32, state: u32) -> Option<Action> {
+        let down = match state {
+            WL_KEY_RELEASED => false,
+            WL_KEY_PRESSED => true,
+            _ => return None,
+        };
+        let c = evdev::keycode(key)?;
+        if self.km.down(c) == down {
+            return None;
+        }
+        self.km.set(c, down);
+        self.chords.step(&self.km)
     }
 }
 
@@ -286,60 +410,88 @@ fn disabled_by_env() -> bool {
     std::env::var(crate::env::KEYS).is_ok_and(|v| v == "0")
 }
 
-/// Starts polling for the session's telemetry (once per process).
+/// Starts reading keys for the session's telemetry (once per process).
 pub fn start(t: &'static Telemetry) {
     if disabled_by_env() {
-        return t.set_keys(KEYS_OFF);
-    }
-    // Checked here so "no DISPLAY" doesn't cost a thread.
-    if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
-        log!("keys: DISPLAY not set; no in-game HUD keys");
-        return t.set_keys(KEYS_NO_DISPLAY);
+        // Off for both: the thread never runs, so no Wayland objects are ever made either.
+        return t.set_keys_x11(KEYS_OFF);
     }
     let spawned = std::thread::Builder::new().name("quiver-sight-keys".into()).stack_size(256 << 10).spawn(move || {
         if std::panic::catch_unwind(|| run(t)).is_err() {
-            log!("keys: panic; polling off");
-            t.set_keys(KEYS_INTERNAL);
+            log!("keys: panic; key reading off");
+            t.set_keys_x11(KEYS_INTERNAL);
+            crate::wayland::fail_internal();
+            t.set_keys_wayland(crate::wayland::state());
         }
     });
     if let Err(e) = spawned {
         log!("keys: no thread: {e}");
-        t.set_keys(KEYS_INTERNAL);
+        t.set_keys_x11(KEYS_INTERNAL);
     }
 }
 
-fn run(t: &'static Telemetry) {
-    let x = match X11Keys::open(None) {
-        Ok(x) => x,
-        Err(why) => {
-            log!("keys: {}", if why == KEYS_NO_LIBX11 { "libX11.so.6 not loadable" } else { "XOpenDisplay failed" });
-            return t.set_keys(why);
-        }
-    };
+/// The X11 side: our own connection and its chords, or why not (`KEYS_*`).
+fn open_x11() -> Result<(X11Keys, Chords), u32> {
+    if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+        log!("keys: DISPLAY not set; no X11 key polling");
+        return Err(KEYS_NO_DISPLAY);
+    }
+    let x = X11Keys::open(None).inspect_err(|&why| log!("keys: {}", if why == KEYS_NO_LIBX11 { "libX11.so.6 not loadable" } else { "XOpenDisplay failed" }))?;
     let Some(codes) = x.keycodes(&DEFAULT_BINDINGS) else {
         log!("keys: F3/Shift not in the X keymap");
-        return t.set_keys(KEYS_NO_KEYCODES);
+        return Err(KEYS_NO_KEYCODES);
     };
-    log!("keys: polling ({:?})", codes.bindings);
-    t.set_keys(KEYS_ACTIVE);
-    let mut chords = Chords::new(codes);
+    log!("keys: polling X11 ({:?})", codes.bindings);
+    Ok((x, Chords::new(codes)))
+}
+
+/// Polls X11 (when it's there) and services the Wayland keyboard (when the game has a
+/// Wayland surface) at the same cadence, only while the game presents.
+fn run(t: &'static Telemetry) {
+    let mut x11 = match open_x11() {
+        Ok(x) => {
+            t.set_keys_x11(KEYS_ACTIVE);
+            Some(x)
+        }
+        Err(why) => {
+            t.set_keys_x11(why);
+            None
+        }
+    };
+    let mut wl_state = u32::MAX;
     let mut presents = t.presents.load(Ordering::Relaxed);
     loop {
         std::thread::sleep(POLL_EVERY);
         // Only while the game presents: a game that stopped presenting has no HUD to change
         // and, usually, no focus.
         let p = t.presents.load(Ordering::Relaxed);
-        if p == presents {
-            continue;
+        if p != presents {
+            presents = p;
+            if let Some((x, chords)) = &mut x11 {
+                match x.keymap() {
+                    Some(km) => {
+                        if let Some(a) = chords.step(&km) {
+                            log!("keys: {a:?} (X11)");
+                            t.key_pressed(a);
+                        }
+                    }
+                    None => {
+                        log!("keys: the X connection broke; X11 polling off");
+                        x11 = None;
+                        t.set_keys_x11(KEYS_IO_ERROR);
+                    }
+                }
+            }
+            for a in crate::wayland::service(std::time::Instant::now()) {
+                log!("keys: {a:?} (Wayland)");
+                t.key_pressed(a);
+            }
         }
-        presents = p;
-        let Some(km) = x.keymap() else {
-            log!("keys: the X connection broke; polling off");
-            return t.set_keys(KEYS_IO_ERROR);
-        };
-        if let Some(a) = chords.step(&km) {
-            log!("keys: {a:?}");
-            t.key_pressed(a);
+        // Surfaces come and go on the app's threads; follow their state either way.
+        let s = crate::wayland::state();
+        if s != wl_state {
+            wl_state = s;
+            t.set_keys_wayland(s);
         }
     }
 }
@@ -418,6 +570,109 @@ mod tests {
     fn a_chord_held_when_polling_starts_is_no_press() {
         let mut c = chords();
         assert_eq!(run(&mut c, &[&[SHL, F3], &[SHL, F3], &[SHL], &[SHL, F3]]), [None, None, None, Some(Action::Toggle)]);
+    }
+
+    mod wayland_evdev {
+        use super::super::evdev::*;
+        use super::super::*;
+
+        const DOWN: u32 = WL_KEY_PRESSED;
+        const UP: u32 = WL_KEY_RELEASED;
+        const KEY_A: u32 = 30;
+
+        /// Feeds (code, state) key events and returns what each did.
+        fn keys(k: &mut EvdevKeys, evs: &[(u32, u32)]) -> Vec<Option<Action>> {
+            evs.iter().map(|&(c, s)| k.key(c, s)).collect()
+        }
+
+        #[test]
+        fn evdev_codes_are_x_keycodes_minus_8() {
+            // The X11 tests' codes (an evdev PC keyboard) are these plus 8.
+            assert_eq!(code_of(keysym::F3).and_then(keycode), Some(super::F3));
+            assert_eq!(code_of(keysym::SHIFT_L).and_then(keycode), Some(super::SHL));
+            assert_eq!(code_of(keysym::SHIFT_R).and_then(keycode), Some(super::SHR));
+            assert_eq!(code_of(keysym::CONTROL_L).and_then(keycode), Some(super::CTL));
+            assert_eq!(code_of(keysym::CONTROL_R).and_then(keycode), Some(super::CTR));
+            assert_eq!(code_of(keysym::ALT_L).and_then(keycode), Some(super::ALT));
+            assert_eq!(code_of(keysym::SUPER_L).and_then(keycode), Some(super::SUP));
+            assert_eq!(keycode(248), None);
+            assert_eq!(keycode(u32::MAX), None);
+        }
+
+        #[test]
+        fn shift_f3_toggles_ctrl_shift_f3_is_next() {
+            let mut k = EvdevKeys::new();
+            k.enter(&[]);
+            let got = keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F3, DOWN), (KEY_F3, UP), (KEY_LEFTSHIFT, UP)]);
+            assert_eq!(got, [None, Some(Action::Toggle), None, None]);
+            let got = keys(&mut k, &[(KEY_RIGHTCTRL, DOWN), (KEY_RIGHTSHIFT, DOWN), (KEY_F3, DOWN), (KEY_F3, UP), (KEY_RIGHTSHIFT, UP), (KEY_RIGHTCTRL, UP)]);
+            assert_eq!(got, [None, None, Some(Action::Next), None, None, None]);
+            // A tap inside one dispatch batch still counts: each event is a step.
+            assert_eq!(keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F3, DOWN), (KEY_F3, UP), (KEY_F3, DOWN), (KEY_F3, UP)]).iter().flatten().count(), 2);
+        }
+
+        #[test]
+        fn exact_modifiers_and_no_repeat() {
+            let mut k = EvdevKeys::new();
+            k.enter(&[]);
+            // Bare F3, Ctrl+F3, Alt+Shift+F3, Super+Shift+F3: nothing.
+            let got = keys(
+                &mut k,
+                &[
+                    (KEY_F3, DOWN),
+                    (KEY_F3, UP),
+                    (KEY_LEFTCTRL, DOWN),
+                    (KEY_F3, DOWN),
+                    (KEY_F3, UP),
+                    (KEY_LEFTCTRL, UP),
+                    (KEY_LEFTALT, DOWN),
+                    (KEY_LEFTSHIFT, DOWN),
+                    (KEY_F3, DOWN),
+                    (KEY_F3, UP),
+                    (KEY_LEFTALT, UP),
+                    (KEY_LEFTMETA, DOWN),
+                    (KEY_F3, DOWN),
+                    (KEY_F3, UP),
+                    (KEY_LEFTMETA, UP),
+                    (KEY_LEFTSHIFT, UP),
+                ],
+            );
+            assert!(got.iter().all(Option::is_none), "{got:?}");
+            // Held: a second "pressed" for a held key (a compositor resend) and v10's
+            // `repeated` (2) are no press.
+            let got = keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F3, DOWN), (KEY_F3, DOWN), (KEY_F3, 2), (KEY_F3, 2), (KEY_F3, UP)]);
+            assert_eq!(got, [None, Some(Action::Toggle), None, None, None, None]);
+            // Shift+F3 held, then Ctrl added: F3 didn't go down again.
+            let got = keys(&mut k, &[(KEY_F3, DOWN), (KEY_LEFTCTRL, DOWN), (KEY_F3, UP), (KEY_LEFTCTRL, UP), (KEY_LEFTSHIFT, UP)]);
+            assert_eq!(got, [Some(Action::Toggle), None, None, None, None]);
+            // Other keys are tracked but match nothing.
+            assert_eq!(keys(&mut k, &[(KEY_A, DOWN), (KEY_A, UP), (9999, DOWN)]), [None, None, None]);
+        }
+
+        #[test]
+        fn enter_keys_are_held_not_pressed_and_leave_clears() {
+            let mut k = EvdevKeys::new();
+            // Focus arrives with Shift+F3 already down (the alt-tab chord): no press, and
+            // releasing it is none either.
+            k.enter(&[KEY_LEFTSHIFT, KEY_F3]);
+            assert_eq!(keys(&mut k, &[(KEY_F3, UP), (KEY_F3, DOWN)]), [None, Some(Action::Toggle)]);
+            // Focus leaves with keys down: they're forgotten, so the next press after the
+            // next enter counts normally and nothing sticks.
+            k.leave();
+            k.enter(&[]);
+            assert_eq!(keys(&mut k, &[(KEY_F3, DOWN), (KEY_F3, UP)]), [None, None], "Shift was released while unfocused");
+            assert_eq!(keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F3, DOWN)]), [None, Some(Action::Toggle)]);
+            // Enter with Shift held only: F3 next is a press.
+            k.leave();
+            k.enter(&[KEY_RIGHTSHIFT]);
+            assert_eq!(keys(&mut k, &[(KEY_F3, DOWN)]), [Some(Action::Toggle)]);
+        }
+
+        #[test]
+        fn key_before_any_enter_only_primes() {
+            let mut k = EvdevKeys::new();
+            assert_eq!(keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F3, DOWN), (KEY_F3, UP), (KEY_F3, DOWN)]), [None, Some(Action::Toggle), None, Some(Action::Toggle)]);
+        }
     }
 
     #[test]

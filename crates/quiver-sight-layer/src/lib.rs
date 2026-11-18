@@ -11,7 +11,9 @@
 //!   position and opacity onto the swapchain image just before present, plus the live
 //!   frame-time graph drawn from the layer's own present history;
 //! - **reads the HUD's keys** (Shift+F3, Ctrl+Shift+F3) by polling X11's keymap on its own
-//!   connection ([`keys`]) and counts presses in the status block for quiverd to act on.
+//!   connection ([`keys`]) and, for Wayland-native windows, from a `wl_keyboard` of its own
+//!   on the game's `wl_display` ([`wayland`]), and counts presses in the status block for
+//!   quiverd to act on.
 //!
 //! **Enabling.** The manifest (manifest/) makes it an *implicit* layer that the loader loads
 //! only when `QUIVER_SIGHT=1` is set (`QUIVER_SIGHT_DISABLE=1` vetoes it), or when
@@ -48,6 +50,7 @@ mod pipelines;
 mod present;
 mod state;
 mod telemetry;
+pub mod wayland;
 
 use std::ffi::{CStr, c_char};
 use std::sync::OnceLock;
@@ -190,6 +193,7 @@ fn instance_ext_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
         b"vkCreateXlibSurfaceKHR" => hook!(hooks::create_xlib_surface_khr),
         b"vkCreateXcbSurfaceKHR" => hook!(hooks::create_xcb_surface_khr),
         b"vkCreateWaylandSurfaceKHR" => hook!(hooks::create_wayland_surface_khr),
+        b"vkDestroySurfaceKHR" => hook!(hooks::destroy_surface_khr),
         _ => None,
     }
 }

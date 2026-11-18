@@ -199,6 +199,53 @@ this over the focus-scoped Hyprland binds above, which quiverd never applied.
   reports keys while one of its windows has keyboard focus, so this is focus-scoped by
   construction (to XWayland as a whole: Shift+F3 in another focused XWayland window would
   count too).
+- **Wayland-native windows** (`crates/quiver-sight-layer/src/wayland.rs`, as built
+  2026-11-17). The first real test failed over X11: AC Origins under GE-Proton11-12 on
+  NVIDIA runs on Wine's Wayland driver (winewayland.so in explorer.exe and the game, with
+  `DISPLAY=:0` set and nothing asking for it), so XWayland never saw the keys. Now the
+  `vkCreateWaylandSurfaceKHR` hook keeps the surface's `wl_display*`, and the same
+  `quiver-sight-keys` thread, on its next tick while the game presents, adds a keyboard of
+  the layer's own to **the game's own connection**, MangoHud style: the
+  `libwayland-client.so.0` the game already loaded (`RTLD_NOLOAD`, no link-time dependency),
+  a private event queue (`wl_display_create_queue`), the registry through a proxy wrapper set
+  to that queue (so it and the `wl_seat` (≤ v5) and `wl_keyboard` made from it live on our
+  queue from their first event). The compositor sends key events to every `wl_keyboard` of
+  the focused client (Hyprland's `CSeatManager::sendKeyboardKey` loops over all of the
+  client's seat resources; a keyboard made while the client has focus gets `enter` at once),
+  so ours sees keys exactly while the game's window has focus, and the game's own keyboard
+  still gets every key. Keys are raw evdev codes from `wl_keyboard.key` (F3 61, Shift 42/54,
+  Ctrl 29/97, Alt 56/100, Meta 125/126), plus `enter`'s held keys, cleared on `leave`; no
+  xkbcommon (the keymap fd is closed unread). They go into the same `Chords` as X11 (an evdev
+  code + 8 is the X keycode), one step per key event, so the semantics are identical (exact
+  modifiers, no repeat, Ctrl+Shift+F3 only "next"; keys held when focus arrives are no
+  press) and a tap shorter than 50 ms still counts. Presses feed the same status-block
+  counters: nothing changed in quiverd's handling.
+- **Sharing Wine's `wl_display`: the threading argument.** The layer never reads the socket
+  and dispatches only its own queue. Whoever reads (Wine's `waylanddrv_unix_read_events`
+  thread loops on `wl_display_dispatch_queue` on Wine's queue; a native game's event pump;
+  the driver's WSI) sorts every event onto its proxy's queue under the display mutex; ours
+  wait on our queue until our tick calls `wl_display_dispatch_queue_pending` (dispatches
+  only what's queued: never reads, never blocks), then `wl_display_flush` (non-blocking
+  `sendmsg(MSG_DONTWAIT)`; `EAGAIN` retries next tick). There is **no roundtrip**: MangoHud
+  does two `wl_display_roundtrip_queue`s on its queue, which libwayland's
+  `prepare_read`/`read_events` protocol allows alongside Wine's reader, but it blocks until
+  the compositor answers and, while prepared in `poll`, it's a reader Wine's thread waits for
+  in `read_events`. We don't need it: the game reads its socket anyway, so globals and seat
+  capabilities arrive on our queue by themselves and binding completes over a few ticks.
+  Never joining the read protocol is what guarantees the layer can't stall or steal the
+  game's events. Our listeners run only inside our dispatch on the keys thread (a listener
+  that found itself elsewhere touches nothing and the layer tears down, state `internal`),
+  catch panics, and touch only our state. Lock order is ours → libwayland's (which never
+  holds its mutex across a listener), and nothing of the game's takes ours.
+- **Lifetime.** Our objects live while a Wayland surface on that display does.
+  `vkDestroySurfaceKHR` of its last surface (newly hooked) and `vkDestroyInstance` with
+  surfaces left tear them down synchronously **before** the call goes down the chain (the app
+  may disconnect right after; the spec requires the display to outlive the surface): keyboard
+  (`release`, v3+), seat (`release`, v5+), registry, then the queue. Swapchain destruction
+  needs nothing (dispatch is gated on presents; a recreated swapchain reuses the surface). A
+  display whose connection broke isn't retried while its surfaces live. At process exit an
+  `atexit` handler stops dispatching and drops our objects without calling libwayland (the
+  game may already have disconnected).
 - **Not in `vkQueuePresentKHR`.** The brief said "from the present path"; the poll runs on its
   own thread, gated on presents, because an X round trip can block (a stalled XWayland, an
   unreachable `DISPLAY`) and the layer's present path makes no syscalls beyond Vulkan's. The
@@ -221,27 +268,43 @@ this over the focus-scoped Hyprland binds above, which quiverd never applied.
   can't flood (bursts are capped at 4 per drain). Order within one 50 ms drain is lost (steps
   go before toggles). `XQueryKeymap` is server-wide, so every process with the layer (a game
   and its launcher) sees each press: only one layer per session counts, the live one on the
-  largest swapchain (`Session::key_layer`), whose state `hud status` shows.
-- **Status.** `qv_layer_status.keys` (`QV_KEYS_*`) says whether polling runs or why not:
-  `active`, `no_display`, `no_libx11`, `open_failed`, `no_keycodes`, `io_error` (the
-  connection broke; an `XSetIOErrorExitHandler` keeps Xlib from exiting the game where libX11
-  ≥ 1.7 has it), `off` (`QUIVER_SIGHT_KEYS=0`), `internal`. The layer also hooks
-  `vkCreate{Xlib,Xcb,Wayland}SurfaceKHR` to flag the surface kinds (`QV_LAYER_X11_SURFACE`,
-  `QV_LAYER_WAYLAND_SURFACE`); a game with only Wayland surfaces reports `wayland`.
-  `quiver hud status` prints a `keys:` line with the presses seen; `quiver hud keybinds` says
-  the layer reads the keys and lists each running game's state.
+  largest swapchain (`Session::key_layer`), whose state `hud status` shows. (Wayland keys are
+  per client: only the focused process's layer sees them.)
+- **Status.** `qv_layer_status.keys` holds both sources: the low byte (`QV_KEYS_*`) says
+  whether X11 polling runs or why not: `active`, `no_display`, `no_libx11`, `open_failed`,
+  `no_keycodes`, `io_error` (the connection broke; an `XSetIOErrorExitHandler` keeps Xlib
+  from exiting the game where libX11 ≥ 1.7 has it), `off` (`QUIVER_SIGHT_KEYS=0`, both
+  sources), `internal`. The next byte (`QV_KEYS_WL_*`, `QV_KEYS_WL_SHIFT`) is the Wayland
+  keyboard: none (no Wayland surface, or a layer from before), active, starting,
+  no_libwayland, no_seat, no_keyboard (after a 2 s setup timeout), display_error, stopped
+  (surfaces destroyed), internal. The layer also hooks `vkCreate{Xlib,Xcb,Wayland}SurfaceKHR`
+  to flag the surface kinds (`QV_LAYER_X11_SURFACE`, `QV_LAYER_WAYLAND_SURFACE`). quiverd's
+  word: `active_wayland` when the Wayland keyboard reads keys; for a game with only Wayland
+  surfaces otherwise the Wayland reason (`starting`, `no_libwayland`, `no_seat`,
+  `no_keyboard`, `wayland_error`, `stopped`, `internal`), and `wayland` only for an older
+  layer that truly can't; else the X11 state. `quiver hud status` prints a `keys:` line with
+  the presses seen; `quiver hud keybinds` says the layer reads the keys and lists each
+  running game's state.
+- **Tests.** Unit tests for evdev tracking and chords (`keys.rs`). `tests/keys_wayland.rs`
+  runs the layer's Wayland code on real libwayland against a fake compositor
+  (libwayland-server, Hyprland-like fan-out) and a fake game reading its socket on its own
+  thread like Wine: binding without roundtrips, late `enter`, chords, focus changes, the game
+  still getting every key, `release`s on surface/instance destruction, no seat, no
+  keyboard, a broken connection, keymap fds closed; it fails if the registry isn't on the
+  private queue. Opt-in `tests/vulkan_keys_wayland.rs` does it through the real hooks with a
+  `vkCreateWaylandSurfaceKHR` on the fake display and a presenting Vulkan app (passes on
+  RADV). Not verified: a real compositor, and a real winewayland game.
 - **Hyprland binds stay as the fallback** for games without the layer (anti-cheat-flagged,
-  OpenGL, Wayland-native windows), which is the desktop presenter's audience:
+  OpenGL), which is the desktop presenter's audience:
   `quiver hud keybinds --conf` prints them; quiverd still never applies them (the `Binder` keeps
   its dry-run applier). The app's HUD settings say the same.
 - **Not configurable yet.** `quiver_api::perf::Keybind` only describes the binds; there is no
   user setting, so the chords are fixed in the layer (`DEFAULT_BINDINGS`) and in quiverd
   (`perf::keybinds::binds`). The layer's matching works on (keysym, exact modifiers) pairs, so a
   setting only needs a way to hand them to the layer (an env var at launch).
-- **Follow-ups.** Native Wayland and winewayland games: the layer would need a `wl_keyboard`
-  listener on the game's own Wayland connection (MangoHud hooks `wl_display_connect` and the
-  seat for this); out of scope here, reported as `wayland`. MOD-CONFIG C7 registration of the
-  keys. The hyprpad controller snippet. Spike H7's MangoHud question now only matters when both
+- **Follow-ups.** MOD-CONFIG C7 registration of the keys. Keys are physical (evdev): F3 is
+  the key labelled F3 whatever the layout, as with XKB's evdev mapping. Only the first
+  `wl_seat` is bound (multi-seat setups would need one keyboard per seat). The hyprpad controller snippet. Spike H7's MangoHud question now only matters when both
   HUDs run.
 
 ### 1.4 Layouts and scopes
@@ -1568,7 +1631,7 @@ the app.
 | H4 | **Clocks and correlation** | QPC = `CLOCK_MONOTONIC_RAW`/100 on the Proton builds in use (GE-Proton10, Proton 9/10, Experimental); DXVK's `VkPresentIdKHR` vs the mod's present sequence with FG on; offset fit stability across resize and alt-tab | per-frame views, latency to present |
 | H5 | **Reflex reports** | `NvAPI_D3D_GetLatency` through dxvk-nvapi with aco-dlss's injected Reflex: fields filled, units, clock domain vs QPC; and `vkGetLatencyTimingsNV` from the layer for the same frames | latency metrics |
 | H6 | **Sensors** | = SIGHT S9: NVML on the laptop without waking the dGPU outside sessions; hwmon CPU package temp; battery | system producer |
-| H7 | **Keys** | Shift+F3 / Ctrl+Shift+F3 as Hyprland binds over XWayland and Wine-Wayland games; does a consumed Hyprland bind hide Shift_L+F2 from MangoHud's key polling; remapping MangoHud's `toggle_logging` via `MANGOHUD_CONFIG`. *Superseded for the HUD by in-layer polling (§1.3, as built); left: a Wine-Wayland key path* | key plan |
+| H7 | **Keys** | Shift+F3 / Ctrl+Shift+F3 as Hyprland binds over XWayland and Wine-Wayland games; does a consumed Hyprland bind hide Shift_L+F2 from MangoHud's key polling; remapping MangoHud's `toggle_logging` via `MANGOHUD_CONFIG`. *Superseded for the HUD by in-layer polling (§1.3, as built); the Wine-Wayland key path is built too (a `wl_keyboard` on the game's connection)* | key plan |
 | H8 | **GPUI off-screen on the bumped GPUI** | The GPUI 0.2.2 half is done (2.10). Port it onto upstream's wgpu `WgpuHeadlessRenderer`: transparent, premultiplied output; readback through a mappable buffer without the 4.6 ms penalty seen with blade's shared memory; timings against the spike; RSS; adapter choice (the iGPU under Wayland and headless); Geist Mono legibility at 0.75× on 1080p | how the HUD is drawn |
 | H9 | **Capture switching** | With Hidden: a portal screencast of the game's monitor and of its window (OBS, gpu-screen-recorder in portal mode); time from `screencastv2>>1` to the HUD leaving the game image, and how many captured frames still show it; the black box in monitor captures; obs-vkcapture with both layer orders | decision 15 |
 
@@ -1688,8 +1751,8 @@ Decided by the user, 2026-11-16. Each: the decision, why, and what was rejected.
    Quiver launches MangoHud. Why: free of every known default and next to Sight's chord.
    Rejected: an always-bound Super chord; taking over MangoHud's Shift_R+F12; no default.
    *Revised 2026-11-17:* the chords stand, but the Sight layer reads them in the game (X11
-   keymap polling) instead of Hyprland binds; the binds are only a printed fallback (§1.3, as
-   built).
+   keymap polling, or a `wl_keyboard` on a Wayland-native game's own connection) instead of
+   Hyprland binds; the binds are only a printed fallback (§1.3, as built).
 5. **Quiver's HUD by default, MangoHud a per-game option**, with MangoHud-compatible CSV export.
    Why: own HUD where it matters, MangoHud for OpenGL, gamescope and existing setups. Rejected:
    MangoHud as the default; dropping MangoHud integration.
