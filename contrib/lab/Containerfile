@@ -1,0 +1,29 @@
+# quiver lab: the headless runtime for game instances (design/LAB.md).
+# Built with `quiver lab image build` (tag: quiver_core::lab::IMAGE).
+#
+# NVIDIA's 64-bit userspace comes from the host through CDI (--device nvidia.com/gpu=all);
+# its 32-bit libraries are mounted from the host, and lib32 Vulkan is here, because 32-bit
+# helpers (and 32-bit games) need them. Proton comes from the host, mounted read-only.
+# Nothing here is a store client: no Steam, no Ubisoft Connect, no Epic launcher.
+FROM docker.io/library/archlinux:latest
+
+RUN printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf && \
+    pacman -Syu --noconfirm --needed \
+      python which file procps-ng psmisc util-linux \
+      gamescope xorg-xwayland xorg-xprop xorg-xwininfo xorg-xdpyinfo xdotool \
+      vulkan-icd-loader lib32-vulkan-icd-loader vulkan-tools \
+      libx11 lib32-libx11 libxext lib32-libxext libxrandr lib32-libxrandr \
+      libxi lib32-libxi libxtst lib32-libxtst libxcursor lib32-libxcursor libxcomposite lib32-libxcomposite \
+      libxfixes lib32-libxfixes libxrender lib32-libxrender libxinerama lib32-libxinerama \
+      libxkbcommon lib32-libxkbcommon libxxf86vm lib32-libxxf86vm \
+      freetype2 lib32-freetype2 fontconfig lib32-fontconfig ttf-liberation \
+      gnutls lib32-gnutls libpulse lib32-libpulse alsa-lib lib32-alsa-lib \
+      sdl2 dbus lib32-dbus libgcrypt lib32-libgcrypt \
+      gst-plugins-base-libs cabextract unzip && \
+    pacman -Scc --noconfirm && rm -rf /var/cache/pacman/pkg/*
+
+# Proton names the Wine user steamuser; podman's keep-id maps the host user onto this uid.
+RUN useradd -u 1000 -m -s /bin/bash steamuser
+ENV HOME=/tmp/home
+WORKDIR /tmp
+LABEL quiver.lab.image="1"

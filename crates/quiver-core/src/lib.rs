@@ -13,6 +13,7 @@ pub mod download;
 pub mod exports;
 pub mod gameinfo;
 pub mod install;
+pub mod lab;
 pub mod launch;
 pub mod launcher;
 pub mod library;

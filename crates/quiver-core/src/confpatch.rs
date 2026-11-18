@@ -79,6 +79,22 @@ fn encode(text: &str, enc: Encoding) -> Vec<u8> {
     }
 }
 
+/// Edit a config file in place with `f`, writing it back in its own encoding (through a
+/// temporary file and a rename) only if the text changed (`quiver lab set`).
+pub fn edit_file<T>(path: &Path, format: PatchFormat, f: impl FnOnce(&mut Doc) -> Result<T>) -> Result<T> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let (text, enc) = decode(&bytes).with_context(|| format!("decode {}", path.display()))?;
+    let mut doc = Doc::parse(format, &text);
+    let out = f(&mut doc)?;
+    let new = doc.render();
+    if new != text {
+        let tmp = path.with_extension("quiver-tmp");
+        std::fs::write(&tmp, encode(&new, enc)).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+    }
+    Ok(out)
+}
+
 // -- INI -----------------------------------------------------------------------------------
 
 /// Where a key was in its section or element: after the entry (key or attribute) named
