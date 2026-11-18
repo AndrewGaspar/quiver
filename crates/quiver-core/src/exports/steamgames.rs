@@ -103,8 +103,9 @@ pub struct AppManifest {
     pub scripts: Vec<String>,
     /// Changes when the game updates.
     pub build_id: Option<String>,
-    /// `StateFlags`: 4 fully installed, 2 update required, 512/1024 update started/running,
-    /// 1048576 (and others) more download states.
+    /// `StateFlags` (Steam's `EAppState` bits, [`flags`]): 4 fully installed, 2 update
+    /// required, 256 update running, 512 update paused, 1024 update started, and the
+    /// download phases (1048576 downloading, 2097152 staging, 4194304 committing, …).
     pub state_flags: u32,
     /// Bytes on disk (`SizeOnDisk`).
     pub size_on_disk: u64,
@@ -114,6 +115,40 @@ pub struct AppManifest {
     pub dlc_installed: Vec<u32>,
     /// A newer build is wanted than the one installed (`TargetBuildID`).
     pub target_build_id: Option<String>,
+    /// Steam's download of it (`BytesToDownload`, …, `UpdateResult`,
+    /// `AutoUpdateBehavior`).
+    pub download: Download,
+}
+
+/// Steam's `EAppState` bits in an app manifest's `StateFlags`.
+pub mod flags {
+    pub const UPDATE_REQUIRED: u32 = 2;
+    pub const FULLY_INSTALLED: u32 = 4;
+    pub const UPDATE_RUNNING: u32 = 256;
+    pub const UPDATE_PAUSED: u32 = 512;
+    pub const UPDATE_STARTED: u32 = 1024;
+    pub const VALIDATING: u32 = 131072;
+    pub const ADDING_FILES: u32 = 262144;
+    pub const PREALLOCATING: u32 = 524288;
+    pub const DOWNLOADING: u32 = 1048576;
+    pub const STAGING: u32 = 2097152;
+    pub const COMMITTING: u32 = 4194304;
+    /// Any bit that means an update is wanted or under way.
+    pub const ANY_UPDATE: u32 = UPDATE_REQUIRED | UPDATE_RUNNING | UPDATE_PAUSED | UPDATE_STARTED | DOWNLOADING | STAGING | COMMITTING | ADDING_FILES | PREALLOCATING;
+}
+
+/// What an app manifest says about Steam's current download of the app (present while
+/// Steam has one, 0 otherwise; all **verified** present on real manifests, STORE-STEAM.md §2.2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Download {
+    pub bytes_to_download: u64,
+    pub bytes_downloaded: u64,
+    pub bytes_to_stage: u64,
+    pub bytes_staged: u64,
+    /// Why the last update attempt failed (`UpdateResult`; 0 is success, so `None`).
+    pub update_result: Option<u32>,
+    /// `AutoUpdateBehavior`: 0 keep it updated, 1 only when launched, 2 high priority.
+    pub auto_update_behavior: u32,
 }
 
 impl AppManifest {
@@ -123,6 +158,7 @@ impl AppManifest {
         let app_id = a.str("appid")?.parse().ok()?;
         let dir = a.str("installdir").filter(|d| !d.is_empty())?;
         let flags: u32 = a.str("StateFlags").and_then(|f| f.parse().ok()).unwrap_or(0);
+        let num = |k: &str| a.str(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         let scripts = a.get("InstallScripts").map(|s| s.entries().iter().filter_map(|(_, v)| match v {
             textvdf::Node::Str(s) => Some(s.clone()),
             textvdf::Node::Map(_) => None,
@@ -144,14 +180,60 @@ impl AppManifest {
                 .map(|d| d.entries().iter().filter_map(|(_, v)| v.str("dlcappid")?.parse().ok()).collect())
                 .unwrap_or_default(),
             target_build_id: a.str("TargetBuildID").filter(|t| !t.is_empty() && *t != "0").map(str::to_owned),
+            download: Download {
+                bytes_to_download: num("BytesToDownload"),
+                bytes_downloaded: num("BytesDownloaded"),
+                bytes_to_stage: num("BytesToStage"),
+                bytes_staged: num("BytesStaged"),
+                update_result: Some(num("UpdateResult") as u32).filter(|&r| r != 0),
+                auto_update_behavior: num("AutoUpdateBehavior") as u32,
+            },
         })
     }
 
-    /// Steam has an update for it waiting or in progress (an update-required or update-
-    /// running state flag, or a target build other than the installed one).
+    /// Steam has an update for it waiting or in progress (an update or download state
+    /// flag, or a target build other than the installed one), for a game that was
+    /// installed before: a first install still downloading isn't an update.
     pub fn update_pending(&self) -> bool {
-        const UPDATE: u32 = 2 | 512 | 1024;
-        self.state_flags & UPDATE != 0 || self.target_build_id.as_ref().is_some_and(|t| Some(t) != self.build_id.as_ref())
+        let first_install = !self.installed && self.build_id.as_deref().is_none_or(|b| b.is_empty() || b == "0");
+        if first_install {
+            return false;
+        }
+        self.state_flags & flags::ANY_UPDATE != 0 || self.target_build_id.as_ref().is_some_and(|t| Some(t) != self.build_id.as_ref())
+    }
+
+    /// Steam's update of it, as its manifest says (`None`: no update and no file check).
+    /// Steam does the updating; this is for showing it.
+    pub fn update(&self) -> Option<quiver_api::stores::ClientUpdate> {
+        use quiver_api::stores::{ClientUpdate, ClientUpdateState as S};
+        let f = self.state_flags;
+        let validating = f & flags::VALIDATING != 0;
+        if !self.update_pending() && !validating {
+            return None;
+        }
+        let state = if f & flags::UPDATE_PAUSED != 0 {
+            S::Paused
+        } else if validating {
+            S::Validating
+        } else if f & (flags::STAGING | flags::COMMITTING | flags::ADDING_FILES | flags::PREALLOCATING) != 0 {
+            S::Installing
+        } else if f & (flags::DOWNLOADING | flags::UPDATE_RUNNING | flags::UPDATE_STARTED) != 0 {
+            S::Downloading
+        } else {
+            S::Queued
+        };
+        let d = &self.download;
+        Some(ClientUpdate {
+            state,
+            bytes_to_download: d.bytes_to_download,
+            bytes_downloaded: d.bytes_downloaded,
+            bytes_to_stage: d.bytes_to_stage,
+            bytes_staged: d.bytes_staged,
+            target_build_id: self.target_build_id.clone().filter(|t| Some(t) != self.build_id.as_ref()),
+            error: d.update_result,
+            on_launch: d.auto_update_behavior == 1,
+            open_url: Some(super::steamlaunch::DOWNLOADS_URL.to_owned()),
+        })
     }
 
     /// `<library>/steamapps/compatdata/<appid>/pfx`.
@@ -876,6 +958,38 @@ mod tests {
     const Q: &str = "/h/.local/bin/quiver --source steam steam-run --product 66088";
     /// What earlier versions wrote when steam-run could find the product itself.
     const OLD: &str = "/h/.local/bin/quiver --source steam steam-run";
+
+    /// Steam's update state, from the manifest fields Steam writes while it updates.
+    #[test]
+    fn update_states() {
+        use quiver_api::stores::ClientUpdateState as S;
+        let m = |flags: u32, build: &str, extra: &str| {
+            let text = format!("\"AppState\"\n{{\n\t\"appid\"\t\t\"620\"\n\t\"name\"\t\t\"Portal 2\"\n\t\"StateFlags\"\t\t\"{flags}\"\n\t\"installdir\"\t\t\"Portal 2\"\n\t\"buildid\"\t\t\"{build}\"\n{extra}}}\n");
+            AppManifest::parse(&text, Path::new("/lib")).unwrap()
+        };
+        // Installed and current: no update.
+        assert!(m(4, "100", "").update().is_none());
+        // Steam knows of one, not started yet.
+        let q = m(6, "100", "\t\"TargetBuildID\"\t\t\"101\"\n\t\"BytesToDownload\"\t\t\"3100000000\"\n").update().unwrap();
+        assert_eq!((q.state, q.target_build_id.as_deref(), q.bytes_to_download), (S::Queued, Some("101"), 3_100_000_000));
+        assert_eq!(q.describe("Steam"), "Update queued in Steam of 3.1 GB");
+        assert_eq!(q.open_url.as_deref(), Some(super::super::steamlaunch::DOWNLOADS_URL));
+        // Downloading (1026: update started, update required; the installed bit is off).
+        let d = m(1026 | flags::DOWNLOADING, "100", "\t\"BytesToDownload\"\t\t\"2000\"\n\t\"BytesDownloaded\"\t\t\"500\"\n").update().unwrap();
+        assert_eq!((d.state, d.fraction()), (S::Downloading, Some(0.25)));
+        assert_eq!(d.describe("Steam"), "Steam is updating it · 25% of 0.0 GB");
+        // Staging, paused, failed, only-on-launch.
+        assert_eq!(m(1026 | flags::STAGING, "100", "\t\"BytesToStage\"\t\t\"10\"\n\t\"BytesStaged\"\t\t\"5\"\n").update().unwrap().fraction(), Some(0.5));
+        assert_eq!(m(1538, "100", "").update().unwrap().state, S::Paused);
+        let f = m(6, "100", "\t\"UpdateResult\"\t\t\"12\"\n\t\"AutoUpdateBehavior\"\t\t\"1\"\n").update().unwrap();
+        assert_eq!((f.error, f.on_launch), (Some(12), true));
+        assert!(f.describe("Steam").contains("updates it when you play") && f.describe("Steam").contains("error 12"));
+        // A first install still downloading is not an update.
+        let first = m(1026 | flags::DOWNLOADING, "0", "\t\"BytesToDownload\"\t\t\"2000\"\n");
+        assert!(!first.update_pending() && first.update().is_none() && !first.installed);
+        // Steam checking the files of a current install shows too.
+        assert_eq!(m(4 | flags::VALIDATING, "100", "").update().unwrap().state, S::Validating);
+    }
 
     #[test]
     fn word_spans() {

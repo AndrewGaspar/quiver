@@ -32,6 +32,7 @@ pub mod manifest;
 pub mod ops;
 pub mod provider;
 pub mod secrets;
+pub mod updates;
 // Phase 3: cloud saves, play time, achievements (design/STORE-EPIC.md §9.5).
 pub mod achievements;
 pub mod playtime;
@@ -104,6 +105,8 @@ pub struct Epic {
     installs: installs::Installs,
     /// Cloud saves, play time and achievements ([`progress`]).
     p3: progress::Phase3,
+    /// Epic's latest builds of installed games ([`updates`]).
+    builds: updates::Builds,
 }
 
 impl Epic {
@@ -120,6 +123,7 @@ impl Epic {
         Epic {
             cache: Cache::new(&dir),
             installs: installs::Installs::new(&dir),
+            builds: updates::Builds::new(&dir),
             dir,
             api: Api::new(transport, config),
             secrets,

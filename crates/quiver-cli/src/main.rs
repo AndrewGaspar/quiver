@@ -74,6 +74,11 @@ enum Cmd {
         /// assets, extras, items Epic's catalog doesn't describe), with the reason.
         #[arg(long)]
         all: bool,
+        /// Only games with an update waiting: Quiver's installs behind their store's
+        /// build (Ubisoft, Epic), and games Steam has an update for. With --refresh,
+        /// the stores are asked first.
+        #[arg(long)]
+        updates: bool,
         #[arg(long)]
         json: bool,
     },
@@ -554,6 +559,10 @@ fn store_note(e: &LibraryEntry) -> String {
 /// The list's note for another store's game: "(Steam · 12.4 GB · 41 h played · 12/50 achievements)".
 fn client_note(c: &quiver_api::stores::ClientInstall) -> String {
     let mut parts = vec![format!("{:.1} GB", c.size_bytes as f64 / 1e9)];
+    // Steam's update of it, as its manifest says ("Steam is updating it · 42% of 3.1 GB").
+    if let Some(u) = &c.update {
+        parts.push(u.describe("Steam"));
+    }
     if let Some(p) = c.playtime.filter(|p| p.total_seconds > 0) {
         parts.push(format!("{} h played", p.total_seconds / 3600));
     }
@@ -751,10 +760,17 @@ async fn main() -> Result<()> {
                 println!("         {}", shown.join(", "));
             }
         }
-        Cmd::Library { refresh, store, all, json } => {
+        Cmd::Library { refresh, store, all, updates, json } => {
             let mut lib: Vec<LibraryEntry> = client.call(Request::Library { refresh, all_stores: true }).await?;
             if let Some(s) = store {
                 lib.retain(|e| e.stores().contains(&s));
+            }
+            if updates {
+                lib.retain(LibraryEntry::has_update);
+                if lib.is_empty() && !json {
+                    println!("no updates waiting{}", if refresh { "" } else { " (--refresh asks the stores)" });
+                    return Ok(());
+                }
             }
             let hidden: Vec<quiver_api::epic::HiddenItem> = if all && store.is_none_or(|s| s == StoreId::Epic) {
                 client.call(Request::Epic(quiver_api::epic::EpicRequest::Hidden)).await.unwrap_or_default()

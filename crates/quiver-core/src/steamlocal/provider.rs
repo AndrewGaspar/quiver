@@ -36,7 +36,7 @@ use super::{AppInfo, appinfo, is_tool, playtime, remotecache, stats};
 use crate::exports::steam::{self, Steam};
 use crate::exports::steamgames::{self, AppManifest};
 use crate::exports::{steamart, steamlaunch};
-use crate::stores::{AccountInfo, AccountState, BoxFuture, Capabilities, Launched, StoreProvider, Support};
+use crate::stores::{AccountInfo, AccountState, AskedClient, BoxFuture, Capabilities, Launched, StoreProvider, Support};
 
 /// How long a scan of Steam's files is reused.
 pub const TTL: Duration = Duration::from_secs(15);
@@ -104,6 +104,7 @@ impl App {
             size_bytes: m.size_on_disk,
             complete: m.installed,
             update_pending: m.update_pending(),
+            update: m.update(),
             build_id: m.build_id.clone(),
             platforms: self.info.as_ref().map(|i| i.oslist.clone()).unwrap_or_default(),
             art: self.art.clone(),
@@ -372,6 +373,29 @@ impl StoreProvider for SteamLocal {
             })
             .await??;
             Ok(Launched::Delegated { url: steamlaunch::rungameid_url(id), argv })
+        })
+    }
+
+    /// Steam updates its games itself and Quiver writes none of its files, and Steam has no
+    /// URL that starts one game's update. What Quiver can do is open Steam's Downloads page
+    /// (its update queue, with the game's Update button), and only when Steam's manifest
+    /// says an update is waiting.
+    fn update_in_client(&self, game: GameRef) -> BoxFuture<'_, Result<AskedClient>> {
+        Box::pin(async move {
+            let id = app_id(&game)?;
+            let s = self.scan_async(true).await?;
+            let app = s.app(id).with_context(|| format!("{game} is not installed in Steam"))?;
+            let Some(u) = app.manifest.update() else {
+                let build = app.manifest.build_id.as_deref().map(|b| format!(" (build {b})")).unwrap_or_default();
+                bail!("Steam has no update waiting for {}{build}; Steam checks for updates itself", app.name());
+            };
+            let home = self.inner.home.clone();
+            let argv = tokio::task::spawn_blocking(move || {
+                let steam = Steam::find(&home).context("Steam not found")?;
+                steamlaunch::open(&steam, steamlaunch::DOWNLOADS_URL)
+            })
+            .await??;
+            Ok(AskedClient { url: steamlaunch::DOWNLOADS_URL.to_owned(), argv, note: u.describe("Steam") })
         })
     }
 }

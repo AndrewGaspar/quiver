@@ -3,10 +3,10 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, UpdatePreview, VerifyReport};
-use quiver_api::{Client, Request};
+use quiver_api::{Client, Request, StoreId};
 use quiver_core::install::human_bytes;
 
-use crate::{follow, game_label, print_json, resolve_installable};
+use crate::{follow, game_label, print_json, resolve_any, resolve_installable};
 
 #[derive(Subcommand)]
 pub enum QueueAction {
@@ -214,6 +214,29 @@ pub async fn dry_run(client: &Client, game: &str, language: Option<String>, json
 }
 
 pub async fn update(client: &Client, game: &str, preview: bool, detach: bool, json: bool) -> Result<()> {
+    // A game its store's client updates (Steam): show the client's update, or ask the
+    // client (quiverd opens its Downloads page).
+    let any = resolve_any(client, game).await?;
+    if let Some(c) = any.client.as_ref().filter(|_| !matches!(any.store(), StoreId::Ubisoft | StoreId::Epic)) {
+        let label = any.store().label();
+        if preview || json {
+            if json {
+                return print_json(&c.update);
+            }
+            match &c.update {
+                Some(u) => {
+                    let builds = u.target_build_id.as_ref().map(|t| format!(" (build {} → {t})", c.build_id.as_deref().unwrap_or("?"))).unwrap_or_default();
+                    println!("{}: {}{builds}", any.name, u.describe(label));
+                }
+                None => println!("{}: no update waiting in {label}{}", any.name, c.build_id.as_ref().map(|b| format!(" (build {b})")).unwrap_or_default()),
+            }
+            println!("{label} updates it itself; `quiver update {}` opens {label}'s downloads", game_label(&any.game));
+            return Ok(());
+        }
+        let events = client.subscribe().await?;
+        let id: u64 = client.call(Request::Update { game: any.game.into() }).await?;
+        return follow(client, events, id).await;
+    }
     let e = resolve_installable(client, game).await?;
     if preview {
         let u: UpdatePreview = client.call(Request::UpdatePreview { game: e.game.into()}).await?;

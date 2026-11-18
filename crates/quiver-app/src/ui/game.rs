@@ -101,7 +101,7 @@ impl Quiver {
             let focused = self.focused(Target::SideRow(id));
             let dot = if g.running() {
                 Some(th.ok)
-            } else if g.installing().is_some() || (g.installed() && g.entry.update_available) {
+            } else if g.installing().is_some() || g.has_update() {
                 Some(th.acc)
             } else if g.failed().is_some() {
                 Some(th.warn)
@@ -292,7 +292,7 @@ impl Quiver {
             div().text_size(px(11.)).text_color(th.tx3).child("Queued").into_any_element()
         } else if g.failed().is_some() {
             icon(Icon::TriangleAlert, 12., th.warn).into_any_element()
-        } else if g.installed() && g.entry.update_available {
+        } else if g.has_update() {
             icon(Icon::ArrowDownToLine, 12., th.acc_hi).into_any_element()
         } else {
             div().into_any_element()
@@ -733,6 +733,8 @@ impl Quiver {
             let label = g.entry.store().label();
             let (kind, i, text) = if g.running() {
                 (PillKind::Ok, Icon::Gamepad, "Playing now".to_owned())
+            } else if let Some(u) = &c.update {
+                (PillKind::Warn, Icon::ArrowDownToLine, u.describe(label))
             } else if !c.complete {
                 (PillKind::Warn, Icon::Download, format!("Downloading in {label}"))
             } else if c.update_pending {
@@ -747,6 +749,11 @@ impl Quiver {
                     this.gp.play_menu = false;
                     this.click(Target::Action(ACTION_MORE), cx)
                 }));
+            // The client updates it; Quiver can open the client's downloads (its queue).
+            let open_downloads = c.update.is_some().then(|| {
+                button("act-client-update", th, Kind::Secondary, Size::Medium, Some(Icon::ArrowDownToLine), format!("Open {label} downloads"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.update_in_client(id, cx)))
+            });
             let pad = if slim { 0. } else { self.pane_bp().pad() };
             return div()
                 .flex()
@@ -759,6 +766,7 @@ impl Quiver {
                 .child(play)
                 .children(steam_profile)
                 .child(pill(th, kind, Some(i), text).py(px(5.)))
+                .children(open_downloads)
                 .child(div().flex_1())
                 .child(more_btn);
         }

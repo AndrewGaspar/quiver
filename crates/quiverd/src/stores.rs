@@ -165,6 +165,25 @@ impl Daemon {
         }
     }
 
+    /// `Request::Update` for a game its store's client installed and updates (Steam): ask
+    /// the client ([`StoreProvider::update_in_client`]). Returns a finished job saying what
+    /// was opened and where the client's update is; nothing of the client's is written.
+    pub(crate) async fn update_in_client(self: &Arc<Self>, source: &str, game: GameRef) -> Result<u64> {
+        let providers = self.providers();
+        let asked = provider_for(&providers, &game)?.update_in_client(game).await?;
+        let name = self.game_name(game).await;
+        let label = game.store.label();
+        self.log_activity_game(source, format!("asked {label} to update {name}"), Some(game));
+        tracing::info!(%game, "opened {label}'s downloads: {}", asked.argv.join(" "));
+        let id = self.new_game_job(JobKind::Install, game, name);
+        self.update_job(id, |j| {
+            j.status = format!("Opened {label}'s Downloads: {}", asked.note);
+            j.detail = vec![asked.url.clone(), format!("{label} updates it; Quiver shows its progress in the library")];
+            j.done = true;
+        });
+        Ok(id)
+    }
+
     pub(crate) async fn game_name(self: &Arc<Self>, game: GameRef) -> String {
         match game.as_ubisoft() {
             Some(id) => self.product_name(id),

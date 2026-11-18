@@ -295,7 +295,7 @@ test installs, do Ubisoft's manifests become a `ContentSource`.
 | Operation | Shared (`quiver-core`) | Store-specific |
 |---|---|---|
 | Verify, repair | hash files against the plan, re-fetch only bad pieces, never touch non-manifest files | hash kind; Steam delegates to `steam://validate` |
-| Update | plan diff and piece reuse, update preview, auto-update policy | build listing; Epic delta manifests; GOG xdelta later; Steam's `AutoUpdateBehavior` |
+| Update | plan diff and piece reuse, update preview, auto-update policy (**built**: one queue, `downloads::auto_update` over `Host::pending_updates`, hourly store checks; `LibraryEntry::has_update` for front ends) | build listing (**built**: Ubisoft's library, Epic's `Live` build version, STORE-EPIC.md §9.12); Epic delta manifests (**built**, unverified on real deltas); GOG xdelta later; Steam's `AutoUpdateBehavior` (Steam updates; Quiver shows `ClientUpdate` and opens Steam's downloads, STORE-STEAM.md §11) |
 | Move | **built once for every store** (not built yet anywhere): rename or reflink, rewrite records, re-point overlay mounts | `on_moved`: GOG and EA registry keys; Steam: its storage manager; Meta: the OAF library path |
 | Uninstall | files, prefix optional; offer to clean profiles and exports | EA also deletes `.dlf` licences; Steam delegates; Meta removes the manifest |
 | Import | **verify against the manifest before adopting**, reflink where possible, first-run scan | finders: Heroic/legendary `installed.json`, EGL `.item`, `goggame-*.info`, `installerdata.xml`, the Heroic fork's `MetaGames`, Lutris and Connect (as today) |

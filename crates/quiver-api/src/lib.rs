@@ -290,6 +290,14 @@ impl LibraryEntry {
         self.game.store
     }
 
+    /// An update is waiting, whoever installs the game: Quiver's install is behind the
+    /// store's build (Ubisoft, Epic: `update_available`), or the store's client has one
+    /// waiting or under way (Steam: `client.update_pending`). The library's Updates filter
+    /// and badge, and `quiver library --updates`.
+    pub fn has_update(&self) -> bool {
+        (self.installed.is_some() && self.update_available) || self.client.as_ref().is_some_and(|c| c.update_pending)
+    }
+
     /// Installed only through Steam (no Quiver install of its own): a Ubisoft game's Steam
     /// copy, or a Steam game.
     pub fn steam_only(&self) -> bool {

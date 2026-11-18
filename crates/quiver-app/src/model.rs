@@ -141,6 +141,26 @@ impl GameRow {
         self.entry.client.as_ref()
     }
 
+    /// The store client's update of it (Steam's), when it has one waiting or under way.
+    pub fn client_update(&self) -> Option<&quiver_api::stores::ClientUpdate> {
+        self.client().and_then(|c| c.update.as_ref())
+    }
+
+    /// An update is waiting: Quiver's (Ubisoft, Epic) or the store client's (Steam).
+    pub fn has_update(&self) -> bool {
+        self.entry.has_update()
+    }
+
+    /// The tile's update tag: "Updating" while the store's client is at it, else "Update".
+    pub fn update_tag(&self) -> Option<&'static str> {
+        use quiver_api::stores::ClientUpdateState as S;
+        match self.client_update().map(|u| u.state) {
+            Some(S::Downloading | S::Installing) => Some("Updating"),
+            _ if self.has_update() => Some("Update"),
+            _ => None,
+        }
+    }
+
     /// Only Steam has it installed: Steam plays, updates and uninstalls it.
     pub fn steam_only(&self) -> bool {
         self.entry.steam_only()
@@ -208,6 +228,9 @@ impl GameRow {
         if let Some(c) = self.client() {
             let label = self.entry.store().label();
             let played = played.or(c.playtime.map(|p| p.total_seconds).filter(|s| *s > 0));
+            if let Some(u) = &c.update {
+                return u.describe(label);
+            }
             return match (c.complete, c.update_pending, played, self.last_played().or(c.playtime.and_then(|p| p.last_played))) {
                 (false, _, _, _) => format!("Downloading in {label}"),
                 (true, true, _, _) => format!("Update waiting in {label}"),

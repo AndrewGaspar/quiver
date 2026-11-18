@@ -67,7 +67,8 @@ pub fn game_of(i: &Installed) -> Option<Game> {
     })
 }
 
-/// The library entry for a title, installed or not.
+/// The library entry for a title, installed or not. `update_available` is the caller's
+/// (it comes from the last build check, [`crate::updates`]).
 pub fn entry(t: &Title, installed: Option<&Installed>) -> Option<LibraryEntry> {
     let game = game_ref(&t.app_name)?;
     let records = match (ubisoft_of(t), &t.third_party) {
@@ -143,8 +144,22 @@ impl StoreProvider for EpicProvider {
             for e in &lib.errors {
                 tracing::info!("Epic library: {e}");
             }
+            // A refresh also asks Epic for new builds of installed games (at most every
+            // few minutes); a plain read uses the last answer (`updates`).
+            if refresh {
+                self.epic.check_updates(crate::updates::REFRESH_INTERVAL).await;
+            }
             let installed = self.epic.installed().unwrap_or_default();
-            Ok(lib.titles.iter().filter_map(|t| entry(t, installed.iter().find(|i| i.app_name == t.app_name || t.apps.contains(&i.app_name)))).collect())
+            Ok(lib
+                .titles
+                .iter()
+                .filter_map(|t| {
+                    let i = installed.iter().find(|i| i.app_name == t.app_name || t.apps.contains(&i.app_name));
+                    let mut e = entry(t, i)?;
+                    e.update_available = i.is_some_and(|i| self.epic.update_available(i));
+                    Some(e)
+                })
+                .collect())
         })
     }
 
@@ -176,7 +191,7 @@ impl StoreProvider for EpicProvider {
                     library: None,
                     size_bytes: i.size,
                     complete: true,
-                    update_pending: false,
+                    update_pending: self.epic.update_available(&i),
                     build_id: Some(i.version.clone()),
                     platforms: vec!["windows".into()],
                     ..Default::default()

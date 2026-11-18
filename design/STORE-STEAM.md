@@ -992,6 +992,41 @@ person's quiverd and data untouched):
 - Mods for other stores' games (`epic:…`, `gog:…`): the store keys are ready, the games aren't
   `Game`s yet.
 
+## 11. As built: Steam's updates in Quiver (2026-11-18)
+
+Steam installs and updates Steam games; Quiver writes none of Steam's files. What Quiver does
+is show Steam's update and point at where to act on it.
+
+- **Read** (`exports/steamgames.rs`, `AppManifest::update`): the app manifest's
+  `StateFlags` (Steam's `EAppState` bits: 2 update required, 256 running, 512 paused, 1024
+  started, 1048576 downloading, 2097152 staging, 4194304 committing, 131072 validating),
+  `BytesToDownload`/`BytesDownloaded`, `BytesToStage`/`BytesStaged`, `TargetBuildID`,
+  `UpdateResult` (non-zero: the last attempt failed) and `AutoUpdateBehavior` (1: only when
+  launched). A first install still downloading (build id 0, not installed) isn't an
+  update. The earlier `update_pending` treated 512 as "update started" and missed 256 and
+  the download phases; it now covers them.
+- **Shown:** `ClientInstall::update` (`quiver-api::stores::ClientUpdate`: queued,
+  downloading, paused, installing, validating; bytes; target build; error), so the library
+  entry's `update_available`/`client.update_pending`, the tile's tag ("Update", or
+  "Updating" while Steam downloads), the Updates filter, the game page's pill ("Steam is
+  updating it · 42% of 3.1 GB") and `quiver library` ("Update queued in Steam of 3.1
+  GB") all say the same. `LibraryEntry::has_update` is the one rule front ends use.
+- **Act:** Steam has no `steam://` URL that starts one game's update (there are
+  `install`, `validate`, `uninstall` and `open/<page>`). So `quiver update steam:<appid>`,
+  and **Open Steam downloads** on the game page, hand `steam://open/downloads` to the
+  client (`steamlaunch::open`, the same route Play takes: the running client, or a newly
+  started one in a scope of its own). Only when the manifest says an update is waiting;
+  otherwise the answer is that Steam has none and checks for updates itself. The result is
+  a finished Install job saying what Steam's manifest shows. Steam is never restarted or
+  stopped. `quiver update steam:<appid> --preview` prints Steam's state without opening
+  anything; `UpdatePreview` for a Steam game is refused with that explanation.
+- **Not in Quiver's queue or auto-update:** Steam's own auto-update (and the per-game
+  `AutoUpdateBehavior`) decides. Changing that setting means writing the manifest with
+  Steam closed, which isn't built.
+- **Checked:** unit tests on manifests with each state; the field names are the ones
+  §2.2 verified present. The `steam://open/downloads` URL is Valve's documented
+  `open/<window>` command; it hasn't been tried against this machine's client.
+
 ## Sources
 
 - SteamKit2 and DepotDownloader: https://github.com/SteamRE/SteamKit, https://github.com/SteamRE/DepotDownloader (`-qr`, `-remember-password`, `-validate`, `-pubfile`, `-os`)
