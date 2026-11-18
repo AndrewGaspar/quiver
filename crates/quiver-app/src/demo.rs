@@ -368,9 +368,27 @@ pub fn library() -> Vec<LibraryEntry> {
     entries.into_iter().map(|(_, e)| e).collect()
 }
 
+/// `QUIVER_DEMO_LIBRARY`: a saved library to show instead of the fixtures.
+fn saved_library() -> Option<Vec<LibraryEntry>> {
+    let path = std::env::var_os("QUIVER_DEMO_LIBRARY")?;
+    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| Ok(serde_json::from_slice(&b)?)) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!("QUIVER_DEMO_LIBRARY: {e:#}");
+            None
+        }
+    }
+}
+
 fn build_state() -> State {
-    let mut entries = library();
-    entries.extend(stores::entries());
+    let entries = match saved_library() {
+        Some(v) => v,
+        None => {
+            let mut v = library();
+            v.extend(stores::entries());
+            v
+        }
+    };
     let mut playtime = BTreeMap::new();
     for fx in FIXTURES {
         let mut sessions = vec![];

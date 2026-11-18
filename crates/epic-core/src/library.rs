@@ -6,15 +6,20 @@
 //! (`CanRunOffline`, `CloudSaveFolder`, `FolderName`, `OwnershipToken`,
 //! `ThirdPartyManaged*`, …). [`build`] turns records and catalog items into [`Title`]s:
 //!
-//! - **left out:** Unreal Engine marketplace items (namespace `ue`), private sandboxes,
-//!   engines and plugins, and items with no Windows build (mobile only);
-//! - **DLC and extras** are not titles of their own: they mark their main game's DLC list
-//!   as owned;
+//! - **only playable games and apps are titles**, each with a real name and art. A tile
+//!   never shows a hex id: everything else is in [`Built::hidden`] with the reason, for
+//!   `quiver library --all`. Left out: Unreal Engine marketplace assets (namespace `ue`),
+//!   private sandboxes, engines, plugins and assets, digital extras (soundtracks, art
+//!   books), audience entitlements, items with no Windows build, games another launcher
+//!   (not Ubisoft's) runs, and records whose catalog item Epic didn't return (asked again
+//!   at every read until it does);
+//! - **DLC** goes on its game's list as owned (by `mainGameItem`, the games' `dlcItemList`,
+//!   or the one game in the namespace), never as a title of its own;
+//! - **one game, one title:** a game owned by several accounts, or listed under several
+//!   app names (one catalog item, or one namespace with the same name), is one title;
 //! - **Ubisoft games sold on Epic** (`ThirdPartyManagedApp`/`ThirdPartyManagedProvider`
 //!   naming Ubisoft or Uplay, or `partnerLinkType = ubisoft`) carry the Ubisoft product id
-//!   from `GameID`, so the library folds them into their Ubisoft entry (STORES.md §2.4);
-//! - a record whose catalog item couldn't be read stays in the library under its app
-//!   name, so a catalog failure never hides a game.
+//!   from `GameID`, so the library folds them into their Ubisoft entry (STORES.md §2.4).
 //!
 //! Both are cached under `<data>/epic/cache/`: the library per account (the last good
 //! read, used when Epic can't be reached) and catalog items (they rarely change).
@@ -36,6 +41,8 @@ pub const CATALOG_TTL: chrono::Duration = chrono::Duration::days(3);
 pub struct Title {
     /// Epic's stable id for the game (`Camellia`): the `id` of `epic:<app>`.
     pub app_name: String,
+    /// Every app name owned for this game, `app_name` among them.
+    pub apps: Vec<String>,
     pub namespace: String,
     pub catalog_item_id: String,
     pub title: String,
@@ -49,8 +56,6 @@ pub struct Title {
     /// Epic account ids that own it, in the order the accounts were read.
     pub owners: Vec<String>,
     pub acquired: Option<DateTime<Utc>>,
-    /// The catalog item couldn't be read: only the library record is known.
-    pub catalog_missing: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -110,13 +115,35 @@ pub struct Attributes {
     pub additional_command_line: Option<String>,
 }
 
-/// Why a record isn't a title, or what it is.
+/// What a record is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Game,
-    /// DLC or an extra of the game whose catalog item id this is.
+    /// DLC or an add-on of the game whose catalog item id this is (empty: the game in the
+    /// same namespace).
     Addon { main: String },
-    Skip(&'static str),
+    /// Not a tile, and why (for `quiver library --all`).
+    Skip(String),
+}
+
+/// An owned record that isn't in the library, and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hidden {
+    pub app_name: String,
+    pub namespace: String,
+    pub catalog_item_id: String,
+    /// Epic's sandbox name (often the game's name, even when the catalog is silent).
+    pub sandbox: String,
+    pub title: Option<String>,
+    pub reason: String,
+    pub owners: Vec<String>,
+}
+
+/// The library proper and the owned records left out of it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Built {
+    pub titles: Vec<Title>,
+    pub hidden: Vec<Hidden>,
 }
 
 fn attr<'a>(item: &'a CatalogItem, key: &str) -> Option<&'a str> {
@@ -131,33 +158,68 @@ fn has_category(item: &CatalogItem, path: &str) -> bool {
     item.categories.iter().any(|c| c.path == path || c.path.starts_with(&format!("{path}/")))
 }
 
-/// What a record is, from the record and (when read) its catalog item.
-pub fn classify(r: &LibraryRecord, item: Option<&CatalogItem>) -> Kind {
+/// A 32-hex id (Epic's newer app names and every catalog id): never a name for people.
+pub fn is_hex_id(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// An entitlement that only unlocks something inside another game (`AUDIENCE` items,
+/// in-game currency packs).
+fn is_entitlement_only(item: &CatalogItem) -> bool {
+    item.entitlement_type.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("AUDIENCE")) || has_category(item, "audience")
+}
+
+/// What a record is, from the record and (when read) its catalog item. `dlc_of` maps DLC
+/// catalog ids to their game's, from every item's `dlcItemList`.
+pub fn classify(r: &LibraryRecord, item: Option<&CatalogItem>, dlc_of: &HashMap<String, String>) -> Kind {
+    let skip = |s: &str| Kind::Skip(s.to_owned());
     if r.namespace == "ue" {
-        return Kind::Skip("Unreal Engine marketplace item");
+        return skip("Unreal Engine marketplace asset");
     }
     if r.sandbox_type.eq_ignore_ascii_case("PRIVATE") {
-        return Kind::Skip("private sandbox");
+        return skip("private sandbox (a developer or test build)");
     }
     if r.app_name.is_empty() {
-        return Kind::Skip("no app");
+        return skip("no app to install");
     }
-    let Some(item) = item else { return Kind::Game };
-    if has_category(item, "engines") || has_category(item, "plugins") {
-        return Kind::Skip("engine or plugin");
+    if !r.record_type.is_empty() && !r.record_type.eq_ignore_ascii_case("APPLICATION") {
+        return Kind::Skip(format!("not an application ({})", r.record_type));
+    }
+    let Some(item) = item else { return skip(UNRESOLVED) };
+    if has_category(item, "engines") || has_category(item, "plugins") || has_category(item, "assets") {
+        return skip("engine, plugin or asset");
+    }
+    if has_category(item, "digitalextras") {
+        return skip("digital extra (soundtrack, art book…)");
+    }
+    if is_entitlement_only(item) {
+        return skip("an entitlement inside another game");
     }
     if let Some(main) = item.main_game_item.as_ref().filter(|m| m.id != item.id) {
         return Kind::Addon { main: main.id.clone() };
     }
-    if has_category(item, "addons") || has_category(item, "digitalextras") {
+    if let Some(main) = dlc_of.get(&item.id).filter(|m| **m != item.id) {
+        return Kind::Addon { main: main.clone() };
+    }
+    if has_category(item, "addons") {
         return Kind::Addon { main: String::new() };
+    }
+    if !has_category(item, "games") && !has_category(item, "applications") {
+        let cats: Vec<&str> = item.categories.iter().map(|c| c.path.as_str()).collect();
+        return Kind::Skip(format!("not a game or app ({})", if cats.is_empty() { "no categories".to_owned() } else { cats.join(", ") }));
+    }
+    if let Some(t) = item.entitlement_type.as_deref().filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("EXECUTABLE")) {
+        return Kind::Skip(format!("nothing to install ({t})"));
     }
     let platforms = platforms(item);
     if !platforms.is_empty() && !platforms.iter().any(|p| p == "Windows" || p == "Win32") {
-        return Kind::Skip("no Windows build");
+        return skip("no Windows build");
     }
     Kind::Game
 }
+
+/// The reason for a record whose catalog item Epic didn't return.
+pub const UNRESOLVED: &str = "Epic's catalog didn't describe it (asked again at the next library read)";
 
 fn platforms(item: &CatalogItem) -> Vec<String> {
     let mut v: Vec<String> = item.release_info.iter().flat_map(|r| r.platform.iter().cloned()).collect();
@@ -168,6 +230,15 @@ fn platforms(item: &CatalogItem) -> Vec<String> {
 
 fn image(item: &CatalogItem, kinds: &[&str]) -> Option<String> {
     kinds.iter().find_map(|k| item.key_images.iter().find(|i| i.kind == *k && i.url.starts_with("https://")).map(|i| i.url.clone()))
+}
+
+/// Art for the three slots, from `keyImages`.
+pub fn art_of(item: &CatalogItem) -> TitleArt {
+    TitleArt {
+        tall: image(item, &["DieselGameBoxTall", "OfferImageTall", "Thumbnail", "CodeRedemption_340x440"]),
+        wide: image(item, &["DieselGameBox", "DieselStoreFrontWide", "OfferImageWide", "DieselGameBoxWide"]),
+        logo: image(item, &["DieselGameBoxLogo"]),
+    }
 }
 
 /// A Ubisoft (or other) client manages this game.
@@ -189,35 +260,33 @@ pub fn third_party(item: &CatalogItem) -> Option<ThirdParty> {
     Some(tp)
 }
 
-fn title_of(r: &LibraryRecord, item: Option<&CatalogItem>) -> Title {
-    let Some(item) = item else {
-        return Title {
-            app_name: r.app_name.clone(),
-            namespace: r.namespace.clone(),
-            catalog_item_id: r.catalog_item_id.clone(),
-            title: r.app_name.clone(),
-            acquired: r.acquisition_date,
-            catalog_missing: true,
-            ..Default::default()
-        };
-    };
+/// A DLC list entry worth showing: real DLC, not the audience entitlements, engine kits
+/// and editor tools some catalogs list next to it.
+fn listed_dlc(d: &CatalogItem) -> bool {
+    !d.id.is_empty()
+        && !d.title.trim().is_empty()
+        && !is_entitlement_only(d)
+        && !has_category(d, "engines")
+        && !has_category(d, "plugins")
+        && !has_category(d, "digitalextras")
+        && (has_category(d, "games") || has_category(d, "applications") || has_category(d, "addons"))
+}
+
+fn title_of(r: &LibraryRecord, item: &CatalogItem) -> Title {
     let description = item.description.clone().or(item.long_description.clone()).map(|d| d.trim().to_owned()).filter(|d| !d.is_empty() && *d != item.title);
     Title {
         app_name: r.app_name.clone(),
+        apps: vec![r.app_name.clone()],
         namespace: r.namespace.clone(),
         catalog_item_id: r.catalog_item_id.clone(),
-        title: if item.title.trim().is_empty() { r.app_name.clone() } else { item.title.trim().to_owned() },
+        title: item.title.trim().to_owned(),
         description,
         developer: item.developer.clone().filter(|d| !d.trim().is_empty()),
-        art: TitleArt {
-            tall: image(item, &["DieselGameBoxTall", "OfferImageTall", "Thumbnail"]),
-            wide: image(item, &["DieselGameBox", "DieselStoreFrontWide", "OfferImageWide", "DieselGameBoxWide"]),
-            logo: image(item, &["DieselGameBoxLogo"]),
-        },
+        art: art_of(item),
         dlc: item
             .dlc_item_list
             .iter()
-            .filter(|d| !d.id.is_empty())
+            .filter(|d| listed_dlc(d))
             .map(|d| DlcInfo { catalog_item_id: d.id.clone(), title: d.title.trim().to_owned(), app_name: None, owned: false })
             .collect(),
         third_party: third_party(item),
@@ -231,7 +300,6 @@ fn title_of(r: &LibraryRecord, item: Option<&CatalogItem>) -> Title {
         platforms: platforms(item),
         owners: Vec::new(),
         acquired: r.acquisition_date,
-        catalog_missing: false,
     }
 }
 
@@ -240,47 +308,151 @@ pub fn catalog_key(namespace: &str, id: &str) -> String {
     format!("{namespace}/{id}")
 }
 
-/// Titles from every account's records. A game owned by several accounts is one title
-/// with every owner. Sorted by title.
-pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String, CatalogItem>) -> Vec<Title> {
-    let mut titles: BTreeMap<String, Title> = BTreeMap::new();
-    let mut addons: Vec<(String, &LibraryRecord, Option<&CatalogItem>)> = Vec::new();
+/// Why a game can't be a tile, if it can't: no real name, no art, or another launcher
+/// (not Ubisoft's, whose games fold into their Ubisoft entries) would have to run it.
+fn unfit(t: &Title) -> Option<String> {
+    if t.title.is_empty() || is_hex_id(&t.title) {
+        return Some("Epic's catalog gives it no name".into());
+    }
+    if t.art.tall.is_none() && t.art.wide.is_none() {
+        return Some("Epic's catalog has no art for it".into());
+    }
+    match &t.third_party {
+        Some(tp) if !tp.is_ubisoft() => Some(format!("managed by {}, which Quiver doesn't run", tp.client_name())),
+        _ => None,
+    }
+}
+
+/// Whether `candidate` should name its group instead of the current app: the app the
+/// catalog lists for the item wins, else the first acquired.
+fn better_primary(candidate: &LibraryRecord, current: &Title, item: &CatalogItem) -> bool {
+    let listed = |app: &str| item.release_info.iter().any(|ri| ri.app_id == app);
+    match (listed(&candidate.app_name), listed(&current.app_name)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => matches!((candidate.acquisition_date, current.acquired), (Some(a), Some(b)) if a < b),
+    }
+}
+
+fn normalized(title: &str) -> String {
+    title.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn push_unique(v: &mut Vec<String>, s: String) {
+    if !v.contains(&s) {
+        v.push(s);
+    }
+}
+
+/// The library from every account's records: games and apps with a real name and art.
+/// A game owned by several accounts, or listed under several app names (one catalog
+/// item, or one namespace with the same title), is one title with every owner and app.
+/// DLC goes on its game's list. Everything else is in [`Built::hidden`] with the reason.
+/// Titles are sorted by name.
+pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String, CatalogItem>) -> Built {
+    let mut dlc_of: HashMap<String, String> = HashMap::new();
+    for item in catalog.values() {
+        for d in &item.dlc_item_list {
+            dlc_of.entry(d.id.clone()).or_insert_with(|| item.id.clone());
+        }
+    }
+    // Grouped by catalog item here, then by namespace and name below.
+    let mut games: BTreeMap<String, Title> = BTreeMap::new();
+    let mut addons: Vec<(String, String, &LibraryRecord, Option<&CatalogItem>)> = Vec::new();
+    let mut hidden: BTreeMap<String, Hidden> = BTreeMap::new();
+    fn hide(hidden: &mut BTreeMap<String, Hidden>, account: &str, r: &LibraryRecord, item: Option<&CatalogItem>, reason: String) {
+        let h = hidden.entry(r.app_name.clone()).or_insert_with(|| Hidden {
+            app_name: r.app_name.clone(),
+            namespace: r.namespace.clone(),
+            catalog_item_id: r.catalog_item_id.clone(),
+            sandbox: r.sandbox_name.clone(),
+            title: item.map(|i| i.title.trim().to_owned()).filter(|t| !t.is_empty()),
+            reason,
+            owners: Vec::new(),
+        });
+        push_unique(&mut h.owners, account.to_owned());
+    }
     for (account, records) in accounts {
         for r in records {
             let item = catalog.get(&catalog_key(&r.namespace, &r.catalog_item_id));
-            match classify(r, item) {
-                Kind::Skip(why) => tracing::trace!(app = r.app_name, "Epic library: left out ({why})"),
-                Kind::Addon { main } => addons.push((main, r, item)),
-                Kind::Game => {
-                    let t = titles.entry(r.app_name.clone()).or_insert_with(|| title_of(r, item));
-                    if !t.owners.contains(account) {
-                        t.owners.push(account.clone());
+            match (classify(r, item, &dlc_of), item) {
+                (Kind::Skip(why), _) => hide(&mut hidden, account, r, item, why),
+                (Kind::Addon { main }, _) => addons.push((account.clone(), main, r, item)),
+                (Kind::Game, None) => hide(&mut hidden, account, r, None, UNRESOLVED.into()),
+                (Kind::Game, Some(item)) => {
+                    let t = games.entry(catalog_key(&r.namespace, &r.catalog_item_id)).or_insert_with(|| title_of(r, item));
+                    if !t.apps.contains(&r.app_name) {
+                        t.apps.push(r.app_name.clone());
+                        if better_primary(r, t, item) {
+                            t.app_name = r.app_name.clone();
+                            t.acquired = r.acquisition_date;
+                        }
                     }
+                    push_unique(&mut t.owners, account.clone());
                 }
             }
         }
     }
-    for (main, r, item) in addons {
-        // The main game by catalog id, else the game in the same namespace.
-        let base = titles.values_mut().find(|t| !main.is_empty() && t.catalog_item_id == main).map(|t| t.app_name.clone());
-        let base = base.or_else(|| titles.values().find(|t| t.namespace == r.namespace).map(|t| t.app_name.clone()));
-        let Some(t) = base.and_then(|b| titles.get_mut(&b)) else { continue };
+    // One namespace, one name: the same game under two catalog items.
+    let mut titles: Vec<Title> = Vec::new();
+    for t in games.into_values() {
+        match titles.iter_mut().find(|o| o.namespace == t.namespace && normalized(&o.title) == normalized(&t.title)) {
+            Some(o) => {
+                t.apps.into_iter().for_each(|a| push_unique(&mut o.apps, a));
+                t.owners.into_iter().for_each(|w| push_unique(&mut o.owners, w));
+            }
+            None => titles.push(t),
+        }
+    }
+    for (account, main, r, item) in addons {
+        // The main game by catalog id, else the one game in the same namespace.
+        let by_id = titles.iter().position(|t| !main.is_empty() && t.catalog_item_id == main);
+        let in_ns: Vec<usize> = titles.iter().enumerate().filter(|(_, t)| t.namespace == r.namespace).map(|(i, _)| i).collect();
+        let base = by_id.or(if in_ns.len() == 1 { Some(in_ns[0]) } else { None });
+        let Some(t) = base.map(|i| &mut titles[i]) else {
+            let main_title = item.and_then(|i| i.main_game_item.as_ref()).map(|m| m.title.trim().to_owned()).filter(|m| !m.is_empty());
+            let reason = match main_title {
+                Some(m) => format!("DLC for {m}, which isn't in your library"),
+                None => "DLC or add-on for a game that isn't in your library".to_owned(),
+            };
+            hide(&mut hidden, &account, r, item, reason);
+            continue;
+        };
         match t.dlc.iter_mut().find(|d| d.catalog_item_id == r.catalog_item_id) {
             Some(d) => {
                 d.owned = true;
                 d.app_name = Some(r.app_name.clone());
             }
-            None => t.dlc.push(DlcInfo {
-                catalog_item_id: r.catalog_item_id.clone(),
-                title: item.map(|i| i.title.trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| r.app_name.clone()),
-                app_name: Some(r.app_name.clone()),
-                owned: true,
-            }),
+            None => {
+                let name = item.map(|i| i.title.trim().to_owned()).filter(|n| !n.is_empty() && !is_hex_id(n));
+                t.dlc.push(DlcInfo { catalog_item_id: r.catalog_item_id.clone(), title: name.unwrap_or_else(|| r.app_name.clone()), app_name: Some(r.app_name.clone()), owned: true });
+            }
         }
     }
-    let mut v: Vec<Title> = titles.into_values().collect();
-    v.sort_by_key(|t| t.title.to_lowercase());
-    v
+    let mut visible = Vec::new();
+    for t in titles {
+        match unfit(&t) {
+            Some(reason) => {
+                hidden.insert(
+                    t.app_name.clone(),
+                    Hidden {
+                        app_name: t.app_name.clone(),
+                        namespace: t.namespace.clone(),
+                        catalog_item_id: t.catalog_item_id.clone(),
+                        sandbox: String::new(),
+                        title: Some(t.title.clone()).filter(|n| !n.is_empty()),
+                        reason,
+                        owners: t.owners.clone(),
+                    },
+                );
+            }
+            None => visible.push(t),
+        }
+    }
+    visible.sort_by_key(|t| t.title.to_lowercase());
+    let mut hidden: Vec<Hidden> = hidden.into_values().collect();
+    hidden.sort_by(|a, b| (&a.reason, a.title.as_deref().unwrap_or(&a.sandbox)).cmp(&(&b.reason, b.title.as_deref().unwrap_or(&b.sandbox))));
+    Built { titles: visible, hidden }
 }
 
 // ---- caches
@@ -367,12 +539,12 @@ pub(crate) mod tests {
     #[test]
     fn titles_from_records_and_catalog() {
         let (accounts, catalog) = fixture();
-        let titles = build(&accounts, &catalog);
+        let built = build(&accounts, &catalog);
+        let titles = &built.titles;
         let names: Vec<&str> = titles.iter().map(|t| t.title.as_str()).collect();
-        // UE assets, the mobile-only game and the private sandbox are left out; the DLC and
-        // the soundtrack are on their games, not titles; an item the catalog didn't return
-        // stays, named by its app.
-        assert_eq!(names, ["Alan Wake Remastered", "Assassin's Creed Origins", "Celeste", "MysteryApp"]);
+        // UE assets, the mobile-only game, the private sandbox, the soundtrack and the item
+        // the catalog didn't return are left out; the DLC is on its game.
+        assert_eq!(names, ["Alan Wake Remastered", "Assassin's Creed Origins", "Celeste"]);
         let aw = &titles[0];
         assert_eq!((aw.app_name.as_str(), aw.namespace.as_str()), ("Kestrel", "ns-alanwake"));
         assert_eq!(aw.developer.as_deref(), Some("Remedy Entertainment"));
@@ -387,20 +559,99 @@ pub(crate) mod tests {
         assert_eq!(ac.third_party.as_ref().map(|t| (t.is_ubisoft(), t.ubisoft_product, t.client_name())), Some((true, Some(3539), "Ubisoft Connect".to_owned())));
         assert_eq!(ac.owners, ["acct-one", "acct-two"]);
         let owned: Vec<(&str, bool)> = ac.dlc.iter().map(|d| (d.title.as_str(), d.owned)).collect();
-        assert_eq!(owned, [("The Hidden Ones", true), ("The Curse of the Pharaohs", false), ("Origins Soundtrack", true)]);
-        assert!(titles[3].catalog_missing && titles[3].art.tall.is_none());
+        assert_eq!(owned, [("The Hidden Ones", true), ("The Curse of the Pharaohs", false)]);
+        let hidden: Vec<(&str, &str)> = built.hidden.iter().map(|h| (h.app_name.as_str(), h.reason.as_str())).collect();
+        assert_eq!(
+            hidden,
+            [
+                ("MysteryApp", UNRESOLVED),
+                ("ForestPack", "Unreal Engine marketplace asset"),
+                ("CamelliaOST", "digital extra (soundtrack, art book…)"),
+                ("MobileOnly", "no Windows build"),
+                ("PrivateThing", "private sandbox (a developer or test build)"),
+            ]
+        );
+        assert_eq!(built.hidden[0].owners, ["acct-two"]);
+    }
+
+    /// The shapes behind the hex ids and odd entries a real library showed: a game listed
+    /// with its DLC under hex app names in one namespace, audience entitlements in DLC
+    /// lists, an EA game, a game with no art, one game under two app names.
+    #[test]
+    fn only_playable_titles_with_names_and_art() {
+        let items: HashMap<String, CatalogItem> = serde_json::from_str(include_str!("../tests/fixtures/catalog_mixed.json")).unwrap();
+        let catalog: HashMap<String, CatalogItem> = items.into_values().map(|i| (catalog_key(&i.namespace, &i.id), i)).collect();
+        let rec = |ns: &str, item: &str, app: &str| LibraryRecord {
+            namespace: ns.into(),
+            catalog_item_id: item.into(),
+            app_name: app.into(),
+            sandbox_name: "Fallout: New Vegas".into(),
+            sandbox_type: "PUBLIC".into(),
+            record_type: "APPLICATION".into(),
+            ..Default::default()
+        };
+        let records = vec![
+            rec("ns-fnv", "item-fnv", "5daeb974a22a435988892319b3a4f476"),
+            rec("ns-fnv", "item-fnv-dlc1", "ee9a44b4530942499ef1c8c390731fce"),
+            rec("ns-fnv", "item-fnv-dlc2", "b290229eb58045cbab9501640f3278f3"),
+            rec("ns-fnv", "item-fnv-gone", "4fa3d8d9b2cb4714a19a38d1a598be8f"),
+            rec("ns-bf2", "item-bf2", "MtMassive"),
+            rec("ns-noart", "item-noart", "NoArt"),
+            rec("ns-hexname", "item-hexname", "8935bb3e1420443a9789fe01758039a5"),
+            rec("ns-two", "item-two-a", "TwoA"),
+            rec("ns-two", "item-two-b", "c8dae1ab0570475a8b38a9041e614840"),
+            rec("ns-lonely", "item-lonely-dlc", "LonelyDLC"),
+        ];
+        let built = build(&[("acct".into(), records)], &catalog);
+        let names: Vec<(&str, &str)> = built.titles.iter().map(|t| (t.title.as_str(), t.app_name.as_str())).collect();
+        assert_eq!(names, [("Fallout: New Vegas", "5daeb974a22a435988892319b3a4f476"), ("Two Names", "TwoA")]);
+        let fnv = &built.titles[0];
+        // Owned DLC (one by mainGameItem, one only from the game's list) is on the game;
+        // the audience entitlement and the engine kit in the list are not.
+        let dlc: Vec<(&str, bool)> = fnv.dlc.iter().map(|d| (d.title.as_str(), d.owned)).collect();
+        assert_eq!(dlc, [("Honest Hearts", true), ("Old World Blues", false), ("Dead Money", true)]);
+        assert_eq!(built.titles[1].apps, ["TwoA", "c8dae1ab0570475a8b38a9041e614840"]);
+        let hidden: Vec<(&str, &str)> = built.hidden.iter().map(|h| (h.app_name.as_str(), h.reason.as_str())).collect();
+        assert_eq!(
+            hidden,
+            [
+                ("LonelyDLC", "DLC for Some Other Game, which isn't in your library"),
+                ("4fa3d8d9b2cb4714a19a38d1a598be8f", UNRESOLVED),
+                ("8935bb3e1420443a9789fe01758039a5", "Epic's catalog gives it no name"),
+                ("NoArt", "Epic's catalog has no art for it"),
+                ("MtMassive", "managed by the EA app, which Quiver doesn't run"),
+            ]
+        );
+        assert_eq!(built.hidden[1].sandbox, "Fallout: New Vegas");
+        assert!(built.titles.iter().all(|t| !is_hex_id(&t.title)));
     }
 
     #[test]
     fn classify_rules() {
+        let none = HashMap::new();
         let r = |ns: &str, sandbox: &str, app: &str| LibraryRecord { namespace: ns.into(), sandbox_type: sandbox.into(), app_name: app.into(), ..Default::default() };
-        assert_eq!(classify(&r("ue", "PUBLIC", "x"), None), Kind::Skip("Unreal Engine marketplace item"));
-        assert_eq!(classify(&r("n", "PRIVATE", "x"), None), Kind::Skip("private sandbox"));
-        assert_eq!(classify(&r("n", "PUBLIC", ""), None), Kind::Skip("no app"));
-        assert_eq!(classify(&r("n", "PUBLIC", "x"), None), Kind::Game);
+        let skip = |s: &str| Kind::Skip(s.to_owned());
+        assert_eq!(classify(&r("ue", "PUBLIC", "x"), None, &none), skip("Unreal Engine marketplace asset"));
+        assert_eq!(classify(&r("n", "PRIVATE", "x"), None, &none), skip("private sandbox (a developer or test build)"));
+        assert_eq!(classify(&r("n", "PUBLIC", ""), None, &none), skip("no app to install"));
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), None, &none), skip(UNRESOLVED));
         let mut item = CatalogItem { id: "i".into(), ..Default::default() };
         item.categories.push(crate::api::Category { path: "plugins/engine".into() });
-        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item)), Kind::Skip("engine or plugin"));
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item), &none), skip("engine, plugin or asset"));
+        let mut item = CatalogItem { id: "i".into(), ..Default::default() };
+        item.categories.push(crate::api::Category { path: "games".into() });
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item), &none), Kind::Game);
+        item.entitlement_type = Some("AUDIENCE".into());
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item), &none), skip("an entitlement inside another game"));
+        item.entitlement_type = None;
+        let dlc_of = HashMap::from([("i".to_owned(), "main".to_owned())]);
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item), &dlc_of), Kind::Addon { main: "main".into() });
+        item.categories = vec![crate::api::Category { path: "bundles".into() }];
+        assert_eq!(classify(&r("n", "PUBLIC", "x"), Some(&item), &none), skip("not a game or app (bundles)"));
+        let mut rec = r("n", "PUBLIC", "x");
+        rec.record_type = "SKIN".into();
+        assert_eq!(classify(&rec, None, &none), skip("not an application (SKIN)"));
+        assert!(is_hex_id("8935bb3e1420443a9789fe01758039a5") && !is_hex_id("Camellia") && !is_hex_id("8935bb3e1420443a9789fe01758039a"));
     }
 
     #[test]

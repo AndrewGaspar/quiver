@@ -41,6 +41,10 @@ pub const ART_HOSTS: &[&str] = &[
     "cdn.cloudflare.steamstatic.com",
     "cdn.akamai.steamstatic.com",
     "steamcdn-a.akamaihd.net",
+    // Epic's catalog keyImages.
+    "cdn1.epicgames.com",
+    "cdn2.epicgames.com",
+    "cdn2.unrealengine.com",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -147,28 +151,37 @@ impl Fetcher {
         self
     }
 
-    /// Where a URL's image is cached, relative to the cache dir: `url/<host>/<path>`. `None`
-    /// for URLs Quiver won't fetch (unknown host, odd characters, not an image).
-    fn url_cache_rel(&self, url: &str) -> Option<PathBuf> {
+    /// Where a URL's image is cached, relative to the cache dir: `url/<host>/<path>` for
+    /// plain image paths, else `url/<host>/h/<sha1 of the URL>` with the extension the
+    /// downloaded image turns out to have (Epic's CDN names files with spaces, `&` and no
+    /// extension). `None` for URLs Quiver won't fetch (unknown host, http, a query).
+    fn url_cache(&self, url: &str) -> Option<UrlCache> {
         let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://").filter(|_| self.allow_http))?;
         let (host, path) = rest.split_once('/')?;
-        if !self.hosts.iter().any(|h| h == host) {
+        if !self.hosts.iter().any(|h| h == host) || path.is_empty() || path.contains(['?', '#', '\\']) || path.split('/').any(|s| s == "..") || path.len() > 1024 {
             return None;
         }
+        let base = PathBuf::from("url").join(host.replace(':', "_"));
         let segs: Vec<&str> = path.split('/').collect();
         let ok = |s: &&str| {
             !s.is_empty() && s.len() <= 128 && !s.starts_with('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         };
-        if segs.is_empty() || segs.len() > 8 || !segs.iter().all(ok) {
-            return None;
+        let ext = segs.last().and_then(|l| l.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase());
+        if segs.len() <= 8 && segs.iter().all(ok) && ext.as_deref().is_some_and(|e| matches!(e, "jpg" | "jpeg" | "png" | "webp")) {
+            let mut rel = base;
+            rel.extend(segs);
+            return Some(UrlCache::Exact(rel));
         }
-        let ext = segs.last()?.rsplit_once('.')?.1.to_ascii_lowercase();
-        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-            return None;
+        use sha1::Digest as _;
+        let hash = hex::encode(sha1::Sha1::digest(url.as_bytes()));
+        Some(UrlCache::Hashed(base.join("h").join(hash)))
+    }
+
+    #[cfg(test)]
+    fn url_cache_rel(&self, url: &str) -> Option<PathBuf> {
+        match self.url_cache(url)? {
+            UrlCache::Exact(p) | UrlCache::Hashed(p) => Some(p),
         }
-        let mut rel = PathBuf::from("url").join(host.replace(':', "_"));
-        rel.extend(segs);
-        Some(rel)
     }
 
     /// Download `url` to `path` (once, however many ask at the same time).
@@ -197,6 +210,35 @@ impl Fetcher {
         Ok(path.to_owned())
     }
 
+    /// Download `url` to `<stem>.<ext>`, the extension from the image's own bytes.
+    async fn download_sniffed(&self, url: &str, stem: &Path) -> Result<PathBuf> {
+        let key = stem.to_string_lossy().into_owned();
+        let lock = self.inflight.lock().unwrap().entry(key.clone()).or_default().clone();
+        let _guard = lock.lock().await;
+        if let Some(p) = hashed_file(stem) {
+            return Ok(p);
+        }
+        let _permit = self.limit.acquire().await?;
+        let resp = self.http.get(url).send().await.with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            bail!("GET {url}: {}", resp.status());
+        }
+        let bytes = resp.bytes().await.with_context(|| format!("GET {url}"))?;
+        let ext = match image::guess_format(&bytes).with_context(|| format!("{url} is not an image"))? {
+            image::ImageFormat::Jpeg => "jpg",
+            image::ImageFormat::Png => "png",
+            image::ImageFormat::WebP => "webp",
+            f => bail!("{url}: {f:?} images aren't used"),
+        };
+        let path = stem.with_extension(ext);
+        tokio::fs::create_dir_all(path.parent().unwrap_or(&self.cache_dir)).await?;
+        let tmp = tmp_path(&path);
+        tokio::fs::write(&tmp, &bytes).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        self.inflight.lock().unwrap().remove(&key);
+        Ok(path)
+    }
+
     /// The original file on disk, downloading it first if it isn't cached.
     async fn original(&self, src: &ArtSource) -> Result<PathBuf> {
         match src {
@@ -213,22 +255,34 @@ impl Fetcher {
                 let url = format!("{}{}", self.base_url, file);
                 self.download(file, &url, &self.cache_dir.join(file)).await
             }
-            ArtSource::Url(url) => {
-                let rel = self.url_cache_rel(url).with_context(|| format!("refusing art URL {url:?}"))?;
-                self.download(url, url, &self.cache_dir.join(rel)).await
-            }
+            ArtSource::Url(url) => match self.url_cache(url).with_context(|| format!("refusing art URL {url:?}"))? {
+                UrlCache::Exact(rel) => self.download(url, url, &self.cache_dir.join(rel)).await,
+                UrlCache::Hashed(stem) => {
+                    let stem = self.cache_dir.join(stem);
+                    if let Some(p) = hashed_file(&stem) {
+                        return Ok(p);
+                    }
+                    self.download_sniffed(url, &stem).await
+                }
+            },
         }
     }
 
     fn derived_path(&self, src: &ArtSource, original: &Path, variant: Variant) -> PathBuf {
         let stem = match src {
             ArtSource::Cdn(file) => file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file).to_owned(),
-            ArtSource::Url(url) => {
-                let rel = self.url_cache_rel(url).unwrap_or_default();
-                let flat: Vec<String> = rel.iter().skip(1).map(|s| s.to_string_lossy().into_owned()).collect();
-                let flat = flat.join("_");
-                format!("url-{}", flat.rsplit_once('.').map(|(s, _)| s).unwrap_or(&flat))
-            }
+            ArtSource::Url(url) => match self.url_cache(url) {
+                Some(UrlCache::Hashed(stem)) => format!("url-h-{}", stem.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+                other => {
+                    let rel = match other {
+                        Some(UrlCache::Exact(p)) => p,
+                        _ => PathBuf::new(),
+                    };
+                    let flat: Vec<String> = rel.iter().skip(1).map(|s| s.to_string_lossy().into_owned()).collect();
+                    let flat = flat.join("_");
+                    format!("url-{}", flat.rsplit_once('.').map(|(s, _)| s).unwrap_or(&flat))
+                }
+            },
             ArtSource::Local(p) => {
                 // Key local files on path + mtime, so replacing the file refreshes it.
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -266,6 +320,19 @@ impl Fetcher {
             .with_context(|| format!("reading {}", path.display()))?;
         Ok(ArtImage { path: path.into(), width, height })
     }
+}
+
+/// Where a URL's image lives in the cache.
+enum UrlCache {
+    /// At this path (relative to the cache dir), as named by the URL.
+    Exact(PathBuf),
+    /// At this stem plus the image's own extension.
+    Hashed(PathBuf),
+}
+
+/// The cached file for a hashed URL, whatever its extension.
+fn hashed_file(stem: &Path) -> Option<PathBuf> {
+    ["jpg", "png", "webp"].iter().map(|e| stem.with_extension(e)).find(|p| p.is_file())
 }
 
 /// CDN art names are content hashes like `79b8e5e2468fb3f434b622ee5c5063fb.jpg`.
@@ -488,7 +555,7 @@ mod tests {
                     let mut buf = [0u8; 2048];
                     let n = s.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
-                    let found = req.starts_with("GET /assets/good.png");
+                    let found = req.starts_with("GET /assets/good");
                     let head = if found {
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
                     } else {
@@ -622,12 +689,39 @@ mod tests {
         for bad in [
             "https://evil.example/x.png",
             "https://shared.steamstatic.com/../x.png",
-            "https://shared.steamstatic.com/a/b.ico",
             "https://shared.steamstatic.com/a/b.png?x=1",
+            "https://cdn1.epicgames.com/a/../../x",
         ] {
             assert!(prod.url_cache_rel(bad).is_none(), "{bad}");
         }
         assert!(prod.url_cache_rel("https://shared.steamstatic.com/store_item_assets/steam/apps/3751950/logo.png").is_some());
+    }
+
+    /// Epic's catalog URLs: spaces, `&` and no extension. Cached under a hash of the URL,
+    /// with the extension the image has.
+    #[tokio::test]
+    async fn epic_urls_are_cached_by_hash() {
+        let cache = tempfile::tempdir().unwrap();
+        let (base, hits) = serve(png(40, 20, (10, 5, 30, 15))).await;
+        let host = base.trim_start_matches("http://").split('/').next().unwrap().to_owned();
+        let f = Fetcher::new(cache.path().join("art"), "http://127.0.0.1:9/").allow_test_host(&host);
+        let url = format!("{base}good Portrait_1200x1600&RED-1200x1600-61df06244a496c82f3ac231174c1b1f5");
+        let a = f.load(ArtSource::Url(url.clone()), Variant::Original).await.unwrap();
+        assert_eq!((a.width, a.height), (40, 20));
+        let rel = a.path.strip_prefix(cache.path().join("art")).unwrap().to_string_lossy().into_owned();
+        assert!(rel.starts_with(&format!("url/{}/h/", host.replace(':', "_"))) && rel.ends_with(".png"), "{rel}");
+        let t = f.load(ArtSource::Url(url.clone()), Variant::Tile).await.unwrap();
+        assert!(t.path.to_string_lossy().contains("derived/url-h-"), "{:?}", t.path);
+        let again = f.load(ArtSource::Url(url), Variant::Original).await.unwrap();
+        assert_eq!(again, a);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The real hosts are allowed; the cache path never leaves the cache dir.
+        let prod = Fetcher::new(cache.path().join("art"), "http://127.0.0.1:9/");
+        let real = "https://cdn1.epicgames.com/item/7af7476ff9eb4a8d9cd9d6486224de76/ABZU_Portrait_Storefront_1200X1600_1200x1600-61df06244a496c82f3ac231174c1b1f5";
+        let rel = prod.url_cache_rel(real).unwrap();
+        assert!(rel.starts_with("url/cdn1.epicgames.com/h") && rel.components().count() == 4, "{rel:?}");
+        assert!(prod.url_cache_rel("https://cdn1.epicgames.com/0584/item/GTAV Landscaped Store-2560x1440-79155f.jpg").is_some());
+        assert!(prod.url_cache_rel("http://cdn1.epicgames.com/x.jpg").is_none());
     }
 
     #[test]

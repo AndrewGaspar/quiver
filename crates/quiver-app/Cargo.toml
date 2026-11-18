@@ -23,6 +23,8 @@ chrono.workspace = true
 toml.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+sha1.workspace = true
+hex.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 quiver-ui = { path = "../quiver-ui" }

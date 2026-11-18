@@ -25,6 +25,7 @@ optdepends=(
   'desktop-file-utils: refreshing the menu after desktop shortcuts are exported'
   'gamemode: the gamemoderun wrapper'
   'mangohud: the mangohud wrapper'
+  'webkit2gtk-4.1: in-app Epic sign-in window (quiver-webview; without it, sign in in a browser and paste the code)'
 )
 makedepends=('cargo' 'git' 'mingw-w64-gcc' 'protobuf')
 provides=('quiver')

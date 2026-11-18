@@ -250,7 +250,8 @@ the Ubisoft product) fold into their Ubisoft entry once your Ubisoft account has
 Quiver plays them as Ubisoft games.
 
 ```sh
-quiver epic login            # prints Epic's sign-in page; paste the code it ends on
+quiver epic login            # Epic's sign-in page in Quiver's sign-in window
+quiver epic login --paste    # prints the page instead; sign in in a browser, paste the code
 quiver epic login --open     # same, and opens the page in your browser
 quiver epic login --code <code or the page's JSON>
 quiver epic accounts         # * marks the default; several accounts are fine
@@ -259,7 +260,12 @@ quiver epic logout [<name>]
 ```
 
 The app has the same in Settings › Accounts › Epic Games. You sign in on Epic's own page: Quiver
-never sees your password. The session goes into your desktop keyring (Secret Service, service
+never sees your password. The sign-in window is `quiver-webview`, a small separate program that
+shows Epic's page with WebKitGTK and hands Quiver the code Epic's last page shows; it keeps no
+cookies (its website data lives in memory, and anything else it writes goes to a private folder
+deleted when it closes). It needs `webkit2gtk-4.1` (an optional dependency, loaded only when the
+window opens); without it, or without a display, Quiver falls back to the browser and a pasted
+code. The session goes into your desktop keyring (Secret Service, service
 `quiver`, entry `epic:<account id>`), never into a file; `<data>/epic/accounts.json` holds only
 ids, display names and the linked Ubisoft account. Epic rotates its refresh tokens, and Quiver
 stores the new one before using it. When Epic ends a session the account is marked "sign in

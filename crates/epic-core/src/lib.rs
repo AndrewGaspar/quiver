@@ -43,18 +43,23 @@ use accounts::{Entry, Index};
 use api::{Api, EpicError, Grant};
 use auth::Tokens;
 use config::ClientConfig;
-use library::{Cache, CachedItem, CachedLibrary, Title};
+use library::{Cache, CachedItem, CachedLibrary, Hidden, Title};
 use secrets::{SecretStore, entry_name};
 
 /// How long a library read is reused before Epic is asked again.
 pub const LIBRARY_TTL: Duration = Duration::from_secs(15 * 60);
-/// Catalog requests in flight at once (one per namespace; EGL makes them too).
+/// Catalog requests in flight at once (one item each).
 const CATALOG_CONCURRENCY: usize = 4;
+/// Pause before asking for a catalog item a second time.
+const CATALOG_RETRY_AFTER: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 1500 });
 
 /// The Epic library across signed-in accounts.
 #[derive(Debug, Clone, Default)]
 pub struct Library {
     pub titles: Vec<Title>,
+    /// Owned records that aren't games or apps with a name and art, and why
+    /// (`quiver library --store epic --all`).
+    pub hidden: Vec<Hidden>,
     /// What couldn't be read (an account signed out, Epic unreachable): the titles then
     /// come from the last good read, if any.
     pub errors: Vec<String>,
@@ -62,7 +67,11 @@ pub struct Library {
 
 impl Library {
     pub fn title(&self, app_name: &str) -> Option<&Title> {
-        self.titles.iter().find(|t| t.app_name == app_name)
+        self.titles.iter().find(|t| t.app_name == app_name).or_else(|| self.titles.iter().find(|t| t.apps.iter().any(|a| a == app_name)))
+    }
+
+    pub fn hidden(&self, app_name: &str) -> Option<&Hidden> {
+        self.hidden.iter().find(|h| h.app_name == app_name)
     }
 }
 
@@ -297,6 +306,24 @@ impl Epic {
         Ok(lib)
     }
 
+    /// Owned items the library leaves out, and why.
+    pub async fn hidden_items(&self) -> Result<Vec<quiver_api::epic::HiddenItem>> {
+        let lib = self.library(false).await?;
+        Ok(lib
+            .hidden
+            .iter()
+            .map(|h| quiver_api::epic::HiddenItem {
+                app_name: h.app_name.clone(),
+                namespace: h.namespace.clone(),
+                catalog_item_id: h.catalog_item_id.clone(),
+                title: h.title.clone(),
+                sandbox: h.sandbox.clone(),
+                reason: h.reason.clone(),
+                owned_by: h.owners.clone(),
+            })
+            .collect())
+    }
+
     /// The last library read, without asking Epic (`None`: nothing read yet this run).
     pub async fn cached_library(&self) -> Option<Arc<Library>> {
         self.library.lock().await.as_ref().map(|(_, l)| l.clone())
@@ -334,11 +361,13 @@ impl Epic {
             }
         }
         let catalog = self.catalog_for(&per_account, tokens.first(), refresh, &mut errors).await;
-        Ok(Library { titles: library::build(&per_account, &catalog), errors })
+        let built = library::build(&per_account, &catalog);
+        Ok(Library { titles: built.titles, hidden: built.hidden, errors })
     }
 
     /// Catalog items for every record, from the cache when fresh, else from Epic (one call
-    /// per namespace). Items Epic doesn't return keep their cached copy.
+    /// per item, a failed call tried once more). Items Epic doesn't return keep their
+    /// cached copy; items never returned are asked for again at the next read.
     async fn catalog_for(
         &self,
         per_account: &[(String, Vec<api::LibraryRecord>)],
@@ -348,31 +377,38 @@ impl Epic {
     ) -> HashMap<String, api::CatalogItem> {
         let mut cached = self.cache.catalog();
         let now = Utc::now();
-        let mut wanted: HashMap<String, Vec<String>> = HashMap::new();
+        let mut wanted: Vec<(String, String)> = Vec::new();
         for (_, records) in per_account {
-            for r in records.iter().filter(|r| r.namespace != "ue" && !r.catalog_item_id.is_empty()) {
+            for r in records.iter().filter(|r| r.namespace != "ue" && !r.sandbox_type.eq_ignore_ascii_case("PRIVATE") && !r.catalog_item_id.is_empty()) {
                 let key = library::catalog_key(&r.namespace, &r.catalog_item_id);
                 let stale = cached.get(&key).is_none_or(|c| refresh || now - c.fetched_at > library::CATALOG_TTL);
-                if stale {
-                    let ids = wanted.entry(r.namespace.clone()).or_default();
-                    if !ids.contains(&r.catalog_item_id) {
-                        ids.push(r.catalog_item_id.clone());
-                    }
+                let job = (r.namespace.clone(), r.catalog_item_id.clone());
+                if stale && !wanted.contains(&job) {
+                    wanted.push(job);
                 }
             }
         }
         if let (Some(token), false) = (token, wanted.is_empty()) {
-            let jobs: Vec<(String, Vec<String>)> =
-                wanted.into_iter().flat_map(|(ns, ids)| ids.chunks(api::CATALOG_BATCH).map(|c| (ns.clone(), c.to_vec())).collect::<Vec<_>>()).collect();
-            let results: Vec<_> = futures::stream::iter(jobs)
-                .map(|(ns, ids)| async move { (ns.clone(), self.api.catalog_items(token.expose(), &ns, &ids).await) })
+            let api = &self.api;
+            let results: Vec<_> = futures::stream::iter(wanted)
+                .map(|(ns, id)| async move {
+                    let mut r = api.catalog_item(token.expose(), &ns, &id).await;
+                    if r.is_err() {
+                        tokio::time::sleep(CATALOG_RETRY_AFTER).await;
+                        r = api.catalog_item(token.expose(), &ns, &id).await;
+                    }
+                    (ns, id, r)
+                })
                 .buffer_unordered(CATALOG_CONCURRENCY)
                 .collect()
                 .await;
             let mut failed = 0;
-            for (ns, r) in results {
+            for (ns, id, r) in results {
                 match r {
                     Ok(items) => {
+                        if !items.values().any(|i| i.id == id) {
+                            tracing::info!(namespace = ns, item = id, "Epic catalog: no such item");
+                        }
                         for (_, item) in items {
                             let key = library::catalog_key(if item.namespace.is_empty() { &ns } else { &item.namespace }, &item.id);
                             cached.insert(key, CachedItem { fetched_at: now, item });
@@ -380,12 +416,12 @@ impl Epic {
                     }
                     Err(e) => {
                         failed += 1;
-                        tracing::info!(namespace = ns, "Epic catalog: {e:#}");
+                        tracing::info!(namespace = ns, item = id, "Epic catalog: {e:#}");
                     }
                 }
             }
             if failed > 0 {
-                errors.push(format!("Epic's catalog didn't answer for {failed} game(s); their names and art may be missing"));
+                errors.push(format!("Epic's catalog didn't answer for {failed} item(s); they stay out of the library until it does"));
             }
             if let Err(e) = self.cache.save_catalog(&cached) {
                 tracing::info!("Epic catalog cache: {e:#}");

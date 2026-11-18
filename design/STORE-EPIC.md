@@ -302,9 +302,9 @@ a client. Steer 2.
    becomes a notification with Epic's `continuationUrl` and **Open in browser**. Quiver never
    accepts anything on the user's behalf.
 
-Later options (steer 1): (b) a tiny optional `quiver-epic-login` helper using WebKitGTK that
-captures the code from the redirect, as Heroic's web view does (Heroic redirects to `localhost`
-and reads `code`). (c) Device-code flow: Epic supports it only for some first-party clients,
+Later options (steer 1): (b) a tiny optional helper using WebKitGTK that captures the code
+from the redirect, as Heroic's web view does (Heroic redirects to `localhost` and reads `code`).
+**Built** as `quiver-webview` (section 9.6); it is now the default, and pasting is the fallback. (c) Device-code flow: Epic supports it only for some first-party clients,
 which would mean borrowing yet another client's credentials, so it's not recommended.
 (d) `--token <exchange code>` for people who already have a signed-in EGL. Importing EGL's or
 legendary's stored sessions is **not offered**: it reads credential files, and because refresh
@@ -646,6 +646,160 @@ nothing is written to your Epic account.
    Heroic/EGL stayed signed in.
 9. **Undo**, if you want: `quiver epic logout` (ends Quiver's session at Epic and deletes
    its keyring entry; other launchers' sessions are separate).
+
+### 9.5 Library cleanup (2026-11-18)
+
+After the first real sign-in the library had 120 Epic entries, no art on any of them, and
+about 30 tiles named by a 32-hex id. What they were, from quiverd's own caches
+(`<data>/epic/cache/`, read-only):
+
+- **The hex tiles were real games and their DLC whose catalog lookup failed.** All 32
+  records without a catalog item were in the 11 namespaces where the library has more than
+  one record: Fortnite (three apps), Borderlands 2 (game and two DLC), Killing Floor 2,
+  Civilization VI (game and the Aztec DLC), Death Stranding (five), Fallout: New Vegas
+  (seven), Alien: Isolation, Pillars of Eternity, Tyranny, Tropico 5 and a sandbox named
+  Hydra (two each). Every single-record namespace resolved. Stage 1 asked `bulk/items` for
+  a namespace's ids comma-separated in one call, and that form came back without any of
+  them. The newer catalog names apps (DLC especially) by hex id, so those records showed
+  their app name. None were UE assets, engines, launcher items or private sandboxes: all
+  120 records are `APPLICATION`s in public sandboxes.
+- **`epic:Quail` "20XX" and `epic:Flounder` "3 out of 10, EP 1: …" are real games** (both
+  `games`/`applications`, executable, Windows, with art; 3 out of 10 is an episodic game
+  Epic gave away). They stay.
+- **No art anywhere** was the app refusing the URLs: `cdn1.epicgames.com` wasn't an allowed
+  art host, and Epic's image URLs have spaces, `&` and often no extension, which the art
+  cache's path rules refused. The provider already sent the right URLs.
+
+What changed:
+
+- **Catalog:** one `bulk/items` call per item (as legendary asks), 4 at a time, a failed call
+  tried once more after 1.5 s. Items Epic doesn't return are asked for again at the next
+  read (they were never cached). Private-sandbox items aren't asked for. quiverd now logs
+  `epic_core` at info, so catalog failures show in `quiverd.log`.
+- **Library rule** (`library::build`): a tile is a game or app with a catalog name and art.
+  Each owned record is one of: a **game** (`games` or `applications`, executable, Windows,
+  no main game), **DLC** (`mainGameItem`, listed in an owned game's `dlcItemList`, or
+  `addons`; shown on its game's page as owned, never a tile), or **hidden with a reason**:
+  UE asset, private sandbox, engine/plugin/asset, digital extra, audience entitlement, not a
+  game or app, nothing to install, no Windows build, DLC whose game isn't owned, the catalog
+  didn't describe it, no name (a hex title), no art, or managed by a launcher Quiver doesn't
+  run (the EA app: STAR WARS Battlefront II). Ubisoft titles still fold into their Ubisoft
+  entries. The game page's DLC list leaves out audience entitlements, engine kits and editor
+  tools, and shows owned DLC first with an "Owned" mark.
+- **One game, one tile:** records of one catalog item, or of one namespace with the same
+  name, are one title (`Title.apps` keeps every app name, and `epic:<any of them>` finds
+  it). The tile's ref is the app the catalog lists for the item, else the first acquired.
+- **Hidden items** come back from `Request::Epic(EpicRequest::Hidden)` (`Vec<HiddenItem>`),
+  and `quiver library --all` (with `--store epic` or not) lists them after the library as
+  `epic:<app>  <title> [<sandbox>]: <reason>` (`--json --all` prints `{library, hidden}`).
+  `quiver info epic:<hidden app>` says why it isn't in the library.
+- **Art:** `cdn1.epicgames.com`, `cdn2.epicgames.com` and `cdn2.unrealengine.com` are art
+  hosts. A URL that isn't a plain `<path>.jpg|png|webp` is cached as
+  `~/.cache/quiver/art/url/<host>/h/<sha1 of the URL>.<ext>`, with the extension taken from
+  the image's bytes. Slots: tile `DieselGameBoxTall` (else `OfferImageTall`, `Thumbnail`),
+  hero `DieselGameBox` (else `DieselStoreFrontWide`, `OfferImageWide`), logo
+  `DieselGameBoxLogo`.
+- With the cache as it was, the new rule gives 87 titles (82 tiles, the five Ubisoft ones
+  folded) and 33 hidden: the 32 unresolved records and Battlefront II. The first library
+  read on the new build asks for the 32 again, one at a time, and they become Fortnite,
+  Borderlands 2, Killing Floor 2 and the rest, with their DLC on their pages.
+- `QUIVER_DEMO_LIBRARY=<file>` (demo mode only) shows a saved `quiver library --json` in the
+  app, for screenshots of a real library without a daemon.
+
+**Checking it:** after `tools/install-user.sh` and quiverd's restart, run `quiver library
+--store epic --refresh`: no hex names; Fortnite, Borderlands 2, Death Stranding, Fallout: New
+Vegas and the rest listed by name. `quiver library --store epic --all` ends with "Not in the
+library (N)": expect Battlefront II (the EA app) and any item Epic still doesn't describe.
+`grep "Epic catalog" ~/.local/share/quiver/quiverd.log` names any item that failed. In the
+app every Epic tile has box art, and an Epic game's page lists its DLC with what's owned.
+
+### 9.6 Sign-in window (quiver-webview), 2026-11-18
+
+The user asked for sign-in inside Quiver instead of copying `authorizationCode` out of Epic's
+JSON page by hand. `quiver epic login` and the app's **Sign in to Epic** now open Epic's own
+sign-in page in a small window of Quiver's, which hands the code back by itself.
+
+**Design.**
+
+- A separate binary, `crates/quiver-webview` (`quiver-webview epic-login --url <url>
+  [--timeout <s>]`), so neither quiverd nor the app has WebKit in its process. The URL is the
+  one `EpicRequest::LoginBegin` returns (the same `quiver epic login` always printed); the
+  helper refuses any URL not on `https://www.epicgames.com/`.
+- The window is titled "Quiver — Sign in to Epic Games". It watches each finished load. When
+  the page is `https://www.epicgames.com/id/api/redirect…`, it reads that page's body (WebKit's
+  main resource, the raw JSON), takes `authorizationCode`, prints it on **stdout** and exits.
+  The code never goes to stderr, a log or a file; stdout is a pipe the caller reads.
+- `"authorizationCode": null` (Epic finished the sign-in on another page first) loads the
+  sign-in URL again; with the session cookie now set, Epic redirects straight to a page with a
+  code. After three such retries it gives up with a message.
+- **No Epic cookies on disk.** The web view uses an ephemeral website-data manager (cookies,
+  local storage and caches in memory only), and the process's `XDG_CACHE_HOME` and
+  `XDG_DATA_HOME` point into a private 0700 directory (`$XDG_RUNTIME_DIR/quiver-webview-XXXXXX`)
+  deleted on every exit path, including SIGTERM/SIGINT/SIGHUP (handled in GLib's main loop) and
+  the caller dying (`PR_SET_PDEATHSIG`).
+- Closing the window is a cancel; a timeout (600 s by default) ends it too.
+- Exit codes: 0 signed in (code on stdout), 1 failed, 2 window closed, 3 timed out, 4 no
+  WebKitGTK or no display, 64 bad arguments.
+- Client: `quiver_api::epic::webview::sign_in(url, timeout) -> Outcome` (`Code(SignInCode)`,
+  whose `Debug` is redacted; `Cancelled`; `TimedOut`; `Unavailable(reason)`; `Failed(reason)`).
+  It finds the helper at `$QUIVER_WEBVIEW`, next to the running binary, then on `PATH`, and gives
+  the helper 15 s past its own timeout before stopping it (SIGTERM, then kill).
+- **CLI**: `quiver epic login` uses the window by default ("Opening Epic's sign-in window…").
+  `--paste` (or `--open`) is the old browser-and-paste flow. If the window is unavailable it
+  says why ("The sign-in window isn't available (…); install webkit2gtk-4.1 for it. Falling back
+  to pasting the code.") and continues with the paste flow. Closing the window prints "Sign-in
+  cancelled" and exits non-zero. `--code` is unchanged.
+- **App**: Settings › Accounts › Epic Games › Sign in to Epic runs the helper off the UI thread
+  and shows a card while the window is open; the code goes straight to `LoginComplete`. A
+  missing window falls back to the browser and code field with a toast saying why; a cancel,
+  timeout or failure leaves a short note. "Paste a code instead" is always offered on that card.
+- **Packaging**: `packaging/layout.sh` installs `quiver-webview` beside the other binaries (so
+  `tools/install-user.sh` and the PKGBUILD both ship it); the PKGBUILD lists
+  `webkit2gtk-4.1` under `optdepends`.
+
+**Bindings: none (dlopen).** The helper opens `libwebkit2gtk-4.1.so.0` at run time and looks up
+the 22 C functions it calls (GTK 3 window and main loop, `g_signal_connect_data`, GLib timeouts
+and Unix signals, WebKit's ephemeral data manager, context, view, `load_uri`, `get_uri`, and
+the main resource's `get_data`) through that handle, which also resolves GTK's and GLib's
+symbols from WebKit's own dependencies (`src/ffi.rs`). Weighed against:
+
+| Option | Build weight | Maintenance | Reading the page body |
+|---|---|---|---|
+| **dlopen, hand-written signatures (chosen)** | `libc` + `serde_json`; no headers or pkg-config at build time | 22 stable C signatures (the WebKitGTK 4.1 and GTK 3 APIs are frozen); unsafe code is confined to two small files | `webkit_web_resource_get_data` directly |
+| webkit2gtk-rs 2.0 + gtk-rs 0.18 | ~40 crates, needs webkit2gtk/gtk3/soup headers to build the whole workspace | gtk3-rs is archived upstream; kept alive by Tauri | same calls, safe wrappers |
+| wry (+ tao) | heavier still (wry, tao, webkit2gtk-rs, gtk-rs) | maintained by Tauri | only through JavaScript and an IPC handler |
+
+The deciding point: with dlopen, `webkit2gtk-4.1` is a true run-time optional dependency. The
+workspace and the package build on machines without it, and a missing library is exit code 4
+and a clear fallback, not a binary that fails to start because a shared library is missing.
+
+**Tested** (`crates/quiver-webview/tests/sign_in.rs`, run by `cargo test --workspace`) against a
+local server on 127.0.0.1 in a private Xvfb (a free display number of its own, `DISPLAY` set
+only for the helper, `WAYLAND_DISPLAY` removed, the session bus pointed nowhere); never on the
+desktop. The server's `/login` redirects with HTTP 302 (and `/login-js` with JavaScript) to its
+own `/id/api/redirect`, which serves Epic's JSON. The test-only `--redirect-prefix` points the
+matcher at it; it and `--close-after-load` are refused unless `--url` is a loopback URL. Cases:
+the code on stdout (and not on stderr); the JavaScript redirect; `null` once, then a code
+(the redirect page is visited twice); `null` every time (exit 1, nothing on stdout); the window
+closed (`--close-after-load` closes it the way the window manager does: exit 2); a 2 s timeout
+(exit 3); a missing library (`QUIVER_WEBVIEW_TEST_LIB`, loopback only: exit 4); no display
+(exit 4). After every run the private directory is checked to be gone. The test skips with a
+note when Xvfb or WebKitGTK isn't installed. Unit tests cover the argument and URL rules, the
+redirect matcher and the JSON (`src/args.rs`), and the client's exit-code mapping and hung-helper
+handling with stand-in scripts (`quiver-api`).
+
+**How to check it** (after `tools/install-user.sh`; it doesn't need quiverd restarted for the
+window itself, but `quiver epic login` talks to quiverd as before):
+
+1. `quiver-webview epic-login --url 'https://www.epicgames.com/id/login' --timeout 30`, then close
+   the window: it prints `quiver-webview: the sign-in window was closed` and `echo $?` says 2.
+   Nothing is signed in.
+2. For a real sign-in (adds or refreshes an Epic account, as `quiver epic login` always has):
+   Settings › Accounts › Epic Games › Add Epic account (or `quiver epic login`). Sign in in the
+   window; it closes by itself and the account appears. `ls $XDG_RUNTIME_DIR | grep
+   quiver-webview` prints nothing afterwards.
+3. Fallback: `QUIVER_WEBVIEW=/nonexistent quiver epic login` prints the "isn't available …
+   Falling back to pasting the code" line and the old prompt (Ctrl+C to leave).
 
 ---
 

@@ -47,6 +47,7 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicRequest) -> Res
             json!(a)
         }
         EpicRequest::Accounts => json!(d.epic.accounts()?),
+        EpicRequest::Hidden => json!(d.epic.hidden_items().await?),
         EpicRequest::AccountDefault { account } => {
             let a = d.epic.set_default(&account)?;
             d.log_activity(source, format!("default Epic account is now {}", a.display_name), None);

@@ -6,7 +6,7 @@
 #
 # Final locations come from the environment (absolute paths, as installed; files land at
 # <staging root><path>):
-#   BINDIR      quiver, quiverd, quiver-app, quiver-sight, ubi (the CLI's old name)  (/usr/bin)
+#   BINDIR      quiver, quiverd, quiver-app, quiver-sight, quiver-webview, ubi (the CLI's old name)  (/usr/bin)
 #   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
 #               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
@@ -34,7 +34,7 @@ if [[ "$(realpath -m "$BINDIR/../lib/quiver")" != "$(realpath -m "$LIBDIR")" ]];
 fi
 
 # quiver-sight (Sight's HUD renderer and toasts) must sit next to quiverd, which starts it.
-for bin in quiver quiverd quiver-app quiver-sight ubi; do
+for bin in quiver quiverd quiver-app quiver-sight quiver-webview ubi; do
     install -Dm755 "$target/release/$bin" "$root$BINDIR/$bin"
 done
 install -Dm644 "$target/x86_64-pc-windows-gnu/release/quiver-bridge.exe" "$root$LIBDIR/quiver-bridge.exe"

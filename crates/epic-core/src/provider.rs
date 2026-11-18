@@ -78,7 +78,10 @@ impl EpicProvider {
         match lib.title(&app) {
             Some(t) => Ok((t.clone(), accounts)),
             None if accounts.is_empty() => bail!("{game}: no Epic account is signed in (quiver epic login)"),
-            None => bail!("{game} is not in your Epic library"),
+            None => match lib.hidden(&app) {
+                Some(h) => bail!("{game} isn't in the library: {}", h.reason),
+                None => bail!("{game} is not in your Epic library"),
+            },
         }
     }
 }
@@ -128,10 +131,7 @@ impl StoreProvider for EpicProvider {
                     Some(Dlc { game: r, name: Some(d.title.clone()).filter(|n| !n.is_empty()), installed: false, owned: Some(d.owned) })
                 })
                 .collect();
-            let mut unavailable = vec!["release date".to_owned(), "play time".to_owned(), "achievements".to_owned(), "cloud saves".to_owned()];
-            if t.catalog_missing {
-                unavailable.splice(0..0, ["name", "art", "developer", "description"].map(str::to_owned));
-            }
+            let unavailable = vec!["release date".to_owned(), "play time".to_owned(), "achievements".to_owned(), "cloud saves".to_owned()];
             Ok(GameDetail {
                 game,
                 name: t.title.clone(),
