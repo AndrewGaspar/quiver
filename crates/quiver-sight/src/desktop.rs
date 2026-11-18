@@ -4,6 +4,11 @@
 //! can't draw (OpenGL, anti-cheat, layer missing or dead). It draws the frame-time graph
 //! itself from the model's points. Commits follow the model (≤ the HUD's rate), which keeps
 //! the extra compositor flips of §2.1 to that rate.
+//!
+//! Tied to the game like the panel (design/SIGHT.md §14): while the game isn't in front
+//! ([`crate::front`]: another workspace, another window active, minimised) the surface goes,
+//! and it comes back at once when the game is in front again. The in-game HUD needs none of
+//! this: it's in the game's own frames.
 
 use anyhow::Result;
 use gpui::layer_shell::{KeyboardInteractivity, Layer, LayerShellOptions};
@@ -28,6 +33,8 @@ struct Key {
 #[derive(Default)]
 pub struct DesktopHud {
     window: Option<(WindowHandle<HudView>, Key)>,
+    /// The game isn't in front: nothing is shown until it is.
+    away: bool,
 }
 
 /// The display GPUI knows for an output name (`eDP-1`): Wayland outputs' UUIDs are v5 UUIDs
@@ -79,7 +86,7 @@ impl DesktopHud {
     /// Shown while the model is on and its presenter is the desktop; `layer_shell` is false
     /// when the platform has none (headless, X11): then nothing is shown.
     pub fn update(&mut self, m: &HudModel, layer_shell: bool, cx: &mut App) -> Result<()> {
-        if !(m.on && m.presenter == Presenter::Desktop && layer_shell) {
+        if !(m.on && m.presenter == Presenter::Desktop && layer_shell) || self.away {
             self.close(cx);
             return Ok(());
         }
@@ -118,6 +125,22 @@ impl DesktopHud {
         tracing::info!(monitor = ?m.monitor, anchor = ?m.anchor, reason = %m.presenter_reason, "desktop HUD shown");
         self.window = Some((h, key));
         Ok(())
+    }
+
+    /// Whether the game is away (not in front); `m` is the last model, to show again with.
+    pub fn set_away(&mut self, away: bool, m: Option<&HudModel>, layer_shell: bool, cx: &mut App) -> Result<()> {
+        if self.away == away {
+            return Ok(());
+        }
+        self.away = away;
+        if away {
+            if self.window.is_some() {
+                tracing::info!("desktop HUD hidden: the game isn't in front");
+            }
+            self.close(cx);
+            return Ok(());
+        }
+        m.map_or(Ok(()), |m| self.update(m, layer_shell, cx))
     }
 
     pub fn close(&mut self, cx: &mut App) {

@@ -9,7 +9,8 @@ use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, Lay
 use quiver_perf::descriptor::{Display, MetricKind, Range, Unit};
 use quiver_perf::layout::{
     BACKDROP_ERR_DEVICE_LOST, BACKDROP_ERR_FORMAT, BACKDROP_ERR_INTERNAL, BACKDROP_ERR_NONE, BACKDROP_ERR_OFF, BACKDROP_ERR_QUEUE, BACKDROP_ERR_USAGE, DRAW_ERR_DEVICE_LOST,
-    DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_NONE, DRAW_ERR_QUEUE, DRAW_ERR_USAGE, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_PANICKED,
+    DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_NONE, DRAW_ERR_QUEUE, DRAW_ERR_USAGE, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_FOCUS_KNOWN, LAYER_FOCUSED,
+    LAYER_PANICKED,
 };
 
 use super::format::{self, Raw};
@@ -142,6 +143,20 @@ pub struct ModelInput<'a> {
     pub monitor: Option<&'a str>,
     /// The layer's backdrop blur ([`layer_backdrop`]).
     pub backdrop: Option<LayerBackdrop>,
+    /// The game's window in front, as its layer sees it ([`game_focus`]).
+    pub game_focus: Option<bool>,
+}
+
+/// Whether the game's window is in front as its layer reports it (design/SIGHT.md §14):
+/// `None` when the layer is gone, stale, or can't tell (`LAYER_FOCUS_KNOWN` unset, as from a
+/// layer before it).
+pub fn game_focus(layer: Option<&LayerRing>, now: i64) -> Option<bool> {
+    let l = layer.filter(|l| l.alive && !l.ring.starts_with("invalid"))?;
+    if l.heartbeat > 0 && now - l.heartbeat > LAYER_STALE_NS {
+        return None;
+    }
+    let s = l.status?;
+    (s.flags & LAYER_FOCUS_KNOWN != 0).then_some(s.flags & LAYER_FOCUSED != 0)
 }
 
 /// `LayerStatus::backdrop_error` as a word.
@@ -345,6 +360,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         size: inp.layout.size(hud_card::panel(background)),
         rows,
         backdrop: inp.backdrop.clone().map(Box::new),
+        game_focus: inp.game_focus,
     }
 }
 
@@ -449,7 +465,7 @@ mod tests {
     fn model(store: &Store, layout: &str, now: i64) -> HudModel {
         let cfg = HudConfig::default();
         let l = builtin(layout).unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None };
         build_model(&inp, store, now)
     }
 
@@ -520,7 +536,7 @@ mod tests {
         // Without a panel the padding goes, the slots stay.
         let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
         let l = builtin("standard").unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None };
         assert_eq!(build_model(&inp, &modded, now2).size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0]);
     }
 
@@ -609,5 +625,23 @@ mod tests {
         assert!(!layer_backdrop(Some(img), Some(&layer(Some(pan))), now).unwrap().ready);
         let silent = LayerRing { heartbeat: now - 5_000 * MS, ..layer(Some(ready)) };
         assert!(!layer_backdrop(Some(img), Some(&silent), now).unwrap().ready);
+    }
+
+    #[test]
+    fn game_focus_from_the_layer() {
+        let now = 100_000 * MS;
+        assert_eq!(game_focus(None, now), None);
+        assert_eq!(game_focus(Some(&layer(None)), now), None, "no status yet");
+        // A layer from before focus reporting (or one that can't tell): unknown.
+        assert_eq!(game_focus(Some(&layer(Some(LayerStatus::ZERO))), now), None);
+        let away = LayerStatus { flags: LAYER_FOCUS_KNOWN, ..LayerStatus::ZERO };
+        assert_eq!(game_focus(Some(&layer(Some(away))), now), Some(false));
+        let front = LayerStatus { flags: LAYER_FOCUS_KNOWN | LAYER_FOCUSED, ..LayerStatus::ZERO };
+        assert_eq!(game_focus(Some(&layer(Some(front))), now), Some(true));
+        // FOCUSED without KNOWN means nothing; a silent layer is unknown.
+        let odd = LayerStatus { flags: LAYER_FOCUSED, ..LayerStatus::ZERO };
+        assert_eq!(game_focus(Some(&layer(Some(odd))), now), None);
+        let silent = LayerRing { heartbeat: now - 5_000 * MS, ..layer(Some(front)) };
+        assert_eq!(game_focus(Some(&silent), now), None);
     }
 }

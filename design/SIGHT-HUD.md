@@ -296,6 +296,15 @@ this over the focus-scoped Hyprland binds above, which quiverd never applied.
   private queue. Opt-in `tests/vulkan_keys_wayland.rs` does it through the real hooks with a
   `vkCreateWaylandSurfaceKHR` on the fake display and a presenting Vulkan app (passes on
   RADV). Not verified: a real compositor, and a real winewayland game.
+- **Focus** (*2026-11-18*, SIGHT §14 "Tied to the game window"). The same thread reports
+  whether the game's window is in front: the Wayland keyboard's `enter`/`leave`, and for
+  X11 surfaces `_NET_ACTIVE_WINDOW` read on a plain XCB connection of the layer's own
+  (`src/focus.rs`: XCB so that a request on a destroyed window is an error reply, not an X
+  error in Wine's process-wide Xlib handler). Status flags `LAYER_FOCUS_KNOWN` /
+  `LAYER_FOCUSED`, rewritten at once on a change; quiverd passes them on as
+  `HudModel::game_focus` without waiting for the next model. Focus is read every tick, also
+  while the game doesn't present, and once attached the Wayland queue is serviced every tick
+  too (so keys typed on a loading screen that doesn't present now count).
 - **Hyprland binds stay as the fallback** for games without the layer (anti-cheat-flagged,
   OpenGL), which is the desktop presenter's audience:
   `quiver hud keybinds --conf` prints them; quiverd still never applies them (the `Binder` keeps
@@ -791,6 +800,12 @@ Commits are coalesced to the HUD's update rate, and the graph updates at most 10
 the extra flips of section 2.1. Built in phase 1 with `quiver-sight` (commits follow the
 model's revisions, at most the HUD's rate; the graph from the model's `points`).
 
+*2026-11-18:* tied to the game window like the Sight panel (SIGHT §14, "Tied to the game
+window"): a layer surface belongs to an output, so without this the desktop HUD stayed over
+other workspaces and windows. While the game's toplevel isn't the active one (another
+workspace, another window, minimised) the surface goes, and it comes back when the game is
+in front again; when nothing can tell (no toplevel list and no layer word) it stays shown.
+
 ### 2.12 The HUD in captures
 
 **Deferred (2026-11-16):** the user chose not to separate the HUD from screen shares for now.
@@ -1129,7 +1144,9 @@ typedef struct qv_ring_header {
                                    key polling state and chord press counters, §1.3; the
                                    panel's backdrop blur: LAYER_BLUR_READY / LAYER_BLURRING
                                    flags, backdrop_error, backdrop_gpu_ns in the last 8 bytes,
-                                   zero from older layers, SIGHT §14) */
+                                   zero from older layers, SIGHT §14; whether the game's
+                                   window is in front: LAYER_FOCUS_KNOWN / LAYER_FOCUSED,
+                                   flags bits 10-11, SIGHT §14) */
     uint8_t  _pad3[1856];
 } qv_ring_header;
 

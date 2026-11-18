@@ -36,6 +36,12 @@ pub enum Msg {
     /// Someone (a mod's own menu, the app) changed options of this session.
     OptionsChanged { session: String },
     Pad(quiver_ui::gamepad::PadEvent),
+    /// The compositor's toplevels changed (or there's no list): [`crate::toplevels`].
+    Toplevels(crate::toplevels::Event),
+    /// The panel's surface (the `map_gen`th one) gained or lost the keyboard.
+    PanelKeyboard { map_gen: u64, active: bool },
+    /// Ask again whether the game is in front (a hide or grace timer ran out).
+    Front,
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.

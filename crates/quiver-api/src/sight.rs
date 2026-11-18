@@ -143,6 +143,17 @@ pub struct PanelReport {
     /// The window focus goes back to on close (Hyprland address).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_to: Option<String>,
+    /// Open but hidden because the game isn't in front (design/SIGHT.md §14): why ("another
+    /// window is active (kitty)"). It comes back, as it was, when the game is in front again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<String>,
+    /// Whether the game is in front and how that's known ("the game's window is active", "no
+    /// way to tell (…)").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub front: String,
+    /// The game's toplevel the panel is tied to (app id, title, how it was found), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_window: Option<String>,
     /// The last command it acted on.
     #[serde(default)]
     pub handled_seq: u64,
@@ -177,6 +188,8 @@ pub struct PanelKeys {
     pub presses: u32,
 }
 
+// `Report` carries a whole `PanelReport`; a request is sent on a panel change, not per frame.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SightRequest {

@@ -10,7 +10,10 @@ mod harness;
 mod xvfb;
 
 use harness::*;
-use quiver_perf::layout::{KEYS_ACTIVE, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE};
+use quiver_perf::layout::{KEYS_ACTIVE, LAYER_FOCUS_KNOWN, LAYER_FOCUSED, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode};
+use x11rb::wrapper::ConnectionExt as _;
 use quiver_perf::session::open_ring_reader;
 use quiver_sight_layer::keys::{X11Keys, keysym};
 
@@ -79,17 +82,30 @@ fn chords_reach_the_status_block() {
     // An XCB window on the Xvfb: the surface hook notes an X11 surface. Not every driver
     // presents to Xvfb (no DRI3); then this part is skipped.
     let status = std::cell::RefCell::new(None);
+    // Whether the window is in front (SIGHT §14): a window manager's _NET_ACTIVE_WINDOW,
+    // set by the test (Xvfb has no window manager); the atom exists before the layer looks.
+    let (xc, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&x.name())).unwrap();
+    let root = xc.setup().roots[screen].root;
+    let net_active = xc.intern_atom(false, b"_NET_ACTIVE_WINDOW").unwrap().reply().unwrap().atom;
+    let set_active = |w: u32| {
+        xc.change_property32(PropMode::REPLACE, root, net_active, AtomEnum::WINDOW, &[w]).unwrap();
+        xc.sync().unwrap();
+    };
+    let in_front = std::cell::RefCell::new(None);
     let windowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run(Opts {
-            frames: 40,
+            frames: 60,
             fps: 60.0,
             readback: false,
             surface: Surface::Window { title: "quiver-sight-keys-test".into() },
             extent: (320, 240),
-            on_frame: Some(Box::new(|f, _, _| {
-                if f == 39 {
-                    *status.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status());
-                }
+            on_frame: Some(Box::new(|f, _, _| match f {
+                // The test window is the root's only child (no window manager to reparent it).
+                10 => set_active(xc.query_tree(root).unwrap().reply().unwrap().children.last().copied().unwrap_or(0)),
+                30 => *in_front.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status()),
+                32 => set_active(0),
+                59 => *status.borrow_mut() = open_ring_reader(&session.ring_path()).ok().and_then(|r| r.layer_status()),
+                _ => {}
             })),
             ..Opts::default()
         })
@@ -99,6 +115,9 @@ fn chords_reach_the_status_block() {
             eprintln!("windowed on {}", r.device_name);
             assert_ne!(s.flags & LAYER_X11_SURFACE, 0, "the XCB surface was noted");
             assert_eq!(s.flags & LAYER_WAYLAND_SURFACE, 0);
+            let f = in_front.into_inner().expect("a status block").flags;
+            assert_eq!(f & (LAYER_FOCUS_KNOWN | LAYER_FOCUSED), LAYER_FOCUS_KNOWN | LAYER_FOCUSED, "the active window is the game's");
+            assert_eq!(s.flags & (LAYER_FOCUS_KNOWN | LAYER_FOCUSED), LAYER_FOCUS_KNOWN, "no active window");
         }
         _ => eprintln!("skipping the windowed part: no device presents to Xvfb here"),
     }

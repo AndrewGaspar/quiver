@@ -206,6 +206,8 @@ struct Listen {
     caps: Option<u32>,
     keyboard: *mut Proxy,
     keys: EvdevKeys,
+    /// Between `enter` and `leave`: the game's window has the keyboard (SIGHT §14).
+    focused: bool,
     presses: Vec<Action>,
     /// Requests were made: flush after dispatching.
     flush: bool,
@@ -277,6 +279,7 @@ impl Listen {
         }
         self.keyboard = std::ptr::null_mut();
         self.keys.leave();
+        self.focused = false;
         self.flush = true;
     }
 
@@ -388,11 +391,21 @@ unsafe extern "C" fn on_enter(data: *mut c_void, _: *mut Proxy, _serial: u32, _s
             _ => &[],
         }
     };
-    unsafe { with(data, |l| l.keys.enter(held)) }
+    unsafe {
+        with(data, |l| {
+            l.keys.enter(held);
+            l.focused = true;
+        })
+    }
 }
 
 unsafe extern "C" fn on_leave(data: *mut c_void, _: *mut Proxy, _serial: u32, _surface: *mut Proxy) {
-    unsafe { with(data, |l| l.keys.leave()) }
+    unsafe {
+        with(data, |l| {
+            l.keys.leave();
+            l.focused = false;
+        })
+    }
 }
 
 unsafe extern "C" fn on_key(data: *mut c_void, _: *mut Proxy, _serial: u32, _time: u32, key: u32, state: u32) {
@@ -458,6 +471,7 @@ impl Conn {
                 caps: None,
                 keyboard: std::ptr::null_mut(),
                 keys: EvdevKeys::new(),
+                focused: false,
                 presses: Vec::with_capacity(8),
                 flush: false,
                 broken: false,
@@ -533,6 +547,34 @@ pub fn state() -> u32 {
     STATE.load(Ordering::Relaxed)
 }
 
+/// Whether the game's Wayland window has the keyboard: 0 unknown (no keyboard bound), 1 no,
+/// 2 yes. Written by [`service`] after each dispatch.
+static FOCUS: AtomicU32 = AtomicU32::new(0);
+
+fn set_focus(f: Option<bool>) {
+    let v = match f {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    if FOCUS.swap(v, Ordering::Relaxed) != v {
+        log!("focus: Wayland {}", match f {
+            None => "unknown",
+            Some(false) => "elsewhere",
+            Some(true) => "the game",
+        });
+    }
+}
+
+/// The game's Wayland window has the keyboard (`None`: no keyboard of ours is bound).
+pub fn focused() -> Option<bool> {
+    match FOCUS.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
 /// The keys thread died: nothing will service the keyboard any more.
 pub fn fail_internal() {
     set_state(KEYS_WL_INTERNAL);
@@ -577,6 +619,7 @@ fn release_unused(s: &mut Shared) {
             // SAFETY: the display's last surface is being destroyed now, so it's still alive.
             unsafe { c.teardown() };
         }
+        set_focus(None);
         log!("keys: Wayland objects released (their display's last surface is gone)");
     }
     // A display that failed and has no surface left may be gone; its address can be reused.
@@ -590,10 +633,12 @@ fn release_unused(s: &mut Shared) {
     }
 }
 
-/// One tick of the keys thread, while the game presents: attach if a surface needs it,
-/// dispatch our queue (only what's already queued), flush our requests, update the state.
+/// One tick of the keys thread: attach if a surface needs it (only while the game presents,
+/// `presenting`), dispatch our queue (only what's already queued), flush our requests,
+/// update the state and the focus. Runs every tick once attached, also while the game
+/// doesn't present, so a `leave` isn't missed when a hidden game stops drawing (SIGHT §14).
 /// Returns the chord presses since the last tick, in order.
-pub fn service(now: Instant) -> Vec<Action> {
+pub fn service(now: Instant, presenting: bool) -> Vec<Action> {
     if EXITING.load(Ordering::Relaxed) {
         return Vec::new();
     }
@@ -602,6 +647,10 @@ pub fn service(now: Instant) -> Vec<Action> {
         return Vec::new();
     }
     if s.conn.is_none() {
+        set_focus(None);
+        if !presenting {
+            return Vec::new();
+        }
         let Some(d) = s.surfaces.iter().map(|x| x.display).find(|d| !s.failed.contains(d)) else { return Vec::new() };
         // SAFETY: `d` belongs to a live surface (destroying it needs SHARED, which we hold).
         match unsafe { Conn::attach(d as *mut c_void, now) } {
@@ -638,11 +687,13 @@ pub fn service(now: Instant) -> Vec<Action> {
         // SAFETY: still alive (its surface is); after a fatal error libwayland makes the
         // release requests no-ops and only frees our proxies.
         unsafe { c.teardown() };
+        set_focus(None);
         set_state(if ok { KEYS_WL_INTERNAL } else { KEYS_WL_DISPLAY_ERROR });
         return presses;
     }
     // SAFETY: as above.
     let l = unsafe { &*c.listen };
+    set_focus(if l.keyboard.is_null() { None } else { Some(l.focused) });
     let st = if !l.keyboard.is_null() {
         KEYS_WL_ACTIVE
     } else if now.saturating_duration_since(c.since) < SETUP_TIMEOUT {
