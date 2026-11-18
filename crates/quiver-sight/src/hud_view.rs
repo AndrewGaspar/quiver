@@ -387,10 +387,11 @@ impl Render for HudView {
         let ctx = Ctx { th: &th, u, text_alpha: m.text_opacity.clamp(0.5, 1.0), level_colors: m.level_colors, advance, reserved: &self.reserved };
         let panel = hud_card::panel(m.background);
         let (cw, ch) = model_size(m);
-        // A bare card (no panel) leans its rows towards its anchor's side.
-        let justify = |d: Div| match (panel, m.anchor) {
-            (false, Anchor::TopRight | Anchor::Right | Anchor::BottomRight) => d.justify_end(),
-            (false, Anchor::Top | Anchor::Bottom) => d.justify_center(),
+        // Rows lean towards the anchor's side (panel or not): a right-anchored card's
+        // contents are flush right, a centred card's centred; the card keeps its fixed size.
+        let justify = |d: Div| match m.anchor {
+            Anchor::TopRight | Anchor::Right | Anchor::BottomRight => d.justify_end(),
+            Anchor::Top | Anchor::Bottom => d.justify_center(),
             _ => d,
         };
         let row = |cells: &[HudCell], slot: f32| {
