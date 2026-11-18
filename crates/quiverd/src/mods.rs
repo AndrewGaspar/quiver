@@ -215,6 +215,13 @@ impl Daemon {
                         let profiles = ModStore::open(game).profiles()?.into_iter().map(|(p, _)| p).collect();
                         list.push(GameProfiles { product_id: 0, name, profiles, game: Some(game) });
                     }
+                    // Every Epic game Quiver installed.
+                    let epic = epic_core::installs::Installs::new(&quiver_core::launcher::data_dir().join("epic"));
+                    for i in epic.list().unwrap_or_default() {
+                        let Some(game) = epic_core::provider::game_ref(&i.app_name) else { continue };
+                        let profiles = ModStore::open(game).profiles()?.into_iter().map(|(p, _)| p).collect();
+                        list.push(GameProfiles { product_id: 0, name: i.title, profiles, game: Some(game) });
+                    }
                     Ok(list)
                 })
                 .await?;

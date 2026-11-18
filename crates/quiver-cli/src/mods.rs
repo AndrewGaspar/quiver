@@ -320,8 +320,8 @@ impl From<GameArg> for quiver_api::game::GameField {
     }
 }
 
-/// A game mods can be used with, by ref or unique name match: an installed Ubisoft game, or
-/// any Steam game Steam has installed (`steam:<appid>`, or its name when no Ubisoft game
+/// A game mods can be used with, by ref or unique name match: an installed Ubisoft or Epic
+/// game, or any Steam game Steam has installed (`steam:<appid>`, or its name when no Ubisoft game
 /// matches; design/STORE-STEAM.md §10).
 pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<GameProfiles> {
     let games: Vec<GameProfiles> = client.call(Request::Mods(ModsRequest::Games)).await?;
@@ -332,6 +332,9 @@ pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<Gam
         }
         if r.is_ubisoft() {
             bail!("product {} is not installed", r.id);
+        }
+        if r.store == quiver_api::StoreId::Epic {
+            bail!("{r} isn't installed (mods need an Epic game Quiver installed)");
         }
         if r.as_steam().is_none() {
             bail!("{r}: mods for {} games aren't built yet", r.store.label());
