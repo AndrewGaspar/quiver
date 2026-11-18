@@ -10,6 +10,9 @@
 //!   `hud.image`, uploaded only when its publish counter changes, blended at the descriptor's
 //!   position and opacity onto the swapchain image just before present, plus the live
 //!   frame-time graph drawn from the layer's own present history;
+//! - **watches Reflex** (`VK_NV_low_latency2`, [`latency`]): the sleep mode and frame cap the
+//!   app sets, its latency markers and sleeps, so the status block carries the Reflex mode,
+//!   PC latency and the frame-generation multiplier the layer can see;
 //! - **reads the HUD's keys** (Shift+F3, Ctrl+Shift+F3) by polling X11's keymap on its own
 //!   connection ([`keys`]) and, for Wayland-native windows, from a `wl_keyboard` of its own
 //!   on the game's `wl_display` ([`wayland`]), and counts presses in the status block for
@@ -46,6 +49,7 @@ pub mod formats;
 pub mod graph;
 mod hooks;
 pub mod keys;
+pub mod latency;
 mod pipelines;
 mod present;
 mod state;
@@ -89,6 +93,8 @@ pub mod env {
     pub const LOG: &str = "QUIVER_SIGHT_LOG";
     /// `0`: don't read the HUD's keys in the game ([`crate::keys`]).
     pub const KEYS: &str = "QUIVER_SIGHT_KEYS";
+    /// `1`: read Reflex timing reports with `vkGetLatencyTimingsNV` ([`crate::latency`]).
+    pub use crate::latency::ENV_TIMINGS as REFLEX_TIMINGS;
 }
 
 struct Config {
@@ -208,6 +214,10 @@ fn device_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
         b"vkCreateSwapchainKHR" => hook!(hooks::create_swapchain_khr),
         b"vkDestroySwapchainKHR" => hook!(hooks::destroy_swapchain_khr),
         b"vkQueuePresentKHR" => hook!(present::queue_present_khr),
+        // VK_NV_low_latency2 (latency.rs): only returned when the next layer has them.
+        b"vkSetLatencySleepModeNV" => hook!(latency::set_latency_sleep_mode_nv),
+        b"vkLatencySleepNV" => hook!(latency::latency_sleep_nv),
+        b"vkSetLatencyMarkerNV" => hook!(latency::set_latency_marker_nv),
         _ => None,
     }
 }

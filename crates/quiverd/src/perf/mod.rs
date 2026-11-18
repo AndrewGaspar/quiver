@@ -23,6 +23,7 @@ pub mod keybinds;
 pub mod launch;
 pub mod layout;
 pub mod mods;
+pub mod nvidia;
 pub mod nvml;
 pub mod registry;
 pub mod rings;
@@ -121,6 +122,8 @@ pub struct Session {
     pub monitor: Option<String>,
     /// The presenter while shown, as last accounted for the summary.
     noted: Option<Presenter>,
+    /// The layer's Reflex counters at the last drain (`nvidia::apply_layer`).
+    nv_last: nvidia::Last,
 }
 
 impl Session {
@@ -308,6 +311,11 @@ impl PerfHub {
                     None
                 }
             };
+            if cfg.ngx_log
+                && let Err(e) = std::fs::create_dir(dir.path().join(nvidia::NGX_DIR))
+            {
+                notes.push(format!("NGX log dir not created: {e}"));
+            }
             (Some(dir), image)
         } else {
             (None, None)
@@ -330,6 +338,9 @@ impl PerfHub {
             store.producer(catalog::PRODUCER_LAYER, "Sight layer", false).info.ring = "none".into();
             store.declare(catalog::PRODUCER_LAYER, quiver_perf::descriptor::layer_present_descriptor());
         }
+        // What the launch asks of NVIDIA's stack: a DLSS override (requested, not measured)
+        // and Smooth Motion (frames generated above the layer).
+        nvidia::apply_launch(&mut store, &nvidia::LaunchNv::from_env(env), now);
         let s = Session {
             id: session_id.to_owned(),
             game,
@@ -356,6 +367,7 @@ impl PerfHub {
             anti_cheat: false,
             monitor: None,
             noted: None,
+            nv_last: nvidia::Last::default(),
         };
         {
             let mut st = self.lock();
@@ -778,7 +790,22 @@ impl PerfHub {
 }
 
 /// The headline metrics a subscription without `select` gets.
-const HEADLINE: [&str; 12] = ["fps", "fps.base", "frametime", "fps.p1low", "latency.render", "gpu.load", "gpu.temp", "gpu.power", "cpu.load", "cpu.temp", "upscaler", "fg.ratio"];
+const HEADLINE: [&str; 14] = [
+    "fps",
+    "fps.base",
+    "frametime",
+    "fps.p1low",
+    "latency.render",
+    "latency.pc",
+    "nv.reflex.mode",
+    "gpu.load",
+    "gpu.temp",
+    "gpu.power",
+    "cpu.load",
+    "cpu.temp",
+    "upscaler",
+    "fg.ratio",
+];
 
 fn update(s: &Session, sub: &Sub, now: i64) -> PerfUpdate {
     let mut ids: Vec<String> = Vec::new();
@@ -817,6 +844,10 @@ pub fn static_catalog() -> Vec<MetricInfo> {
     s.producer(catalog::PRODUCER_DISPLAY, "Display", false);
     for d in catalog::display() {
         s.declare(catalog::PRODUCER_DISPLAY, d);
+    }
+    s.producer(nvidia::PRODUCER, "NVIDIA (Reflex, DLSS)", false);
+    for d in nvidia::descriptors() {
+        s.declare(nvidia::PRODUCER, d);
     }
     s.catalog(0).into_iter().map(|mut m| {
         m.state = quiver_api::perf::MetricState::Declared;
@@ -871,7 +902,9 @@ pub fn drain_once(h: &PerfHub, watched: &mut HashMap<String, rings::SessionRings
         }
         let alive = drained.layers.iter().any(|l| l.alive && !l.ring.starts_with("invalid"));
         if let Some(l) = drained.layers.iter().rev().find(|l| l.alive && l.status.is_some()) {
-            s.store.set_layer_status(l.status.unwrap());
+            let st = l.status.unwrap();
+            s.store.set_layer_status(st);
+            changed |= nvidia::apply_layer(&mut s.store, &st, &mut s.nv_last, now);
         }
         let p = s.store.producer(catalog::PRODUCER_LAYER, "Sight layer", alive);
         let (records, lost, rejected) = drained.layers.iter().fold((0, 0, 0), |a, l| (a.0 + l.records, a.1 + l.lost, a.2 + l.rejected));
@@ -907,15 +940,51 @@ fn spawn_sensors(hub: Weak<PerfHub>) {
     let _ = std::thread::Builder::new().name("quiverd-perf-sensors".into()).spawn(move || {
         let mut sys = system::SystemProducer::new(system::Roots::default());
         let sock = display::socket();
+        let mut dlss: HashMap<String, nvidia::DlssScan> = HashMap::new();
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let Some(h) = hub.upgrade() else { return };
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sense_once(&h, &mut sys, sock.as_deref())));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sense_once(&h, &mut sys, sock.as_deref());
+                scan_dlss(&h, &mut dlss);
+            }));
             if r.is_err() {
                 tracing::error!("perf: sensors panicked; continuing");
             }
         }
     });
+}
+
+/// The DLSS DLLs mapped in each session's game processes and NGX's log in its session dir
+/// (`nvidia::DlssScan`), outside the hub's lock.
+pub fn scan_dlss(h: &PerfHub, scans: &mut HashMap<String, nvidia::DlssScan>) {
+    let work: Vec<(String, Vec<u32>, Option<PathBuf>)> = {
+        let st = h.lock();
+        st.sessions
+            .values()
+            .map(|s| {
+                let mut pids = s.pids.clone();
+                pids.extend(s.layers.iter().filter(|l| l.alive).map(|l| l.pid));
+                pids.sort_unstable();
+                pids.dedup();
+                (s.id.clone(), pids, s.dir.as_ref().map(|d| d.path().join(nvidia::NGX_DIR)).filter(|p| p.is_dir()))
+            })
+            .collect()
+    };
+    scans.retain(|id, _| work.iter().any(|w| &w.0 == id));
+    let now = std::time::Instant::now();
+    for (id, pids, ngx) in work {
+        let Some(found) = scans.entry(id.clone()).or_default().scan(&pids, ngx.as_deref(), now) else { continue };
+        let at = mono_raw_ns();
+        let fresh = {
+            let mut st = h.lock();
+            let Some(s) = st.sessions.get_mut(&id) else { continue };
+            (nvidia::apply_dlss(&mut s.store, &found, at), s.product_id())
+        };
+        if fresh.0 {
+            h.catalog_changed(&id, fresh.1);
+        }
+    }
 }
 
 /// A session's id, its environment markers and its game pids (to recognize its windows).

@@ -302,6 +302,9 @@ fn update(sub: u64, product: u32, tick: u64) -> PerfUpdate {
         put("latency.render", Stat::Mean, value(lat, format!("{lat:.0}"), "ms", Level::Normal));
         put("fg.ratio", Stat::Last, value(2.0, "2.0".into(), "×", Level::Normal));
         put("upscaler", Stat::Last, PerfValue { text: "DLSS K".into(), ..Default::default() });
+        let pc = 17.0 + 1.5 * w2;
+        put("latency.pc", Stat::Mean, value(pc, format!("{pc:.1}"), "ms", Level::Normal));
+        put("nv.reflex.mode", Stat::Last, PerfValue { text: "boost".into(), level: Level::Good, ..Default::default() });
     }
     let gpu = 87.0 + 3.0 * w2;
     put("gpu.load", Stat::Mean, value(gpu, format!("{gpu:.0}"), "%", Level::Normal));
@@ -371,7 +374,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                 macro_rules! take {
                     ($($f:ident),*) => { $( if set.$f.is_some() { cur.$f = set.$f.clone(); } )* };
                 }
-                take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz);
+                take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz, ngx_log, reflex_timings);
                 for k in &unset {
                     match k.as_str() {
                         "enabled" => cur.enabled = None,
@@ -385,6 +388,8 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                         "background" => cur.background = None,
                         "text_opacity" => cur.text_opacity = None,
                         "rate_hz" => cur.rate_hz = None,
+                        "ngx_log" => cur.ngx_log = None,
+                        "reflex_timings" => cur.reflex_timings = None,
                         k => bail!("unknown HUD setting '{k}'"),
                     }
                 }

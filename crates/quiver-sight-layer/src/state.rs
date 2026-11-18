@@ -13,6 +13,7 @@ use quiver_perf::layout::{LAYER_LOW_LATENCY2, LAYER_PRESENT_WAIT};
 use crate::compositor::Compositor;
 use crate::ffi::{PfnSetDeviceLoaderData, dispatch_key};
 use crate::graph::History;
+use crate::latency::{self, Latency};
 use crate::pipelines::Pipelines;
 use crate::telemetry;
 
@@ -39,6 +40,11 @@ pub struct DeviceData {
     /// `VK_NV_low_latency2` enabled: our submits carry `VkLatencySubmissionPresentIdNV`.
     pub low_latency2: bool,
     pub present_wait: bool,
+    /// The next layer's `VK_NV_low_latency2` commands (latency.rs).
+    pub ll2: latency::Fns,
+    /// Each registered swapchain's Reflex state, apart from the swapchain lock (the app's
+    /// latency calls must not wait for a present's HUD work).
+    latency: RwLock<Vec<(vk::SwapchainKHR, Arc<Latency>)>>,
     queues: RwLock<Vec<(vk::Queue, u32)>>,
     pub swapchains: RwLock<Vec<(vk::SwapchainKHR, Arc<Mutex<Swapchain>>)>>,
     pub pipelines: Mutex<Vec<Arc<Pipelines>>>,
@@ -64,6 +70,7 @@ impl DeviceData {
         props: vk::PhysicalDeviceProperties,
         low_latency2: bool,
         present_wait: bool,
+        ll2: latency::Fns,
     ) -> DeviceData {
         DeviceData {
             handle,
@@ -78,6 +85,8 @@ impl DeviceData {
             props,
             low_latency2,
             present_wait,
+            ll2,
+            latency: RwLock::new(Vec::new()),
             queues: RwLock::new(Vec::new()),
             swapchains: RwLock::new(Vec::new()),
             pipelines: Mutex::new(Vec::new()),
@@ -99,6 +108,24 @@ impl DeviceData {
 
     pub fn swapchain(&self, handle: vk::SwapchainKHR) -> Option<Arc<Mutex<Swapchain>>> {
         read(&self.swapchains).iter().find(|(h, _)| *h == handle).map(|(_, s)| s.clone())
+    }
+
+    pub fn latency(&self, handle: vk::SwapchainKHR) -> Option<Arc<Latency>> {
+        read(&self.latency).iter().find(|(h, _)| *h == handle).map(|(_, l)| l.clone())
+    }
+
+    pub fn add_latency(&self, handle: vk::SwapchainKHR, l: Arc<Latency>) {
+        let mut v = write(&self.latency);
+        v.retain(|(h, _)| *h != handle);
+        v.push((handle, l));
+    }
+
+    pub fn remove_latency(&self, handle: vk::SwapchainKHR) {
+        write(&self.latency).retain(|(h, _)| *h != handle);
+    }
+
+    pub fn clear_latency(&self) {
+        write(&self.latency).clear();
     }
 
     /// Keeps per-image semaphores of a destroyed compositor. The oldest are destroyed once
@@ -157,6 +184,8 @@ pub struct Swapchain {
     pub disabled: Vec<Compositor>,
     /// Why there's no compositor (`DRAW_ERR_*`), or why it was disabled.
     pub draw_error: u32,
+    /// Reflex state (also in the device's latency list).
+    pub latency: Arc<Latency>,
 }
 
 /// Locks, ignoring poisoning (a panic is already handled by [`crate::guard`]).
@@ -246,12 +275,13 @@ pub fn device(h: vk::Device) -> Option<Arc<DeviceData>> {
 /// status block. Called on swapchain creation and destruction.
 pub fn retarget() {
     let mut best: Option<(u64, u32, LayerStatus)> = None;
+    let mut best_latency: Option<(vk::Device, vk::SwapchainKHR, Arc<Latency>)> = None;
     let mut count = 0;
     {
         let devs = read(&DEVICES);
         for (_, d) in devs.iter() {
             let scs = read(&d.swapchains);
-            for (_, sc) in scs.iter() {
+            for (handle, sc) in scs.iter() {
                 let s = lock(sc);
                 count += 1;
                 let area = s.extent.width as u64 * s.extent.height as u64;
@@ -285,10 +315,12 @@ pub fn retarget() {
                 }
                 st.draw_error = s.draw_error;
                 best = Some((area, s.id, st));
+                best_latency = Some((d.handle, *handle, s.latency.clone()));
             }
         }
     }
     let target = best.as_ref().map_or(0, |(_, id, _)| *id);
+    *lock(&latency::TARGET) = best_latency;
     let prev = TARGET.swap(target, Ordering::Relaxed);
     if let Some(t) = telemetry::get() {
         t.update_status(|st| {

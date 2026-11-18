@@ -112,7 +112,9 @@ pub enum HudAction {
     },
     /// HUD settings at a scope: `key=value` to set, `key=` to unset. Keys: enabled, on,
     /// layout, presenter (auto|game|desktop), captures, anchor (top-left, …), offset (x,y),
-    /// scale, background, text_opacity, level_colors, graph_span (ms), safe_area, rate (Hz).
+    /// scale, background, text_opacity, level_colors, graph_span (ms), safe_area, rate (Hz),
+    /// ngx_log (NGX's DLSS log for the HUD's DLSS row), reflex_timings (the layer reads
+    /// Reflex's timing reports for game-to-render latency).
     Set {
         #[arg(required = true)]
         changes: Vec<String>,
@@ -361,11 +363,12 @@ fn print_catalog(cat: &[MetricInfo], all: bool) {
 }
 
 /// Fixed labels for the watch line, in order; anything else selected follows as `id=v`.
-const WATCH_LINE: [(&str, &str); 14] = [
+const WATCH_LINE: [(&str, &str); 15] = [
     ("fps", "FPS"),
     ("frametime", "FT"),
     ("fps.p1low", "1%↓"),
     ("latency.render", "LAT"),
+    ("latency.pc", "PC"),
     ("gpu.load", "GPU"),
     ("gpu.temp", ""),
     ("gpu.power", ""),
@@ -564,6 +567,8 @@ fn kv_scope(changes: &[String]) -> Result<(HudScope, Vec<String>)> {
             "graph_span_ms" => set.graph_span_ms = Some(millis(v)?),
             "safe_area" => set.safe_area = Some(f()?),
             "rate_hz" => set.rate_hz = Some(v.trim_end_matches("Hz").parse()?),
+            "ngx_log" => set.ngx_log = Some(b()?),
+            "reflex_timings" => set.reflex_timings = Some(b()?),
             k => bail!("unknown HUD setting '{k}'"),
         }
     }
@@ -593,6 +598,9 @@ fn print_view(v: &HudSettingsView) {
         e.safe_area,
         e.rate_hz
     );
+    if e.ngx_log || e.reflex_timings {
+        println!("  NVIDIA detail: NGX log {}  Reflex timings {}", if e.ngx_log { "on" } else { "off" }, if e.reflex_timings { "on" } else { "off" });
+    }
     let set = serde_json::to_value(&v.set).unwrap_or_default();
     if set.as_object().is_some_and(|o| !o.is_empty()) {
         println!("  set here: {set}");

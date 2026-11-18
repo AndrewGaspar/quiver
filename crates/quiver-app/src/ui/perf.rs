@@ -1130,6 +1130,13 @@ impl Quiver {
         if has("latency.render") {
             cells.push(cell("LATENCY", get("latency.render"), false));
         }
+        // Reflex through the Sight layer (SIGHT-HUD §3.17): PC latency to present, the mode.
+        if has("latency.pc") {
+            cells.push(cell("PC LATENCY", get("latency.pc"), false));
+        }
+        if has("nv.reflex.mode") {
+            cells.push(cell("REFLEX", get("nv.reflex.mode"), false));
+        }
         cells.push(cell("GPU", get("gpu.load"), false));
         cells.push(cell("", get("gpu.temp"), false));
         cells.push(cell("", get("gpu.power"), false));

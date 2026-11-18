@@ -546,6 +546,15 @@ pub struct HudScope {
     /// Number updates per second: 1, 2, 4 or 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_hz: Option<u32>,
+    /// NVIDIA's NGX (DLSS) logs into the session dir, for the HUD's DLSS preset, quality and
+    /// render resolution (SIGHT-HUD §3.17). Off by default: NGX writes a file per feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ngx_log: Option<bool>,
+    /// The Sight layer reads Reflex's timing reports (`vkGetLatencyTimingsNV`) for the
+    /// game-to-render latency. Off by default: the spec doesn't promise a read leaves the
+    /// game's own reports alone (on NVIDIA 620 it does, SIGHT-HUD §3.17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reflex_timings: Option<bool>,
 }
 
 /// HUD settings resolved for a game and profile.
@@ -565,6 +574,10 @@ pub struct HudConfig {
     pub graph_span_ms: u32,
     pub safe_area: f32,
     pub rate_hz: u32,
+    #[serde(default)]
+    pub ngx_log: bool,
+    #[serde(default)]
+    pub reflex_timings: bool,
 }
 
 impl Default for HudConfig {
@@ -584,6 +597,8 @@ impl Default for HudConfig {
             graph_span_ms: 3000,
             safe_area: 0.0,
             rate_hz: 2,
+            ngx_log: false,
+            reflex_timings: false,
         }
     }
 }
@@ -632,6 +647,12 @@ impl HudConfig {
         }
         if let Some(v) = s.rate_hz {
             self.rate_hz = [1u32, 2, 4, 10].into_iter().min_by_key(|r| r.abs_diff(v)).unwrap_or(2);
+        }
+        if let Some(v) = s.ngx_log {
+            self.ngx_log = v;
+        }
+        if let Some(v) = s.reflex_timings {
+            self.reflex_timings = v;
         }
         self
     }

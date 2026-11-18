@@ -355,14 +355,17 @@ fn mod_metrics_through_the_registry_sink() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     sink.samples(&m, 0, &[s(0, CheckedValue::Counter(18))]);
     let cat = e.hub.catalog(Some(&sid), None).unwrap();
-    assert!(cat.iter().any(|x| x.descriptor.id == "aco-dlss.frames.real" && x.roles == [catalog::ROLE_BASE_COUNT]));
+    // Generic roles are never a mod's (§3.4): the claim is listed as a conflict, the metric
+    // stays under the mod's namespace, and the generic metrics don't take its values.
+    assert!(cat.iter().any(|x| x.descriptor.id == "aco-dlss.frames.real" && x.roles.is_empty() && x.conflicts == [catalog::ROLE_BASE_COUNT]));
     assert!(!cat.iter().any(|x| x.descriptor.id == "other.thing"));
     let base = cat.iter().find(|x| x.descriptor.id == "fps.base").unwrap();
-    assert_eq!(base.source.as_deref(), Some("aco-dlss.frames.real"));
-    let v = e.hub.with_session(Some(&sid), 3539, |s| s.store.value("fps.base", Stat::Mean, registry::WINDOW_1S, mono_raw_ns())).flatten();
+    assert_eq!(base.source.as_deref(), Some("fps"));
+    let v = e.hub.with_session(Some(&sid), 3539, |s| s.store.value("aco-dlss.frames.real", Stat::Rate, registry::WINDOW_1S, mono_raw_ns())).flatten();
     let rate = v.and_then(|r| r.num()).unwrap();
     assert!((40.0..=80.0).contains(&rate), "{rate}");
-    assert_eq!(cat.iter().find(|x| x.descriptor.id == "upscaler").unwrap().last.as_ref().unwrap().text, "DLSS K");
+    assert_eq!(cat.iter().find(|x| x.descriptor.id == "upscaler").unwrap().last.as_ref().unwrap().text, "—");
+    assert_eq!(cat.iter().find(|x| x.descriptor.id == "aco-dlss.upscaler").unwrap().last.as_ref().unwrap().text, "DLSS K");
     // A mark with a QPC time far outside the session is dropped and the clock flagged.
     sink.mark(&m, &declared[1], 1, None, Some("begin"));
     let info = e.hub.sessions().into_iter().find(|s| s.session == sid).unwrap();
@@ -372,6 +375,41 @@ fn mod_metrics_through_the_registry_sink() {
     sink.disconnected(&m);
     let cat = e.hub.catalog(Some(&sid), None).unwrap();
     assert_eq!(cat.iter().find(|x| x.descriptor.id == "aco-dlss.fg.state").unwrap().state, quiver_api::perf::MetricState::Gone);
+    e.hub.end(&sid);
+}
+
+/// The layer's Reflex block, end to end: a status block with sleep mode, counters and
+/// latency sums → the `nvidia` producer → fps.base, fg.ratio, latency.pc and the Full row.
+#[test]
+fn reflex_from_the_layer_status_block() {
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 3539);
+    let w = fake_layer(&dir, 2);
+    let mut watched = HashMap::new();
+    let mut st = fake_status();
+    st.reflex_flags = quiver_perf::layout::REFLEX_MODE_SET
+        | quiver_perf::layout::REFLEX_LOW_LATENCY
+        | quiver_perf::layout::REFLEX_SLEEPING
+        | quiver_perf::layout::REFLEX_COUNTING_SLEEP;
+    st.reflex_min_interval_us = 6250;
+    // Two status writes 600 ms apart: 36 frames, 72 presents, 36 latency samples of 18 ms.
+    for (frames, lat_frames) in [(100u64, 100u64), (136, 136)] {
+        st.app_frames = frames;
+        st.app_presents = frames * 2;
+        st.pc_latency_frames = lat_frames;
+        st.pc_latency_sum_us = lat_frames * 18_000;
+        w.set_layer_status(&st);
+        drain_once(&e.hub, &mut watched);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+    let now = mono_raw_ns();
+    let v = |id: &str| e.hub.with_session(Some(&sid), 3539, |s| s.store.formatted(id, Stat::Mean, registry::WINDOW_1S, now)).flatten().map(|v| v.text);
+    assert_eq!(v("fg.ratio").as_deref(), Some("2.0"));
+    assert_eq!(v("latency.pc").as_deref(), Some("18.0"));
+    assert_eq!(v("nv.reflex.cap").as_deref(), Some("160"));
+    let cat = e.hub.catalog(Some(&sid), None).unwrap();
+    assert_eq!(cat.iter().find(|x| x.descriptor.id == "fps.base").unwrap().source.as_deref(), Some("nv.frames.app"));
+    assert!(cat.iter().any(|x| x.descriptor.id == "nv.reflex.mode" && x.last.as_ref().is_some_and(|l| l.text == "on")));
     e.hub.end(&sid);
 }
 

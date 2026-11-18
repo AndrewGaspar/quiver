@@ -960,6 +960,10 @@ help = "About 2.6–3× Alexandria's crowds. Costs CPU."
 set = { "world.npc_density" = 5, "world.npc_distance" = 2 }
 
 # ---------------------------------------------------------------- metrics (SIGHT-HUD §3.15)
+# The mod's own metrics, under its namespace (aco-dlss.*). They claim no generic roles
+# (fps.base, fg.*, latency.*, upscaler, render.resolution): those come only from sources
+# that don't depend on a mod (the Sight layer's Reflex hooks, NGX's log, the game's DLLs;
+# SIGHT-HUD §3.4, §3.17), and quiverd ignores a mod's claim on one.
 
 [metric.frame]
 kind = "frame"
@@ -971,10 +975,6 @@ fields = ["game_present", "present_call", "present_return"]
 sample = "per-frame"
 level = "advanced"
 group = "Frame generation"
-roles = [
-  { role = "frame.base", flags = ["real", "nofg"], on = "game_present" },
-  { role = "frame.generated", flags = ["generated"], on = "present_call" },
-]
 
 [metric."fg.state"]
 kind = "state"
@@ -985,7 +985,6 @@ values = [
   { value = "on", label = "on" },
   { value = "failed", label = "failed", level = "bad" },
 ]
-roles = ["fg.state"]
 group = "Frame generation"
 display = "badge"
 level = "basic"
@@ -1003,7 +1002,6 @@ level = "advanced"
 kind = "text"
 label = "Upscaler"
 help = "The upscaler in use: DLSS and its preset, or the game's TAA."
-roles = ["upscaler"]
 group = "Upscaling"
 level = "basic"
 
@@ -1011,7 +1009,6 @@ level = "basic"
 kind = "text"
 label = "Internal resolution"
 help = "The resolution the game renders at before upscaling."
-roles = ["render.resolution"]
 group = "Upscaling"
 level = "basic"
 
@@ -1047,7 +1044,6 @@ clock = "reflex_us"
 key = "frame_id"
 fields = ["input", "sim_start", "sim_end", "submit_start", "submit_end", "present_start",
           "present_end", "driver_end", "queue_end", "gpu_start", "gpu_end"]
-roles = ["latency.frame"]
 group = "Latency"
 level = "advanced"
 

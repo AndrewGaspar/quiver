@@ -13,17 +13,42 @@ pub const PRODUCER_DISPLAY: &str = "display";
 /// Quiver Tweaks (design/TWEAKS.md §6): what each active tweak does this session.
 pub const PRODUCER_TWEAKS: &str = "tweaks";
 
-/// Roles a phase-1 mod fills over JSON, beside quiver-perf's ring roles (`frame.base`, …):
-/// a counter of real frames, whose rate is `fps.base` (mean only), and a counter of
-/// generated frames.
+/// Generic roles (§3.4, §3.17): filled only by implementation-agnostic producers (the Sight
+/// layer's Vulkan interception, NGX's and dxvk-nvapi's logs, the game's DLLs: the `nvidia`
+/// producer), never by a mod. A mod's claim on one is recorded in the catalog as a conflict
+/// and not bound; its metric stays under the mod's own namespace.
+///
+/// A counter of application-rendered frames, whose rate is `fps.base` (mean only), and a
+/// counter of the further (generated) presents.
 pub const ROLE_BASE_COUNT: &str = "frame.base.count";
 pub const ROLE_GENERATED_COUNT: &str = "frame.generated.count";
-/// A gauge of mean render latency in ms the mod computes from Reflex reports.
+/// A gauge of mean game-to-render latency in ms (simulation start → GPU render end).
 pub const ROLE_LATENCY_RENDER: &str = "latency.render";
+/// A gauge of mean PC latency to present in ms (simulation start → present).
+pub const ROLE_LATENCY_PC: &str = "latency.pc";
 pub const ROLE_FG_STATE: &str = "fg.state";
 pub const ROLE_UPSCALER: &str = "upscaler";
 pub const ROLE_RENDER_RES: &str = "render.resolution";
 pub const ROLE_OUTPUT_RES: &str = "output.resolution";
+/// The ring roles of §3.4 (`frame.base`, `frame.generated`, `latency.frame`) are generic too.
+pub const GENERIC_ROLES: [&str; 11] = [
+    ROLE_BASE_COUNT,
+    ROLE_GENERATED_COUNT,
+    ROLE_LATENCY_RENDER,
+    ROLE_LATENCY_PC,
+    ROLE_FG_STATE,
+    ROLE_UPSCALER,
+    ROLE_RENDER_RES,
+    ROLE_OUTPUT_RES,
+    "frame.base",
+    "frame.generated",
+    "latency.frame",
+];
+
+/// Whether `producer` may fill generic roles: built-in producers only, not mods.
+pub fn agnostic(producer: &str) -> bool {
+    !producer.starts_with("mod:")
+}
 
 /// What feeds a canonical metric.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +57,9 @@ pub enum Source {
     Frames,
     /// The rate of the counter that fills a role.
     CounterRate(&'static str),
-    /// `fps` ÷ `fps.base`.
+    /// Presents per application frame: (base + generated) ÷ base from the same counters,
+    /// else `fps` ÷ `fps.base`. Not shown while a driver frame generator (Smooth Motion) the
+    /// layer can't see is on.
     FgRatio,
     /// Whether frame generation is on (a base provider, and `fg.state` not off).
     FgActive,
@@ -134,25 +161,42 @@ pub fn canonical() -> Vec<Canonical> {
         Unit::Fps,
         "Base FPS",
         Some("FPS"),
-        "Frames the game rendered per second (a frame-generation mod's real frames; else presented FPS). Mean only in this version.",
+        "Frames the game rendered per second: application frames the Sight layer counts from Reflex (sleeps or present markers); else presented FPS. Mean only in this version.",
         Source::CounterRate(ROLE_BASE_COUNT),
     );
-    alias("fps.generated", MetricKind::Gauge, Unit::Fps, "Generated FPS", Some("GEN"), "Generated frames per second, from a frame-generation mod.", Source::CounterRate(ROLE_GENERATED_COUNT));
-    alias("fg.ratio", MetricKind::Gauge, Unit::Ratio, "FG ratio", Some("FG"), "Presented ÷ base FPS.", Source::FgRatio);
-    alias("fg.active", MetricKind::State, Unit::None, "FG active", None, "Frame generation is on: a mod provides base frames and its FG state isn't off.", Source::FgActive);
-    alias("fg.state", MetricKind::State, Unit::None, "Frame generation", Some("FG"), "The frame-generation state a mod reports.", Source::Alias(ROLE_FG_STATE));
+    alias("fps.generated", MetricKind::Gauge, Unit::Fps, "Generated FPS", Some("GEN"), "Presents beyond the first of each game frame, per second (the Sight layer's Reflex counting).", Source::CounterRate(ROLE_GENERATED_COUNT));
+    alias(
+        "fg.ratio",
+        MetricKind::Gauge,
+        Unit::Ratio,
+        "FG ratio",
+        Some("FG"),
+        "Presents per game frame the Sight layer sees (needs Reflex sleeps or markers). Smooth Motion and lsfg-vk sit above the layer and aren't counted.",
+        Source::FgRatio,
+    );
+    alias("fg.active", MetricKind::State, Unit::None, "FG active", None, "Frame generation is on: the layer counts game frames and presents clearly outrun them.", Source::FgActive);
+    alias("fg.state", MetricKind::State, Unit::None, "Frame generation", Some("FG"), "A frame-generation state from an agnostic source (none yet).", Source::Alias(ROLE_FG_STATE));
     alias(
         "latency.render",
         MetricKind::Gauge,
         Unit::Ms,
         "Render latency",
         Some("LAT"),
-        "Simulation start to GPU end, from a mod's Reflex reports.",
+        "Simulation start to GPU end, from the driver's Reflex reports (the Sight layer's opt-in vkGetLatencyTimingsNV reads).",
         Source::Alias(ROLE_LATENCY_RENDER),
     );
-    alias("upscaler", MetricKind::Text, Unit::None, "Upscaler", None, "The upscaler a mod reports (\"DLSS K\", \"TAA\").", Source::Alias(ROLE_UPSCALER));
-    alias("render.resolution", MetricKind::Text, Unit::None, "Render resolution", None, "The game's internal resolution, from a mod.", Source::Alias(ROLE_RENDER_RES));
-    alias("output.resolution", MetricKind::Text, Unit::None, "Output resolution", None, "The swapchain's size, from the Sight layer (or a mod).", Source::OutputResolution);
+    alias(
+        "latency.pc",
+        MetricKind::Gauge,
+        Unit::Ms,
+        "PC latency (to present)",
+        Some("PC"),
+        "Simulation start (or the marked input sample) to the frame's present returning at the Sight layer, from Reflex markers. Excludes queued GPU work and scan-out.",
+        Source::Alias(ROLE_LATENCY_PC),
+    );
+    alias("upscaler", MetricKind::Text, Unit::None, "Upscaler", None, "The upscaler and preset NGX logged (\"DLSS K\"; opt-in NGX log).", Source::Alias(ROLE_UPSCALER));
+    alias("render.resolution", MetricKind::Text, Unit::None, "Render resolution", None, "DLSS's input size at feature creation, from NGX's log.", Source::Alias(ROLE_RENDER_RES));
+    alias("output.resolution", MetricKind::Text, Unit::None, "Output resolution", None, "DLSS's output size from NGX's log, else the swapchain's size from the Sight layer.", Source::OutputResolution);
     alias("session.time", MetricKind::Gauge, Unit::S, "Session time", Some("TIME"), "Time since the game started.", Source::SessionTime);
     alias("clock.time", MetricKind::Text, Unit::None, "Clock", None, "Local time.", Source::Clock);
     for c in &mut out {
@@ -162,7 +206,7 @@ pub fn canonical() -> Vec<Canonical> {
         if c.desc.id == "frametime" || c.desc.id == "frametime.p99" {
             c.desc.thresholds = vec![above(33.4, Level::Warn), above(50.0, Level::Bad)];
         }
-        if c.desc.id == "latency.render" {
+        if c.desc.id == "latency.render" || c.desc.id == "latency.pc" {
             c.desc.thresholds = vec![above(30.0, Level::Warn), above(50.0, Level::Bad)];
             c.desc.better = Some(Better::Lower);
         }

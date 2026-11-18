@@ -9,6 +9,8 @@
 //! | `VK_ADD_IMPLICIT_LAYER_PATH` | Quiver's layer dir | only when the layer is installed there rather than in `~/.local/share/vulkan/implicit_layer.d` |
 //! | `VK_INSTANCE_LAYERS` | the order below | always: without it the loader may put Sight above (closer to the application than) vkBasalt or lsfg-vk, and the HUD gets post-processed or interpolated |
 //! | `MANGOHUD_CONFIG` | `…,toggle_logging=Shift_L+F7` | only when the launch runs MangoHud: moves its logging key off Sight's Shift+F2 |
+//! | `__NGX_LOG_LEVEL`, `__NGX_ENABLE_OVERRIDE_LOG_PATH`, `__NGX_LOG_PATH_OVERRIDE` | `1`, `1`, `Z:\…\<session>\ngx\` | only with `ngx_log` on: NGX's own log, for the DLSS preset, quality and render resolution (SIGHT-HUD §3.17) |
+//! | `QUIVER_SIGHT_REFLEX_TIMINGS` | `1` | only with `reflex_timings` on: the layer reads Reflex's timing reports |
 //!
 //! Layer order, application first: the user's own `VK_INSTANCE_LAYERS`, then the
 //! frame-generation and post-processing layers the launch turns on (the HUD must not be
@@ -121,6 +123,19 @@ pub fn plan(cfg: &HudConfig, session_env: &[(&str, String)], env: &BTreeMap<Stri
             None => p.notes.push("MangoHud's toggle_logging is set by the game's settings; left as is".into()),
         }
     }
+    if cfg.ngx_log
+        && let Some((_, dir)) = session_env.iter().find(|(k, _)| *k == quiver_perf::session::ENV_PERF_DIR)
+    {
+        let add = super::nvidia::ngx_env(Path::new(dir), env);
+        if add.len() < 3 {
+            p.notes.push("NGX logging: the launch sets its own __NGX_* variables; those win".into());
+        }
+        p.env.extend(add);
+        p.notes.push("NGX logging on (DLSS preset, quality and resolution in the HUD)".into());
+    }
+    if cfg.reflex_timings {
+        p.env.insert("QUIVER_SIGHT_REFLEX_TIMINGS".into(), "1".into());
+    }
     p.notes.push(format!("HUD: {} ({}), presenter {:?}, captures {:?}", cfg.layout, if cfg.on { "shown" } else { "hidden until Shift+F3" }, cfg.presenter, cfg.captures).to_lowercase());
     p
 }
@@ -195,6 +210,17 @@ mod tests {
         // HUD off: untouched.
         let p = plan(&HudConfig::default(), &sess(), &e, &[], None);
         assert!(!p.env.contains_key("VK_INSTANCE_LAYERS"));
+    }
+
+    #[test]
+    fn nvidia_detail_is_opt_in() {
+        let p = plan(&on(), &sess(), &BTreeMap::new(), &[], None);
+        assert!(!p.env.keys().any(|k| k.starts_with("__NGX") || k == "QUIVER_SIGHT_REFLEX_TIMINGS"));
+        let p = plan(&HudConfig { ngx_log: true, reflex_timings: true, ..on() }, &sess(), &env(&[("__NGX_LOG_LEVEL", "2")]), &[], None);
+        assert_eq!(p.env["__NGX_LOG_PATH_OVERRIDE"], "Z:\\dev\\shm\\quiver-1000\\s-1\\ngx\\");
+        assert_eq!(p.env["__NGX_ENABLE_OVERRIDE_LOG_PATH"], "1");
+        assert!(!p.env.contains_key("__NGX_LOG_LEVEL"), "the launch's own level wins");
+        assert_eq!(p.env["QUIVER_SIGHT_REFLEX_TIMINGS"], "1");
     }
 
     #[test]

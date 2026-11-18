@@ -86,6 +86,17 @@ extern "C" {
 #define QV_LAYER_WAYLAND_SURFACE  0x40 /* the game made a Wayland VkSurfaceKHR */
 #define QV_LAYER_X11_SURFACE      0x80 /* ... an Xlib or XCB one */
 
+/* qv_layer_status.reflex_flags */
+#define QV_REFLEX_MODE_SET        0x001 /* the app called vkSetLatencySleepModeNV */
+#define QV_REFLEX_LOW_LATENCY     0x002
+#define QV_REFLEX_BOOST           0x004
+#define QV_REFLEX_MARKERS         0x008 /* present markers within the last second */
+#define QV_REFLEX_SLEEPING        0x010 /* vkLatencySleepNV within the last second */
+#define QV_REFLEX_COUNTING_SLEEP  0x020 /* app frames counted by sleeps */
+#define QV_REFLEX_COUNTING_MARKERS 0x040 /* ... by present markers */
+#define QV_REFLEX_OUT_OF_BAND     0x080 /* out-of-band present markers seen */
+#define QV_REFLEX_TIMINGS         0x100 /* vkGetLatencyTimingsNV polling on (opt-in) */
+
 /* qv_layer_status.keys & 0xff: the layer's in-game HUD key polling (X11 XQueryKeymap). */
 #define QV_KEYS_UNKNOWN           0 /* not reported (not started, or an older layer) */
 #define QV_KEYS_ACTIVE            1
@@ -201,6 +212,18 @@ typedef struct qv_layer_status {
     uint32_t keys;              /* QV_KEYS_* | QV_KEYS_WL_* << QV_KEYS_WL_SHIFT */
     uint16_t key_toggles;       /* HUD toggle / next-preset chord presses, wrapping */
     uint16_t key_nexts;
+    /* Reflex (VK_NV_low_latency2) on that swapchain, as the app drives it (SIGHT-HUD 3.17). */
+    uint32_t reflex_flags;      /* QV_REFLEX_* */
+    uint32_t reflex_min_interval_us; /* the app's minimumIntervalUs (Reflex frame cap), 0 none */
+    uint64_t reflex_markers;    /* vkSetLatencyMarkerNV calls (cumulative per swapchain) */
+    uint64_t reflex_sleeps;     /* vkLatencySleepNV calls */
+    uint64_t app_frames;        /* application-rendered frames counted ... */
+    uint64_t app_presents;      /* ... and presents counted alongside (FG multiplier) */
+    uint64_t pc_latency_frames; /* sim start (or input sample) -> present returned, samples */
+    uint64_t pc_latency_sum_us;
+    uint64_t render_latency_frames; /* opt-in vkGetLatencyTimingsNV: sim start -> GPU end */
+    uint64_t render_latency_sum_us;
+    uint32_t reflex_reserved[2];
 } qv_layer_status;
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
@@ -290,7 +313,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 256);
+QV_ASSERT_SIZE(qv_layer_status, 336);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -316,6 +339,17 @@ QV_ASSERT_OFFSET(qv_layer_status, device_name, 184);
 QV_ASSERT_OFFSET(qv_layer_status, keys, 248);
 QV_ASSERT_OFFSET(qv_layer_status, key_toggles, 252);
 QV_ASSERT_OFFSET(qv_layer_status, key_nexts, 254);
+QV_ASSERT_OFFSET(qv_layer_status, reflex_flags, 256);
+QV_ASSERT_OFFSET(qv_layer_status, reflex_min_interval_us, 260);
+QV_ASSERT_OFFSET(qv_layer_status, reflex_markers, 264);
+QV_ASSERT_OFFSET(qv_layer_status, reflex_sleeps, 272);
+QV_ASSERT_OFFSET(qv_layer_status, app_frames, 280);
+QV_ASSERT_OFFSET(qv_layer_status, app_presents, 288);
+QV_ASSERT_OFFSET(qv_layer_status, pc_latency_frames, 296);
+QV_ASSERT_OFFSET(qv_layer_status, pc_latency_sum_us, 304);
+QV_ASSERT_OFFSET(qv_layer_status, render_latency_frames, 312);
+QV_ASSERT_OFFSET(qv_layer_status, render_latency_sum_us, 320);
+QV_ASSERT_OFFSET(qv_layer_status, reflex_reserved, 328);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

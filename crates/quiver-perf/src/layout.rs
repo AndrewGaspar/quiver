@@ -50,7 +50,10 @@ pub const PRODUCER_LAYER: u32 = 1;
 pub const PRODUCER_MOD: u32 = 2;
 
 /// Record flags (`qv_record.flags`). Frame records: one of REAL, GENERATED, NOFG (REAL|NOFG
-/// for "FG off"). Event records: HAS_LABEL, HAS_DURATION. Layer present records: PRESENT_*.
+/// for "FG off"). Event records: HAS_LABEL, HAS_DURATION. Layer present records: PRESENT_*,
+/// and REAL (the first present of an application-rendered frame) or GENERATED (a further
+/// present of one) while the layer counts Reflex frames (`REFLEX_COUNTING_*`); neither
+/// otherwise.
 pub const FLAG_REAL: u8 = 1 << 0;
 pub const FLAG_GENERATED: u8 = 1 << 1;
 pub const FLAG_NOFG: u8 = 1 << 2;
@@ -196,7 +199,51 @@ pub struct LayerStatus {
     /// difference from the last value it read (the first value it reads is the baseline).
     pub key_toggles: u16,
     pub key_nexts: u16,
+    /// Reflex (`VK_NV_low_latency2`) on the HUD's swapchain, as the application (or DXVK /
+    /// vkd3d-proton on its behalf) drives it through the layer (SIGHT-HUD §3.17):
+    /// `REFLEX_*` flags.
+    pub reflex_flags: u32,
+    /// `VkLatencySleepModeInfoNV::minimumIntervalUs` the app last set (Reflex's frame cap),
+    /// 0 for none.
+    pub reflex_min_interval_us: u32,
+    /// `vkSetLatencyMarkerNV` and `vkLatencySleepNV` calls on that swapchain (cumulative; a
+    /// new swapchain starts again from 0).
+    pub reflex_markers: u64,
+    pub reflex_sleeps: u64,
+    /// Application-rendered frames the layer counted (the first present of each), and every
+    /// present it counted alongside, while counting was live (`REFLEX_COUNTING_*`):
+    /// presents ÷ frames is the frame-generation multiplier the layer can see.
+    pub app_frames: u64,
+    pub app_presents: u64,
+    /// PC latency samples (simulation start, or the input sample when marked, to the frame's
+    /// `vkQueuePresentKHR` returning at the layer) and their sum, µs.
+    pub pc_latency_frames: u64,
+    pub pc_latency_sum_us: u64,
+    /// Opt-in (`QUIVER_SIGHT_REFLEX_TIMINGS=1`): frames read back with
+    /// `vkGetLatencyTimingsNV` and the sum of their simulation start → GPU render end, µs.
+    pub render_latency_frames: u64,
+    pub render_latency_sum_us: u64,
+    pub reflex_reserved: [u32; 2],
 }
+
+/// `LayerStatus::reflex_flags`: the app called `vkSetLatencySleepModeNV` on the swapchain.
+pub const REFLEX_MODE_SET: u32 = 1 << 0;
+/// The last sleep mode had `lowLatencyMode` on.
+pub const REFLEX_LOW_LATENCY: u32 = 1 << 1;
+/// ... and `lowLatencyBoost`.
+pub const REFLEX_BOOST: u32 = 1 << 2;
+/// Present markers (`PRESENT_START`, or out-of-band present markers) within the last second.
+pub const REFLEX_MARKERS: u32 = 1 << 3;
+/// `vkLatencySleepNV` within the last second.
+pub const REFLEX_SLEEPING: u32 = 1 << 4;
+/// Application frames are counted by `vkLatencySleepNV` calls (one per frame).
+pub const REFLEX_COUNTING_SLEEP: u32 = 1 << 5;
+/// ... by present markers, with the spec's frame attribution rules.
+pub const REFLEX_COUNTING_MARKERS: u32 = 1 << 6;
+/// Out-of-band present markers seen (a frame-generation implementation marks its presents).
+pub const REFLEX_OUT_OF_BAND: u32 = 1 << 7;
+/// `vkGetLatencyTimingsNV` polling is on (opt-in).
+pub const REFLEX_TIMINGS: u32 = 1 << 8;
 
 pub const LAYER_DRAWING: u32 = 1 << 0;
 pub const LAYER_LOW_LATENCY2: u32 = 1 << 1;
@@ -356,7 +403,7 @@ const _: () = {
     assert!(size_of::<StatusBlock>() == RING_STATUS_BYTES);
     assert!(size_of::<Record>() == SLOT_BYTES);
     assert!(align_of::<Record>() == 8);
-    assert!(size_of::<LayerStatus>() == 256);
+    assert!(size_of::<LayerStatus>() == 336);
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
@@ -441,6 +488,17 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, keys),
     o!("qv_layer_status", LayerStatus, key_toggles),
     o!("qv_layer_status", LayerStatus, key_nexts),
+    o!("qv_layer_status", LayerStatus, reflex_flags),
+    o!("qv_layer_status", LayerStatus, reflex_min_interval_us),
+    o!("qv_layer_status", LayerStatus, reflex_markers),
+    o!("qv_layer_status", LayerStatus, reflex_sleeps),
+    o!("qv_layer_status", LayerStatus, app_frames),
+    o!("qv_layer_status", LayerStatus, app_presents),
+    o!("qv_layer_status", LayerStatus, pc_latency_frames),
+    o!("qv_layer_status", LayerStatus, pc_latency_sum_us),
+    o!("qv_layer_status", LayerStatus, render_latency_frames),
+    o!("qv_layer_status", LayerStatus, render_latency_sum_us),
+    o!("qv_layer_status", LayerStatus, reflex_reserved),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
@@ -533,6 +591,15 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_LAYER_HUD_OFF", LAYER_HUD_OFF as u64),
     ("QV_LAYER_WAYLAND_SURFACE", LAYER_WAYLAND_SURFACE as u64),
     ("QV_LAYER_X11_SURFACE", LAYER_X11_SURFACE as u64),
+    ("QV_REFLEX_MODE_SET", REFLEX_MODE_SET as u64),
+    ("QV_REFLEX_LOW_LATENCY", REFLEX_LOW_LATENCY as u64),
+    ("QV_REFLEX_BOOST", REFLEX_BOOST as u64),
+    ("QV_REFLEX_MARKERS", REFLEX_MARKERS as u64),
+    ("QV_REFLEX_SLEEPING", REFLEX_SLEEPING as u64),
+    ("QV_REFLEX_COUNTING_SLEEP", REFLEX_COUNTING_SLEEP as u64),
+    ("QV_REFLEX_COUNTING_MARKERS", REFLEX_COUNTING_MARKERS as u64),
+    ("QV_REFLEX_OUT_OF_BAND", REFLEX_OUT_OF_BAND as u64),
+    ("QV_REFLEX_TIMINGS", REFLEX_TIMINGS as u64),
     ("QV_KEYS_UNKNOWN", KEYS_UNKNOWN as u64),
     ("QV_KEYS_ACTIVE", KEYS_ACTIVE as u64),
     ("QV_KEYS_OFF", KEYS_OFF as u64),

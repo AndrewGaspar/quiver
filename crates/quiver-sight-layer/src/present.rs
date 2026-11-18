@@ -17,6 +17,8 @@ use crate::{draw_enabled, guard, log, telemetry};
 
 /// Swapchains per present the layer records (more are presented but not recorded).
 const MAX_SWAPCHAINS: usize = 8;
+/// `VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR` (VK_KHR_present_id2; newer than ash's headers).
+const STRUCTURE_TYPE_PRESENT_ID_2_KHR: vk::StructureType = vk::StructureType::from_raw(1_000_479_001);
 
 struct Plan {
     n: usize,
@@ -26,6 +28,8 @@ struct Plan {
     semaphore: [vk::Semaphore; 1],
     drawn_on: Option<usize>,
     hud_ns: i64,
+    /// Which of the present's swapchains is the HUD's target (Reflex frame counting).
+    target: Option<usize>,
 }
 
 impl Plan {
@@ -37,6 +41,7 @@ impl Plan {
             semaphore: [vk::Semaphore::null()],
             drawn_on: None,
             hud_ns: 0,
+            target: None,
         }
     }
 }
@@ -82,9 +87,14 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
     let n = count.min(MAX_SWAPCHAINS);
     // SAFETY: the app's arrays have swapchain_count entries.
     let (handles, indices) = unsafe { (std::slice::from_raw_parts(pi.p_swapchains, n), std::slice::from_raw_parts(pi.p_image_indices, n)) };
-    // DXVK chains its frame id here (VK_KHR_present_id).
+    // DXVK chains its frame id here (VK_KHR_present_id, or VK_KHR_present_id2's
+    // VkPresentId2KHR, the same layout, which DXVK prefers when the driver has it).
     // SAFETY: the app's pNext chain.
-    let pid = unsafe { find_in_chain(pi.p_next, vk::StructureType::PRESENT_ID_KHR, |_| true) } as *const vk::PresentIdKHR<'_>;
+    let mut pid = unsafe { find_in_chain(pi.p_next, vk::StructureType::PRESENT_ID_KHR, |_| true) } as *const vk::PresentIdKHR<'_>;
+    if pid.is_null() {
+        // SAFETY: as above; VkPresentId2KHR is {sType, pNext, swapchainCount, pPresentIds}.
+        pid = unsafe { find_in_chain(pi.p_next, STRUCTURE_TYPE_PRESENT_ID_2_KHR, |_| true) } as *const vk::PresentIdKHR<'_>;
+    }
     if !pid.is_null() {
         // SAFETY: a PresentIdKHR from the chain.
         let p = unsafe { &*pid };
@@ -108,6 +118,7 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
 
     let target = TARGET.load(Ordering::Relaxed);
     let Some(i) = plan.swapchains[..n].iter().position(|s| s.as_ref().is_some_and(|s| lock(s).id == target)) else { return };
+    plan.target = Some(i);
     let sc = plan.swapchains[i].clone().unwrap();
     let mut s = lock(&sc);
     let mut history = lock(&HISTORY);
@@ -189,11 +200,13 @@ unsafe fn finish(dev: &DeviceData, pi: &vk::PresentInfoKHR<'_>, plan: &Plan, ent
     let results = if plan.n > 0 && !pi.p_results.is_null() { Some(unsafe { std::slice::from_raw_parts(pi.p_results, plan.n) }) } else { None };
     for i in 0..plan.n {
         let Some(sc) = &plan.swapchains[i] else { continue };
-        let (id, seq, mode) = {
+        let (id, seq, mode, latency) = {
             let mut s = lock(sc);
             s.seq += 1;
-            (s.id, s.seq, s.present_mode)
+            (s.id, s.seq, s.present_mode, (plan.target == Some(i)).then(|| s.latency.clone()))
         };
+        // Reflex frame attribution and counting, on the HUD's swapchain only.
+        let app_frame = latency.and_then(|l| l.on_present(ret));
         let rec = LayerPresent {
             swapchain: id,
             present_id: plan.present_ids[i],
@@ -205,6 +218,7 @@ unsafe fn finish(dev: &DeviceData, pi: &vk::PresentInfoKHR<'_>, plan: &Plan, ent
             result: results.map_or(result, |r| r[i]).as_raw(),
             hud_drawn: plan.drawn_on == Some(i),
             hud_ns: if plan.drawn_on == Some(i) { plan.hud_ns } else { 0 },
+            app_frame,
         };
         t.ring.push(&rec.to_record());
     }

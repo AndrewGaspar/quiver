@@ -174,6 +174,10 @@ pub struct LayerPresent {
     /// The HUD was composited into this present.
     pub hud_drawn: bool,
     pub hud_ns: i64,
+    /// While the layer counts Reflex frames: `Some(true)` for the first present of an
+    /// application-rendered frame ([`FLAG_REAL`]), `Some(false)` for a further one
+    /// ([`FLAG_GENERATED`]: a frame generator's).
+    pub app_frame: Option<bool>,
 }
 
 impl LayerPresent {
@@ -185,6 +189,11 @@ impl LayerPresent {
         }
         if self.hud_drawn {
             flags |= FLAG_PRESENT_HUD;
+        }
+        match self.app_frame {
+            Some(true) => flags |= FLAG_REAL,
+            Some(false) => flags |= FLAG_GENERATED,
+            None => {}
         }
         let mut f = [0i64; PRESENT_NFIELDS];
         f[PRESENT_F_ENTRY] = self.entry_ns;
@@ -216,6 +225,13 @@ impl LayerPresent {
             result: f[PRESENT_F_RESULT] as i32,
             hud_drawn: r.flags & FLAG_PRESENT_HUD != 0,
             hud_ns: f[PRESENT_F_HUD_NS],
+            app_frame: if r.is_real() {
+                Some(true)
+            } else if r.is_generated() {
+                Some(false)
+            } else {
+                None
+            },
         })
     }
 }
@@ -247,6 +263,17 @@ impl LayerStatus {
         keys: 0,
         key_toggles: 0,
         key_nexts: 0,
+        reflex_flags: 0,
+        reflex_min_interval_us: 0,
+        reflex_markers: 0,
+        reflex_sleeps: 0,
+        app_frames: 0,
+        app_presents: 0,
+        pc_latency_frames: 0,
+        pc_latency_sum_us: 0,
+        render_latency_frames: 0,
+        render_latency_sum_us: 0,
+        reflex_reserved: [0; 2],
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -260,7 +287,7 @@ impl LayerStatus {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 256).
+        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 336).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }
     }
 
@@ -307,13 +334,18 @@ mod tests {
             result: -1000001004,
             hud_drawn: true,
             hud_ns: 4100,
+            app_frame: Some(true),
         };
         let r = p.to_record();
         assert_eq!(r.key, 1234);
         assert_eq!(r.t, 1_000_000);
         assert!(r.check(LAYER_METRIC_PRESENT).is_ok());
         assert_eq!(LayerPresent::from_record(&r), Some(p));
-        let q = LayerPresent { present_id: None, ..p };
+        assert!(r.is_real() && r.check(LAYER_METRIC_PRESENT).is_ok());
+        let g = LayerPresent { app_frame: Some(false), ..p };
+        assert!(g.to_record().is_generated());
+        assert_eq!(LayerPresent::from_record(&g.to_record()), Some(g));
+        let q = LayerPresent { present_id: None, app_frame: None, ..p };
         assert_eq!(q.to_record().key, 99);
         assert_eq!(LayerPresent::from_record(&q.to_record()), Some(q));
         assert_eq!(Record::from_words(r.to_words()), r);
@@ -358,10 +390,14 @@ mod tests {
         s.extent_w = 2560;
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
-        assert_eq!(b.len(), 256);
+        assert_eq!(b.len(), 336);
         let t = LayerStatus::from_bytes(b);
         assert_eq!(t, s);
         assert_eq!(LayerStatus::get_str(&t.engine_name), Some("DXVK"));
         assert_eq!(LayerStatus::from_bytes(&b[..8]).extent_w, 0);
+        // A layer from before the Reflex fields (256 bytes): they read as zero.
+        let mut r = s;
+        r.app_frames = 9;
+        assert_eq!(LayerStatus::from_bytes(&r.as_bytes()[..256]).app_frames, 0);
     }
 }

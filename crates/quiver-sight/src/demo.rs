@@ -67,6 +67,7 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
             r.push(value("render.resolution", None, v("1280×800", "", Level::Dim)));
             r.push(value("fg.ratio", Some("FG"), v("2.0", "×", Level::Normal)));
             r.push(value("latency.render", Some("LAT"), v("21", "ms", Level::Normal)));
+            r.push(value("latency.pc", Some("PC"), v("16.8", "ms", Level::Normal)));
             (Orientation::Row, 0.45, vec![HudRow { cells: r }])
         }
         _ => {
@@ -87,9 +88,25 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
                         value("output.resolution", None, v("2560×1600", "", Level::Normal)),
                     ],
                 },
-                HudRow { cells: vec![value("latency.render", Some("LAT"), v("21", "ms", Level::Good))] },
+                HudRow { cells: vec![value("latency.render", Some("LAT"), v("21", "ms", Level::Good)), value("latency.pc", Some("PC"), v("16.8", "ms", Level::Normal))] },
             ];
             if layout == "full" {
+                // NVIDIA (SIGHT-HUD §3.17): Reflex and the FG multiplier the layer counts, then DLSS.
+                rows.push(HudRow {
+                    cells: vec![
+                        HudCell::Badge { metric: "nv.reflex.mode".into(), label: Some("RFX".into()), value: v("boost", "", Level::Good) },
+                        value("nv.reflex.cap", Some("CAP"), v("120", "fps", Level::Normal)),
+                        value("fg.ratio", Some("FG"), v("2.0", "×", Level::Normal)),
+                    ],
+                });
+                rows.push(HudRow {
+                    cells: vec![
+                        value("dlss.sr.quality", Some("SR"), v("Perf", "", Level::Normal)),
+                        value("dlss.sr.model", None, v("Transformer", "", Level::Normal)),
+                        value("dlss.version", Some("DLL"), v("310.9.16", "", Level::Normal)),
+                        value("dlss.sr.requested", Some("REQ"), v("K", "", Level::Dim)),
+                    ],
+                });
                 rows.push(HudRow {
                     cells: vec![
                         value("display.mode", Some("DISP"), v("2560×1600@165", "", Level::Normal)),
@@ -167,6 +184,11 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
                         "display.mode" => "7680×4320@240",
                         "display.path" => "composited (blocked: overlays, a notification)",
                         "latency.render" => "1021",
+                        "latency.pc" => "1002.5",
+                        "dlss.sr.model" => "Transformer (DLSS 4.5)",
+                        "dlss.version" => "310.10.123.4",
+                        "dlss.sr.requested" => "latest · Ultra Perf",
+                        "nv.reflex.cap" => "1000",
                         _ => continue,
                     };
                     value.text = text.into();
@@ -175,7 +197,23 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
             }
         }
         "short" => {
-            let gone = ["fps.base", "frametime.base", "render.resolution", "output.resolution", "upscaler", "fg.ratio", "latency.render"];
+            // No NVIDIA GPU, no DLSS, Reflex off: every NVIDIA cell goes with them.
+            let gone = [
+                "fps.base",
+                "frametime.base",
+                "render.resolution",
+                "output.resolution",
+                "upscaler",
+                "fg.ratio",
+                "latency.render",
+                "latency.pc",
+                "nv.reflex.mode",
+                "nv.reflex.cap",
+                "dlss.sr.quality",
+                "dlss.sr.model",
+                "dlss.version",
+                "dlss.sr.requested",
+            ];
             for r in &mut m.rows {
                 r.cells.retain(|c| metric(c).is_none_or(|id| !gone.contains(&id.as_str())) && !matches!(c, HudCell::Text { .. }));
                 // The label of a dropped first cell moves to the next one (as quiverd does).
