@@ -34,19 +34,25 @@ pub struct Local {
     pub perf_session: Option<String>,
     pub settings_revision: u32,
     pub tweaks: Option<TweakRevisions>,
+    /// The mods launch quiverd prepared (`SteamLaunchPlan { mods: true }`): its profile, mod
+    /// versions and options, and the options session that ends with this one.
+    pub mods: Option<(String, crate::steammods::Prepared)>,
 }
 
 impl Local {
     pub fn active(&self) -> ActiveSession {
+        let prepared = self.mods.as_ref().map(|(_, p)| p);
         ActiveSession {
             product_id: 0,
             started: self.started,
             holders: vec![HOLDER.to_owned()],
             reported: false,
             steam_app_id: self.game.as_steam(),
-            session: self.perf_session.clone(),
+            session: self.perf_session.clone().or_else(|| self.mods.as_ref().map(|(id, _)| id.clone())),
             pids: vec![self.pid],
             game: Some(self.game),
+            profile: prepared.and_then(|p| p.profile.clone()),
+            options_revision: prepared.and_then(|p| p.options_revision),
             ..Default::default()
         }
     }
@@ -117,6 +123,11 @@ pub fn record(l: &Local, ended: DateTime<Utc>, perf: Option<quiver_api::perf::Pe
         settings_revision: l.settings_revision,
         perf,
         tweaks: l.tweaks,
+        profile: l.mods.as_ref().and_then(|(_, p)| p.profile.clone()),
+        profile_revision: l.mods.as_ref().and_then(|(_, p)| p.profile_revision),
+        mods: l.mods.as_ref().map(|(_, p)| p.mods.clone()).unwrap_or_default(),
+        session: l.mods.as_ref().map(|(id, _)| id.clone()).or_else(|| l.perf_session.clone()),
+        options_revision: l.mods.as_ref().and_then(|(_, p)| p.options_revision),
         ..Default::default()
     }
 }
@@ -131,7 +142,15 @@ impl crate::Daemon {
 
     /// `Request::SteamSession`: hold a local play session for Steam app `app_id` while `pid`
     /// lives. A second registration of the same process returns its session.
-    pub(crate) async fn steam_session(self: &std::sync::Arc<Self>, source: &str, app_id: u32, pid: u32, perf_session: Option<String>, settings_revision: u32) -> Result<ActiveSession> {
+    pub(crate) async fn steam_session(
+        self: &std::sync::Arc<Self>,
+        source: &str,
+        app_id: u32,
+        pid: u32,
+        perf_session: Option<String>,
+        settings_revision: u32,
+        mods_launch: Option<String>,
+    ) -> Result<ActiveSession> {
         if app_id == 0 {
             bail!("no Steam app id");
         }
@@ -141,25 +160,39 @@ impl crate::Daemon {
         }
         let fd = pidfd_open(pid).context("watching the launch's process")?;
         let tweaks = quiver_core::tweaks::Scopes::load(&quiver_core::launcher::data_dir(), Some(&game), None).ok().map(|s| s.revisions());
-        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks };
+        let mods = mods_launch.and_then(|id| crate::steammods::claim(&id, game).map(|p| (id, p)));
+        let with = match mods.as_ref().map(|(_, p)| p) {
+            Some(p) => match &p.profile {
+                Some(id) => format!(" with profile {id}{}", if p.mods.is_empty() { String::new() } else { format!(" ({})", p.mods.iter().map(|m| m.describe()).collect::<Vec<_>>().join(" < ")) }),
+                None if !p.mods.is_empty() => format!(" with fixes ({})", p.mods.iter().map(|m| m.describe()).collect::<Vec<_>>().join(" < ")),
+                None => " (vanilla)".to_owned(),
+            },
+            None => String::new(),
+        };
+        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks, mods };
         let active = l.active();
         let id = self.local.insert(l);
         let name = self.game_name(game).await;
-        self.log_activity_game(source, format!("playing {name} from Steam, through quiver steam-run"), Some(game));
+        self.log_activity_game(source, format!("playing {name} from Steam{with}, through quiver steam-run"), Some(game));
         self.emit(quiver_api::Event::SessionsChanged { sessions: self.all_sessions() });
         let this = self.clone();
         tokio::spawn(async move {
             if let Err(e) = exited(fd).await {
                 tracing::warn!(%game, pid, "watching a Steam launch: {e:#}; ending its session");
             }
-            this.end_local(id, &name);
+            this.end_local(id, &name).await;
         });
         Ok(active)
     }
 
     /// A local session's process exited: end its perf session and record it.
-    fn end_local(&self, id: u64, name: &str) {
+    async fn end_local(self: &std::sync::Arc<Self>, id: u64, name: &str) {
         let Some(l) = self.local.remove(id) else { return };
+        // Its options session (outside edits imported, crash correlation), as for a Quiver
+        // launch. Steam doesn't say how the game exited.
+        if let Some((launch, _)) = &l.mods {
+            self.options_session_end(launch, None).await;
+        }
         let ended = Utc::now();
         // Only the perf session this launch began (a newer launch may have its own by now).
         let perf = l.perf_session.as_deref().and_then(|s| self.perf.end_steam_session(&l.game, s));
@@ -183,7 +216,7 @@ mod tests {
         let s = LocalSessions::default();
         assert!(s.list().is_empty());
         let control = GameRef::steam(870780);
-        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None });
+        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None, mods: None });
         let a = &s.list()[0];
         assert_eq!((a.product_id, a.game, a.game_ref(), a.steam_app_id), (0, Some(control), control, Some(870780)));
         assert_eq!((a.holders.as_slice(), a.session.as_deref(), a.pids.as_slice()), (&["steam".to_owned()][..], Some("s-x"), &[4242][..]));

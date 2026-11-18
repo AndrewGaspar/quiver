@@ -48,6 +48,24 @@ pub struct Game {
     pub args: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    /// The game when it isn't a Ubisoft product (`steam:620`: a Steam game as mods see it,
+    /// with Steam's install folder and, for a Proton game, Steam's prefix; `product_id` is
+    /// then 0). Never written for Ubisoft games, so `games.json` is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+}
+
+impl Game {
+    /// The game's ref: [`Game::game`], else the Ubisoft product.
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
+
+    /// The Wine prefix, if the game has one (a native Steam game has none: `prefix` is
+    /// empty).
+    pub fn prefix(&self) -> Option<&std::path::Path> {
+        (!self.prefix.as_os_str().is_empty()).then_some(self.prefix.as_path())
+    }
 }
 
 /// Per-game launch settings. Every change creates a new revision in the game's history.
@@ -91,12 +109,19 @@ pub struct GameSettings {
     /// and the write Quiver would send is logged instead of sent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub achievements: Option<String>,
+    /// The mod profile a launch from Steam runs (`quiver steam-run`; a profile id, the daemon
+    /// resolves names); `None`: vanilla. Steam's Play has no profile picker, so this is what
+    /// it runs; `steam-run --profile` overrides it for one launch (design/STEAM-COPIES.md §4,
+    /// STORE-STEAM.md §10). For a Steam game, `profile` sets this too (its only launch is
+    /// Steam's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_profile: Option<String>,
 }
 
 impl GameSettings {
     /// Apply one edit. Keys: `proton`, `language`, `account` (a user id; the daemon
     /// resolves names), `profile` (the default mod profile's id; `vanilla` or empty: none;
-    /// the daemon resolves names), `art` (`steam` or `ubisoft`), `achievements` (`on`,
+    /// the daemon resolves names), `steam_profile` (the same for launches from Steam), `art` (`steam` or `ubisoft`), `achievements` (`on`,
     /// `off` or `dry-run`), `args` (whitespace-separated), `wrappers` (comma/space-separated),
     /// `env.NAME`, `dll.NAME`.
     pub fn apply(&mut self, op: &SettingOp) -> Result<(), String> {
@@ -110,6 +135,7 @@ impl GameSettings {
             "language" => self.language = opt(value),
             "account" => self.account = opt(value),
             "profile" => self.profile = opt(value).filter(|v| !v.trim().eq_ignore_ascii_case(mods::VANILLA)),
+            "steam_profile" => self.steam_profile = opt(value).filter(|v| !v.trim().eq_ignore_ascii_case(mods::VANILLA)),
             "art" => {
                 self.art = match opt(value).map(|v| v.trim().to_ascii_lowercase()) {
                     None => None,
@@ -708,6 +734,11 @@ pub enum Request {
         /// The settings revision the plan came from.
         #[serde(default)]
         settings_revision: u32,
+        /// The mod launch the plan prepared (`SteamLaunchPlan { mods: true }`,
+        /// `SteamMods::launch`): its profile, mods and options go into the session's record,
+        /// and its options session ends with it (appended).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mods_launch: Option<String>,
     },
     /// Read (and with `enabled`, change) whether quiverd offers the switch for Ubisoft
     /// games newly installed in Steam. Returns `{ "enabled": bool }`.
@@ -758,6 +789,15 @@ pub enum Request {
         /// launch, Ubisoft copies included (STORE-STEAM §9, G4).
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
+        /// Prepare the launch's mods too (appended; design/STEAM-COPIES.md §4): the profile's
+        /// config patches and options are applied to Steam's prefix and install view, and the
+        /// plan's `mods` says what to mount. Sent by a `steam-run` that can mount them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mods: bool,
+        /// The profile to run (a name or id, `vanilla`); `None`: the game's `steam_profile`
+        /// setting (`steam-run --profile`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
     // ---- Save stores (see [`savestores`]); appended
     /// A game's save stores, who uses each, slot counts (`savestores::SaveStoresReport`).
@@ -885,8 +925,13 @@ pub enum Event {
     LibraryChanged,
     /// The set of games being played changed (see `Request::Sessions`).
     SessionsChanged { sessions: Vec<ActiveSession> },
-    /// A game's mod layers or profiles changed.
-    ModsChanged { product_id: u32 },
+    /// A game's mod layers or profiles changed. Another store's game (appended): `game`,
+    /// with `product_id` 0.
+    ModsChanged {
+        product_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<GameRef>,
+    },
     /// Not sent by quiverd: [`Client`] reports that the daemon went away (it is
     /// reconnecting; events are missed until [`Event::Reconnected`]).
     Disconnected,
@@ -1358,8 +1403,24 @@ mod tests {
         // Settings and Steam launch plans: Ubisoft games on the wire exactly as before.
         let v = serde_json::to_value(Request::SettingsGet { game: 3539.into() }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "settings_get", "params": { "product_id": 3539 } }));
-        let v = serde_json::to_value(Request::SteamLaunchPlan { game: 66088.into(), perf: true, env: BTreeMap::new() }).unwrap();
+        let v = serde_json::to_value(Request::SteamLaunchPlan { game: 66088.into(), perf: true, env: BTreeMap::new(), mods: false, profile: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "steam_launch_plan", "params": { "product_id": 66088, "perf": true } }));
+        let v = serde_json::to_value(Request::SteamLaunchPlan { game: GameRef::steam(292030).into(), perf: true, env: BTreeMap::new(), mods: true, profile: Some("Next-gen".into()) }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_launch_plan", "params": { "game": "steam:292030", "perf": true, "mods": true, "profile": "Next-gen" } }));
+
+        // Mods and options requests: Ubisoft games exactly as before, other stores as `game`.
+        let v = serde_json::to_value(Request::Mods(ModsRequest::List { game: 3539.into() })).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "mods", "params": { "op": "list", "product_id": 3539 } }));
+        let r: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(r, Request::Mods(ModsRequest::List { game }) if game == GameRef::ubisoft(3539)));
+        let v = serde_json::to_value(Request::Mods(ModsRequest::Plan { game: GameRef::steam(292030).into(), profile: Some("p".into()) })).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "mods", "params": { "op": "plan", "game": "steam:292030", "profile": "p" } }));
+        let r: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(r, Request::Mods(ModsRequest::Plan { game, .. }) if game == GameRef::steam(292030)));
+        let r: Request = serde_json::from_str(r#"{"method":"options","params":{"op":"list","game":"steam:292030"}}"#).unwrap();
+        assert!(matches!(r, Request::Options(options::OptionsRequest::List { game, .. }) if game == GameRef::steam(292030)));
+        let v = serde_json::to_value(Event::ModsChanged { product_id: 3539, game: None }).unwrap();
+        assert_eq!(v, serde_json::json!({ "type": "mods_changed", "product_id": 3539 }));
         let r: Request = serde_json::from_str(r#"{"method":"steam_launch_plan","params":{"product_id":66088}}"#).unwrap();
         assert!(matches!(r, Request::SteamLaunchPlan { game, perf: false, .. } if game == GameRef::ubisoft(66088)));
         let r: Request = serde_json::from_str(r#"{"method":"settings_set","params":{"game":"steam:870780","ops":[],"message":null}}"#).unwrap();

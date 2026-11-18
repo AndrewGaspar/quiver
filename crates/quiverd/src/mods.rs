@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use quiver_api::mods::{GameProfiles, LaunchPlan, ModPrefs, ModsRequest, PatchState, ProfileRevision, is_human_source};
-use quiver_api::{Event, SettingOp};
+use quiver_api::game::GameField;
+use quiver_api::{Event, GameRef, GameSettings, SettingOp};
 use quiver_core::launcher::{self, Config, Games};
 use quiver_core::mods::{ModStore, Package, Plan};
 use quiver_core::modversions::{NewVersion, parse_save_compatible};
@@ -58,8 +59,15 @@ fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
     )
 }
 
-fn installed(product_id: u32) -> Result<launcher::Game> {
-    Games::load()?.get(product_id).cloned().context("not installed (mods need an installed game)")
+/// The game a mods request is for, as mods see it: a Quiver install of a Ubisoft game, or a
+/// Steam game (Steam's install folder, and Steam's prefix for a Proton game; see
+/// [`crate::steammods::mod_game`]).
+pub(crate) fn installed(game: GameRef) -> Result<launcher::Game> {
+    if let Some(app) = game.as_steam() {
+        return crate::steammods::mod_game(app);
+    }
+    let id = game.as_ubisoft().with_context(|| format!("{game}: mods for {} games aren't built yet", game.store.label()))?;
+    Games::load()?.get(id).cloned().context("not installed (mods need an installed game)")
 }
 
 /// The app-level `fixes_on_vanilla` setting, as saved now.
@@ -69,24 +77,31 @@ fn fixes_on_vanilla() -> Option<bool> {
 
 /// The store for an installed game, with its prefix and the app-level settings.
 pub(crate) fn store_for(game: &launcher::Game) -> ModStore {
-    ModStore::open(game.product_id).with_game(game, fixes_on_vanilla())
+    ModStore::open(game.game_ref()).with_game(game, fixes_on_vanilla())
 }
 
-fn store(product_id: u32) -> Result<ModStore> {
-    Ok(store_for(&installed(product_id)?))
+pub(crate) fn store(game: GameRef) -> Result<ModStore> {
+    Ok(store_for(&installed(game)?))
+}
+
+/// The game's default profile setting: `profile`, or for a Steam game `steam_profile` (its
+/// only launch is Steam's; STORE-STEAM.md §10, steer M1).
+pub(crate) fn default_setting(game: GameRef, s: &GameSettings) -> Option<String> {
+    if game.as_steam().is_some() { s.steam_profile.clone() } else { s.profile.clone() }
 }
 
 /// The profile a launch of the store's game runs: `requested` (a name or id; `vanilla`:
 /// unmodded), else the game's default (its `profile` setting). The second value is a
 /// warning when the default can't be used (deleted): the launch runs vanilla instead.
-pub(crate) fn launch_profile(store: &ModStore, product_id: u32, requested: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+pub(crate) fn launch_profile(store: &ModStore, requested: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+    let game = store.game_ref();
     let default = match requested {
         Some(_) => None,
-        None => settings::current(product_id)?.0.profile,
+        None => default_setting(game, &settings::current(game)?.0),
     };
     let (profile, warning) = store.launch_profile(requested, default.as_deref());
     if let Some(w) = &warning {
-        tracing::warn!(product_id, "{w}");
+        tracing::warn!(%game, "{w}");
     }
     Ok((profile, warning))
 }
@@ -98,7 +113,7 @@ pub(crate) fn launch_profile(store: &ModStore, product_id: u32, requested: Optio
 pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: &str) -> Result<(Plan, Option<String>)> {
     let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let store = store_for(game);
-    let (profile, warning) = launch_profile(&store, game.product_id, profile)?;
+    let (profile, warning) = launch_profile(&store, profile)?;
     if profile.is_some() {
         match store.migrate(false, source) {
             Ok(r) => r.notes.iter().for_each(|n| tracing::info!("mods v2 migration: {n}")),
@@ -118,12 +133,12 @@ pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: 
 
 /// The game's default profile as a profile id: `value` is a name or id (`vanilla` or empty:
 /// none, returned as is).
-pub(crate) fn resolve_default(product_id: u32, value: &str) -> Result<String> {
+pub(crate) fn resolve_default(game: impl Into<GameRef>, value: &str) -> Result<String> {
     let v = value.trim();
     if v.is_empty() || v.eq_ignore_ascii_case(quiver_api::mods::VANILLA) {
         return Ok(v.to_owned());
     }
-    Ok(ModStore::open(product_id).profile(v)?.0.id)
+    Ok(ModStore::open(game).profile(v)?.0.id)
 }
 
 /// What a launch plan says worth keeping with the launch job.
@@ -183,55 +198,62 @@ impl Daemon {
             ModsRequest::Games => {
                 let games = Games::load()?;
                 let list = blocking(move || {
-                    games
+                    let mut list = games
                         .games
                         .into_iter()
                         .map(|g| {
                             let profiles = ModStore::open(g.product_id).profiles()?.into_iter().map(|(p, _)| p).collect();
-                            Ok(GameProfiles { product_id: g.product_id, name: g.name, profiles })
+                            Ok(GameProfiles { product_id: g.product_id, name: g.name, profiles, game: None })
                         })
-                        .collect::<Result<Vec<_>>>()
+                        .collect::<Result<Vec<_>>>()?;
+                    // Steam games that have mods or profiles (any Steam game can: `quiver mods
+                    // steam:<appid> …`).
+                    for (game, name) in crate::steammods::with_mods() {
+                        let profiles = ModStore::open(game).profiles()?.into_iter().map(|(p, _)| p).collect();
+                        list.push(GameProfiles { product_id: 0, name, profiles, game: Some(game) });
+                    }
+                    Ok(list)
                 })
                 .await?;
                 json!(list)
             }
-            ModsRequest::List { product_id } => {
-                let store = store(product_id)?;
-                let default_profile = settings::current(product_id)?.0.profile;
+            ModsRequest::List { game: GameField(game) } => {
+                let store = store(game)?;
+                let default_profile = default_setting(game, &settings::current(game)?.0);
                 let mut state = blocking(move || store.state()).await?;
                 state.default_profile = default_profile;
                 json!(state)
             }
-            ModsRequest::LayerAdd { product_id, name, path, deletes } => {
-                let game = installed(product_id)?;
+            ModsRequest::LayerAdd { game: GameField(game), name, path, deletes } => {
+                let inst = installed(game)?;
                 let change = blocking(move || {
                     let path = (!path.as_os_str().is_empty()).then_some(path);
-                    ModStore::open(product_id).add_layer_with(&name, path.as_deref(), &deletes, Some(&game.install_dir), &src)
+                    ModStore::open(game).add_layer_with(&name, path.as_deref(), &deletes, Some(&inst.install_dir), &src)
                 })
                 .await?;
                 let l = &change.layer;
                 let deletes = if l.deletes.is_empty() { String::new() } else { format!(", deletes {}", l.deletes.len()) };
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("added mod layer '{}' ({} files{deletes}) to {}", l.name, l.files, self.product_name(product_id)),
+                    game,
+                    format!("added mod layer '{}' ({} files{deletes}) to {}", l.name, l.files, self.name_of(game)),
                 );
                 json!(change)
             }
-            ModsRequest::LayerRemove { product_id, layer, confirmed } => {
+            ModsRequest::LayerRemove { game: GameField(game), layer, confirmed } => {
                 ask(source, confirmed, "removing a mod layer")?;
-                let store = store(product_id)?;
-                self.not_running(product_id, "removing a layer")?;
+                let store = store(game)?;
+                self.not_running(game, "removing a layer")?;
                 let (layer, undone) = blocking(move || store.uninstall(&layer)).await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("removed mod layer '{}' from {}{}", layer.name, self.product_name(product_id), undone_note(&undone)),
+                    game,
+                    format!("removed mod layer '{}' from {}{}", layer.name, self.name_of(game), undone_note(&undone)),
                 );
                 json!(layer)
             }
-            ModsRequest::ProfileCreate { product_id, name, layers, message, saves } => {
-                let store = store(product_id)?;
+            ModsRequest::ProfileCreate { game: GameField(game), name, layers, message, saves } => {
+                let store = store(game)?;
                 let followed = saves.is_none();
                 let (rev, notes, advice) = blocking(move || {
                     let (rev, advice) = store.create_profile_with(&name, &layers, saves.as_deref(), &src, message)?;
@@ -241,8 +263,8 @@ impl Daemon {
                 .await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("created mod profile '{}' ({}) for {}", rev.profile.name, rev.profile.id, self.product_name(product_id)),
+                    game,
+                    format!("created mod profile '{}' ({}) for {}", rev.profile.name, rev.profile.id, self.name_of(game)),
                 );
                 let mut v = with_notes(json!(rev), notes);
                 // Why the store was picked, when the daemon picked it.
@@ -251,8 +273,8 @@ impl Daemon {
                 }
                 v
             }
-            ModsRequest::ProfileSet { product_id, profile, ops, message } => {
-                let store = store(product_id)?;
+            ModsRequest::ProfileSet { game: GameField(game), profile, ops, message } => {
+                let store = store(game)?;
                 for op in &ops {
                     if let SettingOp::Set { key, value } = op
                         && key == "proton"
@@ -268,108 +290,108 @@ impl Daemon {
                 .await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("mod profile '{}' r{} for {}", rev.profile.name, rev.revision, self.product_name(product_id)),
+                    game,
+                    format!("mod profile '{}' r{} for {}", rev.profile.name, rev.revision, self.name_of(game)),
                 );
                 with_notes(json!(rev), notes)
             }
-            ModsRequest::ProfileDelete { product_id, profile, confirmed } => {
+            ModsRequest::ProfileDelete { game: GameField(game), profile, confirmed } => {
                 ask(source, confirmed, "deleting a mod profile")?;
-                installed(product_id)?;
-                let rev = blocking(move || ModStore::open(product_id).delete_profile(&profile, &src)).await?;
+                installed(game)?;
+                let rev = blocking(move || ModStore::open(game).delete_profile(&profile, &src)).await?;
                 // The game's default stays pointed at it (restoring brings it back), but
                 // until then Play runs vanilla: say so.
-                let was_default = settings::current(product_id)?.0.profile.as_deref() == Some(rev.profile.id.as_str());
+                let was_default = default_setting(game, &settings::current(game)?.0).as_deref() == Some(rev.profile.id.as_str());
                 let note = if was_default { "; it was the default profile, so Play runs vanilla until it's restored or another default is picked" } else { "" };
                 self.mods_changed(
                     source,
-                    product_id,
+                    game,
                     format!(
                         "deleted mod profile '{}' ({}) of {} (restore: r{}){note}",
                         rev.profile.name,
                         rev.profile.id,
-                        self.product_name(product_id),
+                        self.name_of(game),
                         rev.revision - 1
                     ),
                 );
                 let notes = if was_default { vec![note.trim_start_matches("; ").to_owned()] } else { Vec::new() };
                 with_notes(json!(rev), (notes, None))
             }
-            ModsRequest::ProfileHistory { product_id, profile } => {
-                let (_, history) = blocking(move || ModStore::open(product_id).history_of(&profile)).await?;
+            ModsRequest::ProfileHistory { game: GameField(game), profile } => {
+                let (_, history) = blocking(move || ModStore::open(game).history_of(&profile)).await?;
                 json!(history)
             }
-            ModsRequest::ProfileRestore { product_id, profile, revision, confirmed } => {
+            ModsRequest::ProfileRestore { game: GameField(game), profile, revision, confirmed } => {
                 ask(source, confirmed, "restoring a mod profile revision")?;
-                installed(product_id)?;
-                let rev = blocking(move || ModStore::open(product_id).restore_profile(&profile, revision, &src)).await?;
+                installed(game)?;
+                let rev = blocking(move || ModStore::open(game).restore_profile(&profile, revision, &src)).await?;
                 self.mods_changed(
                     source,
-                    product_id,
+                    game,
                     format!(
                         "restored mod profile '{}' r{revision} as r{} for {}",
                         rev.profile.name,
                         rev.revision,
-                        self.product_name(product_id)
+                        self.name_of(game)
                     ),
                 );
                 json!(rev)
             }
-            ModsRequest::LayerDeletes { product_id, layer, delete, keep, message } => {
+            ModsRequest::LayerDeletes { game: GameField(game), layer, delete, keep, message } => {
                 // Whiteouts only hide files inside a launch's mount, so this is a normal
                 // edit for agents too. A mounted layer must not change underneath it.
-                let game = installed(product_id)?;
-                self.not_running(product_id, "changing a layer's deletions")?;
+                let inst = installed(game)?;
+                self.not_running(game, "changing a layer's deletions")?;
                 let change = blocking(move || {
-                    ModStore::open(product_id).change_deletions(&layer, &delete, &keep, Some(&game.install_dir), &src, message)
+                    ModStore::open(game).change_deletions(&layer, &delete, &keep, Some(&inst.install_dir), &src, message)
                 })
                 .await?;
-                self.layer_changed(source, product_id, &change, None);
+                self.layer_changed(source, game, &change, None);
                 json!(change)
             }
-            ModsRequest::LayerHistory { product_id, layer } => {
-                let (_, history) = blocking(move || ModStore::open(product_id).layer_history_of(&layer)).await?;
+            ModsRequest::LayerHistory { game: GameField(game), layer } => {
+                let (_, history) = blocking(move || ModStore::open(game).layer_history_of(&layer)).await?;
                 json!(history)
             }
-            ModsRequest::LayerRestore { product_id, layer, revision, confirmed } => {
+            ModsRequest::LayerRestore { game: GameField(game), layer, revision, confirmed } => {
                 ask(source, confirmed, "restoring a mod layer revision")?;
-                installed(product_id)?;
-                self.not_running(product_id, "restoring a layer's deletions")?;
-                let change = blocking(move || ModStore::open(product_id).restore_layer(&layer, revision, &src)).await?;
-                self.layer_changed(source, product_id, &change, Some(revision));
+                installed(game)?;
+                self.not_running(game, "restoring a layer's deletions")?;
+                let change = blocking(move || ModStore::open(game).restore_layer(&layer, revision, &src)).await?;
+                self.layer_changed(source, game, &change, Some(revision));
                 json!(change)
             }
             // -- Mods v2 ------------------------------------------------------------------
-            ModsRequest::Catalog { product_id } => {
-                let store = store(product_id)?;
+            ModsRequest::Catalog { game: GameField(game) } => {
+                let store = store(game)?;
                 json!(blocking(move || store.catalog()).await?)
             }
-            ModsRequest::Install { product_id, builtin, path, name } => {
-                let store = store(product_id)?;
+            ModsRequest::Install { game: GameField(game), builtin, path, name } => {
+                let store = store(game)?;
                 let pkg = match (builtin, path) {
                     (Some(id), None) => Package::Builtin(id),
                     (None, Some(path)) => Package::Dir { path, name },
                     _ => bail!("give a built-in mod id or a folder, not both"),
                 };
-                self.not_running(product_id, "installing a mod")?;
+                self.not_running(game, "installing a mod")?;
                 let change = blocking(move || store.install(&pkg, &src)).await?;
                 let l = &change.layer;
                 self.mods_changed(
                     source,
-                    product_id,
+                    game,
                     format!(
                         "installed mod '{}' ({}{}) for {} (r{})",
                         l.name,
                         l.id,
                         l.mod_id().map(|m| format!(", {m}")).unwrap_or_default(),
-                        self.product_name(product_id),
+                        self.name_of(game),
                         change.revision
                     ),
                 );
                 json!(change)
             }
-            ModsRequest::Uninstall { product_id, mod_id, confirmed } => {
-                let store = store(product_id)?;
+            ModsRequest::Uninstall { game: GameField(game), mod_id, confirmed } => {
+                let store = store(game)?;
                 let (layer, applied, files) = {
                     let (store, q) = (store.clone(), mod_id.clone());
                     blocking(move || {
@@ -385,22 +407,22 @@ impl Daemon {
                 if files || !applied.is_empty() {
                     ask(source, confirmed, "uninstalling a mod with install files or changed config values")?;
                 }
-                self.not_running(product_id, "uninstalling a mod")?;
+                self.not_running(game, "uninstalling a mod")?;
                 let (layer, undone) = blocking(move || store.uninstall(&layer.id)).await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("uninstalled mod '{}' from {}{}", layer.name, self.product_name(product_id), undone_note(&undone)),
+                    game,
+                    format!("uninstalled mod '{}' from {}{}", layer.name, self.name_of(game), undone_note(&undone)),
                 );
                 json!({ "mod": layer, "undone": undone })
             }
-            ModsRequest::Show { product_id, mod_id } => {
-                let store = store(product_id)?;
+            ModsRequest::Show { game: GameField(game), mod_id } => {
+                let store = store(game)?;
                 json!(blocking(move || store.detail(&mod_id)).await?)
             }
-            ModsRequest::ModSet { product_id, mod_id, ops, message } => {
-                let store = store(product_id)?;
-                self.not_running(product_id, "changing a mod")?;
+            ModsRequest::ModSet { game: GameField(game), mod_id, ops, message } => {
+                let store = store(game)?;
+                self.not_running(game, "changing a mod")?;
                 let changes = ops
                     .iter()
                     .map(|o| match o {
@@ -412,32 +434,32 @@ impl Daemon {
                 let change = blocking(move || store.set_mod(&mod_id, &ops, &src, message)).await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("mod '{}' of {}: {changes} (r{})", change.layer.name, self.product_name(product_id), change.revision),
+                    game,
+                    format!("mod '{}' of {}: {changes} (r{})", change.layer.name, self.name_of(game), change.revision),
                 );
                 json!(change)
             }
-            ModsRequest::Plan { product_id, profile } => {
-                let game = installed(product_id)?;
+            ModsRequest::Plan { game: GameField(game), profile } => {
+                let inst = installed(game)?;
                 // No profile: what Play would run, i.e. the game's default.
                 json!(blocking(move || {
-                    let store = store_for(&game);
-                    let (profile, warning) = launch_profile(&store, product_id, profile.as_deref())?;
+                    let store = store_for(&inst);
+                    let (profile, warning) = launch_profile(&store, profile.as_deref())?;
                     let mut plan = store.plan(profile.as_deref())?.api;
                     plan.warnings.extend(warning);
                     Ok(plan)
                 })
                 .await?)
             }
-            ModsRequest::PatchesUndo { product_id, mod_id, confirmed } => {
+            ModsRequest::PatchesUndo { game: GameField(game), mod_id, confirmed } => {
                 ask(source, confirmed, "undoing config patches")?;
-                let store = store(product_id)?;
-                self.not_running(product_id, "undoing config patches")?;
+                let store = store(game)?;
+                self.not_running(game, "undoing config patches")?;
                 let undone = blocking(move || store.undo_patches(mod_id.as_deref())).await?;
                 self.mods_changed(
                     source,
-                    product_id,
-                    format!("undid config patches of {}{}", self.product_name(product_id), undone_note(&undone)),
+                    game,
+                    format!("undid config patches of {}{}", self.name_of(game), undone_note(&undone)),
                 );
                 json!(undone)
             }
@@ -456,16 +478,16 @@ impl Daemon {
                 if let Some(v) = fixes_on_vanilla {
                     self.log_activity(source, format!("fixes on unmodded games: {}", if v { "on" } else { "off" }), None);
                     for g in Games::load()?.games {
-                        self.emit(Event::ModsChanged { product_id: g.product_id });
+                        self.emit(Event::ModsChanged { product_id: g.product_id, game: None });
                     }
                 }
                 json!(prefs)
             }
             // -- Mod versions --------------------------------------------------------------
-            ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes, options } => {
+            ModsRequest::VersionAdd { game: GameField(game), mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes, options } => {
                 // A new version is a normal edit for agents too (it's how a mod is updated);
                 // the old versions stay, and rolling back is one request.
-                let store = store(product_id)?;
+                let store = store(game)?;
                 let save_compatible = save_compatible.as_deref().map(parse_save_compatible).transpose()?;
                 let path = (!path.as_os_str().is_empty()).then_some(path);
                 let opts = NewVersion { path, label, notes, no_update, prerelease, save_compatible, deletes, options };
@@ -474,12 +496,12 @@ impl Daemon {
                 let current = c.record.current == c.version.id;
                 self.mods_changed(
                     source,
-                    product_id,
+                    game,
                     format!(
                         "added version {label} ({}) of mod '{}' to {}{}",
                         c.version.id,
                         c.record.name,
-                        self.product_name(product_id),
+                        self.name_of(game),
                         match (current, c.tracking.is_empty()) {
                             (true, true) => "; current".to_owned(),
                             (true, false) => format!("; current, so {} run it next", c.tracking.join(", ")),
@@ -489,17 +511,17 @@ impl Daemon {
                 );
                 json!(c)
             }
-            ModsRequest::VersionUse { product_id, mod_id, version, message } => {
-                let store = store(product_id)?;
+            ModsRequest::VersionUse { game: GameField(game), mod_id, version, message } => {
+                let store = store(game)?;
                 let c = blocking(move || store.use_version(&mod_id, &version, &src, message)).await?;
                 if c.revision > 0 {
                     self.mods_changed(
                         source,
-                        product_id,
+                        game,
                         format!(
                             "mod '{}' of {}: current version {} (r{}){}",
                             c.record.name,
-                            self.product_name(product_id),
+                            self.name_of(game),
                             c.record.label_of(&c.record.current),
                             c.revision,
                             if c.tracking.is_empty() { String::new() } else { format!("; {} run it next", c.tracking.join(", ")) }
@@ -508,16 +530,16 @@ impl Daemon {
                 }
                 json!(c)
             }
-            ModsRequest::VersionRetire { product_id, mod_id, version, retired, message } => {
-                let store = store(product_id)?;
+            ModsRequest::VersionRetire { game: GameField(game), mod_id, version, retired, message } => {
+                let store = store(game)?;
                 let c = blocking(move || store.retire_version(&mod_id, &version, retired, &src, message)).await?;
                 self.mods_changed(
                     source,
-                    product_id,
+                    game,
                     format!(
                         "mod '{}' of {}: {} version {} (r{})",
                         c.record.name,
-                        self.product_name(product_id),
+                        self.name_of(game),
                         if retired { "retired" } else { "brought back" },
                         c.record.label_of(&c.version.id),
                         c.revision
@@ -525,25 +547,25 @@ impl Daemon {
                 );
                 json!(c)
             }
-            ModsRequest::ModHistory { product_id, mod_id } => {
-                let (_, history) = blocking(move || ModStore::open(product_id).mod_history_of(&mod_id)).await?;
+            ModsRequest::ModHistory { game: GameField(game), mod_id } => {
+                let (_, history) = blocking(move || ModStore::open(game).mod_history_of(&mod_id)).await?;
                 json!(history)
             }
-            ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed } => {
+            ModsRequest::MergeVersions { game: GameField(game), into, from, labels, dry_run, confirmed } => {
                 // It rewrites profiles (keeping what each runs), so agents ask first.
                 if !dry_run {
                     ask(source, confirmed, "merging mods into versions of one mod")?;
-                    self.not_running(product_id, "merging mods")?;
+                    self.not_running(game, "merging mods")?;
                 }
-                let store = store(product_id)?;
+                let store = store(game)?;
                 let r = blocking(move || store.merge_versions(&into, &from, &labels, dry_run, &src)).await?;
                 if !dry_run {
                     self.mods_changed(
                         source,
-                        product_id,
+                        game,
                         format!(
                             "merged mods of {} into '{}' ({} versions){}",
-                            self.product_name(product_id),
+                            self.name_of(game),
                             r.record.name,
                             r.record.versions.len(),
                             if r.profiles.is_empty() { String::new() } else { format!("; {} profile stack(s) rewritten", r.profiles.len()) }
@@ -552,14 +574,14 @@ impl Daemon {
                 }
                 json!(r)
             }
-            ModsRequest::Migrate { product_id, dry_run } => {
-                let store = store(product_id)?;
+            ModsRequest::Migrate { game: GameField(game), dry_run } => {
+                let store = store(game)?;
                 let report = blocking(move || store.migrate(dry_run, &src)).await?;
                 if !dry_run && (!report.profile_stores.is_empty() || !report.builtin_updates.is_empty()) {
                     self.mods_changed(
                         source,
-                        product_id,
-                        format!("mods v2 migration of {}: {}", self.product_name(product_id), report.notes.join("; ")),
+                        game,
+                        format!("mods v2 migration of {}: {}", self.name_of(game), report.notes.join("; ")),
                     );
                 }
                 json!(report)
@@ -567,14 +589,33 @@ impl Daemon {
         })
     }
 
-    fn not_running(&self, product_id: u32, what: &str) -> Result<()> {
-        if self.running.lock().unwrap().contains(&product_id) {
-            bail!("{} is running; stop it before {what}", self.product_name(product_id));
+    pub(crate) fn not_running(&self, game: GameRef, what: &str) -> Result<()> {
+        if self.is_playing(game) {
+            bail!("{} is running; stop it before {what}", self.name_of(game));
         }
         Ok(())
     }
 
-    fn layer_changed(&self, source: &str, product_id: u32, change: &quiver_api::mods::LayerChange, restored: Option<u32>) {
+    /// Whether the game runs now: a Quiver launch of it, or a Steam launch through `quiver
+    /// steam-run`.
+    pub(crate) fn is_playing(&self, game: GameRef) -> bool {
+        match game.as_ubisoft() {
+            Some(id) => self.running.lock().unwrap().contains(&id),
+            None => self.local.list().iter().any(|s| s.game_ref() == game),
+        }
+    }
+
+    /// A game's name for messages: the installed Ubisoft game's, or the Steam app's (from its
+    /// manifest, read-only), else the ref.
+    pub(crate) fn name_of(&self, game: GameRef) -> String {
+        match (game.as_ubisoft(), game.as_steam()) {
+            (Some(id), _) => self.product_name(id),
+            (_, Some(app)) => crate::steammods::app_name(app).unwrap_or_else(|| game.to_string()),
+            _ => game.to_string(),
+        }
+    }
+
+    fn layer_changed(&self, source: &str, game: GameRef, change: &quiver_api::mods::LayerChange, restored: Option<u32>) {
         let l = &change.layer;
         let what = match restored {
             Some(r) => format!("restored r{r} of"),
@@ -582,21 +623,26 @@ impl Daemon {
         };
         self.mods_changed(
             source,
-            product_id,
+            game,
             format!(
                 "{what} mod layer '{}' of {}: deletes {} (r{})",
                 l.name,
-                self.product_name(product_id),
+                self.name_of(game),
                 l.deletes.len(),
                 change.revision
             ),
         );
     }
 
-    fn mods_changed(&self, source: &str, product_id: u32, action: String) {
-        self.log_activity(source, action, Some(product_id));
-        self.emit(Event::ModsChanged { product_id });
+    pub(crate) fn mods_changed(&self, source: &str, game: GameRef, action: String) {
+        self.log_activity_game(source, action, Some(game));
+        self.emit(mods_event(game));
     }
+}
+
+/// `ModsChanged` for a game: Ubisoft games as always, others with `game` (product 0).
+pub(crate) fn mods_event(game: GameRef) -> Event {
+    Event::ModsChanged { product_id: game.as_ubisoft().unwrap_or(0), game: (!game.is_ubisoft()).then_some(game) }
 }
 
 /// A revision's or reply's notes, added to a JSON reply object (older clients ignore them).

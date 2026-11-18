@@ -269,7 +269,9 @@ pub fn capabilities() -> Capabilities {
         install: Support::No,
         launch: Support::Delegated,
         settings: Support::No,
-        mods: Support::No,
+        // Mod profiles, overlays, config patches and options, applied by `quiver steam-run`
+        // (STORE-STEAM.md §10).
+        mods: Support::Quiver,
         cloud_saves: Support::ReadOnly,
         achievements: Support::ReadOnly,
         playtime: Support::ReadOnly,

@@ -5,14 +5,17 @@
 //! same fields; see [`quiver_api::mods::ModManifest`]), and optionally a folder of files laid
 //! out like the install folder (`files/`, or the manifest's `files.dir`).
 //!
-//! The **catalog** is every `mods/<product id>/<mod id>/quiver-mod.toml` in the repository,
-//! compiled in (`build.rs`). Built-in mods are recipes (flags, deletions, config patches),
+//! The **catalog** is every `mods/<game>/<mod id>/quiver-mod.toml` in the repository,
+//! compiled in (`build.rs`); `<game>` is the game's data folder name
+//! ([`quiver_api::GameRef::dir_name`]): a Ubisoft product id (`mods/3539/`), or a store and
+//! id (`mods/steam-292030/`). Built-in mods are recipes (flags, deletions, config patches),
 //! each audited when translated from its source (PCGamingWiki and the like), with the link
 //! and an `audited` note in the manifest.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use quiver_api::GameRef;
 use quiver_api::mods::{MANIFEST_FILE, MANIFEST_FILE_JSON, ModKind, ModManifest};
 
 include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
@@ -94,24 +97,49 @@ pub fn read_package(dir: &Path) -> Result<Option<(ModManifest, Option<PathBuf>)>
     Ok(Some((m.clone(), files.is_dir().then_some(files))))
 }
 
-/// The built-in mods for a product, by id.
-pub fn catalog(product_id: u32) -> Result<Vec<ModManifest>> {
-    CATALOG
+/// The built-in mods for a game, by id.
+pub fn catalog(game: &GameRef) -> Result<Vec<ModManifest>> {
+    catalog_in(CATALOG, game)
+}
+
+/// [`catalog`] over a table of (folder, mod id, manifest text).
+fn catalog_in(table: &[(&str, &str, &str)], game: &GameRef) -> Result<Vec<ModManifest>> {
+    let dir = game.dir_name();
+    table
         .iter()
-        .filter(|(p, _, _)| *p == product_id)
-        .map(|(_, id, text)| {
-            let m = parse(text, false).with_context(|| format!("built-in mod mods/{product_id}/{id}"))?;
+        .filter(|(d, _, _)| *d == dir)
+        .map(|(d, id, text)| {
+            let m = parse(text, false).with_context(|| format!("built-in mod mods/{d}/{id}"))?;
             if m.id != *id {
-                bail!("built-in mod mods/{product_id}/{id} has id {}", m.id);
+                bail!("built-in mod mods/{d}/{id} has id {}", m.id);
             }
+            check_game(&m, game).with_context(|| format!("built-in mod mods/{d}/{id}"))?;
             Ok(m)
         })
         .collect()
 }
 
-/// A built-in mod for a product, by id.
-pub fn builtin(product_id: u32, id: &str) -> Result<ModManifest> {
-    let all = catalog(product_id)?;
+/// Whether a manifest is for `game`: a Ubisoft product it names in `products`, or a game it
+/// names in `games`. A manifest that names neither isn't checked.
+pub fn check_game(m: &ModManifest, game: &GameRef) -> Result<()> {
+    if m.products.is_empty() && m.games.is_empty() {
+        return Ok(());
+    }
+    let ok = match game.as_ubisoft() {
+        Some(p) => m.products.contains(&p) || m.games.contains(game),
+        None => m.games.contains(game),
+    };
+    if !ok {
+        let mut names: Vec<String> = m.products.iter().map(|p| format!("product {p}")).collect();
+        names.extend(m.games.iter().map(|g| g.to_string()));
+        bail!("{} is for {}, not {game}", m.id, names.join(", "));
+    }
+    Ok(())
+}
+
+/// A built-in mod for a game, by id.
+pub fn builtin(game: &GameRef, id: &str) -> Result<ModManifest> {
+    let all = catalog(game)?;
     let found = all.iter().find(|m| m.id.eq_ignore_ascii_case(id.trim())).cloned();
     found.with_context(|| {
         let ids: Vec<&str> = all.iter().map(|m| m.id.as_str()).collect();
@@ -205,27 +233,51 @@ set = { a = "1" }"#, false).unwrap_err()).contains("element"));
     fn catalog_loads() {
         assert!(!CATALOG.is_empty());
         let mut seen = std::collections::BTreeSet::new();
-        for (product, id, _) in CATALOG {
-            let m = builtin(*product, id).unwrap();
+        for (dir, id, _) in CATALOG {
+            let product: u32 = dir.parse().expect("built-in mods are Ubisoft products so far");
+            let m = builtin(&GameRef::ubisoft(product), id).unwrap();
             assert!(m.source.as_deref().is_some_and(|s| s.starts_with("https://www.pcgamingwiki.com/")), "{id}: source");
             assert!(m.audited.as_deref().is_some_and(|a| a.len() > 20), "{id}: audited note");
-            assert_eq!(m.products, [*product], "{id}: products");
+            assert_eq!(m.products, [product], "{id}: products");
             assert!(m.save_compatible.is_some(), "{id}: says whether it is save-compatible");
             assert!(seen.insert(m.id.clone()), "{id}: unique");
         }
         // The recipes translated from the hand-made edits.
-        let fc4 = catalog(420).unwrap();
+        let fc4 = catalog(&GameRef::ubisoft(420)).unwrap();
         let skip = fc4.iter().find(|m| m.id == "fc4-skip-intro").unwrap();
         assert_eq!(skip.launch.args, ["-skipintro"]);
         let mouse = fc4.iter().find(|m| m.id == "fc4-raw-mouse").unwrap();
         assert_eq!(mouse.patches[0].set.len(), 3);
-        let china = catalog(1651).unwrap();
+        let china = catalog(&GameRef::ubisoft(1651)).unwrap();
         assert_eq!(china.iter().find(|m| m.id == "acc-china-skip-intro").unwrap().patches[0].delete, ["StartupMovies"]);
         let af = china.iter().find(|m| m.id == "acc-china-anisotropy-16").unwrap();
         assert_eq!(af.kind, ModKind::Mod, "the quality mod is optional, not a fix");
-        assert_eq!(catalog(1847).unwrap().len(), 1);
-        assert_eq!(builtin(3539, "ACO-skip-intros").unwrap().files.delete.len(), 4);
-        assert!(builtin(3539, "nope").unwrap_err().to_string().contains("aco-skip-intros"));
-        assert!(catalog(999_999).unwrap().is_empty());
+        assert_eq!(catalog(&GameRef::ubisoft(1847)).unwrap().len(), 1);
+        assert_eq!(builtin(&GameRef::ubisoft(3539), "ACO-skip-intros").unwrap().files.delete.len(), 4);
+        assert!(builtin(&GameRef::ubisoft(3539), "nope").unwrap_err().to_string().contains("aco-skip-intros"));
+        assert!(catalog(&GameRef::ubisoft(999_999)).unwrap().is_empty());
+        assert!(catalog(&GameRef::steam(3539)).unwrap().is_empty(), "a Steam app with a Ubisoft product's number has none of its mods");
+    }
+
+    /// Entries keyed by store id (`mods/steam-<appid>/<mod>/`) next to product ones.
+    #[test]
+    fn catalog_by_store_id() {
+        let steam = "id = \"w3-x\"\nname = \"X\"\nkind = \"fix\"\nsave_compatible = true\ngames = [\"steam:292030\"]\n[launch]\nargs = [\"-x\"]\n";
+        let ubi = "id = \"u\"\nname = \"U\"\nproducts = [3539]\n";
+        let table = [("steam-292030", "w3-x", steam), ("3539", "u", ubi)];
+        let w3 = catalog_in(&table, &GameRef::steam(292030)).unwrap();
+        assert_eq!((w3.len(), w3[0].games.as_slice()), (1, &[GameRef::steam(292030)][..]));
+        assert_eq!(catalog_in(&table, &GameRef::ubisoft(3539)).unwrap()[0].id, "u");
+        assert!(catalog_in(&table, &GameRef::steam(1)).unwrap().is_empty());
+        // A manifest in the wrong folder fails loudly.
+        let wrong = [("steam-1", "w3-x", steam)];
+        assert!(format!("{:#}", catalog_in(&wrong, &GameRef::steam(1)).unwrap_err()).contains("not steam:1"));
+        // Installing checks the same.
+        let m = parse(steam, false).unwrap();
+        assert!(check_game(&m, &GameRef::steam(292030)).is_ok());
+        assert!(check_game(&m, &GameRef::ubisoft(292030)).is_err());
+        let u = parse(ubi, false).unwrap();
+        assert!(check_game(&u, &GameRef::steam(3539)).is_err() && check_game(&u, &GameRef::ubisoft(3539)).is_ok());
+        assert!(check_game(&parse("id = \"a\"\nname = \"A\"\n", false).unwrap(), &GameRef::steam(5)).is_ok());
     }
 }

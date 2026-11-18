@@ -93,6 +93,11 @@ impl Plan {
     /// Bring the config files this launch sees in line with its stack (see
     /// [`confpatch::reconcile`]). Call before mounting the namespace.
     pub fn apply_patches(&self) -> Result<Vec<PatchStatus>> {
+        // No prefix (a native game): the plan has no prefix patches, and nothing may resolve
+        // against an empty path.
+        if self.view.prefix.as_os_str().is_empty() {
+            return Ok(Vec::new());
+        }
         confpatch::reconcile(&self.record, &self.view, &self.patches)
     }
 }
@@ -111,7 +116,10 @@ pub enum Package {
 #[derive(Debug, Clone)]
 pub struct ModStore {
     data: PathBuf,
-    product_id: u32,
+    /// The game the store is for: its folders are `games/<dir>` and `mods/<dir>`
+    /// ([`quiver_api::GameRef::dir_name`]: `3539` for a Ubisoft product, as always, and
+    /// `steam-620` for a Steam game).
+    key: quiver_api::GameRef,
     /// The game, for what needs its prefix or install folder (saves, per-profile folders,
     /// config patches, builds).
     game: Option<Game>,
@@ -483,18 +491,20 @@ fn short_hash(s: &str) -> String {
 }
 
 impl ModStore {
-    pub fn new(data: &Path, product_id: u32) -> Self {
-        Self { data: data.to_owned(), product_id, game: None, fixes_on_vanilla: None }
+    /// The store of `game` (a Ubisoft product id, or any [`quiver_api::GameRef`]).
+    pub fn new(data: &Path, game: impl Into<quiver_api::GameRef>) -> Self {
+        Self { data: data.to_owned(), key: game.into(), game: None, fixes_on_vanilla: None }
     }
 
     /// The store under Quiver's data directory.
-    pub fn open(product_id: u32) -> Self {
-        Self::new(&crate::launcher::data_dir(), product_id)
+    pub fn open(game: impl Into<quiver_api::GameRef>) -> Self {
+        Self::new(&crate::launcher::data_dir(), game)
     }
 
     /// With the installed game (its prefix and install folder) and the app-level
-    /// `fixes_on_vanilla` setting.
+    /// `fixes_on_vanilla` setting. The store is then the game's ([`Game::game_ref`]).
     pub fn with_game(mut self, game: &Game, fixes_on_vanilla: Option<bool>) -> Self {
+        self.key = game.game_ref();
         self.game = Some(game.clone());
         self.fixes_on_vanilla = fixes_on_vanilla;
         self
@@ -513,13 +523,26 @@ impl ModStore {
         &self.data
     }
 
+    /// The Ubisoft product (0 for another store's game: see [`Self::game_ref`]).
     pub fn product_id(&self) -> u32 {
-        self.product_id
+        self.key.as_ubisoft().unwrap_or(0)
+    }
+
+    /// The game the store is for.
+    pub fn game_ref(&self) -> quiver_api::GameRef {
+        self.key
+    }
+
+    /// Whether saves follow Quiver's save stores (Ubisoft games). Other stores' games use
+    /// their real save folders, which their client syncs (Steam Cloud): profiles of theirs
+    /// share them (design/STEAM-COPIES.md §4, "Saves").
+    pub fn has_save_stores(&self) -> bool {
+        self.key.is_ubisoft()
     }
 
     /// `<data>/games/<id>`: settings history, profile and layer histories.
     fn game_dir(&self) -> PathBuf {
-        crate::paths::game_dir_in(&self.data, &quiver_api::GameRef::ubisoft(self.product_id))
+        crate::paths::game_dir_in(&self.data, &self.key)
     }
 
     /// The game's prefix, when the store knows the game ([`Self::with_game`]).
@@ -539,7 +562,7 @@ impl ModStore {
     }
 
     fn mods_dir(&self) -> PathBuf {
-        crate::paths::mods_dir_in(&self.data, &quiver_api::GameRef::ubisoft(self.product_id))
+        crate::paths::mods_dir_in(&self.data, &self.key)
     }
 
     pub(crate) fn layers_dir(&self) -> PathBuf {
@@ -1036,8 +1059,10 @@ impl ModStore {
         self.game.as_ref().map(|g| g.install_dir.as_path())
     }
 
+    /// The game's prefix: none for a native game (Steam's Linux builds), and none until the
+    /// store knows the game.
     fn prefix(&self) -> Option<&Path> {
-        self.game.as_ref().map(|g| g.prefix.as_path())
+        self.game.as_ref().and_then(|g| g.prefix())
     }
 
     /// The catalog's mods for this game, with whether each is installed (and whether the
@@ -1045,7 +1070,7 @@ impl ModStore {
     pub fn catalog(&self) -> Result<Vec<CatalogEntry>> {
         let layers = self.layers()?;
         let mods = mods_of(&layers, &self.records()?);
-        Ok(crate::modpkg::catalog(self.product_id)?
+        Ok(crate::modpkg::catalog(&self.key)?
             .into_iter()
             .map(|manifest| {
                 let have = self.builtin_mod(&mods, &layers, &manifest.id);
@@ -1072,7 +1097,7 @@ impl ModStore {
     pub fn install(&self, pkg: &Package, source: &str) -> Result<LayerChange> {
         let install = self.install_dir();
         let (manifest, files, builtin, name) = match pkg {
-            Package::Builtin(id) => (crate::modpkg::builtin(self.product_id, id)?, None, true, None),
+            Package::Builtin(id) => (crate::modpkg::builtin(&self.key, id)?, None, true, None),
             Package::Dir { path, name } => {
                 let path = path.canonicalize().with_context(|| format!("{} not found", path.display()))?;
                 match crate::modpkg::read_package(&path)? {
@@ -1085,9 +1110,7 @@ impl ModStore {
                 }
             }
         };
-        if !manifest.products.is_empty() && !manifest.products.contains(&self.product_id) {
-            bail!("{} is for product {:?}, not {}", manifest.id, manifest.products, self.product_id);
-        }
+        crate::modpkg::check_game(&manifest, &self.key)?;
         let layers = self.layers()?;
         let mods = mods_of(&layers, &self.records()?);
         let installed = mods.iter().find(|r| {
@@ -1300,7 +1323,7 @@ impl ModStore {
         let users = self.users_of(&mods, &rec.id)?;
         let current = layers.iter().find(|l| l.id == rec.current);
         let catalog_update = match current.filter(|l| l.builtin).and_then(|l| l.mod_id()) {
-            Some(id) => crate::modpkg::catalog(self.product_id)?.into_iter().find(|m| m.id == id).filter(|m| Some(m) != current.and_then(|l| l.manifest.as_ref())),
+            Some(id) => crate::modpkg::catalog(&self.key)?.into_iter().find(|m| m.id == id).filter(|m| Some(m) != current.and_then(|l| l.manifest.as_ref())),
             None => None,
         };
         layer.name = rec.display(&vid);
@@ -1470,7 +1493,12 @@ impl ModStore {
         };
         self.check_name(name, &id)?;
         let layers = self.resolve_layers(layers)?;
-        let advice = self.saves_advice(&layers)?;
+        let mut advice = self.saves_advice(&layers)?;
+        if !self.has_save_stores() {
+            // Steam games: the real saves, whatever the mods (and say so).
+            advice.share_default = true;
+            advice.reason = crate::savestores::REAL_SAVES.into();
+        }
         let wanted = saves.unwrap_or(if advice.share_default { crate::savestores::DEFAULT_STORE } else { crate::savestores::NEW_STORE });
         let store = self.resolve_store(wanted, name, source)?;
         let p = Profile { id, name: name.to_owned(), layers, saves: Some(store), ..Default::default() };
@@ -1560,7 +1588,7 @@ impl ModStore {
     pub fn state(&self) -> Result<ModsState> {
         let (deleted, live): (Vec<_>, Vec<_>) = self.all_profiles()?.into_iter().partition(|r| r.deleted);
         Ok(ModsState {
-            product_id: self.product_id,
+            product_id: self.product_id(),
             layers: self.layers()?,
             profiles: live.into_iter().map(|r| self.info(r)).collect(),
             deleted: deleted.into_iter().map(|r| self.info(r)).collect(),
@@ -1568,7 +1596,8 @@ impl ModStore {
             vanilla_fixes: self.vanilla_fixes()?.into_iter().map(|l| l.id).collect(),
             // A game setting; the daemon fills it in.
             default_profile: None,
-            save_stores: self.save_stores().current()?.stores,
+            game: (!self.key.is_ubisoft()).then_some(self.key),
+            save_stores: if self.has_save_stores() { self.save_stores().current()?.stores } else { Vec::new() },
             vanilla_saves: Some(self.saves_plan(None, &[])),
             mods: self.mods()?,
         })
@@ -1687,8 +1716,11 @@ impl ModStore {
     }
     /// The saves folder a profile made before Mods v2 (relative to the prefix), if any.
     pub(crate) fn legacy_saves(&self, id: &str) -> Option<String> {
+        if !self.has_save_stores() {
+            return None;
+        }
         let saves = self.prefix()?.join(crate::launcher::UPC_REL).join("savegames");
-        let name = format!("{}-{id}", self.product_id);
+        let name = format!("{}-{id}", self.product_id());
         let mut users: Vec<String> = std::fs::read_dir(&saves).ok()?.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
         users.sort();
         users.into_iter().find(|u| saves.join(u).join(&name).is_dir()).map(|u| format!("{}/savegames/{u}/{name}", crate::launcher::UPC_REL))
@@ -1782,13 +1814,20 @@ impl ModStore {
             overlays.push(OverlaySpec { target: game.install_dir.clone(), lower, upper: state.join("upper"), work: state.join("work") });
         }
         let mut config_dirs = Vec::new();
-        if let Some(p) = &profile {
+        let prefix = game.prefix();
+        if let Some(p) = &profile
+            && !p.profile_config.is_empty()
+            && prefix.is_none()
+        {
+            st.problems.push("profile_config: the game has no Wine prefix (a native game), so there are no prefix folders to give the profile".into());
+        }
+        if let (Some(p), Some(prefix)) = (&profile, prefix) {
             if let Err(e) = self.check_config_dirs(&p.profile_config) {
                 st.problems.push(format!("profile_config: {e:#}"));
             }
             for (d, info) in p.profile_config.iter().zip(self.config_dirs(p)) {
                 overlays.push(OverlaySpec {
-                    target: game.prefix.join(d),
+                    target: prefix.join(d),
                     lower: Vec::new(),
                     upper: info.upper.clone(),
                     work: self.profile_dir(&p.id).join("prefix-work").join(short_hash(d)),
@@ -1800,17 +1839,24 @@ impl ModStore {
             prefix: game.prefix.clone(),
             profile: profile
                 .as_ref()
-                .filter(|p| !p.profile_config.is_empty())
+                .filter(|p| !p.profile_config.is_empty() && prefix.is_some())
                 .map(|p| (p.id.clone(), self.profile_prefix(&p.id), p.profile_config.clone())),
         };
         // Recorded under the mod's id, so switching versions reconciles like any change of
         // what the mod wants.
-        let patches: Vec<Wanted> = st
+        let mut patches: Vec<Wanted> = st
             .mods
             .iter()
             .zip(&st.resolved)
             .flat_map(|(m, r)| m.patches().iter().map(|p| Wanted { mod_id: r.mod_id.clone(), patch: p.clone() }))
             .collect();
+        // Config patches are prefix-relative: a native game has nowhere to apply them.
+        if prefix.is_none() && !patches.is_empty() {
+            for w in &patches {
+                st.warnings.push(format!("{}: config patch on {} not applied: the game has no Wine prefix (a native game)", w.mod_id, w.patch.file));
+            }
+            patches.clear();
+        }
         // What the patches would touch (they're applied at launch).
         let preview = patches
             .iter()
@@ -1831,7 +1877,7 @@ impl ModStore {
             })
             .collect();
         let api = LaunchPlan {
-            product_id: self.product_id,
+            product_id: self.product_id(),
             profile: profile.clone(),
             revision,
             mods: st.mods.iter().map(|m| m.id.clone()).collect(),
@@ -1854,7 +1900,7 @@ impl ModStore {
     /// [`Self::migrate_saves`]). Layers need nothing (they're file-only mods as they are).
     /// Idempotent.
     pub fn migrate(&self, dry_run: bool, source: &str) -> Result<MigrationReport> {
-        let mut report = MigrationReport { product_id: self.product_id, dry_run, ..Default::default() };
+        let mut report = MigrationReport { product_id: self.product_id(), dry_run, ..Default::default() };
         report.file_only_mods = self.layers()?.into_iter().filter(|l| l.manifest.is_none()).map(|l| l.id).collect();
         if self.prefix().is_none() {
             report.notes.push("no game prefix given; profiles' saves folders weren't checked".into());
@@ -2233,6 +2279,7 @@ mod tests {
             exe: "game.exe".into(),
             args: None,
             language: None,
+            game: None,
         }
     }
 

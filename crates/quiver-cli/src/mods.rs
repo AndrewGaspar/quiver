@@ -10,7 +10,7 @@ use quiver_api::mods::{
     CatalogEntry, GameProfiles, LaunchPlan, Layer, LayerChange, LayerRevision, MigrationReport, ModDetail, ModPrefs, ModRecord, ModRevision, ModSdkConnection, ModSdkRequest,
     ModsState, PatchState, PatchStatus, ProfileInfo, ProfileRevision, SettingConflict, VersionChange, VersionMerge, is_human_source,
 };
-use quiver_api::{Client, ModsRequest, Request, SettingOp};
+use quiver_api::{Client, GameRef, ModsRequest, Request, SettingOp};
 
 #[derive(Subcommand)]
 pub enum ModsAction {
@@ -303,23 +303,71 @@ pub enum ProfileAction {
     Restore { profile: String, revision: u32 },
 }
 
-/// An installed game by product id or unique name match.
+/// A game as `quiver mods` names it on the command line and in hints: `3539` for a Ubisoft
+/// product (as always), `steam:620` for a Steam game; sent as the request's game.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GameArg(pub GameRef);
+
+impl std::fmt::Display for GameArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.key())
+    }
+}
+
+impl From<GameArg> for quiver_api::game::GameField {
+    fn from(g: GameArg) -> Self {
+        g.0.into()
+    }
+}
+
+/// A game mods can be used with, by ref or unique name match: an installed Ubisoft game, or
+/// any Steam game Steam has installed (`steam:<appid>`, or its name when no Ubisoft game
+/// matches; design/STORE-STEAM.md §10).
 pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<GameProfiles> {
     let games: Vec<GameProfiles> = client.call(Request::Mods(ModsRequest::Games)).await?;
-    if let Ok(id) = game.parse::<u32>() {
-        return games.into_iter().find(|g| g.product_id == id).with_context(|| format!("product {id} is not installed"));
+    let steam_game = |name: String, r: GameRef| GameProfiles { product_id: 0, name, profiles: Vec::new(), game: Some(r) };
+    if let Some(r) = GameRef::parse_ref(game) {
+        if let Some(g) = games.iter().find(|g| g.game_ref() == r) {
+            return Ok(g.clone());
+        }
+        if r.is_ubisoft() {
+            bail!("product {} is not installed", r.id);
+        }
+        if r.as_steam().is_none() {
+            bail!("{r}: mods for {} games aren't built yet", r.store.label());
+        }
+        let e = crate::resolve_any(client, game).await.with_context(|| format!("{r} is not installed in Steam"))?;
+        return Ok(steam_game(e.name, r));
     }
     let norm = |s: &str| s.to_lowercase().replace(['®', '™', '’', '\''], "");
     let needle = norm(game);
     let matches: Vec<GameProfiles> = games.into_iter().filter(|g| norm(&g.name).contains(&needle)).collect();
     match matches.len() {
         1 => Ok(matches.into_iter().next().unwrap()),
-        0 => bail!("no installed game matches '{game}'"),
+        0 => match crate::resolve_any(client, game).await {
+            Ok(e) if e.game.as_steam().is_some() => Ok(steam_game(e.name, e.game)),
+            _ => bail!("no installed game matches '{game}'"),
+        },
         _ => bail!(
             "'{game}' matches several games: {}",
-            matches.iter().map(|g| format!("{} ({})", g.name, g.product_id)).collect::<Vec<_>>().join(", ")
+            matches.iter().map(|g| format!("{} ({})", g.name, GameArg(g.game_ref()))).collect::<Vec<_>>().join(", ")
         ),
     }
+}
+
+/// For a Steam game, what decides whether its mods reach the game: the hook, and the saves.
+pub(crate) async fn steam_note(client: &Client, game: GameRef) -> Option<String> {
+    let app = game.as_steam()?;
+    let hooked = client
+        .call::<quiver_api::exports::SteamHook>(Request::SteamHookStatus { app_id: app, steam_user: None })
+        .await
+        .is_ok_and(|h| h.hooked());
+    let saves = "every profile uses the game's real saves, which Steam Cloud syncs (profiles with saves of their own aren't built for Steam games yet)";
+    Some(if hooked {
+        format!("it starts through quiver steam-run, so Steam's Play runs this profile; {saves}")
+    } else {
+        format!("Steam starts it without Quiver, so mods don't reach it yet: quiver steam hook {game} on; {saves}")
+    })
 }
 
 /// For "Ask" actions requested under an agent source: ask the person at the terminal.
@@ -453,11 +501,12 @@ fn entry_label(s: &ModsState, e: &str) -> String {
 
 fn print_state(name: &str, s: &ModsState) {
     let layer_name = |id: &String| if s.mod_of(id).is_some() { s.display(id) } else { format!("{id} (missing)") };
-    println!("{name} ({})", s.product_id);
+    let key = GameArg(s.game_ref());
+    println!("{name} ({key})");
     println!("mods:");
     let mods = s.all_mods();
     if mods.is_empty() {
-        println!("  (none; quiver mods {} catalog, install ID|DIR, or layer add NAME DIR)", s.product_id);
+        println!("  (none; quiver mods {} catalog, install ID|DIR, or layer add NAME DIR)", key);
     }
     for m in &mods {
         let Some(l) = s.layer(&m.current) else {
@@ -483,10 +532,10 @@ fn print_state(name: &str, s: &ModsState) {
             "           {flags}{}{}",
             // A package's id; a store id (what `set` gave a layer) says nothing new.
             l.mod_id().filter(|x| *x != m.id && !m.has(x)).map(|x| format!(" [{x}]")).unwrap_or_default(),
-            if versions.is_empty() { String::new() } else { format!("; {versions} (quiver mods {} version list {})", s.product_id, m.id) }
+            if versions.is_empty() { String::new() } else { format!("; {versions} (quiver mods {} version list {})", key, m.id) }
         );
     }
-    println!("profiles (Play uses {}; change it: quiver mods {} default PROFILE|vanilla):", default_label(s), s.product_id);
+    println!("profiles (Play uses {}; change it: quiver mods {} default PROFILE|vanilla):", default_label(s), key);
     let fixes = match s.fixes_on_vanilla {
         None => "fixes on unmodded games: not decided (quiver fixes-on-vanilla on|off)".to_owned(),
         Some(false) => "fixes on unmodded games: off".to_owned(),
@@ -546,7 +595,7 @@ fn print_state(name: &str, s: &ModsState) {
     };
     s.profiles.iter().for_each(print_profile);
     if !s.deleted.is_empty() {
-        println!("deleted (quiver mods {} profile restore ID REVISION):", s.product_id);
+        println!("deleted (quiver mods {} profile restore ID REVISION):", key);
         s.deleted.iter().for_each(print_profile);
     }
 }
@@ -719,15 +768,18 @@ fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
 
 pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) -> Result<()> {
     let g = resolve_installed(client, game).await?;
-    let product_id = g.product_id;
+    let product_id = GameArg(g.game_ref());
     let call = |req: ModsRequest| client.call::<serde_json::Value>(Request::Mods(req));
     match action {
         ModsAction::List { json } => {
-            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&state)?);
             } else {
                 print_state(&g.name, &state);
+                if let Some(n) = steam_note(client, product_id.0).await {
+                    println!("note: {n}");
+                }
             }
         }
         ModsAction::Default { profile, message } => {
@@ -736,8 +788,16 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 let rev: quiver_api::Revision = client.call(Request::SettingsSet { game: product_id.into(), ops, message }).await?;
                 eprintln!("{}: settings revision {} (quiver history {product_id} lists every change)", g.name, rev.revision);
             }
-            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
-            println!("{}: Play uses {}", g.name, default_label(&state));
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
+            if product_id.0.as_steam().is_some() {
+                // Its `steam_profile` setting: what Play in Steam runs through quiver steam-run.
+                println!("{}: Play in Steam runs {}", g.name, default_label(&state));
+                if let Some(n) = steam_note(client, product_id.0).await {
+                    println!("note: {n}");
+                }
+            } else {
+                println!("{}: Play uses {}", g.name, default_label(&state));
+            }
         }
         ModsAction::Layer { action: LayerAction::Add { name, dir, delete, version_of: Some(of) } } => {
             // "DLSS-v5" as a version of DLSS is "v5".
@@ -764,7 +824,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         ModsAction::Options { action, profile, json } => return crate::options::run(client, source, game, profile, json, action).await,
         ModsAction::MergeVersions { into, from, labels, dry_run, json } => {
             let confirmed = !dry_run && confirm(source, &format!("make {} versions of mod '{into}' of {} (profiles that stack them are rewritten)", from.join(", "), g.name))?;
-            let req = ModsRequest::MergeVersions { product_id, into, from, labels, dry_run, confirmed };
+            let req = ModsRequest::MergeVersions { game: product_id.into(), into, from, labels, dry_run, confirmed };
             let r: VersionMerge = client.call(Request::Mods(req)).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -794,21 +854,21 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 }
                 None => PathBuf::new(),
             };
-            let c: LayerChange = client.call(Request::Mods(ModsRequest::LayerAdd { product_id, name, path, deletes: delete })).await?;
+            let c: LayerChange = client.call(Request::Mods(ModsRequest::LayerAdd { game: product_id.into(), name, path, deletes: delete })).await?;
             print_change(&g.name, "added", &c);
         }
         ModsAction::Layer { action: LayerAction::DeleteFiles { layer, paths, message } } => {
-            let req = ModsRequest::LayerDeletes { product_id, layer, delete: paths, keep: Vec::new(), message };
+            let req = ModsRequest::LayerDeletes { game: product_id.into(), layer, delete: paths, keep: Vec::new(), message };
             let c: LayerChange = client.call(Request::Mods(req)).await?;
             print_change(&g.name, "changed", &c);
         }
         ModsAction::Layer { action: LayerAction::KeepFiles { layer, paths, message } } => {
-            let req = ModsRequest::LayerDeletes { product_id, layer, delete: Vec::new(), keep: paths, message };
+            let req = ModsRequest::LayerDeletes { game: product_id.into(), layer, delete: Vec::new(), keep: paths, message };
             let c: LayerChange = client.call(Request::Mods(req)).await?;
             print_change(&g.name, "changed", &c);
         }
         ModsAction::Layer { action: LayerAction::Show { layer } } => {
-            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
             let found: Vec<&Layer> = match state.layers.iter().find(|l| l.id == layer) {
                 Some(l) => vec![l],
                 None => state.layers.iter().filter(|l| l.name.trim().to_lowercase() == layer.trim().to_lowercase()).collect(),
@@ -820,7 +880,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             println!("  used by {}", if users.is_empty() { "no profile".into() } else { users.join(", ") });
         }
         ModsAction::Layer { action: LayerAction::History { layer } } => {
-            let revs: Vec<LayerRevision> = client.call(Request::Mods(ModsRequest::LayerHistory { product_id, layer })).await?;
+            let revs: Vec<LayerRevision> = client.call(Request::Mods(ModsRequest::LayerHistory { game: product_id.into(), layer })).await?;
             for r in revs {
                 println!(
                     "r{:<3} {}  by {:<8} deletes {:<3} {}  {}",
@@ -835,23 +895,23 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
         ModsAction::Layer { action: LayerAction::Restore { layer, revision } } => {
             let confirmed = confirm(source, &format!("restore the deletions of mod layer '{layer}' of {} to revision {revision}", g.name))?;
-            let req = ModsRequest::LayerRestore { product_id, layer, revision, confirmed };
+            let req = ModsRequest::LayerRestore { game: product_id.into(), layer, revision, confirmed };
             let c: LayerChange = client.call(Request::Mods(req)).await?;
             print_change(&g.name, "restored", &c);
         }
         ModsAction::Layer { action: LayerAction::Remove { layer } } => {
             let confirmed = confirm(source, &format!("delete mod layer '{layer}' of {}", g.name))?;
-            let l: Layer = client.call(Request::Mods(ModsRequest::LayerRemove { product_id, layer, confirmed })).await?;
+            let l: Layer = client.call(Request::Mods(ModsRequest::LayerRemove { game: product_id.into(), layer, confirmed })).await?;
             println!("{}: removed layer '{}'", g.name, l.name);
         }
         ModsAction::Profile { action } => {
             let rev: ProfileRevision = match action {
                 ProfileAction::Create { name, layers, saves, message } => {
-                    profile_reply(call(ModsRequest::ProfileCreate { product_id, name, layers, message, saves }).await?)?
+                    profile_reply(call(ModsRequest::ProfileCreate { game: product_id.into(), name, layers, message, saves }).await?)?
                 }
                 ProfileAction::Set { profile, changes, message } => {
                     let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
-                    profile_reply(call(ModsRequest::ProfileSet { product_id, profile, ops, message }).await?)?
+                    profile_reply(call(ModsRequest::ProfileSet { game: product_id.into(), profile, ops, message }).await?)?
                 }
                 pin @ (ProfileAction::Pin { .. } | ProfileAction::Unpin { .. }) => {
                     let (profile, on) = match pin {
@@ -860,11 +920,11 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                         _ => unreachable!(),
                     };
                     let ops = vec![SettingOp::Set { key: "pinned".into(), value: on.into() }];
-                    serde_json::from_value(call(ModsRequest::ProfileSet { product_id, profile, ops, message: None }).await?)?
+                    serde_json::from_value(call(ModsRequest::ProfileSet { game: product_id.into(), profile, ops, message: None }).await?)?
                 }
                 ProfileAction::Delete { profile } => {
                     let confirmed = confirm(source, &format!("delete mod profile '{profile}' of {}", g.name))?;
-                    let rev = profile_reply(call(ModsRequest::ProfileDelete { product_id, profile, confirmed }).await?)?;
+                    let rev = profile_reply(call(ModsRequest::ProfileDelete { game: product_id.into(), profile, confirmed }).await?)?;
                     println!(
                         "{}: deleted profile '{}' ({}); its saves are kept. Undo: quiver mods {product_id} profile restore {} {}",
                         g.name,
@@ -877,7 +937,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 }
                 ProfileAction::History { profile } => {
                     let revs: Vec<ProfileRevision> =
-                        serde_json::from_value(call(ModsRequest::ProfileHistory { product_id, profile }).await?)?;
+                        serde_json::from_value(call(ModsRequest::ProfileHistory { game: product_id.into(), profile }).await?)?;
                     for r in revs {
                         println!(
                             "r{:<3} {}  by {:<8} {}{}  {}",
@@ -893,11 +953,11 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 }
                 ProfileAction::Restore { profile, revision } => {
                     let confirmed = confirm(source, &format!("restore mod profile '{profile}' of {} to revision {revision}", g.name))?;
-                    serde_json::from_value(call(ModsRequest::ProfileRestore { product_id, profile, revision, confirmed }).await?)?
+                    serde_json::from_value(call(ModsRequest::ProfileRestore { game: product_id.into(), profile, revision, confirmed }).await?)?
                 }
             };
             let p = &rev.profile;
-            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
             let names: Vec<String> = p.layers.iter().map(|e| entry_label(&state, e)).collect();
             let store = p.saves.as_deref().map(|id| {
                 state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced" } else { ", this PC only" }))
@@ -915,7 +975,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             );
         }
         ModsAction::Catalog { json } => {
-            let list: Vec<CatalogEntry> = client.call(Request::Mods(ModsRequest::Catalog { product_id })).await?;
+            let list: Vec<CatalogEntry> = client.call(Request::Mods(ModsRequest::Catalog { game: product_id.into() })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&list)?);
                 return Ok(());
@@ -943,9 +1003,9 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             let as_dir = what.contains('/') || std::path::Path::new(&what).is_dir();
             let req = if as_dir {
                 let path = PathBuf::from(&what).canonicalize().with_context(|| format!("{what} not found"))?;
-                ModsRequest::Install { product_id, builtin: None, path: Some(path), name }
+                ModsRequest::Install { game: product_id.into(), builtin: None, path: Some(path), name }
             } else {
-                ModsRequest::Install { product_id, builtin: Some(what), path: None, name }
+                ModsRequest::Install { game: product_id.into(), builtin: Some(what), path: None, name }
             };
             let c: LayerChange = client.call(Request::Mods(req)).await?;
             print_change(&g.name, "installed", &c);
@@ -954,14 +1014,14 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
         ModsAction::Uninstall { mod_id } => {
             let confirmed = confirm(source, &format!("uninstall mod '{mod_id}' of {} (its files, and config values it changed go back)", g.name))?;
-            let v: serde_json::Value = call(ModsRequest::Uninstall { product_id, mod_id, confirmed }).await?;
+            let v: serde_json::Value = call(ModsRequest::Uninstall { game: product_id.into(), mod_id, confirmed }).await?;
             let l: Layer = serde_json::from_value(v["mod"].clone())?;
             let undone: Vec<PatchStatus> = serde_json::from_value(v["undone"].clone()).unwrap_or_default();
             println!("{}: uninstalled '{}' ({})", g.name, l.name, l.id);
             print_patches(&undone, &|id| id.clone());
         }
         ModsAction::Show { mod_id, json } => {
-            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { product_id, mod_id })).await?;
+            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { game: product_id.into(), mod_id })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&d)?);
             } else {
@@ -970,16 +1030,16 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
         }
         ModsAction::Set { mod_id, changes, message } => {
             let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
-            let c: LayerChange = client.call(Request::Mods(ModsRequest::ModSet { product_id, mod_id, ops, message })).await?;
+            let c: LayerChange = client.call(Request::Mods(ModsRequest::ModSet { game: product_id.into(), mod_id, ops, message })).await?;
             print_change(&g.name, "changed", &c);
             println!("  {}", mod_flags(&c.layer));
         }
         ModsAction::Plan { profile, json } => {
-            let plan: LaunchPlan = client.call(Request::Mods(ModsRequest::Plan { product_id, profile })).await?;
+            let plan: LaunchPlan = client.call(Request::Mods(ModsRequest::Plan { game: product_id.into(), profile })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
-                let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
+                let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
                 print_plan(&g.name, &plan, &state);
             }
         }
@@ -989,14 +1049,14 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
                 None => format!("put back every config value Quiver changed for {}", g.name),
             };
             let confirmed = confirm(source, &what)?;
-            let undone: Vec<PatchStatus> = client.call(Request::Mods(ModsRequest::PatchesUndo { product_id, mod_id, confirmed })).await?;
+            let undone: Vec<PatchStatus> = client.call(Request::Mods(ModsRequest::PatchesUndo { game: product_id.into(), mod_id, confirmed })).await?;
             if undone.is_empty() {
                 println!("{}: nothing to undo", g.name);
             }
             print_patches(&undone, &|id| id.clone());
         }
         ModsAction::Sdk { action: SdkAction::Status { json } } => {
-            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: Some(product_id) })).await?;
+            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: product_id.0.as_ubisoft() })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&conns)?);
             } else {
@@ -1004,7 +1064,7 @@ pub async fn run(client: &Client, source: &str, game: &str, action: ModsAction) 
             }
         }
         ModsAction::Migrate { dry_run } => {
-            let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { product_id, dry_run })).await?;
+            let r: MigrationReport = client.call(Request::Mods(ModsRequest::Migrate { game: product_id.into(), dry_run })).await?;
             println!("{}: {}", g.name, if dry_run { "would migrate (dry run)" } else { "migrated" });
             println!("  file-only mods (no change needed): {}", if r.file_only_mods.is_empty() { "none".into() } else { r.file_only_mods.join(", ") });
             if r.notes.is_empty() {
@@ -1086,7 +1146,7 @@ fn print_version_change(game: &str, verb: &str, c: &VersionChange) {
 
 /// `quiver mods <game> version …`.
 async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -> Result<()> {
-    let product_id = g.product_id;
+    let product_id = GameArg(g.game_ref());
     let change = |req: ModsRequest| client.call::<VersionChange>(Request::Mods(req));
     match action {
         VersionAction::Add { mod_id, dir, label, notes, no_update, prerelease, save_compatible, delete, options } => {
@@ -1099,22 +1159,22 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
                 }
                 None => PathBuf::new(),
             };
-            let req = ModsRequest::VersionAdd { product_id, mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete, options };
+            let req = ModsRequest::VersionAdd { game: product_id.into(), mod_id, path, label, notes, no_update, prerelease, save_compatible, deletes: delete, options };
             print_version_change(&g.name, "added", &change(req).await?);
         }
         VersionAction::Use { mod_id, version, message } => {
-            print_version_change(&g.name, "now current:", &change(ModsRequest::VersionUse { product_id, mod_id, version, message }).await?);
+            print_version_change(&g.name, "now current:", &change(ModsRequest::VersionUse { game: product_id.into(), mod_id, version, message }).await?);
         }
         VersionAction::Retire { mod_id, version, message } => {
-            let req = ModsRequest::VersionRetire { product_id, mod_id, version, retired: true, message };
+            let req = ModsRequest::VersionRetire { game: product_id.into(), mod_id, version, retired: true, message };
             print_version_change(&g.name, "retired", &change(req).await?);
         }
         VersionAction::Unretire { mod_id, version } => {
-            let req = ModsRequest::VersionRetire { product_id, mod_id, version, retired: false, message: None };
+            let req = ModsRequest::VersionRetire { game: product_id.into(), mod_id, version, retired: false, message: None };
             print_version_change(&g.name, "brought back", &change(req).await?);
         }
         VersionAction::History { mod_id } => {
-            let revs: Vec<ModRevision> = client.call(Request::Mods(ModsRequest::ModHistory { product_id, mod_id: mod_id.clone() })).await?;
+            let revs: Vec<ModRevision> = client.call(Request::Mods(ModsRequest::ModHistory { game: product_id.into(), mod_id: mod_id.clone() })).await?;
             if revs.is_empty() {
                 println!("{}: '{mod_id}' has one version and no history yet (it gets one with a second version)", g.name);
             }
@@ -1131,8 +1191,8 @@ async fn run_version(client: &Client, g: &GameProfiles, action: VersionAction) -
             }
         }
         VersionAction::List { mod_id, json } => {
-            let state: ModsState = client.call(Request::Mods(ModsRequest::List { product_id })).await?;
-            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { product_id, mod_id })).await?;
+            let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
+            let d: ModDetail = client.call(Request::Mods(ModsRequest::Show { game: product_id.into(), mod_id })).await?;
             let r = d.record.clone().or_else(|| state.mod_of(&d.layer.id)).context("the daemon didn't say which mod that is")?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);

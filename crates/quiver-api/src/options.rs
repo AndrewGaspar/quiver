@@ -1574,6 +1574,9 @@ pub struct InvokeResult {
 pub struct SessionOptions {
     pub session: String,
     pub product_id: u32,
+    /// Another store's game (`product_id` is then 0; appended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     pub profile: String,
     /// The options revision the session launched with.
     pub launched_revision: u32,
@@ -1623,7 +1626,8 @@ pub enum OptionsRequest {
     /// (`Vec<options::SurfaceState>`, C2). `profile` `None`: the game's default profile.
     /// `level`: hide options above it (`basic`, `advanced`; default: everything).
     List {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1633,7 +1637,8 @@ pub enum OptionsRequest {
     /// the daemon. Agents need `confirmed` for live changes to a running game and for
     /// `danger` options; everyone needs it for `danger` options.
     Set {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         ops: Vec<OptionOp>,
@@ -1647,7 +1652,8 @@ pub enum OptionsRequest {
     /// What a profile's values differ in (`Vec<options::OptionDiff>`): against `default`
     /// (the default), another profile (name or id), or a revision (`r12`).
     Diff {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1655,14 +1661,16 @@ pub enum OptionsRequest {
     },
     /// A profile's options history (`Vec<options::OptionsRevision>`).
     History {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
     /// Make an earlier options revision current again, as a new revision (live where the
     /// game runs). Agents need `confirmed`.
     Restore {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         revision: u32,
@@ -1672,14 +1680,16 @@ pub enum OptionsRequest {
     /// Put back the values a session launched with (C4; also after a crash), live where
     /// possible. Agents need `confirmed`.
     RevertSession {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         session: String,
         #[serde(default)]
         confirmed: bool,
     },
     /// Run a mod's action in a running session (SDK; `InvokeResult`).
     Invoke {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         surface: String,
         action: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1690,13 +1700,15 @@ pub enum OptionsRequest {
     /// Every key binding in play for a profile, normalized, with conflicts
     /// (`KeysReport`, C7).
     Keys {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
     },
     /// A mod version's resolved schema, its source and lint findings (`SchemaInfo`).
     Schema {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1704,7 +1716,8 @@ pub enum OptionsRequest {
     },
     /// Write a local schema for an installed mod (revisioned; `SchemaInfo`).
     SchemaSet {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         toml: String,
@@ -1713,7 +1726,8 @@ pub enum OptionsRequest {
     },
     /// A schema guessed from one of a mod version's files (TOML text).
     Infer {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         file: String,
@@ -1726,14 +1740,16 @@ pub enum OptionsRequest {
     /// The files of a mod's current version that `Infer` can read (INI-like text files,
     /// install-relative, `/`-separated; `Vec<String>`).
     Files {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
     },
     /// Recent play sessions' option records, newest first (`Vec<SessionOptions>`): live
     /// changes and crash notes, for "Revert this session". `profile` `None`: every profile.
     SessionRecords {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

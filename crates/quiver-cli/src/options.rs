@@ -315,19 +315,19 @@ fn parse_change(surface: &str, s: &str) -> Result<OptionOp> {
 
 pub async fn run(client: &Client, source: &str, game: &str, profile: Option<String>, json: bool, action: Option<OptionsAction>) -> Result<()> {
     let g = resolve_installed(client, game).await?;
-    let product_id = g.product_id;
+    let product_id = crate::mods::GameArg(g.game_ref());
     let call = |req: OptionsRequest| client.call::<Value>(Request::Options(req));
     let action = action.unwrap_or(OptionsAction::List { advanced: false, all: false, raw: false, changed: false });
     let set = |ops: Vec<OptionOp>, live: Live, message: Option<String>, confirmed: bool| {
         let profile = profile.clone();
         async move {
-            let req = OptionsRequest::Set { product_id, profile: profile.clone(), ops: ops.clone(), live, message: message.clone(), confirmed };
+            let req = OptionsRequest::Set { game: product_id.into(), profile: profile.clone(), ops: ops.clone(), live, message: message.clone(), confirmed };
             match client.call::<OptionsChange>(Request::Options(req)).await {
                 Err(e) if !confirmed && e.to_string().contains("confirmation") => {
                     let what = e.to_string();
                     let prompt = if is_human_source(source) { what.clone() } else { format!("'{source}' asks: {what}") };
                     if ask(&prompt)? {
-                        client.call::<OptionsChange>(Request::Options(OptionsRequest::Set { product_id, profile, ops, live, message, confirmed: true })).await
+                        client.call::<OptionsChange>(Request::Options(OptionsRequest::Set { game: product_id.into(), profile, ops, live, message, confirmed: true })).await
                     } else {
                         Err(e)
                     }
@@ -338,7 +338,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
     };
     match action {
         OptionsAction::List { advanced, all, raw, changed } => {
-            let list: Vec<SurfaceState> = client.call(Request::Options(OptionsRequest::List { product_id, profile: profile.clone(), level: None })).await?;
+            let list: Vec<SurfaceState> = client.call(Request::Options(OptionsRequest::List { game: product_id.into(), profile: profile.clone(), level: None })).await?;
             if json {
                 return json_out(&list);
             }
@@ -351,7 +351,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             }
         }
         OptionsAction::Get { surface, id } => {
-            let list: Vec<SurfaceState> = client.call(Request::Options(OptionsRequest::List { product_id, profile: profile.clone(), level: None })).await?;
+            let list: Vec<SurfaceState> = client.call(Request::Options(OptionsRequest::List { game: product_id.into(), profile: profile.clone(), level: None })).await?;
             let q = surface.to_lowercase();
             let s = list
                 .iter()
@@ -420,7 +420,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             print_change(&g.name, &c);
         }
         OptionsAction::Diff { against } => {
-            let d: Vec<OptionDiff> = serde_json::from_value(call(OptionsRequest::Diff { product_id, profile: profile.clone(), against: against.clone() }).await?)?;
+            let d: Vec<OptionDiff> = serde_json::from_value(call(OptionsRequest::Diff { game: product_id.into(), profile: profile.clone(), against: against.clone() }).await?)?;
             if json {
                 return json_out(&d);
             }
@@ -440,7 +440,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             }
         }
         OptionsAction::History => {
-            let h: Vec<OptionsRevision> = serde_json::from_value(call(OptionsRequest::History { product_id, profile: profile.clone() }).await?)?;
+            let h: Vec<OptionsRevision> = serde_json::from_value(call(OptionsRequest::History { game: product_id.into(), profile: profile.clone() }).await?)?;
             if json {
                 return json_out(&h);
             }
@@ -458,7 +458,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         OptionsAction::Restore { revision } => {
             let n: u32 = revision.trim_start_matches(['r', 'R']).parse().with_context(|| format!("'{revision}' isn't a revision (rN)"))?;
             let confirmed = is_human_source(source) || ask(&format!("'{source}' asks to restore options revision r{n} of {}.", g.name))?;
-            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::Restore { product_id, profile: profile.clone(), revision: n, confirmed }).await?)?;
+            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::Restore { game: product_id.into(), profile: profile.clone(), revision: n, confirmed }).await?)?;
             if json {
                 return json_out(&c);
             }
@@ -466,14 +466,14 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         }
         OptionsAction::Revert { session } => {
             let confirmed = is_human_source(source) || ask(&format!("'{source}' asks to revert session {session}'s option changes in {}.", g.name))?;
-            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::RevertSession { product_id, session, confirmed }).await?)?;
+            let c: OptionsChange = serde_json::from_value(call(OptionsRequest::RevertSession { game: product_id.into(), session, confirmed }).await?)?;
             if json {
                 return json_out(&c);
             }
             print_change(&g.name, &c);
         }
         OptionsAction::Keys => {
-            let k: KeysReport = serde_json::from_value(call(OptionsRequest::Keys { product_id, profile: profile.clone() }).await?)?;
+            let k: KeysReport = serde_json::from_value(call(OptionsRequest::Keys { game: product_id.into(), profile: profile.clone() }).await?)?;
             if json {
                 return json_out(&k);
             }
@@ -492,7 +492,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         OptionsAction::Schema { mod_id, version, lint, set: Some(file), message } => {
             let _ = (version, lint);
             let toml = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let info: SchemaInfo = serde_json::from_value(call(OptionsRequest::SchemaSet { product_id, mod_id, toml, message }).await?)?;
+            let info: SchemaInfo = serde_json::from_value(call(OptionsRequest::SchemaSet { game: product_id.into(), mod_id, toml, message }).await?)?;
             if json {
                 return json_out(&info);
             }
@@ -502,7 +502,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             }
         }
         OptionsAction::Schema { mod_id, version, lint, set: None, .. } => {
-            let info: SchemaInfo = serde_json::from_value(call(OptionsRequest::Schema { product_id, mod_id, version }).await?)?;
+            let info: SchemaInfo = serde_json::from_value(call(OptionsRequest::Schema { game: product_id.into(), mod_id, version }).await?)?;
             if json {
                 return json_out(&info);
             }
@@ -527,7 +527,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             }
         }
         OptionsAction::Infer { mod_id, file } => {
-            let text: String = serde_json::from_value(call(OptionsRequest::Infer { product_id, mod_id, file }).await?)?;
+            let text: String = serde_json::from_value(call(OptionsRequest::Infer { game: product_id.into(), mod_id, file }).await?)?;
             print!("{text}");
         }
         OptionsAction::Lint { dir } => {
@@ -546,7 +546,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
         }
         OptionsAction::Sessions => {
             let list: Vec<SessionDetail> = serde_json::from_value(call(OptionsRequest::Sessions).await?)?;
-            let list: Vec<&SessionDetail> = list.iter().filter(|s| s.product_id == product_id).collect();
+            let list: Vec<&SessionDetail> = list.iter().filter(|s| s.game_ref() == product_id.0).collect();
             if json {
                 return json_out(&list);
             }
@@ -564,7 +564,7 @@ pub async fn run(client: &Client, source: &str, game: &str, profile: Option<Stri
             }
         }
         OptionsAction::Invoke { surface, action, arg } => {
-            let r: InvokeResult = serde_json::from_value(call(OptionsRequest::Invoke { product_id, surface, action, arg, session: None }).await?)?;
+            let r: InvokeResult = serde_json::from_value(call(OptionsRequest::Invoke { game: product_id.into(), surface, action, arg, session: None }).await?)?;
             if json {
                 return json_out(&r);
             }

@@ -213,6 +213,7 @@ fn prefix_config_in_user_namespace() {
         exe: "game.exe".into(),
         args: None,
         language: None,
+        game: None,
     };
     let store = ModStore::new(&t.join("data"), 77).with_game(&game, None);
     let pkg = t.join("pkg");

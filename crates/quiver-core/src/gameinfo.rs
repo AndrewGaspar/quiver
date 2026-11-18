@@ -339,6 +339,7 @@ mod tests {
             exe: "ACIII.exe".into(),
             args: None,
             language: Some("en-US".into()),
+            game: None,
         };
         let info = build(5183, "Assassin's Creed® III - Remastered", Some(&p), &assoc, Some(&game));
         // Ownership's space id wins over the config's.
@@ -365,6 +366,7 @@ mod tests {
             exe: String::new(),
             args: None,
             language: Some("en-US".into()),
+            game: None,
         };
         let i = install_info(&game);
         eprintln!("{i:?}");

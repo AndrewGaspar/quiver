@@ -729,7 +729,7 @@ impl Quiver {
                     .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
                     .when(!is_cur && !v.retired, |d| {
                         d.child(small(key("use"), th, Some(Icon::CircleCheck), "Make current").on_click(cx.listener(move |this, _, _, cx| {
-                            this.version_op(id, ModsRequest::VersionUse { product_id: id.pid(), mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
+                            this.version_op(id, ModsRequest::VersionUse { game: id.pid().into(), mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
                         })))
                     })
                     .when(!is_cur, |d| {
@@ -737,7 +737,7 @@ impl Quiver {
                         d.child(
                             small(key("retire"), th, Some(if retired { Icon::ArchiveRestore } else { Icon::Minus }), if retired { "Bring back" } else { "Retire" })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let req = ModsRequest::VersionRetire { product_id: id.pid(), mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
+                                    let req = ModsRequest::VersionRetire { game: id.pid().into(), mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
                                     this.version_op(id, req, cx);
                                 })),
                         )

@@ -533,7 +533,7 @@ impl Quiver {
         if self.gp.mods.ready().is_none() {
             self.gp.mods = Load::Loading;
         }
-        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { product_id: id.pid() }), cx, move |this, r, cx| {
+        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { game: id.pid().into()}), cx, move |this, r, cx| {
             if this.gp.id != id {
                 return;
             }
@@ -554,7 +554,7 @@ impl Quiver {
     pub fn load_profile_history(&mut self, id: Gid, profile: &str, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<Vec<ProfileRevision>, _>(
-            Request::Mods(ModsRequest::ProfileHistory { product_id: id.pid(), profile: p.clone() }),
+            Request::Mods(ModsRequest::ProfileHistory { game: id.pid().into(), profile: p.clone() }),
             cx,
             move |this, r, _| {
                 if this.gp.id == id {
@@ -1191,7 +1191,7 @@ impl Quiver {
     pub fn profile_set(&mut self, id: Gid, profile: &str, ops: Vec<SettingOp>, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<ProfileRevision, _>(
-            Request::Mods(ModsRequest::ProfileSet { product_id: id.pid(), profile: p.clone(), ops, message: None }),
+            Request::Mods(ModsRequest::ProfileSet { game: id.pid().into(), profile: p.clone(), ops, message: None }),
             cx,
             move |this, r, cx| match r {
                 Ok(rev) => {
@@ -1219,7 +1219,7 @@ impl Quiver {
         let name = if name.is_empty() { path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() } else { name };
         let (ni, pi) = (n.clone(), p.clone());
         self.show_toast(format!("Copying {} into the mod store…", crate::model::tilde(&path)), cx);
-        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id.pid(), name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
+        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { game: id.pid().into(), name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
             Ok(l) => {
                 this.show_toast(format!("Added layer {} ({} files)", l.name, l.files), cx);
                 ni.update(cx, |t, cx| t.set_text("", cx));
@@ -1307,7 +1307,7 @@ impl Quiver {
             Dialog::DeleteProfile { game, profile } => {
                 let name = profile.name.clone();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileDelete { product_id: game.pid(), profile: profile.id.clone(), confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileDelete { game: game.pid().into(), profile: profile.id.clone(), confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1323,7 +1323,7 @@ impl Quiver {
             }
             Dialog::RestoreProfile { game, id, name, revision } => {
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileRestore { product_id: game, profile: id.clone(), revision, confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileRestore { game: game.into(), profile: id.clone(), revision, confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1339,7 +1339,7 @@ impl Quiver {
             Dialog::RemoveLayer { game, layer } => {
                 let name = layer.name.clone();
                 self.call::<Layer, _>(
-                    Request::Mods(ModsRequest::LayerRemove { product_id: game.pid(), layer: layer.id, confirmed: true }),
+                    Request::Mods(ModsRequest::LayerRemove { game: game.pid().into(), layer: layer.id, confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(_) => {
@@ -1360,7 +1360,7 @@ impl Quiver {
                 }
                 let chosen: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileCreate { product_id: game.pid(), name: n, layers: chosen, message: None, saves }),
+                    Request::Mods(ModsRequest::ProfileCreate { game: game.pid().into(), name: n, layers: chosen, message: None, saves }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {

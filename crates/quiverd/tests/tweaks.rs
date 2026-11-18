@@ -132,13 +132,13 @@ async fn tweaks_end_to_end() {
     assert_eq!(p.revisions.global, 1);
 
     // With the DLSS mod in a profile: it provides the cap; Quiver's DXVK limiter stands down.
-    let _: Value = cli.call(Request::Mods(ModsRequest::Install { product_id: 3539, builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
-    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { product_id: 3539, name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
+    let _: Value = cli.call(Request::Mods(ModsRequest::Install { game: 3539.into(), builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
+    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { game: 3539.into(), name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
     let p: TweaksPlan = tweaks(&cli, TweaksRequest::Plan { game, profile: Some("DLSS".into()) }).await.unwrap();
     assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Provided { by, option, .. } if by == "Pharos" && option == "reflex.fps_limit"), "{:?}", p.entry("fps.cap"));
     assert!(!p.env["DXVK_CONFIG"].contains("maxFrameRate"));
     // The mod's option shows the bound value, from Quiver Tweaks (global).
-    let list: Vec<SurfaceState> = cli.call(Request::Options(OptionsRequest::List { product_id: 3539, profile: Some("DLSS".into()), level: None })).await.unwrap();
+    let list: Vec<SurfaceState> = cli.call(Request::Options(OptionsRequest::List { game: 3539.into(), profile: Some("DLSS".into()), level: None })).await.unwrap();
     assert_eq!(list.len(), 2);
     let dlss = &list[0];
     assert_eq!(dlss.options["reflex.fps_limit"].value, json!(160.0));
@@ -149,7 +149,7 @@ async fn tweaks_end_to_end() {
 
     // The profile scope through the Options request (surface "quiver").
     let c: OptionsChange = cli
-        .call(Request::Options(OptionsRequest::Set { product_id: 3539, profile: Some("DLSS".into()), ops: vec![set("tex.anisotropy", json!("8"))], live: Live::IfRunning, message: None, confirmed: false }))
+        .call(Request::Options(OptionsRequest::Set { game: 3539.into(), profile: Some("DLSS".into()), ops: vec![set("tex.anisotropy", json!("8"))], live: Live::IfRunning, message: None, confirmed: false }))
         .await
         .unwrap();
     assert!(c.revision > 0 && c.changes[0].starts_with("Profile: tex.anisotropy 16"), "{c:?}");

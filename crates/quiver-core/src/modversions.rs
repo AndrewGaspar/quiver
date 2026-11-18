@@ -74,7 +74,7 @@ fn next_label(rec: &ModRecord) -> String {
 
 impl ModStore {
     fn mods_hist_dir(&self) -> PathBuf {
-        crate::paths::game_dir_in(self.data_dir(), &quiver_api::GameRef::ubisoft(self.product_id())).join("mods")
+        crate::paths::game_dir_in(self.data_dir(), &self.game_ref()).join("mods")
     }
 
     pub(crate) fn mod_history_path(&self, id: &str) -> PathBuf {
@@ -519,7 +519,7 @@ impl ModStore {
     /// unless someone made an older version current by hand (the newest isn't current).
     /// Returns what was (or, with `dry_run`, would be) updated.
     pub fn update_builtins(&self, dry_run: bool, source: &str) -> Result<Vec<String>> {
-        let Ok(catalog) = crate::modpkg::catalog(self.product_id()) else { return Ok(Vec::new()) };
+        let Ok(catalog) = crate::modpkg::catalog(&self.game_ref()) else { return Ok(Vec::new()) };
         let mut out = Vec::new();
         for m in catalog {
             let layers = self.layers()?;
@@ -574,6 +574,7 @@ mod tests {
             exe: "game.exe".into(),
             args: None,
             language: None,
+            game: None,
         }
     }
 

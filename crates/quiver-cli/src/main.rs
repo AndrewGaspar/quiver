@@ -785,7 +785,7 @@ async fn main() -> Result<()> {
             let profile = profile.or(profile_id).or(vanilla.then(|| quiver_api::mods::VANILLA.to_owned()));
             let default = match &profile {
                 None => client
-                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { product_id: e.product_id }))
+                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()}))
                     .await
                     .ok()
                     .map(|s| mods::default_label(&s)),
@@ -842,7 +842,7 @@ async fn main() -> Result<()> {
                 }
             }
             if v["settings"]["profile"].is_string()
-                && let Ok(s) = client.call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { product_id: e.product_id })).await
+                && let Ok(s) = client.call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()})).await
             {
                 println!("  (Play uses {})", mods::default_label(&s));
             }

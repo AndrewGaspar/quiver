@@ -57,7 +57,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 format!("save stores of {name}: {} (r{})", rev.message.as_deref().unwrap_or("changed"), rev.revision),
                 Some(product_id),
             );
-            daemon.emit(quiver_api::Event::ModsChanged { product_id });
+            daemon.emit(quiver_api::Event::ModsChanged { product_id, game: None });
             json!(rev)
         }
         Request::SavesMerge { product_id, from, into, confirmed } => {
@@ -90,7 +90,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 ),
                 Some(product_id),
             );
-            daemon.emit(quiver_api::Event::ModsChanged { product_id });
+            daemon.emit(quiver_api::Event::ModsChanged { product_id, game: None });
             json!(r)
         }
         other => bail!("not a save store request: {other:?}"),

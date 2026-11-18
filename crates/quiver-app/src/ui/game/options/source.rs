@@ -176,7 +176,7 @@ impl Quiver {
     pub(super) fn options_infer(&mut self, id: Gid, m: String, file: String, cx: &mut Context<Self>) {
         self.gp.opt.guess = Load::Loading;
         let (m2, f2) = (m.clone(), file.clone());
-        self.call::<String, _>(Request::Options(OptionsRequest::Infer { product_id: id.pid(), mod_id: m, file }), cx, move |this, r, _| {
+        self.call::<String, _>(Request::Options(OptionsRequest::Infer { game: id.pid().into(), mod_id: m, file }), cx, move |this, r, _| {
             if this.gp.opt.source_mod.as_deref() != Some(m2.as_str()) {
                 return;
             }
@@ -271,7 +271,7 @@ impl Quiver {
 
     fn options_keep_guess(&mut self, id: Gid, m: String, toml: String, cx: &mut Context<Self>) {
         self.call::<SchemaInfo, _>(
-            Request::Options(OptionsRequest::SchemaSet { product_id: id.pid(), mod_id: m.clone(), toml, message: Some("Guessed from the file in the app".into()) }),
+            Request::Options(OptionsRequest::SchemaSet { game: id.pid().into(), mod_id: m.clone(), toml, message: Some("Guessed from the file in the app".into()) }),
             cx,
             move |this, r, cx| match r {
                 Ok(info) => {

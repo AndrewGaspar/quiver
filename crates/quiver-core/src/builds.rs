@@ -378,6 +378,7 @@ mod tests {
             exe: "a.bin".into(),
             args: None,
             language: None,
+            game: None,
         };
         assert!(verify_plan(&game, "en-US").unwrap_err().to_string().contains("unfinished"));
         install::set_target(&dest, &h1).unwrap();
@@ -400,6 +401,7 @@ mod tests {
             exe: String::new(),
             args: None,
             language: None,
+            game: None,
         };
         let lang = std::env::var("QUIVER_VERIFY_LANG").unwrap_or_else(|_| "en-US".into());
         let start = std::time::Instant::now();
