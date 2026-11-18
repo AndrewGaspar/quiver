@@ -41,7 +41,9 @@ struct Caches {
 
 static CACHES: LazyLock<Mutex<Caches>> = LazyLock::new(Mutex::default);
 
-/// Sources whose restores (and other "Ask" actions) need a person's approval.
+/// Agent sources, whose writes to a store account (an achievement report, an Epic cloud
+/// conflict resolution) need a person's approval. Game changes don't ask this: every source
+/// applies them the same way (2026-11-18).
 pub(crate) fn needs_approval(source: &str) -> bool {
     source.to_ascii_lowercase().starts_with("agent")
 }
@@ -332,13 +334,8 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
         Request::GameInfo { product_id, refresh } => json!(game_info(daemon, product_id, refresh).await?),
         Request::GameProgress { product_id, refresh } => json!(game_progress(daemon, product_id, refresh).await?),
         Request::Saves { product_id, cloud } => json!(saves_report(daemon, product_id, cloud).await?),
-        Request::SavesRestore { product_id, backup, confirmed } => {
+        Request::SavesRestore { product_id, backup } => {
             let name = daemon.product_name(product_id);
-            if needs_approval(source) && !confirmed {
-                bail!(
-                    "restoring saves needs your approval: run `quiver saves {product_id} restore {backup}` yourself, or restore it from {name}'s Saves tab"
-                );
-            }
             if daemon.running.lock().unwrap().contains(&product_id)
                 || daemon.sessions.list().iter().any(|s| s.product_id == product_id)
             {
@@ -352,7 +349,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             let what = r.previous.as_ref().map(|p| format!("; previous saves kept as {}", p.id)).unwrap_or_default();
             daemon.log_activity(
                 source,
-                format!("restored {name} save backup {backup} (slots {:?}){what}{}", r.restored, if confirmed { " (approved)" } else { "" }),
+                format!("restored {name} save backup {backup} (slots {:?}){what}", r.restored),
                 Some(product_id),
             );
             json!(r)

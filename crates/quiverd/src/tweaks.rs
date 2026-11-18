@@ -4,8 +4,9 @@
 //! each tweak's effect is recorded with the session, reported as `Event::TweaksEffect` and as
 //! `tweaks.*` metrics in the session's perf catalog.
 //!
-//! **Agent policy** (steer 12): game and profile tweaks are Allow; global tweaks, `prefer` at
-//! the global scope, restores and `danger` tweaks are Ask (refused without `confirmed`).
+//! **Agents** act like the person (the user's decision, 2026-11-18, replacing steer 12's
+//! Ask): every scope, global included, and restores apply the same way from every source.
+//! `danger` tweaks need `confirmed` from every source.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use quiver_api::mods::{VANILLA, is_human_source};
+use quiver_api::mods::VANILLA;
 use quiver_api::options::{OpOutcome, OptionsChange, OptionsRevision, Outcome};
 use quiver_api::tweaks::{DisplayCaps, Effect, Planned, Scope, ScopeKind, SessionTweaks, TweakEffect, TweakRevisions, TweaksPlan, TweaksRequest};
 use quiver_api::{Event, GameRef};
@@ -49,13 +50,6 @@ impl Tweaks {
 
 fn data() -> PathBuf {
     launcher::data_dir()
-}
-
-fn ask(source: &str, confirmed: bool, what: &str) -> Result<()> {
-    if is_human_source(source) || confirmed {
-        return Ok(());
-    }
-    bail!("{what} needs your confirmation when requested by '{source}' (agent policy: Ask). Run it in a terminal, where quiver asks, or without --source")
 }
 
 fn installed(product_id: u32) -> Option<launcher::Game> {
@@ -186,11 +180,9 @@ impl Daemon {
                 )
             }
             TweaksRequest::Set { scope, ops, message, confirmed } => json!(self.tweaks_set(&src, scope, Change::Ops(ops), message, confirmed).await?),
-            TweaksRequest::Prefer { scope, id, prefer, message, confirmed } => json!(self.tweaks_set(&src, scope, Change::Prefer(id, prefer), message, confirmed).await?),
-            TweaksRequest::Restore { scope, revision, confirmed } => {
-                ask(&src, confirmed, &format!("restoring tweaks r{revision}"))?;
-                json!(self.tweaks_set(&src, scope, Change::Restore(revision), None, true).await?)
-            }
+            TweaksRequest::Prefer { scope, id, prefer, message } => json!(self.tweaks_set(&src, scope, Change::Prefer(id, prefer), message, false).await?),
+            // A restore puts back values that were set (and confirmed) before.
+            TweaksRequest::Restore { scope, revision } => json!(self.tweaks_set(&src, scope, Change::Restore(revision), None, true).await?),
             TweaksRequest::History { scope } => json!(
                 with_store_lock(move || {
                     let r = resolve_scope(&scope)?;
@@ -264,9 +256,6 @@ impl Daemon {
     }
 
     async fn tweaks_set(self: &Arc<Self>, source: &str, scope: Scope, change: Change, message: Option<String>, confirmed: bool) -> Result<OptionsChange> {
-        if scope == Scope::Global && !matches!(change, Change::Restore(_)) {
-            ask(source, confirmed, "changing tweaks for every game (global scope)")?;
-        }
         let src = source.to_owned();
         let sc = scope.clone();
         let (rev, applied) = with_store_lock(move || -> Result<(Option<OptionsRevision>, tw::Applied)> {

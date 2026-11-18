@@ -169,7 +169,7 @@ fn paste_flow(start: &LoginStart, open: bool) -> Result<String> {
     read_pasted()
 }
 
-pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()> {
+pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
     match action {
         EpicAction::Login { code, paste, open } => {
             let code = match code {
@@ -206,7 +206,7 @@ pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()
             let a: EpicAccount = client.call(epic(EpicRequest::AccountDefault { account })).await?;
             println!("default Epic account: {}", a.display_name);
         }
-        EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, source, &game, json, local, action).await?,
+        EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, &game, json, local, action).await?,
         EpicAction::Playtime { game, json, send, yes, discard } => crate::epicgame::playtime(client, game, json, send, yes, discard).await?,
         EpicAction::SavesBackground { state } => {
             let enabled = state.map(|s| s == "on");

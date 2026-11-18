@@ -753,8 +753,10 @@ $ quiver tweaks reset origins sync.vsync
 ```
 
 `--json` everywhere, `--live-only` / `--no-live` as for options, source labels and approvals as
-usual. Agents: game and profile tweaks are Allow (like options on profiles); **global** tweaks,
-live changes to a running game, restores and `danger` tweaks are Ask (steer 12).
+usual. Agents act like the person (the user's decision, 2026-11-18, replacing steer 12's Ask):
+tweaks at every scope, **global** included, live changes and restores apply the same way from
+every source. An agent could pass `--yes` itself anyway, and the risk is low; every change is a
+revision with its source. `danger` tweaks need a confirmation from every source.
 
 ### 8.3 App
 
@@ -938,7 +940,7 @@ recommendation unless the user says otherwise.
 | 9 | **Anti-cheat games** | (a) configuration tweaks everywhere, layer and third-party-layer tweaks off, per-game deny-list; (b) no tweaks for flagged games; (c) everything everywhere | **(a)**: matches Sight's rule and what the NVIDIA App does with driver settings |
 | 10 | **DLSS override reach** (the NVIDIA App limits DLSS Override to an allow-list of games) | (a) any game (dxvk-nvapi answers any application), with a catalog "known bad" list; (b) only games on a Quiver allow-list | **(a)** |
 | 11 | **Third-party layers** (lsfg-vk, vkBasalt) | (a) phase 2, using the person's installs, lsfg-vk only with their own `lsfg-vk.dll`; (b) Quiver-managed downloads of those tools; (c) out of scope | **(a)** |
-| 12 | **Agents** | (a) game and profile tweaks Allow; global tweaks, live changes, restores and `danger` Ask; (b) all Allow; (c) all Ask | **(a)**: a global change touches every game |
+| 12 | **Agents** | (a) game and profile tweaks Allow; global tweaks, live changes, restores and `danger` Ask; (b) all Allow; (c) all Ask | **(a)**: a global change touches every game. *Revised 2026-11-18: (b), with `danger` still confirmed by everyone* |
 | 13 | **Where Tweaks live in the app** | (a) Settings → Tweaks (global) and a game-page Tweaks tab, also listed as the first surface in the Mods tab's Options view; (b) only inside the Options view; (c) inside Launch options | **(a)** |
 | 14 | **Session dir and logs** | (a) every launch with a tweak gets a session log dir (and `tweaks.ctl` when a layer tweak is on), independent of the HUD; (b) only when the HUD is on (no evidence otherwise) | **(a)** |
 | 15 | **Default values** | (a) every tweak defaults to "game's choice / off": Quiver changes nothing until asked; (b) ship opinionated defaults (16x AF, VRR cap) | **(a)**; presets cover the opinionated sets |

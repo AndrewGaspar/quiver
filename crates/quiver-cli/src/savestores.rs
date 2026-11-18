@@ -1,8 +1,6 @@
 //! `quiver saves <game> stores|store|merge`: a game's save stores (named sets of save
 //! slots that profiles point at, independently of their mods).
 
-use std::io::{IsTerminal, Write};
-
 use anyhow::{Result, bail};
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
@@ -41,24 +39,6 @@ pub enum StoreAction {
 
 fn when(t: Option<DateTime<Utc>>) -> String {
     t.map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "—".into())
-}
-
-/// For "Ask" actions under an agent source: ask whoever is at this terminal, if anyone.
-fn ask(source: &str, what: &str) -> Result<bool> {
-    if !source.to_ascii_lowercase().starts_with("agent") {
-        return Ok(false);
-    }
-    if !std::io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    eprint!("An agent ({source}) wants to {what}. Allow? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    if !matches!(line.trim(), "y" | "Y" | "yes") {
-        bail!("not done");
-    }
-    Ok(true)
 }
 
 fn print_store(i: &SaveStoreInfo, vanilla: &str) {
@@ -132,7 +112,7 @@ fn print_revision(r: &SaveStoresRevision) {
     );
 }
 
-pub async fn store(client: &Client, source: &str, game: &str, action: StoreAction) -> Result<()> {
+pub async fn store(client: &Client, game: &str, action: StoreAction) -> Result<()> {
     let e = resolve(client, game).await?;
     let product_id = e.product_id;
     let op = match action {
@@ -152,12 +132,7 @@ pub async fn store(client: &Client, source: &str, game: &str, action: StoreActio
         StoreAction::Vanilla { store } => SaveStoreOp::Vanilla { store },
         StoreAction::Restore { revision } => SaveStoreOp::Restore { revision },
     };
-    let confirmed = match &op {
-        SaveStoreOp::Cloud { store } => ask(source, &format!("make '{}' {}'s cloud save store", store.as_deref().unwrap_or("none"), e.name))?,
-        SaveStoreOp::Restore { revision } => ask(source, &format!("restore {}'s save stores to revision {revision}", e.name))?,
-        _ => false,
-    };
-    let r: SaveStoresRevision = client.call(Request::SaveStoreEdit { product_id, op: op.clone(), message: None, confirmed }).await?;
+    let r: SaveStoresRevision = client.call(Request::SaveStoreEdit { product_id, op: op.clone(), message: None }).await?;
     print!("{}: ", e.name);
     print_revision(&r);
     if let SaveStoreOp::Cloud { .. } = op {
@@ -178,7 +153,7 @@ fn outcome(o: MergeOutcome) -> &'static str {
     }
 }
 
-pub async fn merge(client: &Client, source: &str, game: &str, from: String, into: Vec<String>) -> Result<()> {
+pub async fn merge(client: &Client, game: &str, from: String, into: Vec<String>) -> Result<()> {
     let e = resolve(client, game).await?;
     let into = match into.as_slice() {
         [] => None,
@@ -187,9 +162,7 @@ pub async fn merge(client: &Client, source: &str, game: &str, from: String, into
         [to] => Some(to.clone()),
         _ => bail!("merge FROM [into] [TO]"),
     };
-    let target = into.clone().unwrap_or_else(|| "default".into());
-    let confirmed = ask(source, &format!("merge {}'s save store '{from}' into '{target}' (its saves are backed up first)", e.name))?;
-    let r: MergeReport = client.call(Request::SavesMerge { product_id: e.product_id, from, into, confirmed }).await?;
+    let r: MergeReport = client.call(Request::SavesMerge { product_id: e.product_id, from, into }).await?;
     println!("{}: merged save store '{}' into '{}'", e.name, r.from.name, r.into.name);
     if r.slots.is_empty() {
         println!("  '{}' has no save slots on this PC; nothing to do", r.from.name);

@@ -102,7 +102,7 @@ impl Quiver {
 
     fn epic_restore(&mut self, id: Gid, backup: String, cx: &mut Context<Self>) {
         self.gp.epic_confirm = None;
-        self.call::<serde_json::Value, _>(game_req(EpicGameRequest::SavesRestore { game: id.0, backup, confirmed: true }), cx, move |this, r, cx| {
+        self.call::<serde_json::Value, _>(game_req(EpicGameRequest::SavesRestore { game: id.0, backup }), cx, move |this, r, cx| {
             match r {
                 Ok(_) => this.show_toast("Backup restored: it uploads with the next sync", cx),
                 Err(e) => this.show_toast(err_text(&e), cx),

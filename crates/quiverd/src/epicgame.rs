@@ -26,7 +26,9 @@
 //! **Who may do what** (STORES.md §7 item 10): reading is open to everyone. The first
 //! upload of saves and the first play-time report are writes to the person's Epic account,
 //! so they need the person (`confirmed` from the app or a terminal); after that they happen
-//! on their own. Settling a conflict or restoring a backup needs a person's OK for agents.
+//! on their own. Settling a conflict (which can overwrite the cloud copy) needs a person's
+//! OK for agents. Restoring a local backup is a game change like any other: every source
+//! may (2026-11-18).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -105,11 +107,8 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicGameRequest) ->
             }
             json!(report)
         }
-        EpicGameRequest::SavesRestore { game, backup, confirmed } => {
+        EpicGameRequest::SavesRestore { game, backup } => {
             let app = epic_app(&game)?;
-            if needs_approval(source) && !confirmed {
-                bail!("restoring saves needs your approval: run `quiver epic saves {game} restore {backup}` yourself");
-            }
             if d.running_epic(app) {
                 bail!("{game} is running: stop it before restoring its saves");
             }

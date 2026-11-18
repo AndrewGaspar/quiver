@@ -1,7 +1,5 @@
 //! `quiver info`, `quiver progress` and `quiver saves`: the game page's data from a terminal.
 
-use std::io::{IsTerminal, Write};
-
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
@@ -390,21 +388,9 @@ pub async fn saves(client: &Client, game: &str, json: bool, local: bool) -> Resu
     Ok(())
 }
 
-pub async fn restore(client: &Client, source: &str, game: &str, backup: String) -> Result<()> {
+pub async fn restore(client: &Client, game: &str, backup: String) -> Result<()> {
     let e = resolve(client, game).await?;
-    // An agent's restore needs a person's OK: ask whoever is at this terminal, if anyone.
-    let mut confirmed = false;
-    if source.to_ascii_lowercase().starts_with("agent") && std::io::stdin().is_terminal() {
-        eprint!("An agent ({source}) wants to restore {}'s save backup {backup:?}. The current saves are backed up first. Allow? [y/N] ", e.name);
-        std::io::stderr().flush()?;
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        confirmed = matches!(line.trim(), "y" | "Y" | "yes");
-        if !confirmed {
-            anyhow::bail!("not restored");
-        }
-    }
-    let r: RestoreResult = client.call(Request::SavesRestore { product_id: e.product_id, backup, confirmed }).await?;
+    let r: RestoreResult = client.call(Request::SavesRestore { product_id: e.product_id, backup }).await?;
     println!("{}: restored slots {:?}; they upload to the cloud after the next session", e.name, r.restored);
     if let Some(p) = r.previous {
         println!("the saves that were there are backed up as {} (quiver saves {} restore {})", p.id, e.product_id, p.id);

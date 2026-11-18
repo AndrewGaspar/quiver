@@ -181,10 +181,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             json!({ "result": 0, "seconds": secs, "last_played": last.map(|t| t.to_rfc3339()) })
         }
         Request::Saves { product_id, cloud } => json!(d.saves(st, product_id, cloud)?),
-        Request::SavesRestore { product_id, backup, confirmed } => {
-            if !confirmed {
-                bail!("restoring saves needs your approval: confirm it in the Saves tab");
-            }
+        Request::SavesRestore { product_id, backup } => {
             if st.sessions.iter().any(|s| s.product_id == product_id) {
                 bail!("{} is running; quit it before restoring saves", name(st, product_id));
             }
@@ -1654,10 +1651,7 @@ impl Detail {
                 m.layers.push(l.clone());
                 (json!(l), Some(id))
             }
-            ModsRequest::LayerRemove { layer, confirmed, .. } => {
-                if !confirmed {
-                    bail!("removing a mod layer needs your approval");
-                }
+            ModsRequest::LayerRemove { layer, .. } => {
                 let lid = split_entry(&m.resolve_layer(&layer)?).0.to_owned();
                 if let Some(p) = m.live().find(|r| r.profile.layers.iter().any(|e| split_entry(e).0 == lid)) {
                     bail!("profile '{}' uses this mod; take it out of the profile first", p.profile.name);
@@ -1712,10 +1706,7 @@ impl Detail {
                 m.history[i].push(r.clone());
                 (json!(r), Some(id))
             }
-            ModsRequest::ProfileDelete { profile, confirmed, .. } => {
-                if !confirmed {
-                    bail!("deleting a mod profile needs your approval");
-                }
+            ModsRequest::ProfileDelete { profile, .. } => {
                 let i = m.find(&profile, false)?;
                 let last = m.history[i].last().unwrap();
                 let r = ProfileRevision { revision: last.revision + 1, at: now, source: src.into(), message: None, deleted: true, profile: last.profile.clone() };
@@ -1726,10 +1717,7 @@ impl Detail {
                 let i = m.find(&profile, true)?;
                 (json!(m.history[i]), None)
             }
-            ModsRequest::ProfileRestore { profile, revision, confirmed, .. } => {
-                if !confirmed {
-                    bail!("restoring a mod profile revision needs your approval");
-                }
+            ModsRequest::ProfileRestore { profile, revision, .. } => {
                 let i = m.find(&profile, true)?;
                 let old = m.history[i]
                     .iter()
@@ -1839,10 +1827,9 @@ mod tests {
         assert!(s.slots.iter().any(|x| x.state == SlotState::CloudNewer));
         let local: SavesReport = call(&demo, Request::Saves { product_id: 3539, cloud: false });
         assert!(local.slots.iter().all(|x| x.cloud.is_none()));
-        // Restoring needs the person's confirmation, and backs up what was there.
+        // Restoring backs up what was there.
         let backup = s.backups[2].id.clone();
-        assert!(demo.handle(Request::SavesRestore { product_id: 3539, backup: backup.clone(), confirmed: false }).is_err());
-        let r: RestoreResult = call(&demo, Request::SavesRestore { product_id: 3539, backup, confirmed: true });
+        let r: RestoreResult = call(&demo, Request::SavesRestore { product_id: 3539, backup });
         assert!(!r.restored.is_empty() && r.previous.is_some());
         let after: SavesReport = call(&demo, Request::Saves { product_id: 3539, cloud: true });
         assert_eq!(after.backups.len(), s.backups.len() + 1);
@@ -1882,14 +1869,13 @@ mod tests {
         assert_eq!(s.stores.len(), 2);
         assert_eq!(s.cloud.as_deref(), Some("default"));
         assert_eq!(s.stores[1].used_by[0].name, "Nightmare");
-        assert!(demo.handle(Request::Mods(ModsRequest::ProfileDelete { game: 5059.into(), profile: r.profile.id.clone(), confirmed: false })).is_err());
-        let d: ProfileRevision = call(&demo, Request::Mods(ModsRequest::ProfileDelete { game: 5059.into(), profile: r.profile.id.clone(), confirmed: true }));
+        let d: ProfileRevision = call(&demo, Request::Mods(ModsRequest::ProfileDelete { game: 5059.into(), profile: r.profile.id.clone() }));
         assert!(d.deleted);
         let h: Vec<ProfileRevision> = call(&demo, Request::Mods(ModsRequest::ProfileHistory { game: 5059.into(), profile: r.profile.id.clone() }));
         assert_eq!(h.len(), 3);
         let back: ProfileRevision = call(
             &demo,
-            Request::Mods(ModsRequest::ProfileRestore { game: 5059.into(), profile: r.profile.id.clone(), revision: 2, confirmed: true }),
+            Request::Mods(ModsRequest::ProfileRestore { game: 5059.into(), profile: r.profile.id.clone(), revision: 2 }),
         );
         assert!(!back.deleted && back.profile.pinned);
         // Play with a profile that exists, by name; an unknown one fails.

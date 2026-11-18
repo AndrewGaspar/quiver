@@ -3,18 +3,17 @@
 //! folders are counted is the game's launch account when one is signed in, else every
 //! account folder in the prefix.
 //!
-//! Agent policy: listing and creating, renaming, retiring and unretiring stores, and
-//! picking vanilla's store, are normal edits (retiring keeps the files). Moving the cloud
-//! flag, restoring a revision (both change which saves sync) and merging (which replaces
-//! saves, after a backup) are "Ask" for agents.
+//! Every source's requests apply the same way (agents act like the person, the user's
+//! decision of 2026-11-18): creating, renaming, retiring stores (retiring keeps the files),
+//! moving the cloud flag, restoring a revision and merging (after a backup of the target).
+//! Changes record their source.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use quiver_api::Request;
-use quiver_api::mods::is_human_source;
-use quiver_api::savestores::{MergeOutcome, SaveStoreOp};
+use quiver_api::savestores::MergeOutcome;
 use quiver_core::launcher::{self, Games};
 use quiver_core::mods::ModStore;
 
@@ -43,13 +42,8 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
         Request::SaveStoreHistory { product_id } => {
             json!(ModStore::open(product_id).save_stores().history()?)
         }
-        Request::SaveStoreEdit { product_id, op, message, confirmed } => {
+        Request::SaveStoreEdit { product_id, op, message } => {
             let name = daemon.product_name(product_id);
-            if matches!(op, SaveStoreOp::Cloud { .. } | SaveStoreOp::Restore { .. }) && !is_human_source(source) && !confirmed {
-                bail!(
-                    "changing which saves sync with the cloud needs your confirmation when requested by '{source}' (agent policy: Ask); run it in a terminal, where quiver asks"
-                );
-            }
             Games::load()?.get(product_id).with_context(|| format!("{name} is not installed"))?;
             let rev = crate::mods::with_store_lock(move || ModStore::open(product_id).edit_stores(&op, &src, message)).await?;
             daemon.log_activity(
@@ -60,13 +54,8 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             daemon.emit(quiver_api::Event::ModsChanged { product_id, game: None });
             json!(rev)
         }
-        Request::SavesMerge { product_id, from, into, confirmed } => {
+        Request::SavesMerge { product_id, from, into } => {
             let name = daemon.product_name(product_id);
-            if !is_human_source(source) && !confirmed {
-                bail!(
-                    "merging saves needs your approval: run `quiver saves {product_id} merge {from}` yourself (the target's saves are backed up first)"
-                );
-            }
             if daemon.running.lock().unwrap().contains(&product_id) || daemon.sessions.list().iter().any(|s| s.product_id == product_id) {
                 bail!("{name} is running; quit it before merging saves");
             }
@@ -79,14 +68,13 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             daemon.log_activity(
                 source,
                 format!(
-                    "merged {name} save store '{}' into '{}': {} copied, {} replaced, {} kept{}{}",
+                    "merged {name} save store '{}' into '{}': {} copied, {} replaced, {} kept{}",
                     r.from.name,
                     r.into.name,
                     count(MergeOutcome::Copied),
                     count(MergeOutcome::Replaced),
                     count(MergeOutcome::Kept),
                     if backups.is_empty() { String::new() } else { format!("; previous saves backed up as {}", backups.join(", ")) },
-                    if confirmed { " (approved)" } else { "" }
                 ),
                 Some(product_id),
             );

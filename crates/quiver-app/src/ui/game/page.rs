@@ -1344,9 +1344,8 @@ impl Quiver {
             }
             Dialog::RestoreSettings { game, revision } => self.restore_settings(game, revision, cx),
             Dialog::RestoreSaves { game, backup } => {
-                // The person confirmed in this dialog, so the request says so.
                 let bid = backup.id.clone();
-                self.call::<RestoreResult, _>(Request::SavesRestore { product_id: game.pid(), backup: bid, confirmed: true }, cx, move |this, r, cx| {
+                self.call::<RestoreResult, _>(Request::SavesRestore { product_id: game.pid(), backup: bid }, cx, move |this, r, cx| {
                     match r {
                         Ok(r) => {
                             let prev = r.previous.map(|p| format!("; the saves that were there are in backup {}", p.id)).unwrap_or_default();
@@ -1361,7 +1360,7 @@ impl Quiver {
             Dialog::DeleteProfile { game, profile } => {
                 let name = profile.name.clone();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileDelete { game: game.0.into(), profile: profile.id.clone(), confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileDelete { game: game.0.into(), profile: profile.id.clone() }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1381,7 +1380,7 @@ impl Quiver {
             }
             Dialog::RestoreProfile { game, id, name, revision } => {
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileRestore { game: game.0.into(), profile: id.clone(), revision, confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileRestore { game: game.0.into(), profile: id.clone(), revision }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1397,7 +1396,7 @@ impl Quiver {
             Dialog::RemoveLayer { game, layer } => {
                 let name = layer.name.clone();
                 self.call::<Layer, _>(
-                    Request::Mods(ModsRequest::LayerRemove { game: game.0.into(), layer: layer.id, confirmed: true }),
+                    Request::Mods(ModsRequest::LayerRemove { game: game.0.into(), layer: layer.id }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(_) => {

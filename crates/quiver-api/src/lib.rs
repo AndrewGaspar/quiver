@@ -717,13 +717,10 @@ pub enum Request {
         cloud: bool,
     },
     /// Make a save backup current (`info::RestoreResult`); the saves there now are backed
-    /// up first. `backup` is a backup id, a unique part of one, or `latest`. Agents need a
-    /// human's approval: only a front end that asked the person sets `confirmed`.
+    /// up first. `backup` is a backup id, a unique part of one, or `latest`.
     SavesRestore {
         product_id: u32,
         backup: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Upload a game's saves that are waiting for the cloud (slots with `.upload` markers),
     /// without launching it: e.g. after an upload failed at exit. `profile` picks a mod
@@ -878,29 +875,24 @@ pub enum Request {
     /// Reads only the prefix; no Ubisoft request.
     SaveStores { product_id: u32 },
     /// Create, rename, retire or restore stores, move the cloud flag, or pick vanilla's
-    /// store. Records a revision; returns `savestores::SaveStoresRevision`. Agents need
-    /// `confirmed` to move the cloud flag or restore a revision (which saves sync changes).
+    /// store. Records a revision; returns `savestores::SaveStoresRevision`.
     SaveStoreEdit {
         product_id: u32,
         op: savestores::SaveStoreOp,
         #[serde(default)]
         message: Option<String>,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// The save stores' revisions (`Vec<savestores::SaveStoresRevision>`).
     SaveStoreHistory { product_id: u32 },
     /// Merge one store's slots into another (`into` `None`: Default), slot by slot, the
     /// newer file (by modification time) winning. The target's saves are backed up before
-    /// any is replaced; the source is left as it was. Refused while the game runs. Agents
-    /// need `confirmed`. Returns `savestores::MergeReport`.
+    /// any is replaced; the source is left as it was. Refused while the game runs.
+    /// Returns `savestores::MergeReport`.
     SavesMerge {
         product_id: u32,
         from: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         into: Option<String>,
-        #[serde(default)]
-        confirmed: bool,
     },
     // ---- Mod options (see [`options`]); appended
     /// Mod options: schemas, values per profile, live changes (design/MOD-CONFIG.md).
@@ -1347,7 +1339,10 @@ mod tests {
         let r: Request = serde_json::from_str(r#"{"method":"saves","params":{"product_id":1}}"#).unwrap();
         assert!(matches!(r, Request::Saves { cloud: true, .. }));
         let r: Request = serde_json::from_str(r#"{"method":"saves_restore","params":{"product_id":1,"backup":"latest"}}"#).unwrap();
-        assert!(matches!(r, Request::SavesRestore { confirmed: false, .. }));
+        assert!(matches!(r, Request::SavesRestore { .. }));
+        // Older clients' `confirmed` (the agent policy's "Ask", dropped 2026-11-18) is ignored.
+        let r: Request = serde_json::from_str(r#"{"method":"saves_restore","params":{"product_id":1,"backup":"latest","confirmed":true}}"#).unwrap();
+        assert!(matches!(r, Request::SavesRestore { product_id: 1, .. }));
         // Results decode from minimal objects (older or newer daemons).
         let i: info::GameInfo = serde_json::from_str(r#"{"product_id":1,"name":"x","future":1}"#).unwrap();
         assert!(i.addons.is_empty() && i.install.is_none());

@@ -554,7 +554,7 @@ impl Quiver {
     pub(super) fn options_restore(&mut self, revision: u32, cx: &mut Context<Self>) {
         let Some((g, p)) = self.gp.opt.of.clone() else { return };
         self.gp.opt.confirm = None;
-        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::Restore { game: g.0.into(), profile: Some(p), revision, confirmed: false }), cx, move |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::Restore { game: g.0.into(), profile: Some(p), revision }), cx, move |this, r, cx| match r {
             Ok(c) => {
                 for o in &c.outcomes {
                     this.gp.opt.outcomes.insert((o.surface.clone(), o.id.clone()), o.clone());
@@ -572,7 +572,7 @@ impl Quiver {
     pub(super) fn options_revert_session(&mut self, session: String, cx: &mut Context<Self>) {
         let Some((g, _)) = self.gp.opt.of.clone() else { return };
         self.gp.opt.confirm = None;
-        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::RevertSession { game: g.0.into(), session: session.clone(), confirmed: false }), cx, move |this, r, cx| match r {
+        self.call::<OptionsChange, _>(Request::Options(OptionsRequest::RevertSession { game: g.0.into(), session: session.clone() }), cx, move |this, r, cx| match r {
             Ok(c) => {
                 let summary = if c.revision == 0 { format!("Session {session} changed nothing that's still set") } else { format!("Reverted session {session} · {}", logic::outcome_summary(c.revision, &c.outcomes)) };
                 if this.gp.opt.crash.as_ref().is_some_and(|x| x.2.session == session) {

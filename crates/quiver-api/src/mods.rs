@@ -39,9 +39,15 @@ use crate::{GameSettings, SettingOp};
 /// The fixed id (and reserved name) of the implicit unmodded profile.
 pub const VANILLA: &str = "vanilla";
 
-/// Sources treated as a person at a front end: the CLI, the app, and the in-game Sight
+/// Sources that are the person at a front end: the CLI, the app, and the in-game Sight
 /// panel (`sight`, which acts only on the person's own keys or controller). Anything else
-/// (`agent`, scripts, MCP…) gets the "Ask" rules of the agent policy.
+/// is an agent, a script, MCP…
+///
+/// Game changes (mods, options, tweaks, save stores, save restores) don't depend on it:
+/// every source's requests apply the same way (the user's decision, 2026-11-18; an agent
+/// could pass `--yes` itself anyway). It decides who activity entries name, and the gates
+/// that protect store accounts and other apps: Steam restarts, store sign-ins, account
+/// writes such as the first Epic upload.
 pub fn is_human_source(source: &str) -> bool {
     matches!(source, "cli" | "gui" | "sight")
 }
@@ -1170,14 +1176,11 @@ pub enum ModsRequest {
         #[serde(default)]
         deletes: Vec<String>,
     },
-    /// Delete a layer's files. Refused while a profile uses it. `confirmed`: a person
-    /// approved it in a front end (needed for agent sources).
+    /// Delete a layer's files. Refused while a profile uses it.
     LayerRemove {
         #[serde(flatten)]
         game: crate::game::GameField,
         layer: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// A new profile. `saves`: a save store (id, name, `default` or `new`); `None` follows
     /// the advice (Default if every mod is save-compatible, else a new store).
@@ -1202,25 +1205,19 @@ pub enum ModsRequest {
         message: Option<String>,
     },
     /// Delete a profile (a restorable revision; its saves and writable layer are kept).
-    /// Agents need `confirmed` (the policy's "Ask").
     ProfileDelete {
         #[serde(flatten)]
         game: crate::game::GameField,
         profile: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// A profile's history (`Vec<ProfileRevision>`), deleted profiles included.
     ProfileHistory { #[serde(flatten)] game: crate::game::GameField, profile: String },
     /// Make an earlier revision current again, as a new revision (also undeletes).
-    /// Agents need `confirmed`.
     ProfileRestore {
         #[serde(flatten)]
         game: crate::game::GameField,
         profile: String,
         revision: u32,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Add (`delete`) or take back (`keep`) a layer's deletions: paths relative to the
     /// install folder. Records a revision in the layer's history; answers a
@@ -1239,14 +1236,11 @@ pub enum ModsRequest {
     /// A layer's history of deletions (`Vec<LayerRevision>`).
     LayerHistory { #[serde(flatten)] game: crate::game::GameField, layer: String },
     /// Make an earlier revision of a layer's deletions current again, as a new revision.
-    /// Agents need `confirmed`, as for profile restores.
     LayerRestore {
         #[serde(flatten)]
         game: crate::game::GameField,
         layer: String,
         revision: u32,
-        #[serde(default)]
-        confirmed: bool,
     },
     // -- Mods v2 (appended; older clients never send these) ------------------------------
     /// Quiver's built-in mods for a game (`Vec<CatalogEntry>`).
@@ -1267,15 +1261,12 @@ pub enum ModsRequest {
         name: Option<String>,
     },
     /// Remove an installed mod: its files, and the config values it changed go back to the
-    /// file's own. Refused while a profile stacks it or the game runs. Agents need
-    /// `confirmed` when the mod has install files or applied config patches.
+    /// file's own. Refused while a profile stacks it or the game runs.
     Uninstall {
         #[serde(flatten)]
         game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// An installed mod in detail (`ModDetail`).
     Show {
@@ -1305,14 +1296,12 @@ pub enum ModsRequest {
         profile: Option<String>,
     },
     /// Put the config values Quiver changed back to the files' own, now (all mods, or one).
-    /// Refused while the game runs. Agents need `confirmed`.
+    /// Refused while the game runs.
     PatchesUndo {
         #[serde(flatten)]
         game: crate::game::GameField,
         #[serde(default, rename = "mod")]
         mod_id: Option<String>,
-        #[serde(default)]
-        confirmed: bool,
     },
     /// Read the app-level mod preferences, changing the ones given (`ModPrefs`).
     Prefs {
@@ -1395,7 +1384,7 @@ pub enum ModsRequest {
     /// stacked one of them now stack `into`, tracking current if they ran the newest version,
     /// else pinned to the version they ran, so no launch changes. `labels` names the versions
     /// in order (default: `v1`, `v2`… for versions without a label of their own). Recorded as
-    /// revisions (the mod's, each profile's). Agents need `confirmed`.
+    /// revisions (the mod's, each profile's).
     MergeVersions {
         #[serde(flatten)]
         game: crate::game::GameField,
@@ -1405,8 +1394,6 @@ pub enum ModsRequest {
         labels: Vec<String>,
         #[serde(default)]
         dry_run: bool,
-        #[serde(default)]
-        confirmed: bool,
     },
 }
 
@@ -1545,7 +1532,14 @@ mod tests {
             r#"{"method":"mods","params":{"op":"profile_delete","product_id":5,"profile":"x"}}"#,
         )
         .unwrap();
-        assert!(matches!(r, crate::Request::Mods(ModsRequest::ProfileDelete { confirmed: false, .. })));
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::ProfileDelete { .. })));
+        // Older clients still send `confirmed` (for the agent policy's "Ask", dropped
+        // 2026-11-18): it's ignored.
+        let r: crate::Request = serde_json::from_str(
+            r#"{"method":"mods","params":{"op":"profile_delete","product_id":5,"profile":"x","confirmed":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::ProfileDelete { .. })));
         // Older clients send no profile (the game's default applies); `vanilla` forces vanilla.
         let r: crate::Request = serde_json::from_str(r#"{"method":"play","params":{"product_id":5}}"#).unwrap();
         assert!(matches!(r, crate::Request::Play { profile: None, .. }));
@@ -1627,7 +1621,7 @@ mod tests {
         let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"install","product_id":1,"builtin":"x"}}"#).unwrap();
         assert!(matches!(r, crate::Request::Mods(ModsRequest::Install { path: None, .. })));
         let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"uninstall","product_id":1,"mod":"x"}}"#).unwrap();
-        assert!(matches!(r, crate::Request::Mods(ModsRequest::Uninstall { confirmed: false, .. })));
+        assert!(matches!(r, crate::Request::Mods(ModsRequest::Uninstall { .. })));
         let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"prefs"}}"#).unwrap();
         assert!(matches!(r, crate::Request::Mods(ModsRequest::Prefs { fixes_on_vanilla: None })));
         let r: crate::Request = serde_json::from_str(r#"{"method":"mods","params":{"op":"plan","product_id":1}}"#).unwrap();

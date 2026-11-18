@@ -158,7 +158,7 @@ Quiver restarts Steam only when you explicitly confirm it, every time, in a dial
 
 - **Restart Steam** closes Steam cleanly, writes the file and starts Steam again.
 - **Not now** keeps the change staged. Quiver writes it the next time Steam is not running, so it appears after Steam next restarts on its own.
-- Quiver never restarts Steam silently, as a side effect of another action (an install finishing, a profile being pinned), or because an agent asked. An agent can request a restart, but it waits for your approval like any other “Ask” action.
+- Quiver never restarts Steam silently, as a side effect of another action (an install finishing, a profile being pinned), or because an agent asked. An agent can request a restart, but it waits for your approval (one of the few “Ask” actions left; see [What agents may do](#what-agents-may-do)).
 - The dialog is not offered while a game launched from Steam is running.
 - From the CLI, `quiver steam restart` asks for confirmation in the terminal before doing anything.
 
@@ -494,10 +494,26 @@ Confirmed policy, editable in Settings › Automation and CLI:
 | Change launch options, mod profiles, exports | Allow | Allow |
 | Launch and stop games | Allow | Allow |
 | Install and update | Allow | Allow |
-| Restore saves or settings | Allow | Ask |
-| Uninstall, delete prefixes, profiles or saves | Allow | Ask |
+| Restore saves or settings | Allow | Allow |
+| Uninstall, delete prefixes, profiles or saves | Allow | Allow |
 | Restart Steam | Ask | Ask |
 | Sign in, sign out, add or remove accounts | Ask | Deny |
+
+**Agents act like you for game changes** (your decision, 2026-11-18). Mods, profiles, layers,
+options (live changes to a running game included), tweaks at every scope, save stores and
+restores of saves or revisions apply the same way whoever sends them: the app, the CLI, the
+in-game Sight panel, an agent, a script or MCP. There is no "needs your confirmation when
+requested by an agent" refusal and no "'agent' asks: …" prompt for them. The reasons: an agent
+running the CLI could pass `--yes` itself anyway, so the prompt protected nothing, and the risk
+is low (agents aren't tampering with your games behind your back; every change is a revision you
+can restore). Every change still records its source, so Activity and the histories say who did
+it (You · app, You · CLI, You · in game, or the agent's name).
+
+What still asks, because it protects your store accounts and other apps rather than a game:
+restarting Steam (only after you confirm it, each time), signing in or out of a store (you only),
+and writes to a store account an agent asks for: re-sending an achievement to Ubisoft, settling an
+Epic cloud-save conflict, and the first Epic save upload and play-time report. `danger` options
+and tweaks still need a confirmation from every source, you included (`--yes` on the CLI).
 
 The command palette, `quiver --help` and the MCP tool list all come from one command registry in the daemon, so they cannot drift apart.
 
@@ -522,6 +538,9 @@ Each decision is written into the sections above; this list is the record.
   Assassin's Creed terms such as Animus, Abstergo or Helix). Decided: **Quiver** (the `ubi`
   CLI becomes `quiver`).
 - **Agent permissions:** as proposed. See [What agents may do](#what-agents-may-do).
+  Revised 2026-11-18: game changes (restores, deletes, uninstalls, live option changes, global
+  tweaks, save stores) are no longer "Ask" for agents. An agent could pass `--yes` itself
+  anyway, and the risk is low. Steam restarts and store accounts keep their rules.
 - **Mod overlays:** unprivileged overlayfs in a user namespace, verified on this machine, mounted with the syscall to keep the real uid. See [Mod overlays](#mod-overlays).
 - **Mod profiles are first-class launch targets:** pinned tiles, their own .desktop entry and Steam shortcut. See [Pinned profiles](#pinned-profiles-steam-and-desktop-exports).
 - **Modded saves:** own saves per modded profile, cloud sync off by default, per-profile toggle.
