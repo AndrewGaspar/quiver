@@ -170,12 +170,18 @@ pub fn ensure(store: &mut Store) -> bool {
     true
 }
 
-/// The layer status counters at the last drain, for deltas.
+/// The layer status counters at the last drain, for deltas, and when each last moved.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Last {
     pc: (u64, u64),
     render: (u64, u64),
+    pc_at: i64,
+    render_at: i64,
 }
+
+/// A latency with no new sample for this long is cleared rather than shown frozen: the
+/// markers (or reports) it comes from stopped, and an old number would read as live.
+const LATENCY_STALE_NS: i64 = 2_000_000_000;
 
 /// What the layer's status block says, into the store. Returns whether the producer was
 /// declared now (a catalog change).
@@ -202,7 +208,7 @@ pub fn apply_layer(store: &mut Store, s: &LayerStatus, last: &mut Last, now: i64
         store.push_counter("nv.frames.app", now, s.app_frames);
         store.push_counter("nv.frames.generated", now, s.app_presents.saturating_sub(s.app_frames));
     }
-    let mut delta = |id: &str, prev: &mut (u64, u64), frames: u64, sum: u64| {
+    let mut delta = |id: &str, prev: &mut (u64, u64), at: &mut i64, frames: u64, sum: u64| {
         if frames < prev.0 || sum < prev.1 {
             // A new swapchain started its counters again.
             *prev = (0, 0);
@@ -211,10 +217,14 @@ pub fn apply_layer(store: &mut Store, s: &LayerStatus, last: &mut Last, now: i64
         if n > 0 {
             store.push_num(id, now, us as f64 / n as f64 / 1000.0);
             *prev = (frames, sum);
+            *at = now;
+        } else if *at != 0 && now - *at > LATENCY_STALE_NS {
+            store.clear(id);
+            *at = 0;
         }
     };
-    delta("nv.latency.pc", &mut last.pc, s.pc_latency_frames, s.pc_latency_sum_us);
-    delta("nv.latency.render", &mut last.render, s.render_latency_frames, s.render_latency_sum_us);
+    delta("nv.latency.pc", &mut last.pc, &mut last.pc_at, s.pc_latency_frames, s.pc_latency_sum_us);
+    delta("nv.latency.render", &mut last.render, &mut last.render_at, s.render_latency_frames, s.render_latency_sum_us);
     fresh
 }
 
@@ -654,6 +664,17 @@ mod tests {
         apply_layer(&mut s, &st, &mut last, 1100 * MS);
         assert_eq!(txt(&s, "nv.reflex.mode").as_deref(), Some("off"));
         assert_eq!(s.state("nv.reflex.cap", 1100 * MS), quiver_api::perf::MetricState::Declared);
+        // The markers stop (the counters stand still): still shown within the grace...
+        apply_layer(&mut s, &st, &mut last, 2500 * MS);
+        assert_eq!(txt(&s, "latency.pc").as_deref(), Some("16.5"));
+        // ...then cleared rather than shown frozen, and back with the next samples.
+        apply_layer(&mut s, &st, &mut last, 3100 * MS);
+        assert_eq!(s.state("nv.latency.pc", 3100 * MS), quiver_api::perf::MetricState::Declared);
+        st.pc_latency_frames = 110;
+        st.pc_latency_sum_us = 1_650_000 + 10 * 9_000;
+        apply_layer(&mut s, &st, &mut last, 3200 * MS);
+        let at = |s: &Store, id: &str| s.formatted(id, Stat::Last, super::super::registry::WINDOW_1S, 3200 * MS).map(|v| v.text);
+        assert_eq!(at(&s, "latency.pc").as_deref(), Some("9.0"));
     }
 
     #[test]
