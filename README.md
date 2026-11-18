@@ -267,6 +267,29 @@ again"; Quiver never signs in on its own. Only you can sign in or out: requests 
 scripts are refused. Quiver never reads another launcher's Epic session (legendary's
 `user.json`, Heroic's or the Epic Games Launcher's data).
 
+**Cloud saves, play time, achievements.** For an Epic game whose catalog names a save folder,
+Quiver syncs Epic's launcher cloud saves: it downloads what's newer before a launch (backing
+up this machine's copies first, under `epic-<app>/` in the save-backups folder) and uploads
+after the game exits. A file changed both here and in the cloud since the last sync is a
+conflict: nothing moves until you keep one side. Every upload is a new cloud version; Quiver
+never deletes one. Games whose catalog names no folder show "saves sync in game" (EOS does it
+inside the game). Epic's own play-time total is the one shown, and each session is reported
+to Epic when it ends (the `report_playtime` setting), once: a report that got no answer isn't
+sent again. Achievements are read from Epic's store (the game reports unlocks itself); new
+unlocks during a session become Sight toasts. The first upload of saves and the first
+play-time report are writes to your Epic account, so they wait for your yes once; after that
+they happen on their own.
+
+```sh
+quiver epic saves <game>                    # this machine against the cloud, backups
+quiver epic saves <game> sync [--yes]       # sync now; --yes: the first upload
+quiver epic saves <game> sync --keep local|cloud   # settle a conflict
+quiver epic saves <game> restore <backup|latest>
+quiver epic playtime [<game>]               # Epic's totals and the report queue
+quiver epic playtime --send [--yes]         # report queued sessions now
+quiver progress <game>                      # Epic's play time and achievements
+```
+
 **Which client Quiver signs in as.** Epic has no OAuth client for third-party launchers, so
 Quiver presents the Epic Games Launcher's public client id and secret, user agent and label,
 as [legendary](https://github.com/legendary-gl/legendary), Heroic and egs-api do. That is

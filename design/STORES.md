@@ -907,3 +907,14 @@ of its own, in `crates/epic-core`.
   because `accounts.json` is Ubisoft's and older daemons rewrite it without unknown fields.
   Keyring entries are `epic:<account id>`. The `Accounts` trait itself isn't extracted yet:
   Epic's sign-in is `Request::Epic(..)`, a nested enum as section 3.1 allows.
+
+**Epic phase 3 (2026-11-18; STORE-EPIC.md §9.5).** The first store besides Ubisoft that Quiver
+syncs saves for, reports play time to and reads achievements from.
+
+- §3.7 for a `Tree` location: one cloud store (the real folder), a per-file base, conflicts
+  held for the person, backups before every download, whole-version uploads read back, no
+  cloud deletions. Its sync engine is in `epic-core::saves`, not yet the shared engine in
+  `quiver-core` this section asks for; it is written against plain files so it can move.
+- §3.8: Epic unlocks come from polling (`AchievementUnlocked.{game, key}`, `ReportState::ByGame`).
+- §3.9: Epic is `AfterSession`, under `report_playtime`, behind a one-time yes for the first
+  report (and likewise the first save upload).
