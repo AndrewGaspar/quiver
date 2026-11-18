@@ -46,6 +46,12 @@ impl Quiver {
                 return HeroTitle::Baked;
             }
         }
+        self.logo_title(g, cx)
+    }
+
+    /// The game's logo, else its name, ignoring a logo painted into the hero: for places that
+    /// crop or dim the hero (the slim banner, download cards), where a baked logo doesn't show.
+    pub fn logo_title(&mut self, g: &GameRow, cx: &mut Context<Self>) -> HeroTitle {
         match self.art_for(g, ArtSlot::Logo, Variant::Trimmed, cx) {
             ArtState::Ready(l) => HeroTitle::Logo(l),
             _ => HeroTitle::Text,

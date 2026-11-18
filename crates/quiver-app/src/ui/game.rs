@@ -629,8 +629,8 @@ impl Quiver {
                 gpui::linear_color_stop(th.ink1.opacity(0.), 0.),
                 gpui::linear_color_stop(th.ink1.opacity(0.85), 1.),
             )));
-        // The crop above hides a painted-in logo, so baked art gets the name here.
-        let title = if baked { HeroTitle::Text } else { title };
+        // The crop above hides a painted-in logo, so baked art gets the separate logo here.
+        let title = if baked { self.logo_title(g, cx) } else { title };
         let tb = if stacked {
             TitleBox { max_w: 180., max_h: 36., max_scale: 1.2, text: 18., text_w: pane_w - 2. * pad }
         } else {

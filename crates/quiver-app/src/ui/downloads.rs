@@ -977,7 +977,7 @@ impl Quiver {
         };
         let title = match &g {
             Some(g) => match self.hero_title(g, cx) {
-                HeroTitle::Baked => HeroTitle::Text,
+                HeroTitle::Baked => self.logo_title(g, cx),
                 t => t,
             },
             None => HeroTitle::Text,
