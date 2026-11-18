@@ -26,6 +26,7 @@ pub mod options;
 pub mod perf;
 pub mod savestores;
 pub mod setup;
+pub mod sight;
 pub mod steamlib;
 pub mod tweaks;
 pub mod stores;
@@ -883,6 +884,9 @@ pub enum Request {
     // ---- Epic Games Store (appended; design/STORE-EPIC.md)
     /// Epic accounts: sign in with a pasted code, sign out, list (see [`epic`]).
     Epic(epic::EpicRequest),
+    // ---- The Sight panel (appended; design/SIGHT.md §14)
+    /// Open, close or toggle the in-game panel; its status (see [`sight`]).
+    Sight(sight::SightRequest),
 }
 
 fn yes() -> bool {
@@ -1082,6 +1086,9 @@ pub enum Event {
     /// A store's accounts changed (signed in, signed out, default, or Epic ended a
     /// session): reload `Request::Stores` and that store's account list.
     StoreAccountsChanged { store: StoreId },
+    // ---- appended: the Sight panel (design/SIGHT.md §14). Comes as a perf event
+    // (`PerfEvent::Panel`) to every subscriber; only `quiver-sight` acts on it.
+    SightPanel(sight::PanelCommand),
 }
 
 impl From<options::OptionsEvent> for Event {
@@ -1105,6 +1112,7 @@ impl From<perf::PerfEvent> for Event {
             P::CatalogChanged { session, product_id } => Event::PerfCatalogChanged { session, product_id },
             P::HudChanged { product_id, session } => Event::HudChanged { product_id, session },
             P::Session { session, product_id, ended, summary, game } => Event::PerfSession { session, product_id, ended, summary, game },
+            P::Panel(c) => Event::SightPanel(c),
         }
     }
 }
@@ -1149,6 +1157,7 @@ impl Event {
             Event::PerfSession { session, product_id, ended, summary, game } => {
                 P::Session { session: session.clone(), product_id: *product_id, ended: *ended, summary: summary.clone(), game: *game }
             }
+            Event::SightPanel(c) => P::Panel(c.clone()),
             _ => return None,
         })
     }

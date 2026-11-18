@@ -223,7 +223,12 @@ pub struct LayerStatus {
     /// `vkGetLatencyTimingsNV` and the sum of their simulation start → GPU render end, µs.
     pub render_latency_frames: u64,
     pub render_latency_sum_us: u64,
-    pub reflex_reserved: [u32; 2],
+    // ---- appended (the Sight panel, SIGHT §14): in the 8 bytes the Reflex fields left
+    // reserved; layers from before read as zero here.
+    /// Shift+F2 (the Sight panel) presses the layer saw, wrapping, like `key_toggles`.
+    pub key_panels: u16,
+    pub _pad0: u16,
+    pub _reserved0: u32,
 }
 
 /// `LayerStatus::reflex_flags`: the app called `vkSetLatencySleepModeNV` on the swapchain.
@@ -498,7 +503,7 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, pc_latency_sum_us),
     o!("qv_layer_status", LayerStatus, render_latency_frames),
     o!("qv_layer_status", LayerStatus, render_latency_sum_us),
-    o!("qv_layer_status", LayerStatus, reflex_reserved),
+    o!("qv_layer_status", LayerStatus, key_panels),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),

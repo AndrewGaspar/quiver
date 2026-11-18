@@ -237,6 +237,9 @@ pub enum PerfEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         game: Option<GameRef>,
     },
+    /// Open, close or toggle the Sight panel (appended; `crate::sight`). To every
+    /// subscriber; `quiver-sight` acts on it.
+    Panel(crate::sight::PanelCommand),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

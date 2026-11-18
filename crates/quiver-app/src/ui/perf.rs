@@ -413,7 +413,7 @@ impl Quiver {
                     self.perf.status.remove(&Gid::from(p));
                 }
             }
-            PerfEvent::CatalogChanged { .. } | PerfEvent::HudModel(_) => {}
+            PerfEvent::CatalogChanged { .. } | PerfEvent::HudModel(_) | PerfEvent::Panel(_) => {}
         }
         cx.notify();
     }

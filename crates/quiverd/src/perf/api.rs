@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use quiver_api::perf::{HudScopeRef, PerfRequest, SessionSummary};
+use quiver_api::sight::{PanelAction, SightRequest};
 use quiver_core::launcher;
 
 use super::ConnCtx;
@@ -84,6 +85,24 @@ impl Daemon {
                     }
                     json!({ "info": info, "env": began.plan.env })
                 }
+            }
+        })
+    }
+
+    /// `Request::Sight`: the in-game panel (`panel.rs`).
+    pub(crate) fn handle_sight(&self, source: &str, req: SightRequest) -> Result<Value> {
+        let hub = &self.perf;
+        Ok(match req {
+            SightRequest::Toggle { session, section } => json!(hub.panel_command(PanelAction::Toggle, session.as_deref(), section, source)?),
+            SightRequest::Open { session, section } => json!(hub.panel_command(PanelAction::Open, session.as_deref(), section, source)?),
+            SightRequest::Close => json!(hub.panel_command(PanelAction::Close, None, None, source)?),
+            SightRequest::Status => json!(hub.panel_status()),
+            SightRequest::Report { report } => {
+                if source != "sight" {
+                    bail!("only quiver-sight reports the panel's state");
+                }
+                hub.panel_report(report);
+                Value::Null
             }
         })
     }

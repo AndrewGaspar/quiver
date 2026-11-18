@@ -604,6 +604,7 @@ impl Daemon {
             // The connection loop passes connection-bound perf requests (subscriptions, HUD
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
+            Request::Sight(req) => self.handle_sight(source, req)?,
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
             // The connection loop passes its connection (holds without a time limit).
             Request::Daemon(req) => self.handle_daemon(source, None, req)?,
@@ -856,7 +857,8 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Subscribe
         | Request::Sessions
         | Request::Activity { .. }
-        | Request::Daemon(quiver_api::daemon::DaemonRequest::Status) => None,
+        | Request::Daemon(quiver_api::daemon::DaemonRequest::Status)
+        | Request::Sight(quiver_api::sight::SightRequest::Status) => None,
         r => Some(
             serde_json::to_value(r)
                 .ok()

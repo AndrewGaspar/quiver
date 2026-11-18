@@ -1233,6 +1233,8 @@ impl Quiver {
                             }
                             cx.notify();
                         }
+                        // The app asks for no chord; gilrs not starting is a log line already.
+                        PadEvent::Chord | PadEvent::Unavailable(_) => {}
                     }
                 });
                 if alive.is_err() {

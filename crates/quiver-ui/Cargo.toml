@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+quiver-api.workspace = true
+serde_json.workspace = true
+gilrs = "0.11"
 gpui.workspace = true
 tracing.workspace = true
 unicode-segmentation = "1"
@@ -15,7 +18,6 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 notify = { version = "8", default-features = false }
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile = "3"
 # Examples: the platform, and PNG output.
 gpui_platform.workspace = true

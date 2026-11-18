@@ -10,6 +10,11 @@
 
 pub mod assets;
 pub mod components;
+/// Gamepads through gilrs (read-only), mapped to [`input::Input`]s.
+pub mod gamepad;
+pub mod input;
+/// Option and tweak rows' wording and stepping (MOD-CONFIG), for the app and the panel.
+pub mod options;
 pub mod palette;
 pub mod text_input;
 pub mod theme;

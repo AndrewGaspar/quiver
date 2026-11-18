@@ -273,7 +273,9 @@ impl LayerStatus {
         pc_latency_sum_us: 0,
         render_latency_frames: 0,
         render_latency_sum_us: 0,
-        reflex_reserved: [0; 2],
+        key_panels: 0,
+        _pad0: 0,
+        _reserved0: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -391,6 +393,8 @@ mod tests {
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
         assert_eq!(b.len(), 336);
+        // A layer from before the panel key left these 8 bytes reserved (zero).
+        assert_eq!(LayerStatus::from_bytes(b).key_panels, 0);
         let t = LayerStatus::from_bytes(b);
         assert_eq!(t, s);
         assert_eq!(LayerStatus::get_str(&t.engine_name), Some("DXVK"));

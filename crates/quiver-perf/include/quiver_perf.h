@@ -223,7 +223,9 @@ typedef struct qv_layer_status {
     uint64_t pc_latency_sum_us;
     uint64_t render_latency_frames; /* opt-in vkGetLatencyTimingsNV: sim start -> GPU end */
     uint64_t render_latency_sum_us;
-    uint32_t reflex_reserved[2];
+    uint16_t key_panels;        /* Shift+F2 (Sight panel) presses, wrapping (in the former reflex_reserved) */
+    uint16_t _pad0;
+    uint32_t _reserved0;
 } qv_layer_status;
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
@@ -349,7 +351,7 @@ QV_ASSERT_OFFSET(qv_layer_status, pc_latency_frames, 296);
 QV_ASSERT_OFFSET(qv_layer_status, pc_latency_sum_us, 304);
 QV_ASSERT_OFFSET(qv_layer_status, render_latency_frames, 312);
 QV_ASSERT_OFFSET(qv_layer_status, render_latency_sum_us, 320);
-QV_ASSERT_OFFSET(qv_layer_status, reflex_reserved, 328);
+QV_ASSERT_OFFSET(qv_layer_status, key_panels, 328);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

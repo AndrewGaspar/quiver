@@ -186,31 +186,8 @@ pub enum Zone {
     Body,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Input {
-    Up,
-    Down,
-    Left,
-    Right,
-    /// Enter / A.
-    Activate,
-    /// Esc / B.
-    Back,
-    /// LB / RB: the previous or next top-level section.
-    PrevSection,
-    NextSection,
-    /// LT / RT: the previous or next tab.
-    PrevTab,
-    NextTab,
-    /// Ctrl K / Start.
-    Palette,
-    /// Y: the menu for the focused game.
-    Menu,
-    /// X: play options for the focused game (the menu, for now).
-    PlayOptions,
-    /// P: play the focused game.
-    Play,
-}
+/// The input vocabulary, shared with Sight's panel.
+pub use quiver_ui::input::Input;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Overlay {

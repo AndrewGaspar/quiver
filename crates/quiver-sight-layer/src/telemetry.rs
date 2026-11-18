@@ -41,6 +41,7 @@ pub struct Telemetry {
     pub keys: AtomicU32,
     pub key_toggles: AtomicU32,
     pub key_nexts: AtomicU32,
+    pub key_panels: AtomicU32,
 }
 
 /// The current `hud.image` reader. `generation` bumps whenever the thread (re)opens or drops
@@ -99,6 +100,7 @@ pub fn init() -> Option<&'static Telemetry> {
                 keys: AtomicU32::new(0),
                 key_toggles: AtomicU32::new(0),
                 key_nexts: AtomicU32::new(0),
+                key_panels: AtomicU32::new(0),
             })
         })
         .as_ref()
@@ -130,6 +132,7 @@ impl Telemetry {
         s.key_toggles = self.key_toggles.load(Ordering::Relaxed) as u16;
         s.key_nexts = self.key_nexts.load(Ordering::Relaxed) as u16;
         crate::latency::fill_status(&mut s, mono_raw_ns());
+        s.key_panels = self.key_panels.load(Ordering::Relaxed) as u16;
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }
@@ -163,6 +166,7 @@ impl Telemetry {
         match a {
             keys::Action::Toggle => &self.key_toggles,
             keys::Action::Next => &self.key_nexts,
+            keys::Action::Panel => &self.key_panels,
         }
         .fetch_add(1, Ordering::Relaxed);
         self.write_status();
