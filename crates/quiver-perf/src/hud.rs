@@ -23,6 +23,8 @@ const OFF_BUFFER_BYTES: usize = offset_of!(HudHeader, buffer_bytes);
 const OFF_PUBLISHED: usize = offset_of!(HudHeader, published);
 const OFF_HEARTBEAT: usize = offset_of!(HudHeader, heartbeat);
 const OFF_PID: usize = offset_of!(HudHeader, writer_pid);
+const OFF_BACKDROP: usize = offset_of!(HudHeader, backdrop);
+const OFF_BACKDROP_UNTIL: usize = offset_of!(HudHeader, backdrop_until);
 const DESC_WORDS: usize = HUD_PIXELS_OFFSET / 8;
 
 /// The layer stops drawing an image whose writer heartbeat is older than this (§2.8).
@@ -177,6 +179,83 @@ impl HudGraph {
     };
 }
 
+/// The Sight panel's backdrop request in the `hud.image` header (`qv_hud_header.backdrop`,
+/// `backdrop_dim`, `backdrop_radius`, `backdrop_until`; SIGHT §14): quiver-sight asks the layer
+/// in this session's game to blur its frames while the panel is open over it.
+///
+/// The first three fields share one 64-bit word (offset 128), stored and loaded as one, and
+/// the deadline is the next word. Writer: deadline, then the word (release). Reader: the word
+/// (acquire), then the deadline. A request is live while its mode is
+/// [`HUD_BACKDROP_BLUR`] and the deadline is ahead (at most [`HUD_BACKDROP_MAX_HOLD_NS`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackdropRequest {
+    /// `HUD_BACKDROP_*`.
+    pub mode: u32,
+    /// Darkening, 1/1000.
+    pub dim: u16,
+    /// Blur radius, 1/1000 of the swapchain height; 0: [`HUD_BACKDROP_DEFAULT_RADIUS`].
+    pub radius: u16,
+    /// CLOCK_MONOTONIC_RAW ns.
+    pub until: u64,
+}
+
+impl BackdropRequest {
+    pub const NONE: BackdropRequest = BackdropRequest { mode: HUD_BACKDROP_NONE, dim: 0, radius: 0, until: 0 };
+
+    /// A blur until `until_ns`, dim and radius in 1/1000 (clamped to 1000).
+    pub fn blur(dim: u16, radius: u16, until_ns: i64) -> BackdropRequest {
+        BackdropRequest { mode: HUD_BACKDROP_BLUR, dim: dim.min(1000), radius: radius.min(1000), until: until_ns.max(0) as u64 }
+    }
+
+    /// The request asks for a blur at `now_ns`.
+    pub fn is_live(&self, now_ns: i64) -> bool {
+        let now = now_ns.max(0) as u64;
+        self.mode == HUD_BACKDROP_BLUR && self.until > now
+    }
+
+    /// Darkening as a fraction, 0..=1.
+    pub fn dim_fraction(&self) -> f32 {
+        self.dim.min(1000) as f32 / 1000.0
+    }
+
+    /// Blur radius as a fraction of the swapchain height.
+    pub fn radius_fraction(&self) -> f32 {
+        let r = if self.radius == 0 { HUD_BACKDROP_DEFAULT_RADIUS } else { self.radius.min(1000) as u32 };
+        r as f32 / 1000.0
+    }
+
+    fn word(&self) -> u64 {
+        self.mode as u64 | (self.dim as u64) << 32 | (self.radius as u64) << 48
+    }
+
+    fn from_words(word: u64, until: u64) -> BackdropRequest {
+        BackdropRequest { mode: word as u32, dim: (word >> 32) as u16, radius: (word >> 48) as u16, until }
+    }
+}
+
+/// Writes a backdrop request into a `hud.image` header (quiver-sight).
+pub fn set_backdrop<R: ShmRegion>(region: &R, b: &BackdropRequest) {
+    if b.mode == HUD_BACKDROP_NONE {
+        region.u64_at(OFF_BACKDROP).store(0, Ordering::Release);
+        region.u64_at(OFF_BACKDROP_UNTIL).store(0, Ordering::Relaxed);
+    } else {
+        region.u64_at(OFF_BACKDROP_UNTIL).store(b.until, Ordering::Relaxed);
+        region.u64_at(OFF_BACKDROP).store(b.word(), Ordering::Release);
+    }
+}
+
+/// Reads the backdrop request (untrusted: check [`BackdropRequest::is_live`]; the deadline
+/// is clamped to [`HUD_BACKDROP_MAX_HOLD_NS`] from `now_ns`).
+pub fn read_backdrop<R: ShmRegion>(region: &R, now_ns: i64) -> BackdropRequest {
+    let word = region.u64_at(OFF_BACKDROP).load(Ordering::Acquire);
+    if word as u32 == HUD_BACKDROP_NONE {
+        return BackdropRequest::NONE;
+    }
+    let until = region.u64_at(OFF_BACKDROP_UNTIL).load(Ordering::Acquire);
+    let cap = (now_ns.max(0) as u64).saturating_add(HUD_BACKDROP_MAX_HOLD_NS);
+    BackdropRequest::from_words(word, until.min(cap))
+}
+
 /// A validated `hud.image` header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HudInfo {
@@ -285,6 +364,11 @@ impl<R: ShmRegion> HudWriter<R> {
         self.region.u64_at(OFF_HEARTBEAT).store(now_ns as u64, Ordering::Release);
     }
 
+    /// The Sight panel's backdrop request ([`BackdropRequest`]); independent of publishing.
+    pub fn set_backdrop(&self, b: &BackdropRequest) {
+        set_backdrop(&self.region, b);
+    }
+
     /// Writes `desc` (its `seq` is ignored) and `pixels` (premultiplied RGBA8, `stride ×
     /// height` bytes) into the back buffer and publishes it. Returns the new publish count.
     pub fn publish(&mut self, desc: &HudBufferHeader, pixels: &[u8]) -> Result<u64, Error> {
@@ -391,6 +475,12 @@ impl<R: ShmRegion> HudReader<R> {
         self.region.u32_at(OFF_PID).load(Ordering::Relaxed)
     }
 
+    /// The Sight panel's backdrop request (two loads; the layer's per-present check).
+    #[inline]
+    pub fn backdrop(&self, now_ns: i64) -> BackdropRequest {
+        read_backdrop(&self.region, now_ns)
+    }
+
     /// No heartbeat within [`HUD_STALE_NS`] of `now_ns` (CLOCK_MONOTONIC_RAW), or none yet.
     pub fn is_stale(&self, now_ns: i64) -> bool {
         let hb = self.heartbeat();
@@ -479,6 +569,45 @@ mod tests {
 
     fn pixels(d: &HudBufferHeader) -> Vec<u8> {
         (0..d.pixel_bytes()).map(|i| (i as u64 ^ d.model_rev) as u8).collect()
+    }
+
+    #[test]
+    fn backdrop_request() {
+        let bb = buffer_bytes_for(64, 64).unwrap();
+        let mem = Arc::new(HeapRegion::new(hud_file_bytes(bb)));
+        init_hud(&mem, bb).unwrap();
+        let w = HudWriter::new(mem.clone()).unwrap();
+        let r = HudReader::new(mem.clone()).unwrap();
+        // A fresh file (or a writer from before): no request.
+        assert_eq!(r.backdrop(100), BackdropRequest::NONE);
+        assert!(!r.backdrop(100).is_live(100));
+        let req = BackdropRequest::blur(120, 0, 2_000);
+        w.set_backdrop(&req);
+        let got = r.backdrop(1_000);
+        assert_eq!(got, req);
+        assert!(got.is_live(1_000) && !got.is_live(2_000));
+        assert!((got.dim_fraction() - 0.12).abs() < 1e-6);
+        assert!((got.radius_fraction() - HUD_BACKDROP_DEFAULT_RADIUS as f32 / 1000.0).abs() < 1e-6);
+        assert_eq!(BackdropRequest::blur(5000, 40, 1).dim, 1000);
+        // The header words, as C sees them.
+        assert_eq!(mem.u32_at(OFF_BACKDROP).load(Ordering::Relaxed), HUD_BACKDROP_BLUR);
+        assert_eq!(mem.u16_at(offset_of!(HudHeader, backdrop_dim)).load(Ordering::Relaxed), 120);
+        // A deadline too far ahead is cut to the maximum hold.
+        w.set_backdrop(&BackdropRequest::blur(0, 30, i64::MAX));
+        let got = r.backdrop(5);
+        assert_eq!(got.until, 5 + HUD_BACKDROP_MAX_HOLD_NS);
+        assert!((got.radius_fraction() - 0.03).abs() < 1e-6);
+        // An unknown mode reads back but isn't live.
+        mem.u32_at(OFF_BACKDROP).store(7, Ordering::Relaxed);
+        assert!(!r.backdrop(5).is_live(5));
+        w.set_backdrop(&BackdropRequest::NONE);
+        assert_eq!(r.backdrop(5), BackdropRequest::NONE);
+        // Publishing doesn't touch it, and it doesn't touch the publish counter.
+        w.set_backdrop(&req);
+        let mut w = w;
+        let d = desc(64, 64, 1);
+        w.publish(&d, &pixels(&d)).unwrap();
+        assert_eq!((r.backdrop(1_000), r.published()), (req, 1));
     }
 
     #[test]

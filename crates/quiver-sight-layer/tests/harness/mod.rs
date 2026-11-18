@@ -82,6 +82,11 @@ impl TestSession {
         self.writer.lock().unwrap().publish(&img.desc, &img.pixels).unwrap()
     }
 
+    /// The Sight panel's backdrop request, as quiver-sight writes it.
+    pub fn backdrop(&self, req: &quiver_perf::hud::BackdropRequest) {
+        self.writer.lock().unwrap().set_backdrop(req);
+    }
+
     /// Stops the heartbeat (the layer must stop drawing within 3 s).
     pub fn stop_heartbeat(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -199,7 +204,16 @@ pub struct Opts<'a> {
     pub debug_utils: bool,
     /// Drive `VK_NV_low_latency2` as a Reflex game does (the device must have it).
     pub reflex: Option<ReflexOpts>,
+    /// Fill every frame with black and white vertical stripes ([`STRIPE`] px each) instead of
+    /// the flat clear, so a blur is measurable.
+    pub stripes: bool,
+    /// The surface format and colour space to ask for (with `VK_EXT_swapchain_colorspace` when
+    /// the instance has it); the run falls back to the first offered when it isn't there.
+    pub surface_format: Option<(vk::Format, vk::ColorSpaceKHR)>,
 }
+
+/// The stripes' width.
+pub const STRIPE: u32 = 8;
 
 /// How the app drives Reflex (`VK_NV_low_latency2`), per application-rendered frame.
 #[derive(Clone, Debug, Default)]
@@ -240,6 +254,8 @@ impl Default for Opts<'_> {
             present_id: true,
             debug_utils: false,
             reflex: None,
+            stripes: false,
+            surface_format: None,
         }
     }
 }
@@ -250,6 +266,7 @@ pub struct Report {
     pub recreations: u32,
     pub extent: (u32, u32),
     pub format: vk::Format,
+    pub color_space: vk::ColorSpaceKHR,
     pub present_id: bool,
     /// RGBA8 (converted from BGRA when needed), `extent` sized.
     pub pixels: Option<Vec<u8>>,
@@ -331,6 +348,10 @@ pub fn run(mut o: Opts<'_>) -> Report {
         };
         if o.debug_utils {
             exts.push(ash::ext::debug_utils::NAME.as_ptr());
+        }
+        let inst_exts = entry.enumerate_instance_extension_properties(None).unwrap();
+        if o.surface_format.is_some() && inst_exts.iter().any(|e| e.extension_name_as_c_str().ok() == Some(ash::ext::swapchain_colorspace::NAME)) {
+            exts.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
         }
         let instance = entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app_info).enabled_extension_names(&exts), None).unwrap();
         let messenger = o.debug_utils.then(|| {
@@ -414,7 +435,8 @@ pub fn run(mut o: Opts<'_>) -> Report {
 
         let want = if o.srgb { vk::Format::B8G8R8A8_SRGB } else { vk::Format::B8G8R8A8_UNORM };
         let formats = surface_fn.get_physical_device_surface_formats(pd, surface).unwrap();
-        let fmt = formats.iter().find(|f| f.format == want && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).copied().unwrap_or(formats[0]);
+        let (want, want_cs) = o.surface_format.unwrap_or((want, vk::ColorSpaceKHR::SRGB_NONLINEAR));
+        let fmt = formats.iter().find(|f| f.format == want && f.color_space == want_cs).copied().unwrap_or(formats[0]);
         let modes = surface_fn.get_physical_device_surface_present_modes(pd, surface).unwrap();
         let mode = [vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE].into_iter().find(|m| modes.contains(m)).unwrap_or(vk::PresentModeKHR::FIFO);
         // (Re)creates the swapchain at the surface's current size (a tiling window manager may
@@ -490,6 +512,33 @@ pub fn run(mut o: Opts<'_>) -> Report {
             let acq: Vec<_> = (0..2).map(|_| sem()).collect();
             let ren: Vec<_> = imgs.iter().map(|_| sem()).collect();
             (sc, surf, imgs, acq, ren)
+        });
+
+        // The stripes, uploaded from a host buffer every frame (sized for the first extent).
+        let stripes = o.stripes.then(|| {
+            let (white, black) = stripe_texels(fmt.format);
+            let (w, h) = (extent.width, extent.height);
+            let mut data = Vec::with_capacity((w * h) as usize * white.len());
+            for _y in 0..h {
+                for x in 0..w {
+                    data.extend_from_slice(if (x / STRIPE).is_multiple_of(2) { &black } else { &white });
+                }
+            }
+            let buf = device.create_buffer(&vk::BufferCreateInfo::default().size(data.len() as u64).usage(vk::BufferUsageFlags::TRANSFER_SRC), None).unwrap();
+            let req = device.get_buffer_memory_requirements(buf);
+            let mp = instance.get_physical_device_memory_properties(pd);
+            let ty = (0..mp.memory_type_count)
+                .find(|&i| {
+                    req.memory_type_bits & (1 << i) != 0
+                        && mp.memory_types[i as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                })
+                .unwrap();
+            let mem = device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None).unwrap();
+            device.bind_buffer_memory(buf, mem, 0).unwrap();
+            let p = device.map_memory(mem, 0, data.len() as u64, vk::MemoryMapFlags::empty()).unwrap() as *mut u8;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+            device.unmap_memory(mem);
+            (buf, mem, (w, h))
         });
 
         let pool = device
@@ -583,10 +632,22 @@ pub fn run(mut o: Opts<'_>) -> Report {
                     &[],
                     &[barrier(img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)],
                 );
-                // A slowly cycling, mid-grey-ish clear so blending is checkable.
-                let t = frame as f32 / o.frames.max(1) as f32;
-                let clear = vk::ClearColorValue { float32: [0.25 + 0.2 * t, 0.35 + 0.3 * n as f32, 0.45 - 0.2 * t, 1.0] };
-                device.cmd_clear_color_image(cmd, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear, &[range]);
+                match stripes {
+                    Some((buf, _, (w, h))) if n == 0 && (w, h) == (extent.width, extent.height) => {
+                        let region = vk::BufferImageCopy {
+                            image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                            image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+                            ..Default::default()
+                        };
+                        device.cmd_copy_buffer_to_image(cmd, buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+                    }
+                    _ => {
+                        // A slowly cycling, mid-grey-ish clear so blending is checkable.
+                        let t = frame as f32 / o.frames.max(1) as f32;
+                        let clear = vk::ClearColorValue { float32: [0.25 + 0.2 * t, 0.35 + 0.3 * n as f32, 0.45 - 0.2 * t, 1.0] };
+                        device.cmd_clear_color_image(cmd, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear, &[range]);
+                    }
+                }
                 device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::TRANSFER,
@@ -746,6 +807,10 @@ pub fn run(mut o: Opts<'_>) -> Report {
             device.destroy_fence(f, None);
         }
         device.destroy_command_pool(pool, None);
+        if let Some((buf, mem, _)) = stripes {
+            device.destroy_buffer(buf, None);
+            device.free_memory(mem, None);
+        }
         sc_fn.destroy_swapchain(swapchain, None);
         device.destroy_device(None);
         surface_fn.destroy_surface(surface, None);
@@ -754,7 +819,21 @@ pub fn run(mut o: Opts<'_>) -> Report {
         }
         instance.destroy_instance(None);
         drop(xcb);
-        Report { device_name, recreations, extent: (extent.width, extent.height), format: fmt.format, present_id, pixels, present_ns, messages: std::mem::take(&mut *MESSAGES.lock().unwrap()), reflex: reflex_report }
+        Report { device_name, recreations, extent: (extent.width, extent.height), format: fmt.format, color_space: fmt.color_space, present_id, pixels, present_ns, messages: std::mem::take(&mut *MESSAGES.lock().unwrap()), reflex: reflex_report }
+    }
+}
+
+/// The stripes' (black, white) texel bytes in `format`.
+pub fn stripe_texels(format: vk::Format) -> (Vec<u8>, Vec<u8>) {
+    use vk::Format as F;
+    match format {
+        F::A2B10G10R10_UNORM_PACK32 | F::A2R10G10B10_UNORM_PACK32 => (0xC000_0000u32.to_le_bytes().to_vec(), u32::MAX.to_le_bytes().to_vec()),
+        F::R16G16B16A16_SFLOAT => {
+            let one = 0x3C00u16.to_le_bytes();
+            let zero = [0u8, 0];
+            ([zero, zero, zero, one].concat(), [one, one, one, one].concat())
+        }
+        _ => (vec![0, 0, 0, 255], vec![255; 4]),
     }
 }
 

@@ -10,6 +10,10 @@
 //!   `hud.image`, uploaded only when its publish counter changes, blended at the descriptor's
 //!   position and opacity onto the swapchain image just before present, plus the live
 //!   frame-time graph drawn from the layer's own present history;
+//! - **blurs the game behind the Sight panel** ([`blur`], design/SIGHT.md §14): while
+//!   quiver-sight's request in `hud.image`'s header is live, the game's frame is blurred under
+//!   the HUD at present time, so the panel's backdrop works under any compositor (`SAMPLED`
+//!   usage is added at swapchain creation for it);
 //! - **watches Reflex** (`VK_NV_low_latency2`, [`latency`]): the sleep mode and frame cap the
 //!   app sets, its latency markers and sleeps, so the status block carries the Reflex mode,
 //!   PC latency and the frame-generation multiplier the layer can see;
@@ -43,6 +47,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod blur;
 mod compositor;
 mod ffi;
 pub mod formats;
@@ -89,6 +94,9 @@ pub mod env {
     /// `0`: telemetry only, never composite (debugging; the per-game kill switch doesn't load
     /// the layer at all).
     pub const DRAW: &str = "QUIVER_SIGHT_DRAW";
+    /// `0`: never blur the game behind the Sight panel ([`crate::blur`]), and don't add
+    /// `SAMPLED` usage to swapchains for it.
+    pub const BLUR: &str = "QUIVER_SIGHT_BLUR";
     /// `1`: log events (not per-present work) to stderr.
     pub const LOG: &str = "QUIVER_SIGHT_LOG";
     /// `0`: don't read the HUD's keys in the game ([`crate::keys`]).
@@ -99,6 +107,7 @@ pub mod env {
 
 struct Config {
     draw: bool,
+    blur: bool,
     log: bool,
 }
 
@@ -106,8 +115,17 @@ fn config() -> &'static Config {
     static C: OnceLock<Config> = OnceLock::new();
     C.get_or_init(|| {
         let flag = |k: &str| std::env::var(k).ok();
-        Config { draw: flag(env::DRAW).as_deref() != Some("0"), log: flag(env::LOG).is_some_and(|v| !v.is_empty() && v != "0") }
+        Config {
+            draw: flag(env::DRAW).as_deref() != Some("0"),
+            blur: flag(env::BLUR).as_deref() != Some("0"),
+            log: flag(env::LOG).is_some_and(|v| !v.is_empty() && v != "0"),
+        }
     })
+}
+
+/// The backdrop blur may be set up on new swapchains.
+pub(crate) fn blur_enabled() -> bool {
+    config().blur && draw_enabled()
 }
 
 #[doc(hidden)]

@@ -151,6 +151,7 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
         captures: Captures::Shown,
         size,
         rows,
+        backdrop: None,
     }
 }
 

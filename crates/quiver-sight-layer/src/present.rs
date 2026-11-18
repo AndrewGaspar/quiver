@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use quiver_perf::clock::mono_raw_ns;
-use quiver_perf::layout::{DRAW_ERR_DEVICE_LOST, DRAW_ERR_QUEUE, LAYER_DRAWING, LAYER_HUD_OFF, LAYER_PRESENT_ID};
+use quiver_perf::layout::{BACKDROP_ERR_DEVICE_LOST, BACKDROP_ERR_INTERNAL, DRAW_ERR_DEVICE_LOST, DRAW_ERR_QUEUE, LAYER_DRAWING, LAYER_HUD_OFF, LAYER_PRESENT_ID};
 use quiver_perf::record::LayerPresent;
 
-use crate::compositor::Drawn;
+use crate::compositor::{Drawn, Hud};
 use crate::ffi::find_in_chain;
 use crate::state::{self, DeviceData, HISTORY, Swapchain, TARGET, lock};
 use crate::{draw_enabled, guard, log, telemetry};
@@ -139,22 +139,29 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
             // SAFETY: inside the app's present on `queue`.
             Some(f) => unsafe { s.comp.as_mut().unwrap().draw(dev, queue, f, indices[i], waits, plan.present_ids[i], &history, entry) },
             // A queue we didn't see created: don't draw from it.
-            None => Ok(Drawn::Nothing(DRAW_ERR_QUEUE)),
+            None => Ok(Drawn::Done { semaphore: None, hud: Hud::Nothing(DRAW_ERR_QUEUE), blurred: false }),
         };
         plan.hud_ns = mono_raw_ns() - t0;
         match r {
-            Ok(Drawn::Submitted { semaphore, hud }) => {
-                plan.semaphore[0] = semaphore;
-                if hud {
-                    plan.drawn_on = Some(i);
-                    drawing = true;
-                    error = 0;
+            Ok(Drawn::Done { semaphore, hud, blurred }) => {
+                if let Some(s) = semaphore {
+                    plan.semaphore[0] = s;
                 }
-            }
-            Ok(Drawn::Nothing(reason)) => error = reason,
-            Ok(Drawn::Off) => {
-                hud_off = true;
-                error = 0;
+                match hud {
+                    Hud::Drawn => {
+                        plan.drawn_on = Some(i);
+                        drawing = true;
+                        error = 0;
+                    }
+                    Hud::Off => {
+                        hud_off = true;
+                        error = 0;
+                    }
+                    Hud::Nothing(reason) => error = reason,
+                }
+                if blurred && let Some(t) = tel {
+                    t.blur_last_ns.store(entry, Ordering::Relaxed);
+                }
             }
             Ok(Drawn::Skipped) => return,
             Err(e) => {
@@ -164,6 +171,10 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
                 error = e;
                 if e == DRAW_ERR_DEVICE_LOST {
                     dev.lost.store(true, Ordering::Relaxed);
+                }
+                // The backdrop blur goes with the compositor.
+                if let Some(t) = tel {
+                    t.blur_error.store(if e == DRAW_ERR_DEVICE_LOST { BACKDROP_ERR_DEVICE_LOST } else { BACKDROP_ERR_INTERNAL }, Ordering::Relaxed);
                 }
                 if let Some(c) = s.comp.take() {
                     // Keep the objects alive until the swapchain goes (they may be in flight).

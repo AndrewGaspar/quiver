@@ -71,23 +71,12 @@ impl Pipelines {
         }
     }
 
-    unsafe fn build(&mut self, dev: &ash::Device) -> Result<(), vk::Result> {
-        let attachment = [vk::AttachmentDescription {
-            format: self.format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::LOAD,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            ..Default::default()
-        }];
-        let color_ref = [vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
-        let subpass = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_ref)];
-        // The app's rendering reaches us through the semaphores our submit waits on (all
-        // commands); these order our attachment access after it and before the present.
-        let deps = [
+    /// The render pass's dependencies on the swapchain image (shared by the backdrop blur's
+    /// composite pass, which must be compatible). The app's rendering reaches us through the
+    /// semaphores our submit waits on (all commands); these order our attachment access after
+    /// it and before the present.
+    pub fn dependencies() -> [vk::SubpassDependency; 2] {
+        [
             vk::SubpassDependency {
                 src_subpass: vk::SUBPASS_EXTERNAL,
                 dst_subpass: 0,
@@ -106,7 +95,24 @@ impl Pipelines {
                 dst_access_mask: vk::AccessFlags::empty(),
                 dependency_flags: vk::DependencyFlags::empty(),
             },
-        ];
+        ]
+    }
+
+    unsafe fn build(&mut self, dev: &ash::Device) -> Result<(), vk::Result> {
+        let attachment = [vk::AttachmentDescription {
+            format: self.format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::LOAD,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            ..Default::default()
+        }];
+        let color_ref = [vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
+        let subpass = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_ref)];
+        let deps = Self::dependencies();
         let rp = vk::RenderPassCreateInfo::default().attachments(&attachment).subpasses(&subpass).dependencies(&deps);
         // SAFETY: valid create infos throughout; handles are stored for destroy().
         unsafe {

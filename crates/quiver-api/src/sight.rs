@@ -93,6 +93,8 @@ pub struct PanelCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backdrop {
+    /// The Sight layer blurs the game's own frames (any compositor), under a light tint.
+    GameBlur,
     /// The compositor blurs the game behind a light tint (a Hyprland layer rule).
     Blur,
     /// A plain dark scrim over the game.
@@ -103,9 +105,15 @@ pub enum Backdrop {
 impl Backdrop {
     pub fn as_str(self) -> &'static str {
         match self {
+            Backdrop::GameBlur => "game blur",
             Backdrop::Blur => "blur",
             Backdrop::Dim => "dim",
         }
+    }
+
+    /// Something blurs the game (the panel draws the light tint, not the dim).
+    pub fn blurred(self) -> bool {
+        matches!(self, Backdrop::GameBlur | Backdrop::Blur)
     }
 }
 
@@ -122,8 +130,8 @@ pub struct PanelReport {
     /// The backdrop in use (or that the last open used).
     #[serde(default)]
     pub backdrop: Backdrop,
-    /// Why that backdrop ("Hyprland layer rule, blur size 8 × 2 passes", "blur is off in
-    /// decoration:blur", "not Hyprland", "the rule failed: …").
+    /// Why that backdrop ("the Sight layer blurs the game", "Hyprland layer rule, blur size
+    /// 8 × 2 passes", "blur is off in decoration:blur", "not Hyprland", "the rule failed: …").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub backdrop_detail: String,
     /// The controller: `none`, a pad's name, or why gilrs can't read pads.

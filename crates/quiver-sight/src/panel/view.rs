@@ -866,13 +866,11 @@ impl PanelView {
     }
 }
 
-/// The backdrop and card colours: with the compositor's blur a light tint (dark themes: ink-0
-/// at 35%) and a translucent card; without it the plain dim of SIGHT §9 (ink-0 at 55%).
+/// The backdrop and card colours: over a blur (the Sight layer's in the game, or the
+/// compositor's) a light tint (dark themes: ink-0 at 35%) and a translucent card; without one
+/// the plain dim of SIGHT §9 (ink-0 at 55%).
 pub fn backdrop_colors(th: &Theme, b: Backdrop) -> (Hsla, Hsla) {
-    match b {
-        Backdrop::Blur => (th.ink0.opacity(0.35), th.ink1.opacity(0.78)),
-        Backdrop::Dim => (th.ink0.opacity(0.55), th.ink1.opacity(0.94)),
-    }
+    if b.blurred() { (th.ink0.opacity(0.35), th.ink1.opacity(0.78)) } else { (th.ink0.opacity(0.55), th.ink1.opacity(0.94)) }
 }
 
 impl Render for PanelView {

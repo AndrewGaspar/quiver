@@ -5,9 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
-use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, Level, MetricState, PerfValue, Presenter, PresenterSetting, Stat, hud_card};
+use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, LayerBackdrop, Level, MetricState, PerfValue, Presenter, PresenterSetting, Stat, hud_card};
 use quiver_perf::descriptor::{Display, MetricKind, Range, Unit};
-use quiver_perf::layout::{DRAW_ERR_DEVICE_LOST, DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_NONE, DRAW_ERR_QUEUE, DRAW_ERR_USAGE, LAYER_PANICKED};
+use quiver_perf::layout::{
+    BACKDROP_ERR_DEVICE_LOST, BACKDROP_ERR_FORMAT, BACKDROP_ERR_INTERNAL, BACKDROP_ERR_NONE, BACKDROP_ERR_OFF, BACKDROP_ERR_QUEUE, BACKDROP_ERR_USAGE, DRAW_ERR_DEVICE_LOST,
+    DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_NONE, DRAW_ERR_QUEUE, DRAW_ERR_USAGE, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_PANICKED,
+};
 
 use super::format::{self, Raw};
 use super::layout::{Cell, Layout};
@@ -137,6 +140,54 @@ pub struct ModelInput<'a> {
     pub reason: &'a str,
     pub image: Option<&'a Path>,
     pub monitor: Option<&'a str>,
+    /// The layer's backdrop blur ([`layer_backdrop`]).
+    pub backdrop: Option<LayerBackdrop>,
+}
+
+/// `LayerStatus::backdrop_error` as a word.
+pub fn backdrop_error_name(e: u32) -> &'static str {
+    match e {
+        BACKDROP_ERR_NONE => "not reported (a layer from before the backdrop blur)",
+        BACKDROP_ERR_FORMAT => "format",
+        BACKDROP_ERR_USAGE => "usage",
+        BACKDROP_ERR_QUEUE => "queue",
+        BACKDROP_ERR_DEVICE_LOST => "device_lost",
+        BACKDROP_ERR_INTERNAL => "internal",
+        BACKDROP_ERR_OFF => "off",
+        _ => "unknown",
+    }
+}
+
+/// Whether the session's layer can blur the game behind the Sight panel (design/SIGHT.md
+/// §14), for `quiver-sight`: `image` is the session's `hud.image` (where the request goes),
+/// `layer` the layer on the game's swapchain.
+pub fn layer_backdrop(image: Option<&Path>, layer: Option<&LayerRing>, now: i64) -> Option<LayerBackdrop> {
+    let image = image?.to_path_buf();
+    let not = |reason: &str| Some(LayerBackdrop { image: image.clone(), ready: false, blurring: false, reason: reason.into() });
+    let Some(l) = layer.filter(|l| l.alive && !l.ring.starts_with("invalid")) else { return not("no Sight layer in the game") };
+    if l.heartbeat > 0 && now - l.heartbeat > LAYER_STALE_NS {
+        return not("the layer stopped (no heartbeat)");
+    }
+    let Some(s) = l.status else { return not("waiting for the layer's first swapchain") };
+    if s.flags & LAYER_PANICKED != 0 {
+        return not("the layer disabled drawing after a panic");
+    }
+    if s.flags & LAYER_BLUR_READY == 0 {
+        return not(&format!("the layer can't blur this swapchain ({})", backdrop_error_name(s.backdrop_error as u32)));
+    }
+    Some(LayerBackdrop { image, ready: true, blurring: s.flags & LAYER_BLURRING != 0, reason: String::new() })
+}
+
+/// The layer's backdrop blur for `quiver hud status`.
+pub fn backdrop_status(s: &quiver_perf::layout::LayerStatus) -> String {
+    let gpu = if s.backdrop_gpu_ns > 0 { format!(", {:.2} ms GPU", s.backdrop_gpu_ns as f64 / 1e6) } else { String::new() };
+    if s.flags & LAYER_BLURRING != 0 {
+        format!("blurring{gpu}")
+    } else if s.flags & LAYER_BLUR_READY != 0 {
+        format!("ready{}", if gpu.is_empty() { String::new() } else { format!(" (last{gpu})") })
+    } else {
+        format!("unavailable: {}", backdrop_error_name(s.backdrop_error as u32))
+    }
 }
 
 fn shown_condition(store: &Store, id: &str, now: i64) -> bool {
@@ -293,6 +344,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         captures: inp.cfg.captures,
         size: inp.layout.size(hud_card::panel(background)),
         rows,
+        backdrop: inp.backdrop.clone().map(Box::new),
     }
 }
 
@@ -397,7 +449,7 @@ mod tests {
     fn model(store: &Store, layout: &str, now: i64) -> HudModel {
         let cfg = HudConfig::default();
         let l = builtin(layout).unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None };
         build_model(&inp, store, now)
     }
 
@@ -468,7 +520,7 @@ mod tests {
         // Without a panel the padding goes, the slots stay.
         let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
         let l = builtin("standard").unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None };
         assert_eq!(build_model(&inp, &modded, now2).size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0]);
     }
 
@@ -522,5 +574,40 @@ mod tests {
         assert_eq!(choose_presenter(auto, false, Some(&dead), None, 0, now).0, Presenter::Desktop);
         let silent = LayerRing { heartbeat: now - 5_000 * MS, ..layer(Some(st)) };
         assert_eq!(choose_presenter(auto, false, Some(&silent), None, 0, now).0, Presenter::Desktop);
+    }
+
+    #[test]
+    fn layer_backdrop_state() {
+        let now = 100_000 * MS;
+        let img = Path::new("/dev/shm/quiver-1000/s-1/hud.image");
+        // No hud.image: nowhere to ask.
+        assert_eq!(layer_backdrop(None, Some(&layer(None)), now), None);
+        let no = |l: Option<&LayerRing>| layer_backdrop(Some(img), l, now).map(|b| (b.ready, b.reason));
+        assert_eq!(no(None), Some((false, "no Sight layer in the game".into())));
+        assert_eq!(no(Some(&layer(None))), Some((false, "waiting for the layer's first swapchain".into())));
+        // A layer from before the blur: zero flags, zero error.
+        let old = LayerStatus::ZERO;
+        assert_eq!(no(Some(&layer(Some(old)))).unwrap().1, "the layer can't blur this swapchain (not reported (a layer from before the backdrop blur))");
+        let mut usage = old;
+        usage.backdrop_error = BACKDROP_ERR_USAGE as u16;
+        assert_eq!(no(Some(&layer(Some(usage)))).unwrap().1, "the layer can't blur this swapchain (usage)");
+        assert_eq!(backdrop_status(&usage), "unavailable: usage");
+        // Ready, then blurring (HDR swapchains too: the HUD's presenter doesn't matter).
+        let mut ready = old;
+        ready.flags = LAYER_BLUR_READY;
+        ready.color_space = 1_000_104_008;
+        let b = layer_backdrop(Some(img), Some(&layer(Some(ready))), now).unwrap();
+        assert_eq!((b.ready, b.blurring, b.image.as_path()), (true, false, img));
+        assert_eq!(backdrop_status(&ready), "ready");
+        let mut blurring = ready;
+        blurring.flags |= LAYER_BLURRING;
+        blurring.backdrop_gpu_ns = 420_000;
+        assert!(layer_backdrop(Some(img), Some(&layer(Some(blurring))), now).unwrap().blurring);
+        assert_eq!(backdrop_status(&blurring), "blurring, 0.42 ms GPU");
+        // A panicked or silent layer isn't ready whatever its flags say.
+        let pan = LayerStatus { flags: LAYER_BLUR_READY | LAYER_PANICKED, ..old };
+        assert!(!layer_backdrop(Some(img), Some(&layer(Some(pan))), now).unwrap().ready);
+        let silent = LayerRing { heartbeat: now - 5_000 * MS, ..layer(Some(ready)) };
+        assert!(!layer_backdrop(Some(img), Some(&silent), now).unwrap().ready);
     }
 }

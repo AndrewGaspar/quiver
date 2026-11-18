@@ -85,6 +85,17 @@ extern "C" {
 #define QV_LAYER_HUD_OFF          0x20
 #define QV_LAYER_WAYLAND_SURFACE  0x40 /* the game made a Wayland VkSurfaceKHR */
 #define QV_LAYER_X11_SURFACE      0x80 /* ... an Xlib or XCB one */
+#define QV_LAYER_BLUR_READY       0x100 /* the layer can blur the game behind the Sight panel */
+#define QV_LAYER_BLURRING         0x200 /* it blurred a present within the last 0.5 s */
+
+/* qv_layer_status.backdrop_error: why the layer can't blur behind the Sight panel. */
+#define QV_BACKDROP_ERR_NONE        0
+#define QV_BACKDROP_ERR_FORMAT      1 /* not sampleable/filterable/blendable, or layered etc. */
+#define QV_BACKDROP_ERR_USAGE       2 /* the surface doesn't allow SAMPLED swapchain images */
+#define QV_BACKDROP_ERR_QUEUE       3
+#define QV_BACKDROP_ERR_DEVICE_LOST 4
+#define QV_BACKDROP_ERR_INTERNAL    6
+#define QV_BACKDROP_ERR_OFF         7 /* QUIVER_SIGHT_BLUR=0, drawing off, or after a panic */
 
 /* qv_layer_status.reflex_flags */
 #define QV_REFLEX_MODE_SET        0x001 /* the app called vkSetLatencySleepModeNV */
@@ -137,6 +148,11 @@ extern "C" {
 #define QV_HUD_MAX_DIM            2048
 #define QV_HUD_MAX_GRAPHS         2
 #define QV_HUD_FORMAT_RGBA8_PREMUL_SRGB 1
+/* qv_hud_header.backdrop (the Sight panel's request; 0 from writers before it). */
+#define QV_HUD_BACKDROP_NONE      0
+#define QV_HUD_BACKDROP_BLUR      1
+#define QV_HUD_BACKDROP_DEFAULT_RADIUS 25 /* backdrop_radius 0: 2.5% of the swapchain height */
+#define QV_HUD_BACKDROP_MAX_HOLD_NS 10000000000ull /* a later backdrop_until counts as now + this */
 
 #define QV_GRAPH_SERIES_PRESENTED      1
 #define QV_GRAPH_SERIES_BASE           2
@@ -224,8 +240,8 @@ typedef struct qv_layer_status {
     uint64_t render_latency_frames; /* opt-in vkGetLatencyTimingsNV: sim start -> GPU end */
     uint64_t render_latency_sum_us;
     uint16_t key_panels;        /* Shift+F2 (Sight panel) presses, wrapping (in the former reflex_reserved) */
-    uint16_t _pad0;
-    uint32_t _reserved0;
+    uint16_t backdrop_error;    /* QV_BACKDROP_ERR_*: why the layer can't blur behind the panel */
+    uint32_t backdrop_gpu_ns;   /* GPU time of the backdrop blur per present (running mean), 0 none */
 } qv_layer_status;
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
@@ -242,7 +258,15 @@ typedef struct qv_hud_header {      /* offset 0, one 4 KiB page */
     uint64_t published;             /* publish counter; buffer (published % 2) is current */
     uint64_t heartbeat;             /* quiver-sight, CLOCK_MONOTONIC_RAW ns, >= 1/s */
     uint32_t writer_pid;
-    uint8_t  _pad1[4012];
+    uint8_t  _pad1[44];
+    /* Offset 128, own cache line: the Sight panel's backdrop request (quiver-sight -> layer),
+     * in what was padding (zero: none). backdrop, backdrop_dim and backdrop_radius are one
+     * 64-bit word, stored after backdrop_until (release) and loaded before it (acquire). */
+    uint32_t backdrop;              /* QV_HUD_BACKDROP_* */
+    uint16_t backdrop_dim;          /* darkening, 1/1000 */
+    uint16_t backdrop_radius;       /* blur radius, 1/1000 of the swapchain height; 0: default */
+    uint64_t backdrop_until;        /* CLOCK_MONOTONIC_RAW ns; renewed while the panel is open */
+    uint8_t  _pad2[3952];
 } qv_hud_header;
 
 typedef struct qv_hud_graph {       /* a rectangle the layer fills with the live graph */
@@ -352,6 +376,8 @@ QV_ASSERT_OFFSET(qv_layer_status, pc_latency_sum_us, 304);
 QV_ASSERT_OFFSET(qv_layer_status, render_latency_frames, 312);
 QV_ASSERT_OFFSET(qv_layer_status, render_latency_sum_us, 320);
 QV_ASSERT_OFFSET(qv_layer_status, key_panels, 328);
+QV_ASSERT_OFFSET(qv_layer_status, backdrop_error, 330);
+QV_ASSERT_OFFSET(qv_layer_status, backdrop_gpu_ns, 332);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);
@@ -360,6 +386,10 @@ QV_ASSERT_OFFSET(qv_hud_header, buffer_bytes, 12);
 QV_ASSERT_OFFSET(qv_hud_header, published, 64);
 QV_ASSERT_OFFSET(qv_hud_header, heartbeat, 72);
 QV_ASSERT_OFFSET(qv_hud_header, writer_pid, 80);
+QV_ASSERT_OFFSET(qv_hud_header, backdrop, 128);
+QV_ASSERT_OFFSET(qv_hud_header, backdrop_dim, 132);
+QV_ASSERT_OFFSET(qv_hud_header, backdrop_radius, 134);
+QV_ASSERT_OFFSET(qv_hud_header, backdrop_until, 136);
 QV_ASSERT_SIZE(qv_hud_graph, 60);
 QV_ASSERT_OFFSET(qv_hud_graph, x, 0);
 QV_ASSERT_OFFSET(qv_hud_graph, y, 4);

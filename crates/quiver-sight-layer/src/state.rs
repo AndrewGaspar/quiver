@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuar
 use ash::vk;
 use ash::vk::Handle;
 use quiver_perf::LayerStatus;
-use quiver_perf::layout::{LAYER_LOW_LATENCY2, LAYER_PRESENT_WAIT};
+use quiver_perf::layout::{BACKDROP_ERR_INTERNAL, LAYER_BLUR_READY, LAYER_LOW_LATENCY2, LAYER_PRESENT_WAIT};
 
+use crate::blur::BlurPipes;
 use crate::compositor::Compositor;
 use crate::ffi::{PfnSetDeviceLoaderData, dispatch_key};
 use crate::graph::History;
@@ -48,6 +49,8 @@ pub struct DeviceData {
     queues: RwLock<Vec<(vk::Queue, u32)>>,
     pub swapchains: RwLock<Vec<(vk::SwapchainKHR, Arc<Mutex<Swapchain>>)>>,
     pub pipelines: Mutex<Vec<Arc<Pipelines>>>,
+    /// The backdrop blur's pipelines per swapchain format, built the first time a panel asks.
+    pub blur_pipes: Mutex<Vec<Arc<BlurPipes>>>,
     /// Semaphores of destroyed compositors a present may still wait on: destroyed with the
     /// device, or once they're long retired.
     semaphores: Mutex<Vec<vk::Semaphore>>,
@@ -90,6 +93,7 @@ impl DeviceData {
             queues: RwLock::new(Vec::new()),
             swapchains: RwLock::new(Vec::new()),
             pipelines: Mutex::new(Vec::new()),
+            blur_pipes: Mutex::new(Vec::new()),
             semaphores: Mutex::new(Vec::new()),
             lost: AtomicBool::new(false),
         }
@@ -167,6 +171,25 @@ impl DeviceData {
         v.push(p.clone());
         Ok(p)
     }
+
+    /// The backdrop blur's pipelines for a swapchain format, built once per device and format.
+    pub fn blur_pipes_for(&self, format: vk::Format) -> Result<Arc<BlurPipes>, vk::Result> {
+        let mut v = lock(&self.blur_pipes);
+        if let Some(p) = v.iter().find(|p| p.format == format) {
+            return Ok(p.clone());
+        }
+        // SAFETY: a live device.
+        let p = Arc::new(unsafe { BlurPipes::new(&self.dev, format)? });
+        v.push(p.clone());
+        Ok(p)
+    }
+
+    /// Whether `family` can time GPU work (`timestampValidBits`), and the tick length in ns.
+    pub fn timestamps(&self, family: u32) -> Option<f32> {
+        let f = self.families.get(family as usize)?;
+        let period = self.props.limits.timestamp_period;
+        (f.timestamp_valid_bits > 0 && period > 0.0).then_some(period)
+    }
 }
 
 pub struct Swapchain {
@@ -184,6 +207,8 @@ pub struct Swapchain {
     pub disabled: Vec<Compositor>,
     /// Why there's no compositor (`DRAW_ERR_*`), or why it was disabled.
     pub draw_error: u32,
+    /// Why it can't blur behind the Sight panel (`BACKDROP_ERR_*`), 0 when it can.
+    pub blur_error: u32,
     /// Reflex state (also in the device's latency list).
     pub latency: Arc<Latency>,
 }
@@ -314,6 +339,15 @@ pub fn retarget() {
                     st.flags |= LAYER_PRESENT_WAIT;
                 }
                 st.draw_error = s.draw_error;
+                let blur_error = match &s.comp {
+                    Some(c) => c.blur_error(),
+                    None if s.blur_error != 0 => s.blur_error,
+                    None => BACKDROP_ERR_INTERNAL,
+                };
+                if blur_error == 0 {
+                    st.flags |= LAYER_BLUR_READY;
+                }
+                st.backdrop_error = blur_error as u16;
                 best = Some((area, s.id, st));
                 best_latency = Some((d.handle, *handle, s.latency.clone()));
             }
@@ -343,6 +377,7 @@ pub fn retarget() {
         });
         if prev != target {
             t.draw_error.store(0, Ordering::Relaxed);
+            t.blur_error.store(0, Ordering::Relaxed);
         }
     }
 }

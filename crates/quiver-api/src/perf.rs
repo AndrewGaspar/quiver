@@ -799,6 +799,26 @@ pub struct HudModel {
     #[serde(default)]
     pub size: [f32; 2],
     pub rows: Vec<HudRow>,
+    /// Whether the Sight layer in the game can blur it behind the Sight panel (design/SIGHT.md
+    /// §14). `None` without a `hud.image` (nowhere to ask), or from a quiverd before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<Box<LayerBackdrop>>,
+}
+
+/// The Sight layer's backdrop blur for one session, from its status block (SIGHT §14).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LayerBackdrop {
+    /// `hud.image`: `quiver-sight` writes its blur request into the header (whatever the HUD's
+    /// presenter).
+    pub image: PathBuf,
+    /// The layer can blur the game's swapchain.
+    pub ready: bool,
+    /// It blurred a present within the last half second.
+    #[serde(default)]
+    pub blurring: bool,
+    /// Why not, when not ready.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// The HUD card's geometry (SIGHT-HUD §1.4), shared by quiverd (which sizes the card from
@@ -1083,6 +1103,10 @@ pub struct LayerInfo {
     pub key_toggles: u32,
     #[serde(default)]
     pub key_nexts: u32,
+    /// The backdrop blur behind the Sight panel: `ready`, `blurring, 0.42 ms GPU`, or
+    /// `unavailable: usage` (SIGHT §14). Empty from a quiverd before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backdrop: String,
 }
 
 /// The HUD's keys (§1.3, decision 4). The Sight layer reads them inside the game (X11
