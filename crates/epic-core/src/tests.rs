@@ -194,7 +194,7 @@ async fn library_reads_every_account_and_survives_a_failure() {
 }
 
 fn provider_entries(lib: &Library) -> Vec<LibraryEntry> {
-    lib.titles.iter().filter_map(provider::entry).collect()
+    lib.titles.iter().filter_map(|t| provider::entry(t, None)).collect()
 }
 
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn provider_entries_pages_and_play() {
     let lib = p.library(false).await.unwrap();
     let aw = lib.iter().find(|e| e.name == "Alan Wake Remastered").unwrap();
     assert_eq!(aw.game.to_string(), "epic:Kestrel");
-    assert!(aw.installed.is_none() && aw.client.is_none() && !aw.installable && !aw.on_disk());
+    assert!(aw.installed.is_none() && aw.client.is_none() && aw.installable && !aw.on_disk());
     assert_eq!(aw.stores(), [quiver_api::StoreId::Epic]);
     assert_eq!(aw.art.epic.tile.as_deref(), Some("https://cdn1.epicgames.com/fixture/awr/tall.jpg"));
     assert_eq!(aw.owned_by, [ID]);
@@ -299,4 +299,180 @@ async fn catalog_items_are_retried_and_unresolved_ones_hidden() {
     assert_eq!(catalog_calls, 3);
     assert_eq!(lib.titles.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Assassin's Creed Origins", "Mystery Game"]);
     assert!(lib.errors.is_empty(), "{:?}", lib.errors);
+}
+
+/// A local "CDN" for chunks and the manifest: `GET /cdn/<path>` serves `files[path]`.
+async fn cdn(files: std::collections::HashMap<String, Vec<u8>>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let files = Arc::new(files);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { break };
+            let files = files.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let resp = match path.strip_prefix("/cdn/").and_then(|p| files.get(p)) {
+                    Some(b) => {
+                        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len()).into_bytes();
+                        r.extend_from_slice(b);
+                        r
+                    }
+                    None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                };
+                let _ = s.write_all(&resp).await;
+            });
+        }
+    });
+    format!("http://{addr}/cdn")
+}
+
+/// The build API's answer for a manifest served at `<base>/m.manifest?sig=…`.
+fn build_reply(base: &str, manifest: &[u8], version: &str) -> String {
+    use sha1::Digest as _;
+    serde_json::json!({"elements": [{
+        "appName": "Kestrel", "labelName": "Live", "buildVersion": version,
+        "hash": hex::encode(sha1::Sha1::digest(manifest)),
+        "manifests": [{"uri": format!("{base}/m.manifest"), "queryParams": [{"name": "sig", "value": "s3cr3t"}]}],
+    }]})
+    .to_string()
+}
+
+/// Install → verify → repair → update → launch arguments → uninstall, against a local CDN
+/// and recorded API shapes: Alan Wake Remastered's fixture (`epic:Kestrel`).
+#[tokio::test]
+async fn install_verify_repair_update_launch_uninstall() {
+    let r = rig();
+    r.login("eg1~a1", "eg1~r1", ID, "Player One").await;
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_page1.json"), Some(include_str!("../tests/fixtures/library_page2.json")));
+    script_catalog(&r.fake);
+    let files: &[(&str, &[u8], &[&str])] = &[("Bin/Game.exe", b"MZ the game", &[]), ("Data/a.pak", &[7u8; 5000], &[]), ("Data/b.pak", &[9u8; 3000], &[])];
+    let (mut m, mut chunks) = crate::manifest::tests::build(18, files, 1024, None);
+    m.meta.app_name = "Kestrel".into();
+    m.meta.prereq_path = "Redist\\setup.exe".into();
+    m.meta.prereq_ids = vec!["vc2019".into()];
+    m.meta.prereq_args = "/quiet".into();
+    let bytes = crate::manifest::write(&m, true);
+    chunks.insert("m.manifest".into(), bytes.clone());
+    let base = cdn(chunks.clone()).await;
+    let api_part = "/assets/v2/platform/Windows/namespace/ns-alanwake/catalogItem/item-awr/app/Kestrel/label/Live";
+    let script_build = |bytes: &[u8], version: &str| {
+        r.fake.reply(api_part, 200, &build_reply(&base, bytes, version));
+        r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes.to_vec());
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = ops::Roots { library: tmp.path().join("Games"), prefixes: tmp.path().join("Prefixes"), taken_prefixes: vec![tmp.path().join("Prefixes/alan-wake-remastered")] };
+    let progress = quiver_core::install::Progress::default();
+    let status = |_s: String| {};
+
+    // Preview, then install.
+    script_build(&bytes, "1.0");
+    let pv = r.epic.install_preview("Kestrel", &roots).await.unwrap();
+    assert_eq!((pv.install_bytes, pv.game.unwrap().to_string(), pv.update.is_none()), (8011, "epic:Kestrel".to_owned(), true));
+    assert_eq!(pv.dest, tmp.path().join("Games/AlanWakeRemastered"));
+    script_build(&bytes, "1.0");
+    let (rec, notes) = r.epic.install("Kestrel", &roots, &progress, &status).await.unwrap();
+    assert!(notes[0].starts_with("3 files written"), "{notes:?}");
+    assert_eq!(rec.dir, tmp.path().join("Games/AlanWakeRemastered"));
+    // A Ubisoft game already has the plain prefix name.
+    assert_eq!(rec.prefix, tmp.path().join("Prefixes/alan-wake-remastered-epic"));
+    assert_eq!((rec.exe.as_str(), rec.version.as_str(), rec.prereq_done), ("Bin/Game.exe", m.meta.build_version.as_str(), false));
+    assert_eq!(rec.prereq.as_ref().unwrap().path, "Redist/setup.exe");
+    assert_eq!(std::fs::read(rec.dir.join("Data/a.pak")).unwrap(), vec![7u8; 5000]);
+    // The library and the launcher see it installed.
+    let entry = provider::entry(r.epic.library(false).await.unwrap().title("Kestrel").unwrap(), Some(&rec)).unwrap();
+    let g = entry.installed.unwrap();
+    assert_eq!((g.install_dir.clone(), g.prefix.clone(), g.exe.clone(), g.game_ref().to_string()), (rec.dir.clone(), rec.prefix.clone(), "Bin/Game.exe".into(), "epic:Kestrel".into()));
+    // Nothing secret on disk: the record and the manifest copy hold no signature or key.
+    let on_disk = std::fs::read_to_string(r._tmp.path().join("epic/installed.json")).unwrap();
+    assert!(!on_disk.contains("s3cr3t") && !on_disk.contains("eg1~"));
+
+    // Verify: clean; then a corrupted and a missing file; repair fetches only those.
+    let v = r.epic.verify("Kestrel", &progress).await.unwrap();
+    assert!(v.is_ok() && v.files == 3, "{v:?}");
+    std::fs::write(rec.dir.join("Data/a.pak"), b"broken").unwrap();
+    std::fs::remove_file(rec.dir.join("Data/b.pak")).unwrap();
+    std::fs::write(rec.dir.join("my-mod.ini"), b"keep me").unwrap();
+    let v = r.epic.verify("Kestrel", &progress).await.unwrap();
+    assert_eq!((v.missing.clone(), v.corrupt.iter().map(|c| c.path.clone()).collect::<Vec<_>>()), (vec!["Data/b.pak".to_owned()], vec!["Data/a.pak".to_owned()]));
+    script_build(&bytes, "1.0");
+    let fixed = r.epic.repair("Kestrel", &roots, &progress, &status).await.unwrap();
+    assert_eq!(fixed.repaired_files, 2);
+    assert!(r.epic.verify("Kestrel", &progress).await.unwrap().is_ok());
+
+    // Update: one file changed, one added, one removed.
+    let files2: &[(&str, &[u8], &[&str])] = &[("Bin/Game.exe", b"MZ the game v2", &[]), ("Data/a.pak", &[7u8; 5000], &[]), ("Data/c.pak", &[1u8; 100], &[])];
+    let (mut m2, chunks2) = crate::manifest::tests::build(18, files2, 1024, None);
+    m2.meta.app_name = "Kestrel".into();
+    m2.meta.build_version = "2.0".into();
+    let bytes2 = crate::manifest::write(&m2, true);
+    let mut all = chunks2;
+    all.insert("m.manifest".into(), bytes2.clone());
+    let base2 = cdn(all).await;
+    r.fake.reply(api_part, 200, &build_reply(&base2, &bytes2, "2.0"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes2.clone());
+    let up = r.epic.update_preview("Kestrel").await.unwrap();
+    assert_eq!((up.changed.clone(), up.added.clone(), up.removed.clone(), up.unchanged), (vec!["Bin/Game.exe".to_owned()], vec!["Data/c.pak".to_owned()], vec!["Data/b.pak".to_owned()], 1));
+    r.fake.reply(api_part, 200, &build_reply(&base2, &bytes2, "2.0"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes2.clone());
+    let (rec2, _) = r.epic.install("Kestrel", &roots, &progress, &status).await.unwrap();
+    assert_eq!((rec2.version.as_str(), rec2.installed_at, rec2.updated_at.is_some()), ("2.0", rec.installed_at, true));
+    assert!(!rec2.dir.join("Data/b.pak").exists() && rec2.dir.join("Data/c.pak").exists());
+    assert_eq!(std::fs::read(rec2.dir.join("my-mod.ini")).unwrap(), b"keep me");
+
+    // Launch: EGL's arguments with a fresh exchange code (never in `shown`).
+    r.fake.reply("/oauth/exchange", 200, r#"{"code":"x9code","expiresInSeconds":300}"#);
+    let lm = r.epic.launch_material("Kestrel", |n| format!(r"Z:\run\{n}"), false).await.unwrap();
+    assert!(lm.args.contains(&"-AUTH_PASSWORD=x9code".to_owned()) && lm.args.contains(&"-epicapp=Kestrel".to_owned()) && lm.args.contains(&"-epicsandboxid=ns-alanwake".to_owned()));
+    assert!(lm.args.contains(&"-epicusername=Player One".to_owned()) && lm.ownership_token.is_none());
+    assert!(!lm.shown.join(" ").contains("x9code"));
+    // Offline: only for games Epic allows offline (Alan Wake's fixture does).
+    assert!(r.epic.launch_material("Kestrel", |n| n.to_owned(), true).await.unwrap().args.contains(&"-AUTH_PASSWORD=".to_owned()));
+
+    // Uninstall: the manifest's files go, the user's file stays (so the folder does too).
+    let gone = r.epic.uninstall("Kestrel", true).unwrap();
+    assert_eq!(gone.title, "Alan Wake Remastered");
+    assert!(!gone.dir.join("Bin/Game.exe").exists() && gone.dir.join("my-mod.ini").exists());
+    assert!(r.epic.installed_game("Kestrel").is_none());
+    assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
+}
+
+/// An existing folder (say, another launcher's install) adopted in place: matching files
+/// are kept, the rest downloaded.
+#[tokio::test]
+async fn adopt_an_existing_folder() {
+    let r = rig();
+    r.login("eg1~a1", "eg1~r1", ID, "Player One").await;
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_page1.json"), Some(include_str!("../tests/fixtures/library_page2.json")));
+    script_catalog(&r.fake);
+    let files: &[(&str, &[u8], &[&str])] = &[("Bin/Game.exe", b"MZ the game", &[]), ("Data/a.pak", &[7u8; 5000], &[])];
+    let (mut m, mut chunks) = crate::manifest::tests::build(18, files, 1024, None);
+    m.meta.app_name = "Kestrel".into();
+    let bytes = crate::manifest::write(&m, true);
+    chunks.insert("m.manifest".into(), bytes.clone());
+    let base = cdn(chunks).await;
+    let api_part = "/assets/v2/platform/Windows/namespace/ns-alanwake/catalogItem/item-awr/app/Kestrel/label/Live";
+    r.fake.reply(api_part, 200, &build_reply(&base, &bytes, "1.0"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let elsewhere = tmp.path().join("Heroic/AlanWake");
+    std::fs::create_dir_all(elsewhere.join("Bin")).unwrap();
+    std::fs::write(elsewhere.join("Bin/Game.exe"), b"MZ the game").unwrap();
+    let roots = ops::Roots { library: tmp.path().join("Games"), prefixes: tmp.path().join("Prefixes"), taken_prefixes: Vec::new() };
+    let progress = quiver_core::install::Progress::default();
+    let (rec, report) = r.epic.adopt("Kestrel", &elsewhere, &roots, &progress, &|_| {}).await.unwrap();
+    assert!(rec.adopted && rec.dir == elsewhere && report.is_ok() && report.repaired_files == 1, "{report:?}");
+    assert_eq!(std::fs::read(elsewhere.join("Data/a.pak")).unwrap(), vec![7u8; 5000]);
+    // A folder with nothing of the game is refused.
+    r.epic.uninstall("Kestrel", false).unwrap();
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    r.fake.reply(api_part, 200, &build_reply(&base, &bytes, "1.0"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes);
+    let e = r.epic.adopt("Kestrel", &empty, &roots, &progress, &|_| {}).await.unwrap_err();
+    assert!(e.to_string().contains("is it the right folder"), "{e}");
 }

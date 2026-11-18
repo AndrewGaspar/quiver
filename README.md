@@ -244,8 +244,14 @@ copies are designed in [design/STEAM-COPIES.md](design/STEAM-COPIES.md), not bui
 ## Epic Games Store
 
 Epic games are in the same library, with an Epic badge (`quiver library --store epic`,
-`quiver info epic:<app>`). This build lists them as not installed; installing and playing them
-natively comes next (design/STORE-EPIC.md). Ubisoft games bought on Epic (Epic's catalog names
+`quiver info epic:<app>`). Quiver installs them natively from Epic's CDN on the same
+download queue (`quiver install epic:<app>`, `--dry-run` for sizes; `quiver epic manifest
+<game>` reads the current build without downloading it), verifies, repairs, updates,
+adopts an existing folder (`quiver import epic:<app> <folder>`) and uninstalls them, and
+plays them in their own Proton prefix with a fresh Epic exchange code per launch, with the
+same mods, settings, Tweaks and HUD as any Quiver launch (design/STORE-EPIC.md §9.10). Only
+games and apps with a name and art are listed; `quiver library --all` shows what's left
+out and why. Ubisoft games bought on Epic (Epic's catalog names
 the Ubisoft product) fold into their Ubisoft entry once your Ubisoft account has them, and
 Quiver plays them as Ubisoft games.
 

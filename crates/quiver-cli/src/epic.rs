@@ -65,6 +65,13 @@ pub enum EpicAction {
         #[arg(long)]
         yes: bool,
     },
+    /// The current build of an Epic game as Epic serves it: version, files, sizes, launch
+    /// executable, prerequisites. Read-only: nothing is downloaded but the manifest.
+    Manifest {
+        game: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn epic(r: EpicRequest) -> Request {
@@ -171,6 +178,27 @@ pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()
         }
         EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, source, &game, json, local, action).await?,
         EpicAction::Playtime { game, json, send, yes } => crate::epicgame::playtime(client, game, json, send, yes).await?,
+        EpicAction::Manifest { game, json } => {
+            let e = crate::resolve_installable(client, &game).await?;
+            anyhow::ensure!(e.game.store == quiver_api::StoreId::Epic, "{} isn't an Epic game", e.name);
+            let v: serde_json::Value = client.call(epic(EpicRequest::Manifest { game: e.game })).await?;
+            if json {
+                return print_json(&v);
+            }
+            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned();
+            let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            let gb = |b: u64| format!("{:.2} GB", b as f64 / 1e9);
+            println!("{} ({}): build {}", s("title"), e.game, s("build_version"));
+            println!("  manifest v{}, {} files, {} chunks{}", n("manifest_version"), n("files"), n("chunks"), if n("encrypted") > 0 { ", encrypted" } else { "" });
+            println!("  install {}, download {}", gb(n("install_bytes")), gb(n("download_bytes")));
+            println!("  launches {} {}", s("launch_exe"), s("launch_command"));
+            if let Some(p) = v.get("prerequisites").filter(|p| !p.is_null()) {
+                println!("  prerequisites: {} ({} {})", p["name"].as_str().unwrap_or(""), p["path"].as_str().unwrap_or(""), p["args"].as_str().unwrap_or(""));
+            }
+            if let Some(u) = v.get("update").filter(|u| !u.is_null()) {
+                println!("  update from the installed build: {} to write, {} kept, {} removed, {} to download", u["write"], u["keep"], u["remove"], gb(u["download_bytes"].as_u64().unwrap_or(0)));
+            }
+        }
     }
     Ok(())
 }

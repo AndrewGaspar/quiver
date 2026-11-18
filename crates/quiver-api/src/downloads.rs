@@ -58,7 +58,12 @@ impl std::str::FromStr for QueueMove {
 /// `max_active` at a time; paused and failed items keep their place but are skipped.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueueEntry {
+    /// The Ubisoft product; 0 for another store's game ([`QueueEntry::game`] names it).
     pub product_id: u32,
+    /// The game when it isn't a Ubisoft product (`epic:<app>`). Never written for Ubisoft
+    /// games, so their queue lines are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     pub name: String,
     pub kind: QueueKind,
     pub state: QueueState,
@@ -89,6 +94,13 @@ pub struct QueueEntry {
     /// Slice downloads tried again so far (connection trouble, expired URLs).
     #[serde(default)]
     pub retries: u64,
+}
+
+impl QueueEntry {
+    /// The game: [`QueueEntry::game`], else the Ubisoft product.
+    pub fn game_ref(&self) -> crate::GameRef {
+        self.game.unwrap_or(crate::GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// Download settings (`config.json` → `downloads`).
@@ -127,6 +139,9 @@ pub struct LanguageSize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPreview {
     pub product_id: u32,
+    /// The game when it isn't a Ubisoft product (`product_id` is then 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     pub name: String,
     pub dest: PathBuf,
     pub version: Option<String>,
@@ -152,6 +167,9 @@ pub struct InstallPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePreview {
     pub product_id: u32,
+    /// The game when it isn't a Ubisoft product (`product_id` is then 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     pub name: String,
     pub installed_version: Option<String>,
     pub latest_version: Option<String>,
@@ -180,6 +198,9 @@ pub struct CorruptFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct VerifyReport {
     pub product_id: u32,
+    /// The game when it isn't a Ubisoft product (`product_id` is then 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     pub at: Option<DateTime<Utc>>,
     pub version: Option<String>,
     pub files: usize,

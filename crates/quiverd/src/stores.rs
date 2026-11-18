@@ -122,13 +122,25 @@ impl Daemon {
         }
         match first_err {
             Some(e) if parts.iter().all(Vec::is_empty) => Err(e),
-            _ => Ok(quiver_core::stores::merge_libraries(parts)),
+            _ => {
+                let mut lib = quiver_core::stores::merge_libraries(parts);
+                // Other stores' games Quiver is running (Epic).
+                let running = self.running_games.lock().unwrap().clone();
+                for e in lib.iter_mut().filter(|e| running.contains(&e.game)) {
+                    e.running = true;
+                }
+                Ok(lib)
+            }
         }
     }
 
     /// `Request::Play`, routed by store. A delegated launch (the store's client plays it)
     /// gets a finished Play job and an activity line here, the same for every store.
     pub(crate) async fn play(self: &Arc<Self>, source: &str, game: GameRef, profile: Option<String>) -> Result<u64> {
+        // An Epic game Quiver installed: Quiver plays it (mods and profiles apply).
+        if crate::epic::is_installed(self, game) {
+            return crate::epic::play(self, source, game, profile).await;
+        }
         let providers = self.providers();
         let p = provider_for(&providers, &game)?;
         if !game.is_ubisoft() && profile.is_some() {

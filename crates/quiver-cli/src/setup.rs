@@ -142,7 +142,7 @@ pub async fn run(client: &Client) -> Result<()> {
             let Some(product_id) = f.product_id else { continue };
             let events = client.subscribe().await?;
             let id: u64 = client
-                .call(Request::Import { product_id, path: f.path.clone(), language: f.language.clone() })
+                .call(Request::Import { game: product_id.into(), path: f.path.clone(), language: f.language.clone() })
                 .await?;
             eprintln!("  importing {} (job {id})", f.name);
             if let Err(e) = follow(client, events, id).await {

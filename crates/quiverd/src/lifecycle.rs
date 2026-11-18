@@ -578,7 +578,12 @@ impl crate::Daemon {
             starting: running.iter().filter(|p| !sessions.iter().any(|s| s.product_id == **p)).map(|p| name(*p)).collect(),
             ..Default::default()
         };
-        busy.jobs = self.downloads.running(&mut name);
+        busy.jobs = self.downloads.running(|g| match g.as_ubisoft() {
+            Some(id) => name(id),
+            None => g.to_string(),
+        });
+        // Other stores' games Quiver started (Epic) are running games too.
+        busy.sessions.extend(self.running_games.lock().unwrap().iter().map(|g| format!("{g} (quiver)")));
         busy.jobs.extend(
             self.jobs
                 .lock()

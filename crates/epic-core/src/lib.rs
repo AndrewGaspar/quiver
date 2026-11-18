@@ -22,9 +22,14 @@
 pub mod accounts;
 pub mod api;
 pub mod auth;
+pub mod chunk;
 pub mod config;
+pub mod content;
 pub mod http;
+pub mod installs;
 pub mod library;
+pub mod manifest;
+pub mod ops;
 pub mod provider;
 pub mod secrets;
 // Phase 3: cloud saves, play time, achievements (design/STORE-EPIC.md §9.5).
@@ -95,6 +100,8 @@ pub struct Epic {
     refreshing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// One library read at a time, and the last one.
     library: tokio::sync::Mutex<Option<(Instant, Arc<Library>)>>,
+    /// Installed games (`<data>/epic/installed.json`, `manifests/`).
+    installs: installs::Installs,
     /// Cloud saves, play time and achievements ([`progress`]).
     p3: progress::Phase3,
 }
@@ -112,6 +119,7 @@ impl Epic {
         let p3 = progress::Phase3::new(&dir);
         Epic {
             cache: Cache::new(&dir),
+            installs: installs::Installs::new(&dir),
             dir,
             api: Api::new(transport, config),
             secrets,

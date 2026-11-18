@@ -84,6 +84,8 @@ struct Daemon {
     jobs: Mutex<BTreeMap<u64, Job>>,
     next_job: AtomicU64,
     running: Mutex<HashSet<u32>>,
+    /// Other stores' games Quiver is running (Epic).
+    running_games: Mutex<HashSet<GameRef>>,
     /// The install queue (installs, updates, repairs) and verify jobs.
     downloads: Arc<downloads::Downloads>,
     library: tokio::sync::Mutex<Option<Vec<LibraryEntry>>>,
@@ -412,17 +414,22 @@ impl Daemon {
             Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
             Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
             Request::Epic(r) => epic::handle(self, source, r).await?,
-            Request::Install { product_id, language } => json!(downloads::install(self, source, product_id, language).await?),
+            Request::Install { game, .. } if !game.is_ubisoft() => json!(epic::install(self, source, game.0).await?),
+            Request::Install { game, language } => json!(downloads::install(self, source, downloads::ubisoft(game.0)?, language).await?),
             Request::Play { game, profile } => json!(self.play(source, game.0, profile).await?),
-            Request::Import { product_id, path, language } => {
+            Request::Import { game, path, .. } if !game.is_ubisoft() => json!(epic::adopt(self, source, game.0, path).await?),
+            Request::Import { game, path, language } => {
+                let product_id = downloads::ubisoft(game.0)?;
                 let online = self.account_for(product_id, None).await?;
                 json!(self.start_import(source, product_id, path, language, online))
             }
-            Request::Uninstall { product_id, remove_prefix } => {
+            Request::Uninstall { game, remove_prefix } if !game.is_ubisoft() => json!(epic::uninstall(self, source, game.0, remove_prefix).await?),
+            Request::Uninstall { game, remove_prefix } => {
+                let product_id = downloads::ubisoft(game.0)?;
                 if self.running.lock().unwrap().contains(&product_id) {
                     bail!("stop the game first");
                 }
-                self.downloads.ensure_idle(product_id)?;
+                self.downloads.ensure_idle(game.0)?;
                 let game = launcher::uninstall(product_id, remove_prefix)?;
                 *self.library.lock().await = None;
                 self.log_activity(
@@ -448,6 +455,10 @@ impl Daemon {
                     JobKind::Import => bail!("imports can't be cancelled"),
                 }
                 self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), job.game.as_ubisoft());
+                Value::Null
+            }
+            Request::Stop { game } if epic::is_installed(self, game.0) => {
+                epic::stop(self, game.0).await?;
                 Value::Null
             }
             Request::Stop { game } => {
@@ -1123,6 +1134,7 @@ async fn main() -> Result<()> {
         jobs: Mutex::new(BTreeMap::new()),
         next_job: AtomicU64::new(1),
         running: Mutex::new(HashSet::new()),
+        running_games: Mutex::new(HashSet::new()),
         downloads: queue,
         library: tokio::sync::Mutex::new(None),
         library_failed: Mutex::new(Vec::new()),

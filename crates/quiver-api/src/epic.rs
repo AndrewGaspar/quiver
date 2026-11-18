@@ -42,6 +42,10 @@ pub enum EpicRequest {
     Hidden,
     /// An Epic game's cloud saves, play time and achievements (appended; phase 3).
     Game(crate::epicgame::EpicGameRequest),
+    /// The current build of an Epic game as Epic serves it (version, files, sizes, launch
+    /// executable, prerequisites; `serde_json::Value`), read without downloading it. For
+    /// checking a build before installing it.
+    Manifest { game: crate::GameRef },
 }
 
 impl fmt::Debug for EpicRequest {
@@ -55,6 +59,7 @@ impl fmt::Debug for EpicRequest {
             EpicRequest::AccountDefault { account } => f.debug_struct("AccountDefault").field("account", account).finish(),
             EpicRequest::Hidden => f.write_str("Hidden"),
             EpicRequest::Game(r) => f.debug_tuple("Game").field(r).finish(),
+            EpicRequest::Manifest { game } => f.debug_struct("Manifest").field("game", game).finish(),
         }
     }
 }

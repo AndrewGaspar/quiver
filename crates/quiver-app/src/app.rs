@@ -1016,7 +1016,7 @@ impl Quiver {
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
                 Err(e) => this.show_toast(err_text(&e), cx),
             });
-        } else if !id.is_ubisoft() && !g.entry.on_disk() {
+        } else if !id.is_ubisoft() && !g.entry.on_disk() && !g.entry.installable {
             // Another store's game that isn't installed: its provider says why it can't
             // play yet (an Epic game before Epic installs; a Ubisoft game bought on Epic).
             self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, |this, r, cx| {

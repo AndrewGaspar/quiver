@@ -113,7 +113,8 @@ impl TestHost {
 }
 
 impl Host for TestHost {
-    fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64 {
+    fn new_job(&self, kind: JobKind, game: quiver_api::GameRef, name: String) -> u64 {
+        let product_id = game.as_ubisoft().unwrap();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let job = Job { id, kind, game: quiver_api::GameRef::ubisoft(product_id), name, status: "Queued".into(), downloaded: 0, total: 0, done: false, error: None, detail: Vec::new() };
         self.jobs.lock().unwrap().insert(id, job);
@@ -124,15 +125,15 @@ impl Host for TestHost {
             f(j);
         }
     }
-    fn log(&self, _: &str, _: String, _: Option<u32>) {}
-    fn playing(&self, product_id: u32) -> bool {
-        self.playing.lock().unwrap().contains(&product_id)
+    fn log(&self, _: &str, _: String, _: Option<quiver_api::GameRef>) {}
+    fn playing(&self, game: quiver_api::GameRef) -> bool {
+        game.as_ubisoft().is_some_and(|p| self.playing.lock().unwrap().contains(&p))
     }
     fn library_cache(&self) -> Option<Vec<LibraryEntry>> {
         None
     }
     fn changed(self: Arc<Self>) {}
-    fn discard(&self, _: u32, _: &str) -> bool {
+    fn discard(&self, _: quiver_api::GameRef, _: &str) -> bool {
         false
     }
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>> {
@@ -346,6 +347,7 @@ fn bad_queue_file_is_ignored_and_states_restored() {
     assert!(Downloads::load(path.clone(), DownloadSettings::default()).list().is_empty());
     let entry = |id: u32, state| QueueEntry {
         product_id: id,
+        game: None,
         name: id.to_string(),
         kind: QueueKind::Update,
         state,

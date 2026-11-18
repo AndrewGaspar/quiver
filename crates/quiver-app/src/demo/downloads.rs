@@ -95,6 +95,7 @@ fn job(id: u64, kind: JobKind, product_id: u32, name: &str, status: &str, downlo
 fn entry(st: &State, id: u32, kind: QueueKind, state: QueueState, job_id: u64, source: &str, mins_ago: i64) -> QueueEntry {
     QueueEntry {
         product_id: id,
+        game: None,
         name: super::name_of(st, id).unwrap_or_default(),
         kind,
         state,
@@ -172,6 +173,7 @@ impl Dl {
             3539,
             VerifyReport {
                 product_id: 3539,
+                game: None,
                 at: Some(Utc::now() - Span::days(2)),
                 version: Some("1.6.0".into()),
                 files: 1_412,
@@ -317,6 +319,7 @@ impl Dl {
         let margin = (1u64 << 30).max(required / 20);
         Ok(InstallPreview {
             product_id,
+            game: None,
             name: e.name.clone(),
             dest: self.library.join(clean(&e.name)),
             version: Some(match product_id {
@@ -410,6 +413,7 @@ impl Dl {
         if !e.update_available {
             return Ok(UpdatePreview {
                 product_id,
+                game: None,
                 name: e.name.clone(),
                 installed_version: Some("1.6.0".into()),
                 latest_version: Some("1.6.0".into()),
@@ -425,6 +429,7 @@ impl Dl {
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         Ok(UpdatePreview {
             product_id,
+            game: None,
             name: e.name.clone(),
             installed_version: Some("1.5.6".into()),
             latest_version: Some("1.6.1".into()),
@@ -447,7 +452,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
     let mut events = vec![];
     let out = match req {
         Request::Queue => json!(d.queue),
-        Request::QueueMove { product_id, to } => {
+        Request::QueueMove { game, to } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let q = &mut d.queue;
             let i = q.iter().position(|e| e.product_id == product_id).ok_or_else(|| anyhow!("not in the queue"))?;
             match to {
@@ -463,7 +469,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(d.queue.iter().filter_map(|e| st.jobs.iter().find(|j| Some(j.id) == e.job_id)).map(|j| Event::Job(j.clone())));
             json!(d.queue)
         }
-        Request::QueuePause { product_id } => {
+        Request::QueuePause { game } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let e = d.queue.iter_mut().find(|e| e.product_id == product_id).ok_or_else(|| anyhow!("not in the queue"))?;
             if e.state == QueueState::Failed {
                 bail!("{} can't be paused (Failed)", e.name);
@@ -476,12 +483,14 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(d.pump(st));
             Value::Null
         }
-        Request::QueueResume { product_id } => {
+        Request::QueueResume { game } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let (id, ev) = d.resume(st, product_id)?;
             events.extend(ev);
             json!(id)
         }
-        Request::QueueRemove { product_id } => {
+        Request::QueueRemove { game } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let i = d.queue.iter().position(|e| e.product_id == product_id).ok_or_else(|| anyhow!("not in the queue"))?;
             let e = d.queue.remove(i);
             if let Some(j) = st.jobs.iter_mut().find(|j| Some(j.id) == e.job_id) {
@@ -494,7 +503,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(d.pump(st));
             Value::Null
         }
-        Request::Install { product_id, language } => {
+        Request::Install { game, language } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let kind = if st.entries.iter().any(|e| e.ubisoft_id() == Some(product_id) && e.installed.is_some()) { QueueKind::Update } else { QueueKind::Install };
             if kind == QueueKind::Install && flag("low-space") {
                 bail!("not enough space on ~/Games: needs {} plus a margin", crate::model::gb(size_of(product_id)));
@@ -503,7 +513,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(ev);
             json!(id)
         }
-        Request::Update { product_id } => {
+        Request::Update { game } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let (id, ev) = d.enqueue(st, product_id, QueueKind::Update, None)?;
             events.extend(ev);
             json!(id)
@@ -519,20 +530,23 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(d.pump(st));
             Value::Null
         }
-        Request::InstallPreview { product_id, language } => {
+        Request::InstallPreview { game, language } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let mut p = d.preview(st, product_id, language)?;
             if st.entries.iter().any(|e| e.ubisoft_id() == Some(product_id) && e.installed.is_some()) {
                 p.update = Some(d.update_preview(st, product_id)?);
             }
             json!(p)
         }
-        Request::UpdatePreview { product_id } => json!(d.update_preview(st, product_id)?),
-        Request::Verify { product_id, repair: true } => {
+        Request::UpdatePreview { game } => { let product_id = game.as_ubisoft().unwrap_or(0); json!(d.update_preview(st, product_id)?) }
+        Request::Verify { game, repair: true } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let (id, ev) = d.enqueue(st, product_id, QueueKind::Repair, None)?;
             events.extend(ev);
             json!(id)
         }
-        Request::Verify { product_id, repair: false } => {
+        Request::Verify { game, repair: false } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             if d.verifying.is_some() {
                 bail!("another game is being verified (demo: one at a time)");
             }
@@ -542,7 +556,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("verify {}", j.name), game: Some(quiver_api::GameRef::ubisoft(product_id)) });
             json!(j.id)
         }
-        Request::VerifyResult { product_id } => json!(d.reports.get(&product_id)),
+        Request::VerifyResult { game } => { let product_id = game.as_ubisoft().unwrap_or(0); json!(d.reports.get(&product_id)) }
         Request::DownloadSettings { max_active, bandwidth_limit, auto_update } => {
             if let Some(n) = max_active {
                 if n == 0 {
@@ -585,7 +599,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             }
             json!(ModPrefs { fixes_on_vanilla: d.fixes })
         }
-        Request::Import { product_id, path, .. } => {
+        Request::Import { game, path, .. } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
             let found = d.found(st).into_iter().find(|f| f.path == path && f.importable).ok_or_else(|| anyhow!("{} has no uplay_install.manifest", path.display()))?;
             let j = Dl::new_job(st, JobKind::Import, product_id, "Reading the manifest…");
             let extras = if product_id == 5183 {
@@ -751,26 +766,26 @@ mod tests {
         assert_eq!(q[0].state, QueueState::Downloading);
         assert_eq!(q[4].state, QueueState::Failed);
         // Reorder, pause, resume, retry, remove.
-        let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::QueueMove { product_id: 5595, to: QueueMove::Up }).unwrap()).unwrap();
+        let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::QueueMove { game: 5595.into(), to: QueueMove::Up }).unwrap()).unwrap();
         assert_eq!(q[1].product_id, 5595);
         assert_eq!(q[1].position, 2);
-        demo.handle(Request::QueuePause { product_id: 6100 }).unwrap();
+        demo.handle(Request::QueuePause { game: 6100.into()}).unwrap();
         let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::Queue).unwrap()).unwrap();
         assert_eq!(q[0].state, QueueState::Paused);
         assert!(q[1].state.is_active(), "the next one starts");
-        demo.handle(Request::QueueResume { product_id: 420 }).unwrap();
-        demo.handle(Request::QueueRemove { product_id: 2688 }).unwrap();
+        demo.handle(Request::QueueResume { game: 420.into()}).unwrap();
+        demo.handle(Request::QueueRemove { game: 2688.into()}).unwrap();
         let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::Queue).unwrap()).unwrap();
         assert!(q.iter().all(|e| e.product_id != 2688 && e.state != QueueState::Failed));
         // Previews.
-        let p: InstallPreview = serde_json::from_value(demo.handle(Request::InstallPreview { product_id: 5183, language: Some("fr-FR".into()) }).unwrap()).unwrap();
+        let p: InstallPreview = serde_json::from_value(demo.handle(Request::InstallPreview { game: 5183.into(), language: Some("fr-FR".into()) }).unwrap()).unwrap();
         assert!(p.fits && p.language == "fr-FR" && p.languages.len() > 1);
-        let u: UpdatePreview = serde_json::from_value(demo.handle(Request::UpdatePreview { product_id: 5059 }).unwrap()).unwrap();
+        let u: UpdatePreview = serde_json::from_value(demo.handle(Request::UpdatePreview { game: 5059.into()}).unwrap()).unwrap();
         assert!(!u.up_to_date && !u.changed.is_empty());
         // Verify runs and leaves a report.
-        let r: Option<VerifyReport> = serde_json::from_value(demo.handle(Request::VerifyResult { product_id: 3539 }).unwrap()).unwrap();
+        let r: Option<VerifyReport> = serde_json::from_value(demo.handle(Request::VerifyResult { game: 3539.into()}).unwrap()).unwrap();
         assert!(!r.unwrap().is_ok());
-        let job: u64 = serde_json::from_value(demo.handle(Request::Verify { product_id: 13504, repair: false }).unwrap()).unwrap();
+        let job: u64 = serde_json::from_value(demo.handle(Request::Verify { game: 13504.into(), repair: false }).unwrap()).unwrap();
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let s: quiver_api::Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();

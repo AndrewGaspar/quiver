@@ -522,10 +522,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all_stores: bool,
     },
-    Install { product_id: u32, language: Option<String> },
+    /// Install a game, or update it if installed (any store that installs: Ubisoft, Epic).
+    Install {
+        #[serde(flatten)]
+        game: game::GameField,
+        language: Option<String>,
+    },
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
-    Import { product_id: u32, path: PathBuf, language: Option<String> },
-    Uninstall { product_id: u32, remove_prefix: bool },
+    Import {
+        #[serde(flatten)]
+        game: game::GameField,
+        path: PathBuf,
+        language: Option<String>,
+    },
+    Uninstall {
+        #[serde(flatten)]
+        game: game::GameField,
+        remove_prefix: bool,
+    },
     /// Launch a game. `profile`: a mod profile's name or id, or `vanilla` for the unmodded
     /// game; `None` (what older clients send): the game's default profile (its `profile`
     /// setting; vanilla when unset, or with a warning when that profile was deleted).
@@ -613,26 +627,56 @@ pub enum Request {
     /// The download queue in order (`Vec<downloads::QueueEntry>`).
     Queue,
     /// Move a game's queue item up, down or to the top.
-    QueueMove { product_id: u32, to: downloads::QueueMove },
+    QueueMove {
+        #[serde(flatten)]
+        game: game::GameField,
+        to: downloads::QueueMove,
+    },
     /// Pause a game's download (it stops at a slice boundary and resumes where it was).
-    QueuePause { product_id: u32 },
+    QueuePause {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Resume a paused item, or retry a failed one.
-    QueueResume { product_id: u32 },
+    QueueResume {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Take a game out of the queue, stopping it if it is running. Downloaded files stay,
     /// so installing again resumes.
-    QueueRemove { product_id: u32 },
+    QueueRemove {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Sizes, free space and languages for installing (or updating) a game, without
     /// starting it (`downloads::InstallPreview`).
-    InstallPreview { product_id: u32, language: Option<String> },
+    InstallPreview {
+        #[serde(flatten)]
+        game: game::GameField,
+        language: Option<String>,
+    },
     /// What updating an installed game would change (`downloads::UpdatePreview`).
-    UpdatePreview { product_id: u32 },
+    UpdatePreview {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Queue an update for an installed game. Returns the job id.
-    Update { product_id: u32 },
+    Update {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Hash a game's installed files against its manifest. With `repair`, queue
     /// re-downloading only what is missing or corrupt. Returns the job id.
-    Verify { product_id: u32, repair: bool },
+    Verify {
+        #[serde(flatten)]
+        game: game::GameField,
+        repair: bool,
+    },
     /// The last verify report for a game (`Option<downloads::VerifyReport>`).
-    VerifyResult { product_id: u32 },
+    VerifyResult {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Read download settings, changing the ones given (`bandwidth_limit: 0` = unlimited).
     /// Returns `downloads::DownloadSettings`.
     DownloadSettings {
@@ -1430,6 +1474,17 @@ mod tests {
         assert!(matches!(r, Request::Stop { game } if game == GameRef::ubisoft(1)));
         let r: Request = serde_json::from_str(r#"{"method":"playtime","params":{"product_id":1}}"#).unwrap();
         assert!(matches!(r, Request::Playtime { game } if game == GameRef::ubisoft(1)));
+        // Install, verify and the queue take any store's game; Ubisoft's still go out as
+        // `product_id`, so a daemon from before reads them.
+        let v = serde_json::to_value(Request::Install { game: GameRef::ubisoft(3539).into(), language: None }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "install", "params": {"product_id": 3539, "language": null}}));
+        let epic = GameRef::new(StoreId::Epic, "Kestrel").unwrap();
+        let v = serde_json::to_value(Request::QueuePause { game: epic.into() }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "queue_pause", "params": {"game": "epic:Kestrel"}}));
+        let r: Request = serde_json::from_str(r#"{"method":"verify","params":{"product_id":420,"repair":true}}"#).unwrap();
+        assert!(matches!(r, Request::Verify { game, repair: true } if game == GameRef::ubisoft(420)));
+        let q: downloads::QueueEntry = serde_json::from_value(serde_json::json!({"product_id": 0, "game": "epic:Kestrel", "name": "AW", "kind": "install", "state": "queued", "source": "cli", "added": "2026-11-18T00:00:00Z"})).unwrap();
+        assert_eq!(q.game_ref(), epic);
         // Older clients ask for the library without `all_stores`, and get Ubisoft's.
         let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
         assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));

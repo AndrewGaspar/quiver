@@ -140,8 +140,6 @@ async fn needs_upload(d: &Daemon, app: &str) -> bool {
     }
 }
 
-// Called by the Epic launch (stage 2's install-and-play branch), as the module docs show.
-#[allow(dead_code)]
 /// An Epic game's session as quiverd runs it: from [`begin`] to [`end`].
 pub(crate) struct EpicSession {
     prepared: Prepared,
@@ -150,8 +148,6 @@ pub(crate) struct EpicSession {
     started: chrono::DateTime<Utc>,
 }
 
-// Called by the Epic launch (stage 2's install-and-play branch), as the module docs show.
-#[allow(dead_code)]
 impl EpicSession {
     /// What happened to the saves before the launch, for the job's status.
     pub(crate) fn note(&self) -> &str {
@@ -159,8 +155,6 @@ impl EpicSession {
     }
 }
 
-// Called by the Epic launch (stage 2's install-and-play branch), as the module docs show.
-#[allow(dead_code)]
 /// Before an Epic game starts in `prefix`: pull saves, start watching achievements.
 /// `session`: the launch's session id (the play-time report's id), when it has one.
 pub(crate) async fn begin(d: &Arc<Daemon>, app: &str, prefix: &Path, install_dir: Option<&Path>, session: Option<String>) -> EpicSession {
@@ -180,8 +174,6 @@ pub(crate) async fn begin(d: &Arc<Daemon>, app: &str, prefix: &Path, install_dir
     EpicSession { prepared, poller, id, started }
 }
 
-// Called by the Epic launch (stage 2's install-and-play branch), as the module docs show.
-#[allow(dead_code)]
 /// After the game exited: last unlock check, play time to Epic, saves up. Returns a line
 /// for the job's status.
 pub(crate) async fn end(d: &Arc<Daemon>, mut s: EpicSession) -> String {
@@ -196,8 +188,6 @@ pub(crate) async fn end(d: &Arc<Daemon>, mut s: EpicSession) -> String {
     f.note
 }
 
-// Called by the Epic launch (stage 2's install-and-play branch), as the module docs show.
-#[allow(dead_code)]
 /// A new unlock: a Sight toast (and the open page reloads), the activity log.
 fn unlocked(d: &Arc<Daemon>, u: epic_core::achievements::Unlock) {
     let Some(game) = epic_core::provider::game_ref(&u.app) else { return };

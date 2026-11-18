@@ -924,6 +924,153 @@ pub async fn play(
     Ok(())
 }
 
+/// What another store adds to a launch of one of its games (design/STORES.md §3.6): the
+/// licence arguments (Epic's exchange code, kept out of logs by the caller), environment,
+/// and installers to run once per prefix (Epic's prerequisites).
+#[derive(Default)]
+pub struct StoreLaunch {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Run in the prefix before the game, each to the end (a failure is reported, not fatal).
+    pub setup: Vec<SetupRun>,
+}
+
+/// An installer run once in a prefix.
+pub struct SetupRun {
+    pub name: String,
+    /// Host path of the executable.
+    pub exe: PathBuf,
+    pub args: Vec<String>,
+    /// Written in the prefix's run folder when it succeeds, so it runs once.
+    pub marker: String,
+}
+
+/// Create a plain Proton prefix for a game of another store (no Ubisoft SDK).
+pub async fn ensure_plain_prefix(cfg: &Config, prefix: &Path, build: &Path) -> Result<()> {
+    let marker = prefix.join(".quiver-prefix-ready");
+    if marker.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(prefix)?;
+    let pfx_link = prefix.join("pfx");
+    if !pfx_link.exists() {
+        std::os::unix::fs::symlink(".", &pfx_link)?;
+    }
+    let proton = Proton { cfg, prefix, build: build.to_owned() };
+    proton.run_to_end(&["wineboot", "-u"], &prefix.join("quiver-setup.log")).await?;
+    std::fs::write(marker, "")?;
+    Ok(())
+}
+
+/// Launch another store's game (Epic) the way Quiver launches its own: the game's Proton
+/// prefix and build, the plan's mods (overlays), config patches, settings (env, DLL
+/// overrides, arguments, wrappers) and session id, plus what the store adds
+/// ([`StoreLaunch`]). No bridge, no Ubisoft services. Waits for the game to exit; the
+/// caller records the session (local play time).
+pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan, store: StoreLaunch, events: impl Fn(LaunchEvent)) -> Result<()> {
+    let settings = &plan.api.settings;
+    let profile = plan.api.profile.as_ref();
+    let build = match &settings.proton {
+        Some(name) => resolve_proton(name)?,
+        None => cfg.proton.clone(),
+    };
+    events(LaunchEvent::Status("Preparing prefix…".into()));
+    ensure_plain_prefix(cfg, &game.prefix, &build).await?;
+    let run_dir = run_dir(&game.prefix);
+    std::fs::create_dir_all(&run_dir)?;
+    let previous = Proton { cfg, prefix: &game.prefix, build: session_build(game).unwrap_or_else(|| build.clone()) };
+    let _ = previous.wineserver().arg("-k").status().await;
+    let _ = previous.wineserver().arg("-w").status().await;
+    record_session_build(game, &build)?;
+    let proton = Proton { cfg, prefix: &game.prefix, build };
+    for step in &store.setup {
+        let marker = run_dir.join(&step.marker);
+        if marker.exists() {
+            continue;
+        }
+        events(LaunchEvent::Status(format!("Installing {}…", step.name)));
+        let exe = win_path(&step.exe);
+        let mut args = vec![exe.as_str()];
+        args.extend(step.args.iter().map(String::as_str));
+        match proton.run_to_end(&args, &run_dir.join(format!("{}.log", step.marker))).await {
+            Ok(()) => std::fs::write(&marker, "")?,
+            Err(e) => events(LaunchEvent::Detail(vec![format!("{} didn't finish: {e:#}", step.name)])),
+        }
+    }
+    if !plan.patches.is_empty() {
+        events(LaunchEvent::Status("Applying config patches…".into()));
+    }
+    match plan.apply_patches() {
+        Ok(st) if !st.is_empty() => events(LaunchEvent::Detail(describe_patches(&st))),
+        Ok(_) => {}
+        Err(e) => events(LaunchEvent::Detail(vec![format!("config patches not applied: {e:#}")])),
+    }
+    let ns = if plan.overlays.is_empty() {
+        None
+    } else {
+        let what = profile.map_or_else(|| "fixes".to_owned(), |p| p.name.clone());
+        events(LaunchEvent::Status(format!("Mounting mods ({what})…")));
+        for o in &plan.overlays {
+            std::fs::create_dir_all(&o.target)?;
+        }
+        Some(crate::overlay::Namespace::create_many(&plan.overlays)?)
+    };
+
+    events(LaunchEvent::Status("Starting…".into()));
+    let exe = game.install_dir.join(&game.exe);
+    let exe_win = win_path(&exe);
+    let mut args = vec![exe_win.as_str()];
+    let extra: Vec<String> = game.args.as_deref().map(|a| a.split_whitespace().map(str::to_owned).collect()).unwrap_or_default();
+    args.extend(extra.iter().map(String::as_str));
+    args.extend(store.args.iter().map(String::as_str));
+    args.extend(settings.args.iter().map(String::as_str));
+    let mut cmd = proton.wrapped(&settings.wrappers, &args);
+    for (k, v) in store.env.iter().map(|(k, v)| (k, v)).chain(&settings.env) {
+        cmd.env(k, v);
+    }
+    if !settings.dll_overrides.is_empty() {
+        let overrides: Vec<String> = settings.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        cmd.env("WINEDLLOVERRIDES", overrides.join(";"));
+    }
+    let workdir = exe.parent().unwrap_or(&game.install_dir);
+    if let Some(ns) = &ns {
+        ns.enter(cmd.as_std_mut(), Some(workdir))?;
+    }
+    if let Some(p) = profile {
+        cmd.env("QUIVER_PROFILE", &p.id);
+    }
+    if let Some(s) = &plan.session {
+        cmd.env("QUIVER_SESSION", s);
+    }
+    cmd.current_dir(workdir).stdout(Stdio::null()).stderr(std::fs::File::create(run_dir.join("game.log"))?).kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let started = wait_for_game_start(&proton, &mut child).await;
+    if !started {
+        let _ = child.start_kill();
+        let _ = proton.wineserver().arg("-k").status().await;
+        bail!("the game didn't start; see {}", run_dir.join("game.log").display());
+    }
+    events(LaunchEvent::Running);
+    let mut pids = game_processes(&proton);
+    events(LaunchEvent::Pids(pids.clone()));
+    while !pids.is_empty() {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let now = game_processes(&proton);
+        if now != pids {
+            events(LaunchEvent::Pids(now.clone()));
+        }
+        pids = now;
+    }
+    let status = child.try_wait().ok().flatten();
+    let _ = child.start_kill();
+    let _ = proton.wineserver().arg("-k").status().await;
+    let _ = child.wait().await;
+    events(LaunchEvent::Exited(status.and_then(|s| s.code())));
+    drop(ns);
+    events(LaunchEvent::Status("Done".into()));
+    Ok(())
+}
+
 /// Where the Proton build of the game's latest session is recorded.
 fn session_build_path(game: &Game) -> PathBuf {
     run_dir(&game.prefix).join("proton-build")

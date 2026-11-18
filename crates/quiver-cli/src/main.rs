@@ -475,6 +475,16 @@ pub(crate) async fn resolve_any(client: &Client, game: &str) -> Result<LibraryEn
     pick(lib, game)
 }
 
+/// A game argument for installing, updating, verifying, importing or uninstalling: a
+/// Ubisoft game, or an Epic game Quiver installs (`epic:<app>` or its name).
+pub(crate) async fn resolve_installable(client: &Client, game: &str) -> Result<LibraryEntry> {
+    let e = resolve_any(client, game).await?;
+    match e.store() {
+        StoreId::Ubisoft | StoreId::Epic => Ok(e),
+        s => bail!("{} is a {} game; {} installs it", game_label(&e.game), s.label(), s.label()),
+    }
+}
+
 /// [`resolve_any`] over a library already fetched.
 fn pick(lib: Vec<LibraryEntry>, game: &str) -> Result<LibraryEntry> {
     if let Some(r) = GameRef::parse_ref(game) {
@@ -818,25 +828,25 @@ async fn main() -> Result<()> {
         Cmd::Update { game, preview, detach, json } => downloads::update(&client, &game, preview, detach, json).await?,
         Cmd::Verify { game, repair, detach, json } => downloads::verify(&client, &game, repair, detach, json).await?,
         Cmd::Install { game, language, detach, .. } => {
-            let e = resolve(&client, &game).await?;
+            let e = resolve_installable(&client, &game).await?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Install { product_id: e.product_id, language }).await?;
+            let id: u64 = client.call(Request::Install { game: e.game.into(), language }).await?;
             eprintln!("installing {} (job {id})", e.name);
             if !detach {
                 follow(&client, events, id).await?;
             }
         }
         Cmd::Import { game, path, language } => {
-            let e = resolve(&client, &game).await?;
+            let e = resolve_installable(&client, &game).await?;
             let path = path.canonicalize().with_context(|| format!("{} not found", path.display()))?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Import { product_id: e.product_id, path, language }).await?;
+            let id: u64 = client.call(Request::Import { game: e.game.into(), path, language }).await?;
             eprintln!("importing {} (job {id})", e.name);
             follow(&client, events, id).await?;
         }
         Cmd::Uninstall { game, prefix } => {
-            let e = resolve(&client, &game).await?;
-            let () = client.call(Request::Uninstall { product_id: e.product_id, remove_prefix: prefix }).await?;
+            let e = resolve_installable(&client, &game).await?;
+            let _: serde_json::Value = client.call(Request::Uninstall { game: e.game.into(), remove_prefix: prefix }).await?;
             println!("uninstalled {}", e.name);
         }
         Cmd::Play { game, profile, profile_id, vanilla, detach } => {
@@ -849,13 +859,14 @@ async fn main() -> Result<()> {
                 eprintln!("asked {} to start {} ({})", any.store().label(), any.name, c.launch_url.as_deref().unwrap_or("its client"));
                 return Ok(());
             }
-            let e = resolve(&client, &game_label(&any.game)).await?;
+            // An Epic game Quiver installed plays through Quiver too (mods and profiles apply).
+            let e = if any.store() == StoreId::Epic { any } else { resolve(&client, &game_label(&any.game)).await?.entry };
             let events = client.subscribe().await?;
             // `None`: the daemon runs the game's default profile; `vanilla` forces vanilla.
             let profile = profile.or(profile_id).or(vanilla.then(|| quiver_api::mods::VANILLA.to_owned()));
             let default = match &profile {
                 None => client
-                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()}))
+                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.game.into() }))
                     .await
                     .ok()
                     .map(|s| mods::default_label(&s)),
@@ -877,7 +888,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Cancel { game, discard } => {
-            let e = resolve(&client, &game).await?;
+            let e = resolve_installable(&client, &game).await?;
             let status: Status = client.call(Request::Status).await?;
             let job = status
                 .jobs
@@ -889,7 +900,7 @@ async fn main() -> Result<()> {
             println!("cancelling {:?} job {} for {}", job.kind, job.id, e.name);
         }
         Cmd::Stop { game } => {
-            let e = resolve(&client, &game).await?;
+            let e = resolve_installable(&client, &game).await?;
             let () = client.call(Request::Stop { game: e.game.into() }).await?;
         }
         Cmd::Get { game } => {
