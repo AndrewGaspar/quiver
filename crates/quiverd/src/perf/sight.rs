@@ -1,9 +1,9 @@
 //! Starting `quiver-sight` (SIGHT.md §5, SIGHT-HUD.md §2.9): the GPUI process that renders the
-//! HUD into `hud.image` (or a layer-shell surface) and shows the toast lane.
+//! HUD into `hud.image` (or a layer-shell surface), shows the toast lane and the panel.
 //!
 //! quiverd starts it when a Quiver launch begins (toasts are on by default for Quiver
-//! launches; the HUD needs it whenever it is enabled), when a running game's HUD is toggled
-//! on, and for dev sessions that ask for it. One instance serves every running session: it
+//! launches; the HUD needs it whenever it is enabled), on a Sight panel command (`panel.rs`),
+//! when a running game's HUD is toggled on, and for dev sessions that ask for it. One instance serves every running session: it
 //! attaches itself to each session's HUD, holds a lock so a second copy exits at once, and
 //! exits a few seconds after the last session ends. quiverd only makes sure one is running.
 //!

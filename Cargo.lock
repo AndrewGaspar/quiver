@@ -4505,6 +4505,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
  "tracing-subscriber",
 ]
 
@@ -4591,9 +4592,11 @@ dependencies = [
  "quiver-api",
  "quiver-perf",
  "quiver-ui",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -4617,10 +4620,12 @@ name = "quiver-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gilrs",
  "gpui",
  "gpui_platform",
  "image",
  "notify",
+ "quiver-api",
  "rust-embed",
  "serde_json",
  "tempfile",

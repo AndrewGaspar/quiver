@@ -1,10 +1,11 @@
 # Sight: Quiver's in-game overlay (design notes)
 
-Status: design only (2026-11-16). Nothing here is built. Companion to `design/MOD-CONFIG.md`
+Status: designed 2026-11-16; the HUD (SIGHT-HUD.md) and the panel MVP are built, see
+[§14 As built](#14-as-built-the-panel-mvp-2026-11-17). Companion to `design/MOD-CONFIG.md`
 (pluggable mod configuration, designed in parallel), which Sight consumes; see
 [Assumptions about MOD-CONFIG](#10-assumptions-about-mod-config). The pinned performance HUD and
 the metrics model are designed, with their steers decided, in [SIGHT-HUD.md](SIGHT-HUD.md); this
-document's own steers (section 13) are still open.
+document's own steers (section 13) were decided 2026-11-16.
 
 **Name.** In this codebase "overlay" already means the overlayfs mod mounts
 (`crates/quiver-core/src/overlay.rs`, "mod overlays"). The in-game layer is called **Sight**: on a
@@ -949,8 +950,8 @@ for the record.
    sit next to Shift+F2; with (b) or (c) they'd no longer be next to the panel's chord.
    *As built (2026-11-17):* the HUD's keys are read in the game by the Sight layer (X11 keymap
    polling, §4.1's "in-layer key polling"), not bound in Hyprland (SIGHT-HUD §1.3). The panel's
-   Shift+F2 is still planned as a focus-scoped Hyprland bind; the layer's key reader could
-   carry it too once the panel exists, for XWayland games.
+   Shift+F2 is read the same way, X11 and Wayland windows alike (§14); a Hyprland bind is only
+   a printed fallback (`quiver sight keybinds --conf`).
 5. **Gamepad while Sight is open.** (a) rely on hyprpad to neutralize the game's pad;
    (b) Quiver grabs the pad (EVIOCGRAB) while open, reversing PROPOSAL's "never grab";
    (c) accept that the game also sees the pad.
@@ -1015,3 +1016,159 @@ for the record.
     needs that process for the whole session, so the `quiver-ui` extraction is needed in the HUD's
     MVP. (c) is ruled out for the HUD: decision 18 keeps the Vulkan device (100–280 MiB RSS) out
     of quiverd.
+
+---
+
+## 14. As built: the panel MVP (2026-11-17)
+
+Phase 1's panel, built on the HUD's `quiver-sight` process (SIGHT-HUD §2.9) with the steers of
+§13 as decided: a compositor panel on a wlr-layer-shell surface, GPUI in `quiver-sight`,
+Shift+F2, hyprpad holding the game's pad neutral (5a), and the panel taking keyboard focus
+(6a; the per-game "toasts only" fallback of 6c isn't built).
+
+**Summon and dismiss**
+
+- **Shift+F2 in the game.** The Sight layer's key reader (`quiver-sight-layer/src/keys.rs`,
+  X11 keymap polling and the Wayland `wl_keyboard` of SIGHT-HUD §1.3) has a third binding,
+  `Shift+F2 → Action::Panel`, matched like the HUD's (exact modifiers, edge only). Presses
+  are counted in a new `qv_layer_status.key_panels` (the struct grew from 256 to 264 bytes;
+  a layer from before writes 256 and reads as zero). quiverd's ring thread diffs it like
+  `key_toggles` and calls `PerfHub::panel_keys`, which issues a panel toggle for that session
+  (`by: "keys"`). No Hyprland bind is installed; `quiver sight keybinds --conf` prints one
+  (Lua and hyprlang forms) for games without the layer.
+- **Closing** is the panel's own job: while it is open it has the keyboard, so the game's
+  layer sees nothing. Shift+F2, Escape, B at the top level, or the chord again close it.
+- **CLI**: `quiver sight toggle [--section S] [--session ID] | open [SECTION] | close |
+  status [--json] | hyprpad [--snippet] | keybinds [--conf] | pad-chord [on|off]`.
+- **Control plane** (`quiver-api/src/sight.rs`, `quiverd/src/perf/panel.rs`):
+  `Request::Sight(SightRequest::{Toggle, Open, Close, Status, Report})`. quiverd picks the
+  session (named, else the focused game, else the only one: `PerfHub::pick`, as `hud toggle`
+  does), starts `quiver-sight` if needed, and broadcasts a `PanelCommand` (seq, action,
+  session, section, the game's monitor, who) as `PerfEvent::Panel` (`Event::SightPanel` for
+  new clients; old clients skip it). It keeps the last command, so a `quiver-sight` started
+  for it acts on it if it's under 8 s old (`PanelCommand::fresh`). quiverd keeps no open/closed
+  state of its own: a toggle goes through as a toggle and `quiver-sight` decides.
+  `quiver-sight` sends `Report(PanelReport)` on every change (open, section, monitor, backdrop
+  and why, pad, focus target, last error), which `quiver sight status` prints.
+
+**The surface** (`quiver-sight/src/panel/mod.rs`)
+
+- Namespace `quiver-sight`, overlay layer, anchored to all four edges at the monitor's
+  logical size, `exclusive_zone = -1` (over bars), keyboard interactivity **exclusive**. The
+  toast lane moved to `quiver-sight-toast` (it shared `quiver-sight` before), so hyprpad's
+  mode rule and the blur rule match only the panel; the desktop HUD stays
+  `quiver-sight-hud`.
+- Monitor: the command's (quiverd's game monitor), else the focused window's, else the
+  focused one. Before opening it records Hyprland's active window (focus goes back there on
+  close, `focuswindow`) and finds the game's window (a client whose process, or a parent a
+  few levels up, has `QUIVER_SESSION=<session>` in its environment), which Quit closes.
+- Checked on the live desktop with a 2.5 s test window (`--demo panel --namespace
+  quiver-sight-test`): mapped on eDP-2 at the full 2048×1280 logical size, took the keyboard,
+  gave focus back on close.
+
+**Backdrop: compositor blur, else dim** (`quiver-sight/src/hypr.rs`)
+
+- On Hyprland with `decoration:blur:enabled` on, opening adds a runtime layer rule that blurs
+  the panel's surface with the user's own blur settings (size, passes: nothing overridden),
+  `ignore_alpha 0.02`, and the panel draws a light tint over it (`ink-0` at 35%, a card at
+  78%, theme tokens so light themes get a light tint). Otherwise, or if the rule fails, the
+  plain dim of §9 (`ink-0` at 55%, card at 94%). `quiver sight status` says which and why
+  ("blur is off in Hyprland (decoration:blur:enabled): plain dim" on this machine today).
+- Hyprland's syntax is detected, not assumed: `eval hl.version()` answering `ok` means the Lua
+  config (0.55+; this machine, 0.56.2): `eval if quiver_sight_panel_blur == nil then
+  quiver_sight_panel_blur = hl.layer_rule({ name = 'quiver-sight-panel-blur', blur = true,
+  ignore_alpha = 0.02, match = { namespace = '^(quiver-sight)$' } }) end
+  quiver_sight_panel_blur:set_enabled(true)`, disabled again on close
+  (`set_enabled(false)`); a config reload drops the rule and its global, and the next open
+  adds it again. A hyprlang config ≥ 0.53 gets `keyword layerrule blur on, ignore_alpha
+  0.02, match:namespace ^(quiver-sight)$`, older ones `layerrule = blur,…` and
+  `ignorealpha 0.02,…`; keyword rules can't be removed without a reload, so they are added
+  once per `quiver-sight` run and left (they only match the panel). Focus and Quit use
+  `dispatch hl.dsp.focus({ window = 'address:…' })` / `hl.dsp.window.close(…)` under Lua,
+  `focuswindow` / `closewindow` otherwise. Nothing is written to the user's config. Side
+  effect noted in Hyprland's source: every `eval` clears Hyprland's stored config-error list.
+- The blur keeps the game composited while the panel is open, but nothing is lost by it:
+  direct scan-out is already off while any Sight surface is on the game's monitor (§4.1 (c)).
+  For compositors without layer blur, the Sight layer could blur the game's own image in the
+  game (a shader pass when the panel is up): a possible phase 3 alternative next to
+  presenter 2, not built.
+
+**Sections** (`panel/state.rs` builds rows from `PanelData`; `panel/view.rs` draws them)
+
+- **Session**: game and copy (Quiver install, Steam copy), profile, mod versions
+  (`ModsState` profile's `resolved[].describe()`, the current resolution, not necessarily what
+  launched), play time (this session from `ActiveSession.started`; total from the store's
+  `GameDetail.playtime`), whether Ubisoft took the session; clock and battery in the header.
+  **Quit** asks Hyprland to close the game's window (the game's own close, which may prompt);
+  **Force quit** is quiverd's `Stop` (`wineserver -k` for Quiver installs). Both need a
+  confirmation (Cancel focused by default).
+- **Mods**: `OptionsList` for the running profile (not the platform surface), rows grouped by
+  page and group, only options for the overlay (`overlay != false`, visible, up to the
+  Advanced level). Bool/enum/int/float/key options step with Left/Right and cycle with A
+  (`quiver_ui::options`, the app's logic moved there); dangerous and free-text options are
+  read-only with "change it in the app". Each row shows the apply badge as the app does (LIVE,
+  LIVE · ~10 s, AT SWAPCHAIN CREATION, RESTART, NEXT LAUNCH), the pending text, and after a
+  change the outcome quiverd reported (`outcome_text`: "Applied live · the mod confirmed",
+  "Saved · needs a restart", "Rejected: …"). Steps on a row are debounced 350 ms into one
+  `OptionsSet` (source `sight`, saved to the profile, live where possible); then the section
+  reloads. Changes made elsewhere (`OptionsLive` not by Sight) reload it too.
+- **Tweaks**: the platform surface at the running profile's scope (else the game's), so a
+  change always reaches this game; same rows and honesty (most are NEXT LAUNCH).
+- **Performance**: tiles for FPS, 1% low, base FPS (when a mod provides it), frame time, GPU
+  load/temp/power, VRAM, CPU, RAM, from a `PerfSubscribe` at 2 Hz held only while the panel
+  is open. The HUD: shown (`HudToggle`), preset, position and size (`HudSet` at the game
+  scope; `settings_changed` makes them live). When the HUD isn't set up for this launch the
+  rows say NEXT LAUNCH and "Use Quiver's HUD" turns it on for the next one.
+- **Achievements**: from `GameDetail.achievements` (definitions with unlock state where the
+  store's data has it): n / m earned, unlocked first (newest first), hidden ones masked
+  until A.
+
+**Input** (`panel/state.rs` `Nav`, `quiver-ui/src/input.rs`, `quiver-ui/src/gamepad.rs`)
+
+- One `Input` vocabulary for keyboard and pad, shared with the app (moved to `quiver-ui`):
+  Up/Down move (side list or rows), Right/A enter the rows, Left/Right adjust a stepper or
+  toggle (Left on a plain row goes back to the side list), A activates (cycles a value,
+  opens a confirmation, reveals a hidden achievement), B goes back then closes, LB/RB and
+  LT/RT switch sections (wrapping). Keys: arrows (and hjkl), Enter/Space, Escape/Backspace,
+  Tab/Shift+Tab, `[` `]`, Page Up/Down. Mouse: click sections, rows, ◀ ▶, dialog buttons.
+- **The controller, two paths.** Spike S6's question turned out to matter: in a hyprpad mode
+  that doesn't forward, no evdev device carries the real pad (hyprpad reads the Steam
+  Controller over a root-only hidraw node, grabs evdev pads like the Elite, and its virtual
+  pad, which the game and gilrs see, goes neutral). So the panel takes the pad as **keys
+  typed by hyprpad** in its `quiver-sight` mode (`tools/hyprpad/quiver-sight.lua`: D-pad and
+  stick flicks → arrows, A → Enter, B → Escape, X → Space, LB/RB/LT/RT → Page Up/Down; held
+  buttons hold keys, so key repeat works). gilrs still reads pads read-only (the app's
+  `gamepad.rs`, now shared) for setups without hyprpad or pads hyprpad doesn't own; there the
+  game sees the pad too, and the hint bar says so. The two never both deliver a press: in
+  the `quiver-sight` mode gilrs sees only the neutral virtual pad.
+- **Without hyprpad**, optional and off by default: Select+Start held 0.6 s toggles the panel
+  (`quiver_ui::gamepad::HoldChord`; `quiver sight pad-chord on` writes `pad_chord = true` to
+  `$XDG_DATA_HOME/quiver/sight.toml`, read when `quiver-sight` starts).
+- **hyprpad snippet** (`tools/hyprpad/quiver-sight.lua`, `quiver sight hyprpad --snippet`):
+  the mode (`ctx.layers:has("quiver-sight")`, an exact match), placed before the game modes
+  since the first matching mode wins; the button → key binds, `:only_in("quiver-sight")`;
+  and the chord. hyprpad keeps one binding per guide chord and `guide+start` is
+  `guide+menu`, which the user's config uses for the Omarchy menu, so the snippet offers a
+  mode-branching script (Quiver in game modes and over the panel, the menu elsewhere) or a
+  direct bind where the chord is free. Quiver edits no hyprpad config.
+
+**Lifecycle**: unchanged from the HUD: quiverd starts `quiver-sight` for every Quiver launch
+and Steam copy, and now also on a panel command; it exits 5 s after the last session. A
+session ending closes its panel. The panel needs nothing in the game besides the layer's key.
+
+**Verification**: unit tests for navigation, rows, value stepping, confirmations, key
+mapping (`panel::state`), Hyprland command forms, flavor detection, game-window matching
+(`hypr`), the chord (`quiver-ui` gamepad), Shift+F2 over X11 and Wayland (layer `keys`), the
+status layout, and quiverd's key → command path, commands and reports (`perf::tests::
+panel_key_and_commands`). `quiver-sight --demo panel` shows the fixture on a desktop;
+`cargo run -p quiver-sight --example panel_png -- OUT [--backdrop dim]` renders every section
+off-screen. Not verified: a real game (Shift+F2 → panel → focus back), hyprpad's keys
+reaching the surface, the blur (it's off on this machine), spike S1.
+
+**Deferred**: per-game "toasts only" / "pause via SDK" fallbacks (6c) and
+`OverlayStateChangedPush` (S7); the quick menu; try-then-keep (`live: Only` + Revert); mod
+actions and status metrics in the Mods section; the frame-time graph in Performance; Club
+challenges; cursor hiding for pad use; on-screen keyboard for text options; Shift+F2 as a
+configurable chord; the panel on the game's own monitor when quiverd hasn't seen it focused
+(falls back to the focused monitor); session id ⇄ window matching beyond `QUIVER_SESSION` in
+the environment.

@@ -13,6 +13,7 @@ mod options;
 mod info;
 mod savestores;
 mod setup;
+mod sight;
 mod steamrun;
 mod tweaks;
 
@@ -228,6 +229,11 @@ enum Cmd {
     Hud {
         #[command(subcommand)]
         action: perf::HudAction,
+    },
+    /// The in-game panel: `quiver sight toggle|open SECTION|close|status|hyprpad|keybinds|pad-chord`.
+    Sight {
+        #[command(subcommand)]
+        action: sight::SightAction,
     },
     /// The daemon: status, holding off its restart onto a new build, stopping it.
     Daemon {
@@ -997,6 +1003,7 @@ async fn main() -> Result<()> {
         Cmd::Perf { action } => perf::run(&client, action).await?,
         Cmd::Tweaks { json, action } => tweaks::run(&client, &cli.source, json, action).await?,
         Cmd::Hud { action } => perf::hud(&client, action).await?,
+        Cmd::Sight { action } => sight::run(&client, action).await?,
         Cmd::FixesOnVanilla { value } => mods::fixes_on_vanilla(&client, value).await?,
         Cmd::Info { game, json, refresh, all } => info::info(&client, &game, json, refresh, all).await?,
         Cmd::Progress { game, json, refresh } => info::progress(&client, &game, json, refresh).await?,

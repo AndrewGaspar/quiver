@@ -11,6 +11,8 @@
 //! - or, when the model's presenter is `desktop`, shows the same view on a click-through
 //!   layer-shell surface on the game's monitor;
 //! - shows the toast lane: achievements unlocked and mod-setting outcomes of Quiver launches;
+//! - shows the Sight panel over the game when summoned ([`panel`]: Shift+F2, a hyprpad
+//!   chord, `quiver sight toggle`), driven with the controller;
 //! - exits when quiverd goes away or a few seconds after the last session ends.
 //!
 //! Threads: GPUI's main thread (all rendering, windows, the heartbeat) and one tokio thread
@@ -22,13 +24,17 @@
 //! quiver-sight --demo desktop [--seconds N]      # a sample desktop HUD
 //! quiver-sight --demo image --image PATH [--extent WxH] [--layout standard] [--variant long]
 //!                                   # render a sample model into a hud.image file
+//! quiver-sight --demo panel [--section mods] [--seconds N] [--namespace quiver-sight-test]
+//!                                   # the panel with sample data on this desktop
 //! ```
 
 pub mod demo;
 pub mod desktop;
 pub mod game;
 pub mod hud_view;
+pub mod hypr;
 pub mod link;
+pub mod panel;
 pub mod place;
 pub mod toasts;
 
@@ -59,19 +65,21 @@ struct SessionHud {
 pub struct Sight {
     huds: HashMap<String, SessionHud>,
     toasts: toasts::ToastLane,
+    pub panel: panel::PanelCtl,
     layer_shell: bool,
     ticks: u32,
 }
 
 impl Sight {
-    fn new(layer_shell: bool) -> Self {
-        Self { huds: HashMap::new(), toasts: toasts::ToastLane::new(layer_shell), layer_shell, ticks: 0 }
+    fn new(layer_shell: bool, panel: panel::PanelCtl) -> Self {
+        Self { huds: HashMap::new(), toasts: toasts::ToastLane::new(layer_shell), panel, layer_shell, ticks: 0 }
     }
 
     fn handle(&mut self, msg: Msg, cx: &mut App) {
         match msg {
             Msg::Model(m) => self.model(*m, cx),
             Msg::Ended(s) => {
+                self.panel.ended(&s, cx);
                 if let Some(mut h) = self.huds.remove(&s) {
                     let (rss, hwm) = game::rss_mib();
                     tracing::info!(session = %s, rss_mib = rss, peak_mib = hwm, "HUD closed: {}", h.game.stats.line());
@@ -91,6 +99,7 @@ impl Sight {
                     h.desktop.close(cx);
                 }
                 self.toasts.close(cx);
+                self.panel.close(cx);
                 // Leave once the windows are gone. Not through GPUI's teardown: dropping the
                 // app at exit can touch thread-locals that are already destroyed and abort
                 // ("cannot access a Thread Local Storage value during or after destruction").
@@ -103,6 +112,12 @@ impl Sight {
                 })
                 .detach();
             }
+            Msg::Panel(c) => self.panel.command(c, cx),
+            Msg::Loaded { session, data } => self.panel.loaded(&session, *data, cx),
+            Msg::Done { change, result } => self.panel.done(change, result, cx),
+            Msg::Metrics(u) => self.panel.metrics(u, cx),
+            Msg::OptionsChanged { session } => self.panel.options_changed(&session),
+            Msg::Pad(e) => self.panel.pad(e, cx),
         }
     }
 
@@ -143,6 +158,10 @@ impl Sight {
             h.game.tick(cx);
         }
         self.toasts.tick(cx);
+        // The panel's clock and play time.
+        if self.ticks.is_multiple_of(4) {
+            self.panel.tick(cx);
+        }
     }
 }
 
@@ -159,6 +178,8 @@ fn single_instance() -> anyhow::Result<Option<std::fs::File>> {
 
 pub struct Args {
     demo: Option<String>,
+    section: Option<String>,
+    namespace: Option<String>,
     seconds: f32,
     image: Option<PathBuf>,
     extent: (u32, u32),
@@ -168,7 +189,7 @@ pub struct Args {
 }
 
 fn args() -> anyhow::Result<Args> {
-    let mut a = Args { demo: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), variant: "base".into(), headless: false };
+    let mut a = Args { demo: None, section: None, namespace: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), variant: "base".into(), headless: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
@@ -184,12 +205,14 @@ fn args() -> anyhow::Result<Args> {
             "--layout" => a.layout = val()?,
             "--variant" => a.variant = val()?,
             "--headless" => a.headless = true,
+            "--section" => a.section = Some(val()?),
+            "--namespace" => a.namespace = Some(val()?),
             "-V" | "--version" => {
                 println!("quiver-sight {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "-h" | "--help" => {
-                println!("quiver-sight: Sight's HUD renderer and toast lane. quiverd starts it; it takes no arguments.\n  --demo toasts|desktop|image  try it without quiverd (see the source)");
+                println!("quiver-sight: Sight's HUD renderer and toast lane. quiverd starts it; it takes no arguments.\n  --demo toasts|desktop|image|panel  try it without quiverd (see the source)");
                 std::process::exit(0);
             }
             other => anyhow::bail!("unknown argument {other} (try --help)"),
@@ -224,21 +247,32 @@ pub fn run() -> anyhow::Result<()> {
     let layer_shell = !headless && wayland;
     let app = if headless { gpui_platform::headless() } else { gpui_platform::application() };
     let (tx, rx) = mpsc::unbounded::<Msg>();
+    let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<link::LinkReq>();
+    let mut panel = panel::PanelCtl::new(layer_shell, None, Some(tx.clone()));
+    if let Some(ns) = &args.namespace {
+        panel.namespace = ns.clone();
+    }
     match args.demo.clone() {
         None => {
+            panel = panel::PanelCtl::new(layer_shell, Some(req_tx), Some(tx.clone()));
+            let tx = tx.clone();
             std::thread::Builder::new().name("quiver-sight-link".into()).spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
-                rt.block_on(link::run(tx));
+                rt.block_on(link::run(tx, req_rx));
             })?;
         }
-        Some(d) => demo::feed(&d, &args, tx)?,
+        Some(d) => demo::feed(&d, &args, tx.clone())?,
+    }
+    // The controller's long-press fallback has to listen from the start.
+    if panel.pad_chord() && args.demo.is_none() {
+        panel.start_pad();
     }
     tracing::info!(pid = std::process::id(), layer_shell, headless, "quiver-sight starting");
     // Windows come and go (toasts, the desktop HUD, off-screen HUDs): quit only when told.
     app.with_quit_mode(gpui::QuitMode::Explicit).with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         let dir = theme::omarchy_state_dir();
         quiver_ui::init(cx, theme::load(&dir));
-        let sight = Rc::new(RefCell::new(Sight::new(layer_shell)));
+        let sight = Rc::new(RefCell::new(Sight::new(layer_shell, panel)));
         // Theme switches: reload, and re-render what's shown (by replaying the models).
         let (ttx, mut trx) = mpsc::unbounded::<()>();
         theme::watch(dir.clone(), move || {

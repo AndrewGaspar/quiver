@@ -1,7 +1,8 @@
 //! The toast lane (SIGHT §9, §3.2): small layer-shell toasts, top-right of the game's monitor
 //! (bottom-right when the HUD owns the top-right corner), timed, click-through, never taking
 //! focus. At most three, newest on top; achievements 6 s, everything else 4 s. One surface
-//! (namespace `quiver-sight`) holds the stack and is unmapped when the lane is empty, so it
+//! (namespace `quiver-sight-toast`: `quiver-sight` is the panel's, which hyprpad and the
+//! blur rule match exactly) holds the stack and is unmapped when the lane is empty, so it
 //! costs scan-out only while a toast is up.
 
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use quiver_ui::theme::Theme;
 use crate::desktop::open_layer;
 use crate::place::ToastCorner;
 
-pub const NAMESPACE: &str = "quiver-sight";
+pub const NAMESPACE: &str = "quiver-sight-toast";
 pub const MAX_SHOWN: usize = 3;
 /// A toast's width; the surface adds room for the shadow on every side.
 const WIDTH: f32 = 360.0;
