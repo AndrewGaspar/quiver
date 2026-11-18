@@ -16,6 +16,13 @@
 //! and starts polling achievements; `end` checks them once more, queues the session for
 //! Epic (`report_playtime`) and uploads the saves. Neither fails a launch.
 //!
+//! **Between sessions** ([`fresh_loop`], design/STORE-EPIC.md §9.12): each installed Epic
+//! game that isn't running gets `Epic::freshen` every 30 minutes (backing off after
+//! failures), and sooner when the network comes back, the library is read, or quiverd
+//! starts: the cloud is listed, and what's newer there comes down with the pre-launch
+//! rules, so the saves are ready offline. Download only (a session's failed upload is
+//! finished once uploads are allowed). `epic_saves_background` in the config turns it off.
+//!
 //! **Who may do what** (STORES.md §7 item 10): reading is open to everyone. The first
 //! upload of saves and the first play-time report are writes to the person's Epic account,
 //! so they need the person (`confirmed` from the app or a terminal); after that they happen
@@ -38,6 +45,9 @@ use crate::info::needs_approval;
 
 /// How often queued play sessions are retried.
 const RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How often the background save check looks at its triggers (the network, library
+/// reads, each game's schedule). Each game's own schedule is `epic_core::fresh`'s.
+const FRESH_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn epic_app(game: &GameRef) -> Result<&str> {
     if game.store != StoreId::Epic {
@@ -53,6 +63,8 @@ fn person(source: &str) -> bool {
 /// At start: backups go where Ubisoft's do; queued play sessions are retried now and then.
 pub(crate) fn start(d: &Arc<Daemon>) {
     d.epic.set_save_backups(d.cfg.save_backups.clone());
+    d.epic.set_background_saves(d.cfg.epic_saves_background);
+    tokio::spawn(fresh_loop(d.clone()));
     let d = d.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(90)).await;
@@ -141,6 +153,110 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicGameRequest) ->
             json!(v)
         }
         EpicGameRequest::Achievements { game, refresh } => json!(d.epic.achievements(epic_app(&game)?, refresh).await?),
+        EpicGameRequest::SavesBackground { enabled } => {
+            let mut cfg = quiver_core::launcher::Config::load()?;
+            if let Some(on) = enabled
+                && on != cfg.epic_saves_background
+            {
+                cfg.epic_saves_background = on;
+                cfg.save()?;
+                d.epic.set_background_saves(on);
+                d.log_activity(
+                    source,
+                    if on { "Epic cloud saves are kept fresh between sessions again".to_owned() } else { "stopped keeping Epic cloud saves fresh between sessions (they sync around launches and on request)".to_owned() },
+                    None,
+                );
+            }
+            json!({ "enabled": cfg.epic_saves_background })
+        }
+    })
+}
+
+/// Keep installed Epic games' cloud saves fresh between sessions (the module's rules).
+async fn fresh_loop(d: Arc<Daemon>) {
+    // Let quiverd settle (and the app read the library) first; this first pass is the
+    // daemon-start nudge.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    let mut nudge = true;
+    let mut online = has_default_route();
+    let mut reads = d.epic.library_reads();
+    loop {
+        let on = quiver_core::launcher::Config::load().map(|c| c.epic_saves_background).unwrap_or(d.cfg.epic_saves_background);
+        d.epic.set_background_saves(on);
+        let now_online = has_default_route();
+        if now_online && !online {
+            tracing::info!("network back: checking Epic cloud saves");
+            nudge = true;
+        }
+        online = now_online;
+        let r = d.epic.library_reads();
+        if r != reads {
+            reads = r;
+            nudge = true;
+        }
+        // Offline, nothing is tried (and nothing counts as a failure).
+        if on && online && d.epic.accounts().is_ok_and(|a| !a.is_empty()) {
+            freshen_all(&d, nudge).await;
+        }
+        nudge = false;
+        tokio::time::sleep(FRESH_TICK).await;
+    }
+}
+
+/// One pass over the installed Epic games that aren't running.
+async fn freshen_all(d: &Arc<Daemon>, nudge: bool) {
+    use epic_core::fresh::Outcome;
+    for i in d.epic.installed().unwrap_or_default() {
+        let Some(game) = epic_core::provider::game_ref(&i.app_name) else { continue };
+        if d.running_games.lock().unwrap().contains(&game) || d.running_epic(&i.app_name) {
+            continue;
+        }
+        match d.epic.freshen(&i.app_name, nudge).await {
+            Ok(Outcome::Downloaded(r)) => {
+                let backup = r.backup.as_ref().map(|b| format!(" (this PC's copies backed up as {})", b.id)).unwrap_or_default();
+                d.log_activity_game("quiver", format!("downloaded {} newer Epic cloud save file(s) of {} in the background{backup}", r.downloaded.len(), i.title), Some(game));
+            }
+            Ok(Outcome::Uploaded(r)) => {
+                d.log_activity_game("quiver", format!("uploaded {}'s saves from its last session, which couldn't go at exit ({})", i.title, r.summary()), Some(game));
+            }
+            Ok(Outcome::Conflict { files, new: true }) => {
+                d.log_activity_game(
+                    "quiver",
+                    format!("{}: {} Epic cloud save file(s) changed both here and in the cloud; nothing synced until you choose which to keep (its Saves tab)", i.title, files.len()),
+                    Some(game),
+                );
+            }
+            Ok(Outcome::Skipped(_) | Outcome::UpToDate | Outcome::Conflict { .. }) => {}
+            Ok(Outcome::Held(why)) => tracing::info!(app = i.app_name, "Epic cloud saves in the background: {why}"),
+            Err(e) => tracing::info!(app = i.app_name, "Epic cloud saves in the background: {e:#}"),
+        }
+    }
+}
+
+/// Whether the machine has a default route (IPv4 or IPv6): "the network is up", read from
+/// the kernel without sending anything. Unknown (no `/proc`): assumed up.
+fn has_default_route() -> bool {
+    let v4 = std::fs::read_to_string("/proc/net/route");
+    let v6 = std::fs::read_to_string("/proc/net/ipv6_route");
+    if v4.is_err() && v6.is_err() {
+        return true;
+    }
+    v4.is_ok_and(|t| default_route_v4(&t)) || v6.is_ok_and(|t| default_route_v6(&t))
+}
+
+/// `/proc/net/route`: a line whose destination and mask are 0 and whose flags say up.
+fn default_route_v4(table: &str) -> bool {
+    table.lines().skip(1).any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() >= 8 && f[1] == "00000000" && u32::from_str_radix(f[3], 16).is_ok_and(|flags| flags & 1 == 1) && f[7] == "00000000"
+    })
+}
+
+/// `/proc/net/ipv6_route`: `::/0` through an interface other than loopback.
+fn default_route_v6(table: &str) -> bool {
+    table.lines().any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() >= 10 && f[0].bytes().all(|b| b == b'0') && f[1] == "00" && f[9] != "lo" && u32::from_str_radix(f[8], 16).is_ok_and(|flags| flags & 1 == 1)
     })
 }
 
@@ -241,5 +357,20 @@ mod tests {
         assert!(epic_app(&GameRef::ubisoft(3539)).unwrap_err().to_string().contains("not an Epic game"));
         assert_eq!(epic_app(&GameRef::parse_ref("epic:Wren").unwrap()).unwrap(), "Wren");
         assert!(person("cli") && person("gui") && !person("agent:claude"));
+    }
+
+    #[test]
+    fn default_routes() {
+        let v4 = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+                  wlan0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\
+                  wlan0\t0002A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n";
+        assert!(default_route_v4(v4));
+        let lan_only = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                        wlan0\t0002A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\n";
+        assert!(!default_route_v4(lan_only));
+        let v6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 wlan0\n\
+                  00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n";
+        assert!(default_route_v6(v6));
+        assert!(!default_route_v6(v6.lines().nth(1).unwrap()));
     }
 }

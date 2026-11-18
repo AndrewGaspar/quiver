@@ -10,7 +10,7 @@ use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude
 use quiver_api::Request;
 use quiver_api::stores::{Achievement, GameDetail};
 
-use super::page::{Load, kv, load_note, note};
+use super::page::{Load, kv, load_note, note, small};
 use crate::app::Quiver;
 use crate::err_text;
 use crate::model::{GameRow, Gid, day, gb, hours};
@@ -70,6 +70,9 @@ impl Quiver {
             }
             Some(d) => {
                 left = left.child(self.render_store_achievements(th, d)).when(!d.dlc.is_empty(), |l| l.child(render_dlc(th, d)));
+                if !d.extras.is_empty() {
+                    left = left.child(self.render_extras(th, id, d, cx));
+                }
                 right = right.children(self.render_steam_hook_card(th, g, cx)).child(render_store_about(th, d, label)).child(render_store_install(th, d, label));
                 if let Some(c) = &d.cloud {
                     let pending = if c.unsynced > 0 { format!(" · {} not synced yet", c.unsynced) } else { String::new() };
@@ -219,6 +222,60 @@ fn render_store_install(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
                 .child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{label} installs, updates and starts it, and keeps its licence, overlay and play time."))),
         )
         .into_any_element()
+}
+
+impl Quiver {
+    /// Digital extras (Epic: soundtracks, art books, wallpapers): their own downloads, in a
+    /// folder next to the game's. Download, or Open once downloaded.
+    fn render_extras(&self, th: &Theme, id: Gid, d: &GameDetail, cx: &mut Context<Self>) -> AnyElement {
+        let done = d.extras.iter().filter(|x| x.installed.is_some()).count();
+        let rows = d.extras.iter().enumerate().map(|(i, x)| {
+            let action = match (&x.installed, &x.dir) {
+                (Some(_), Some(dir)) => {
+                    let dir = dir.to_string_lossy().into_owned();
+                    Some(small(("st-extra-open", i), th, Some(Icon::FolderOpen), "Open").on_click(cx.listener(move |this, _, _, cx| this.open_external(&dir, cx))).into_any_element())
+                }
+                (None, _) if x.installable => {
+                    let extra = x.id.clone();
+                    Some(
+                        small(("st-extra-get", i), th, Some(Icon::Download), "Download")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let req = Request::Epic(quiver_api::epic::EpicRequest::ExtraInstall { game: id.0, extra: extra.clone() });
+                                this.call::<u64, _>(req, cx, move |this, r, cx| match r {
+                                    Ok(_) => this.show_toast("Downloading the extra next to the game's folder (see Downloads)", cx),
+                                    Err(e) => this.show_toast(err_text(&e), cx),
+                                });
+                            }))
+                            .into_any_element(),
+                    )
+                }
+                _ => None,
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(8.))
+                .py(px(6.))
+                .when(i > 0, |r| r.border_t_1().border_color(th.line1))
+                .child(icon(if x.installed.is_some() { Icon::CircleCheck } else { Icon::Package }, 14., if x.installed.is_some() { th.ok } else { th.tx4 }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().text_size(px(12.5)).font_weight(MEDIUM).child(x.name.clone()))
+                        .children(x.dir.as_ref().filter(|_| x.installed.is_some()).map(|dir| mono(11., th.tx3).truncate().child(crate::model::tilde(dir))))
+                        .children(x.note.clone().filter(|_| x.installed.is_none()).map(|n| div().text_size(px(11.5)).text_color(th.tx3).child(n))),
+                )
+                .children(action)
+        });
+        card(th)
+            .child(card_header(th, "Extras").child(div().flex_1()).child(caption(&format!("{} owned · {done} downloaded", d.extras.len()), th.tx3)))
+            .child(div().flex().flex_col().p(px(8.)).children(rows))
+            .into_any_element()
+    }
 }
 
 fn render_dlc(th: &Theme, d: &GameDetail) -> AnyElement {

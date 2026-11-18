@@ -20,7 +20,8 @@
 //!   → that side wins; changed on both → a conflict, which nothing settles on its own;
 //! - with no base yet (the first sync on this machine), times decide as EGL does (the
 //!   file's time against the version's, ±60 s; within that, a conflict);
-//! - before a launch: download only; after a session and on request: download, then upload;
+//! - before a launch, and between sessions ([`crate::fresh`]): download only; after a
+//!   session and on request: download, then upload;
 //! - before anything is downloaded over a file here, the files it replaces are copied to a
 //!   backup (`<save_backups>/epic-<app>/<time>/`);
 //! - deletions aren't synced: a file deleted here isn't downloaded again, and the next
@@ -97,7 +98,7 @@ impl Api {
 }
 
 /// A key's file name and whether it is a manifest: `…/<app>/manifests/<v>.manifest`.
-fn manifest_name(key: &str) -> Option<&str> {
+pub(crate) fn manifest_name(key: &str) -> Option<&str> {
     let (dir, file) = key.rsplit_once('/')?;
     (dir.ends_with("/manifests") || dir == "manifests").then_some(file).and_then(|f| f.strip_suffix(".manifest"))
 }
@@ -145,9 +146,12 @@ pub struct GameState {
     pub place: Option<Place>,
     /// Per Epic account.
     pub base: BTreeMap<String, Base>,
+    /// Background freshness per Epic account ([`crate::fresh`]).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub fresh: BTreeMap<String, crate::fresh::Fresh>,
 }
 
-fn state_path(epic_dir: &Path, app: &str) -> PathBuf {
+pub(crate) fn state_path(epic_dir: &Path, app: &str) -> PathBuf {
     epic_dir.join("saves").join(format!("{}.json", sanitize(app)))
 }
 
@@ -283,7 +287,13 @@ pub fn overall(files: &[SaveFile]) -> SyncState {
 pub enum Trigger {
     /// Download only.
     BeforeLaunch,
+    /// Between sessions ([`crate::fresh`]): download only, the pre-launch rules; never
+    /// while the game is being played.
+    Background,
     AfterExit,
+    /// A session's upload that couldn't go at exit, tried again between sessions (only
+    /// once uploads are allowed; never while the game is being played).
+    Retry,
     /// Someone asked (`source`: `cli`, `gui`, …). `first_upload_ok`: the person said yes
     /// to the first upload ever.
     Manual { resolve: Option<Resolve>, first_upload_ok: bool },
@@ -293,9 +303,21 @@ impl Trigger {
     fn by(self) -> &'static str {
         match self {
             Trigger::BeforeLaunch => "before launch",
+            Trigger::Background => "in the background",
             Trigger::AfterExit => "after exit",
+            Trigger::Retry => "after exit (retried)",
             Trigger::Manual { .. } => "on request",
         }
+    }
+
+    /// Whether this sync may upload (it still needs the first yes).
+    pub fn uploads(self) -> bool {
+        !matches!(self, Trigger::BeforeLaunch | Trigger::Background)
+    }
+
+    /// Syncs nobody waits for, which stand aside while the game is being played.
+    fn between_sessions(self) -> bool {
+        matches!(self, Trigger::Background | Trigger::Retry)
     }
 }
 
@@ -435,8 +457,17 @@ impl Epic {
         Ok(())
     }
 
-    fn game_state(&self, app: &str) -> Result<GameState> {
+    pub(crate) fn game_state(&self, app: &str) -> Result<GameState> {
         read_json(&state_path(&self.dir, app))
+    }
+
+    /// Change a game's state file in place (under the game's sync lock or not: each
+    /// write reads the file first, so fields it doesn't touch stay as they are).
+    pub(crate) fn edit_state(&self, app: &str, f: impl FnOnce(&mut GameState)) -> Result<()> {
+        let path = state_path(&self.dir, app);
+        let mut st: GameState = read_json(&path)?;
+        f(&mut st);
+        write_json(&path, &st)
     }
 
     fn set_base(&self, app: &str, account: &str, base: Base) -> Result<()> {
@@ -451,7 +482,7 @@ impl Epic {
     }
 
     /// A game's save spec and account; the location too, once its prefix is known.
-    async fn locate(&self, app: &str) -> Result<(Spec, (String, String), std::result::Result<Location, String>)> {
+    pub(crate) async fn locate(&self, app: &str) -> Result<(Spec, (String, String), std::result::Result<Location, String>)> {
         let t = self.title_of(app).await?;
         let spec = Spec::of(self.catalog_item(&t).as_ref());
         let owner = self.owner_of(&t)?;
@@ -583,6 +614,10 @@ impl Epic {
         let lock = self.p3.syncing.lock().unwrap().entry(loc.app.clone()).or_default().clone();
         let _one = lock.lock().await;
         let mut report = SyncReport::default();
+        if trigger.between_sessions() && self.is_playing(&loc.app) {
+            report.held = Some("the game is being played: its saves sync when it exits".into());
+            return Ok(report);
+        }
         let cloud = self.read_cloud(loc).await?;
         let base = self.game_state(&loc.app)?.base.get(&loc.account_id).cloned();
         let local = scan(&loc.dir, &loc.filter)?;
@@ -634,7 +669,7 @@ impl Epic {
             next.retain(|n, _| cloud_sha.contains_key(n));
         }
         let mut new_base = Base { at: Utc::now(), version: latest_name.clone(), files: next, by: trigger.by().to_owned() };
-        if up && trigger != Trigger::BeforeLaunch {
+        if up && trigger.uploads() {
             let writes = self.writes()?;
             let ok = writes.saves.open() || matches!(trigger, Trigger::Manual { first_upload_ok: true, .. });
             if !ok {
@@ -651,6 +686,10 @@ impl Epic {
             }
         }
         self.set_base(&loc.app, &loc.account_id, new_base)?;
+        if trigger.uploads() && report.held.is_none() {
+            // Whatever a session left to upload is up now.
+            self.clear_upload_pending(&loc.app, &loc.account_id)?;
+        }
         Ok(report)
     }
 
@@ -677,6 +716,7 @@ impl Epic {
         }
         let base = self.game_state(app)?.base.get(&account_id).cloned();
         r.last_sync = base.as_ref().map(|b| LastSync { at: b.at, version: b.version.clone(), by: b.by.clone() });
+        r.background = Some(self.freshness(app, &account_id, loc.as_ref().ok().and_then(|l| self.not_checked(l)).or_else(|| loc.as_ref().err().cloned())));
         let local = match &loc {
             Ok(l) => {
                 r.dir = Some(l.dir.clone());
@@ -740,6 +780,7 @@ impl Epic {
                 SyncState::Empty => "No saves here or in the cloud yet.",
                 SyncState::LocalNewer if !r.uploads.open() => "Newer here: the first upload waits for your yes (Sync now).",
                 SyncState::LocalNewer => "Newer here: uploaded after the next session, or now with Sync.",
+                SyncState::CloudNewer if self.background_saves() => "Newer in the cloud: downloaded at the next background check or before the next launch (this machine's copies are backed up first).",
                 SyncState::CloudNewer => "Newer in the cloud: downloaded before the next launch (this machine's copies are backed up first).",
                 SyncState::Both => "Different files changed on each side: a sync takes both.",
                 SyncState::Conflict => "The same files changed here and in the cloud: choose which to keep. Nothing syncs until then.",

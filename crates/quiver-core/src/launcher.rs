@@ -72,6 +72,11 @@ pub struct Config {
     /// Ubisoft Connect (`exports::steamgames`).
     #[serde(default = "yes")]
     pub steam_offers: bool,
+    /// Keep Epic cloud saves fresh between sessions: quiverd checks the cloud now and then
+    /// and downloads what's newer there, so games are ready to play offline (never
+    /// uploads on its own; design/STORE-EPIC.md §9.12).
+    #[serde(default = "yes")]
+    pub epic_saves_background: bool,
 }
 
 fn yes() -> bool {
@@ -249,6 +254,7 @@ impl Config {
             fixes_on_vanilla: None,
             first_run: None,
             steam_offers: true,
+            epic_saves_background: true,
         };
         cfg.save()?;
         Ok(cfg)
@@ -946,8 +952,12 @@ pub struct SetupRun {
 }
 
 /// Create a plain Proton prefix for a game of another store (no Ubisoft SDK).
+/// The marker [`ensure_plain_prefix`] leaves in a prefix it set up (nothing should be
+/// written into a prefix before it is there).
+pub const PLAIN_PREFIX_READY: &str = ".quiver-prefix-ready";
+
 pub async fn ensure_plain_prefix(cfg: &Config, prefix: &Path, build: &Path) -> Result<()> {
-    let marker = prefix.join(".quiver-prefix-ready");
+    let marker = prefix.join(PLAIN_PREFIX_READY);
     if marker.exists() {
         return Ok(());
     }

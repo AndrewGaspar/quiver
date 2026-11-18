@@ -217,6 +217,10 @@ pub struct GameDetail {
     /// `ubisoft:3539`), which installs and plays it (appended; STORES.md §2.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked: Option<GameRef>,
+    /// Digital extras that come with the game (a soundtrack, an art book, wallpapers): their
+    /// own downloads, never part of the game's folder (appended; Epic).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extras: Vec<Extra>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -273,6 +277,26 @@ pub struct Dlc {
     /// Whether the account owns it, when the store says (appended; Epic's library).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned: Option<bool>,
+}
+
+/// A digital extra of a game (`GameDetail.extras`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Extra {
+    /// The store's id for it (Epic: its app name); pass it to install it.
+    pub id: String,
+    pub name: String,
+    /// Its folder on this machine (next to the game's): where it goes, or where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// Downloaded (its build version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<String>,
+    /// Quiver can download it (`EpicRequest::ExtraInstall`).
+    #[serde(default)]
+    pub installable: bool,
+    /// For people: why it can't be downloaded, or what it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[cfg(test)]

@@ -51,6 +51,8 @@ pub struct Finished {
 impl Epic {
     /// Before an Epic game starts in `prefix`: download what's newer in the cloud.
     pub async fn before_launch(&self, app: &str, prefix: &Path, install_dir: Option<&Path>) -> Prepared {
+        // From here to `after_exit`, background syncs leave the game's saves alone.
+        self.set_playing(app, true);
         let account_id = match self.title_of(app).await.and_then(|t| self.owner_of(&t)) {
             Ok((id, _)) => Some(id),
             Err(e) => {
@@ -109,10 +111,17 @@ impl Epic {
             let r = self.sync_saves(loc, Trigger::AfterExit).await.map_err(|e| format!("{e:#}"));
             notes.push(match &r {
                 Ok(r) => r.summary(),
-                Err(e) => format!("cloud saves not uploaded: {e}"),
+                Err(e) if self.writes().is_ok_and(|w| w.saves.open()) => format!("cloud saves not uploaded: {e} (tried again in the background once Epic answers)"),
+                Err(e) => format!("cloud saves not synced: {e} (tried again in the background once Epic answers and you've said yes to uploads)"),
             });
+            if let Err(e) = &r
+                && let Err(x) = self.mark_upload_pending(&loc.app, &loc.account_id, e)
+            {
+                tracing::warn!(app = loc.app, "remembering the pending save upload: {x:#}");
+            }
             f.saves = Some(r);
         }
+        self.set_playing(&prepared.app, false);
         f.note = notes.join("; ");
         f
     }

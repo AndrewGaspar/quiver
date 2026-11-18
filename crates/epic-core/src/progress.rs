@@ -44,6 +44,12 @@ pub struct Phase3 {
     pub(crate) totals: tokio::sync::Mutex<HashMap<String, Totals>>,
     /// The player's achievement records (`<account>/<sandbox>`), and when they were read.
     pub(crate) players: tokio::sync::Mutex<HashMap<String, (DateTime<Utc>, crate::achievements::PlayerRecord)>>,
+    /// Games between `before_launch` and `after_exit`: background syncs stand aside.
+    pub(crate) playing: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether saves are kept fresh between sessions (quiverd's `epic_saves_background`).
+    pub(crate) background: std::sync::atomic::AtomicBool,
+    /// Library reads that asked Epic, this run (the background check wakes on a new one).
+    pub(crate) library_reads: std::sync::atomic::AtomicU64,
 }
 
 impl Phase3 {
@@ -55,6 +61,9 @@ impl Phase3 {
             unlocks: Default::default(),
             totals: Default::default(),
             players: Default::default(),
+            playing: Default::default(),
+            background: std::sync::atomic::AtomicBool::new(true),
+            library_reads: Default::default(),
         }
     }
 }
