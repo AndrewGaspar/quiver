@@ -820,7 +820,7 @@ anything you'd sample at 10 Hz or less goes as JSON.**
 
 | Producer | Namespace | Transport | Publishes |
 |---|---|---|---|
-| **Sight layer** (`VK_LAYER_QUIVER_sight`) | `present.*` | ring (+ status block in the ring header) | one record per `vkQueuePresentKHR`: CPU time at entry and return, present id (if the app chained `VkPresentIdKHR`), swapchain, image index, present mode, result; swapchain extent/format/colour space; `VK_NV_low_latency2` in use. Later: display time via `vkWaitForPresentKHR` on a layer thread when the app enabled present-wait; Reflex timings via `vkGetLatencyTimingsNV` for games whose Reflex is native or comes from dxvk-nvapi. **It can't tell rendered from generated frames.** |
+| **Sight layer** (`VK_LAYER_QUIVER_sight`) | `present.*` | ring (+ status block in the ring header) | one record per `vkQueuePresentKHR`: CPU time at entry and return, present id (if the app chained `VkPresentIdKHR`), swapchain, image index, present mode, result; swapchain extent/format/colour space; `VK_NV_low_latency2` in use. Later: display time via `vkWaitForPresentKHR` on a layer thread when the app enabled present-wait; Reflex timings via `vkGetLatencyTimingsNV` for games whose Reflex is native or comes from dxvk-nvapi. **It can't tell rendered from generated frames** by itself; as built (§3.17) it counts application frames from the app's `VK_NV_low_latency2` sleeps and markers, and reports Reflex's mode, cap and PC latency. |
 | **quiverd system** | `gpu.*`, `cpu.*`, `mem.*`, `bat.*`, `disk.*`, `net.*`, `proc.*` | in-process | GPU via NVML (load, temp, power, clocks, VRAM total/used, per-process VRAM, throttle reasons) or sysfs/hwmon for AMD/Intel; CPU load total and per core from `/proc/stat`, package temp from hwmon; RAM, swap; game process RSS, CPU, I/O from `/proc/<pid>`; battery and AC from `power_supply`/UPower; disk and network throughput. Polled only while a session runs (SIGHT S9: never wake a sleeping dGPU) |
 | **quiverd display** | `display.*` | Hyprland IPC | mode, refresh, VRR active, tearing active, direct scanout target, blocked-by reasons, the game window's fullscreen state |
 | **Mods** (SDK) | the mod's surface id (`aco-dlss.*`) | JSON over the mod pipe + one ring per mod | anything the mod knows. aco-dlss: rendered-frame records (game Present arrival, its own present call/return, real/generated/no-FG flag), FG state, generated/dropped counts, upscaler and preset, internal and output resolution, DLSS evaluate time, Reflex mode, Reflex sleep time, per-frame latency reports from `NvAPI_D3D_GetLatency` (input, simulation, render submit, present, driver, OS queue, GPU start/end), markers (FG reset, swapchain resize, teleport, bench begin/end) |
@@ -879,12 +879,16 @@ mod, an lsfg-vk reader, or a Streamline producer later, without new layouts:
 | Role | Filled by | Canonical metrics derived |
 |---|---|---|
 | `frame.presented` | the layer (always) | `fps`, `frametime`, `fps.p1low`, `fps.p01low`, `frametime.p99` |
-| `frame.base` | a mod's frame metric, filtered to real/no-FG records; else = `frame.presented` | `fps.base`, `frametime.base`, `fps.base.p1low` |
-| `frame.generated` | a mod's frame metric, generated records | `fps.generated`, `fg.ratio` (= presented ÷ base) |
-| `fg.state` | a mod state metric | `fg.state` |
-| `latency.frame` | a mod's (or the layer's) Reflex reports | `latency.render` (simulation start → GPU end), `latency.total` (input → present end, when input is marked), `latency.breakdown` (stack) |
-| `render.resolution`, `output.resolution` | a mod text metric; the layer (swapchain extent) | same |
-| `upscaler` | a mod text metric | same |
+| `frame.base` (`frame.base.count`) | the layer's Reflex frame counting (§3.17); else = `frame.presented` | `fps.base`, `frametime.base`, `fps.base.p1low` |
+| `frame.generated` (`frame.generated.count`) | the layer's further presents per game frame (§3.17) | `fps.generated`, `fg.ratio` (= presents per game frame) |
+| `fg.state` | an agnostic state source (none yet) | `fg.state` |
+| `latency.frame`, `latency.render`, `latency.pc` | the layer's Reflex markers and (opt-in) the driver's timing reports (§3.17) | `latency.render` (simulation start → GPU end), `latency.pc` (simulation start → present), `latency.total` (input → present end, when input is marked), `latency.breakdown` (stack) |
+| `render.resolution`, `output.resolution` | NGX's log (§3.17); the layer (swapchain extent) | same |
+| `upscaler` | NGX's log (§3.17) | same |
+
+**As built (§3.17): these roles are generic and filled only by implementation-agnostic
+producers; a mod's claim on one is listed as a conflict and not bound.** The paragraph below
+describes the original design.
 
 Names like the user's example `dlss.fps.base` therefore become: the mod publishes
 `aco-dlss.frame` with role `frame.base` (its real frames), and layouts show `fps.base`. A mod's
@@ -1616,6 +1620,212 @@ the app.
   producers; `quiver-sight` falling behind only makes the HUD image older (section 2.9).
 - **Privacy**: recordings stay local; mod strings in recordings are already sanitized; agents
   reading recordings see what the user sees.
+
+### 3.17 NVIDIA metrics without a mod (Reflex, frame generation, DLSS; as built 2026-11-17)
+
+**Principle.** The HUD's NVIDIA numbers (Reflex mode and cap, PC latency, the frame-generation
+multiplier with base vs presented FPS, DLSS preset, quality and render resolution, the DLSS
+DLL) come **only** from observation that doesn't depend on how a game or mod implements
+them: the Sight layer's Vulkan interception, NVIDIA's NGX log, dxvk-nvapi's DRS environment
+and the DLLs mapped in the game process. A mod's own numbers stay under the mod's namespace
+(`aco-dlss.*`), for what only the mod knows (its auto-cap target, why FG is paused), and are
+shown as that mod's metrics, never as the generic ones.
+
+**Generic roles are agnostic-only** (this changes §3.4's "a mod's frame metric fills
+`frame.base`"). `catalog::GENERIC_ROLES` lists `frame.base.count`, `frame.generated.count`,
+`latency.render`, `latency.pc`, `fg.state`, `upscaler`, `render.resolution`,
+`output.resolution` and the ring roles `frame.base`, `frame.generated`, `latency.frame`.
+`Store::declare` binds them only for built-in producers (`catalog::agnostic`: not `mod:*`); a
+mod's claim is recorded in the catalog entry's `conflicts` and not bound, so `fps.base`,
+`fg.ratio`, `latency.*`, `upscaler` and the resolutions can never show a mod's value, and one
+role never shows two values. A mod's own (non-generic) roles bind as before.
+`options/aco-dlss.toml` no longer claims generic roles; Pharos ships its own schema from v12,
+so its copy should drop them too (quiverd ignores them either way). The migration is complete
+in quiverd: nothing generic is fed by a mod any more; what Pharos alone knew (its frame
+records' real/generated flags, its Reflex reports) is replaced by the sources below, with the
+gaps listed under "Pharos".
+
+#### Metrics
+
+Producer `nvidia` ("NVIDIA (Reflex, DLSS)", `perf/nvidia.rs`), declared on first evidence (a
+Reflex call, a DLSS DLL, an NGX log line or a launch request), so a game without any of it has
+no such producer and every row below stays hidden.
+
+| Metric (short) | What it shows | Source | Absent when |
+|---|---|---|---|
+| `nv.reflex.mode` (RFX) | `off` / `on` / `boost`: the last `VkLatencySleepModeInfoNV` the app set (`lowLatencyMode`, `lowLatencyBoost`; a NULL info is off, per the spec) | layer hook `vkSetLatencySleepModeNV` | the app never set a sleep mode |
+| `nv.reflex.cap` (CAP) | Reflex's frame cap, 1e6 ÷ `minimumIntervalUs` fps (the spec: `vkLatencySleepNV` enforces it even with low latency off) | same | interval 0 |
+| `nv.frames.app` → `fps.base` | application-rendered frames per second | layer frame counting (below) | no sleeps and no present markers in the last second |
+| `nv.frames.generated` → `fps.generated` | further presents per second | same | same |
+| `fg.ratio` (FG), `fg.active` | presents per application frame, (base + generated) ÷ base from the same counter samples; `fg.active` when it's above 1.3 | same | not counting; Smooth Motion on (see `nv.fg.driver`) |
+| `nv.latency.pc` → `latency.pc` (PC) | **PC latency to present**, mean ms: simulation start (the frame's `INPUT_SAMPLE` marker when the game sets one) → that frame's `vkQueuePresentKHR` returning at the layer, all on the layer's CLOCK_MONOTONIC_RAW. A lower bound of NVIDIA's "PC latency": it leaves out the GPU work still queued at present and scan-out | layer marker hook + present timing | no `SIMULATION_START` / `PRESENT_START` markers |
+| `nv.latency.render` → `latency.render` (LAT) | **game to render**, mean ms: the driver's `gpuRenderEndTimeUs − simStartTimeUs` (Reflex's own definition, what Pharos reported) | opt-in `vkGetLatencyTimingsNV` reads on the layer's heartbeat thread (`reflex_timings`) | off (default) |
+| `nv.fg.driver` (FG) | `Smooth Motion (driver)` | the launch's environment: `NVPRESENT_ENABLE_SMOOTH_MOTION` on (Tweaks or the person) and not vetoed | Smooth Motion off |
+| `dlss.version` (DLL), `dlss.fg.version`, `dlss.rr.version` | the SR / FG / RR snippet loaded in the game process: `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssd.dll` found in `/proc/<pid>/maps`, version from the PE `VS_FIXEDFILEINFO` (searched after the UTF-16 `VS_VERSION_INFO`, since `nvngx_dlss.dll` has a stray signature earlier), or the NGX updater model `…/NGX/models/dlss/versions/<N>/files/*.bin` (N = major<<16 \| minor<<8 \| patch). Loaded isn't necessarily evaluating | quiverd's sensors thread, every 3 s until the SR DLL shows, then every 20 s | no DLSS in the process |
+| `dlss.sr` → `upscaler` | `DLSS K` | NGX log (opt-in `ngx_log`) | log off, or no SR feature created |
+| `dlss.sr.preset` (SR) | the preset NGX used at the latest SR feature creation, `*` when it came from a driver-settings (DRS) override | NGX log: `Info: (<mode>) Using DRS Overridden Preset <p>` / `Using App hint Preset <p>` / `… using title default Preset <p>` | same |
+| `dlss.sr.model` | `CNN` (A–F) or `Transformer` (J–M) | the preset | same |
+| `dlss.sr.quality` (SR) | DLAA, Quality, Balanced, Perf, Ultra Perf, Ultra Quality | NGX log: `PerfQualityValue NVSDK_NGX_PerfQuality_Value_<x> (<n>)` and the `(<mode>)` label | same |
+| `dlss.sr.render` → `render.resolution`, `dlss.sr.output` → `output.resolution` | SR input and output size at creation | NGX log: `InCreationTimeWidth/Height`, `OutWidth/Height` | same (output then falls back to the swapchain) |
+| `dlss.sr.requested` (REQ) | what the launch **asks** the driver for: the DRS SR preset (`K`, `latest`) and mode (`Perf`), from `DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION` / `…_SR_MODE` (dedicated variables over `DXVK_NVAPI_DRS_SETTINGS`, dxvk-nvapi's rule; ignored with `NGX_DLSS_SR_OVERRIDE=off`). Requested, not measured: DLSS only uses presets its DLL has | the launch environment (Quiver Tweaks or the person's own) | no override |
+
+Canonical additions: `latency.pc` (alias of role `latency.pc`). Every canonical help text now
+names the agnostic source. Labels fit 24 characters and short labels 6, as the layout's
+terse-label rule requires.
+
+#### The layer: `VK_NV_low_latency2` (`crates/quiver-sight-layer/src/latency.rs`)
+
+Under Proton, dxvk-nvapi implements NvAPI Reflex (`SetSleepMode`, `Sleep`, `SetLatencyMarker`,
+`GetLatency`) on DXVK's and vkd3d-proton's `ID3DLowLatencyDevice`, which call
+`VK_NV_low_latency2` on their swapchain (read in GE-Proton's sources: DXVK
+`dxvk_presenter.cpp`, `dxvk_latency_reflex.cpp`; vkd3d-proton `swapchain.c`,
+`device_vkd3d_ext.c`). Native Vulkan games call it directly. So the layer sees every Reflex
+game's calls, whatever implements Reflex above it.
+
+- **Hooks**: `vkSetLatencySleepModeNV`, `vkSetLatencyMarkerNV`, `vkLatencySleepNV`. Each calls
+  down with the app's arguments unchanged (`vkLatencySleepNV` returns at once; the app waits on
+  its semaphore). They're returned from `vkGetDeviceProcAddr` only when the next layer returns
+  the command (as every hook), and from `vkGetInstanceProcAddr` only when the chain has it; a
+  device that didn't enable the extension but is called through an instance-level pointer
+  gets the command looked up on demand, and a missing one is a no-op (app misuse).
+  `vkGetLatencyTimingsNV` and `vkQueueNotifyOutOfBandNV` aren't hooked.
+- **Cost**: per call a device lookup (read lock), a swapchain lookup in the device's latency
+  list (a separate read lock, so a marker never waits for a present's HUD work), one clock read
+  and a few relaxed atomics; `SIMULATION_START` and `INPUT_SAMPLE` take a small mutex for the
+  32-slot frame table; the present path only `try_lock`s it (a contended sample is skipped).
+  Under a panic guard; 32-bit safe (u64 atomics, no new dependencies).
+- **Frame attribution** follows the spec's rules for `vkQueuePresentKHR` (WSI chapter, "Frame
+  Attribution", revision 3): a present belongs to the presentID of an open
+  `OUT_OF_BAND_PRESENT_START`, else to the most recent `PRESENT_START` no present took yet,
+  else to no frame. The spec says the marker presentID is unrelated to `VkPresentIdKHR`, so
+  the layer never relies on them matching (DXVK's do; vkd3d-proton's are the app's frame id ×
+  10000 and generated presents get the next free id).
+- **Frame counting** (the FG multiplier): while the app calls `vkLatencySleepNV` (the spec:
+  once per application frame, before input), the first present on the HUD's swapchain after
+  each sleep starts a frame and the others are further presents; else, while present markers
+  flow, by attribution (the first present attributed to a presentID starts it); else nothing
+  is counted and no number is shown. Sleeps come first because they're one per frame by
+  contract even when a translation layer's marker mapping breaks (see Pharos). Present records
+  carry `FLAG_REAL` (first of a frame) or `FLAG_GENERATED` while counting; with DLSS-G the
+  generated frame is presented before the real one, so the flag marks "first present after
+  the frame began", which counts right but isn't a per-image truth.
+- **Layer order**: Smooth Motion (`VK_LAYER_NV_present`) and lsfg-vk sit above Sight
+  (`ABOVE_SIGHT`), so their frames never reach the layer: the multiplier is the app's own
+  (DLSS-G, MFG, a mod's). With Smooth Motion on the HUD shows `Smooth Motion (driver)` instead
+  of a number, and presented FPS is the game's presents, not the display's.
+- **`VkPresentId2KHR`**: newer DXVK chains `VK_KHR_present_id2`'s struct instead of
+  `VkPresentIdKHR` when the driver has it; the present hook now reads either (same layout).
+- **Timings** (`vkGetLatencyTimingsNV`): the spec says it returns "the newest collected latency
+  data" and nothing about whether a read consumes it, so the layer reads only when
+  `QUIVER_SIGHT_REFLEX_TIMINGS=1` (HUD setting `reflex_timings`), on its heartbeat thread
+  (4 Hz), up to 64 reports, using each presentID once. Destroying a swapchain or device takes
+  the same lock as the read, so it never queries a dying swapchain. On the RTX 5070 Laptop
+  (driver 620.70.06) two reads in a row return the same 64 reports, and the app's own reads
+  still get theirs with the layer reading too (tests/vulkan_reflex.rs): non-destructive there,
+  but not promised by the spec, so it stays opt-in.
+- **Status block**: `qv_layer_status` grows from 256 to 336 bytes (older readers read the
+  first 256; a shorter block from an older layer reads as zeros): `reflex_flags`
+  (`QV_REFLEX_MODE_SET`, `_LOW_LATENCY`, `_BOOST`, `_MARKERS` and `_SLEEPING` (within the last
+  second), `_COUNTING_SLEEP`, `_COUNTING_MARKERS`, `_OUT_OF_BAND`, `_TIMINGS`),
+  `reflex_min_interval_us`, cumulative `reflex_markers`, `reflex_sleeps`, `app_frames`,
+  `app_presents`, `pc_latency_frames`/`_sum_us`, `render_latency_frames`/`_sum_us`, for the
+  HUD's target swapchain (a new swapchain starts from 0; quiverd treats a counter going back
+  as a reset). Aggregates rather than per-frame ring records, so a quiverd from before this
+  never sees records it would count as invalid. quiverd turns counter deltas into gauges at
+  the status block's 4 Hz.
+
+#### DLSS: what's observable (and what isn't)
+
+NGX runs on the Windows side, and dxvk-nvapi stubs `NvAPI_NGX_GetNGXOverrideState`, so no API
+tells the launcher the live preset. What exists:
+
+- **The DLLs in the process** (always on): Wine maps PE DLLs from their files, so
+  `/proc/<pid>/maps` names the `nvngx_dlss*.dll` (or updater `.bin`) the game loaded; its
+  version resource gives the version (310.9.16 for AC Origins' and Pharos's copies, 310.9.0 for
+  the driver's `nvngx_dlssd.dll`). Cheap: a maps read every few seconds and one file read per
+  new path.
+- **NGX's own log** (opt-in, HUD setting `ngx_log`): NGX reads `__NGX_LOG_LEVEL`,
+  `__NGX_ENABLE_OVERRIDE_LOG_PATH` and `__NGX_LOG_PATH_OVERRIDE` from the environment (strings
+  in the driver's `_nvngx.dll` 32.0.16.2114 and `nvngx_dlss.dll` 310.9.16; the DLSS
+  programming guide documents `__NGX_LOG_LEVEL=1` for Linux), and Wine passes the Unix
+  environment through. quiverd sets level 1 and the path to `Z:\dev\shm\quiver-<uid>\<session>\ngx\`
+  (in the session dir, so it works the same for Quiver and Steam launches and goes away with
+  the session); a launch that sets any of them keeps its own. The log files are `nvngx.log`
+  (core) and `nvngx_<snippet>_*.log`; quiverd parses only fixed lines (taken from the
+  snippet's format strings) and the latest feature creation wins. **Unverified**: which lines
+  print at level 1 rather than 2, whether the preset prints as `K` or `Preset_K` (the parser
+  takes either), and the cost. Level 1 is expected to log at feature creation only (the
+  per-evaluate strings look verbose-only), but it's off by default until a live run shows the
+  files' growth. Pharos sets the same variables itself when its `fg.ngx_log` option is on
+  (inside the process, so its directory wins).
+- **The DRS override** a launch requests (Tweaks' `dlss.sr.model` / `dlss.sr.scale`, or the
+  person's `DXVK_NVAPI_DRS_*`): shown as `REQ`, labelled requested. Tweaks' existing evidence
+  (dxvk-nvapi's `<-NvAPI_DRS_GetSetting (0x10e41df3/…): OK`) still says whether NGX asked for
+  it.
+- Not observable without the log: the live preset, quality mode and render resolution. The
+  DLSS on-screen indicator (`dlss.indicator` tweak) shows them to the person only.
+
+#### Pharos (AC Origins) through the agnostic sources
+
+Read in Pharos's source (`src/reflex/reflex.cpp`, `src/proxy.cpp`, `src/fg/fg_d3d12.cpp`):
+Pharos hooks the game's DXGI `Present`, calls NvAPI on the game's **D3D11** device
+(`SetSleepMode`, `Sleep` once per game Present on a sleeper thread, markers with one frame id
+per game Present), runs DLSS-G on its own vkd3d-proton D3D12 device, and presents the
+generated and real frames through the **game's DXGI swapchain**, i.e. DXVK's
+`vkQueuePresentKHR` (on its present thread with `fg.present_thread`).
+
+| | Observable? |
+|---|---|
+| Reflex mode, boost, cap | yes: DXVK applies Pharos's sleep mode with `vkSetLatencySleepModeNV`. With `reflex.limiter = cpu` Pharos caps with its own CPU wait and sets no interval: no `CAP` (the cap is the mod's own; presented FPS shows its effect) |
+| FG multiplier, base FPS | yes while Reflex sleeps: one `vkLatencySleepNV` per game frame, two presents per sleep on DXVK's swapchain (the second Pharos device never presents). During Pharos's first 240 frames, after a sleep overrun (its watchdog skips sleeps) and with `reflex.mode = off`, there are no sleeps: **no FG number** (gap: DXVK forwards markers only with Reflex, so nothing agnostic delimits game frames then) |
+| PC latency | uncertain: DXVK maps one app frame id to one of its own frame ids per Present, and Pharos's two presents per game frame make DXVK remap and reset its tracking (`Reflex: Expected internal frame ID …`), which can suppress the markers it forwards. When they arrive `PC` shows; when not, it's hidden |
+| Game to render | with `reflex_timings` on, when the driver has reports for DXVK's frames (same caveat) |
+| DLSS DLL, preset, quality, resolution | the DLL always (the game folder's `nvngx_dlss.dll`, and `nvngx_dlssg.dll` once FG loads); the rest with `ngx_log` (Pharos creates the SR feature through NGX like a game) |
+
+What Pharos alone can say (its FG on/off/failed state, dropped generated frames, its own
+latency report, its auto-cap) stays in `aco-dlss.*` and the mod's catalog entries; the Full
+preset doesn't show them (a person's layout can).
+
+#### HUD
+
+- **Compact**: `… │ DLSS K 1280×800 FG 2.0× LAT 18 ms PC 17 ms` (and `FG Smooth Motion (driver)`).
+- **Standard**: the latency row is `LAT <game to render> PC <PC latency>` (the one NVIDIA item
+  added; FG shows as `FPS 79 → 158` in the first row when the layer counts frames).
+- **Full** gains two rows after Standard's: `RFX boost CAP 120 FG 2.0×` (or `FG Smooth Motion
+  (driver)`), and `SR Perf Transformer DLL 310.9.16 FG 310.9.16 REQ K`. Full is now 15 rows
+  (fixed 320 × 380 at scale 1 with a panel); values past the width are truncated as everywhere.
+- Rows hide by themselves: no NVIDIA GPU or no Reflex → no `nvidia` producer; Reflex off →
+  `RFX` is gated on its own value and the cap is cleared; no DLSS → the DLSS row is empty.
+- quiverd's headline subscription (the app's live strip) adds `latency.pc` and
+  `nv.reflex.mode`; the CLI's `quiver perf watch` line adds `PC`.
+- Steam games through `quiver steam-run` and Ubisoft launches share the session path: the
+  layer, the maps scan and the NGX dir behave the same; the DRS request is read from each
+  launch's environment (Tweaks compile before perf on both routes).
+
+#### Verification
+
+- Unit tests: attribution, sleep and marker counting (2×, 4× with out-of-band markers),
+  latency, timings de-duplication (`latency.rs`); status block layout and the C header
+  (`quiver-perf`); the producer, the DRS parser, maps paths, PE versions with a false
+  signature, NGX lines, the NGX env (`nvidia.rs`); generic roles refusing a mod and falling
+  back when counting stops (`registry.rs`); a fake layer's status block end to end through the
+  hub (`tests.rs`); presets with the new rows (`hud.rs`, `layout.rs`).
+- Opt-in on real hardware: `cargo test -p quiver-sight-layer --test vulkan_reflex -- --ignored
+  --nocapture` (NVIDIA GPU, Xvfb). On the RTX 5070 Laptop, 620.70.06: flags `0x13f`, cap
+  8333 µs, 237 frames / 473 presents (2.0×), PC latency 16.8 ms against the driver's
+  game-to-render 17.5 ms; 4.0× with out-of-band markers and no sleeps; nothing counted with
+  the extension enabled but unused; the app's two timing reads identical.
+
+#### Follow-ups
+
+- Confirm the NGX log lines and cost in a live run (the parser is built from format strings).
+- `measured` Tweaks effects for the DLSS override (`REQ K` vs the logged preset).
+- Pharos's FG ratio without Reflex sleeps; a per-image real/generated tint in the graph
+  (needs presentation order, not counting).
+- The compositor chains `VkLatencySubmissionPresentIdNV` with the present's `VkPresentIdKHR`;
+  under revision 3's explicit attribution that equals the marker presentID only for DXVK.
+  Harmless so far (vkd3d-proton already attributes explicitly), but it should take the
+  attributed presentID instead.
 
 ---
 
