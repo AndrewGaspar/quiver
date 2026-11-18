@@ -66,18 +66,16 @@ pub fn render(target: &Target, icon: Option<&Path>) -> String {
     s
 }
 
-/// Write (or rewrite) the entry. The icon is fetched and converted on first use; without
-/// one (no `icon_image`, or the CDN unreachable) the entry uses a generic games icon.
+/// Write (or rewrite) the entry. The icon is fetched and converted on first use
+/// ([`art::export_icon`]); without one (no art, or the CDN unreachable) the entry uses a
+/// generic games icon.
 pub async fn export(paths: &Paths, target: &Target) -> Result<ExportRecord> {
-    let icon = match &target.art.icon {
-        Some(file) => match art::icon_png(&paths.icons(), file).await {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!("icon for {}: {e:#}", target.key);
-                None
-            }
-        },
-        None => None,
+    let icon = match art::export_icon(&paths.icons(), &paths.art(), &target.art).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("icon for {}: {e:#}", target.key);
+            None
+        }
     };
     let text = render(target, icon.as_deref());
     let file = path(paths, &target.key);
@@ -159,6 +157,30 @@ mod tests {
         let t = Target { key: ExportKey { game: quiver_api::GameRef::ubisoft(1651), profile_id: Some("p7f3k2q".into()) }, ..t };
         assert!(render(&t, None).contains(" play 1651 --profile-id p7f3k2q\n"));
         assert_eq!(path(&Paths { data_home: "/d".into(), home: "/h".into() }, &t.key), Path::new("/d/applications/quiver-1651-p7f3k2q.desktop"));
+    }
+
+    #[tokio::test]
+    async fn epic_game_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths { data_home: tmp.path().join("data"), home: tmp.path().join("home") };
+        let t = crate::exports::steam::tests::epic_target(&paths);
+        let rec = export(&paths, &t).await.unwrap();
+        let file = paths.data_home.join("applications/quiver-epic-Hornbill.desktop");
+        assert_eq!((rec.path.as_path(), rec.key.as_str(), rec.game), (file.as_path(), "quiver:epic:Hornbill", t.key.game));
+        let icon = paths.icons().join(format!("{}-icon.png", art::url_stem("https://cdn1.epicgames.com/offer/fixture/tall")));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!(
+                "[Desktop Entry]\nType=Application\nVersion=1.5\nName=The Alto Collection\nComment=Play with Quiver\n\
+                 Exec=/home/u/.local/bin/quiver play epic:Hornbill\nIcon={}\nTerminal=false\nCategories=Game;\n\
+                 StartupWMClass=alto.exe\nX-Quiver-Id=quiver:epic:Hornbill\n",
+                icon.display()
+            )
+        );
+        assert!(icon.is_file());
+        assert_eq!(list(&paths)[0].state, ExportState::Ok);
+        assert!(remove(&paths, &t.key).unwrap());
+        assert!(!file.exists() && list(&paths).is_empty());
     }
 
     #[tokio::test]

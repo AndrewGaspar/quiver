@@ -155,7 +155,7 @@ pub enum GlobalCmd {
 #[derive(Clone, Debug)]
 pub enum ConfirmAction {
     SignOut { user_id: String, name: String },
-    RemoveExport { kind: ExportKind, product_id: Gid },
+    RemoveExport { kind: ExportKind, game: Gid },
     /// Close Steam, write staged changes, start it again (`quiver steam restart`).
     RestartSteam,
     /// Start a game with unsaved launch-options edits: save them first (the action) or
@@ -499,7 +499,6 @@ impl Quiver {
                 let Some(Ok(list)) = &self.ui.exports else { return };
                 let Some(x) = list.get(i).cloned() else { return };
                 let r = &x.record;
-                let Some(product_id) = r.game.as_ubisoft() else { return };
                 let (what, cli, body) = match r.kind {
                     ExportKind::Desktop => (
                         ".desktop entry",
@@ -524,7 +523,7 @@ impl Quiver {
                     body: body.into(),
                     confirm: "Remove".into(),
                     cli: Some(cli.into()),
-                    action: ConfirmAction::RemoveExport { kind: r.kind, product_id: Gid::from(product_id) },
+                    action: ConfirmAction::RemoveExport { kind: r.kind, game: Gid(r.game) },
                     alt: None,
                     selected: 0,
                 });
@@ -565,7 +564,7 @@ impl Quiver {
             }
             GlobalCmd::ExportSteam(id) => {
                 let name = self.game_name(id);
-                let req = Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: None };
+                let req = Request::ExportSteam { game: id.0.into(), remove: false, steam_user: None };
                 self.call::<quiver_api::exports::SteamExportResult, _>(req, cx, move |this, r, cx| {
                     match r {
                         Ok(r) if r.staged => this.show_toast(
@@ -588,7 +587,7 @@ impl Quiver {
             GlobalCmd::SteamRestart => self.ask_restart_steam(cx),
             GlobalCmd::ExportDesktop(id) => {
                 let name = self.game_name(id);
-                let req = Request::ExportDesktop { product_id: id.pid(), remove: false };
+                let req = Request::ExportDesktop { game: id.0.into(), remove: false };
                 self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
                     match r {
                         Ok(_) => this.show_toast(format!("Added {name} to the app launcher"), cx),
@@ -633,10 +632,10 @@ impl Quiver {
                 });
             }
             ConfirmAction::RestartSteam => self.restart_steam(cx),
-            ConfirmAction::RemoveExport { kind, product_id } => {
+            ConfirmAction::RemoveExport { kind, game } => {
                 let req = match kind {
-                    ExportKind::Desktop => Request::ExportDesktop { product_id: product_id.pid(), remove: true },
-                    ExportKind::Steam => Request::ExportSteam { product_id: product_id.pid(), remove: true, steam_user: None },
+                    ExportKind::Desktop => Request::ExportDesktop { game: game.0.into(), remove: true },
+                    ExportKind::Steam => Request::ExportSteam { game: game.0.into(), remove: true, steam_user: None },
                 };
                 self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
                     match r {

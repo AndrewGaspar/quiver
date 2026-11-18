@@ -37,6 +37,8 @@ use crate::err_text;
 pub enum DlCmd {
     /// The verify dialog (last report, verify, repair).
     Verify(Gid),
+    /// The uninstall dialog (`uninstall.rs`).
+    Uninstall(Gid),
     /// The welcome flow from its start, or at "Bring in existing installs".
     Welcome,
     Import,
@@ -108,6 +110,7 @@ pub enum DlDialog {
         /// A verify started from here.
         job: Option<u64>,
     },
+    Uninstall(super::uninstall::UninstallDialog),
 }
 
 /// A control in a dialog, in focus order.
@@ -116,6 +119,8 @@ pub enum DCtl {
     Lang(usize),
     Steam,
     Desktop,
+    /// Uninstall: also delete the compatibility folder.
+    Prefix,
     Cancel,
     Confirm,
     Verify,
@@ -331,7 +336,7 @@ impl Quiver {
         let Some(after) = self.dl.after.remove(&id) else { return };
         let name = self.game_name(id);
         if after.desktop {
-            self.call::<serde_json::Value, _>(Request::ExportDesktop { product_id: id.pid(), remove: false }, cx, move |this, r, cx| {
+            self.call::<serde_json::Value, _>(Request::ExportDesktop { game: id.0.into(), remove: false }, cx, move |this, r, cx| {
                 if let Err(e) = r {
                     this.show_toast(format!(".desktop entry: {}", err_text(&e)), cx);
                 }
@@ -339,7 +344,7 @@ impl Quiver {
             });
         }
         if after.steam {
-            self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: None }, cx, move |this, r, cx| {
+            self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: false, steam_user: None }, cx, move |this, r, cx| {
                 match r {
                     Ok(r) if r.staged => this.show_toast(
                         format!("{name} is installed. Its Steam shortcut shows after Steam restarts; Quiver won't restart Steam without asking"),
@@ -414,6 +419,7 @@ impl Quiver {
     pub fn run_dl(&mut self, c: DlCmd, cx: &mut Context<Self>) {
         match c {
             DlCmd::Verify(id) => self.open_verify_dialog(id, cx),
+            DlCmd::Uninstall(id) => self.open_uninstall_dialog(id, cx),
             DlCmd::Welcome => self.open_welcome(crate::ui::welcome::Step::SignIn, cx),
             DlCmd::Import => self.open_import(cx),
         }
@@ -1579,6 +1585,8 @@ impl Quiver {
         }
         let steam = self.dl.setup.as_ref().and_then(|s| s.first_run.as_ref()).is_none_or(|f| f.steam_on_install);
         let steam_there = matches!(&self.ui.steam, Some(Ok(s)) if s.root.is_some());
+        // Steam already lists a game it has a copy of: no second entry unless asked for.
+        let steam = steam && self.game(id).is_none_or(|g| g.steam().is_none());
         self.nav.close_overlay();
         self.dl.dialog = Some(DlDialog::Install { id, language: None, preview: None, after: After { steam: steam && steam_there, desktop: true } });
         self.dl.dsel = usize::MAX;
@@ -1662,6 +1670,7 @@ impl Quiver {
                 }
                 v
             }
+            Some(DlDialog::Uninstall(_)) => Self::UNINSTALL_CONTROLS.to_vec(),
         }
     }
 
@@ -1670,13 +1679,18 @@ impl Quiver {
         if self.dl.dsel == usize::MAX { n.saturating_sub(1) } else { self.dl.dsel.min(n.saturating_sub(1)) }
     }
 
-    fn dl_dialog_press(&mut self, c: DCtl, cx: &mut Context<Self>) {
+    pub(super) fn dl_dialog_press(&mut self, c: DCtl, cx: &mut Context<Self>) {
         let ctl = self.dl_dialog_controls();
         if let Some(i) = ctl.iter().position(|x| *x == c) {
             self.dl.dsel = i;
         }
         if c == DCtl::Cancel {
             self.dl.dialog = None;
+            cx.notify();
+            return;
+        }
+        if matches!(self.dl.dialog, Some(DlDialog::Uninstall(_))) {
+            self.uninstall_press(c, cx);
             cx.notify();
             return;
         }
@@ -1918,8 +1932,13 @@ impl Quiver {
                 };
                 (id, format!("Verify {name}"), sub, body, Some(format!("quiver verify {id}{}", if bad { " --repair" } else { "" })), primary)
             }
+            Some(DlDialog::Uninstall(d)) => {
+                let (title, sub, body, cli, primary) = self.uninstall_view(th, d, &f, cx);
+                (d.id, title, sub, body, Some(cli), Some(primary))
+            }
             None => return div().into_any_element(),
         };
+        let danger = matches!(self.dl.dialog, Some(DlDialog::Uninstall(_)));
 
         let thumb = self.thumb(th, id, 40., 47., cx);
         let width = self.dialog_width(640.);
@@ -1941,9 +1960,29 @@ impl Quiver {
         }
         if let Some((i, label, enabled)) = primary {
             let c = *ctl.last().unwrap_or(&DCtl::Confirm);
-            buttons = buttons.child(
+            // A destructive action is red, as in the other confirmations.
+            let b = if danger {
+                div()
+                    .id("dlg-ok")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(7.))
+                    .h(px(32.))
+                    .px(px(13.))
+                    .rounded(px(8.))
+                    .bg(th.bad)
+                    .text_color(gpui::white())
+                    .font_weight(SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .child(icon(i, 15., gpui::white()))
+                    .child(label)
+            } else {
                 button("dlg-ok", th, Kind::Primary, Size::Medium, Some(i), label)
-                    .when(!enabled, |d| d.opacity(0.5))
+            };
+            buttons = buttons.child(
+                b.when(!enabled, |d| d.opacity(0.5))
                     .focus_ring(f(c), th, 8.)
                     .on_click(cx.listener(move |this, _, _, cx| this.dl_dialog_press(c, cx))),
             );

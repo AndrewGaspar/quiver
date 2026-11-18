@@ -19,7 +19,7 @@ pub(crate) mod tweaks;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
-pub use page::{ExportAction, GamePage, LaunchDraft, Load, PlayAfter, checkbox, settings_from_reply, toggle};
+pub use page::{ExportAction, GamePage, LaunchDraft, Load, PlayAfter, checkbox, kv, settings_from_reply, toggle};
 
 use super::library::{play_button, primary_label};
 use super::{

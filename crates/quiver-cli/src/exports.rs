@@ -12,7 +12,7 @@ use quiver_api::exports::{
 use quiver_api::{Client, GameRef, Request};
 use quiver_core::exports::{Paths, steam};
 
-use crate::{dev, print_json, resolve};
+use crate::{dev, print_json, resolve_installable};
 
 #[derive(Subcommand)]
 pub enum ExportAction {
@@ -166,13 +166,14 @@ async fn patch(client: &Client, game: &str, user: Option<String>, undo: bool) ->
     Ok(())
 }
 
-/// A game by name or id. Removing works by id even when the library can't be fetched.
-async fn product(client: &Client, game: &str) -> Result<(u32, String)> {
-    match resolve(client, game).await {
-        Ok(e) => Ok((e.product_id, e.name.clone())),
-        Err(err) => match game.parse::<u32>() {
-            Ok(id) => Ok((id, id.to_string())),
-            Err(_) => Err(err),
+/// A game Quiver installs (Ubisoft, Epic), by name or ref. Removing works by ref even when
+/// the library can't be fetched.
+async fn exported_game(client: &Client, game: &str) -> Result<(GameRef, String)> {
+    match resolve_installable(client, game).await {
+        Ok(e) => Ok((e.game, e.name)),
+        Err(err) => match GameRef::parse_ref(game) {
+            Some(r) => Ok((r, r.key())),
+            None => Err(err),
         },
     }
 }
@@ -207,23 +208,23 @@ pub(crate) async fn pick_user(client: &Client, user: Option<String>) -> Result<O
 pub async fn export(client: &Client, action: ExportAction) -> Result<()> {
     match action {
         ExportAction::Desktop { game, remove } => {
-            let (product_id, name) = product(client, &game).await?;
+            let (game, name) = exported_game(client, &game).await?;
             if remove {
-                let v: serde_json::Value = client.call(Request::ExportDesktop { product_id, remove }).await?;
+                let v: serde_json::Value = client.call(Request::ExportDesktop { game: game.into(), remove }).await?;
                 if v["removed"].as_bool() == Some(true) {
                     println!("removed {}", v["path"].as_str().unwrap_or_default());
                 } else {
                     println!("{name} had no .desktop entry");
                 }
             } else {
-                let r: ExportRecord = client.call(Request::ExportDesktop { product_id, remove }).await?;
+                let r: ExportRecord = client.call(Request::ExportDesktop { game: game.into(), remove }).await?;
                 println!("{}: wrote {}", r.name, r.path.display());
             }
         }
         ExportAction::Steam { game, remove, user } => {
-            let (product_id, name) = product(client, &game).await?;
+            let (game, name) = exported_game(client, &game).await?;
             let steam_user = if remove { user } else { pick_user(client, user).await? };
-            let r: SteamExportResult = client.call(Request::ExportSteam { product_id, remove, steam_user }).await?;
+            let r: SteamExportResult = client.call(Request::ExportSteam { game: game.into(), remove, steam_user }).await?;
             let what = if remove { "removed the Steam shortcut for" } else { "added a Steam shortcut for" };
             println!("{what} {name} (Steam user {}, appid {})", r.steam_user, r.appid);
             if r.applied_staged > 0 {

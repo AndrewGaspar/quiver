@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use quiver_api::art::{ArtRef, ArtSlot};
 use serde::{Deserialize, Serialize};
 
 use super::vdf::{ShortcutFields, Shortcuts};
@@ -233,26 +234,22 @@ pub(crate) fn fields_hash(f: &ShortcutFields) -> String {
 /// Steam's custom-art names in `userdata/<id>/config/grid/`, keyed by the shortcut's
 /// 32-bit appid in decimal (current clients; the old Big Picture 64-bit id is unused):
 ///
-/// | file | what | Steam's size | from Ubisoft |
-/// |---|---|---|---|
-/// | `<appid>p.<ext>` | portrait capsule (library grid) | 600x900 | `thumb_image` (box art) |
-/// | `<appid>.<ext>` | wide capsule (recent games, Big Picture) | 920x430 | `background_image` |
-/// | `<appid>_hero.<ext>` | hero banner behind the game page header | 1920x620 | `background_image` |
-/// | `<appid>_logo.<ext>` | logo drawn over the hero | any, transparent PNG | `logo_image` |
+/// | file | what | Steam's size | from Ubisoft | from Epic |
+/// |---|---|---|---|---|
+/// | `<appid>p.<ext>` | portrait capsule (library grid) | 600x900 | `thumb_image` (box art) | `DieselGameBoxTall` |
+/// | `<appid>.<ext>` | wide capsule (recent games, Big Picture) | 920x430 | `background_image` | `DieselGameBox` |
+/// | `<appid>_hero.<ext>` | hero banner behind the game page header | 1920x620 | `background_image` | `DieselGameBox` |
+/// | `<appid>_logo.<ext>` | logo drawn over the hero | any, transparent PNG | `logo_image` | `DieselGameBoxLogo` |
 ///
-/// Steam accepts `.png` and `.jpg` for each (and `_icon` for the icon, which we set in
-/// the shortcut's `icon` field instead). Files keep the CDN's extension; other extensions
-/// for the same slot are removed so a stale one can't shadow ours.
-pub fn grid_files(appid: u32, art: &quiver_api::Art) -> Vec<(String, String)> {
-    let slots: [(&str, &Option<String>); 4] =
-        [("p", &art.thumb), ("", &art.background), ("_hero", &art.background), ("_logo", &art.logo)];
-    slots
+/// Each slot takes [`art::pick`]'s image (the config's file, else the games API's, else
+/// Epic's). Steam accepts `.png` and `.jpg` for each (and `_icon` for the icon, which we
+/// set in the shortcut's `icon` field instead). Files keep the cached image's extension;
+/// other extensions for the same slot are removed so a stale one can't shadow ours.
+/// Returns each file's name without its extension, and its image.
+pub fn grid_files(appid: u32, art: &quiver_api::Art) -> Vec<(String, ArtRef)> {
+    [("p", ArtSlot::Tile), ("", ArtSlot::Hero), ("_hero", ArtSlot::Hero), ("_logo", ArtSlot::Logo)]
         .into_iter()
-        .filter_map(|(suffix, file)| {
-            let file = file.as_ref()?;
-            let ext = Path::new(file).extension()?.to_str()?.to_ascii_lowercase();
-            Some((format!("{appid}{suffix}.{ext}"), file.clone()))
-        })
+        .filter_map(|(suffix, slot)| Some((format!("{appid}{suffix}"), art::pick(art, slot)?)))
         .collect()
 }
 
@@ -261,15 +258,17 @@ const GRID_EXTS: [&str; 3] = ["png", "jpg", "jpeg"];
 
 async fn write_grid(paths: &Paths, grid: &Path, appid: u32, art: &quiver_api::Art) -> Result<()> {
     std::fs::create_dir_all(grid)?;
-    for (name, file) in grid_files(appid, art) {
-        let src = match art::fetch(&paths.art(), &file).await {
+    for (stem, r) in grid_files(appid, art) {
+        let src = match art::fetch_ref(&paths.art(), &r).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!("Steam art {file}: {e:#}");
+                tracing::warn!("Steam art {r:?}: {e:#}");
                 continue;
             }
         };
-        let (stem, ext) = name.rsplit_once('.').unwrap();
+        let Some(ext) = src.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase) else { continue };
+        let (stem, ext) = (stem.as_str(), ext.as_str());
+        let name = format!("{stem}.{ext}");
         for other in GRID_EXTS.iter().filter(|&&x| x != ext) {
             let _ = std::fs::remove_file(grid.join(format!("{stem}.{other}")));
         }
@@ -438,10 +437,7 @@ pub fn staged_descriptions(paths: &Paths) -> Vec<String> {
 /// Steam is running right now ([`is_running`]); if so the shortcut is staged.
 pub async fn export(paths: &Paths, steam: &Steam, user: &str, target: &Target, running: bool) -> Result<SteamExportResult> {
     let appid = target.key.steam_appid();
-    let icon = match &target.art.icon {
-        Some(file) => art::icon_png(&paths.icons(), file).await.map_err(|e| tracing::warn!("icon: {e:#}")).ok(),
-        None => None,
-    };
+    let icon = art::export_icon(&paths.icons(), &paths.art(), &target.art).await.map_err(|e| tracing::warn!("icon: {e:#}")).ok().flatten();
     write_grid(paths, &steam.grid_dir(user), appid, &target.art).await?;
     let f = fields(target, icon.as_deref(), steam.flatpak);
     let shortcuts = steam.shortcuts_path(user);
@@ -590,7 +586,7 @@ pub fn restart_steam(paths: &Paths, steam: &Steam, timeout: Duration) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::exports::{ExportState, list};
 
@@ -715,8 +711,18 @@ mod tests {
             icon: None,
             ..Default::default()
         };
-        let names: Vec<String> = grid_files(42, &art).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["42p.jpg", "42.jpg", "42_hero.jpg", "42_logo.png"]);
+        let files = grid_files(42, &art);
+        let asset = |f: &str| ArtRef::Asset(f.into());
+        assert_eq!(
+            files,
+            [("42p".into(), asset("a.jpg")), ("42".into(), asset("b.JPG")), ("42_hero".into(), asset("b.JPG")), ("42_logo".into(), asset("c.png"))]
+        );
+        // Epic's catalog art where the config has none (an Epic game).
+        let art = quiver_api::Art {
+            epic: quiver_api::art::SpaceArt { tile: Some("https://cdn1.epicgames.com/t.jpg".into()), logo: Some("http://insecure/l.png".into()), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(grid_files(42, &art), [("42p".to_owned(), ArtRef::Url("https://cdn1.epicgames.com/t.jpg".into()))]);
     }
 
     #[tokio::test]
@@ -779,6 +785,62 @@ mod tests {
         assert_eq!(std::fs::read(&vdf_path).unwrap(), before);
         assert!(std::fs::read_dir(&grid).unwrap().next().is_none());
         assert!(list(&paths).is_empty());
+    }
+
+    /// An Epic game: Epic's catalog art (cached, so nothing is fetched), launched by ref.
+    pub(crate) fn epic_target(paths: &Paths) -> Target {
+        let url = |n: &str| format!("https://cdn1.epicgames.com/offer/fixture/{n}");
+        let art = quiver_api::Art {
+            epic: quiver_api::art::SpaceArt {
+                tile: Some(url("tall")),
+                hero: Some(url("wide.jpg")),
+                logo: Some(url("logo.png")),
+                icon: None,
+            },
+            ..Default::default()
+        };
+        std::fs::create_dir_all(paths.art()).unwrap();
+        // The tall art is a real image: the icon is made from it.
+        std::fs::write(paths.art().join(format!("{}.png", art::url_stem(&url("tall")))), art::tests::fixture_png(30, 45)).unwrap();
+        std::fs::write(paths.art().join(format!("{}.jpg", art::url_stem(&url("wide.jpg")))), b"wide").unwrap();
+        std::fs::write(paths.art().join(format!("{}.png", art::url_stem(&url("logo.png")))), b"logo").unwrap();
+        Target {
+            key: ExportKey::for_game(quiver_api::GameRef::new(quiver_api::StoreId::Epic, "Hornbill").unwrap()),
+            name: "The Alto Collection".into(),
+            art,
+            wm_class: Some("alto.exe".into()),
+            quiver_exe: "/home/u/.local/bin/quiver".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn epic_game_shortcut() {
+        let (_tmp, paths, steam) = fixture();
+        let t = epic_target(&paths);
+        let appid = t.key.steam_appid();
+        assert_eq!(appid, crc32fast::hash(b"quiver:epic:Hornbill") | 0x8000_0000);
+        let r = export(&paths, &steam, "1001", &t, false).await.unwrap();
+        assert_eq!((r.key.as_str(), r.appid), ("quiver:epic:Hornbill", appid));
+        let sc = Shortcuts::parse(&std::fs::read(steam.shortcuts_path("1001")).unwrap()).unwrap();
+        let f = sc.fields(appid).unwrap();
+        assert_eq!(f.app_name, "The Alto Collection");
+        assert_eq!(f.exe, "\"/home/u/.local/bin/quiver\"");
+        assert_eq!(f.launch_options, "play epic:Hornbill");
+        // No icon in Epic's catalog: the box art on a square.
+        let icon = paths.icons().join(format!("{}-icon.png", art::url_stem("https://cdn1.epicgames.com/offer/fixture/tall")));
+        assert_eq!(f.icon, icon.to_string_lossy());
+        let img = image::open(&icon).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 256));
+        let grid = steam.grid_dir("1001");
+        assert!(grid.join(format!("{appid}p.png")).is_file());
+        assert_eq!(std::fs::read(grid.join(format!("{appid}.jpg"))).unwrap(), b"wide");
+        assert_eq!(std::fs::read(grid.join(format!("{appid}_hero.jpg"))).unwrap(), b"wide");
+        assert_eq!(std::fs::read(grid.join(format!("{appid}_logo.png"))).unwrap(), b"logo");
+        let l = list(&paths);
+        assert_eq!((l.len(), l[0].state, l[0].record.game), (1, ExportState::Ok, t.key.game));
+        remove(&paths, &steam, None, &t.key, false).unwrap();
+        assert!(Shortcuts::parse(&std::fs::read(steam.shortcuts_path("1001")).unwrap()).unwrap().find(appid).is_none());
+        assert!(std::fs::read_dir(&grid).unwrap().next().is_none());
     }
 
     #[tokio::test]

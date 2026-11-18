@@ -272,10 +272,20 @@ pub(crate) async fn uninstall(d: &Arc<Daemon>, source: &str, game: GameRef, remo
     }
     d.downloads.ensure_idle(game)?;
     let i = d.epic.uninstall(&a, remove_prefix)?;
-    d.log_activity_game(source, format!("uninstalled {}{}", i.title, if remove_prefix { " (and its compatibility folder)" } else { "" }), Some(game));
+    let exports_removed = crate::exports::remove_game_exports(game);
+    d.log_activity_game(
+        source,
+        format!(
+            "uninstalled {}{}{}",
+            i.title,
+            if remove_prefix { " (and its compatibility folder)" } else { "" },
+            crate::exports::removed_note(&exports_removed)
+        ),
+        Some(game),
+    );
     *d.library.lock().await = None;
     d.emit(Event::LibraryChanged);
-    Ok(json!({"name": i.title, "dir": i.dir, "prefix": i.prefix}))
+    Ok(json!(quiver_api::UninstallResult { name: i.title, dir: i.dir, prefix: i.prefix, prefix_removed: remove_prefix, exports_removed }))
 }
 
 /// `Request::Import` for an Epic game: adopt an existing folder, checked against the

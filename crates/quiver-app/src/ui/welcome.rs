@@ -376,7 +376,7 @@ impl Quiver {
             .into_iter()
             .filter(|g| g.installed())
             .map(|g| {
-                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.game == quiver_api::GameRef::ubisoft((g.id()).pid()) && x.record.profile_id.is_none()).map(|x| x.state);
+                let st = exports.iter().find(|x| x.record.kind == ExportKind::Steam && x.record.game == g.id().0 && x.record.profile_id.is_none()).map(|x| x.state);
                 (g.id(), clean_name(&g.entry.name), st)
             })
             .collect()
@@ -624,7 +624,7 @@ impl Quiver {
         for id in ids {
             self.wc.steam_busy.insert(id.pid());
             let user = self.wc.steam_user.clone();
-            self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: user }, cx, move |this, r, cx| {
+            self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: false, steam_user: user }, cx, move |this, r, cx| {
                 this.wc.steam_busy.remove(&id.pid());
                 if let Err(e) = r {
                     this.show_toast(err_text(&e), cx);

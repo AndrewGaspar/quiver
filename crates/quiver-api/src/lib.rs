@@ -71,6 +71,24 @@ impl Game {
     }
 }
 
+/// Reply to `Request::Uninstall`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UninstallResult {
+    pub name: String,
+    /// The install folder (its files are gone).
+    pub dir: PathBuf,
+    /// The game's compatibility folder (Wine prefix).
+    #[serde(default)]
+    pub prefix: PathBuf,
+    /// The prefix was deleted too.
+    #[serde(default)]
+    pub prefix_removed: bool,
+    /// Quiver's exports of the game, removed with it: "the .desktop entry", "the Steam
+    /// shortcut", "the Steam shortcut (when Steam restarts)".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports_removed: Vec<String>,
+}
+
 /// Per-game launch settings. Every change creates a new revision in the game's history.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GameSettings {
@@ -620,12 +638,22 @@ pub enum Request {
     AccountDefault { account: String },
     /// Exports Quiver wrote, with whether each is still as written (`Vec<ExportStatus>`).
     ExportList,
-    /// Write (or with `remove`, delete) a game's .desktop entry.
-    ExportDesktop { product_id: u32, remove: bool },
+    /// Write (or with `remove`, delete) a game's .desktop entry: a game Quiver installs
+    /// (Ubisoft, Epic). A Ubisoft game goes out as `product_id`, as before; others as `game`.
+    ExportDesktop {
+        #[serde(flatten)]
+        game: game::GameField,
+        remove: bool,
+    },
     /// Add (or remove) a game's Steam shortcut. Staged if Steam is running. `steam_user`
     /// (id or name) is required when there are several Steam users and none was chosen
-    /// before; a given user is remembered.
-    ExportSteam { product_id: u32, remove: bool, steam_user: Option<String> },
+    /// before; a given user is remembered. Not for Steam's own games (Steam lists them).
+    ExportSteam {
+        #[serde(flatten)]
+        game: game::GameField,
+        remove: bool,
+        steam_user: Option<String>,
+    },
     /// Steam's users on this machine (`exports::SteamUsers`).
     SteamUsers,
     /// Write staged shortcut changes now (fails while Steam is running). Never restarts Steam.
@@ -1327,6 +1355,35 @@ mod tests {
         apply(&mut s, "env.DXVK_HUD=").unwrap();
         assert!(s.env.is_empty());
         assert!(apply(&mut s, "dll.=n").is_err());
+    }
+
+    #[test]
+    fn export_requests_take_a_game() {
+        // What clients from before game refs send still parses, and Ubisoft games still go
+        // out that way (older daemons read it).
+        let r: Request = serde_json::from_str(r#"{"method":"export_desktop","params":{"product_id":1651,"remove":false}}"#).unwrap();
+        assert!(matches!(r, Request::ExportDesktop { game, remove: false } if game == GameRef::ubisoft(1651)));
+        let r: Request =
+            serde_json::from_str(r#"{"method":"export_steam","params":{"product_id":1651,"remove":true,"steam_user":null}}"#).unwrap();
+        assert!(matches!(r, Request::ExportSteam { game, remove: true, steam_user: None } if game == GameRef::ubisoft(1651)));
+        let v = serde_json::to_value(Request::ExportDesktop { game: 1651.into(), remove: false }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "export_desktop", "params": {"product_id": 1651, "remove": false}}));
+        // Other stores' games by ref.
+        let epic = GameRef::new(StoreId::Epic, "Hornbill").unwrap();
+        let v = serde_json::to_value(Request::ExportSteam { game: epic.into(), remove: false, steam_user: Some("1001".into()) }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "export_steam", "params": {"game": "epic:Hornbill", "remove": false, "steam_user": "1001"}}));
+        let back: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, Request::ExportSteam { game, .. } if game == epic));
+        let r: Request = serde_json::from_str(r#"{"method":"export_desktop","params":{"game":"epic:Hornbill","remove":true}}"#).unwrap();
+        assert!(matches!(r, Request::ExportDesktop { game, remove: true } if game == epic));
+    }
+
+    #[test]
+    fn uninstall_reply() {
+        // Epic's reply from before `prefix_removed` and the exports.
+        let r: UninstallResult = serde_json::from_str(r#"{"name":"Alto","dir":"/g/Alto","prefix":"/p/epic-Hornbill"}"#).unwrap();
+        assert_eq!((r.name.as_str(), r.prefix_removed, r.exports_removed.len()), ("Alto", false, 0));
+        // Ubisoft's was null before; the CLI reads it as a Value either way.
     }
 
     #[test]

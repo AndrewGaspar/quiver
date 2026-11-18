@@ -223,7 +223,7 @@ impl GamePage {
     pub fn exports_for(&self, id: Gid) -> Vec<ExportStatus> {
         self.exports
             .ready()
-            .map(|l| l.iter().filter(|e| e.record.game == quiver_api::GameRef::ubisoft(id.pid()) && e.record.profile_id.is_none()).cloned().collect())
+            .map(|l| l.iter().filter(|e| e.record.game == id.0 && e.record.profile_id.is_none()).cloned().collect())
             .unwrap_or_default()
     }
 
@@ -889,7 +889,11 @@ impl Quiver {
             _ => v.push(Command {
                 icon: Icon::Gamepad,
                 label: if steam.is_some() { "Add to Steam again".into() } else { "Add to Steam".into() },
-                detail: Some(if steam.is_some() { format!("Shortcut {}", state(&steam)).into() } else { "Non-Steam shortcut with Ubisoft art".into() }),
+                detail: Some(if steam.is_some() {
+                    format!("Shortcut {}", state(&steam)).into()
+                } else {
+                    format!("Non-Steam shortcut with {} art", id.store().label()).into()
+                }),
                 cli: Some(format!("quiver export steam {id}").into()),
                 action: if installed { Cmd::Export(id, ExportAction::SteamAdd) } else { Cmd::NotYet },
                 future: !installed,
@@ -899,7 +903,7 @@ impl Quiver {
             Some(ExportState::Ok) => v.push(Command {
                 icon: Icon::AppWindow,
                 label: "Remove .desktop entry".into(),
-                detail: Some(format!("quiver-{id}.desktop in the app launcher").into()),
+                detail: Some(format!("quiver-{}.desktop in the app launcher", id.0.dir_name()).into()),
                 cli: Some(format!("quiver export desktop {id} --remove").into()),
                 action: Cmd::Export(id, ExportAction::DesktopRemove),
                 future: false,
@@ -920,6 +924,14 @@ impl Quiver {
                 detail: Some("Hash the install against its manifest; repair only what's bad".into()),
                 cli: Some(format!("quiver verify {id}").into()),
                 action: Cmd::Downloads(crate::ui::downloads::DlCmd::Verify(id)),
+                future: false,
+            });
+            v.push(Command {
+                icon: Icon::Trash,
+                label: "Uninstall…".into(),
+                detail: Some("Shows what goes first; the compatibility folder only if you ask".into()),
+                cli: Some(format!("quiver uninstall {id}").into()),
+                action: Cmd::Downloads(crate::ui::downloads::DlCmd::Uninstall(id)),
                 future: false,
             });
         }
@@ -964,7 +976,7 @@ impl Quiver {
                 });
             }
             ExportAction::SteamRemove => {
-                self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: true, steam_user: None }, cx, move |this, r, cx| {
+                self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: true, steam_user: None }, cx, move |this, r, cx| {
                     match r {
                         Ok(r) if r.staged => this.show_toast(format!("{name} leaves Steam when Steam next restarts"), cx),
                         Ok(_) => this.show_toast(format!("Removed {name} from Steam"), cx),
@@ -984,7 +996,7 @@ impl Quiver {
             }
             ExportAction::DesktopAdd | ExportAction::DesktopRemove => {
                 let remove = a == ExportAction::DesktopRemove;
-                self.call::<serde_json::Value, _>(Request::ExportDesktop { product_id: id.pid(), remove }, cx, move |this, r, cx| {
+                self.call::<serde_json::Value, _>(Request::ExportDesktop { game: id.0.into(), remove }, cx, move |this, r, cx| {
                     match r {
                         Ok(v) => {
                             let path = v.get("path").and_then(|p| p.as_str()).map(|p| crate::model::tilde(Path::new(p))).unwrap_or_default();
@@ -1000,7 +1012,7 @@ impl Quiver {
 
     fn export_steam(&mut self, id: Gid, user: Option<String>, cx: &mut Context<Self>) {
         let name = self.game(id).map(|g| g.entry.name.clone()).unwrap_or_default();
-        self.call::<SteamExportResult, _>(Request::ExportSteam { product_id: id.pid(), remove: false, steam_user: user }, cx, move |this, r, cx| {
+        self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: false, steam_user: user }, cx, move |this, r, cx| {
             match r {
                 Ok(r) if r.staged => {
                     this.load_exports(cx);
