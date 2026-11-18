@@ -1,7 +1,8 @@
 # Steam as a store in Quiver (scoping notes)
 
 Status: scoped 2026-11-16; phase 1 (local mode) built 2026-11-17 on `build/steam-local`. Section 8
-says what was built and what wasn't. Siblings, written in parallel:
+says what was built and what wasn't. Phase 2's generalised `steam-run` (settings, tweaks, HUD and
+local sessions for any Steam game, the opt-in hook) is built; see section 9. Siblings, written in parallel:
 `STORE-EPIC.md`, `STORE-GOG.md`, `STORE-EA.md` and `STORE-META.md` (the Meta VR store).
 `STORES.md` owns the cross-store architecture. This document is Steam-specific. Section 3 lists only the
 interfaces Steam needs from that architecture.
@@ -347,7 +348,8 @@ Consequences for code that already exists:
 **Phase 2: Quiver around Steam's launch.**
 
 - Generalised `steam-run` (opt-in per game): launch settings and revisions, local sessions,
-  markers (`QUIVER_*`, scope, Hyprland tag), Sight and HUD env.
+  markers (`QUIVER_*`, scope, Hyprland tag), Sight and HUD env. **Built (section 9), except the
+  scope and Hyprland tag markers.**
 - Mod profiles and save stores through the namespace. Built-in mods keyed by store id.
 - Proton per game via staged `CompatToolMapping`. Auto-update per game via the manifest.
 - Sight: session page, achievement toasts from the stats cache, Steam overlay coexistence.
@@ -534,11 +536,221 @@ install in `steam`, and `merge_libraries` drops the Steam provider's record for 
 - Flatpak Steam is found but untested.
 - Description text: there is no local source for it.
 - Achievement icons on the page. The detail carries CDN URLs, but the app doesn't draw them yet.
-- Phase 2 onwards: `steam-run` for any game, settings, mods and Sight.
+- Phase 2 onwards: `steam-run` for any game, settings and Sight are in section 9. Mods are not built yet.
 
 **Not exercised live.** `quiver play steam:<appid>` was not run, because it would start a game.
 Routing, refusals (not installed, still downloading, `--profile`) and the `rungameid` argv are
 covered by tests and by the code shared with Steam copies.
+
+## 9. As built: phase 2, any Steam game through `steam-run` (2026-11-17)
+
+**What it does.** A Steam game whose launch options run `quiver steam-run %command%` gets
+Quiver's launch plan from quiverd, the same as a Quiver launch of a Ubisoft game, as far as it
+can ride on Steam's command:
+
+- its Quiver launch settings: `env`, `wrappers` (in front of Steam's command), `args` (after
+  the game's own) and DLL overrides (merged into Steam's `WINEDLLOVERRIDES`). `proton` and
+  `language` are reported as not applied, because Steam picks them;
+- Quiver Tweaks at the global and game scopes (Steam games have no profiles), compiled by the
+  same code as a Quiver launch (`quiver_core::tweaks::plan_for`);
+- the HUD when it's enabled for the game (`quiver hud enable steam:<appid>`): the perf
+  session, its `/dev/shm` session dir and `hud.image`, `QUIVER_SIGHT=1` and the explicit
+  `VK_INSTANCE_LAYERS` order (`perf/launch.rs`, ABOVE_SIGHT), from the same `PerfHub::begin`;
+- a local play session: it shows in `quiver sessions` (`game: "steam:<appid>"`), keeps
+  quiverd from restarting while the game runs, and goes into
+  `games/steam-<appid>/playtime.jsonl` with its settings and tweak revisions and the perf
+  summary when it ends.
+
+Nothing of Steam's command is swapped. Ubisoft games' Steam copies take the path they took
+before (the bridge is swapped in) and their launch plan request is byte-identical on the wire.
+
+**How a launch goes** (`crates/quiver-cli/src/steamrun.rs`, `quiver_core::steamrun::route`):
+
+1. Route: `--product` means a Ubisoft copy. `--app <appid>` means a plain Steam game, and no
+   product is looked for. With neither, a Proton launch whose install script or prefix names a
+   Ubisoft product is a Ubisoft copy, as a hand-typed `quiver steam-run %command%` always was.
+   Anything else, Proton or native, is the Steam game in `SteamAppId`.
+2. `Request::SteamLaunchPlan { game: "steam:<appid>", perf: true, env }`. `env` is the part of
+   Steam's environment the plan needs: the keys under a fixed list of prefixes (`DXVK_`,
+   `VKD3D_`, `PROTON_`, `WINE`, `VK_`, `ENABLE_`, `DISABLE_`, `LSFG`, `NVPRESENT_`, `MANGOHUD`,
+   `OBS_VKCAPTURE`, `__GL_`, `NGX_`, `SL_`, `PROTONFIXES_`). Nothing else leaves the process.
+   With it, tweaks yield per key to what the person typed before `%command%` (their
+   `DXVK_CONFIG` is kept and Quiver's entries go after it), and the Sight layer goes below a
+   vkBasalt or lsfg-vk they turned on there.
+3. `Request::SteamSession { app_id, pid, perf_session, settings_revision }` with `steam-run`'s
+   own pid. quiverd opens a pidfd on it.
+4. `exec` of Steam's command with the plan applied. The pid stays the same, so it is now Steam's
+   reaper (or whatever Steam put first in `%command%`). When it exits, the pidfd turns readable
+   and quiverd ends the session and the perf session.
+
+Steam's process tree is the one it would be with `gamemoderun %command%`: Steam's Stop, its
+overlay (`LD_PRELOAD`, which a setting is appended to rather than replacing) and Steam Input
+are untouched. If quiverd can't be reached, the game starts unchanged. `steam-run` never starts
+quiverd itself (it would be inside Steam's tree): only through its systemd unit.
+
+**The hook** (`quiver steam hook <game> on|off|status`; `Request::SteamHook`,
+`Request::SteamHookStatus`; `quiverd/src/steamhook.rs`, `steamgames::{hook, unhook,
+hook_status}`):
+
+- `on` puts `<quiver> --source steam steam-run --app <appid>` in front of `%command%` in
+  `localconfig.vdf`'s `LaunchOptions` for the Steam user who installed the game. The person's
+  own options are kept around it, and the edit is byte-preserving (`textvdf::set_string`).
+  This is the same staged machinery as the Connect switch: while Steam runs, the change waits
+  in `steam-games.json` and is written once Steam is seen closed, by `quiver steam restart`
+  (asks first) or by `quiver steam apply`.
+- `off` restores exactly what was there. When the hook added the `LaunchOptions` key, or the
+  app's whole section, that is taken out again (`textvdf::remove`) instead of being left
+  empty. If Steam has written more into a section the hook created, only the key goes.
+- A Ubisoft game's Steam copy gets the Connect switch itself (`SteamPatch` with `--product`),
+  so `quiver steam hook` and `quiver steam patch` do the same thing for it.
+- Refused (with the reason) for Flatpak Steam, a quoted `%command%`, no `quiver` found, or
+  several Steam users with none chosen (`--user`).
+
+**Saying it plainly.** For a Steam game that isn't hooked:
+
+- CLI: `quiver set` and `quiver get`, `quiver hud enable`, and `quiver tweaks set` or
+  `preset` print that Steam starts the game without Quiver, and give the command that hooks
+  it. `quiver tweaks plan` carries the same note; hooked, the note says
+  the tweaks apply to its Steam launch.
+- App: the Steam game's Overview has a *Quiver launch* card. It shows the hook state and its
+  switch ("Start through Quiver" or "Stop starting through Quiver"), the launch options, and
+  whether the HUD is on, with its own switch. The Tweaks tab's banner says whether the tweaks
+  reach the game, with the same switch. Saving a tweak, or turning the HUD on, for a game
+  that isn't hooked shows a toast with the offer. `GameDetail.steam_hook` carries the state,
+  and the page reloads it on `SteamGamesChanged`.
+
+**Identity on the wire** (additive; Ubisoft JSON unchanged):
+
+- `ActiveSession`, `PerfSessionInfo`, `HudStatus`, `PerfEvent::Session` and `SteamLaunchPlan`
+  gain `game` for other stores, with `product_id` 0.
+- `HudScopeRef` and the perf requests that named a product (`Catalog`, `Subscribe`,
+  `HudToggle`, `HudNext`, `HudStatus`, `LaunchEnv`, `Summaries`) take a game. A Ubisoft game
+  is still written as `product_id`.
+- `SettingsGet`, `SettingsSet`, `SettingsHistory` and `SettingsRestore` take `GameField`.
+- `hud/settings.json` and `state.json` key games by `GameRef::key` (`3539` as before,
+  `steam:620`).
+- The perf hub's sessions, its Steam launches and `HudSettings::for_launch` are keyed by
+  `GameRef`.
+
+**Verified here** (no real Steam file written, no Steam started or stopped, no game run):
+
+- Unit tests: route selection, `steam_command` and `steam_env` (overlay preload kept, DLL
+  overrides merged), the env allowlist, hook and unhook on fixture trees (keeps the user's
+  options; byte-exact for an added key, an added section, and a section Steam grew; staged
+  while running, then written; a quoted `%command%` refused), `textvdf::remove`, HUD scopes
+  for Steam games with Ubisoft keys unchanged, perf sessions for Steam games with layer order
+  from Steam's environment, pidfd exit, local session records, and the demo's hook.
+- End to end (`crates/quiver-cli/tests/steam_run.rs`), against a scratch quiverd (own XDG
+  dirs, HOME with a fixture Steam tree, `QUIVER_SHM_ROOT`, a do-nothing `systemctl` first on
+  `PATH`):
+  - settings, HUD and a tweak for `steam:870780`, each saying the game isn't hooked;
+  - the hook's status, then on and off, back byte for byte. A Steam client was running on this
+    machine, so this run took the staged branch; the written branch is covered by the unit
+    tests;
+  - a launch through `quiver steam-run --app 870780` of a shell script standing in for
+    Steam's command. Arguments, wrapper, settings env, `QUIVER_SESSION`, `QUIVER_SIGHT`,
+    `QUIVER_PERF_DIR` under the scratch root, `VK_INSTANCE_LAYERS` below the person's
+    vkBasalt, the tweak's `DXVK_CONFIG` and Steam's own variables were all recorded by it;
+  - `quiver sessions` and `hud status` while it ran, and the session's record, with the perf
+    session and its shm dir gone, after it exited;
+  - with quiverd down, the game started unchanged and no daemon was started.
+- `--dry-run` for both routes. A Ubisoft copy's dry run (Black Flag Resynced, the known
+  table) is unchanged.
+
+**Steers taken** (not covered by the docs; the conservative choice each time):
+
+- **G1.** `exec`, not spawn-and-wait. The play session follows the pid through a pidfd, so
+  Steam's process tree, Stop and signal handling are exactly Steam's. Cost: the namespace
+  child mode that mod overlays need (STEAM-COPIES §4) will have to spawn. That waits for the
+  mods work and its S1 checks.
+- **G2.** `--app` means "a plain Steam game": nothing is looked up, so a hook written for a
+  game never turns into a bridge launch later. Bare `quiver steam-run %command%` still
+  detects Ubisoft products.
+- **G3.** If quiverd can't be reached, the game starts as Steam would start it. quiverd is
+  never started from inside Steam's launch.
+- **G4.** Only allowlisted prefixes of Steam's environment go to quiverd, and only for plain
+  Steam games. Ubisoft copies send none, so their plans are unchanged. Doing the same for them
+  would fix tweaks overriding a `DXVK_CONFIG` typed in Steam's launch options; that is left
+  for the person to decide, because it changes the copies' behaviour.
+- **G5.** An exact undo removes an added key or section, but only for the new hook. Ubisoft
+  patches keep today's undo (an empty value is left), per the STORES §8.1 regression rule.
+  They could adopt it later.
+- **G6.** A launch-setting `LD_PRELOAD` is appended after Steam's, so the overlay always
+  loads.
+- **G7.** Local sessions are local only: nothing is reported to Steam or anyone. `quiver
+  playtime steam:<id>` keeps Steam's totals, because Steam counts hooked launches too, and
+  lists Quiver's recorded sessions.
+- **G8.** The offer is a line in the CLI, and a toast and banner in the app. Nothing hooks a
+  game unasked. There is no "declined" memory, as there is for Ubisoft install offers: the
+  offer only appears right after the person changed something.
+- **G9.** `account` and `profile` settings are refused for Steam games. `proton` and
+  `language` are stored but reported as not applied.
+- **G10.** A quiverd crash during a session loses that session's record. Restarts onto new
+  builds wait for running games, local sessions included.
+
+**Spikes that need you** (each touches the real Steam client; agents don't run them):
+
+1. **S1 + TWEAKS T6: the first real hooked launch.** CONTROL (app 870780), with the HUD and
+   `PROTON_LOG=1`:
+   1. Install this build (`tools/install-user.sh` after merge). Check that `quiver daemon
+      status` shows quiverd on it.
+   2. `quiver list --store steam` shows CONTROL; note its ref (`steam:870780`).
+   3. Set it up:
+      `quiver hud enable steam:870780`,
+      `quiver set steam:870780 env.PROTON_LOG=1`,
+      `quiver tweaks set steam:870780 tex.anisotropy=16 dlss.sr.model=K`.
+      Each prints "isn't hooked".
+   4. `quiver steam hook steam:870780 on`. With Steam running it is staged: quit Steam from its
+      menu, wait about a minute (quiverd writes it once Steam is seen closed), or run `quiver
+      steam restart`, which asks first. `quiver steam hook steam:870780` should say "starts
+      through Quiver".
+   5. Start Steam. CONTROL › Properties › Launch Options should read
+      `<your quiver> --source steam steam-run --app 870780 %command%`.
+   6. Play CONTROL from Steam. While it runs, check:
+      - `quiver sessions` lists `steam:870780 … via Steam (app 870780) … local history`;
+      - Shift+F3 shows Quiver's HUD, and `quiver hud status steam:870780` names the presenter
+        (in the game means the Sight layer loaded inside pressure-vessel);
+      - Shift+Tab opens Steam's overlay (and its FPS counter if you use it);
+      - a controller works as before (Steam Input).
+   7. Press Stop in Steam's library. The game should close, Steam should stop showing
+      Playing, and `quiver sessions` should drop it.
+   8. Send these:
+      - `~/.local/share/quiver/steam-run/870780/steam-run.log` (the plan and the exec line);
+      - the top of `~/steam-870780.log`, where Proton logs its environment. Look for
+        `QUIVER_SESSION`, `QUIVER_SIGHT=1`, `VK_INSTANCE_LAYERS=…VK_LAYER_QUIVER_sight`,
+        `DXVK_CONFIG=…samplerAnisotropy = 16` and `DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on`.
+        Present means they survive pressure-vessel (T6). Missing means the Steam route needs a
+        passthrough;
+      - `quiver perf history steam:870780` and `quiver tweaks sessions steam:870780`.
+   9. Undo:
+      - `quiver steam hook steam:870780 off` (staged while Steam runs; written once it
+        closes). The launch options should be back as they were, empty here;
+      - `quiver set steam:870780 env.PROTON_LOG=`;
+      - `quiver hud disable steam:870780`;
+      - `quiver tweaks reset steam:870780 tex.anisotropy dlss.sr.model`.
+2. **S1, a native Linux game.** Repeat steps 4–8 with a native game, such as Stardew Valley,
+   with the HUD on. Native games have no Proton, so `steam-run` takes the route from
+   `SteamAppId` alone. Check the HUD, Stop and the session record.
+3. **S2: do `LaunchOptions` sync?** With the hook on, start Steam on a second machine signed in
+   to the same account, and see whether CONTROL's launch options show the hook there. If they
+   do, the hook needs a louder note (it points at this machine's `quiver`).
+4. **Flatpak Steam** stays unsupported for the hook (`hookable: false` with the reason). There
+   is nothing to try.
+
+**Not built yet.**
+
+- Mods and overlays through the namespace (the stretch goal, G1).
+- Built-in fixes keyed by store id.
+- Tweak evidence on the Steam route: there is no per-session log dir, so effects stay
+  "applied" (TWEAKS "Not built in phase 1").
+- Launch settings and the HUD form for Steam games in the app (the CLI has both). The app's
+  Steam page has only the HUD on/off switch.
+- Gamepad focus for the new card's buttons.
+- `SettingsChanged` for Steam games (none is sent; the app has no Launch options tab for
+  them).
+- A "next launch uses profile P" one-shot for pinned shortcuts (§7).
+- Proton per game (`CompatToolMapping`, steer 4).
+- Achievement toasts from the stats cache.
 
 ## Sources
 

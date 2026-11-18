@@ -1355,6 +1355,20 @@ mod tests {
         let v = serde_json::to_value(Request::Play { game: GameRef::steam(620).into(), profile: None }).unwrap();
         assert_eq!(v, serde_json::json!({ "method": "play", "params": { "game": "steam:620" } }));
 
+        // Settings and Steam launch plans: Ubisoft games on the wire exactly as before.
+        let v = serde_json::to_value(Request::SettingsGet { game: 3539.into() }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "settings_get", "params": { "product_id": 3539 } }));
+        let v = serde_json::to_value(Request::SteamLaunchPlan { game: 66088.into(), perf: true, env: BTreeMap::new() }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "steam_launch_plan", "params": { "product_id": 66088, "perf": true } }));
+        let r: Request = serde_json::from_str(r#"{"method":"steam_launch_plan","params":{"product_id":66088}}"#).unwrap();
+        assert!(matches!(r, Request::SteamLaunchPlan { game, perf: false, .. } if game == GameRef::ubisoft(66088)));
+        let r: Request = serde_json::from_str(r#"{"method":"settings_set","params":{"game":"steam:870780","ops":[],"message":null}}"#).unwrap();
+        assert!(matches!(r, Request::SettingsSet { game, .. } if game == GameRef::steam(870780)));
+        let s = ActiveSession { game: Some(GameRef::steam(870780)), ..Default::default() };
+        assert_eq!((s.game_ref(), ActiveSession { product_id: 3539, ..Default::default() }.game_ref()), (GameRef::steam(870780), GameRef::ubisoft(3539)));
+        let v = serde_json::to_value(ActiveSession { product_id: 3539, ..Default::default() }).unwrap();
+        assert!(v.get("game").is_none(), "Ubisoft sessions as before");
+
         // Library entries: Ubisoft ones keep `product_id` beside `game`.
         let old = r#"{"product_id":3539,"name":"Origins","installed":null,"update_available":false,"running":false,"art":{"thumb":null,"background":null,"logo":null,"icon":null},"owned_by":["u"],"installable":true}"#;
         let e: LibraryEntry = serde_json::from_str(old).unwrap();
