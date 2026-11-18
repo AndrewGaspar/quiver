@@ -996,7 +996,7 @@ async fn main() -> Result<()> {
     }
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info,epic_core=info".into()),
         )
         .init();
     // After a restart onto a new build: the previous build's listening sockets.

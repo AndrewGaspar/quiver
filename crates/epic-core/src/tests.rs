@@ -154,11 +154,17 @@ fn script_library(fake: &Fake, account: &str, page1: &str, page2: Option<&str>) 
     fake.reply("includeMetadata=true", 200, page1);
 }
 
+/// One catalog reply per item, as Epic is asked (the fixture files hold several items;
+/// Epic's reply to one id is the same map shape).
 fn script_catalog(fake: &Fake) {
-    fake.reply("/namespace/ns-alanwake/bulk/items", 200, include_str!("../tests/fixtures/catalog_alanwake.json"));
-    fake.reply("/namespace/ns-origins/bulk/items", 200, include_str!("../tests/fixtures/catalog_origins.json"));
-    fake.reply("/namespace/ns-celeste/bulk/items", 200, include_str!("../tests/fixtures/catalog_misc.json"));
-    fake.reply("/namespace/ns-mobile/bulk/items", 200, include_str!("../tests/fixtures/catalog_misc.json"));
+    let origins = include_str!("../tests/fixtures/catalog_origins.json");
+    let misc = include_str!("../tests/fixtures/catalog_misc.json");
+    fake.reply("/namespace/ns-alanwake/bulk/items?id=item-awr&", 200, include_str!("../tests/fixtures/catalog_alanwake.json"));
+    for id in ["item-aco", "item-aco-dlc1", "item-aco-ost"] {
+        fake.reply(&format!("/namespace/ns-origins/bulk/items?id={id}&"), 200, origins);
+    }
+    fake.reply("/namespace/ns-celeste/bulk/items?id=item-celeste&", 200, misc);
+    fake.reply("/namespace/ns-mobile/bulk/items?id=item-mobile&", 200, misc);
 }
 
 #[tokio::test]
@@ -219,7 +225,7 @@ async fn provider_entries_pages_and_play() {
     let d = p.detail(ac.game, false).await.unwrap();
     assert_eq!(d.linked, Some(GameRef::ubisoft(3539)));
     let dlc: Vec<(String, Option<bool>)> = d.dlc.iter().map(|x| (x.game.to_string(), x.owned)).collect();
-    assert_eq!(dlc, [("epic:CamelliaDLC1".to_owned(), Some(true)), ("epic:item-aco-dlc2".to_owned(), Some(false)), ("epic:CamelliaOST".to_owned(), Some(true))]);
+    assert_eq!(dlc, [("epic:CamelliaDLC1".to_owned(), Some(true)), ("epic:item-aco-dlc2".to_owned(), Some(false))]);
 
     let e = p.launch("cli", aw.game, None).await.unwrap_err();
     assert!(e.to_string().contains("isn't installed"), "{e}");
@@ -256,4 +262,41 @@ async fn ubisoft_titles_fold_into_their_ubisoft_entries() {
     let o = lib.iter().find(|e| e.name.contains("Origins")).unwrap();
     assert_eq!((o.game, o.records[0].relation), (camellia, Relation::Linked));
     assert_eq!(o.stores(), [quiver_api::StoreId::Epic]);
+}
+
+/// Each catalog item is asked for on its own; a failed call is tried once more; an item
+/// Epic still doesn't describe is hidden (with the reason, never as a hex-id tile) and
+/// asked for again at the next read.
+#[tokio::test]
+async fn catalog_items_are_retried_and_unresolved_ones_hidden() {
+    let r = rig();
+    r.login("eg1~a1", "eg1~r1", ID, "Player One").await;
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_second_account.json"), None);
+    let mystery = r#"{"item-mystery": {"id": "item-mystery", "namespace": "ns-mystery", "title": "Mystery Game",
+        "keyImages": [{"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/m/tall.jpg"}],
+        "categories": [{"path": "games"}, {"path": "applications"}], "entitlementType": "EXECUTABLE"}}"#;
+    r.fake.reply("/namespace/ns-origins/bulk/items?id=item-aco&", 200, include_str!("../tests/fixtures/catalog_origins.json"));
+    r.fake.reply("/namespace/ns-mystery/bulk/items?id=item-mystery&", 200, "{}");
+    let lib = r.epic.library(false).await.unwrap();
+    assert_eq!(lib.titles.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Assassin's Creed Origins"]);
+    let h = lib.hidden("MysteryApp").unwrap();
+    assert_eq!(h.reason, library::UNRESOLVED);
+    let items = r.epic.hidden_items().await.unwrap();
+    assert!(items.iter().any(|i| i.app_name == "PrivateThing") && items.iter().any(|i| i.app_name == "MysteryApp"));
+    let p = EpicProvider::new(r.epic.clone());
+    let e = p.detail(GameRef::new(quiver_api::StoreId::Epic, "MysteryApp").unwrap(), false).await.unwrap_err();
+    assert!(e.to_string().contains("isn't in the library: Epic's catalog didn't describe it"), "{e}");
+    // A refresh: every item is asked again; the mystery item fails once, then answers.
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_second_account.json"), None);
+    r.fake.reply("/namespace/ns-origins/bulk/items?id=item-aco&", 200, include_str!("../tests/fixtures/catalog_origins.json"));
+    r.fake.reply("/namespace/ns-mystery/bulk/items?id=item-mystery&", 503, "");
+    r.fake.reply("/namespace/ns-mystery/bulk/items?id=item-mystery&", 200, mystery);
+    let before = r.fake.requests().len();
+    let lib = r.epic.library(true).await.unwrap();
+    assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
+    let catalog_calls = r.fake.requests()[before..].iter().filter(|q| q.url.contains("/bulk/items")).count();
+    // Origins once, the mystery item twice; never the private sandbox's.
+    assert_eq!(catalog_calls, 3);
+    assert_eq!(lib.titles.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Assassin's Creed Origins", "Mystery Game"]);
+    assert!(lib.errors.is_empty(), "{:?}", lib.errors);
 }

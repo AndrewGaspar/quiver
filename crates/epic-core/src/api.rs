@@ -27,8 +27,6 @@ pub const ACCOUNT_HOST: &str = "https://account-public-service-prod03.ol.epicgam
 pub const LIBRARY_HOST: &str = "https://library-service.live.use1a.on.epicgames.com";
 pub const CATALOG_HOST: &str = "https://catalog-public-service-prod06.ol.epicgames.com";
 
-/// Catalog items asked for per request.
-pub const CATALOG_BATCH: usize = 50;
 /// Library pages followed at most (a page holds hundreds of records).
 const MAX_PAGES: usize = 100;
 
@@ -343,14 +341,18 @@ impl Api {
         Ok(out)
     }
 
-    /// Catalog items of one namespace, with their DLC and main game (at most
-    /// [`CATALOG_BATCH`] ids per call).
-    pub async fn catalog_items(&self, access_token: &str, namespace: &str, ids: &[String]) -> Result<HashMap<String, CatalogItem>> {
+    /// One catalog item, with its DLC and main game. The reply maps ids to items; an id
+    /// Epic doesn't know is left out.
+    ///
+    /// One id per call, as legendary asks. Stage 1 sent a namespace's ids comma-separated,
+    /// and on a real library every namespace asked for more than one item (a game and its
+    /// DLC) came back without any of them, while every single-id namespace resolved.
+    pub async fn catalog_item(&self, access_token: &str, namespace: &str, id: &str) -> Result<HashMap<String, CatalogItem>> {
         let c = &self.config;
         let url = format!(
             "{CATALOG_HOST}/catalog/api/shared/namespace/{}/bulk/items?id={}&includeDLCDetails=true&includeMainGameDetails=true&country={}&locale={}",
             urlencode(namespace),
-            ids.iter().map(|i| urlencode(i)).collect::<Vec<_>>().join(","),
+            urlencode(id),
             urlencode(&c.country),
             urlencode(&c.locale),
         );
@@ -438,7 +440,7 @@ mod tests {
     async fn catalog_reads_items_with_dlc() {
         let fake = Arc::new(Fake::new());
         fake.reply("/namespace/ns-alanwake/bulk/items?id=item-awr&includeDLCDetails=true", 200, include_str!("../tests/fixtures/catalog_alanwake.json"));
-        let items = api(fake).catalog_items("tok", "ns-alanwake", &["item-awr".into()]).await.unwrap();
+        let items = api(fake).catalog_item("tok", "ns-alanwake", "item-awr").await.unwrap();
         let aw = &items["item-awr"];
         assert_eq!(aw.title, "Alan Wake Remastered");
         assert_eq!(aw.key_images.iter().find(|k| k.kind == "DieselGameBoxTall").unwrap().width, Some(1200));

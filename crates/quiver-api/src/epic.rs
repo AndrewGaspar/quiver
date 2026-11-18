@@ -34,6 +34,9 @@ pub enum EpicRequest {
     Accounts,
     /// Make an Epic account the default.
     AccountDefault { account: String },
+    /// Owned items the library leaves out, and why (`Vec<HiddenItem>`): DLC whose game
+    /// isn't owned, assets, extras, items Epic's catalog doesn't describe.
+    Hidden,
 }
 
 impl fmt::Debug for EpicRequest {
@@ -45,6 +48,7 @@ impl fmt::Debug for EpicRequest {
             EpicRequest::Logout { account } => f.debug_struct("Logout").field("account", account).finish(),
             EpicRequest::Accounts => f.write_str("Accounts"),
             EpicRequest::AccountDefault { account } => f.debug_struct("AccountDefault").field("account", account).finish(),
+            EpicRequest::Hidden => f.write_str("Hidden"),
         }
     }
 }
@@ -81,6 +85,26 @@ pub struct LinkedAccount {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+/// An owned Epic item that isn't a tile in the library (`EpicRequest::Hidden`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenItem {
+    /// `epic:<app>`'s id.
+    pub app_name: String,
+    pub namespace: String,
+    pub catalog_item_id: String,
+    /// The catalog's name for it, when the catalog has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Epic's sandbox name (often the game the item belongs to).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sandbox: String,
+    /// Why it isn't in the library, for people.
+    pub reason: String,
+    /// Epic account ids that own it.
+    #[serde(default)]
+    pub owned_by: Vec<String>,
 }
 
 #[cfg(test)]

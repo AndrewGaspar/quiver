@@ -219,9 +219,19 @@ fn render_store_install(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
 
 fn render_dlc(th: &Theme, d: &GameDetail) -> AnyElement {
     let installed = d.dlc.iter().filter(|x| x.installed).count();
+    let owned = d.dlc.iter().filter(|x| x.owned == Some(true)).count();
+    // Stores that say what's owned (Epic): owned first, and the count in the header.
+    let mut list: Vec<&quiver_api::stores::Dlc> = d.dlc.iter().collect();
+    list.sort_by_key(|x| (!x.installed, x.owned != Some(true)));
+    let summary = if d.dlc.iter().any(|x| x.owned.is_some()) {
+        format!("{} listed · {owned} owned · {installed} installed", d.dlc.len())
+    } else {
+        format!("{} listed · {installed} installed", d.dlc.len())
+    };
     card(th)
-        .child(card_header(th, "DLC").child(div().flex_1()).child(caption(&format!("{} listed · {installed} installed", d.dlc.len()), th.tx3)))
-        .child(div().flex().flex_col().p(px(8.)).children(d.dlc.iter().take(10).enumerate().map(|(i, x)| {
+        .child(card_header(th, "DLC").child(div().flex_1()).child(caption(&summary, th.tx3)))
+        .child(div().flex().flex_col().p(px(8.)).children(list.into_iter().take(10).enumerate().map(|(i, x)| {
+            let mine = x.installed || x.owned == Some(true);
             div()
                 .id(("st-dlc", i))
                 .flex()
@@ -229,8 +239,9 @@ fn render_dlc(th: &Theme, d: &GameDetail) -> AnyElement {
                 .gap(px(10.))
                 .px(px(8.))
                 .py(px(6.))
-                .child(icon(if x.installed { Icon::CircleCheck } else { Icon::Package }, 14., if x.installed { th.ok } else { th.tx4 }))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).font_weight(if x.installed { SEMIBOLD } else { MEDIUM }).child(x.name.clone().unwrap_or_else(|| x.game.to_string())))
+                .child(icon(if mine { Icon::CircleCheck } else { Icon::Package }, 14., if mine { th.ok } else { th.tx4 }))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(12.5)).font_weight(if mine { SEMIBOLD } else { MEDIUM }).child(x.name.clone().unwrap_or_else(|| x.game.to_string())))
+                .when(x.owned == Some(true) && !x.installed, |r| r.child(caption("Owned", th.tx3)))
         })))
         .when(d.dlc.len() > 10, |c| c.child(div().px(px(16.)).pb(px(12.)).w(relative(1.)).text_size(px(12.)).text_color(th.tx3).child(format!("… and {} more", d.dlc.len() - 10))))
         .into_any_element()

@@ -647,6 +647,72 @@ nothing is written to your Epic account.
 9. **Undo**, if you want: `quiver epic logout` (ends Quiver's session at Epic and deletes
    its keyring entry; other launchers' sessions are separate).
 
+### 9.5 Library cleanup (2026-11-18)
+
+After the first real sign-in the library had 120 Epic entries, no art on any of them, and
+about 30 tiles named by a 32-hex id. What they were, from quiverd's own caches
+(`<data>/epic/cache/`, read-only):
+
+- **The hex tiles were real games and their DLC whose catalog lookup failed.** All 32
+  records without a catalog item were in the 11 namespaces where the library has more than
+  one record: Fortnite (three apps), Borderlands 2 (game and two DLC), Killing Floor 2,
+  Civilization VI (game and the Aztec DLC), Death Stranding (five), Fallout: New Vegas
+  (seven), Alien: Isolation, Pillars of Eternity, Tyranny, Tropico 5 and a sandbox named
+  Hydra (two each). Every single-record namespace resolved. Stage 1 asked `bulk/items` for
+  a namespace's ids comma-separated in one call, and that form came back without any of
+  them. The newer catalog names apps (DLC especially) by hex id, so those records showed
+  their app name. None were UE assets, engines, launcher items or private sandboxes: all
+  120 records are `APPLICATION`s in public sandboxes.
+- **`epic:Quail` "20XX" and `epic:Flounder` "3 out of 10, EP 1: …" are real games** (both
+  `games`/`applications`, executable, Windows, with art; 3 out of 10 is an episodic game
+  Epic gave away). They stay.
+- **No art anywhere** was the app refusing the URLs: `cdn1.epicgames.com` wasn't an allowed
+  art host, and Epic's image URLs have spaces, `&` and often no extension, which the art
+  cache's path rules refused. The provider already sent the right URLs.
+
+What changed:
+
+- **Catalog:** one `bulk/items` call per item (as legendary asks), 4 at a time, a failed call
+  tried once more after 1.5 s. Items Epic doesn't return are asked for again at the next
+  read (they were never cached). Private-sandbox items aren't asked for. quiverd now logs
+  `epic_core` at info, so catalog failures show in `quiverd.log`.
+- **Library rule** (`library::build`): a tile is a game or app with a catalog name and art.
+  Each owned record is one of: a **game** (`games` or `applications`, executable, Windows,
+  no main game), **DLC** (`mainGameItem`, listed in an owned game's `dlcItemList`, or
+  `addons`; shown on its game's page as owned, never a tile), or **hidden with a reason**:
+  UE asset, private sandbox, engine/plugin/asset, digital extra, audience entitlement, not a
+  game or app, nothing to install, no Windows build, DLC whose game isn't owned, the catalog
+  didn't describe it, no name (a hex title), no art, or managed by a launcher Quiver doesn't
+  run (the EA app: STAR WARS Battlefront II). Ubisoft titles still fold into their Ubisoft
+  entries. The game page's DLC list leaves out audience entitlements, engine kits and editor
+  tools, and shows owned DLC first with an "Owned" mark.
+- **One game, one tile:** records of one catalog item, or of one namespace with the same
+  name, are one title (`Title.apps` keeps every app name, and `epic:<any of them>` finds
+  it). The tile's ref is the app the catalog lists for the item, else the first acquired.
+- **Hidden items** come back from `Request::Epic(EpicRequest::Hidden)` (`Vec<HiddenItem>`),
+  and `quiver library --all` (with `--store epic` or not) lists them after the library as
+  `epic:<app>  <title> [<sandbox>]: <reason>` (`--json --all` prints `{library, hidden}`).
+  `quiver info epic:<hidden app>` says why it isn't in the library.
+- **Art:** `cdn1.epicgames.com`, `cdn2.epicgames.com` and `cdn2.unrealengine.com` are art
+  hosts. A URL that isn't a plain `<path>.jpg|png|webp` is cached as
+  `~/.cache/quiver/art/url/<host>/h/<sha1 of the URL>.<ext>`, with the extension taken from
+  the image's bytes. Slots: tile `DieselGameBoxTall` (else `OfferImageTall`, `Thumbnail`),
+  hero `DieselGameBox` (else `DieselStoreFrontWide`, `OfferImageWide`), logo
+  `DieselGameBoxLogo`.
+- With the cache as it was, the new rule gives 87 titles (82 tiles, the five Ubisoft ones
+  folded) and 33 hidden: the 32 unresolved records and Battlefront II. The first library
+  read on the new build asks for the 32 again, one at a time, and they become Fortnite,
+  Borderlands 2, Killing Floor 2 and the rest, with their DLC on their pages.
+- `QUIVER_DEMO_LIBRARY=<file>` (demo mode only) shows a saved `quiver library --json` in the
+  app, for screenshots of a real library without a daemon.
+
+**Checking it:** after `tools/install-user.sh` and quiverd's restart, run `quiver library
+--store epic --refresh`: no hex names; Fortnite, Borderlands 2, Death Stranding, Fallout: New
+Vegas and the rest listed by name. `quiver library --store epic --all` ends with "Not in the
+library (N)": expect Battlefront II (the EA app) and any item Epic still doesn't describe.
+`grep "Epic catalog" ~/.local/share/quiver/quiverd.log` names any item that failed. In the
+app every Epic tile has box art, and an Epic game's page lists its DLC with what's owned.
+
 ---
 
 ## Sources

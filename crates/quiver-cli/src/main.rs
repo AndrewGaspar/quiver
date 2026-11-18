@@ -69,6 +69,10 @@ enum Cmd {
         /// Only one store's games (`ubisoft`, `steam`, `epic`).
         #[arg(long, value_parser = parse_store)]
         store: Option<StoreId>,
+        /// Also list owned items the library leaves out (DLC whose game you don't own,
+        /// assets, extras, items Epic's catalog doesn't describe), with the reason.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -502,6 +506,25 @@ fn parse_store(s: &str) -> std::result::Result<StoreId, String> {
     StoreId::parse(s).ok_or_else(|| format!("unknown store '{s}' (ubisoft, steam, epic)"))
 }
 
+/// `quiver library --all`: what the library leaves out, and why.
+fn print_hidden(hidden: &[quiver_api::epic::HiddenItem]) {
+    if hidden.is_empty() {
+        return;
+    }
+    println!("
+Not in the library ({}):", hidden.len());
+    let w = hidden.iter().map(|h| h.app_name.len() + 5).max().unwrap_or(0);
+    for h in hidden {
+        let name = match (&h.title, h.sandbox.as_str()) {
+            (Some(t), s) if !s.is_empty() && s != t => format!("{t} [{s}]"),
+            (Some(t), _) => t.clone(),
+            (None, "") => "(no name)".into(),
+            (None, s) => format!("[{s}]"),
+        };
+        println!("{:>w$}  {name}: {}", format!("epic:{}", h.app_name), h.reason);
+    }
+}
+
 /// The list's note for an Epic game, or a game also bought on Epic.
 fn store_note(e: &LibraryEntry) -> String {
     use quiver_api::stores::Relation;
@@ -715,13 +738,18 @@ async fn main() -> Result<()> {
                 println!("         {}", shown.join(", "));
             }
         }
-        Cmd::Library { refresh, store, json } => {
+        Cmd::Library { refresh, store, all, json } => {
             let mut lib: Vec<LibraryEntry> = client.call(Request::Library { refresh, all_stores: true }).await?;
             if let Some(s) = store {
                 lib.retain(|e| e.stores().contains(&s));
             }
+            let hidden: Vec<quiver_api::epic::HiddenItem> = if all && store.is_none_or(|s| s == StoreId::Epic) {
+                client.call(Request::Epic(quiver_api::epic::EpicRequest::Hidden)).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             if json {
-                return print_json(&lib);
+                return if all { print_json(&serde_json::json!({"library": lib, "hidden": hidden})) } else { print_json(&lib) };
             }
             let accounts = client.call::<Status>(Request::Status).await?.accounts;
             // Epic owners are Epic account ids (an older daemon has no Epic accounts).
@@ -769,6 +797,9 @@ async fn main() -> Result<()> {
                 } else {
                     println!("{id:>idw$}  {:<10} {}{note}", state, e.name);
                 }
+            }
+            if all {
+                print_hidden(&hidden);
             }
         }
         Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,

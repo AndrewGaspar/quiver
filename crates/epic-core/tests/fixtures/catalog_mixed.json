@@ -1,0 +1,83 @@
+{
+  "item-fnv": {
+    "id": "item-fnv",
+    "namespace": "ns-fnv",
+    "title": "Fallout: New Vegas",
+    "keyImages": [
+      {"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/fnv/tall.jpg"},
+      {"type": "DieselGameBox", "url": "https://cdn1.epicgames.com/fixture/fnv/wide.jpg"}
+    ],
+    "categories": [{"path": "public"}, {"path": "games"}, {"path": "applications"}],
+    "releaseInfo": [{"id": "rel-fnv", "appId": "5daeb974a22a435988892319b3a4f476", "platform": ["Windows"]}],
+    "entitlementType": "EXECUTABLE",
+    "dlcItemList": [
+      {"id": "item-fnv-dlc2", "namespace": "ns-fnv", "title": "Honest Hearts", "categories": [{"path": "public"}, {"path": "games"}, {"path": "applications"}], "entitlementType": "EXECUTABLE"},
+      {"id": "item-fnv-dlc3", "namespace": "ns-fnv", "title": "Old World Blues", "categories": [{"path": "games"}], "entitlementType": "EXECUTABLE"},
+      {"id": "item-fnv-aud", "namespace": "ns-fnv", "title": "Courier Pack Audience", "categories": [{"path": "audience"}, {"path": "public"}], "entitlementType": "AUDIENCE"},
+      {"id": "item-fnv-geck", "namespace": "ns-fnv", "title": "GECK", "categories": [{"path": "engines"}, {"path": "applications"}], "entitlementType": "EXECUTABLE"}
+    ]
+  },
+  "item-fnv-dlc1": {
+    "id": "item-fnv-dlc1",
+    "namespace": "ns-fnv",
+    "title": "Dead Money",
+    "categories": [{"path": "addons"}, {"path": "applications"}],
+    "mainGameItem": {"id": "item-fnv", "namespace": "ns-fnv", "title": "Fallout: New Vegas"},
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-fnv-dlc2": {
+    "id": "item-fnv-dlc2",
+    "namespace": "ns-fnv",
+    "title": "Honest Hearts",
+    "categories": [{"path": "public"}, {"path": "games"}, {"path": "applications"}],
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-bf2": {
+    "id": "item-bf2",
+    "namespace": "ns-bf2",
+    "title": "STAR WARS™ Battlefront™ II: Celebration Edition",
+    "keyImages": [{"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/bf2/tall.jpg"}],
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "customAttributes": {"ThirdPartyManagedApp": {"type": "STRING", "value": "Origin"}},
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-noart": {
+    "id": "item-noart",
+    "namespace": "ns-noart",
+    "title": "A Game Without Art",
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-hexname": {
+    "id": "item-hexname",
+    "namespace": "ns-hexname",
+    "title": "8935bb3e1420443a9789fe01758039a5",
+    "keyImages": [{"type": "DieselGameBoxTall", "url": "https://cdn1.epicgames.com/fixture/hex/tall.jpg"}],
+    "categories": [{"path": "games"}],
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-two-a": {
+    "id": "item-two-a",
+    "namespace": "ns-two",
+    "title": "Two Names",
+    "keyImages": [{"type": "OfferImageTall", "url": "https://cdn1.epicgames.com/fixture/two/tall.jpg"}],
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-two-b": {
+    "id": "item-two-b",
+    "namespace": "ns-two",
+    "title": "TWO NAMES™",
+    "keyImages": [{"type": "DieselGameBox", "url": "https://cdn1.epicgames.com/fixture/two/wide.jpg"}],
+    "categories": [{"path": "games"}, {"path": "applications"}],
+    "entitlementType": "EXECUTABLE"
+  },
+  "item-lonely-dlc": {
+    "id": "item-lonely-dlc",
+    "namespace": "ns-lonely",
+    "title": "Lonely Expansion",
+    "categories": [{"path": "addons"}],
+    "mainGameItem": {"id": "item-other", "namespace": "ns-lonely", "title": "Some Other Game"},
+    "entitlementType": "EXECUTABLE"
+  }
+}
