@@ -57,7 +57,8 @@ impl PerfHub {
         if self.running(&game) {
             anyhow::bail!("the game already has a perf session");
         }
-        let session = quiver_core::modsdk::new_session_id();
+        // One id for the launch: its mods' (options) session when it has one.
+        let session = plan.mods.as_ref().map(|m| m.launch.clone()).unwrap_or_else(quiver_core::modsdk::new_session_id);
         let mut env = steam_env.clone();
         env.extend(plan.env.clone());
         let b = self.begin(&session, game, None, None, &env, &plan.wrappers, false)?;

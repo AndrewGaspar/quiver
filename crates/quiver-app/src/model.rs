@@ -119,6 +119,18 @@ impl GameRow {
         self.entry.installed.is_some()
     }
 
+    /// A Steam game (`steam:<appid>`), whose mods Quiver keeps (they reach it through
+    /// `quiver steam-run`).
+    pub fn steam_game(&self) -> bool {
+        self.entry.game.as_steam().is_some()
+    }
+
+    /// Installed where its mods can stack on it: Quiver's install of a Ubisoft game, or a
+    /// Steam game in Steam's library.
+    pub fn mods_installed(&self) -> bool {
+        self.installed() || (self.steam_game() && self.client().is_some())
+    }
+
     /// Installed through Steam (whether or not Quiver has its own install too).
     pub fn steam(&self) -> Option<&quiver_api::exports::SteamGame> {
         self.entry.steam.as_ref()

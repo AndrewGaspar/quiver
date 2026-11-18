@@ -9,8 +9,17 @@ use clap::Subcommand;
 use quiver_api::savestores::{MergeOutcome, MergeReport, SaveStoreInfo, SaveStoreOp, SaveStoresReport, SaveStoresRevision};
 use quiver_api::{Client, Request};
 
-use crate::mods::resolve_installed as resolve;
 use crate::print_json;
+
+/// A game with save stores: Ubisoft games only. A Steam game's saves are its real ones, which
+/// Steam Cloud syncs (design/STORE-STEAM.md §10).
+async fn resolve(client: &Client, game: &str) -> Result<quiver_api::mods::GameProfiles> {
+    let g = crate::mods::resolve_installed(client, game).await?;
+    if !g.game_ref().is_ubisoft() {
+        bail!("{}: Steam games use their real saves, which Steam Cloud syncs; every profile shares them (save stores are for Ubisoft games)", g.name);
+    }
+    Ok(g)
+}
 
 #[derive(Subcommand)]
 pub enum StoreAction {

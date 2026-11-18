@@ -1,6 +1,7 @@
 //! The game page for other stores' games (a Steam game in local mode): what the store's
-//! client knows, read-only (`Request::GameDetail`). Settings, mods, saves, performance and
-//! Options are Quiver's own launches' features, so those tabs aren't shown; Play asks the
+//! client knows, read-only (`Request::GameDetail`). Settings, saves and performance are
+//! Quiver's own launches' features, so those tabs aren't shown (a Steam game has Mods, with
+//! their Options, which `quiver steam-run` applies: `mods.rs`); Play asks the
 //! store's client to start the game. A Steam game's "Quiver launch" card says whether it
 //! starts through `quiver steam-run` (its tweaks, HUD and launch settings reach it only then)
 //! and switches that (`steamhook.rs`).

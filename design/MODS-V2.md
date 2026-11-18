@@ -172,7 +172,7 @@ version".
 - **Named backups:** `quiver saves` and the Saves tab also list backup folders named by hand
   (`save-backups/<product>-<name>`, e.g. `3539-ptkzxpv-fresh-playthrough-…`), dated by the
   folder's mtime, restorable like the others.
-- **Not done:** Steam launches (`steam-run`) still use Default whatever vanilla's store is;
+- **Not done:** Steam copies of Ubisoft games (`steam-run`'s bridge route) still use Default whatever vanilla's store is (Steam games of other publishers run mods but always use their real saves: STORE-STEAM.md §10);
   restoring a backup into a store other than the cloud one needs a merge from a store instead.
 - **Config patches:** applied by the daemon before the namespace is mounted (never under a
   live overlay), to the file the launch will see: the prefix's, or the profile's copy in

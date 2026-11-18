@@ -92,6 +92,58 @@ pub struct SteamLaunchPlan {
     /// The tweak revisions the plan was compiled from (recorded with the play session).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tweaks: Option<crate::tweaks::TweakRevisions>,
+    // ---- Mods (appended; design/STEAM-COPIES.md §4)
+    /// The launch's mods (`SteamLaunchPlan { mods: true }`): what to mount and what was
+    /// applied. `None`: not asked for, or not a Steam game that mods apply to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mods: Option<SteamMods>,
+}
+
+/// A Steam launch's mods, prepared by quiverd: config patches and options are already
+/// applied (to Steam's prefix, or to the profile's own copies) when this comes back; what's
+/// left for `steam-run` is mounting `overlays` in a namespace of the launch's own and
+/// starting Steam's command in it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SteamMods {
+    /// The launch's id: `SteamSession { mods_launch }` names it, and it is the options
+    /// session (and, with the HUD, the perf session too).
+    pub launch: String,
+    /// The profile's id (`None`: vanilla).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    /// The profile revision (0 for vanilla).
+    #[serde(default)]
+    pub revision: u32,
+    /// Why this profile: "steam_profile", "steam-run --profile", "vanilla".
+    #[serde(default)]
+    pub chosen_by: String,
+    /// The mods it runs, bottom to top ("DLSS v3 (current) < Skip intro videos").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<crate::mods::ResolvedMod>,
+    /// Overlay mounts, in order: the install folder first, then the profile's own prefix
+    /// folders. Empty: nothing to mount (`steam-run` keeps its `exec`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<SteamOverlay>,
+    /// What the launch would refuse to run with (a mod lost its files, a broken stack).
+    /// Non-empty: `steam-run` doesn't start the game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+    /// Lines for the launch log: mods, saves, config patches and options as applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+}
+
+/// One overlayfs mount (`quiver_core::overlay::OverlaySpec` on the wire).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SteamOverlay {
+    pub target: std::path::PathBuf,
+    /// Topmost first.
+    #[serde(default)]
+    pub lower: Vec<std::path::PathBuf>,
+    pub upper: std::path::PathBuf,
+    pub work: std::path::PathBuf,
 }
 
 impl SteamLaunchPlan {

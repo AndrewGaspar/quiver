@@ -200,7 +200,7 @@ pub async fn info(client: &Client, game: &str, json: bool, refresh: bool, all: b
         if !inst.languages.is_empty() {
             row("languages", &inst.languages.join(", "));
         }
-        let mods = Request::Mods(quiver_api::ModsRequest::List { product_id: e.product_id });
+        let mods = Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()});
         if let Ok(s) = client.call::<quiver_api::mods::ModsState>(mods).await {
             row("plays", &crate::mods::default_label(&s));
         }

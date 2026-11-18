@@ -65,7 +65,7 @@ fn installed(product_id: u32) -> Option<launcher::Game> {
 /// The profile id a request means for an installed Ubisoft game (`None`: its default).
 fn profile_id(game: &launcher::Game, profile: Option<&str>) -> Result<String> {
     let store = store_for(game);
-    let (p, _) = launch_profile(&store, game.product_id, profile)?;
+    let (p, _) = launch_profile(&store, profile)?;
     Ok(match p {
         Some(q) if !q.eq_ignore_ascii_case(VANILLA) => store.profile(&q)?.0.id,
         _ => VANILLA.to_owned(),
@@ -256,10 +256,9 @@ impl Daemon {
     }
 
     /// The platform surface at a profile's scope, for the Options view's surface list.
-    pub(crate) fn tweaks_profile_state(&self, product_id: u32, ctx: &quiver_core::options::Ctx, level: Option<quiver_api::options::Level>) -> Result<quiver_api::options::SurfaceState> {
-        let game = GameRef::ubisoft(product_id);
+    pub(crate) fn tweaks_profile_state(&self, game: GameRef, ctx: &quiver_core::options::Ctx, level: Option<quiver_api::options::Level>) -> Result<quiver_api::options::SurfaceState> {
         let scopes = Scopes::load(&data(), Some(&game), Some((&ctx.store, &ctx.profile_id)))?;
-        let plan = installed(product_id).and_then(|g| self.preview(&self.cfg, &game, Some(&g), Some(&ctx.profile_id)).ok());
+        let plan = game.as_ubisoft().and_then(installed).and_then(|g| self.preview(&self.cfg, &game, Some(&g), Some(&ctx.profile_id)).ok());
         let last = tw::last_session(&data(), &game);
         Ok(tw::state(tw::schema(), &scopes, ScopeKind::Profile, level, plan.as_ref(), last.as_ref()))
     }

@@ -132,7 +132,7 @@ pub enum Dialog {
     RestoreSettings { game: u32, revision: u32 },
     RestoreSaves { game: Gid, backup: SaveBackup },
     DeleteProfile { game: Gid, profile: Profile },
-    RestoreProfile { game: u32, id: String, name: String, revision: u32 },
+    RestoreProfile { game: Gid, id: String, name: String, revision: u32 },
     RemoveLayer { game: Gid, layer: Layer },
     /// `saves`: the store picked (`None`: follow the advice for the ticked layers).
     NewProfile { game: Gid, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String> },
@@ -441,11 +441,15 @@ impl Quiver {
         }
         let fresh = self.gp.id != id;
         if !id.is_ubisoft() {
-            // Another store's game: one read-only page from its client's files.
+            // Another store's game: one read-only page from its client's files, and for a
+            // Steam game its mods (and their options), which `quiver steam-run` applies.
             if fresh {
                 self.gp.reset(id);
             }
             self.load_store_detail(id, !fresh, cx);
+            if Tab::of(id).contains(&Tab::Mods) && self.game(id).is_some_and(|g| g.mods_installed()) {
+                self.load_mods(id, cx);
+            }
             return;
         }
         if fresh {
@@ -533,7 +537,7 @@ impl Quiver {
         if self.gp.mods.ready().is_none() {
             self.gp.mods = Load::Loading;
         }
-        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { product_id: id.pid() }), cx, move |this, r, cx| {
+        self.call::<ModsState, _>(Request::Mods(ModsRequest::List { game: id.0.into()}), cx, move |this, r, cx| {
             if this.gp.id != id {
                 return;
             }
@@ -554,7 +558,7 @@ impl Quiver {
     pub fn load_profile_history(&mut self, id: Gid, profile: &str, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<Vec<ProfileRevision>, _>(
-            Request::Mods(ModsRequest::ProfileHistory { product_id: id.pid(), profile: p.clone() }),
+            Request::Mods(ModsRequest::ProfileHistory { game: id.0.into(), profile: p.clone() }),
             cx,
             move |this, r, _| {
                 if this.gp.id == id {
@@ -665,9 +669,19 @@ impl Quiver {
     }
 
     /// The game's `profile` setting as saved (a profile id; `None`: vanilla). It may name a
-    /// deleted profile; [`Self::default_profile`] is what Play really runs.
+    /// deleted profile; [`Self::default_profile`] is what Play really runs. A Steam game's is
+    /// its `steam_profile` (what Play in Steam runs), as its mods state reports it.
     pub fn default_profile_setting(&self, id: Gid) -> Option<String> {
+        if id.0.as_steam().is_some() {
+            return self.gp.mods.ready().filter(|m| self.gp.id == id && m.game_ref() == id.0)?.default_profile.clone();
+        }
         self.game(id)?.settings.as_ref()?.profile.clone()
+    }
+
+    /// What the default profile is called on `id`'s page: Ubisoft games' Play runs it, a
+    /// Steam game's Play in Steam does.
+    pub fn default_for(id: Gid) -> &'static str {
+        if id.0.as_steam().is_some() { "Steam runs" } else { "Default for Play" }
     }
 
     /// The profile Play runs for `id` when none is named (the daemon resolves the same
@@ -703,11 +717,16 @@ impl Quiver {
 
     /// Make profile entry `i` (0: vanilla) the game's default: the `profile` setting, a
     /// revision in its settings history, which Play, `quiver play` and shortcuts follow.
+    /// A Steam game's is `steam_profile`: what Play in Steam runs through `quiver steam-run`.
     pub fn set_default_profile(&mut self, id: Gid, i: usize, cx: &mut Context<Self>) {
         let profiles = self.gp.profiles();
         let chosen = if i == 0 { None } else { profiles.get(i - 1).cloned() };
         let label = chosen.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Vanilla".into());
         let value = chosen.as_ref().map(|p| p.id.clone());
+        if id.0.as_steam().is_some() {
+            self.set_steam_profile(id, label, value, cx);
+            return;
+        }
         if self.default_profile_setting(id) == value {
             self.show_toast(format!("Play already uses {label}"), cx);
             return;
@@ -723,16 +742,43 @@ impl Quiver {
         });
     }
 
+    /// A Steam game's `steam_profile` (`SettingsSet`; `None`: vanilla). The daemon announces
+    /// it with `ModsChanged`, and the mods state carries it.
+    fn set_steam_profile(&mut self, id: Gid, label: String, value: Option<String>, cx: &mut Context<Self>) {
+        if self.default_profile_setting(id) == value {
+            self.show_toast(format!("Steam already runs {label}"), cx);
+            return;
+        }
+        let ops = vec![SettingOp::Set { key: "steam_profile".into(), value: value.unwrap_or_else(|| VANILLA.into()) }];
+        let message = Some(format!("Steam runs: {label}"));
+        let hooked = self.steam_hook(id).map(|h| h.hooked());
+        self.call::<Revision, _>(Request::SettingsSet { game: id.0.into(), ops, message }, cx, move |this, r, cx| match r {
+            Ok(rev) => {
+                let then = if hooked == Some(false) { "; it applies once the game starts through Quiver" } else { "" };
+                this.show_toast(format!("Play in Steam now runs {label} (settings r{}){then}", rev.revision), cx);
+                this.load_mods(id, cx);
+            }
+            Err(e) => this.show_toast(err_text(&e), cx),
+        });
+    }
+
+    /// The `quiver` command that makes `name` (`None`: vanilla) the default.
+    fn default_command(id: Gid, name: Option<&str>) -> String {
+        let name = name.map(sh_quote).unwrap_or_else(|| VANILLA.into());
+        if id.0.as_steam().is_some() { format!("quiver set {id} steam_profile={name}") } else { format!("quiver mods {id} default {name}") }
+    }
+
     /// The profile chip's menu: pick the game's default profile.
     fn default_menu_commands(&self, id: Gid) -> Vec<Command> {
         let current = self.default_profile(id);
+        let default_for = Self::default_for(id);
         let entry = |i: usize, key: Option<&str>, name: &str, what: String| {
             let on = current.as_deref() == key;
             Command {
                 icon: if on { Icon::CircleCheck } else if key.is_some() { Icon::Layers } else { Icon::ShieldCheck },
                 label: name.to_owned().into(),
-                detail: Some(if on { format!("Default for Play · {what}") } else { what }.into()),
-                cli: Some(format!("quiver mods {id} default {}", key.map(|_| sh_quote(name)).unwrap_or_else(|| VANILLA.into())).into()),
+                detail: Some(if on { format!("{default_for} · {what}") } else { what }.into()),
+                cli: Some(Self::default_command(id, key.map(|_| name)).into()),
                 action: Cmd::DefaultProfile(id, i),
                 future: false,
             }
@@ -745,7 +791,7 @@ impl Quiver {
                 v.push(entry(i + 1, Some(p.id.as_str()), &p.name, profile_summary(&m.profiles[i])));
             }
             if let Some(d) = deleted.and_then(|d| m.deleted.iter().find(|x| x.profile.id == d)) {
-                v[0].detail = Some(format!("Default for Play · the default, {}, was deleted", d.profile.name).into());
+                v[0].detail = Some(format!("{default_for} · the default, {}, was deleted", d.profile.name).into());
             }
         }
         v
@@ -754,9 +800,13 @@ impl Quiver {
     /// The play menu (X, or the Play button's arrow): play once with Vanilla or a profile.
     /// From the profile chip it's the default-profile menu instead.
     pub fn play_menu_commands(&self, id: Gid) -> Option<Vec<Command>> {
-        // Mod profiles are for Quiver's own launches; other stores' games get the game menu.
-        if !self.gp.play_menu || !id.is_ubisoft() {
+        // Mod profiles are for Quiver's own launches; other stores' games get the game menu,
+        // except a Steam game's profile chip: which profile Play in Steam runs.
+        if !self.gp.play_menu {
             return None;
+        }
+        if !id.is_ubisoft() {
+            return (self.gp.default_menu && Tab::of(id).contains(&Tab::Mods)).then(|| self.default_menu_commands(id));
         }
         if self.gp.default_menu {
             return Some(self.default_menu_commands(id));
@@ -1191,7 +1241,7 @@ impl Quiver {
     pub fn profile_set(&mut self, id: Gid, profile: &str, ops: Vec<SettingOp>, cx: &mut Context<Self>) {
         let p = profile.to_owned();
         self.call::<ProfileRevision, _>(
-            Request::Mods(ModsRequest::ProfileSet { product_id: id.pid(), profile: p.clone(), ops, message: None }),
+            Request::Mods(ModsRequest::ProfileSet { game: id.0.into(), profile: p.clone(), ops, message: None }),
             cx,
             move |this, r, cx| match r {
                 Ok(rev) => {
@@ -1219,7 +1269,7 @@ impl Quiver {
         let name = if name.is_empty() { path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() } else { name };
         let (ni, pi) = (n.clone(), p.clone());
         self.show_toast(format!("Copying {} into the mod store…", crate::model::tilde(&path)), cx);
-        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { product_id: id.pid(), name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
+        self.call::<Layer, _>(Request::Mods(ModsRequest::LayerAdd { game: id.0.into(), name, path, deletes: Vec::new() }), cx, move |this, r, cx| match r {
             Ok(l) => {
                 this.show_toast(format!("Added layer {} ({} files)", l.name, l.files), cx);
                 ni.update(cx, |t, cx| t.set_text("", cx));
@@ -1307,12 +1357,16 @@ impl Quiver {
             Dialog::DeleteProfile { game, profile } => {
                 let name = profile.name.clone();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileDelete { product_id: game.pid(), profile: profile.id.clone(), confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileDelete { game: game.0.into(), profile: profile.id.clone(), confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
                             let was_default = this.default_profile_setting(game).as_deref() == Some(rev.profile.id.as_str());
-                            let then = if was_default { "; Play uses Vanilla until it's back" } else { "" };
+                            let then = match (was_default, game.0.as_steam().is_some()) {
+                                (true, true) => "; Steam runs Vanilla until it's back",
+                                (true, false) => "; Play uses Vanilla until it's back",
+                                _ => "",
+                            };
                             this.show_toast(format!("Deleted {name}; restore it from Deleted profiles (r{}){then}", rev.revision - 1), cx);
                             this.gp.prof_sel = None;
                             this.load_mods(game, cx);
@@ -1323,14 +1377,14 @@ impl Quiver {
             }
             Dialog::RestoreProfile { game, id, name, revision } => {
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileRestore { product_id: game, profile: id.clone(), revision, confirmed: true }),
+                    Request::Mods(ModsRequest::ProfileRestore { game: game.0.into(), profile: id.clone(), revision, confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
                             this.show_toast(format!("Restored {name} r{revision} as r{}", rev.revision), cx);
                             this.gp.prof_sel = Some(id.clone());
-                            this.load_mods(Gid::from(game), cx);
-                            this.load_profile_history(Gid::from(game), &id, cx);
+                            this.load_mods(game, cx);
+                            this.load_profile_history(game, &id, cx);
                         }
                         Err(e) => this.show_toast(err_text(&e), cx),
                     },
@@ -1339,7 +1393,7 @@ impl Quiver {
             Dialog::RemoveLayer { game, layer } => {
                 let name = layer.name.clone();
                 self.call::<Layer, _>(
-                    Request::Mods(ModsRequest::LayerRemove { product_id: game.pid(), layer: layer.id, confirmed: true }),
+                    Request::Mods(ModsRequest::LayerRemove { game: game.0.into(), layer: layer.id, confirmed: true }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(_) => {
@@ -1360,7 +1414,7 @@ impl Quiver {
                 }
                 let chosen: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
                 self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileCreate { product_id: game.pid(), name: n, layers: chosen, message: None, saves }),
+                    Request::Mods(ModsRequest::ProfileCreate { game: game.0.into(), name: n, layers: chosen, message: None, saves }),
                     cx,
                     move |this, r, cx| match r {
                         Ok(rev) => {
@@ -1481,7 +1535,7 @@ impl Quiver {
             Tab::Overview => g.playtime.as_ref().map(|p| p.sessions.len().min(8)).unwrap_or(0),
             Tab::LaunchOptions => self.launch_bar_rows(id, cx) + g.history.as_ref().map(|h| h.len()).unwrap_or(0),
             Tab::Mods => {
-                if !g.installed() {
+                if !g.mods_installed() {
                     0
                 } else {
                     2 + self.gp.profiles().len() + self.options_body_len(cx)

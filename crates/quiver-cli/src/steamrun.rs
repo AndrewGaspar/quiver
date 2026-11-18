@@ -16,6 +16,13 @@
 //! and its environment set. The exec keeps the pid, so quiverd sees the launch end when
 //! Steam's command does; Steam's process tree, Stop, overlay and Steam Input are as without
 //! the hook. When quiverd can't be reached the game starts anyway, without the plan.
+//!
+//! **Mods** (design/STORE-STEAM.md §10): quiverd also prepares the launch's mod profile
+//! (`--profile`, else the game's `steam_profile`): config patches and options are applied to
+//! Steam's prefix, and the plan says what to mount. With nothing to mount, the `exec` stays.
+//! With overlays, `steam-run` mounts them in a namespace of the launch's own
+//! (`quiver_core::steamns`), runs Steam's command as its child inside it, forwards signals
+//! and exits with the child's status.
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -26,6 +33,7 @@ use quiver_api::{Client, Request};
 use quiver_core::launcher;
 use quiver_api::steamlib::SteamLaunchPlan;
 use quiver_core::steamplan;
+use quiver_core::steamns;
 use quiver_core::steamrun::{self, ProtonCommand, SteamEnv};
 use quiver_ipc::run::BridgeArgs;
 
@@ -50,6 +58,11 @@ pub struct SteamRunArgs {
     /// Don't apply the game's Quiver launch settings (env, DLL overrides, args, wrappers).
     #[arg(long)]
     no_settings: bool,
+    /// The mod profile to run (a name or id, or `vanilla`); default: the game's `steam_profile`
+    /// setting (`quiver set <game> steam_profile=…`, or the app's Steam profile chip). For
+    /// Steam games (`--app`); Steam copies of Ubisoft games don't run mods yet.
+    #[arg(long)]
+    profile: Option<String>,
     /// Point the prefix's Ubisoft InstallDir at this folder of SDK DLLs (a backup of
     /// system.reg is kept as system.reg.quiver-bak). Only needed if Connect's own DLLs
     /// are missing from the prefix.
@@ -181,6 +194,7 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
     }
     let mut argv = a.command.clone();
     let mut env: Vec<(String, String)> = Vec::new();
+    let mut mods: Option<quiver_api::steamlib::SteamMods> = None;
     if a.dry_run {
         println!("game: {game} (Steam game; Steam's command runs as it is, with the game's launch plan from quiverd)");
         println!("{}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" "));
@@ -196,8 +210,14 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
             if a.no_settings {
                 log.line("--no-settings: the game's Quiver launch plan is not applied");
             } else {
-                let steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
-                match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: game.into(), perf: true, env: steam_env }).await {
+                let mut steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                // Whether this launch is Proton, and its prefix: Steam sets this for Proton
+                // launches only (the mods' config patches and prefix folders need it).
+                if let Ok(c) = std::env::var("STEAM_COMPAT_DATA_PATH") {
+                    steam_env.insert("STEAM_COMPAT_DATA_PATH".into(), c);
+                }
+                let req = Request::SteamLaunchPlan { game: game.into(), perf: true, env: steam_env, mods: true, profile: a.profile.clone() };
+                match client.call::<SteamLaunchPlan>(req).await {
                     Ok(p) => {
                         for l in steamplan::describe(&p) {
                             log.line(format!("settings r{}: {l}", p.revision));
@@ -208,6 +228,23 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
                         for l in &p.perf_notes {
                             log.line(l);
                         }
+                        match &p.mods {
+                            Some(m) => {
+                                let who = match (&m.profile, &m.profile_name) {
+                                    (Some(id), Some(n)) => format!("profile '{n}' ({id}) r{}", m.revision),
+                                    _ => "vanilla".into(),
+                                };
+                                log.line(format!("mods: {who} ({})", m.chosen_by));
+                                for l in &m.lines {
+                                    log.line(format!("mods: {l}"));
+                                }
+                                for o in &m.overlays {
+                                    log.line(format!("mount: {} <- {} (writes: {})", o.target.display(), o.lower.iter().map(|l| l.display().to_string()).collect::<Vec<_>>().join(" : "), o.upper.display()));
+                                }
+                            }
+                            None if a.profile.is_some() => log.line("--profile: this quiverd doesn't prepare mods for Steam launches; starting without them"),
+                            None => {}
+                        }
                         argv = steamplan::steam_command(&p, &a.command);
                         env = steamplan::steam_env(&p, |k| std::env::var(k).ok());
                         plan = Some(p);
@@ -215,22 +252,43 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
                     Err(e) => log.line(format!("no launch plan from quiverd ({e:#}); starting without it")),
                 }
             }
-            // The local play session: quiverd watches this pid, which the exec keeps.
+            if let Some(m) = plan.as_ref().and_then(|p| p.mods.as_ref()).filter(|m| !m.problems.is_empty()) {
+                for p in &m.problems {
+                    log.line(format!("can't start with these mods: {p}"));
+                }
+                bail!("not starting {game}: its mods can't run ({}); fix the profile (quiver mods {game} plan) or pick another (quiver set {game} steam_profile=vanilla)", m.problems.join("; "));
+            }
+            // The local play session: quiverd watches this pid, which the exec keeps (or which
+            // waits for Steam's command, with mods mounted).
             let req = Request::SteamSession {
                 app_id,
                 pid: std::process::id(),
                 perf_session: plan.as_ref().and_then(|p| p.perf_session.clone()),
                 settings_revision: plan.as_ref().map_or(0, |p| p.revision),
+                mods_launch: plan.as_ref().and_then(|p| p.mods.as_ref()).map(|m| m.launch.clone()),
             };
             match client.call::<quiver_api::ActiveSession>(req).await {
                 Ok(_) => log.line(format!("play session held for {game} (pid {})", std::process::id())),
                 Err(e) => log.line(format!("no play session from quiverd ({e:#}); the game starts anyway")),
             }
+            mods = plan.and_then(|p| p.mods);
         }
     }
-    log.line(format!("exec: {}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" ")));
+    let start = steamns::start_for(mods.as_ref());
+    let overlays = mods.map(|m| m.overlays).unwrap_or_default();
+    let verb = if start == steamns::Start::Exec { "exec" } else { "spawn (in the mods' namespace)" };
+    log.line(format!("{verb}: {}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" ")));
     for (k, v) in &env {
         log.line(format!("env {k}={v}"));
+    }
+    if start == steamns::Start::Namespace {
+        // G1 (STORE-STEAM §9): spawn only when something mounts.
+        let ns = steamns::namespace(&overlays)?;
+        log.line(format!("mounted {} overlay(s); Steam's command runs inside, steam-run waits for it", overlays.len()));
+        let status = steamns::run(&ns, &argv, &env, steamns::cwd().as_deref()).await?;
+        drop(ns);
+        log.line(format!("Steam's command exited: {status}"));
+        steamns::exit_like(status);
     }
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -330,7 +388,10 @@ async fn run_ubisoft(source: &str, a: SteamRunArgs) -> Result<()> {
     // Steam's environment goes along (as for any Steam game): tweaks yield to what the
     // person typed in Steam's launch options, and the Sight layer goes below their layers.
     let steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: product_id.into(), perf: !a.no_settings, env: steam_env }).await {
+    if let Some(p) = &a.profile {
+        log.line(format!("--profile {p}: Steam copies of Ubisoft games don't run mods yet; ignored"));
+    }
+    match client.call::<SteamLaunchPlan>(Request::SteamLaunchPlan { game: product_id.into(), perf: !a.no_settings, env: steam_env, mods: false, profile: None }).await {
         Ok(plan) if !a.no_settings => {
             for l in steamplan::describe(&plan) {
                 log.line(format!("settings r{}: {l}", plan.revision));

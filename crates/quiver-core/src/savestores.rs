@@ -29,6 +29,10 @@ pub use quiver_api::savestores::{
 use crate::mods::ModStore;
 use crate::settings::{append_jsonl, read_jsonl};
 
+/// Why another store's game has no save stores (design/STEAM-COPIES.md §4, "Saves"): its
+/// client syncs the real save folder, which Quiver doesn't fork yet.
+pub const REAL_SAVES: &str = "Steam games use their real saves, which Steam Cloud syncs: every profile shares them (profiles with saves of their own aren't built for Steam games yet)";
+
 /// One game's save stores under a data directory.
 #[derive(Debug, Clone)]
 pub struct SaveStores {
@@ -431,6 +435,17 @@ impl ModStore {
 
     /// See [`ModStore::saves_plan`].
     pub(crate) fn store_saves_plan(&self, profile: Option<&Profile>, mods: &[Layer]) -> SavesPlan {
+        if !self.has_save_stores() {
+            return SavesPlan {
+                separate: false,
+                reason: REAL_SAVES.into(),
+                folder: "the game's own save folder".into(),
+                cloud: false,
+                store: Some(DEFAULT_STORE.into()),
+                store_name: Some("the game's saves".into()),
+                cloud_note: Some("Steam Cloud syncs the game's real saves; Quiver doesn't sync them".into()),
+            };
+        }
         let cur = self.current_stores();
         let default = cur.get(DEFAULT_STORE).cloned().unwrap_or_else(|| self.save_stores().default_store());
         let (store, why) = match profile {
@@ -478,6 +493,16 @@ impl ModStore {
 
     /// Problems and warnings about a profile's save store, for its stack's notes.
     pub(crate) fn store_notes(&self, p: &Profile, mods: &[Layer], problems: &mut Vec<String>, warnings: &mut Vec<String>) {
+        if !self.has_save_stores() {
+            let risky: Vec<String> = mods.iter().filter(|m| !m.save_compatible()).map(|m| m.name.clone()).collect();
+            if !risky.is_empty() {
+                warnings.push(format!(
+                    "{} may change saves, and this profile uses the game's real saves (Steam Cloud syncs them): back them up before playing it",
+                    risky.join(", ")
+                ));
+            }
+            return;
+        }
         let Some(id) = p.saves.as_deref() else { return };
         let cur = self.current_stores();
         match cur.get(id) {
@@ -496,6 +521,9 @@ impl ModStore {
     /// mod that isn't save-compatible), else Default. Nothing moves; each change is a
     /// revision (the store's and the profile's), so it can be undone.
     pub(crate) fn migrate_saves(&self, dry_run: bool, source: &str, report: &mut quiver_api::mods::MigrationReport) -> Result<()> {
+        if !self.has_save_stores() {
+            return Ok(());
+        }
         let stores = self.save_stores();
         let pid = self.product_id();
         for (p, _) in self.profiles()? {
@@ -609,6 +637,12 @@ impl ModStore {
 
     /// A store id for `query` (`new`: a new store named after `profile_name`).
     pub(crate) fn resolve_store(&self, query: &str, profile_name: &str, source: &str) -> Result<String> {
+        if !self.has_save_stores() {
+            if same_name(query, DEFAULT_STORE) {
+                return Ok(DEFAULT_STORE.into());
+            }
+            bail!("{REAL_SAVES} (saves={query} isn't possible; use saves=default)");
+        }
         if same_name(query, NEW_STORE) {
             let cur = self.save_stores().current()?;
             let name = SaveStores::free_name(&cur, profile_name);

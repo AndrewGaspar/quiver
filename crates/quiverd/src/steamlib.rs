@@ -317,8 +317,13 @@ pub(crate) fn launch_plan(game: GameRef) -> Result<SteamLaunchPlan> {
     Ok(plan_from(game, s, revision))
 }
 
-fn plan_from(game: GameRef, s: quiver_api::GameSettings, revision: u32) -> SteamLaunchPlan {
+pub(crate) fn plan_from(game: GameRef, s: quiver_api::GameSettings, revision: u32) -> SteamLaunchPlan {
     let mut ignored = Vec::new();
+    if game.is_ubisoft()
+        && let Some(p) = &s.steam_profile
+    {
+        ignored.push(format!("steam_profile={p} (mods for Steam copies of Ubisoft games aren't built yet)"));
+    }
     if let Some(p) = &s.proton {
         ignored.push(format!("proton={p} (Steam's compatibility setting picks Proton)"));
     }
@@ -335,8 +340,25 @@ fn plan_from(game: GameRef, s: quiver_api::GameSettings, revision: u32) -> Steam
 ///
 /// `steam_env`: the environment Steam set for the launch (`SteamLaunchPlan`'s `env`), which
 /// `steam-run` keeps: tweaks yield to it per key, and the layer order counts its layers.
-pub(crate) fn full_plan(daemon: &Daemon, game: GameRef, perf: bool, steam_env: &std::collections::BTreeMap<String, String>) -> Result<SteamLaunchPlan> {
+///
+/// `mods`: prepare the launch's mods too (a Steam game only: profile `profile`, else its
+/// `steam_profile`; see `steammods`). The stack's launch settings replace the game's before
+/// tweaks and the HUD see them.
+pub(crate) fn full_plan(
+    daemon: &Daemon,
+    source: &str,
+    game: GameRef,
+    perf: bool,
+    steam_env: &std::collections::BTreeMap<String, String>,
+    mods: bool,
+    profile: Option<&str>,
+) -> Result<SteamLaunchPlan> {
     let mut plan = launch_plan(game)?;
+    if mods && game.as_steam().is_some() {
+        daemon.steam_mods_prepare(source, game, profile, steam_env, &mut plan)?;
+    } else if mods || profile.is_some() {
+        plan.ignored.push("mods: not applied to Steam copies of Ubisoft games yet".into());
+    }
     // Quiver Tweaks: the same compiled environment a Quiver launch gets (Steam picks the
     // Proton build; design/TWEAKS.md §8.1).
     crate::tweaks::steam_plan(&daemon.cfg, &mut plan, steam_env);
@@ -354,11 +376,27 @@ impl Daemon {
             let key = match op {
                 quiver_api::SettingOp::Set { key, .. } | quiver_api::SettingOp::Unset { key } => key.as_str(),
             };
-            if matches!(key, "account" | "profile") {
-                anyhow::bail!("{game}: `{key}` is for Ubisoft games (Steam plays it with the Steam account, without mod profiles)");
+            if key == "account" {
+                anyhow::bail!("{game}: `{key}` is for Ubisoft games (Steam plays it with the Steam account)");
             }
         }
+        // The mod profile: a Steam game's only launch is Steam's, so `profile` is its
+        // `steam_profile` (STORE-STEAM.md §10, M1), stored as the profile's id.
+        let ops = ops
+            .into_iter()
+            .map(|op| match op {
+                quiver_api::SettingOp::Set { key, value } if key == "profile" || key == "steam_profile" => {
+                    Ok(quiver_api::SettingOp::Set { key: "steam_profile".into(), value: crate::mods::resolve_default(game, &value)? })
+                }
+                quiver_api::SettingOp::Unset { key } if key == "profile" => Ok(quiver_api::SettingOp::Unset { key: "steam_profile".into() }),
+                op => Ok(op),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let profile_changed = ops.iter().any(|op| matches!(op, quiver_api::SettingOp::Set { key, .. } | quiver_api::SettingOp::Unset { key } if key == "steam_profile"));
         let rev = settings::apply(game, &ops, source, message)?;
+        if profile_changed {
+            self.emit(crate::mods::mods_event(game));
+        }
         let hooked = crate::steamhook::hooked(game).unwrap_or(false);
         let note = if hooked { "" } else { " (not hooked: they apply once it starts through quiver steam-run)" };
         self.log_activity_game(source, format!("settings r{} for {game}{note}", rev.revision), Some(game));
@@ -369,7 +407,12 @@ impl Daemon {
 pub(crate) async fn handle(daemon: &Arc<Daemon>, _source: &str, req: Request) -> Result<Value> {
     Ok(match req {
         Request::Ownership { product_id, account } => json!(ownership(daemon, product_id, account).await?),
-        Request::SteamLaunchPlan { game, perf, env } => json!(full_plan(daemon, *game, perf, &env)?),
+        Request::SteamLaunchPlan { game, perf, env, mods, profile } => {
+            let d = daemon.clone();
+            let source = _source.to_owned();
+            // Mods touch files (patches, options): off the runtime's threads.
+            json!(tokio::task::spawn_blocking(move || full_plan(&d, &source, *game, perf, &env, mods, profile.as_deref())).await??)
+        }
         other => anyhow::bail!("not a Steam library request: {other:?}"),
     })
 }
@@ -479,6 +522,12 @@ mod tests {
         assert_eq!(p.ignored.len(), 1);
         assert!(p.ignored[0].starts_with("proton=GE-Proton10-34"));
         assert!(plan_from(GameRef::ubisoft(1), Default::default(), 0).ignored.is_empty());
+        // A Ubisoft copy's Steam profile is stored but not applied yet; a Steam game's is (by
+        // the mods part of the plan, not here).
+        let mut s = quiver_api::GameSettings::default();
+        s.apply(&quiver_api::SettingOp::parse("steam_profile=p1").unwrap()).unwrap();
+        assert!(plan_from(GameRef::ubisoft(1), s.clone(), 0).ignored[0].starts_with("steam_profile=p1"));
+        assert!(plan_from(GameRef::steam(1), s, 0).ignored.is_empty());
         // Any other Steam game: the same plan from its own settings, product 0.
         let mut s = quiver_api::GameSettings::default();
         for op in ["env.PROTON_LOG=1", "wrappers=gamemoderun", "args=-dx12"] {

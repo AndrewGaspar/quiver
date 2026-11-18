@@ -25,7 +25,8 @@ use quiver_api::options::{
     CrashNote, InvokeResult, KeysReport, Live, LiveChange, LiveChannel, LintReport, OpOutcome, OptionDiff, OptionOp, OptionsChange, OptionsEvent,
     OptionsRequest, Outcome, SchemaInfo, SessionDetail, SessionOptions, Values,
 };
-use quiver_core::launcher::Games;
+use quiver_api::GameRef;
+use quiver_api::game::GameField;
 use quiver_core::mods::ModStore;
 use quiver_core::options::{self as opt, Ctx, RunInfo};
 
@@ -113,8 +114,8 @@ impl Options {
         let _ = self.events.send(e);
     }
 
-    fn session_for(&self, product_id: u32, profile: &str) -> Option<LiveSession> {
-        self.sessions.lock().unwrap().values().find(|s| s.record.product_id == product_id && s.record.profile == profile).cloned()
+    fn session_for(&self, game: GameRef, profile: &str) -> Option<LiveSession> {
+        self.sessions.lock().unwrap().values().find(|s| rec_game(&s.record) == game && s.record.profile == profile).cloned()
     }
 
     /// The options revision a running session launched with.
@@ -134,7 +135,7 @@ impl Options {
 
     /// The addressing fields for a game being played (C1).
     pub fn detail(&self, mut s: quiver_api::ActiveSession) -> SessionDetail {
-        let found = self.sessions.lock().unwrap().values().find(|l| l.record.product_id == s.product_id).cloned();
+        let found = self.sessions.lock().unwrap().values().find(|l| rec_game(&l.record) == s.game_ref()).cloned();
         if let Some(l) = found {
             s.session = Some(l.record.session.clone());
             s.profile = Some(l.record.profile.clone());
@@ -150,14 +151,24 @@ pub fn new_session_id() -> String {
     quiver_core::modsdk::new_session_id()
 }
 
-fn game(product_id: u32) -> Result<quiver_core::launcher::Game> {
-    Games::load()?.get(product_id).cloned().context("not installed (options need an installed game)")
+fn installed_game(game: GameRef) -> Result<quiver_core::launcher::Game> {
+    crate::mods::installed(game).context("options need an installed game")
+}
+
+/// A session record's game.
+fn rec_game(r: &SessionOptions) -> GameRef {
+    r.game.unwrap_or(GameRef::ubisoft(r.product_id))
+}
+
+/// A game's product id on the wire (0 for another store's game).
+fn pid(g: GameRef) -> u32 {
+    g.as_ubisoft().unwrap_or(0)
 }
 
 /// The store and profile id a request means (`None`: the game's default profile).
-fn resolve(product_id: u32, profile: Option<&str>) -> Result<(ModStore, Option<String>)> {
-    let store = store_for(&game(product_id)?);
-    let (p, _) = launch_profile(&store, product_id, profile)?;
+fn resolve(game: GameRef, profile: Option<&str>) -> Result<(ModStore, Option<String>)> {
+    let store = store_for(&installed_game(game)?);
+    let (p, _) = launch_profile(&store, profile)?;
     // A name to the profile's id (values are stored by id).
     let p = match p {
         Some(q) if !q.eq_ignore_ascii_case(VANILLA) => Some(store.profile(&q)?.0.id),
@@ -166,8 +177,8 @@ fn resolve(product_id: u32, profile: Option<&str>) -> Result<(ModStore, Option<S
     Ok((store, p))
 }
 
-fn ctx_for(product_id: u32, profile: Option<&str>) -> Result<Ctx> {
-    let (store, p) = resolve(product_id, profile)?;
+fn ctx_for(game: GameRef, profile: Option<&str>) -> Result<Ctx> {
+    let (store, p) = resolve(game, profile)?;
     opt::context(&store, p.as_deref())
 }
 
@@ -189,7 +200,7 @@ pub(crate) fn test_session(d: &Daemon) {
         return;
     };
     let result = (|| -> Result<String> {
-        let (store, prof) = resolve(p, Some(profile))?;
+        let (store, prof) = resolve(GameRef::ubisoft(p), Some(profile))?;
         let ctx = opt::context(&store, prof.as_deref())?;
         let rev = opt::current(&store, &ctx.profile_id)?;
         let has = ctx.surfaces.iter().map(|s| (s.key.clone(), opt::eval(&ctx, s, &rev.values, &rev.raw, None).options.into_iter().map(|(id, e)| (id, e.effective())).collect())).collect();
@@ -208,6 +219,7 @@ impl Options {
         let record = SessionOptions {
             session: session.to_owned(),
             product_id: ctx.store.product_id(),
+            game: (!ctx.store.game_ref().is_ubisoft()).then_some(ctx.store.game_ref()),
             profile: ctx.profile_id.clone(),
             launched_revision: revision,
             started: chrono::Utc::now(),
@@ -223,13 +235,13 @@ impl Daemon {
         let src = source.to_owned();
         Ok(match req {
             OptionsRequest::Sessions => json!(self.sessions.list().into_iter().map(|s| self.options.detail(s)).collect::<Vec<_>>()),
-            OptionsRequest::List { product_id, profile, level } => {
+            OptionsRequest::List { game: GameField(game), profile, level } => {
                 let this = self.clone();
                 json!(
                     with_store_lock(move || {
-                        let ctx = ctx_for(product_id, profile.as_deref())?;
+                        let ctx = ctx_for(game, profile.as_deref())?;
                         let rev = opt::current(&ctx.store, &ctx.profile_id)?;
-                        let live = this.options.session_for(product_id, &ctx.profile_id);
+                        let live = this.options.session_for(game, &ctx.profile_id);
                         let run = this.run_info(&ctx, live.as_ref());
                         let mut out = opt::states(&ctx, &rev, &run, level);
                         if !ctx.problems.is_empty()
@@ -239,22 +251,22 @@ impl Daemon {
                         }
                         // Quiver Tweaks, at the profile scope, last on the wire (indexes stay as
                         // they were; the app lists it first, design/TWEAKS.md §8.3).
-                        out.push(this.tweaks_profile_state(product_id, &ctx, level)?);
+                        out.push(this.tweaks_profile_state(game, &ctx, level)?);
                         Ok(out)
                     })
                     .await?
                 )
             }
-            OptionsRequest::Set { product_id, profile, ops, live, message, confirmed } => {
+            OptionsRequest::Set { game: GameField(game), profile, ops, live, message, confirmed } => {
                 // Ops on Quiver Tweaks go to the profile scope of the tweaks store.
                 let (tweak_ops, ops): (Vec<OptionOp>, Vec<OptionOp>) = ops.into_iter().partition(|o| quiver_api::tweaks::is_platform_surface(op_surface(o)));
                 let mut out = if ops.is_empty() && !tweak_ops.is_empty() {
                     None
                 } else {
-                    Some(self.options_set(&src, product_id, profile.clone(), ops, live, message.clone(), confirmed, None).await?)
+                    Some(self.options_set(&src, game, profile.clone(), ops, live, message.clone(), confirmed, None).await?)
                 };
                 if !tweak_ops.is_empty() {
-                    let scope = quiver_api::tweaks::Scope::Profile { game: quiver_api::GameRef::ubisoft(product_id), profile: profile.clone() };
+                    let scope = quiver_api::tweaks::Scope::Profile { game, profile: profile.clone() };
                     let t = self.tweaks_set_ops(&src, scope, tweak_ops, message, confirmed).await?;
                     out = Some(match out {
                         None => t,
@@ -271,19 +283,19 @@ impl Daemon {
                 }
                 json!(out.unwrap_or_default())
             }
-            OptionsRequest::History { product_id, profile } => {
+            OptionsRequest::History { game: GameField(game), profile } => {
                 json!(
                     with_store_lock(move || {
-                        let (store, p) = resolve(product_id, profile.as_deref())?;
+                        let (store, p) = resolve(game, profile.as_deref())?;
                         opt::history(&store, p.as_deref().unwrap_or(VANILLA))
                     })
                     .await?
                 )
             }
-            OptionsRequest::Restore { product_id, profile, revision, confirmed } => {
+            OptionsRequest::Restore { game: GameField(game), profile, revision, confirmed } => {
                 ask(source, confirmed, "restoring an options revision")?;
                 let (ops, msg) = with_store_lock(move || {
-                    let ctx = ctx_for(product_id, profile.as_deref())?;
+                    let ctx = ctx_for(game, profile.as_deref())?;
                     let hist = opt::history(&ctx.store, &ctx.profile_id)?;
                     let target = match revision {
                         0 => quiver_api::options::OptionsRevision::default(),
@@ -294,13 +306,13 @@ impl Daemon {
                 })
                 .await?;
                 let (pid, m) = msg;
-                json!(self.options_set(&src, product_id, Some(pid), ops, Live::IfRunning, Some(m), true, None).await?)
+                json!(self.options_set(&src, game, Some(pid), ops, Live::IfRunning, Some(m), true, None).await?)
             }
-            OptionsRequest::RevertSession { product_id, session, confirmed } => {
+            OptionsRequest::RevertSession { game: GameField(game), session, confirmed } => {
                 ask(source, confirmed, "reverting a session's option changes")?;
                 let live = self.options.session(&session);
                 let (ops, pid) = with_store_lock(move || {
-                    let store = store_for(&game(product_id)?);
+                    let store = store_for(&installed_game(game)?);
                     let rec = match &live {
                         Some(l) => l.record.clone(),
                         None => opt::load_session(&store, &session)?,
@@ -314,34 +326,34 @@ impl Daemon {
                 let (profile, session, rev) = pid;
                 self.options.update(&session, |s| s.session_values.clear());
                 json!(
-                    self.options_set(&src, product_id, Some(profile), ops, Live::IfRunning, Some(format!("reverted session {session} (back to r{rev})")), true, Some(session))
+                    self.options_set(&src, game, Some(profile), ops, Live::IfRunning, Some(format!("reverted session {session} (back to r{rev})")), true, Some(session))
                         .await?
                 )
             }
-            OptionsRequest::Diff { product_id, profile, against } => {
-                json!(with_store_lock(move || diff(product_id, profile.as_deref(), against.as_deref())).await?)
+            OptionsRequest::Diff { game: GameField(game), profile, against } => {
+                json!(with_store_lock(move || diff(game, profile.as_deref(), against.as_deref())).await?)
             }
-            OptionsRequest::Keys { product_id, profile } => {
+            OptionsRequest::Keys { game: GameField(game), profile } => {
                 json!(
                     with_store_lock(move || {
-                        let ctx = ctx_for(product_id, profile.as_deref())?;
+                        let ctx = ctx_for(game, profile.as_deref())?;
                         let rev = opt::current(&ctx.store, &ctx.profile_id)?;
                         let bindings = opt::key_bindings(&ctx, &rev);
                         let conflicts = opt::keys::conflicts(&bindings);
-                        Ok(KeysReport { product_id, profile: ctx.profile_id.clone(), bindings, conflicts })
+                        Ok(KeysReport { product_id: pid(game), profile: ctx.profile_id.clone(), bindings, conflicts })
                     })
                     .await?
                 )
             }
-            OptionsRequest::Invoke { product_id, surface, action, arg, session } => {
+            OptionsRequest::Invoke { game: GameField(game), surface, action, arg, session } => {
                 let ctx = with_store_lock(move || {
-                    let store = store_for(&game(product_id)?);
+                    let store = store_for(&installed_game(game)?);
                     Ok(store)
                 })
                 .await?;
                 let live = match session {
                     Some(s) => self.options.session(&s).context("no such running session")?,
-                    None => self.options.sessions.lock().unwrap().values().find(|s| s.record.product_id == product_id).cloned().context("the game isn't running (actions need a running session)")?,
+                    None => self.options.sessions.lock().unwrap().values().find(|s| rec_game(&s.record) == game).cloned().context("the game isn't running (actions need a running session)")?,
                 };
                 let c = opt::context(&ctx, Some(&live.record.profile))?;
                 let s = opt::surface(&c, &surface)?;
@@ -353,26 +365,26 @@ impl Daemon {
                     bail!("{} isn't connected over the mod SDK in this session; actions need it (its own hotkey still works)", s.title());
                 };
                 let detail = sdk.invoke(&live.record.session, &s.schema().surface, &action, arg).await?;
-                self.log_activity(source, format!("ran {} action {action} in {}", s.title(), self.product_name(product_id)), Some(product_id));
+                self.log_activity_game(source, format!("ran {} action {action} in {}", s.title(), self.name_of(game)), Some(game));
                 json!(InvokeResult { session: live.record.session, surface: s.key.clone(), action, ok: true, detail })
             }
-            OptionsRequest::Schema { product_id, mod_id, version } => json!(with_store_lock(move || schema_info(product_id, &mod_id, version.as_deref())).await?),
-            OptionsRequest::SchemaSet { product_id, mod_id, toml, message } => {
+            OptionsRequest::Schema { game: GameField(game), mod_id, version } => json!(with_store_lock(move || schema_info(game, &mod_id, version.as_deref())).await?),
+            OptionsRequest::SchemaSet { game: GameField(game), mod_id, toml, message } => {
                 let s2 = src.clone();
                 let info = with_store_lock(move || {
-                    let store = store_for(&game(product_id)?);
+                    let store = store_for(&installed_game(game)?);
                     let rec = store.find_mod(&mod_id)?;
                     opt::set_local_schema(&store, &rec.id, &toml, &s2, message)?;
-                    schema_info(product_id, &rec.id, None)
+                    schema_info(game, &rec.id, None)
                 })
                 .await?;
-                self.log_activity(source, format!("local options schema for '{}' of {}", info.mod_id, self.product_name(product_id)), Some(product_id));
+                self.log_activity_game(source, format!("local options schema for '{}' of {}", info.mod_id, self.name_of(game)), Some(game));
                 json!(info)
             }
-            OptionsRequest::Infer { product_id, mod_id, file } => {
+            OptionsRequest::Infer { game: GameField(game), mod_id, file } => {
                 json!(
                     with_store_lock(move || {
-                        let store = store_for(&game(product_id)?);
+                        let store = store_for(&installed_game(game)?);
                         let rec = store.find_mod(&mod_id)?;
                         let rel = file.trim_start_matches('/');
                         let path = store.layer_dir(&rec.current).join(rel);
@@ -384,22 +396,22 @@ impl Daemon {
                 )
             }
             OptionsRequest::Lint { path } => json!(tokio::task::spawn_blocking(move || lint_folder(&path)).await??),
-            OptionsRequest::Files { product_id, mod_id } => {
+            OptionsRequest::Files { game: GameField(game), mod_id } => {
                 json!(
                     with_store_lock(move || {
-                        let store = store_for(&game(product_id)?);
+                        let store = store_for(&installed_game(game)?);
                         let rec = store.find_mod(&mod_id)?;
                         Ok(opt::config_files(&store.layer_dir(&rec.current), 200))
                     })
                     .await?
                 )
             }
-            OptionsRequest::SessionRecords { product_id, profile, limit } => {
+            OptionsRequest::SessionRecords { game: GameField(game), profile, limit } => {
                 json!(
                     with_store_lock(move || {
                         let (store, p) = match &profile {
-                            Some(_) => resolve(product_id, profile.as_deref())?,
-                            None => (store_for(&game(product_id)?), None),
+                            Some(_) => resolve(game, profile.as_deref())?,
+                            None => (store_for(&installed_game(game)?), None),
                         };
                         let want = profile.as_ref().map(|_| p.unwrap_or_else(|| VANILLA.into()));
                         let mut list: Vec<SessionOptions> = opt::sessions(&store).into_iter().filter(|s| want.as_ref().is_none_or(|w| &s.profile == w)).collect();
@@ -432,7 +444,7 @@ impl Daemon {
     pub(crate) async fn options_set(
         self: &Arc<Self>,
         source: &str,
-        product_id: u32,
+        game: GameRef,
         profile: Option<String>,
         ops: Vec<OptionOp>,
         live: Live,
@@ -442,9 +454,9 @@ impl Daemon {
     ) -> Result<OptionsChange> {
         let ctx = {
             let p = profile.clone();
-            with_store_lock(move || ctx_for(product_id, p.as_deref())).await?
+            with_store_lock(move || ctx_for(game, p.as_deref())).await?
         };
-        let running = self.options.session_for(product_id, &ctx.profile_id);
+        let running = self.options.session_for(game, &ctx.profile_id);
         let rev = opt::current(&ctx.store, &ctx.profile_id)?;
         // Session-only changes apply on top of what the session already has.
         let (base_values, base_raw) = match (live, &running) {
@@ -455,7 +467,7 @@ impl Daemon {
         let changed = applied.outcomes.iter().any(|o| o.2.is_none());
         if live == Live::Only && running.is_none() {
             for o in applied.outcomes.iter_mut().filter(|o| o.2.is_none()) {
-                o.2 = Some(Outcome::Rejected { reason: format!("{} isn't running with this profile; nothing was saved (`live: only` sets values for a running session)", self.product_name(product_id)) });
+                o.2 = Some(Outcome::Rejected { reason: format!("{} isn't running with this profile; nothing was saved (`live: only` sets values for a running session)", self.name_of(game)) });
             }
         }
         if changed && !applied.dangers.is_empty() && !confirmed {
@@ -464,11 +476,11 @@ impl Daemon {
         if changed && running.is_some() && live != Live::No && !is_human_source(source) && !confirmed {
             bail!(
                 "{} is running: changing it live needs your confirmation when requested by '{source}' (agent policy: Ask). Save without touching the running game with --no-live, or confirm",
-                self.product_name(product_id)
+                self.name_of(game)
             );
         }
         let delivering = running.is_some() && live != Live::No && applied.outcomes.iter().any(|o| o.2.is_none());
-        let mut out = OptionsChange { product_id, profile: ctx.profile_id.clone(), ..Default::default() };
+        let mut out = OptionsChange { product_id: pid(game), profile: ctx.profile_id.clone(), ..Default::default() };
         out.changes = applied.changes.clone();
         // Save (everything but session-only changes).
         let session_id = running.as_ref().map(|s| s.record.session.clone()).or(session_hint);
@@ -554,7 +566,7 @@ impl Daemon {
                 };
                 match result {
                     Ok(files) => {
-                        out.live.push(format!("{} is running ({}): rewrote {}", self.product_name(product_id), surf.title(), files.join(", ")));
+                        out.live.push(format!("{} is running ({}): rewrote {}", self.name_of(game), surf.title(), files.join(", ")));
                         delivered.insert(key.clone(), Ok(LiveChannel::File));
                     }
                     Err(e) => {
@@ -610,21 +622,26 @@ impl Daemon {
                 by_surface.entry(o.surface.clone()).or_default().insert(o.id.clone(), o.after.clone().unwrap_or_default());
             }
             for (surface, values) in by_surface {
-                self.options.emit(OptionsEvent::Live { session: sid.clone(), product_id, surface, values, by: source.to_owned(), saved: live != Live::Only });
+                self.options.emit(OptionsEvent::Live { session: sid.clone(), product_id: pid(game), surface, values, by: source.to_owned(), saved: live != Live::Only });
             }
             // Sight's toast lane: every outcome, rejections included.
             let outcomes: Vec<OpOutcome> = out.outcomes.iter().filter(|o| o.outcome != Outcome::Unchanged).cloned().collect();
             if !outcomes.is_empty() {
-                self.options.emit(OptionsEvent::Outcome { session: sid, product_id, profile: ctx.profile_id.clone(), by: source.to_owned(), outcomes, changes: out.changes.clone() });
+                self.options.emit(OptionsEvent::Outcome { session: sid, product_id: pid(game), profile: ctx.profile_id.clone(), by: source.to_owned(), outcomes, changes: out.changes.clone() });
             }
         }
         if out.revision > 0 {
-            self.options.emit(OptionsEvent::Changed { product_id, profile: ctx.profile_id.clone(), revision: out.revision, source: source.to_owned(), changes: out.changes.clone() });
+            self.options.emit(OptionsEvent::Changed { product_id: pid(game), profile: ctx.profile_id.clone(), revision: out.revision, source: source.to_owned(), changes: out.changes.clone() });
+            // Front ends key options events by product: another store's game is told by its
+            // `ModsChanged` (which carries `game`).
+            if !game.is_ubisoft() {
+                self.emit(crate::mods::mods_event(game));
+            }
             let live_note = if out.live.is_empty() { String::new() } else { " (live)".into() };
-            self.log_activity(
+            self.log_activity_game(
                 source,
-                format!("options r{} for {} ({}){live_note}: {}", out.revision, self.product_name(product_id), ctx.profile_id, out.changes.join("; ")),
-                Some(product_id),
+                format!("options r{} for {} ({}){live_note}: {}", out.revision, self.name_of(game), ctx.profile_id, out.changes.join("; ")),
+                Some(game),
             );
         }
         Ok(out)
@@ -645,7 +662,7 @@ impl Daemon {
         match result {
             Ok((ctx, lo)) => {
                 if let Some(r) = &lo.imported {
-                    self.options.emit(OptionsEvent::Changed { product_id: game.product_id, profile: ctx.profile_id.clone(), revision: r.revision, source: r.source.clone(), changes: r.changes.clone() });
+                    self.options.emit(OptionsEvent::Changed { product_id: pid(game.game_ref()), profile: ctx.profile_id.clone(), revision: r.revision, source: r.source.clone(), changes: r.changes.clone() });
                 }
                 self.options.register(&ctx, session, lo.revision, lo.has, Vec::new(), None);
                 let mut lines = lo.lines;
@@ -675,9 +692,9 @@ impl Daemon {
                     continue;
                 }
                 let Some(pid) = s.pids.first().copied() else { continue };
-                let (product_id, profile) = (s.record.product_id, s.record.profile.clone());
+                let (game, profile) = (rec_game(&s.record), s.record.profile.clone());
                 let found = with_store_lock(move || {
-                    let ctx = ctx_for(product_id, Some(&profile))?;
+                    let ctx = ctx_for(game, Some(&profile))?;
                     opt::import_external(&ctx, Some(&PathBuf::from(format!("/proc/{pid}/root"))), "while the game ran")
                 })
                 .await;
@@ -689,8 +706,8 @@ impl Daemon {
     }
 
     fn options_imported(&self, s: &LiveSession, r: quiver_api::options::OptionsRevision) {
-        let product_id = s.record.product_id;
-        self.options.emit(OptionsEvent::Changed { product_id, profile: s.record.profile.clone(), revision: r.revision, source: r.source.clone(), changes: r.changes.clone() });
+        let game = rec_game(&s.record);
+        self.options.emit(OptionsEvent::Changed { product_id: pid(game), profile: s.record.profile.clone(), revision: r.revision, source: r.source.clone(), changes: r.changes.clone() });
         let cur = s.has.clone();
         let mut has = cur.clone();
         for (key, vals) in &r.values {
@@ -702,21 +719,21 @@ impl Daemon {
                 }
             }
             if !changed.is_empty() {
-                self.options.emit(OptionsEvent::Live { session: s.record.session.clone(), product_id, surface: key.clone(), values: changed, by: r.source.clone(), saved: true });
+                self.options.emit(OptionsEvent::Live { session: s.record.session.clone(), product_id: pid(game), surface: key.clone(), values: changed, by: r.source.clone(), saved: true });
             }
         }
         self.options.update(&s.record.session, |l| l.has = has);
-        self.log_activity(&r.source, format!("options r{} for {}: {}", r.revision, self.product_name(product_id), r.changes.join("; ")), Some(product_id));
+        self.log_activity_game(&r.source, format!("options r{} for {}: {}", r.revision, self.name_of(game), r.changes.join("; ")), Some(game));
     }
 
     /// After a session: import outside edits, and if the game exited abnormally within 60 s
     /// of a live change, offer a revert (never automatic, §8).
     pub(crate) async fn options_session_end(self: &Arc<Self>, session: &str, exit_code: Option<i32>) {
         let Some(s) = self.options.sessions.lock().unwrap().remove(session) else { return };
-        let (product_id, profile) = (s.record.product_id, s.record.profile.clone());
+        let (game, profile) = (rec_game(&s.record), s.record.profile.clone());
         let p2 = profile.clone();
         if let Ok(Some(r)) = with_store_lock(move || {
-            let ctx = ctx_for(product_id, Some(&p2))?;
+            let ctx = ctx_for(game, Some(&p2))?;
             opt::import_external(&ctx, None, "after the session")
         })
         .await
@@ -730,14 +747,14 @@ impl Daemon {
         if abnormal && let Some(last) = record.live_changes.last() {
             let secs = (record.ended.unwrap() - last.at).num_seconds();
             if secs <= 60 {
-                let name = self.product_name(product_id);
+                let name = self.name_of(game);
                 let message = format!("{name} crashed {secs} s after {} {} was set. Revert this session's in-game changes?", last.surface, last.id);
                 record.crash = Some(CrashNote { seconds_after: secs, change: format!("{} {}", last.surface, last.id), exit_code, message: message.clone() });
-                self.log_activity("quiverd", format!("{message} (quiver mods {product_id} options revert --session {session})"), Some(product_id));
-                self.options.emit(OptionsEvent::Crash { product_id, profile: profile.clone(), note: record.clone() });
+                self.log_activity_game("quiverd", format!("{message} (quiver mods {game} options revert --session {session})"), Some(game));
+                self.options.emit(OptionsEvent::Crash { product_id: pid(game), profile: profile.clone(), note: record.clone() });
             }
         }
-        if let Ok(g) = game(product_id) {
+        if let Ok(g) = installed_game(game) {
             let _ = opt::save_session(&store_for(&g), &record);
         }
     }
@@ -753,7 +770,7 @@ impl Daemon {
         let ops = values.iter().map(|(id, text)| OptionOp::Set { surface: surface.to_owned(), id: id.clone(), value: Value::String(text.clone()) }).collect();
         if !persist {
             // Runtime state: what the program has now; shown, not saved.
-            let ctx = ctx_for(s.record.product_id, Some(&s.record.profile))?;
+            let ctx = ctx_for(rec_game(&s.record), Some(&s.record.profile))?;
             let surf = opt::surface(&ctx, surface)?;
             let key = surf.key.clone();
             let mut typed = BTreeMap::new();
@@ -765,10 +782,10 @@ impl Daemon {
             self.options.update(session, |l| {
                 l.has.entry(key.clone()).or_default().extend(typed.clone());
             });
-            self.options.emit(OptionsEvent::Live { session: session.to_owned(), product_id: s.record.product_id, surface: key, values: typed, by: source, saved: false });
-            return Ok(OptionsChange { product_id: s.record.product_id, profile: s.record.profile, ..Default::default() });
+            self.options.emit(OptionsEvent::Live { session: session.to_owned(), product_id: pid(rec_game(&s.record)), surface: key, values: typed, by: source, saved: false });
+            return Ok(OptionsChange { product_id: pid(rec_game(&s.record)), profile: s.record.profile, ..Default::default() });
         }
-        self.options_set(&source, s.record.product_id, Some(s.record.profile.clone()), ops, Live::No, Some("Changed in the mod's own menu".into()), true, Some(session.to_owned())).await
+        self.options_set(&source, rec_game(&s.record), Some(s.record.profile.clone()), ops, Live::No, Some("Changed in the mod's own menu".into()), true, Some(session.to_owned())).await
     }
 
     /// The SDK said `bye` for a session (a clean exit).
@@ -825,8 +842,8 @@ fn ops_towards(cur: &quiver_api::options::OptionsRevision, target: &quiver_api::
     ops
 }
 
-fn diff(product_id: u32, profile: Option<&str>, against: Option<&str>) -> Result<Vec<OptionDiff>> {
-    let ctx = ctx_for(product_id, profile)?;
+fn diff(game: GameRef, profile: Option<&str>, against: Option<&str>) -> Result<Vec<OptionDiff>> {
+    let ctx = ctx_for(game, profile)?;
     let rev = opt::current(&ctx.store, &ctx.profile_id)?;
     let against = against.unwrap_or("default");
     // The other side's values, evaluated with this profile's schemas.
@@ -837,7 +854,7 @@ fn diff(product_id: u32, profile: Option<&str>, against: Option<&str>) -> Result
         let t = if r == 0 { Default::default() } else { hist.into_iter().find(|x| x.revision == r).with_context(|| format!("no options revision r{r}"))? };
         (Some(t.values), t.raw, format!("r{r}"))
     } else {
-        let (store, p) = resolve(product_id, Some(against))?;
+        let (store, p) = resolve(game, Some(against))?;
         let id = p.unwrap_or_else(|| VANILLA.into());
         let t = opt::current(&store, &id)?;
         (Some(t.values), t.raw, against.to_owned())
@@ -876,8 +893,8 @@ fn diff(product_id: u32, profile: Option<&str>, against: Option<&str>) -> Result
     Ok(out)
 }
 
-fn schema_info(product_id: u32, mod_id: &str, version: Option<&str>) -> Result<SchemaInfo> {
-    let store = store_for(&game(product_id)?);
+fn schema_info(game: GameRef, mod_id: &str, version: Option<&str>) -> Result<SchemaInfo> {
+    let store = store_for(&installed_game(game)?);
     let rec = store.find_mod(mod_id)?;
     let vid = match version {
         Some(v) => rec.version(v).map(|v| v.id.clone()).with_context(|| format!("{} has no version {v}", rec.name))?,

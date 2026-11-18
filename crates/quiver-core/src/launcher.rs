@@ -397,6 +397,7 @@ pub async fn register(cfg: &Config, lib: &mut Library, product_id: u32, install_
         .replace('\\', "/"),
         args: exe.arguments,
         language: Some(language.to_owned()),
+        game: None,
     })
 }
 

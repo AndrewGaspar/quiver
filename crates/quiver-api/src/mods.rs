@@ -407,6 +407,10 @@ pub struct ModManifest {
     /// Products the mod is for (empty: not checked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub products: Vec<u32>,
+    /// Games of other stores the mod is for (`steam:292030`; appended). A mod naming
+    /// neither products nor games isn't checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub games: Vec<crate::GameRef>,
     /// Game builds (install manifest hashes) the mod is known to work with (empty: any).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub builds: Vec<String>,
@@ -723,9 +727,17 @@ pub struct ModsState {
     /// one. Empty from daemons before versions: see [`ModsState::all_mods`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mods: Vec<ModRecord>,
+    /// Another store's game (`steam:620`; `product_id` is then 0). Appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
 }
 
 impl ModsState {
+    /// The game the state is for.
+    pub fn game_ref(&self) -> crate::GameRef {
+        self.game.unwrap_or(crate::GameRef::ubisoft(self.product_id))
+    }
+
     /// Every mod, one-version mods included (also for a state without `mods`).
     pub fn all_mods(&self) -> Vec<ModRecord> {
         mods_of(&self.layers, &self.mods)
@@ -1116,6 +1128,15 @@ pub struct GameProfiles {
     pub product_id: u32,
     pub name: String,
     pub profiles: Vec<Profile>,
+    /// Another store's game (`product_id` is then 0; appended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
+}
+
+impl GameProfiles {
+    pub fn game_ref(&self) -> crate::GameRef {
+        self.game.unwrap_or(crate::GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// Requests about mods (`Request::Mods`). Games are product ids; layers and profiles are
@@ -1126,13 +1147,14 @@ pub enum ModsRequest {
     /// Installed games and their profiles (`Vec<GameProfiles>`); no Ubisoft request.
     Games,
     /// A game's layers and profiles (`ModsState`).
-    List { product_id: u32 },
+    List { #[serde(flatten)] game: crate::game::GameField },
     /// Copy a folder into the store as a new layer (reflinks where the filesystem allows).
     /// File names are matched to the install's case. An empty `path` adds a layer with
     /// only `deletes` (paths relative to the install folder to hide); whiteouts already in
     /// the folder are kept as deletions. Answers a [`LayerChange`].
     LayerAdd {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         name: String,
         path: PathBuf,
         #[serde(default)]
@@ -1141,7 +1163,8 @@ pub enum ModsRequest {
     /// Delete a layer's files. Refused while a profile uses it. `confirmed`: a person
     /// approved it in a front end (needed for agent sources).
     LayerRemove {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         layer: String,
         #[serde(default)]
         confirmed: bool,
@@ -1149,7 +1172,8 @@ pub enum ModsRequest {
     /// A new profile. `saves`: a save store (id, name, `default` or `new`); `None` follows
     /// the advice (Default if every mod is save-compatible, else a new store).
     ProfileCreate {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         name: String,
         #[serde(default)]
         layers: Vec<String>,
@@ -1160,7 +1184,8 @@ pub enum ModsRequest {
     },
     /// Edit a profile (see [`Profile::apply`] for the keys); records a revision.
     ProfileSet {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         profile: String,
         ops: Vec<SettingOp>,
         #[serde(default)]
@@ -1169,17 +1194,19 @@ pub enum ModsRequest {
     /// Delete a profile (a restorable revision; its saves and writable layer are kept).
     /// Agents need `confirmed` (the policy's "Ask").
     ProfileDelete {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         profile: String,
         #[serde(default)]
         confirmed: bool,
     },
     /// A profile's history (`Vec<ProfileRevision>`), deleted profiles included.
-    ProfileHistory { product_id: u32, profile: String },
+    ProfileHistory { #[serde(flatten)] game: crate::game::GameField, profile: String },
     /// Make an earlier revision current again, as a new revision (also undeletes).
     /// Agents need `confirmed`.
     ProfileRestore {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         profile: String,
         revision: u32,
         #[serde(default)]
@@ -1189,7 +1216,8 @@ pub enum ModsRequest {
     /// install folder. Records a revision in the layer's history; answers a
     /// [`LayerChange`]. Refused while the game is running.
     LayerDeletes {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         layer: String,
         #[serde(default)]
         delete: Vec<String>,
@@ -1199,11 +1227,12 @@ pub enum ModsRequest {
         message: Option<String>,
     },
     /// A layer's history of deletions (`Vec<LayerRevision>`).
-    LayerHistory { product_id: u32, layer: String },
+    LayerHistory { #[serde(flatten)] game: crate::game::GameField, layer: String },
     /// Make an earlier revision of a layer's deletions current again, as a new revision.
     /// Agents need `confirmed`, as for profile restores.
     LayerRestore {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         layer: String,
         revision: u32,
         #[serde(default)]
@@ -1211,13 +1240,14 @@ pub enum ModsRequest {
     },
     // -- Mods v2 (appended; older clients never send these) ------------------------------
     /// Quiver's built-in mods for a game (`Vec<CatalogEntry>`).
-    Catalog { product_id: u32 },
+    Catalog { #[serde(flatten)] game: crate::game::GameField },
     /// Install a mod: a built-in one by id (`builtin`), or a package folder (`path`, with a
     /// `quiver-mod.toml`; a folder without one installs as a file-only mod named after
     /// it). Installing a built-in again updates it to the catalog's manifest. Answers a
     /// [`LayerChange`].
     Install {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default)]
         builtin: Option<String>,
         #[serde(default)]
@@ -1230,7 +1260,8 @@ pub enum ModsRequest {
     /// file's own. Refused while a profile stacks it or the game runs. Agents need
     /// `confirmed` when the mod has install files or applied config patches.
     Uninstall {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         #[serde(default)]
@@ -1238,14 +1269,16 @@ pub enum ModsRequest {
     },
     /// An installed mod in detail (`ModDetail`).
     Show {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
     },
     /// Change an installed mod: `enabled=on|off`, `save_compatible=on|off|unknown`,
     /// `kind=fix|mod`, `name=…`. Recorded in the mod's history. Answers a [`LayerChange`].
     ModSet {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         ops: Vec<SettingOp>,
@@ -1256,14 +1289,16 @@ pub enum ModsRequest {
     /// saves, mounts, per-profile folders and where their files live, config patches.
     /// `profile` `None` or `vanilla`: the unmodded game (with fixes, if on).
     Plan {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default)]
         profile: Option<String>,
     },
     /// Put the config values Quiver changed back to the files' own, now (all mods, or one).
     /// Refused while the game runs. Agents need `confirmed`.
     PatchesUndo {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default, rename = "mod")]
         mod_id: Option<String>,
         #[serde(default)]
@@ -1279,7 +1314,8 @@ pub enum ModsRequest {
     /// its saves) gets a store pointing at that folder, so nothing moves; the others use
     /// Default. Layers need nothing. Idempotent. Launches do this on their own.
     Migrate {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(default)]
         dry_run: bool,
     },
@@ -1291,7 +1327,8 @@ pub enum ModsRequest {
     /// overrides that. It becomes current, so every profile tracking the mod runs it next,
     /// unless `no_update` or `prerelease`.
     VersionAdd {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         #[serde(default)]
@@ -1315,7 +1352,8 @@ pub enum ModsRequest {
     /// Make a version the mod's current one, for every profile that tracks it: a roll back
     /// or forward (`VersionChange`).
     VersionUse {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         version: String,
@@ -1325,7 +1363,8 @@ pub enum ModsRequest {
     /// Retire a version (hidden from defaults, files kept, pins still work) or, with
     /// `retired: false`, bring it back (`VersionChange`).
     VersionRetire {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
         version: String,
@@ -1336,7 +1375,8 @@ pub enum ModsRequest {
     },
     /// A mod's history (`Vec<ModRevision>`; empty for a mod that never had a second version).
     ModHistory {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         #[serde(rename = "mod")]
         mod_id: String,
     },
@@ -1347,7 +1387,8 @@ pub enum ModsRequest {
     /// in order (default: `v1`, `v2`… for versions without a label of their own). Recorded as
     /// revisions (the mod's, each profile's). Agents need `confirmed`.
     MergeVersions {
-        product_id: u32,
+        #[serde(flatten)]
+        game: crate::game::GameField,
         into: String,
         from: Vec<String>,
         #[serde(default)]

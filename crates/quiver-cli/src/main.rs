@@ -159,10 +159,12 @@ enum Cmd {
     /// Show a game's launch settings.
     Get { game: String },
     /// Change launch settings: key=value to set, key= to unset.
-    /// Keys: proton, language, account, profile, art, achievements, args, wrappers, env.NAME,
-    /// dll.NAME.
+    /// Keys: proton, language, account, profile, steam_profile, art, achievements, args,
+    /// wrappers, env.NAME, dll.NAME.
     /// `account` (username or user id) picks the account the game launches with; `profile`
-    /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default; `art`
+    /// (a mod profile's name or id, or `vanilla`) the profile Play uses by default;
+    /// `steam_profile` the one a launch from Steam runs (`quiver steam-run`; for a Steam game
+    /// `profile` sets it too); `art`
     /// (`steam` or `ubisoft`) whose art the app shows first for a game with a Steam copy;
     /// `achievements` (`on`, `off` or `dry-run`) whether earned achievements are reported.
     Set {
@@ -814,7 +816,7 @@ async fn main() -> Result<()> {
             let profile = profile.or(profile_id).or(vanilla.then(|| quiver_api::mods::VANILLA.to_owned()));
             let default = match &profile {
                 None => client
-                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { product_id: e.product_id }))
+                    .call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()}))
                     .await
                     .ok()
                     .map(|s| mods::default_label(&s)),
@@ -871,7 +873,7 @@ async fn main() -> Result<()> {
                 }
             }
             if v["settings"]["profile"].is_string()
-                && let Ok(s) = client.call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { product_id: e.product_id })).await
+                && let Ok(s) = client.call::<quiver_api::mods::ModsState>(Request::Mods(quiver_api::ModsRequest::List { game: e.product_id.into()})).await
             {
                 println!("  (Play uses {})", mods::default_label(&s));
             }

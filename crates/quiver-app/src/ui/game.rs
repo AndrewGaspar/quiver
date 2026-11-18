@@ -668,6 +668,7 @@ impl Quiver {
 
     fn render_actionbar(&mut self, th: &Theme, g: &GameRow, slim: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
+        let steam_profile = self.render_steam_profile_chip(th, g, slim, cx);
         let pad = self.mode == InputMode::Pad;
         let f = |i| self.focused(Target::Action(i));
         let (label, i) = primary_label(g);
@@ -724,7 +725,8 @@ impl Quiver {
                 }))
         });
         // Another store's game: Play (its client starts it), its state, and the menu. No
-        // shortcuts, files, launch options or profiles: those are Quiver's own launches'.
+        // shortcuts, files or launch options: those are Quiver's own launches'. A Steam game
+        // with mod profiles: the chip says which one Play in Steam runs.
         if let Some(c) = g.client() {
             let label = g.entry.store().label();
             let (kind, i, text) = if g.running() {
@@ -753,6 +755,7 @@ impl Quiver {
                 .px(px(pad))
                 .when(!slim, |d| d.mt(px(-58.)))
                 .child(play)
+                .children(steam_profile)
                 .child(pill(th, kind, Some(i), text).py(px(5.)))
                 .child(div().flex_1())
                 .child(more_btn);

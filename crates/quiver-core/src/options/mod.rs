@@ -61,11 +61,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn games_dir(store: &ModStore) -> PathBuf {
-    crate::paths::game_dir_in(store.data_dir(), &quiver_api::GameRef::ubisoft(store.product_id())).join("options")
+    crate::paths::game_dir_in(store.data_dir(), &store.game_ref()).join("options")
 }
 
 fn mods_dir(store: &ModStore) -> PathBuf {
-    crate::paths::mods_dir_in(store.data_dir(), &quiver_api::GameRef::ubisoft(store.product_id()))
+    crate::paths::mods_dir_in(store.data_dir(), &store.game_ref())
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -468,10 +468,23 @@ pub fn context(store: &ModStore, profile: Option<&str>) -> Result<Ctx> {
                 if surfaces.iter().any(|s: &Surface| s.key == key) {
                     continue;
                 }
+                // A native game has no prefix: its prefix and Documents files have nowhere
+                // to be (install files work as for any game).
+                let no_prefix = store.game_prefix().is_none();
+                let skipped: Vec<&String> = resolved.schema.files.iter().filter(|(_, d)| no_prefix && d.root != FileRoot::Install).map(|(id, _)| id).collect();
+                if !skipped.is_empty() {
+                    problems.push(format!(
+                        "{} {}: file(s) {} are in the Wine prefix, and the game has none (a native game); their options don't apply",
+                        rec.name,
+                        r.label,
+                        skipped.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
                 let files = resolved
                     .schema
                     .files
                     .iter()
+                    .filter(|(_, def)| !no_prefix || def.root == FileRoot::Install)
                     .map(|(id, def)| locate(def, id, &install, &lowers, &upper, &plan.view, &profile_id))
                     .collect();
                 surfaces.push(Surface { key, mod_id: rec.id.clone(), mod_name: rec.name.clone(), version: layer.id.clone(), label: r.label.clone(), resolved, files });

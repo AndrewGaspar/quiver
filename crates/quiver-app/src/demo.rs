@@ -332,6 +332,7 @@ fn game_for(id: u32, name: &str, exe: Option<&str>) -> Game {
         exe: exe.unwrap_or("game.exe").replace('\\', "/").trim_start_matches(['\'', '.', '/']).to_owned(),
         args: Some(format!("/appid:{id}")),
         language: Some("en-US".into()),
+        game: None,
     }
 }
 

@@ -36,7 +36,7 @@ fn folder(root: &Path, files: &[(&str, &str)]) -> PathBuf {
 }
 
 fn game(t: &Path, product_id: u32) -> Game {
-    Game { product_id, name: "Game".into(), install_dir: t.join("install"), prefix: t.join("pfx"), exe: "game.exe".into(), args: None, language: None }
+    Game { product_id, name: "Game".into(), install_dir: t.join("install"), prefix: t.join("pfx"), exe: "game.exe".into(), args: None, language: None, game: None }
 }
 
 struct Fixture {

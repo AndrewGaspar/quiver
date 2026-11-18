@@ -757,11 +757,11 @@ mod tests {
         assert_eq!(h.len(), 4);
 
         // The Options view lists the platform surface last and saves it at the profile.
-        let surfaces: Vec<SurfaceState> = serde_json::from_value(demo.handle(Request::Options(OptionsRequest::List { product_id: ORIGINS, profile: None, level: None })).unwrap()).unwrap();
+        let surfaces: Vec<SurfaceState> = serde_json::from_value(demo.handle(Request::Options(OptionsRequest::List { game: ORIGINS.into(), profile: None, level: None })).unwrap()).unwrap();
         assert_eq!(surfaces.last().map(|s| s.key.as_str()), Some(SURFACE_KEY));
         let ops = vec![OptionOp::Set { surface: SURFACE_KEY.into(), id: "hdr".into(), value: json!("on") }];
         let c: OptionsChange = serde_json::from_value(
-            demo.handle(Request::Options(OptionsRequest::Set { product_id: ORIGINS, profile: None, ops, live: quiver_api::options::Live::IfRunning, message: None, confirmed: false })).unwrap(),
+            demo.handle(Request::Options(OptionsRequest::Set { game: ORIGINS.into(), profile: None, ops, live: quiver_api::options::Live::IfRunning, message: None, confirmed: false })).unwrap(),
         )
         .unwrap();
         assert_eq!((c.revision, c.outcomes[0].surface.as_str()), (5, SURFACE_KEY));

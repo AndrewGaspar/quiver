@@ -1,7 +1,21 @@
-//! Compiles in Quiver's built-in mod catalog: every `mods/<product id>/<mod id>/quiver-mod.toml`
-//! at the repository root becomes an entry of `CATALOG` (see `src/modpkg.rs`).
+//! Compiles in Quiver's built-in mod catalog: every `mods/<game>/<mod id>/quiver-mod.toml`
+//! at the repository root becomes an entry of `CATALOG` (see `src/modpkg.rs`). `<game>` is a
+//! game's data folder name: a Ubisoft product id (`3539`) or `<store>-<id>` (`steam-292030`).
 
 use std::path::PathBuf;
+
+/// A game folder name: digits (a Ubisoft product), or a lowercase store name, `-` and an id.
+fn game_dir(s: &str) -> bool {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    match s.split_once('-') {
+        Some((store, id)) => {
+            !store.is_empty() && store.bytes().all(|b| b.is_ascii_lowercase()) && !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+        }
+        None => false,
+    }
+}
 
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../mods");
@@ -9,20 +23,20 @@ fn main() {
     let mut entries = Vec::new();
     if let Ok(products) = std::fs::read_dir(&root) {
         for p in products.flatten() {
-            let Some(product) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+            let Some(product) = p.file_name().to_str().filter(|s| game_dir(s)).map(str::to_owned) else { continue };
             for m in std::fs::read_dir(p.path()).into_iter().flatten().flatten() {
                 let manifest = m.path().join("quiver-mod.toml");
                 if manifest.is_file() {
                     let id = m.file_name().to_string_lossy().into_owned();
-                    entries.push((product, id, manifest.canonicalize().unwrap()));
+                    entries.push((product.clone(), id, manifest.canonicalize().unwrap()));
                 }
             }
         }
     }
     entries.sort();
-    let mut out = String::from("/// (product id, mod id, manifest text) of every built-in mod.\npub static CATALOG: &[(u32, &str, &str)] = &[\n");
+    let mut out = String::from("/// (game folder, mod id, manifest text) of every built-in mod.\npub static CATALOG: &[(&str, &str, &str)] = &[\n");
     for (product, id, path) in entries {
-        out.push_str(&format!("    ({product}, {id:?}, include_str!({:?})),\n", path.display().to_string()));
+        out.push_str(&format!("    ({product:?}, {id:?}, include_str!({:?})),\n", path.display().to_string()));
     }
     out.push_str("];\n");
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("catalog.rs"), out).unwrap();

@@ -35,6 +35,7 @@ pub mod settings;
 pub mod spaces;
 pub mod steamplan;
 pub mod steamlocal;
+pub mod steamns;
 pub mod steamrun;
 pub mod store;
 pub mod tweaks;

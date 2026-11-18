@@ -112,8 +112,8 @@ pub enum Tab {
     Overview,
     LaunchOptions,
     Mods,
-    /// Quiver Tweaks for the game and its profiles (`ui/game/tweaks/`); the one tab other
-    /// stores' games have besides Overview.
+    /// Quiver Tweaks for the game and its profiles (`ui/game/tweaks/`); other stores' games
+    /// have it too.
     Tweaks,
     /// Performance summaries, comparisons, live numbers and the HUD (`ui/game/perf.rs`).
     Performance,
@@ -127,10 +127,17 @@ impl Tab {
     pub const ALL: [Tab; 9] = [Tab::Overview, Tab::LaunchOptions, Tab::Mods, Tab::Tweaks, Tab::Performance, Tab::Saves, Tab::AddOns, Tab::Files, Tab::Logs];
     /// Other stores' games: their client's facts and Quiver Tweaks.
     pub const STORE: [Tab; 2] = [Tab::Overview, Tab::Tweaks];
+    /// Steam games: also Mods (with their Options), as the Steam store's capabilities say
+    /// (`mods: quiver`); they reach the game when it starts through `quiver steam-run`.
+    pub const STEAM: [Tab; 3] = [Tab::Overview, Tab::Mods, Tab::Tweaks];
 
     /// The tabs a game's page has.
     pub fn of(id: Gid) -> &'static [Tab] {
-        if id.is_ubisoft() { &Self::ALL } else { &Self::STORE }
+        match id.store() {
+            quiver_api::StoreId::Ubisoft => &Self::ALL,
+            quiver_api::StoreId::Steam => &Self::STEAM,
+            _ => &Self::STORE,
+        }
     }
 
     pub fn index(self) -> usize {
@@ -939,11 +946,15 @@ mod tests {
         let steam = Gid(quiver_api::GameRef::steam(620));
         n.open_game(steam);
         run(&mut n, &l, &[NextTab]);
+        assert_eq!(n.tab, Tab::Mods, "Steam games have mods");
+        run(&mut n, &l, &[NextTab]);
         assert_eq!(n.tab, Tab::Tweaks);
         assert_eq!(n.apply(NextTab, &l), Effect::None, "the last tab");
-        run(&mut n, &l, &[PrevTab]);
+        run(&mut n, &l, &[PrevTab, PrevTab]);
         assert_eq!(n.tab, Tab::Overview);
         assert_eq!(Tab::of(Gid::from(3539)).len(), Tab::ALL.len());
+        let epic = Gid(quiver_api::GameRef::new(quiver_api::StoreId::Epic, "fn").unwrap());
+        assert_eq!(Tab::of(epic), &Tab::STORE);
     }
 
     #[test]

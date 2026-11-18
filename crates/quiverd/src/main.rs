@@ -19,6 +19,7 @@ mod steamgames;
 mod steamhook;
 mod spaces;
 mod steamlib;
+mod steammods;
 mod stores;
 mod epic;
 
@@ -476,7 +477,7 @@ impl Daemon {
                         SettingOp::Set { key, value } if key == "account" => {
                             Ok(SettingOp::Set { key, value: store::resolve(&value)?.user_id })
                         }
-                        SettingOp::Set { key, value } if key == "profile" => {
+                        SettingOp::Set { key, value } if key == "profile" || key == "steam_profile" => {
                             Ok(SettingOp::Set { key, value: mods::resolve_default(product_id, &value)? })
                         }
                         op => Ok(op),
@@ -579,7 +580,9 @@ impl Daemon {
             | Request::SteamDismissOffer { .. }
             | Request::SteamOffers { .. }) => steamgames::handle(self, source, r).await?,
             r @ (Request::SteamHook { .. } | Request::SteamHookStatus { .. }) => steamhook::handle(self, source, r).await?,
-            Request::SteamSession { app_id, pid, perf_session, settings_revision } => json!(self.steam_session(source, app_id, pid, perf_session, settings_revision).await?),
+            Request::SteamSession { app_id, pid, perf_session, settings_revision, mods_launch } => {
+                json!(self.steam_session(source, app_id, pid, perf_session, settings_revision, mods_launch).await?)
+            }
             r @ (Request::Ownership { .. } | Request::SteamLaunchPlan { .. }) => steamlib::handle(self, source, r).await?,
             Request::Subscribe => Value::Null, // handled by the connection loop
             Request::Shutdown => {

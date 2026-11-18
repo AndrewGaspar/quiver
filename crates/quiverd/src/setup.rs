@@ -592,6 +592,7 @@ mod tests {
             exe: "FC5.exe".into(),
             args: None,
             language: None,
+            game: None,
         }];
         let found = scan(&roots, Some(&lib), &installed);
         let by = |n: &str| found.iter().find(|f| norm(&f.name).contains(&norm(n))).unwrap_or_else(|| panic!("{n} not found in {found:#?}"));
