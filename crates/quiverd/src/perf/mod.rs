@@ -867,7 +867,10 @@ async fn publish_loop(hub: Weak<PerfHub>) {
     loop {
         tick.tick().await;
         let Some(h) = hub.upgrade() else { return };
-        h.sight.reap();
+        if h.sight.refresh_due(h.panel_open()) {
+            let h2 = h.clone();
+            tokio::task::spawn_blocking(move || h2.sight.restart(h2.data_dir()));
+        }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.publish(mono_raw_ns()))).is_err() {
             tracing::error!("perf: publishing panicked; continuing");
         }
