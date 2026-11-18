@@ -34,6 +34,8 @@ pub enum EpicRequest {
     Accounts,
     /// Make an Epic account the default.
     AccountDefault { account: String },
+    /// An Epic game's cloud saves, play time and achievements (appended; phase 3).
+    Game(crate::epicgame::EpicGameRequest),
 }
 
 impl fmt::Debug for EpicRequest {
@@ -45,6 +47,7 @@ impl fmt::Debug for EpicRequest {
             EpicRequest::Logout { account } => f.debug_struct("Logout").field("account", account).finish(),
             EpicRequest::Accounts => f.write_str("Accounts"),
             EpicRequest::AccountDefault { account } => f.debug_struct("AccountDefault").field("account", account).finish(),
+            EpicRequest::Game(r) => f.debug_tuple("Game").field(r).finish(),
         }
     }
 }

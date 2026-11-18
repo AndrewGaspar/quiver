@@ -18,6 +18,7 @@ pub mod client;
 pub mod daemon;
 pub mod downloads;
 pub mod epic;
+pub mod epicgame;
 pub mod exports;
 pub mod game;
 pub mod mods;
@@ -988,6 +989,12 @@ pub enum Event {
         image: Option<String>,
         unlocked_at: DateTime<Utc>,
         report: achievements::ReportState,
+        /// Another store's game (appended; Epic): `product_id` is 0 and `achievement_id` 0,
+        /// the store's own id for it is `key`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<GameRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     // ---- appended: mod options (design/MOD-CONFIG.md §6, C5). Daemons from before these
     // sent them as `Reply::Options`; `Client` delivers both forms the same way.

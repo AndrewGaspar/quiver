@@ -1,0 +1,7 @@
+{"data": {"PlayerAchievement": {"playerAchievementGameRecordsBySandbox": {"records": [{
+  "totalXP": 150, "totalUnlocked": 2, "playerAwards": [], "achievementSets": [],
+  "playerAchievements": [
+    {"playerAchievement": {"sandboxId": "ns-wren", "epicAccountId": "8645b4947bbc4c0092a8b7236df169d1", "unlocked": true, "progress": 1.0, "XP": 50, "unlockDate": "2026-11-17T21:04:11.000Z", "achievementName": "FIRST_STEPS", "isBase": true, "achievementSetId": "set-base"}},
+    {"playerAchievement": {"sandboxId": "ns-wren", "epicAccountId": "8645b4947bbc4c0092a8b7236df169d1", "unlocked": true, "progress": 1.0, "XP": 100, "unlockDate": "2026-11-18T19:40:00.000Z", "achievementName": "DEEP_DIVE", "isBase": true, "achievementSetId": "set-base"}}
+  ]
+}]}}}}

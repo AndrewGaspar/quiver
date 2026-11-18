@@ -873,6 +873,8 @@ impl Engine {
                 image: def.and_then(|d| d.image.clone()),
                 unlocked_at: e.earned_at,
                 report: e.state,
+                game: None,
+                key: None,
             });
         }
     }

@@ -1,0 +1,5 @@
+{"files": {
+  "savesync/8645b4947bbc4c0092a8b7236df169d1/Wren/manifests/2026.11.10-08.00.00.manifest": {"readLink": "https://cloud.test/r/old-manifest", "writeLink": "https://cloud.test/w/old-manifest", "lastModified": "2026-11-10T08:00:03.000Z", "length": 512},
+  "savesync/8645b4947bbc4c0092a8b7236df169d1/Wren/manifests/2026.11.17-21.00.00.manifest": {"readLink": "https://cloud.test/r/new-manifest", "writeLink": "https://cloud.test/w/new-manifest", "lastModified": "2026-11-17T21:00:04.000Z", "length": 498},
+  "savesync/8645b4947bbc4c0092a8b7236df169d1/Wren/ChunksV4/07/000000000000DEAD_00000001000000AA000000BB000000CC.chunk": {"readLink": "https://cloud.test/r/chunk", "writeLink": "https://cloud.test/w/chunk", "lastModified": "2026-11-17T21:00:02.000Z", "length": 1290}
+}}
