@@ -377,8 +377,16 @@ impl Quiver {
             self.tw.staged.insert(sk, keep);
         }
         self.tw.preset_note = None;
+        let changed = c.revision > 0;
         self.tw.result = Some(SaveResult { summary: ol::outcome_summary(c.revision, &c.outcomes), live: c.live, warnings: c.warnings, error: None });
         self.tweaks_reload(cx);
+        // A Steam game that isn't hooked doesn't get them: offer the hook (steer 3b).
+        if let Scope::Game { game } = scope
+            && changed
+            && game.as_steam().is_some()
+        {
+            self.steam_hook_offer(Gid(*game), "these tweaks", cx);
+        }
     }
 
     /// Who implements a tweak a mod provides, at the loaded scope.
@@ -601,6 +609,8 @@ impl Quiver {
         out.push(self.render_caps_card(th, caps.as_ref(), Some(if id.is_ubisoft() { "This game's next launch" } else { "This machine" })));
         if id.is_ubisoft() {
             out.push(self.render_scope_picker(th, id, &scope, cx));
+        } else if id.0.as_steam().is_some() {
+            out.push(self.render_steam_hook_banner(th, g, cx));
         } else {
             out.push(
                 banner(

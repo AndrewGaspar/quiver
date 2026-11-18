@@ -11,6 +11,7 @@ mod overview;
 mod page;
 mod perf;
 mod saves;
+mod steamhook;
 mod storepage;
 mod stores;
 pub(crate) mod tweaks;

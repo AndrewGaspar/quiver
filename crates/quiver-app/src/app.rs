@@ -396,7 +396,16 @@ impl Quiver {
                 self.load_library(false, cx);
             }
             // Steam games change Steam copies in the library (installed, switched to Quiver).
-            Event::LibraryChanged | Event::SteamGamesChanged { .. } => self.load_library(false, cx),
+            Event::LibraryChanged => self.load_library(false, cx),
+            Event::SteamGamesChanged { .. } => {
+                self.load_library(false, cx);
+                // A Steam game's page shows its hook (`quiver steam hook` may have changed it).
+                if let Page::Game(id) = self.nav.page
+                    && id.0.as_steam().is_some()
+                {
+                    self.load_store_detail(id, true, cx);
+                }
+            }
             Event::SettingsChanged { product_id, .. } => self.load_details(Gid::from(product_id), cx),
             Event::ModsChanged { product_id } => self.load_page(Gid::from(product_id), cx),
             // The open page's achievements show it (Sight will toast it).

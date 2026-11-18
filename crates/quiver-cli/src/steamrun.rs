@@ -105,7 +105,7 @@ fn find_bridge() -> Result<PathBuf> {
 /// Start quiverd through systemd if it isn't running. Started by the client instead, it
 /// would be a descendant of Steam's reaper, and Steam would show the game running (and
 /// kill quiverd on Stop) for as long as the daemon lives.
-fn ensure_daemon_outside_steam(log: &mut Log) {
+fn ensure_daemon_outside_steam(log: &mut Log, here: bool) {
     let up = || std::os::unix::net::UnixStream::connect(quiver_api::socket_path()).is_ok();
     if up() {
         return;
@@ -121,7 +121,9 @@ fn ensure_daemon_outside_steam(log: &mut Log) {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    log.line("quiverd isn't running and the systemd unit didn't start it; starting it here (Steam will count it as part of the game until it exits)");
+    if here {
+        log.line("quiverd isn't running and the systemd unit didn't start it; starting it here (Steam will count it as part of the game until it exits)");
+    }
 }
 
 /// `--sdk-dir`: point InstallDir at `dir`, with no Wine process running in the prefix.
@@ -184,8 +186,10 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
         println!("{}", argv.iter().map(|x| shell_quote(x)).collect::<Vec<_>>().join(" "));
         return Ok(());
     }
-    ensure_daemon_outside_steam(&mut log);
-    match Client::connect(source).await {
+    // Never started from here: inside Steam's process tree, Steam would count quiverd as
+    // part of the game (and kill it on Stop).
+    ensure_daemon_outside_steam(&mut log, false);
+    match Client::connect_running(source).await {
         Err(e) => log.line(format!("quiverd unreachable ({e:#}); starting the game without Quiver's launch plan")),
         Ok(client) => {
             let mut plan = None;
@@ -301,7 +305,7 @@ async fn run_ubisoft(source: &str, a: SteamRunArgs) -> Result<()> {
     // The bridge goes next to the context, under the home folder: Steam's runtime container
     // sees the home folder but not the host's /usr (where a package installs the bridge).
     std::fs::copy(find_bridge()?, &bridge_dst).context("copy quiver-bridge.exe")?;
-    ensure_daemon_outside_steam(&mut log);
+    ensure_daemon_outside_steam(&mut log, true);
     let client = Client::connect(source).await?;
     let mut ctx: serde_json::Value = client
         .call(Request::LaunchContext {

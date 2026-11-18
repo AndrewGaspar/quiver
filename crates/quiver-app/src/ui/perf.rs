@@ -41,7 +41,7 @@ pub enum ScopePick {
 impl ScopePick {
     pub fn scope(&self, product: Gid) -> HudScopeRef {
         match self {
-            ScopePick::Game => HudScopeRef::game(product.pid()),
+            ScopePick::Game => HudScopeRef::of(product.0),
             ScopePick::Profile(p) => HudScopeRef { game: Some(product.0), profile: Some(p.clone()) },
             ScopePick::Global => HudScopeRef::global(),
         }
@@ -484,7 +484,7 @@ impl Quiver {
 
     /// The running perf session of a game.
     pub fn perf_session(&self, id: Gid) -> Option<&PerfSessionInfo> {
-        self.perf.sessions.ready()?.iter().find(|s| s.product_id == id)
+        self.perf.sessions.ready()?.iter().find(|s| s.game_ref() == id.0)
     }
 
     pub fn load_hud(&mut self, scope: HudScopeRef, cx: &mut Context<Self>) {
@@ -577,8 +577,8 @@ impl Quiver {
                     for s in inner {
                         this.load_hud(s, cx);
                     }
-                    if let Some(p) = key.product_id() {
-                        this.perf.status.remove(&Gid::from(p));
+                    if let Some(g) = key.game {
+                        this.perf.status.remove(&Gid(g));
                     } else {
                         this.perf.status.clear();
                     }

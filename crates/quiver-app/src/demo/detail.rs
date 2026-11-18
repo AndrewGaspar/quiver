@@ -1757,6 +1757,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steam_games_carry_their_hook_and_switch_it() {
+        let (demo, _events) = Demo::start();
+        let detail = |app: u32| -> quiver_api::stores::GameDetail { call(&demo, Request::GameDetail { game: quiver_api::GameRef::steam(app), refresh: false }) };
+        assert!(detail(1145360).steam_hook.unwrap().hooked(), "Hades starts through Quiver");
+        let celeste = detail(504230).steam_hook.unwrap();
+        assert!(!celeste.hooked() && celeste.hookable && celeste.command.ends_with("--app 504230"));
+        let on: quiver_api::exports::SteamHook = call(&demo, Request::SteamHook { app_id: 504230, on: true, steam_user: None });
+        assert!(on.hooked() && !on.unchanged);
+        assert!(detail(504230).steam_hook.unwrap().hooked());
+        let again: quiver_api::exports::SteamHook = call(&demo, Request::SteamHook { app_id: 504230, on: true, steam_user: None });
+        assert!(again.unchanged);
+        let off: quiver_api::exports::SteamHook = call(&demo, Request::SteamHook { app_id: 504230, on: false, steam_user: None });
+        assert!(!off.hooked() && off.launch_options.is_empty());
+    }
+
+    #[tokio::test]
     async fn settings_edit_and_restore() {
         let (demo, _events) = Demo::start();
         let v: Value = call(&demo, Request::SettingsGet { game: 3539.into() });
