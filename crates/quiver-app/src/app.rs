@@ -407,7 +407,16 @@ impl Quiver {
                 }
             }
             Event::SettingsChanged { product_id, .. } => self.load_details(Gid::from(product_id), cx),
-            Event::ModsChanged { product_id } => self.load_page(Gid::from(product_id), cx),
+            // Another store's game (a Steam game): its mods, profiles, `steam_profile` or
+            // options changed; the open page reloads them.
+            Event::ModsChanged { game: Some(g), .. } => {
+                let id = Gid(g);
+                if self.nav.page == Page::Game(id) && self.gp.id == id {
+                    self.load_mods(id, cx);
+                    self.options_mods_changed(id, cx);
+                }
+            }
+            Event::ModsChanged { product_id, game: None } => self.load_page(Gid::from(product_id), cx),
             // The open page's achievements show it (Sight will toast it).
             Event::AchievementUnlocked { product_id, .. } => {
                 if self.nav.page == Page::Game(Gid::from(product_id)) && self.gp.id == product_id {

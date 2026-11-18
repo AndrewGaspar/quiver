@@ -237,6 +237,7 @@ fn demo_sessions(dlss: &str) -> Vec<SessionOptions> {
     let crashed = SessionOptions {
         session: "s-9tq1vb".into(),
         product_id: ORIGINS,
+        game: None,
         profile: dlss.into(),
         launched_revision: 12,
         started: crash_at - Span::minutes(23),
@@ -252,6 +253,7 @@ fn demo_sessions(dlss: &str) -> Vec<SessionOptions> {
     let ingame = SessionOptions {
         session: "s-4kq2mx".into(),
         product_id: ORIGINS,
+        game: None,
         profile: dlss.into(),
         launched_revision: 13,
         started: at(1, 20, 41),
@@ -465,13 +467,19 @@ fn state(s: &Resolved, hist: &[OptionsRevision], running: bool, session: Option<
     }
 }
 
+/// The demo's games are Ubisoft products (0 for any other store's: never installed).
+fn ubisoft_id(g: &quiver_api::game::GameField) -> u32 {
+    g.as_ubisoft().unwrap_or(0)
+}
+
 /// Answer an options request (`detail.rs` hands them over). Events go into `events`.
 pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsRequest, events: &mut Vec<Event>) -> Result<Value> {
     let mut all = OPTS.lock().unwrap();
     let o = all.entry(key).or_insert_with(OptDemo::fixtures);
     let profile_of = |product_id: u32, p: Option<&str>| -> Result<String> { Ok(launch_profile(d, st, product_id, p)?.unwrap_or_else(|| VANILLA.into())) };
     Ok(match req {
-        OptionsRequest::List { product_id, profile, level } => {
+        OptionsRequest::List { game, profile, level } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             let running = running_with(d, product_id, &p);
             snapshot_has(o, d, product_id, &p, running);
@@ -489,7 +497,8 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
             }
             json!(out)
         }
-        OptionsRequest::Set { product_id, profile, ops, live, message, confirmed } => {
+        OptionsRequest::Set { game, profile, ops, live, message, confirmed } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             // Ops on Quiver Tweaks go to the profile's tweak scope (as quiverd routes them).
             let (tw, ops): (Vec<OptionOp>, Vec<OptionOp>) = ops.into_iter().partition(|op| quiver_api::tweaks::is_platform_surface(op_surface(op)));
@@ -507,11 +516,13 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
             }
             json!(out)
         }
-        OptionsRequest::History { product_id, profile } => {
+        OptionsRequest::History { game, profile } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             json!(o.history.get(&p).cloned().unwrap_or_default())
         }
-        OptionsRequest::Restore { product_id, profile, revision, .. } => {
+        OptionsRequest::Restore { game, profile, revision, .. } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             let target = match revision {
                 0 => OptionsRevision::default(),
@@ -520,27 +531,31 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
             let ops = ops_towards(&o.current(&p), &target);
             json!(set(o, d, st, product_id, &p, ops, quiver_api::options::Live::IfRunning, Some(format!("restored r{revision}")), true, "gui", events)?)
         }
-        OptionsRequest::RevertSession { product_id, session, .. } => {
+        OptionsRequest::RevertSession { game, session, .. } => {
+            let product_id = ubisoft_id(&game);
             let rec = o.sessions.iter().find(|s| s.session == session).cloned().ok_or_else(|| anyhow!("no options record for session {session} of this game"))?;
             let target = o.history.get(&rec.profile).and_then(|h| h.iter().find(|x| x.revision == rec.launched_revision)).cloned().unwrap_or_default();
             let ops = ops_towards(&o.current(&rec.profile), &target);
             let msg = format!("reverted session {session} (back to r{})", rec.launched_revision);
             json!(set(o, d, st, product_id, &rec.profile, ops, quiver_api::options::Live::IfRunning, Some(msg), true, "gui", events)?)
         }
-        OptionsRequest::Diff { product_id, profile, against } => {
+        OptionsRequest::Diff { game, profile, against } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             json!(diff(o, d, st, product_id, &p, against.as_deref().unwrap_or("default"))?)
         }
-        OptionsRequest::Keys { product_id, profile } => {
+        OptionsRequest::Keys { game, profile } => {
+            let product_id = ubisoft_id(&game);
             let p = profile_of(product_id, profile.as_deref())?;
             json!(keys(o, d, product_id, &p))
         }
-        OptionsRequest::Schema { product_id, mod_id, .. } => json!(schema_info(o, d, product_id, &mod_id)?),
-        OptionsRequest::SchemaSet { product_id, mod_id, toml: text, .. } => {
+        OptionsRequest::Schema { game, mod_id, .. } => json!(schema_info(o, d, ubisoft_id(&game), &mod_id)?),
+        OptionsRequest::SchemaSet { game, mod_id, toml: text, .. } => {
+            let product_id = ubisoft_id(&game);
             let schema: Schema = toml::from_str(&text).map_err(|e| anyhow!("the schema doesn't parse: {e}"))?;
             let n = o.local.get(&mod_id).map_or(1, |x| x.2 + 1);
             o.local.insert(mod_id.clone(), (schema, text, n));
-            events.push(Event::ModsChanged { product_id });
+            events.push(Event::ModsChanged { product_id, game: None });
             json!(schema_info(o, d, product_id, &mod_id)?)
         }
         OptionsRequest::Infer { mod_id, file, .. } => {
@@ -555,7 +570,8 @@ pub(super) fn handle(key: usize, d: &mut Detail, st: &mut State, req: OptionsReq
             _ => vec![],
         }),
         OptionsRequest::Sessions => json!(st.sessions),
-        OptionsRequest::SessionRecords { product_id, profile, limit } => {
+        OptionsRequest::SessionRecords { game, profile, limit } => {
+            let product_id = ubisoft_id(&game);
             let want = match profile {
                 Some(p) => Some(profile_of(product_id, Some(&p))?),
                 None => None,
@@ -925,14 +941,14 @@ mod tests {
         use quiver_api::options::{Live, OptionsChange};
         let (demo, _events) = crate::demo::Demo::start();
         let ask = |r: OptionsRequest| demo.handle(Request::Options(r));
-        let list: Vec<SurfaceState> = serde_json::from_value(ask(OptionsRequest::List { product_id: ORIGINS, profile: None, level: None }).unwrap()).unwrap();
+        let list: Vec<SurfaceState> = serde_json::from_value(ask(OptionsRequest::List { game: ORIGINS.into(), profile: None, level: None }).unwrap()).unwrap();
         let dlss = list.iter().find(|s| s.key == dlss_key()).expect("the DLSS surface");
         assert_eq!(dlss.schema_source, SchemaSource::Catalog);
         assert!(matches!(&dlss.options["fg.refresh_hz"].from, ValueSource::Profile { revision: 13, source } if source == "gui"));
         assert!(dlss.live.session.is_none());
         let set = |id: &str, v: Value, confirmed: bool| -> Result<OptionsChange> {
             let ops = vec![OptionOp::Set { surface: dlss_key(), id: id.into(), value: v }];
-            Ok(serde_json::from_value(ask(OptionsRequest::Set { product_id: ORIGINS, profile: None, ops, live: Live::IfRunning, message: None, confirmed })?)?)
+            Ok(serde_json::from_value(ask(OptionsRequest::Set { game: ORIGINS.into(), profile: None, ops, live: Live::IfRunning, message: None, confirmed })?)?)
         };
         let c = set("world.npc_density", json!(3), false).unwrap();
         assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: false });
@@ -950,10 +966,10 @@ mod tests {
         let c = set("fg.mode", json!("off"), false).unwrap();
         assert_eq!(c.outcomes[0].outcome, Outcome::SavedRestart { running: true });
         // History has them, newest last, by the app.
-        let h: Vec<OptionsRevision> = serde_json::from_value(ask(OptionsRequest::History { product_id: ORIGINS, profile: None }).unwrap()).unwrap();
+        let h: Vec<OptionsRevision> = serde_json::from_value(ask(OptionsRequest::History { game: ORIGINS.into(), profile: None }).unwrap()).unwrap();
         assert_eq!(h.last().unwrap().source, "gui");
         // Keys: F9 and F10 from DLSS, and Sight's Shift+F2 against MangoHud's.
-        let k: KeysReport = serde_json::from_value(ask(OptionsRequest::Keys { product_id: ORIGINS, profile: None }).unwrap()).unwrap();
+        let k: KeysReport = serde_json::from_value(ask(OptionsRequest::Keys { game: ORIGINS.into(), profile: None }).unwrap()).unwrap();
         assert!(k.bindings.iter().any(|b| b.key == "F10" && b.kind == "option"));
         assert_eq!(k.conflicts.len(), 1);
     }

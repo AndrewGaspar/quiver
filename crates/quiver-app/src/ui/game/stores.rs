@@ -14,6 +14,15 @@ use crate::model::{Gid, GameRow, ago};
 use crate::theme::Theme;
 use crate::ui::{Icon, PillKind, SEMIBOLD, card, card_header, caption, chip, icon, mono, pill};
 
+/// A Steam game's saves, for every profile: save stores don't apply to it.
+pub const STEAM_SAVES: &str = "Uses the game's real saves (Steam Cloud syncs them); profiles with saves of their own aren't available for Steam games yet.";
+
+/// The saves section of a Steam game's profile editor and new-profile dialog: no store
+/// picker, just what its profiles use.
+fn steam_saves(th: &Theme) -> AnyElement {
+    div().flex().flex_col().gap(px(6.)).child(caption("Saves", th.tx3)).child(line(Icon::Cloud, th.tx3, STEAM_SAVES)).into_any_element()
+}
+
 /// The advice for a stack (entries: mods tracking their current version, or pinned ones;
 /// enabled mods only, as a launch applies them).
 pub fn advice_for(m: &ModsState, layers: &[String]) -> SavesAdvice {
@@ -73,6 +82,9 @@ fn store_chips(
 /// (`choice` `None`: follow the advice).
 pub fn new_profile_saves(th: &Theme, m: Option<&ModsState>, layers: &[(String, String, bool)], choice: Option<&str>, cx: &mut Context<Quiver>) -> AnyElement {
     let Some(m) = m else { return div().into_any_element() };
+    if m.game_ref().as_steam().is_some() {
+        return steam_saves(th);
+    }
     let ticked: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
     let advice = advice_for(m, &ticked);
     let recommended = if advice.share_default { DEFAULT_STORE } else { NEW_STORE };
@@ -130,6 +142,9 @@ impl Quiver {
     /// stack, and where its saves sync.
     pub(super) fn render_store_picker(&mut self, th: &Theme, g: &GameRow, m: &ModsState, p: &ProfileInfo, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
+        if g.steam_game() {
+            return steam_saves(th);
+        }
         let pid = p.profile.id.clone();
         let stores = live(m);
         let current = p.profile.saves.clone().unwrap_or_default();

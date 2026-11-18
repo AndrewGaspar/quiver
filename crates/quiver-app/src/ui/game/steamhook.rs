@@ -140,6 +140,87 @@ impl Quiver {
         )
     }
 
+    /// The Mods tab's line for a Steam game: Play in Steam runs the profile marked "Steam
+    /// runs", once the game starts through Quiver (with the switch when it doesn't).
+    pub(in crate::ui) fn render_steam_mods_banner(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = g.id();
+        let name = crate::model::clean_name(&g.entry.name);
+        let h = self.steam_hook(id)?.clone();
+        let (tone, ic, text) = match h.state {
+            PatchState::On | PatchState::ByHand => (Tone::Ok, Icon::CircleCheck, format!("{name} starts through Quiver: Play in Steam runs the profile marked \"Steam runs\", with its mods and options.")),
+            PatchState::Waiting => (Tone::Warn, Icon::RefreshCw, format!("{name} starts through Quiver once Steam closes or restarts; its mods apply from then.")),
+            _ => (Tone::Warn, Icon::TriangleAlert, format!("Steam starts {name} without Quiver, so these mods don't reach it yet: they apply once it starts through Quiver (quiver steam-run in its Steam launch options; undone exactly).")),
+        };
+        let show_button = !h.hooked() && h.hookable;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(banner(th, tone, ic, text))
+                .when(show_button, |d| d.child(div().flex().child(self.hook_button(th, id, &h, cx))))
+                .when_some(h.note.clone().filter(|_| !h.hookable), |d, n| d.child(div().text_size(px(12.)).text_color(th.tx3).child(n)))
+                .into_any_element(),
+        )
+    }
+
+    /// A Steam game's profile chip next to Play: which profile Play in Steam runs (its
+    /// `steam_profile`), opening the menu that changes it; and, while the game doesn't start
+    /// through Quiver, that its mods apply only once it does.
+    pub(in crate::ui) fn render_steam_profile_chip(&mut self, th: &Theme, g: &GameRow, slim: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = g.id();
+        if !g.steam_game() || !g.mods_installed() || self.gp.id != id {
+            return None;
+        }
+        let profiles = self.gp.profiles();
+        if profiles.is_empty() {
+            return None;
+        }
+        let cur = self.default_profile(id).and_then(|p| profiles.iter().find(|x| x.id == p).map(|x| x.name.clone()));
+        let on = cur.is_some();
+        let label = format!("Steam runs: {}", cur.unwrap_or_else(|| "Vanilla".into()));
+        let unhooked = self.steam_hook(id).is_some_and(|h| !h.hooked());
+        let (bg, fg, line) = if slim {
+            (crate::theme::rgba(0x0e1016, 0.62), crate::theme::on_art::tx1(), crate::theme::on_art::line())
+        } else {
+            (th.ink2, th.tx1, th.line2)
+        };
+        let chip = div()
+            .id("act-steam-profile")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .h(px(if slim { 30. } else { 36. }))
+            .px(px(12.))
+            .rounded(px(8.))
+            .bg(bg)
+            .border_1()
+            .border_color(if on { th.acc_line } else { line })
+            .text_color(fg)
+            .font_weight(crate::ui::MEDIUM)
+            .cursor_pointer()
+            .child(icon(Icon::Layers, 14., if on { th.acc_hi } else { fg }))
+            .child(label)
+            .child(icon(Icon::ChevronDown, 12., fg))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.gp.default_menu = true;
+                this.click(crate::nav::Target::Action(crate::app::ACTION_OPTIONS), cx)
+            }));
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .child(chip)
+                .when(unhooked && !slim, |d| {
+                    d.child(div().text_size(px(11.5)).text_color(th.warn).child("Mods apply once it starts through Quiver (Quiver launch, on Overview)"))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// The Tweaks tab's line for a Steam game: whether its tweaks reach it, with the switch.
     pub(in crate::ui) fn render_steam_hook_banner(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();

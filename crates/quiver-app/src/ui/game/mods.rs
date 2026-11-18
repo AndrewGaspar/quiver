@@ -22,7 +22,7 @@ fn layer_color(th: &Theme, i: usize) -> gpui::Hsla {
 impl Quiver {
     pub(super) fn render_mods(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        if !g.installed() {
+        if !g.mods_installed() {
             return card(th)
                 .p(px(24.))
                 .text_color(th.tx3)
@@ -46,6 +46,8 @@ impl Quiver {
             self.load_profile_history(id, &sel, cx);
         }
         self.ensure_mods_inputs(cx);
+        // A Steam game: its mods reach it only when it starts through Quiver.
+        let hook = g.steam_game().then(|| self.render_steam_mods_banner(th, g, cx)).flatten();
 
         // Options, history, keys and sources have views of their own (`options/`).
         if self.gp.opt.view != super::options::ModsView::Stack {
@@ -54,6 +56,7 @@ impl Quiver {
                 .flex()
                 .flex_col()
                 .gap(px(18.))
+                .children(hook)
                 .child(self.render_profile_cards(th, g, &m, &sel, cx))
                 .child(self.render_mods_views(th, id, cx))
                 .child(view)
@@ -85,6 +88,7 @@ impl Quiver {
             .flex()
             .flex_col()
             .gap(px(18.))
+            .children(hook)
             .child(self.render_profile_cards(th, g, &m, &sel, cx))
             .child(self.render_mods_views(th, id, cx))
             .child(crate::ui::responsive::columns(self.pane_bp(), 20., 380., left, right))
@@ -94,6 +98,8 @@ impl Quiver {
     fn render_profile_cards(&mut self, th: &Theme, g: &GameRow, m: &ModsState, sel: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let playing = self.default_profile(id);
+        let steam = g.steam_game();
+        let default_pill = if steam { "Steam runs" } else { "Default" };
         let mut cards: Vec<AnyElement> = Vec::new();
         let entry = |i: usize, key: Option<String>, name: String, sub: String, saves: (Icon, String), ic: Icon, pinned: bool, this: &mut Self, cx: &mut Context<Self>| {
             let on = key.as_deref().unwrap_or(VANILLA) == sel;
@@ -141,7 +147,7 @@ impl Quiver {
                                 .gap(px(6.))
                                 .font_weight(SEMIBOLD)
                                 .child(div().truncate().child(name))
-                                .when(is_play, |d| d.child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), "Default"))),
+                                .when(is_play, |d| d.child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), default_pill))),
                         )
                         .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(sub)),
                 )
@@ -160,8 +166,10 @@ impl Quiver {
                 }))
                 .into_any_element()
         };
-        // Which save store each uses (cloud icon: the store that syncs).
+        // Which save store each uses (cloud icon: the store that syncs). Steam games: every
+        // profile uses the real saves.
         let store_label = |s: Option<&quiver_api::mods::SavesPlan>| match s {
+            _ if steam => (Icon::Cloud, "Real saves".to_owned()),
             Some(s) => (if s.cloud { Icon::Cloud } else { Icon::HardDrive }, s.store_name.clone().unwrap_or_else(|| "Own saves".into())),
             None => (Icon::Cloud, "Default".to_owned()),
         };
@@ -214,8 +222,9 @@ impl Quiver {
         let info = self.gp.info.ready().filter(|_| self.gp.id == g.id());
         let owned: Vec<String> = info.map(|i| i.addons.iter().filter(|a| a.owned && a.kind.is_dlc()).filter_map(|a| a.name.clone()).collect()).unwrap_or_default();
         let ver = info.and_then(|i| i.install.as_ref()).and_then(|i| i.version.clone());
-        let size = info.and_then(|i| i.install.as_ref()).map(|i| i.size_bytes).filter(|s| *s > 0);
-        let dir = g.entry.installed.as_ref().map(|i| tilde(&i.install_dir)).unwrap_or_default();
+        // A Steam game: Steam's install folder.
+        let size = info.and_then(|i| i.install.as_ref()).map(|i| i.size_bytes).or_else(|| g.client().map(|c| c.size_bytes)).filter(|s| *s > 0);
+        let dir = g.entry.installed.as_ref().map(|i| tilde(&i.install_dir)).or_else(|| g.client().map(|c| tilde(&c.dir))).unwrap_or_default();
         let mut v = vec![];
         if !owned.is_empty() {
             v.push(
@@ -729,7 +738,7 @@ impl Quiver {
                     .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
                     .when(!is_cur && !v.retired, |d| {
                         d.child(small(key("use"), th, Some(Icon::CircleCheck), "Make current").on_click(cx.listener(move |this, _, _, cx| {
-                            this.version_op(id, ModsRequest::VersionUse { game: id.pid().into(), mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
+                            this.version_op(id, ModsRequest::VersionUse { game: id.0.into(), mod_id: mid.clone(), version: vid.clone(), message: None }, cx);
                         })))
                     })
                     .when(!is_cur, |d| {
@@ -737,7 +746,7 @@ impl Quiver {
                         d.child(
                             small(key("retire"), th, Some(if retired { Icon::ArchiveRestore } else { Icon::Minus }), if retired { "Bring back" } else { "Retire" })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let req = ModsRequest::VersionRetire { game: id.pid().into(), mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
+                                    let req = ModsRequest::VersionRetire { game: id.0.into(), mod_id: mid2.clone(), version: vid2.clone(), retired: !retired, message: None };
                                     this.version_op(id, req, cx);
                                 })),
                         )
@@ -797,6 +806,13 @@ impl Quiver {
         let del_prof = prof.clone();
         let play_i = self.gp.profiles().iter().position(|x| x.id == prof.id).map(|i| i + 1).unwrap_or(0);
         let is_default = self.default_profile(id).as_deref() == Some(prof.id.as_str());
+        // A Steam game plays from Steam (its `steam_profile`): no Play here, no library tile.
+        let steam = g.steam_game();
+        let cli = if steam {
+            format!("quiver set {id} steam_profile={}", super::page::sh_quote(&prof.name))
+        } else {
+            format!("quiver play {id} --profile {}", super::page::sh_quote(&prof.name))
+        };
         card(th)
             .p(px(16.))
             .gap(px(12.))
@@ -811,7 +827,7 @@ impl Quiver {
                     .child(badge(th, format!("r{}", p.revision), false)),
             )
             .child(stores)
-            .child(row("Pin to library", Some("Its own tile and list row"), pinned))
+            .when(!steam, |c| c.child(row("Pin to library", Some("Its own tile and list row"), pinned)))
             .child(row(
                 "Launch overrides",
                 None,
@@ -827,13 +843,15 @@ impl Quiver {
                         .into_any_element()
                 },
             ))
-            .child(self.cli_line("prof-cli", th, format!("quiver play {id} --profile {}", super::page::sh_quote(&prof.name)), cx))
+            .child(self.cli_line("prof-cli", th, cli, cx))
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap(px(8.))
-                    .child(button("prof-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play this profile").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, play_i, cx))))
+                    .when(!steam, |d| {
+                        d.child(button("prof-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play this profile").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, play_i, cx))))
+                    })
                     .child(self.make_default_button(th, id, play_i, is_default, cx))
                     .child(div().flex_1())
                     .child(danger("prof-del", th, Some(Icon::Trash), "Delete profile…").on_click(cx.listener(move |this, _, _, cx| {
@@ -845,10 +863,12 @@ impl Quiver {
 
     fn render_vanilla_card(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
+        let steam = g.steam_game();
         let cloud = self.gp.info.ready().map(|i| i.features.cloud_saves).unwrap_or(true);
         let is_default = self.default_profile(id).is_none();
         let store = self.gp.mods.ready().and_then(|m| m.vanilla_saves.clone());
         let saves = match (&store, cloud) {
+            _ if steam => "The game's real saves (Steam Cloud syncs them)".to_owned(),
             (_, false) => "The game's own (no cloud saves)".to_owned(),
             (Some(s), _) if s.cloud => format!("{} store, synced with the cloud", s.store_name.as_deref().unwrap_or("Default")),
             (Some(s), _) => format!("{} store, on this PC only", s.store_name.as_deref().unwrap_or("Default")),
@@ -860,24 +880,29 @@ impl Quiver {
             .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(SEMIBOLD).text_size(px(14.)).child("Vanilla")))
             .child(kv(th, "Runs", div().child("The base install, unmounted")))
             .child(kv(th, "Saves", div().child(saves)))
-            .child(kv(th, "Settings", div().child("This game's launch options")))
-            .child(self.cli_line("van-cli", th, format!("quiver play {id} --vanilla"), cx))
+            .child(kv(th, "Settings", div().child(if steam { "Steam's launch, with this game's Quiver settings" } else { "This game's launch options" })))
+            .child(self.cli_line("van-cli", th, if steam { format!("quiver set {id} steam_profile=vanilla") } else { format!("quiver play {id} --vanilla") }, cx))
             .child(
                 div()
                     .flex()
                     .gap(px(8.))
-                    .child(button("van-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play Vanilla").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, 0, cx))))
+                    .when(!steam, |d| {
+                        d.child(button("van-play", th, Kind::Primary, Size::Small, Some(Icon::Play), "Play Vanilla").on_click(cx.listener(move |this, _, _, cx| this.play_with(id, 0, cx))))
+                    })
                     .child(self.make_default_button(th, id, 0, is_default, cx)),
             )
     }
 
     /// "Make default" (profile entry `i`, 0: vanilla), or a "Default for Play" mark when it
-    /// already is: the game's default profile, which Play and shortcuts run.
+    /// already is: the game's default profile, which Play and shortcuts run. A Steam game's:
+    /// "Use in Steam" / "Steam runs this" (its `steam_profile`).
     fn make_default_button(&mut self, th: &Theme, id: Gid, i: usize, is_default: bool, cx: &mut Context<Self>) -> AnyElement {
+        let steam = id.0.as_steam().is_some();
         if is_default {
-            return div().flex().items_center().child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), "Default for Play")).into_any_element();
+            let mark = if steam { "Steam runs this" } else { "Default for Play" };
+            return div().flex().items_center().child(pill(th, PillKind::Accent, Some(Icon::CircleCheck), mark)).into_any_element();
         }
-        small(("make-default", i), th, Some(Icon::CircleCheck), "Make default")
+        small(("make-default", i), th, Some(Icon::CircleCheck), if steam { "Use in Steam" } else { "Make default" })
             .on_click(cx.listener(move |this, _, _, cx| this.set_default_profile(id, i, cx)))
             .into_any_element()
     }
@@ -924,7 +949,7 @@ impl Quiver {
                     .when(is_cur, |d| d.child(pill(th, PillKind::Accent, None, "Current")))
                     .when(!is_cur && !r.deleted, |d| {
                         d.child(small(("prof-restore", i), th, Some(Icon::RotateCcw), "Restore").on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_dialog(Dialog::RestoreProfile { game: id.pid(), id: pid.clone(), name: name.clone(), revision: rev });
+                            this.open_dialog(Dialog::RestoreProfile { game: id, id: pid.clone(), name: name.clone(), revision: rev });
                             cx.notify();
                         })))
                     })
@@ -949,7 +974,7 @@ impl Quiver {
                 .child(icon(Icon::Layers, 14., th.tx3))
                 .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_color(th.tx2).child(name.clone())).child(mono(11., th.tx3).child(format!("{} · saves kept", p.profile.id))))
                 .child(small(("deleted-restore", i), th, Some(Icon::Undo), "Restore").on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_dialog(Dialog::RestoreProfile { game: id.pid(), id: pid.clone(), name: name.clone(), revision: rev });
+                    this.open_dialog(Dialog::RestoreProfile { game: id, id: pid.clone(), name: name.clone(), revision: rev });
                     cx.notify();
                 })))
         }))

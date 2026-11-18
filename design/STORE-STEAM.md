@@ -663,6 +663,7 @@ hook_status}`):
   Steam's process tree, Stop and signal handling are exactly Steam's. Cost: the namespace
   child mode that mod overlays need (STEAM-COPIES §4) will have to spawn. That waits for the
   mods work and its S1 checks. *Decided 2026-11-17: keep `exec` until the mods work needs spawning.*
+  *Built 2026-11-17 (§10, M2): spawn only when a launch has overlays; `exec` otherwise.*
 - **G2.** `--app` means "a plain Steam game": nothing is looked up, so a hook written for a
   game never turns into a bridge launch later. Bare `quiver steam-run %command%` still
   detects Ubisoft products.
@@ -683,7 +684,8 @@ hook_status}`):
   game unasked. There is no "declined" memory, as there is for Ubisoft install offers: the
   offer only appears right after the person changed something.
 - **G9.** `account` and `profile` settings are refused for Steam games. `proton` and
-  `language` are stored but reported as not applied.
+  `language` are stored but reported as not applied. *Lifted for `profile` (§10, M1): for a
+  Steam game it sets `steam_profile`, the profile Steam's Play runs.*
 - **G10.** A quiverd crash during a session loses that session's record. Restarts onto new
   builds wait for running games, local sessions included.
 
@@ -738,8 +740,8 @@ hook_status}`):
 
 **Not built yet.**
 
-- Mods and overlays through the namespace (the stretch goal, G1).
-- Built-in fixes keyed by store id.
+- Mods and overlays through the namespace (the stretch goal, G1). *Built: §10.*
+- Built-in fixes keyed by store id. *The catalog takes `mods/steam-<appid>/`: §10.*
 - Tweak evidence on the Steam route: there is no per-session log dir, so effects stay
   "applied" (TWEAKS "Not built in phase 1").
 - Launch settings and the HUD form for Steam games in the app (the CLI has both). The app's
@@ -750,6 +752,245 @@ hook_status}`):
 - A "next launch uses profile P" one-shot for pinned shortcuts (§7).
 - Proton per game (`CompatToolMapping`, steer 4).
 - Achievement toasts from the stats cache.
+
+## 10. As built: phase 3, mods for Steam games (2026-11-17)
+
+**What it does.** Any Steam game started through the hook (`quiver steam-run --app <appid>`)
+runs Quiver's mods the way a Ubisoft game Quiver installed does: mod profiles (stacks of
+versioned mods plus the person's overrides), install-file overlays (add, replace, delete),
+config patches to the game's files in Steam's prefix (originals recorded and put back), the
+mods' launch settings, and Options (rendered into the profile's install layer and patched into
+the prefix). The rest of the launch plan (settings, tweaks, HUD, local play session) is as in §9.
+
+- **Stores per game** (STORES §2.2, §8.1): a Steam game's mods, profiles, histories, options
+  values and patch record live under `games/steam-<appid>/` and `mods/steam-<appid>/`
+  (`GameRef::dir_name`). Ubisoft games' folders and files are byte-identical to before
+  (`games/3539/…`, `mods/3539/…`; unit-tested).
+- **The Steam game as a `Game`** (`quiverd/src/steammods.rs`): `install_dir` is Steam's
+  (`<library>/steamapps/common/<game>`, from the app manifest, read-only); `prefix` is
+  `compatdata/<appid>/pfx` for a Proton game and none for a native one (`Game::prefix()` is
+  `None`, the field empty); `Game.game = steam:<appid>`, `product_id` 0. Without a prefix,
+  config patches and prefix or Documents option files don't apply (said in the plan's
+  warnings and the Options problems) and `profile_config` is a problem; install files work.
+- **CLI:** `quiver mods steam:<appid> …` (or the game's name when no Ubisoft game matches):
+  install, uninstall, version add/use/retire, profile create/set/delete/restore, default,
+  plan, options, set, undo-patches, migrate. `quiver mods` lists Steam games that have a
+  store. `quiver saves steam:<appid> …` says Steam games have no save stores, and why.
+- **App:** a Steam game's page has the Mods tab (Options inside it, as for Ubisoft games;
+  `Tab::STEAM`), loaded when Steam has the game installed and reloaded on `ModsChanged {
+  game }`. A banner at the top says whether the mods reach the game and offers "Start
+  through Quiver" when it isn't hooked. Next to Play, a **"Steam runs: Vanilla ▾"** chip
+  (shown once the game has profiles) sets `steam_profile`, as does "Use in Steam" on a profile
+  card. When the game isn't hooked, the chip and its toast say mods apply once it starts
+  through Quiver. Profile cards and the new-profile dialog say "Uses the game's real saves
+  (Steam Cloud syncs them)…" and offer no save store. "Play this profile" and "Pin to
+  library" are hidden for Steam games. The Steam store's capabilities report `mods: quiver`.
+- **Built-in catalog by store id:** `mods/<game folder>/<mod>/quiver-mod.toml`, so
+  `mods/steam-<appid>/…` next to `mods/<product>/…` (`build.rs` takes both forms). A Steam
+  game's manifest names it in the new `games = ["steam:<appid>"]`; installing a manifest on
+  another game is refused (`modpkg::check_game`). No Steam built-in ships yet (none audited).
+
+**Which profile a Steam launch runs** (M1): `steam_profile=<id|vanilla>`, a per-game setting,
+default vanilla. `quiver set <game> steam_profile=NAME`, `quiver mods <game> default NAME`
+(for a Steam game `profile` *is* `steam_profile`: its only launch is Steam's) or the app's chip.
+`quiver steam-run --profile NAME|vanilla` in the launch options overrides it for that launch.
+A deleted default runs vanilla with a warning, as for Play. `steam_profile` exists for Ubisoft
+games too, stored and reported as not applied until their Steam copies run mods (M7).
+
+**How a launch goes** (`crates/quiver-cli/src/steamrun.rs`, `quiverd/src/steamlib.rs`,
+`steammods.rs`, `quiver_core::steamns`):
+
+1. `Request::SteamLaunchPlan { game: "steam:<appid>", perf: true, env, mods: true, profile }`.
+   `env` also carries `STEAM_COMPAT_DATA_PATH` on this route (Steam sets it for Proton
+   launches only), so the launch decides whether there's a prefix and where (M6).
+2. quiverd picks the profile (`profile`, else `steam_profile`, else vanilla) and builds the
+   same plan as Play (`mods::launch_plan`: mods v2 migration or built-in updates, stack,
+   resolved settings, mounts, patches). With problems it answers them and logs "can't start …"
+   to the activity log; `steam-run` then doesn't start the game (M3). Otherwise it renders
+   options (`options_launch`, registering the options session under the launch id), applies
+   the config patches to Steam's prefix or the profile's own copies (`Plan::apply_patches`,
+   under the mod-store lock, before anything mounts), and creates the profile's prefix folders.
+   The stack's launch settings replace the game's own in the plan, before tweaks and the HUD
+   see them. The launch id is also the perf session's (one `QUIVER_SESSION`, M10). The
+   activity log says "Steam launch of <name> with profile '<P>' (<id>) r<N>: <mods> (<why>;
+   <mounts>)".
+3. The reply's `mods` (`SteamMods`) lists the overlays. `steamns::start_for` decides:
+   **exec** when nothing mounts (vanilla, config-only stacks: G1 as before), **namespace**
+   when something does, **refuse** on problems (M2).
+4. `Request::SteamSession { …, mods_launch }`: the local session takes the prepared launch's
+   profile, mod versions and options revision (`ActiveSession.profile`).
+5. Namespace: `steamns::namespace` uses the existing holder (`overlay::Namespace`: a `cat`
+   holder unshares, maps uid/gid, mounts, is reaped), then `steamns::run` spawns Steam's
+   command with `setns` into it in `pre_exec`, the working directory Steam gave (as seen
+   inside), `PR_SET_PDEATHSIG(SIGTERM)`, and steam-run's process group. steam-run forwards
+   SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1 and SIGUSR2 to it, waits, and exits with its
+   status (the exit code, or the same signal re-raised) (M4). Steam's reaper, the runtime
+   (pressure-vessel's bwrap binds the library recursively, so the overlay comes along), Proton
+   and the game see the mods; Steam and everything else see the real install.
+6. When the launch ends, quiverd records the session in `games/steam-<appid>/playtime.jsonl`
+   with its profile, profile revision, mod versions, launch id and options revision, imports
+   option edits made outside Quiver, then drops the session ("played <name> for N min").
+
+**Saves and Steam Cloud** (M5). Steam Cloud syncs the game's real save folder. Every profile of
+a Steam game uses it: no save stores, `saves=new` is refused with the reason, and a stack with
+a mod that isn't save-compatible warns ("back them up before playing it"). The CLI (`mods
+list`, `default`, `plan`) and the app say "uses the game's real saves (Steam Cloud syncs
+them); profiles with saves of their own aren't built for Steam games yet". Forking saves needs
+each game's save folder (per game, often not in the prefix) and an overlay of it inside the
+namespace only, so Steam Cloud keeps seeing the real one; that's for later.
+
+**Wire** (additive; Ubisoft games' requests and files unchanged):
+
+- `ModsRequest` and `OptionsRequest` variants take `#[serde(flatten)] game: GameField`:
+  `"product_id": 3539` for a Ubisoft game, as always, `"game": "steam:292030"` otherwise.
+- `Game.game`, `GameSettings.steam_profile`, `ModManifest.games`, `ModsState.game`,
+  `GameProfiles.game`, `SessionOptions.game`, `Event::ModsChanged.game` (Steam games: product
+  0; options changes of a Steam game also send `ModsChanged` with `game`).
+- `Request::SteamLaunchPlan { mods, profile }`, its reply's `mods: SteamMods { launch,
+  profile, profile_name, revision, chosen_by, resolved, overlays: [SteamOverlay { target,
+  lower, upper, work }], problems, lines }`, and `Request::SteamSession { mods_launch }`.
+
+**Verified here** (no real Steam file written, no Steam started or stopped, no game run, the
+person's quiverd and data untouched):
+
+- Unit tests: Steam stores' folders, real saves, `saves=new` refused, a Steam game's patch
+  applied to and undone in a fixture prefix, the mod's launch arguments, a native game (no
+  prefix: install overlay only, patches warned), Ubisoft folders unchanged
+  (`mods::tests::steam_games_have_stores_of_their_own`); the catalog by store id and
+  `check_game` (`modpkg`); a Steam app as a `Game`, the prefix decided by the launch, the
+  prepared launch claimed once (`steammods`); `steam_profile` not applied to Ubisoft copies
+  (`steamlib`); spawn vs exec vs refuse (`steamns`); the wire forms (`quiver-api`).
+- End to end (`crates/quiver-cli/tests/steam_mods.rs`; scratch quiverd, HOME with a fixture
+  Steam tree, `QUIVER_SHM_ROOT`, a do-nothing `systemctl`): a mod installed with
+  `quiver mods steam:292030 install DIR`, a profile, `mods default`, then `steam-run --app` of a
+  script standing in for Steam's command, started in the install folder:
+  - it saw the overlay: a replaced file, an added file, the working directory inside, its own
+    mount namespace, and a nested `bwrap --unshare-user --ro-bind / / --bind <install>
+    <install>` (pressure-vessel's shape) saw the replaced file too;
+  - it was spawned (steam-run stayed the parent, its only child), the play session held
+    steam-run's pid and the profile; the install was unchanged and the script's write went to
+    the profile's upper layer; the config patch was in the fixture prefix and `patches.json`;
+    the play history and activity log named the profile and mod;
+  - `--profile vanilla`: exec (same pid, the host's mounts) and the patch put back;
+  - SIGTERM to the launch's process group (Steam's Stop) and to steam-run alone each ended the
+    command, and steam-run died of the same signal; `exit 7` came back as 7; SIGKILL of
+    steam-run ended the command through the parent-death signal. Each time no process was
+    left in the namespace and the session ended.
+- `cargo test --workspace` and `cargo clippy --workspace --all-targets` (no new warnings in
+  touched files).
+
+**Steers taken** (not covered by the docs; the conservative choice each time):
+
+- **M1.** One setting, `steam_profile`, for "what Steam's Play runs"; for a Steam game
+  `profile` writes it too (G9 lifted for `profile`; `account` is still refused). Stored as the
+  profile id, names resolved by quiverd.
+- **M2.** Spawn only when something mounts. Config-only stacks and vanilla keep `exec` (G1).
+- **M3.** A profile that can't run (a mod lost its folder, a broken stack) doesn't start: steam-run
+  exits with an error, the reason in `steam-run.log` and the activity log, as Play refuses. Not
+  "start vanilla instead": that would run something other than what was picked.
+- **M4.** The child stays in steam-run's process group (no `setpgid`), so Steam's group signal
+  reaches it directly; steam-run forwards too (a group signal can reach the reaper twice,
+  which it tolerates). `PR_SET_PDEATHSIG` is set only when the spawn runs on the main thread
+  (the signal is tied to the forking thread).
+- **M5.** Real saves for every Steam profile; nothing forks saves.
+- **M6.** The prefix is the launch's (`STEAM_COMPAT_DATA_PATH`); without a launch (the Mods
+  tab, `mods plan`) it's `compatdata/<appid>/pfx` when that folder exists. Native means none.
+  Only the Steam route sends the variable, so a Ubisoft copy's plan request is unchanged.
+- **M7.** Steam copies of Ubisoft games don't run mods yet: their route doesn't ask, `--profile`
+  is logged as ignored, `steam_profile` is reported as not applied.
+- **M8.** A Steam game's store is keyed by its Steam ref, so a Ubisoft game's Steam copy, if
+  modded this way later, would have a store apart from the product's (STEAM-COPIES §4 planned
+  to share the product's; to decide with M7).
+- **M9.** A catalog manifest for a Steam game must name it in `games`; no Steam built-in ships
+  until one is audited the usual way.
+- **M10.** One id per launch: the options session, the perf session and `QUIVER_SESSION`.
+- **M11.** Options of a Steam game apply at launch. Live changes find no addressable game process
+  (quiverd knows only steam-run's pid, and Steam games have no SDK bridge), so they're saved
+  for the next launch and say so.
+- **M12.** Tweaks stay at the game and global scopes for Steam launches (no profile scope yet).
+
+**Spikes that need you** (each touches the real Steam client or game; agents don't run them):
+
+1. **S3: the first real modded launch, The Witcher 3 (`steam:292030`, Proton).** A test mod
+   that changes one install file (the debug console) and one setting in Steam's prefix
+   (subtitles), so both paths show in the game.
+   1. Install this build (`tools/install-user.sh` after merge); `quiver daemon status` shows
+      quiverd on it.
+   2. Make the mod (in your home, not in Steam's folders):
+      ```sh
+      M=~/quiver-mods/w3-spike
+      W3="$HOME/.local/share/Steam/steamapps/common/The Witcher 3"
+      mkdir -p "$M/files/bin/config/base"
+      cp "$W3/bin/config/base/general.ini" "$M/files/bin/config/base/general.ini"
+      printf 'DBGConsoleOn=true\n' >> "$M/files/bin/config/base/general.ini"
+      cat > "$M/quiver-mod.toml" <<'EOF'
+      id = "w3-spike"
+      name = "Spike: console, no subtitles"
+      kind = "mod"
+      save_compatible = true
+      games = ["steam:292030"]
+      description = "Quiver spike S3: the debug console (install file) and subtitles off (config patch)."
+      [[patch]]
+      file = "drive_c/users/steamuser/Documents/The Witcher 3/dx12user.settings"
+      section = "Audio"
+      set = { Subtitles = "false" }
+      [[patch]]
+      file = "drive_c/users/steamuser/Documents/The Witcher 3/user.settings"
+      section = "Audio"
+      set = { Subtitles = "false" }
+      EOF
+      ```
+   3. `quiver mods steam:292030 install ~/quiver-mods/w3-spike`, then
+      `quiver mods steam:292030 profile create Spike --layers w3-spike`, then
+      `quiver mods steam:292030 default Spike` (it says whether the game is hooked, and that
+      profiles use the real saves). `quiver mods steam:292030 plan` should show one mount over
+      `…/common/The Witcher 3` and the two config patches.
+   4. If it isn't hooked: `quiver steam hook steam:292030 on` (staged while Steam runs: quit
+      Steam from its menu, or `quiver steam restart`, which asks first).
+   5. Play The Witcher 3 from Steam. While it runs:
+      - `quiver sessions` lists `steam:292030` with profile Spike;
+      - Options › Audio shows subtitles off; the console opens (the key left of 1, or F2);
+      - `pid=$(pgrep -f witcher3.exe | head -1); grep DBGConsole "/proc/$pid/root$W3/bin/config/base/general.ini"`
+        prints the line (the game's view, inside pressure-vessel), and
+        `grep DBGConsole "$W3/bin/config/base/general.ini"` prints nothing (the real file);
+      - Shift+Tab opens Steam's overlay; a controller works (Steam Input).
+   6. Press Stop in Steam's library: the game closes, Steam stops showing Playing, `quiver
+      sessions` drops it, and `quiver playtime steam:292030` lists the session (profile Spike).
+   7. `quiver set steam:292030 steam_profile=vanilla`, Play again: no console, subtitles back on
+      (the original values are put back; a value you changed in-game since is left alone).
+      Quit the game normally.
+   8. Send: `~/.local/share/quiver/steam-run/292030/steam-run.log` (the plan, "mods: profile
+      'Spike'", the mount line, "spawn (in the mods' namespace)", the exit), and the
+      `quiver activity` lines for steam:292030.
+   9. Undo: `quiver mods steam:292030 profile delete Spike`, `quiver mods steam:292030 uninstall
+      w3-spike` (puts back any value still patched), and `quiver steam hook steam:292030 off` if
+      you don't want it hooked. Also check: Steam's "Verify integrity of game files" finds
+      nothing wrong (it runs outside the namespace and should never see the mod).
+2. **S4: a native game, Cities: Skylines (`steam:255710`).** It has a compatibility folder, so
+   whether it runs native or with Proton depends on its Compatibility setting. Repeat steps 3–6
+   with a file-only mod (for example `files/` holding a copy of a file from its install folder
+   with one byte changed, or a new file you can see from `/proc/<pid>/root`). Run it native
+   (no Compatibility tool) and check `steam-run.log`: the plan says the game has no Wine prefix
+   (no config patches), the overlay still mounts, the game starts and Stop ends it. Then, if you
+   use Proton for it, once with Proton: the log names `compatdata/255710/pfx`.
+3. **S5: `--profile` from the launch options.** With the hook on, edit The Witcher 3's launch
+   options in Steam to `<your quiver> --source steam steam-run --app 292030 --profile Spike
+   %command%` (Steam must be closed for Quiver to edit them; editing them in Steam's own
+   Properties is fine). The profile runs whatever `steam_profile` says. Put them back with
+   `quiver steam hook steam:292030 off` and `on`.
+
+**Not built yet.**
+
+- Mods for Steam copies of Ubisoft games (the bridge route; M7, M8).
+- Save forks for Steam games (M5): each game's save folder, overlaid inside the namespace only.
+- Live option changes for Steam launches (M11) and the tweaks' profile scope (M12).
+- A Steam game in the built-in catalog (needs an audited recipe; M9).
+- App: live options events for Steam games (`OptionsLive`, `OptionsOutcome`, `OptionsCrash`
+  carry only `product_id`); gamepad focus for the Steam profile chip; Steam mods in the demo
+  mode (its Steam game shows "needs an installed game"). Not yet seen on screen (spike S3
+  can check the page too).
+- Mods for other stores' games (`epic:…`, `gog:…`): the store keys are ready, the games aren't
+  `Game`s yet.
 
 ## Sources
 

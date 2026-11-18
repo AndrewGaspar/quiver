@@ -1,8 +1,10 @@
 # Steam copies of Ubisoft games (design notes)
 
 Status: library, launch and play-session parts built on `feat/steam-library`; launch
-settings (env, DLL overrides, args, wrappers) applied by `steam-run`. Mod overlays, config
-patches and cloud saves for Steam copies are designed here and not built yet.
+settings (env, DLL overrides, args, wrappers) applied by `steam-run`. Mod profiles, overlays,
+config patches and options are built for Steam games (`steam:<appid>`, 2026-11-17: see §4
+"As built" and STORE-STEAM.md §10). For Steam copies of Ubisoft games (the bridge route) they
+are still designed only, as are cloud saves for those copies.
 
 ## 1. Why Black Flag Resynced wasn't in the library
 
@@ -138,7 +140,29 @@ them, but resets some (`LD_*`, `PATH`, `XDG_*` are rewritten), so a few settings
 reach the game. Wrappers outside the container (`gamemoderun`, `mangohud`) are what users
 already put before `%command%`.
 
-### Mod profiles, overlays and config patches (designed, not built)
+### Mod profiles, overlays and config patches (built for Steam games; Ubisoft copies designed)
+
+**As built (2026-11-17), for any Steam game started through the hook** (`steam-run --app`;
+details, steers M1–M12 and spikes in STORE-STEAM.md §10). The plan below is what was built,
+with these differences:
+
+- The store is the Steam game's own (`games/steam-<appid>/`, `mods/steam-<appid>/`), not the
+  Ubisoft product's. A Ubisoft game's Steam copy (the bridge route) doesn't run mods yet:
+  `--profile` is ignored there with a log line, and its `steam_profile` is reported as not
+  applied (M7).
+- No `SteamPrepare` request: `SteamLaunchPlan` gained `mods: true` and `profile`, and its reply
+  `mods` (`SteamMods`: the launch id, profile, resolved mods, overlays, problems, log lines).
+  quiverd applies config patches and renders options before it answers.
+- The namespace and spawn are as planned (`quiver_core::steamns`): only when there are
+  overlays (G1 kept otherwise). Checked end to end with a stand-in for Steam's command and a
+  nested `bwrap --unshare-user --bind` (pressure-vessel's shape); Steam's own Stop, overlay
+  and Steam Input are spike S3.
+- Saves: Steam Cloud syncs the real save folder, so every profile of a Steam game uses it
+  (M5). Profiles with their own saves aren't built for Steam games.
+- The prefix is the launch's: `STEAM_COMPAT_DATA_PATH` when Steam sets it (Proton), none for a
+  native launch (M6).
+
+The plan as designed:
 
 Which profile: a Steam launch has no picker. Proposal: a per-game setting
 `steam_profile=<id|vanilla>` (default vanilla, plus enabled fixes when fixes-on-vanilla is
@@ -171,7 +195,7 @@ on `LD_PRELOAD` and the reaper, not on the filesystem; probably unaffected). Ste
 "verify integrity" must never run inside the namespace (it won't: Steam runs it, not the
 launch).
 
-Saves: a profile with its own saves would point the bridge's `savegame_path` at the
+Saves (Ubisoft copies, still designed): a profile with its own saves would point the bridge's `savegame_path` at the
 profile's folder in Steam's prefix (`steam-run` already writes `savegame_path` into the
 context).
 

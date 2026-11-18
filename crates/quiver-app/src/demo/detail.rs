@@ -195,7 +195,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         Request::Mods(m) => {
             let (v, changed) = d.mods(st, m)?;
             if let Some(product_id) = changed {
-                events.push(Event::ModsChanged { product_id });
+                events.push(Event::ModsChanged { product_id, game: None });
             }
             v
         }
@@ -210,7 +210,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             d.next += 1;
             let n = d.next;
             let r = d.mods.entry(product_id).or_default().edit_stores(product_id, op, n)?;
-            events.push(Event::ModsChanged { product_id });
+            events.push(Event::ModsChanged { product_id, game: None });
             json!(r)
         }
         Request::SavesMerge { .. } => bail!("merging save stores isn't simulated in demo mode"),
@@ -1567,30 +1567,30 @@ impl Detail {
         let src = "gui";
         let product = match &req {
             ModsRequest::Games => None,
-            ModsRequest::List { product_id }
-            | ModsRequest::LayerAdd { product_id, .. }
-            | ModsRequest::LayerRemove { product_id, .. }
-            | ModsRequest::ProfileCreate { product_id, .. }
-            | ModsRequest::ProfileSet { product_id, .. }
-            | ModsRequest::ProfileDelete { product_id, .. }
-            | ModsRequest::ProfileHistory { product_id, .. }
-            | ModsRequest::ProfileRestore { product_id, .. }
-            | ModsRequest::LayerDeletes { product_id, .. }
-            | ModsRequest::LayerHistory { product_id, .. }
-            | ModsRequest::LayerRestore { product_id, .. }
-            | ModsRequest::Catalog { product_id }
-            | ModsRequest::Install { product_id, .. }
-            | ModsRequest::Uninstall { product_id, .. }
-            | ModsRequest::Show { product_id, .. }
-            | ModsRequest::ModSet { product_id, .. }
-            | ModsRequest::Plan { product_id, .. }
-            | ModsRequest::PatchesUndo { product_id, .. }
-            | ModsRequest::Migrate { product_id, .. }
-            | ModsRequest::VersionAdd { product_id, .. }
-            | ModsRequest::VersionUse { product_id, .. }
-            | ModsRequest::VersionRetire { product_id, .. }
-            | ModsRequest::ModHistory { product_id, .. }
-            | ModsRequest::MergeVersions { product_id, .. } => Some(*product_id),
+            ModsRequest::List { game }
+            | ModsRequest::LayerAdd { game, .. }
+            | ModsRequest::LayerRemove { game, .. }
+            | ModsRequest::ProfileCreate { game, .. }
+            | ModsRequest::ProfileSet { game, .. }
+            | ModsRequest::ProfileDelete { game, .. }
+            | ModsRequest::ProfileHistory { game, .. }
+            | ModsRequest::ProfileRestore { game, .. }
+            | ModsRequest::LayerDeletes { game, .. }
+            | ModsRequest::LayerHistory { game, .. }
+            | ModsRequest::LayerRestore { game, .. }
+            | ModsRequest::Catalog { game }
+            | ModsRequest::Install { game, .. }
+            | ModsRequest::Uninstall { game, .. }
+            | ModsRequest::Show { game, .. }
+            | ModsRequest::ModSet { game, .. }
+            | ModsRequest::Plan { game, .. }
+            | ModsRequest::PatchesUndo { game, .. }
+            | ModsRequest::Migrate { game, .. }
+            | ModsRequest::VersionAdd { game, .. }
+            | ModsRequest::VersionUse { game, .. }
+            | ModsRequest::VersionRetire { game, .. }
+            | ModsRequest::ModHistory { game, .. }
+            | ModsRequest::MergeVersions { game, .. } => Some(game.as_ubisoft().unwrap_or(0)),
             ModsRequest::Prefs { .. } => None,
         };
         if let ModsRequest::Prefs { .. } = req {
@@ -1795,7 +1795,7 @@ mod tests {
     async fn default_profile() {
         let (demo, _events) = Demo::start();
         // Origins plays its DLSS profile by default.
-        let m: ModsState = call(&demo, Request::Mods(ModsRequest::List { product_id: 3539 }));
+        let m: ModsState = call(&demo, Request::Mods(ModsRequest::List { game: 3539.into() }));
         assert_eq!(m.default_profile.as_deref(), Some(ORIGINS_DEFAULT));
         assert!(m.profiles.iter().any(|p| p.profile.id == ORIGINS_DEFAULT && p.profile.name == "DLSS"));
         let session_profile = |demo: &Demo| {
@@ -1852,21 +1852,21 @@ mod tests {
     #[tokio::test]
     async fn mods_profiles_lifecycle() {
         let (demo, mut events) = Demo::start();
-        let m: ModsState = call(&demo, Request::Mods(ModsRequest::List { product_id: 5059 }));
+        let m: ModsState = call(&demo, Request::Mods(ModsRequest::List { game: 5059.into() }));
         assert_eq!(m.profiles.len(), 2);
         assert_eq!(m.deleted.len(), 1);
         assert_eq!(m.profiles[0].conflicts.len(), 3);
-        let l: Layer = call(&demo, Request::Mods(ModsRequest::LayerAdd { product_id: 5059, name: "Mine".into(), path: "/tmp/x".into(), deletes: Vec::new() }));
+        let l: Layer = call(&demo, Request::Mods(ModsRequest::LayerAdd { game: 5059.into(), name: "Mine".into(), path: "/tmp/x".into(), deletes: Vec::new() }));
         let r: ProfileRevision = call(
             &demo,
-            Request::Mods(ModsRequest::ProfileCreate { product_id: 5059, name: "Test".into(), layers: vec![l.id.clone()], message: None, saves: None }),
+            Request::Mods(ModsRequest::ProfileCreate { game: 5059.into(), name: "Test".into(), layers: vec![l.id.clone()], message: None, saves: None }),
         );
         assert_eq!(r.profile.layers, vec![l.id.clone()]);
         // A layer of unknown save compatibility: steered to a store of its own.
         assert!(r.profile.saves.as_deref().is_some_and(|s| s != "default"));
         let mut got = false;
         for _ in 0..8 {
-            if let Ok(Some(Event::ModsChanged { product_id: 5059 })) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            if let Ok(Some(Event::ModsChanged { product_id: 5059, .. })) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
                 got = true;
                 break;
             }
@@ -1874,21 +1874,21 @@ mod tests {
         assert!(got, "ModsChanged");
         let ops = vec![SettingOp::parse("saves=default").unwrap(), SettingOp::parse("pinned=on").unwrap()];
         let r2: ProfileRevision =
-            call(&demo, Request::Mods(ModsRequest::ProfileSet { product_id: 5059, profile: "test".into(), ops, message: None }));
+            call(&demo, Request::Mods(ModsRequest::ProfileSet { game: 5059.into(), profile: "test".into(), ops, message: None }));
         assert!(r2.profile.saves.as_deref() == Some("default") && r2.profile.pinned && r2.revision == 2);
         // Origins has two stores; the stores report says who uses which.
         let s: SaveStoresReport = call(&demo, Request::SaveStores { product_id: 3539 });
         assert_eq!(s.stores.len(), 2);
         assert_eq!(s.cloud.as_deref(), Some("default"));
         assert_eq!(s.stores[1].used_by[0].name, "Nightmare");
-        assert!(demo.handle(Request::Mods(ModsRequest::ProfileDelete { product_id: 5059, profile: r.profile.id.clone(), confirmed: false })).is_err());
-        let d: ProfileRevision = call(&demo, Request::Mods(ModsRequest::ProfileDelete { product_id: 5059, profile: r.profile.id.clone(), confirmed: true }));
+        assert!(demo.handle(Request::Mods(ModsRequest::ProfileDelete { game: 5059.into(), profile: r.profile.id.clone(), confirmed: false })).is_err());
+        let d: ProfileRevision = call(&demo, Request::Mods(ModsRequest::ProfileDelete { game: 5059.into(), profile: r.profile.id.clone(), confirmed: true }));
         assert!(d.deleted);
-        let h: Vec<ProfileRevision> = call(&demo, Request::Mods(ModsRequest::ProfileHistory { product_id: 5059, profile: r.profile.id.clone() }));
+        let h: Vec<ProfileRevision> = call(&demo, Request::Mods(ModsRequest::ProfileHistory { game: 5059.into(), profile: r.profile.id.clone() }));
         assert_eq!(h.len(), 3);
         let back: ProfileRevision = call(
             &demo,
-            Request::Mods(ModsRequest::ProfileRestore { product_id: 5059, profile: r.profile.id.clone(), revision: 2, confirmed: true }),
+            Request::Mods(ModsRequest::ProfileRestore { game: 5059.into(), profile: r.profile.id.clone(), revision: 2, confirmed: true }),
         );
         assert!(!back.deleted && back.profile.pinned);
         // Play with a profile that exists, by name; an unknown one fails.
