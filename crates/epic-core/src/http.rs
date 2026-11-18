@@ -144,6 +144,12 @@ impl Fake {
         self
     }
 
+    /// [`Fake::reply`] with a binary body (a manifest file).
+    pub fn reply_bytes(&self, url_part: &str, status: u16, body: Vec<u8>) -> &Self {
+        self.replies.lock().unwrap().push_back((url_part.to_owned(), Response { status, body }));
+        self
+    }
+
     pub fn requests(&self) -> Vec<Request> {
         self.seen.lock().unwrap().clone()
     }

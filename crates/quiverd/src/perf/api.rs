@@ -130,7 +130,7 @@ impl Daemon {
         if std::env::var("QUIVER_PERF").is_ok_and(|v| v == "0") {
             return Vec::new();
         }
-        match self.perf.begin(session_id, quiver_api::GameRef::ubisoft(game.product_id), profile, Some(&game.prefix), &settings.env, &settings.wrappers, false) {
+        match self.perf.begin(session_id, game.game_ref(), profile, Some(&game.prefix), &settings.env, &settings.wrappers, false) {
             Ok(b) => {
                 let enabled = b.plan.hud.as_ref().is_some_and(|h| h.enabled);
                 settings.env.extend(b.plan.env);

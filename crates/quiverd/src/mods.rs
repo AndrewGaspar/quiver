@@ -66,6 +66,9 @@ pub(crate) fn installed(game: GameRef) -> Result<launcher::Game> {
     if let Some(app) = game.as_steam() {
         return crate::steammods::mod_game(app);
     }
+    if game.store == quiver_api::StoreId::Epic {
+        return crate::epic::mod_game(game);
+    }
     let id = game.as_ubisoft().with_context(|| format!("{game}: mods for {} games aren't built yet", game.store.label()))?;
     Games::load()?.get(id).cloned().context("not installed (mods need an installed game)")
 }

@@ -194,7 +194,8 @@ impl Downloads {
         self.items.lock().unwrap().iter().map(|i| i.entry.clone()).collect()
     }
 
-    pub(crate) fn get(&self, game: GameRef) -> Option<QueueEntry> {
+    pub(crate) fn get(&self, game: impl Into<GameRef>) -> Option<QueueEntry> {
+        let game: GameRef = game.into();
         self.items.lock().unwrap().iter().find(|i| i.entry.game_ref() == game).map(|i| i.entry.clone())
     }
 
@@ -247,12 +248,13 @@ impl Downloads {
         self: &Arc<Self>,
         host: &Arc<H>,
         source: &str,
-        game: GameRef,
+        game: impl Into<GameRef>,
         name: String,
         kind: QueueKind,
         language: Option<String>,
         account: Option<String>,
     ) -> Result<u64> {
+        let game: GameRef = game.into();
         if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == game) {
             bail!("{name} is being verified; wait for it or cancel it first");
         }
@@ -299,7 +301,8 @@ impl Downloads {
         Ok(id)
     }
 
-    pub(crate) fn move_item<H: Host>(&self, host: &Arc<H>, game: GameRef, to: QueueMove) -> Result<()> {
+    pub(crate) fn move_item<H: Host>(&self, host: &Arc<H>, game: impl Into<GameRef>, to: QueueMove) -> Result<()> {
+        let game: GameRef = game.into();
         {
             let mut items = self.items.lock().unwrap();
             let i = items.iter().position(|i| i.entry.game_ref() == game).context("not in the queue")?;
@@ -317,7 +320,8 @@ impl Downloads {
         Ok(())
     }
 
-    pub(crate) fn pause<H: Host>(&self, host: &Arc<H>, source: &str, game: GameRef) -> Result<()> {
+    pub(crate) fn pause<H: Host>(&self, host: &Arc<H>, source: &str, game: impl Into<GameRef>) -> Result<()> {
+        let game: GameRef = game.into();
         let name = {
             let mut items = self.items.lock().unwrap();
             let it = items.iter_mut().find(|i| i.entry.game_ref() == game).context("not in the queue")?;
@@ -340,7 +344,8 @@ impl Downloads {
         Ok(())
     }
 
-    pub(crate) fn resume<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: GameRef) -> Result<u64> {
+    pub(crate) fn resume<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: impl Into<GameRef>) -> Result<u64> {
+        let game: GameRef = game.into();
         let (name, job) = {
             let mut items = self.items.lock().unwrap();
             let it = items.iter_mut().find(|i| i.entry.game_ref() == game).context("not in the queue")?;
@@ -372,7 +377,8 @@ impl Downloads {
     }
 
     /// Take a game out of the queue; a running item stops first (at a slice boundary).
-    pub(crate) fn remove<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: GameRef, discard: bool) -> Result<()> {
+    pub(crate) fn remove<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: impl Into<GameRef>, discard: bool) -> Result<()> {
+        let game: GameRef = game.into();
         let removed = {
             let mut items = self.items.lock().unwrap();
             let i = items.iter().position(|i| i.entry.game_ref() == game).context("not in the queue")?;
@@ -430,7 +436,8 @@ impl Downloads {
         out
     }
 
-    pub(crate) fn ensure_idle(&self, game: GameRef) -> Result<()> {
+    pub(crate) fn ensure_idle(&self, game: impl Into<GameRef>) -> Result<()> {
+        let game: GameRef = game.into();
         if self.items.lock().unwrap().iter().any(|i| i.entry.game_ref() == game && i.progress.is_some()) {
             bail!("a download for this game is running; pause or remove it first (quiver queue)");
         }

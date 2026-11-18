@@ -28,8 +28,8 @@ pub mod content;
 pub mod http;
 pub mod installs;
 pub mod library;
-pub mod ops;
 pub mod manifest;
+pub mod ops;
 pub mod provider;
 pub mod secrets;
 

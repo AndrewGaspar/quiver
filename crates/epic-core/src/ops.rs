@@ -74,11 +74,6 @@ pub fn game_ref(app: &str) -> Result<GameRef> {
     GameRef::new(StoreId::Epic, app).map_err(|e| anyhow::anyhow!("{app}: {e}"))
 }
 
-fn sha1_hex(b: &[u8]) -> String {
-    use sha1::Digest as _;
-    hex::encode(sha1::Sha1::digest(b))
-}
-
 /// The arguments EGL passes (legendary `get_launch_parameters`, read as a spec), in its
 /// order: the manifest's and catalog's arguments first, then the licence.
 #[allow(clippy::too_many_arguments)]

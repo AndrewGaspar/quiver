@@ -456,6 +456,10 @@ impl Daemon {
                 self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), job.game.as_ubisoft());
                 Value::Null
             }
+            Request::Stop { game } if epic::is_installed(self, game.0) => {
+                epic::stop(self, game.0).await?;
+                Value::Null
+            }
             Request::Stop { game } => {
                 if !game.is_ubisoft() {
                     stores::stop_elsewhere(game.0)?;
