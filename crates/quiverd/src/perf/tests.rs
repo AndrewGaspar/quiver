@@ -226,6 +226,14 @@ fn in_game_keys_from_the_layer_status() {
     });
     drain_once(&e.hub, &mut watched);
     assert_eq!(e.hub.keybinds().games[0].keys, "wayland");
+    // A layer with Wayland keys reading them on the game's connection.
+    set(&|s| s.keys = KEYS_ACTIVE | quiver_perf::layout::KEYS_WL_ACTIVE << quiver_perf::layout::KEYS_WL_SHIFT);
+    drain_once(&e.hub, &mut watched);
+    assert_eq!(e.hub.keybinds().games[0].keys, "active_wayland");
+    // Presses read from Wayland count the same way.
+    set(&|s| s.key_toggles = 4);
+    drain_once(&e.hub, &mut watched);
+    assert!(e.hub.status(Some(&sid), None).unwrap().on);
     e.hub.end(&sid);
 }
 

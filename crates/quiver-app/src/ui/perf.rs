@@ -1007,9 +1007,9 @@ impl Quiver {
                 .child(crate::ui::kbd(th, keys_label(&b.mods, &b.key)))
                 .child(div().text_size(px(12.5)).child(b.description.clone()))
         });
-        let state = "The Sight layer reads these inside the game while its window has focus: no compositor binds needed. \
-                     Games without the layer (anti-cheat, OpenGL, Wayland-native windows) can use the Hyprland lines below instead; \
-                     they then work over every window.";
+        let state = "The Sight layer reads these inside the game while its window has focus, X11 or Wayland-native: \
+                     no compositor binds needed. Games without the layer (anti-cheat, OpenGL) can use the Hyprland lines below \
+                     instead; they then work over every window.";
         div()
             .flex()
             .flex_col()
@@ -1083,7 +1083,7 @@ impl Quiver {
                 }
                 let sub = sub.into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
                 // The keys only need a word when the layer can't read them.
-                let keys = s.layer.as_ref().filter(|l| !l.keys.is_empty() && l.keys != "active").map(|l| l.keys_detail.clone());
+                let keys = s.layer.as_ref().filter(|l| !l.keys.is_empty() && !quiver_api::perf::keys_read_in_game(&l.keys)).map(|l| l.keys_detail.clone());
                 div()
                     .flex()
                     .flex_col()

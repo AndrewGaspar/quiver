@@ -722,14 +722,14 @@ pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
             for b in &k.binds {
                 println!("  {:<12} {:<4} {}  ({})", b.mods, b.key, b.description, b.command);
             }
-            println!("The Sight layer reads these keys inside the game (X11/XWayland keymap polling); no compositor binds needed.");
+            println!("The Sight layer reads these keys inside the game (X11 keymap polling, or a keyboard on a Wayland-native game's own connection); no compositor binds needed.");
             if k.games.is_empty() {
                 println!("No running game has the layer.");
             }
             for g in &k.games {
                 println!("  {} (pid {}): {} — {}", g.game.map(|r| r.to_string()).unwrap_or_else(|| format!("product {}", g.product_id)), g.pid, g.keys, g.detail);
             }
-            println!("Games without the layer (anti-cheat, OpenGL, Wayland-native windows) can use Hyprland binds instead;");
+            println!("Games without the layer (anti-cheat, OpenGL) can use Hyprland binds instead;");
             println!("quiverd never applies them. `quiver hud keybinds --conf` prints them for your Hyprland config.");
         }
         HudAction::Env { game, profile, json } => {

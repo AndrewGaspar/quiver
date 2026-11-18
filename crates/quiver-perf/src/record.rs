@@ -249,6 +249,16 @@ impl LayerStatus {
         key_nexts: 0,
     };
 
+    /// The X11 keymap polling's state (`KEYS_*`).
+    pub fn keys_x11(&self) -> u32 {
+        self.keys & 0xff
+    }
+
+    /// The Wayland keyboard's state (`KEYS_WL_*`).
+    pub fn keys_wayland(&self) -> u32 {
+        (self.keys >> crate::layout::KEYS_WL_SHIFT) & 0xff
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 256).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }

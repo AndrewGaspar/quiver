@@ -86,7 +86,7 @@ extern "C" {
 #define QV_LAYER_WAYLAND_SURFACE  0x40 /* the game made a Wayland VkSurfaceKHR */
 #define QV_LAYER_X11_SURFACE      0x80 /* ... an Xlib or XCB one */
 
-/* qv_layer_status.keys: the layer's in-game HUD key polling (X11 XQueryKeymap). */
+/* qv_layer_status.keys & 0xff: the layer's in-game HUD key polling (X11 XQueryKeymap). */
 #define QV_KEYS_UNKNOWN           0 /* not reported (not started, or an older layer) */
 #define QV_KEYS_ACTIVE            1
 #define QV_KEYS_OFF               2 /* QUIVER_SIGHT_KEYS=0 */
@@ -96,6 +96,19 @@ extern "C" {
 #define QV_KEYS_NO_KEYCODES       6
 #define QV_KEYS_IO_ERROR          7
 #define QV_KEYS_INTERNAL          8
+
+/* (qv_layer_status.keys >> QV_KEYS_WL_SHIFT) & 0xff: the layer's wl_keyboard on the game's
+   own Wayland connection (Wayland-native windows). */
+#define QV_KEYS_WL_SHIFT          8
+#define QV_KEYS_WL_NONE           0 /* no Wayland surface, or an older layer */
+#define QV_KEYS_WL_ACTIVE         1
+#define QV_KEYS_WL_STARTING       2
+#define QV_KEYS_WL_NO_LIBWAYLAND  3
+#define QV_KEYS_WL_NO_SEAT        4
+#define QV_KEYS_WL_NO_KEYBOARD    5
+#define QV_KEYS_WL_DISPLAY_ERROR  6
+#define QV_KEYS_WL_STOPPED        7 /* the game destroyed its Wayland surfaces */
+#define QV_KEYS_WL_INTERNAL       8
 
 #define QV_DRAW_ERR_NONE          0
 #define QV_DRAW_ERR_FORMAT        1
@@ -185,7 +198,7 @@ typedef struct qv_layer_status {
     char     engine_name[32];   /* NUL-padded UTF-8 ("DXVK", "vkd3d") */
     char     app_name[64];
     char     device_name[64];
-    uint32_t keys;              /* QV_KEYS_* */
+    uint32_t keys;              /* QV_KEYS_* | QV_KEYS_WL_* << QV_KEYS_WL_SHIFT */
     uint16_t key_toggles;       /* HUD toggle / next-preset chord presses, wrapping */
     uint16_t key_nexts;
 } qv_layer_status;

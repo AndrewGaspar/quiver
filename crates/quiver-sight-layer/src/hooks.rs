@@ -4,7 +4,7 @@
 use std::ffi::{CStr, c_void};
 use std::sync::{Arc, Mutex};
 
-use ash::vk;
+use ash::vk::{self, Handle as _};
 use quiver_perf::LayerStatus;
 use quiver_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_USAGE, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE};
 
@@ -78,6 +78,8 @@ pub unsafe extern "system" fn create_instance(
 }
 
 pub unsafe extern "system" fn destroy_instance(instance: vk::Instance, alloc: *const vk::AllocationCallbacks<'_>) {
+    // Surfaces the app didn't destroy: a keyboard of ours on their display goes first.
+    guard("vkDestroyInstance", || crate::wayland::instance_destroyed(instance.as_raw()));
     let Some(data) = state::remove_instance(instance) else { return };
     // SAFETY: the app's arguments.
     unsafe { (data.fns.fp_v1_0().destroy_instance)(instance, alloc) };
@@ -416,5 +418,29 @@ pub unsafe extern "system" fn create_wayland_surface_khr(
     out: *mut vk::SurfaceKHR,
 ) -> vk::Result {
     // SAFETY: the app's arguments.
-    unsafe { create_surface(c"vkCreateWaylandSurfaceKHR", LAYER_WAYLAND_SURFACE, instance, ci.cast(), alloc, out) }
+    let r = unsafe { create_surface(c"vkCreateWaylandSurfaceKHR", LAYER_WAYLAND_SURFACE, instance, ci.cast(), alloc, out) };
+    if r == vk::Result::SUCCESS {
+        guard("vkCreateWaylandSurfaceKHR", || {
+            // SAFETY: the app's create info; the surface was just written. Only the display
+            // pointer is kept (wayland.rs: our keyboard goes on the game's connection).
+            unsafe { crate::wayland::surface_created(instance.as_raw(), (*out).as_raw(), (*ci).display.cast()) }
+        });
+    }
+    r
+}
+
+pub unsafe extern "system" fn destroy_surface_khr(instance: vk::Instance, surface: vk::SurfaceKHR, alloc: *const vk::AllocationCallbacks<'_>) {
+    // First: the app may disconnect the surface's wl_display as soon as this returns, so a
+    // keyboard of ours on it goes now.
+    if surface != vk::SurfaceKHR::null() {
+        guard("vkDestroySurfaceKHR", || crate::wayland::surface_destroyed(instance.as_raw(), surface.as_raw()));
+    }
+    let Some(inst) = state::instance(instance) else { return };
+    // SAFETY: a valid query down the chain (we only hook it when the chain has it).
+    let next = unsafe { load_fn(inst.next_gipa, instance, c"vkDestroySurfaceKHR") };
+    if next.is_null() {
+        return;
+    }
+    // SAFETY: the function's type; the app's arguments.
+    unsafe { std::mem::transmute::<*const c_void, vk::PFN_vkDestroySurfaceKHR>(next)(instance, surface, alloc) };
 }
