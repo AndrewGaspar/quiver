@@ -128,6 +128,32 @@ fn watch_sees_a_synthetic_layer_ring() {
 }
 
 #[test]
+fn hud_settings_reach_a_running_game() {
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 7);
+    let _w = fake_layer(&dir, 2);
+    drain_once(&e.hub, &mut HashMap::new());
+    let (sight, mut rx) = conn(9);
+    let m = e.hub.attach(&sight, &sid).unwrap();
+    assert_eq!(m.anchor, quiver_api::perf::Anchor::TopLeft);
+    perf_events(&mut rx);
+    // The Performance tab moves it: the running game's model follows, without a relaunch.
+    let set = HudScope { anchor: Some(quiver_api::perf::Anchor::BottomRight), ..Default::default() };
+    e.hub.hud.apply(&HudScopeRef::game(7), &set, &[], "test", None).unwrap();
+    e.hub.settings_changed(&HudScopeRef::game(7), &set);
+    let models: Vec<_> = perf_events(&mut rx).into_iter().filter_map(|e| if let PerfEvent::HudModel(m) = e { Some(m) } else { None }).collect();
+    assert_eq!(models.last().map(|m| m.anchor), Some(quiver_api::perf::Anchor::BottomRight), "{models:?}");
+    assert!(!models.last().unwrap().on, "shown/hidden stays the session's own");
+    // Another game's settings leave it alone.
+    let other = HudScope { anchor: Some(quiver_api::perf::Anchor::TopRight), ..Default::default() };
+    e.hub.hud.apply(&HudScopeRef::game(8), &other, &[], "test", None).unwrap();
+    e.hub.settings_changed(&HudScopeRef::game(8), &other);
+    assert!(perf_events(&mut rx).iter().all(|e| !matches!(e, PerfEvent::HudModel(_))));
+    e.hub.disconnect(9);
+    e.hub.end(&sid);
+}
+
+#[test]
 fn hud_attach_toggle_next_with_a_fake_renderer() {
     let e = env();
     let (sid, dir) = dev_session(&e.hub, 7);

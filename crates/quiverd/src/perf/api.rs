@@ -36,6 +36,8 @@ impl Daemon {
                 let unset_s = if unset.is_empty() { String::new() } else { format!(", unset {}", unset.join(",")) };
                 self.log_activity_game(source, format!("HUD settings r{} ({}): {what}{unset_s}", v.revision, scope.label()), scope.game);
                 hub.broadcast.send(quiver_api::perf::PerfEvent::HudChanged { product_id: scope.product_id(), session: None }).ok();
+                // Running games take the new look now, not at their next launch.
+                hub.settings_changed(&scope, &set);
                 json!(v)
             }
             PerfRequest::HudToggle { session, game } => json!(hub.toggle(session.as_deref(), game)?),

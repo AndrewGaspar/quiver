@@ -554,6 +554,55 @@ impl PerfHub {
         Ok(st)
     }
 
+    /// HUD settings changed at `scope`: running sessions it covers take the new look now
+    /// (position, size, background, rate, …). `enabled` and `captures` decide the launch's
+    /// layer setup, so they wait for the next launch; shown/hidden and the preset change live
+    /// only when this change set them (`on`, `layout`), else they keep the session's state.
+    pub fn settings_changed(&self, scope: &quiver_api::perf::HudScopeRef, set: &quiver_api::perf::HudScope) {
+        let changed: Vec<(GameRef, String)> = {
+            let mut st = self.lock();
+            let mut out = Vec::new();
+            for s in st.sessions.values_mut() {
+                if scope.game.is_some_and(|g| g != s.game) {
+                    continue;
+                }
+                // A profile's settings only reach sessions playing that profile.
+                if scope.profile.is_some() && scope.profile != s.profile {
+                    continue;
+                }
+                let fresh = self.hud.for_launch(&s.game, s.profile.as_deref());
+                let c = &mut s.cfg;
+                c.presenter = fresh.presenter;
+                c.anchor = fresh.anchor;
+                c.offset = fresh.offset;
+                c.scale = fresh.scale;
+                c.background = fresh.background;
+                c.text_opacity = fresh.text_opacity;
+                c.level_colors = fresh.level_colors;
+                c.graph_span_ms = fresh.graph_span_ms;
+                c.safe_area = fresh.safe_area;
+                c.rate_hz = fresh.rate_hz;
+                if let Some(on) = set.on {
+                    s.on = on;
+                }
+                if let Some(l) = &set.layout {
+                    s.layout = l.clone();
+                }
+                s.next_model_ns = 0;
+                s.dirty = true;
+                out.push((s.game, s.id.clone()));
+            }
+            out
+        };
+        if changed.is_empty() {
+            return;
+        }
+        self.publish(mono_raw_ns());
+        for (game, sid) in changed {
+            self.emit(PerfEvent::HudChanged { product_id: game.as_ubisoft(), session: Some(sid) });
+        }
+    }
+
     fn change(&self, session: Option<&str>, product_id: Option<GameRef>, f: impl FnOnce(&mut Session) -> (Option<bool>, Option<String>)) -> Result<HudStatus> {
         let (product, remember, status, sid) = {
             let mut st = self.lock();
