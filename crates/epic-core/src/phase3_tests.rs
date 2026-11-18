@@ -367,6 +367,24 @@ async fn sessions_are_held_until_the_first_yes_then_reported_once() {
 }
 
 #[tokio::test]
+async fn discarded_sessions_are_never_sent_even_after_the_first_yes() {
+    let r = rig().await;
+    let f = &r.cloud.fake;
+    r.epic.queue_session(&played("s-test"), true).await.unwrap();
+    let dropped = r.epic.discard_sessions(Some(&crate::provider::game_ref(AWR).unwrap())).await.unwrap();
+    assert_eq!((dropped.len(), dropped[0].state), (1, SessionReport::Discarded));
+    // Nothing left to drop; the yes opens the gate but sends nothing.
+    assert!(r.epic.discard_sessions(None).await.unwrap().is_empty());
+    f.reply("/library/api/public/playtime/account/", 204, "");
+    assert!(r.epic.send_queue(true, true).await.unwrap().is_empty());
+    assert!(!f.requests().iter().any(|q| q.label == "playtime report"));
+    // A later session is reported as usual.
+    assert_eq!(r.epic.send_queue(true, false).await.unwrap().len(), 0);
+    r.epic.queue_session(&played("s-real"), true).await.unwrap();
+    assert_eq!(r.epic.send_queue(true, false).await.unwrap()[0].state, SessionReport::Reported);
+}
+
+#[tokio::test]
 async fn offline_retries_and_lost_answers_are_never_resent() {
     let r = rig().await;
     let f = &r.cloud.fake;

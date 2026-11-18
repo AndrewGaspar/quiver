@@ -118,7 +118,7 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicGameRequest) ->
             }
             let first_ok = !d.epic.writes()?.playtime.open() && confirmed && person(source);
             if !d.epic.writes()?.playtime.open() && !first_ok {
-                bail!("the first play-time report to your Epic account needs your yes: run `quiver epic playtime send --yes` yourself (after that, sessions are reported when they end)");
+                bail!("the first play-time report to your Epic account needs your yes: run `quiver epic playtime --send --yes` yourself (after that, sessions are reported when they end)");
             }
             let sent = d.epic.send_queue(true, first_ok).await?;
             if !sent.is_empty() {
@@ -126,6 +126,18 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicGameRequest) ->
             }
             let mut v: EpicPlaytime = d.epic.playtime_view(None, true, true).await?;
             v.queue.retain(|q| sent.iter().any(|s| s.id == q.id));
+            json!(v)
+        }
+        EpicGameRequest::PlaytimeDiscard { game } => {
+            if let Some(g) = &game {
+                epic_app(g)?;
+            }
+            let dropped = d.epic.discard_sessions(game.as_ref()).await?;
+            if !dropped.is_empty() {
+                d.log_activity_game(source, format!("dropped {} Epic play session(s) without reporting them", dropped.len()), game);
+            }
+            let mut v: EpicPlaytime = d.epic.playtime_view(game.as_ref(), false, d.cfg.report_playtime).await?;
+            v.queue = dropped;
             json!(v)
         }
         EpicGameRequest::Achievements { game, refresh } => json!(d.epic.achievements(epic_app(&game)?, refresh).await?),

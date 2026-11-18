@@ -155,7 +155,7 @@ impl Epic {
             reported_at: None,
         };
         let cutoff = Utc::now() - chrono::Duration::days(KEEP_DAYS);
-        q.sessions.retain(|s| !matches!(s.state, SessionReport::Reported | SessionReport::Failed | SessionReport::Off) || s.ended > cutoff);
+        q.sessions.retain(|s| !matches!(s.state, SessionReport::Reported | SessionReport::Failed | SessionReport::Off | SessionReport::Discarded) || s.ended > cutoff);
         q.sessions.push(s.clone());
         q.save(&self.dir)?;
         Ok(s)
@@ -224,6 +224,24 @@ impl Epic {
             self.p3.totals.lock().await.clear();
         }
         Ok(touched)
+    }
+
+    /// Drop the sessions waiting to be reported (queued or held for the first yes) for a
+    /// game, or every game: they stay in the queue as `discarded` and are never sent.
+    pub async fn discard_sessions(&self, game: Option<&GameRef>) -> Result<Vec<QueuedSession>> {
+        let _q = self.p3.queue.lock().await;
+        let mut q = Queue::load(&self.dir)?;
+        let mut dropped = Vec::new();
+        for s in &mut q.sessions {
+            if matches!(s.state, SessionReport::Queued | SessionReport::Held) && game.is_none_or(|g| *g == s.game) {
+                s.state = SessionReport::Discarded;
+                dropped.push(s.clone());
+            }
+        }
+        if !dropped.is_empty() {
+            q.save(&self.dir)?;
+        }
+        Ok(dropped)
     }
 
     /// Epic's totals for an account (app name → seconds), from the last read when recent.

@@ -67,6 +67,12 @@ pub enum EpicGameRequest {
         #[serde(default)]
         confirmed: bool,
     },
+    /// Drop sessions waiting to be reported (for a game, or every game) so they are never
+    /// sent ([`EpicPlaytime`], its queue the sessions dropped).
+    PlaytimeDiscard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<GameRef>,
+    },
     /// The game's achievements and this account's unlocks ([`EpicAchievements`]).
     Achievements {
         game: GameRef,
@@ -364,6 +370,8 @@ pub enum SessionReport {
     /// Sent, but no answer came back, so it may have counted: not sent again on its own,
     /// so it is never counted twice.
     Unconfirmed,
+    /// The person dropped it (`quiver epic playtime --discard`): never sent.
+    Discarded,
     #[serde(other)]
     Unknown,
 }

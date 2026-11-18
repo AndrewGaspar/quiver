@@ -64,6 +64,9 @@ pub enum EpicAction {
         /// With `--send`: yes to the first report to your Epic account.
         #[arg(long)]
         yes: bool,
+        /// Drop the sessions waiting to be reported (for GAME, or every game): never sent.
+        #[arg(long)]
+        discard: bool,
     },
     /// The current build of an Epic game as Epic serves it: version, files, sizes, launch
     /// executable, prerequisites. Read-only: nothing is downloaded but the manifest.
@@ -177,7 +180,7 @@ pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()
             println!("default Epic account: {}", a.display_name);
         }
         EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, source, &game, json, local, action).await?,
-        EpicAction::Playtime { game, json, send, yes } => crate::epicgame::playtime(client, game, json, send, yes).await?,
+        EpicAction::Playtime { game, json, send, yes, discard } => crate::epicgame::playtime(client, game, json, send, yes, discard).await?,
         EpicAction::Manifest { game, json } => {
             let e = crate::resolve_installable(client, &game).await?;
             anyhow::ensure!(e.game.store == quiver_api::StoreId::Epic, "{} isn't an Epic game", e.name);

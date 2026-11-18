@@ -181,6 +181,7 @@ impl Quiver {
                         SessionReport::Off => "kept here",
                         SessionReport::Failed => "refused by Epic",
                         SessionReport::Unconfirmed => "sent, no answer (not resent)",
+                        SessionReport::Discarded => "dropped (not reported)",
                         SessionReport::Unknown => "?",
                     };
                     body = body.child(div().text_size(px(12.)).text_color(th.tx2).child(format!("{} · {} min · {s}", when(Some(q.started)), q.seconds / 60)));

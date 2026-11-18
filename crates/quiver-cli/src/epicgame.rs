@@ -3,7 +3,7 @@
 
 use std::io::{IsTerminal, Write};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
 use quiver_api::epic::EpicRequest;
@@ -214,6 +214,7 @@ fn report_word(s: SessionReport) -> &'static str {
         SessionReport::Reported => "reported",
         SessionReport::Failed => "refused by Epic",
         SessionReport::Unconfirmed => "sent, no answer (not resent)",
+        SessionReport::Discarded => "dropped (not reported)",
         SessionReport::Unknown => "?",
     }
 }
@@ -229,7 +230,25 @@ fn print_queue(p: &EpicPlaytime) {
     }
 }
 
-pub async fn playtime(client: &Client, game: Option<String>, json: bool, send: bool, yes: bool) -> Result<()> {
+pub async fn playtime(client: &Client, game: Option<String>, json: bool, send: bool, yes: bool, discard: bool) -> Result<()> {
+    if discard {
+        ensure!(!send, "--send and --discard don't go together");
+        let g = match &game {
+            Some(x) => Some(need_epic(client, x).await?),
+            None => None,
+        };
+        let p: EpicPlaytime = client.call(game_req(EpicGameRequest::PlaytimeDiscard { game: g.as_ref().map(|g| g.1) })).await?;
+        if json {
+            return print_json(&p);
+        }
+        if p.queue.is_empty() {
+            println!("nothing waiting to be reported");
+        }
+        for q in &p.queue {
+            println!("dropped  {}  {}  {:>4} min  (never sent to Epic)", q.game, when(Some(q.started)), q.seconds / 60);
+        }
+        return Ok(());
+    }
     match send {
         true => {
             let mut confirmed = yes;
@@ -307,7 +326,7 @@ fn print_playtime_named(name: Option<&str>, p: &EpicPlaytime, names: &std::colle
     }
     let reporting = match (p.reporting, p.reports.open()) {
         (false, _) => "off (report_playtime)",
-        (true, false) => "on, waiting for your first yes (quiver epic playtime send --yes)",
+        (true, false) => "on, waiting for your first yes (quiver epic playtime --send --yes)",
         (true, true) => "on",
     };
     println!("  reporting   {reporting}");
