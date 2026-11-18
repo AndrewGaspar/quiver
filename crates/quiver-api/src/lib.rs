@@ -1426,6 +1426,7 @@ mod tests {
             product_id: 1,
             at: Utc::now(),
             values: [("fps".to_owned(), [(perf::Stat::P1low, perf::PerfValue { value: Some(61.0), text: "61".into(), ..Default::default() })].into())].into(),
+            game: None,
         };
         let line = serde_json::to_string(&Reply::Perf(perf::PerfEvent::Update(u.clone())).folded()).unwrap();
         assert!(line.contains(r#""type":"perf_update""#), "{line}");

@@ -50,9 +50,17 @@ const PLAN_ENV_PREFIXES: &[&str] = &[
     "DXVK_", "VKD3D_", "PROTON_", "WINE", "VK_", "ENABLE_", "DISABLE_", "LSFG", "NVPRESENT_", "MANGOHUD", "OBS_VKCAPTURE", "__GL_", "NGX_", "SL_", "PROTONFIXES_",
 ];
 
-/// The part of Steam's environment quiverd plans against (see [`PLAN_ENV_PREFIXES`]).
+/// Steam's variable for the game's install folder: quiverd looks there for anti-cheat
+/// (the Sight layer stays out of those games; `quiver_core::anticheat`).
+pub const STEAM_INSTALL_VAR: &str = "STEAM_COMPAT_INSTALL_PATH";
+
+/// The part of Steam's environment quiverd plans against (see [`PLAN_ENV_PREFIXES`]), and
+/// the install folder ([`STEAM_INSTALL_VAR`]).
 pub fn plan_env<'a>(vars: impl IntoIterator<Item = (&'a str, &'a str)>) -> std::collections::BTreeMap<String, String> {
-    vars.into_iter().filter(|(k, _)| PLAN_ENV_PREFIXES.iter().any(|p| k.starts_with(p))).map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+    vars.into_iter()
+        .filter(|(k, _)| *k == STEAM_INSTALL_VAR || PLAN_ENV_PREFIXES.iter().any(|p| k.starts_with(p)))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
 }
 
 /// Steam's command with the plan applied: wrappers in front (as if typed before
@@ -169,7 +177,7 @@ mod tests {
         assert_eq!((env["LD_PRELOAD"].as_str(), env["WINEDLLOVERRIDES"].as_str()), ("/x/libmine.so", "dxgi=n,b"));
 
         // Only the variables the plan needs go to quiverd.
-        let sent = plan_env([("DXVK_CONFIG", "a=1"), ("HOME", "/h"), ("STEAM_COMPAT_DATA_PATH", "/c"), ("VK_INSTANCE_LAYERS", "x"), ("ENABLE_VKBASALT", "1"), ("SSH_AUTH_SOCK", "/s")]);
-        assert_eq!(sent.keys().map(String::as_str).collect::<Vec<_>>(), ["DXVK_CONFIG", "ENABLE_VKBASALT", "VK_INSTANCE_LAYERS"]);
+        let sent = plan_env([("DXVK_CONFIG", "a=1"), ("HOME", "/h"), ("STEAM_COMPAT_DATA_PATH", "/c"), ("VK_INSTANCE_LAYERS", "x"), ("ENABLE_VKBASALT", "1"), ("SSH_AUTH_SOCK", "/s"), ("STEAM_COMPAT_INSTALL_PATH", "/s/common/G")]);
+        assert_eq!(sent.keys().map(String::as_str).collect::<Vec<_>>(), ["DXVK_CONFIG", "ENABLE_VKBASALT", "STEAM_COMPAT_INSTALL_PATH", "VK_INSTANCE_LAYERS"]);
     }
 }

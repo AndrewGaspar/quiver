@@ -90,13 +90,29 @@ pub enum HudAction {
         #[command(subcommand)]
         action: LayoutAction,
     },
-    /// Use Quiver's HUD for a game's launches (or every game's, without GAME). Off by default.
+    /// Show the HUD when the game starts (or every game, without GAME); a running game shows
+    /// it now. Hidden by default: Shift+F3 shows it in any game.
+    Show {
+        game: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Start the game with the HUD hidden (the default); a running game hides it now.
+    Hide {
+        game: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Put the Sight layer back into a game's launches (or every game's, without GAME). It's
+    /// in every launch by default; for a game with anti-cheat in its install folder this
+    /// puts it in anyway.
     Enable {
         game: Option<String>,
         #[arg(long)]
         profile: Option<String>,
     },
-    /// Stop using Quiver's HUD for a game's launches (launches go back to unchanged).
+    /// Keep the Sight layer out of a game's launches, for a game it causes problems in: no
+    /// HUD and no Shift+F3/Shift+F2 in it, and its launches stay unchanged.
     Disable {
         game: Option<String>,
         #[arg(long)]
@@ -110,8 +126,8 @@ pub enum HudAction {
         #[arg(long)]
         profile: Option<String>,
     },
-    /// HUD settings at a scope: `key=value` to set, `key=` to unset. Keys: enabled, on,
-    /// layout, presenter (auto|game|desktop), captures, anchor (top-left, …), offset (x,y),
+    /// HUD settings at a scope: `key=value` to set, `key=` to unset. Keys: enabled (the Sight
+    /// layer in launches; on by default), on (shown at launch; off by default), layout, presenter (auto|game|desktop), captures, anchor (top-left, …), offset (x,y),
     /// scale, background, text_opacity, level_colors, graph_span (ms), safe_area, rate (Hz),
     /// ngx_log (NGX's DLSS log for the HUD's DLSS row), reflex_timings (the layer reads
     /// Reflex's timing reports for game-to-render latency).
@@ -267,7 +283,15 @@ pub async fn run(client: &Client, action: PerfAction) -> Result<()> {
                         None => format!("product {}", x.product_id),
                     },
                     x.started.with_timezone(&chrono::Local).format("%H:%M:%S"),
-                    if x.hud_enabled { format!("  HUD ({})", x.presenter.map(|p| format!("{p:?}").to_lowercase()).unwrap_or_else(|| "pending".into())) } else { "  HUD off".into() },
+                    if x.hud_enabled {
+                        format!(
+                            "  HUD {} ({})",
+                            if x.hud_on { "shown" } else { "hidden" },
+                            x.presenter.map(|p| format!("{p:?}").to_lowercase()).unwrap_or_else(|| "pending".into())
+                        )
+                    } else {
+                        format!("  no Sight layer ({})", x.layer_off.as_deref().unwrap_or("off"))
+                    },
                     if x.dev { "  [dev]" } else { "" }
                 );
                 if let Some(d) = &x.dir {
@@ -579,9 +603,9 @@ fn print_view(v: &HudSettingsView) {
     let e = &v.effective;
     println!("HUD settings ({}), revision {}", v.scope.label(), v.revision);
     println!(
-        "  enabled {}  on at launch {}  layout {}  presenter {:?}  captures {:?}",
-        if e.enabled { "yes" } else { "no" },
-        if e.on { "yes" } else { "no" },
+        "  Sight layer {}  HUD at launch {}  layout {}  presenter {:?}  captures {:?}",
+        if e.enabled { "in launches" } else { "off" },
+        if e.on { "shown" } else { "hidden (Shift+F3)" },
         e.layout,
         e.presenter,
         e.captures
@@ -601,6 +625,13 @@ fn print_view(v: &HudSettingsView) {
     if e.ngx_log || e.reflex_timings {
         println!("  NVIDIA detail: NGX log {}  Reflex timings {}", if e.ngx_log { "on" } else { "off" }, if e.reflex_timings { "on" } else { "off" });
     }
+    if let Some(a) = &v.anti_cheat {
+        if v.set.enabled == Some(true) {
+            println!("  anti-cheat: {a}; the layer is put in anyway (set here)");
+        } else {
+            println!("  anti-cheat: {a}; the layer stays out of its launches unless the game's own scope sets enabled (quiver hud enable GAME)");
+        }
+    }
     let set = serde_json::to_value(&v.set).unwrap_or_default();
     if set.as_object().is_some_and(|o| !o.is_empty()) {
         println!("  set here: {set}");
@@ -612,10 +643,13 @@ fn print_status(s: &HudStatus) {
         "{} (product {}): HUD {}{}, layout {}",
         s.session,
         s.product_id,
-        if !s.enabled { "not enabled" } else if s.on { "shown" } else { "hidden" },
+        if !s.enabled { "unavailable (no Sight layer)" } else if s.on { "shown" } else { "hidden (Shift+F3 shows it)" },
         if s.renderer_attached { "" } else { " (quiver-sight not attached)" },
         s.layout
     );
+    if let Some(why) = &s.layer_off {
+        println!("  no Sight layer: {why}");
+    }
     match s.presenter {
         Some(p) => println!("  presenter: {} — {}", format!("{p:?}").to_lowercase(), s.presenter_reason),
         None => println!("  presenter: — {}", s.presenter_reason),
@@ -696,6 +730,8 @@ pub async fn hud(client: &Client, action: HudAction) -> Result<()> {
             let v: HudSettingsView = client.call(perf(PerfRequest::HudSet { scope, set, unset: vec![], message: None })).await?;
             print_view(&v);
         }
+        HudAction::Show { game, profile } => set_shown(client, game, profile, true).await?,
+        HudAction::Hide { game, profile } => set_shown(client, game, profile, false).await?,
         HudAction::Enable { game, profile } => set_enabled(client, game, profile, true).await?,
         HudAction::Disable { game, profile } => set_enabled(client, game, profile, false).await?,
         HudAction::Captures { value, game, profile } => {
@@ -766,9 +802,25 @@ async fn set_enabled(client: &Client, game: Option<String>, profile: Option<Stri
     let v: HudSettingsView = client.call(perf(PerfRequest::HudSet { scope, set: HudScope { enabled: Some(on), ..Default::default() }, unset: vec![], message: None })).await?;
     print_view(&v);
     if on {
-        println!("The next launch gets the Sight layer and the HUD; Shift+F3 shows it, Ctrl+Shift+F3 cycles presets.");
+        println!("Its next launch gets the Sight layer: Shift+F3 shows the HUD, Ctrl+Shift+F3 cycles presets, Shift+F2 opens the Sight panel.");
+    } else {
+        println!("Its next launch has no Sight layer: no HUD and no Sight keys in the game. A running game keeps its layer until it restarts.");
     }
     // A Steam game gets the HUD only through `quiver steam-run` (opt-in per game).
+    if let Some(g) = game.filter(|g| g.as_steam().is_some()) {
+        crate::exports::hook_offer(client, g, "the HUD").await;
+    }
+    Ok(())
+}
+
+async fn set_shown(client: &Client, game: Option<String>, profile: Option<String>, on: bool) -> Result<()> {
+    let scope = scope(client, game.as_deref(), profile).await?;
+    let game = scope.game;
+    let v: HudSettingsView = client.call(perf(PerfRequest::HudSet { scope, set: HudScope { on: Some(on), ..Default::default() }, unset: vec![], message: None })).await?;
+    print_view(&v);
+    if !v.effective.enabled {
+        println!("Note: the Sight layer is off here, so there's no HUD to show (quiver hud enable).");
+    }
     if let Some(g) = game.filter(|g| g.as_steam().is_some()) {
         crate::exports::hook_offer(client, g, "the HUD").await;
     }
@@ -809,7 +861,7 @@ mod tests {
         values.insert("gpu.power".to_string(), v("92", "W", 92.0));
         values.insert("cpu.load".to_string(), v("38", "%", 38.0));
         values.insert("aco-dlss.dlss.ms".to_string(), v("1.6", "ms", 1.6));
-        let u = PerfUpdate { sub: 1, session: "s".into(), product_id: 1, at: chrono::Utc::now(), values };
+        let u = PerfUpdate { sub: 1, session: "s".into(), product_id: 1, at: chrono::Utc::now(), values, game: None };
         let line = watch_line(&u);
         let line = line.split_once("  ").unwrap().1;
         assert_eq!(line, "FPS 79→158  FT 12.7  1%↓ 64  LAT 21ms  GPU 97% 71° 92W  CPU 38%  aco-dlss.dlss.ms=1.6 ms");

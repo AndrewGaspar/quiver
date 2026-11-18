@@ -250,6 +250,15 @@ pub struct PerfUpdate {
     pub at: DateTime<Utc>,
     /// metric id → stat → value.
     pub values: BTreeMap<String, BTreeMap<Stat, PerfValue>>,
+    /// Another store's game (appended; Ubisoft sessions leave it out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameRef>,
+}
+
+impl PerfUpdate {
+    pub fn game_ref(&self) -> GameRef {
+        self.game.unwrap_or(GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// One value, already formatted by quiverd.
@@ -296,9 +305,11 @@ pub struct PerfSessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub started: DateTime<Utc>,
-    /// `/dev/shm/quiver-<uid>/<session>` when the HUD is enabled for the launch.
+    /// `/dev/shm/quiver-<uid>/<session>` when the launch has the Sight layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
+    /// The launch has the Sight layer (the HUD, and its keys in the game). `layer_off`
+    /// says why not.
     pub hud_enabled: bool,
     pub producers: Vec<ProducerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +320,13 @@ pub struct PerfSessionInfo {
     /// Another store's game (appended; Ubisoft sessions leave it out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<GameRef>,
+    /// The HUD is shown now (appended): hidden until Shift+F3 by default.
+    #[serde(default)]
+    pub hud_on: bool,
+    /// Why the launch has no Sight layer (appended): "anti-cheat: EasyAntiCheat
+    /// (EasyAntiCheat/)", "turned off for this game", …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_off: Option<String>,
 }
 
 impl PerfSessionInfo {
@@ -509,11 +527,16 @@ impl HudScopeRef {
 /// global > defaults, §1.4).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HudScope {
-    /// Quiver's HUD is set up for the game's launches: the session dir, the Sight layer and
-    /// `hud.image`. Off by default for now; nothing about a launch changes while it's off.
+    /// The Sight layer goes into the game's launches (with the session dir and
+    /// `hud.image`), so the HUD (Shift+F3) and the Sight panel (Shift+F2) work in it. On by
+    /// default; off is for a game the layer causes problems in, and nothing about its
+    /// launches changes then. A game with anti-cheat in its install folder doesn't get the
+    /// layer unless its own (or its profile's) scope sets this on: the global value doesn't
+    /// count for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// Shown at launch (the toggle chord changes it for the session and remembers it).
+    /// Shown at launch; hidden (until Shift+F3) by default. The toggle chord changes it for
+    /// the session and remembers it as the game's last state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
     /// A preset (`fps`, `compact`, `standard`, `full`, `clock`) or a user layout id.
@@ -586,7 +609,8 @@ pub struct HudConfig {
 impl Default for HudConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // The layer in every launch, the HUD hidden until Shift+F3.
+            enabled: true,
             on: false,
             layout: "compact".into(),
             presenter: PresenterSetting::Auto,
@@ -669,6 +693,11 @@ pub struct HudSettingsView {
     /// What it resolves to at this scope (with the outer scopes and defaults).
     pub effective: HudConfig,
     pub revision: u32,
+    /// A game scope (or profile) whose install folder has anti-cheat (appended):
+    /// "EasyAntiCheat (EasyAntiCheat/)". Its launches don't get the Sight layer unless
+    /// `enabled` is set on at the game's or profile's own scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anti_cheat: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -996,6 +1025,9 @@ pub struct HudStatus {
     /// Another store's game (appended; Ubisoft sessions leave it out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<GameRef>,
+    /// Why the launch has no Sight layer (appended; `enabled` is false then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_off: Option<String>,
 }
 
 impl HudStatus {
@@ -1125,6 +1157,10 @@ pub struct LaunchPerfPlan {
     /// `hidden`, below it for `shown`).
     pub layer_order: Vec<String>,
     pub notes: Vec<String>,
+    /// Why the launch gets no Sight layer (appended): the setting, or anti-cheat found in
+    /// the install folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_off: Option<String>,
 }
 
 #[cfg(test)]
@@ -1190,7 +1226,7 @@ mod tests {
         assert_eq!(c.scale, 2.5);
         assert!([2, 4].contains(&c.rate_hz));
         assert_eq!(c.background, 0.45);
-        assert!(!c.enabled, "the HUD is off by default");
+        assert!(c.enabled && !c.on, "the layer is in every launch, the HUD hidden");
         let pv = PerfValue { text: "12.7".into(), unit: "ms".into(), ..Default::default() };
         assert_eq!(pv.display(), "12.7 ms");
         let pv = PerfValue { text: "97".into(), unit: "%".into(), ..Default::default() };

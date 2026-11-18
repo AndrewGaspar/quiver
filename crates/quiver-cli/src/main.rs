@@ -233,7 +233,8 @@ enum Cmd {
         #[command(subcommand)]
         action: perf::PerfAction,
     },
-    /// The pinned performance HUD: `quiver hud toggle|next|status|layout|enable|set|keybinds`.
+    /// The pinned performance HUD, in every game, hidden until Shift+F3:
+    /// `quiver hud toggle|next|status|show|hide|layout|enable|disable|set|keybinds`.
     Hud {
         #[command(subcommand)]
         action: perf::HudAction,

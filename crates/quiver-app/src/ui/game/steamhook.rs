@@ -23,13 +23,16 @@ impl Quiver {
         self.gp.store.ready().filter(|d| self.gp.id == id && d.game == id.0).and_then(|d| d.steam_hook.as_ref())
     }
 
-    /// The game's HUD is on for its launches (its own scope or the global one).
-    fn steam_hud_on(&mut self, id: Gid, cx: &mut Context<Self>) -> Option<bool> {
+    /// The game's HUD at launch: (the Sight layer is in its launches, the HUD shown at
+    /// launch), from its own scope or the global one; anti-cheat in its folder keeps the
+    /// layer out.
+    fn steam_hud(&mut self, id: Gid, cx: &mut Context<Self>) -> Option<(bool, bool)> {
         let scope = HudScopeRef::of(id.0);
         if !self.perf.hud.contains_key(&scope) {
             self.load_hud(scope.clone(), cx);
         }
-        self.hud_effective(&scope).map(|c| c.enabled)
+        let blocked = self.hud_anti_cheat_block(&scope).is_some();
+        self.hud_effective(&scope).map(|c| (c.enabled && !blocked, c.on))
     }
 
     /// Turn the hook on or off (staged by quiverd while Steam runs).
@@ -85,7 +88,7 @@ impl Quiver {
         let id = g.id();
         id.0.as_steam()?;
         let h = self.steam_hook(id)?.clone();
-        let hud = self.steam_hud_on(id, cx);
+        let hud = self.steam_hud(id, cx);
         let (ic, color, title) = match h.state {
             PatchState::On | PatchState::ByHand => (Icon::CircleCheck, th.ok, "Starts through Quiver"),
             PatchState::Waiting => (Icon::RefreshCw, th.warn, "Starts through Quiver once Steam closes or restarts"),
@@ -98,25 +101,30 @@ impl Quiver {
         } else {
             "Its tweaks, HUD and Quiver launch settings reach it only when it starts through Quiver (quiver steam-run in its Steam launch options). Steam stays in charge of the launch."
         };
-        let hud_line = hud.map(|on| {
+        // The everyday switch is whether the HUD shows at launch; the layer itself is in
+        // every launch (the Performance tab turns it off for a game it troubles).
+        let hud_line = hud.map(|(layer, shown)| {
             let scope = HudScopeRef::of(id.0);
-            let label = if on { "Turn the HUD off" } else { "Use Quiver's HUD" };
+            let label = if shown { "Hide at launch" } else { "Show at launch" };
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(icon(Icon::Monitor, 14., if on { th.ok } else { th.tx3 }))
-                .child(div().flex_1().text_size(px(12.5)).child(match (on, h.hooked()) {
-                    (true, true) => "Quiver's HUD: on for its launches (Shift+F3 shows it)",
-                    (true, false) => "Quiver's HUD: on, but it doesn't reach the game until it starts through Quiver",
-                    (false, _) => "Quiver's HUD: off for this game",
+                .child(icon(Icon::Monitor, 14., if layer && h.hooked() { th.ok } else { th.tx3 }))
+                .child(div().flex_1().text_size(px(12.5)).child(match (layer, h.hooked(), shown) {
+                    (false, _, _) => "Quiver's HUD: no Sight layer for this game (see Performance)",
+                    (true, true, false) => "Quiver's HUD: in its launches, hidden until Shift+F3 (Shift+F2 opens Sight)",
+                    (true, true, true) => "Quiver's HUD: in its launches, shown at launch (Shift+F3 hides it)",
+                    (true, false, _) => "Quiver's HUD: doesn't reach the game until it starts through Quiver",
                 }))
-                .child(button(("steam-hud", id.ix()), th, Kind::Ghost, Size::Small, None, label).on_click(cx.listener(move |this, _, _, cx| {
-                    this.hud_apply(scope.clone(), HudScope { enabled: Some(!on), ..Default::default() }, vec![], cx);
-                    if !on {
-                        this.steam_hook_offer(id, "the HUD", cx);
-                    }
-                })))
+                .when(layer, |d| {
+                    d.child(button(("steam-hud", id.ix()), th, Kind::Ghost, Size::Small, None, label).on_click(cx.listener(move |this, _, _, cx| {
+                        this.hud_apply(scope.clone(), HudScope { on: Some(!shown), ..Default::default() }, vec![], cx);
+                        if !shown {
+                            this.steam_hook_offer(id, "the HUD", cx);
+                        }
+                    })))
+                })
         });
         Some(
             card(th)

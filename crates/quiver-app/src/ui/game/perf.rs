@@ -197,9 +197,10 @@ impl Quiver {
             return;
         }
         if i == n {
-            // The scope: this game → each profile → all games → this game.
+            // The scope: this game → each profile → all games → this game. HUD profile
+            // scopes are for Ubisoft games' profiles (quiverd refuses the others).
             let mut picks = vec![ScopePick::Game];
-            if self.gp.id == id {
+            if self.gp.id == id && id.0.is_ubisoft() {
                 picks.extend(self.gp.profiles().into_iter().map(|p| ScopePick::Profile(p.id)));
             }
             picks.push(ScopePick::Global);
@@ -240,7 +241,7 @@ impl Quiver {
                 card(th)
                     .child(note(
                         th,
-                        "No performance data yet. quiverd records a summary of every session (frame rates from the Sight layer when the HUD is set up, sensors always); it shows here after the game's next run.",
+                        "No performance data yet. quiverd records a summary of every session Quiver starts (frame rates from the Sight layer, sensors always); it shows here after the game's next run.",
                     ))
                     .into_any_element(),
             ),
@@ -296,7 +297,7 @@ impl Quiver {
                 },
                 None,
             )),
-            None => tiles.push(tile("Shown".into(), "—".into(), "", "No frame data: the HUD wasn't set up, so the Sight layer wasn't there".into(), Some(th.tx3))),
+            None => tiles.push(tile("Shown".into(), "—".into(), "", "No frame data: the Sight layer wasn't in this launch".into(), Some(th.tx3))),
         }
         if let Some(b) = p.fps_base {
             let sub = match p.fg_ratio {
@@ -703,7 +704,7 @@ impl Quiver {
         let id = g.id();
         let base = sessions.min(PERF_ROWS);
         let pick = self.perf_scope_pick(id);
-        let profiles = if self.gp.id == id { self.gp.profiles() } else { vec![] };
+        let profiles = if self.gp.id == id && id.0.is_ubisoft() { self.gp.profiles() } else { vec![] };
         let scope_focused = self.focused(Target::Body(base));
         let mut picks: Vec<(ScopePick, String)> = profiles.iter().map(|p| (ScopePick::Profile(p.id.clone()), format!("Profile: {}", p.name))).collect();
         picks.push((ScopePick::Game, "This game".into()));
@@ -764,11 +765,12 @@ impl Quiver {
         let status = self.render_hud_status(th, id, effective.as_ref());
         let preview = effective.as_ref().map(|c| self.render_hud_preview(th, g, c, cx));
         let keys = self.render_hud_keys(th);
-        let enabled = effective.as_ref().is_some_and(|c| c.enabled);
+        // The everyday switch: shown at launch or not (`enable`/`disable` are the layer's).
+        let verb = if effective.as_ref().is_some_and(|c| c.on) { "hide" } else { "show" };
         let cli = match &pick {
-            ScopePick::Global => format!("quiver hud {}", if enabled { "disable" } else { "enable" }),
-            ScopePick::Game => format!("quiver hud {} {id}", if enabled { "disable" } else { "enable" }),
-            ScopePick::Profile(p) => format!("quiver hud {} {id} --profile {p}", if enabled { "disable" } else { "enable" }),
+            ScopePick::Global => format!("quiver hud {verb}"),
+            ScopePick::Game => format!("quiver hud {verb} {}", id.0.key()),
+            ScopePick::Profile(p) => format!("quiver hud {verb} {} --profile {p}", id.0.key()),
         };
         let sub_card = |title: &str, body: AnyElement| {
             div()
@@ -798,7 +800,7 @@ impl Quiver {
                     .pt(px(12.))
                     .pb(px(6.))
                     .child(div().font_weight(SEMIBOLD).text_size(px(13.5)).child("Performance HUD"))
-                    .child(div().text_color(th.tx3).text_size(px(12.)).child("Pinned on the game while you play: Quiver's own, instead of MangoHud."))
+                    .child(div().text_color(th.tx3).text_size(px(12.)).child("Quiver's own, instead of MangoHud: in the game, hidden until Shift+F3. Shift+F2 opens the Sight panel."))
                     .child(div().flex_1())
                     .when(self.perf.saving, |d| d.child(div().text_size(px(11.5)).text_color(th.tx3).child("Saving…"))),
             )

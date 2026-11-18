@@ -35,7 +35,9 @@ The user's direction, which this document works out:
 
 - **Where it draws.** The pinned HUD is drawn **inside the game by the Sight Vulkan layer**,
   with an **automatic fallback to a compositor (layer-shell) surface** when the layer isn't
-  active (OpenGL/native games, anti-cheat-flagged games, layer failure). Above all this keeps
+  active (OpenGL/native games, anti-cheat-flagged games, layer failure). **Every game Quiver
+  starts gets the layer, with the HUD hidden** until Shift+F3 (Shift+F2 opens the Sight
+  panel), except games with anti-cheat in their install folder (§1.8). Above all this keeps
   **VRR** pacing intact: a desktop surface that updates adds compositor flips off the game's
   cadence. It also keeps **direct scan-out** and **tearing** available: in Hyprland any
   overlay-layer (or visible top-layer) surface on the game's monitor disables both, and
@@ -420,6 +422,65 @@ one-time hint, and the HUD toggle chord doesn't touch MangoHud. Reasons to keep 
 existing presets. `quiver perf export --mangohud` writes MangoHud-compatible CSV so tools that
 read MangoHud logs (FlightlessMango's log viewer, spreadsheets) keep working.
 
+### 1.8 In every game, hidden by default (as built 2026-11-18)
+
+The HUD and Sight are there in any game Quiver starts, with no per-game step: the Sight layer
+goes into every launch, the HUD starts hidden, and the in-game keys (§1.3) work everywhere.
+Launches covered: Ubisoft (`start_play`), Epic (`epic::play`), and Steam games started through
+the `quiver steam-run` hook (Steam copies and any hooked Steam game). A Steam game Steam starts
+without the hook is untouched, as before.
+
+**Settings** (`<data>/hud/settings.json`, version 2; scopes as §1.4):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `on` | off | shown at launch. Shift+F3 shows/hides it in the game; the game remembers its last state (decision 12), so a game shown once starts shown until hidden again. `quiver hud show [GAME]` and `hide` sets it (and applies it to a running game) |
+| `enabled` | on | the Sight layer in the game's launches. Off only for compatibility problems: the launch is then unchanged (no session dir, no layer env, no in-game keys). `quiver hud disable [GAME]` and `enable` |
+
+`quiver hud enable` used to be the opt-in; it is now the way back in (and the anti-cheat
+override). **Migration** (a file without `version`, read as version 1, rewritten once at quiverd
+start with a `source: "migration"` history line per changed scope): a scope that had
+`enabled = true` gets `on = true` unless `on` was set (the person turned the HUD on there, so
+it stays visible at launch); a game's or profile's `enabled = false` stays (they asked for
+unchanged launches); the global `enabled` is dropped (it was the old default either way). The
+remembered toggle state (`state.json`) still wins over `on` at launch.
+
+**Anti-cheat** (`quiver_core::anticheat`, applied in `PerfHub::launch_config`): the layer stays
+out of a game whose install folder has a well-known marker within four levels, shallowest
+first, at most 20 000 entries read, symlinks not followed: folders `EasyAntiCheat`,
+`EasyAntiCheat_EOS`, `BattlEye`, `GameGuard`, `XIGNCODE(3)`, `AntiCheatExpert`, `EQU8`,
+`EAAntiCheat`; files `start_protected_game.exe`, `EasyAntiCheat_*` setups and DLLs,
+`BEService*.exe`, `BEClient*.dll`, `BEDaisy.sys`, `*_BE.exe`, PunkBuster's `PnkBstrA/B.exe` and
+`pbsvc.exe`, GameGuard's `GameMon*.des`, XIGNCODE's `x3.xem`, EA Javelin's
+`EAAntiCheat.*.exe`, `mhyprot2/3.sys`, Vanguard's `vgc.exe`/`vgk.sys`, `equ8_conf.json`. For
+Steam launches also `PROTON_EAC_RUNTIME` / `PROTON_BATTLEYE_RUNTIME` in Steam's environment.
+The folder comes from the launch (`Game.install_dir`; Steam's `STEAM_COMPAT_INSTALL_PATH`,
+which `steam-run` now passes on in the plan's env, else the app manifest). Conservative on
+purpose: a marker counts whether or not the game starts its anti-cheat. Only `enabled = true`
+at the game's (or profile's) own scope overrides it (`quiver hud enable GAME`); the global
+scope doesn't. The reason is in the launch's job detail (`hud: no Sight layer: anti-cheat:
+EasyAntiCheat (EasyAntiCheat/) …`), `PerfSessionInfo.layer_off`, `HudStatus.layer_off`,
+`LaunchPerfPlan.layer_off` (`quiver hud env`) and `HudSettingsView.anti_cheat` (the app's
+Performance tab; looked up through the game's install, cached a minute). Such a session still
+has its registry, sensors and summary; the HUD can't be toggled (no layer; decision 16's
+desktop presenter for these games isn't wired yet), `quiver sight toggle` still opens the panel.
+
+**Cost while hidden.** quiverd: the session dir and a sparse `hud.image` (tmpfs pages only
+once written), the ring drain (50 ms) and sensors (1 Hz) that every session already had, and
+the HUD model rebuilt every 2 s instead of at the HUD's rate. `quiver-sight`: started for
+every Quiver launch anyway (toasts), it attaches, publishes one 1×1 opacity-0 image and then
+nothing (`GameHud::hide` returns early), so no rendering and no uploads. The layer: per present
+a ring record, a seqlock read of `hud.image`'s header and, after that one hide publish, one
+`vkGetFenceStatus`; it returns `Drawn::Off` before recording anything. Its key thread polls at
+most 20 Hz while the game presents (one `XQueryKeymap`, or dispatching the private Wayland
+queue). The compositor's per-swapchain objects and the 4 MiB staging buffer are still created
+up front, so the first Shift+F3 shows the HUD at once.
+
+**Restarts.** quiverd's auto-restart already waited on every game session and on perf sessions
+without one (Steam launches before their game starts); now `quiver-sight` is attached to every
+running game's HUD, which counts as busy only while the game runs anyway. Nothing new holds a
+restart once games end.
+
 ---
 
 ## 2. Where and how it draws
@@ -648,7 +709,8 @@ memory as premultiplied RGBA and written into `hud.image`. The view is built fro
 components with the app's theme tokens and fonts (Geist, Geist Mono), so the HUD, the Sight
 panel, the app's game page and its layout preview are the same widgets.
 
-- **Lifetime.** While the HUD is enabled for a session, `quiver-sight` runs for the whole
+- **Lifetime.** While a session has the Sight layer (every Quiver launch by default, §1.8; a
+  hidden HUD costs it nothing but an attachment), `quiver-sight` runs for the whole
   session: quiverd starts it at launch when the HUD (or Sight) is on for the game, and starts
   it on `quiver hud toggle` if it isn't running. It serves every running session (normally one)
   and exits a little after the last one ends (SIGHT §5).
@@ -956,8 +1018,9 @@ QUIVER_PERF_DIR=/dev/shm/quiver-1000/s-4kq2              # for the layer (Linux 
 QUIVER_SIGHT=1                                           # the layer manifest's enable_environment
 ```
 
-As built (quiverd's perf hub, `crates/quiverd/src/perf/launch.rs`): these go to a launch only
-while the HUD is enabled for the game (`quiver hud enable GAME`; off by default for now).
+As built (quiverd's perf hub, `crates/quiverd/src/perf/launch.rs`): these go to every launch
+with the Sight layer, which is every launch unless the layer is turned off for the game or
+anti-cheat is found in its folder (§1.8; before 2026-11-18 it was opt-in per game).
 `QUIVER_SESSION` is the launch's one session id (Options and the mod pipe use the same).
 quiverd always sets `VK_INSTANCE_LAYERS` while the HUD is on, listing only the layers the
 launch enables, in the order of §2.4 and §2.12 (the user's own list, then vkBasalt and lsfg-vk
@@ -1986,6 +2049,8 @@ Decided by the user, 2026-11-16. Each: the decision, why, and what was rejected.
     Standard.
 12. **Layout scope: global + per game + per profile**, toggle state remembered per game. Why:
     DLSS and Vanilla profiles want different HUDs. Rejected: per game only; global only.
+    *2026-11-18:* the layer is in every launch and the HUD hidden by default (§1.8); the
+    remembered toggle state still applies.
 13. **A performance summary on every session, raw records on request** (and in benchmark runs).
     Why: ~1 KB per session buys DLSS-vs-Vanilla history. Rejected: raw records for the last N
     sessions; nothing unless asked.
@@ -2000,7 +2065,9 @@ Decided by the user, 2026-11-16. Each: the decision, why, and what was rejected.
     only Sight's screenshot able to hide it (this document's earlier pick); always hidden from
     Sight's screenshots; never hidden.
 16. **Anti-cheat-flagged games: layer off, HUD on the desktop presenter.** Rejected: no HUD;
-    layer on anyway.
+    layer on anyway. *As built 2026-11-18:* the flag comes from markers in the install folder
+    (§1.8) and the layer stays out unless the game's own scope puts it in; the desktop
+    presenter for these sessions is still to wire (they have no HUD for now).
 17. **Mods provide data only**; declarative mod widgets later, only if a real mod needs them.
     Rejected: mods drawing into the HUD region.
 18. **The HUD is composed in `quiver-sight`** (GPUI off-screen). quiverd still owns the

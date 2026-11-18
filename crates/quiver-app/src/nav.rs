@@ -128,11 +128,13 @@ impl Tab {
     /// Other stores' games: their client's facts and Quiver Tweaks.
     pub const STORE: [Tab; 2] = [Tab::Overview, Tab::Tweaks];
     /// Steam games: also Mods (with their Options), as the Steam store's capabilities say
-    /// (`mods: quiver`); they reach the game when it starts through `quiver steam-run`.
-    pub const STEAM: [Tab; 3] = [Tab::Overview, Tab::Mods, Tab::Tweaks];
-    /// Epic games: also Mods (with their Options) and Saves & progress (cloud saves, play
-    /// time, achievements).
-    pub const EPIC: [Tab; 4] = [Tab::Overview, Tab::Mods, Tab::Tweaks, Tab::Saves];
+    /// (`mods: quiver`), and Performance (the HUD and session summaries); they reach the game
+    /// when it starts through `quiver steam-run`.
+    pub const STEAM: [Tab; 4] = [Tab::Overview, Tab::Mods, Tab::Tweaks, Tab::Performance];
+    /// Epic games: also Mods (with their Options), Performance (Quiver starts them, so they
+    /// get the Sight layer and a perf session like Ubisoft games) and Saves & progress (cloud
+    /// saves, play time, achievements).
+    pub const EPIC: [Tab; 5] = [Tab::Overview, Tab::Mods, Tab::Tweaks, Tab::Performance, Tab::Saves];
 
     /// The tabs a game's page has.
     pub fn of(id: Gid) -> &'static [Tab] {
@@ -930,12 +932,15 @@ mod tests {
         assert_eq!(n.tab, Tab::Mods, "Steam games have mods");
         run(&mut n, &l, &[NextTab]);
         assert_eq!(n.tab, Tab::Tweaks);
+        run(&mut n, &l, &[NextTab]);
+        assert_eq!(n.tab, Tab::Performance, "the HUD reaches Steam games through steam-run");
         assert_eq!(n.apply(NextTab, &l), Effect::None, "the last tab");
-        run(&mut n, &l, &[PrevTab, PrevTab]);
+        run(&mut n, &l, &[PrevTab, PrevTab, PrevTab]);
         assert_eq!(n.tab, Tab::Overview);
         assert_eq!(Tab::of(Gid::from(3539)).len(), Tab::ALL.len());
         let epic = Gid(quiver_api::GameRef::new(quiver_api::StoreId::Epic, "fn").unwrap());
         assert_eq!(Tab::of(epic), &Tab::EPIC, "Epic games also have Saves & progress");
+        assert!(Tab::EPIC.contains(&Tab::Performance) && Tab::STEAM.contains(&Tab::Performance));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! and manifest handling.
 
 pub mod achievements;
+pub mod anticheat;
 pub mod auth;
 pub mod broker;
 pub mod builds;

@@ -74,6 +74,16 @@ pub async fn run(client: &Client, action: SightAction) -> Result<()> {
                 return Ok(());
             }
             print_status(&s);
+            // Every running game's session: the layer (and so the keys) or why not.
+            let sessions: Vec<quiver_api::perf::PerfSessionInfo> = client.call(Request::Perf(quiver_api::perf::PerfRequest::Sessions)).await.unwrap_or_default();
+            for x in sessions.iter().filter(|x| !x.dev) {
+                let what = if x.hud_enabled {
+                    format!("Sight layer in; HUD {}", if x.hud_on { "shown" } else { "hidden (Shift+F3)" })
+                } else {
+                    format!("no Sight layer ({}); `quiver sight toggle` still opens the panel", x.layer_off.as_deref().unwrap_or("off"))
+                };
+                println!("game:     {} {} — {what}", x.session, x.game_ref());
+            }
         }
         SightAction::Hyprpad { snippet } => {
             if snippet {

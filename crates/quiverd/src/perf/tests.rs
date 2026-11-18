@@ -74,7 +74,7 @@ fn fake_status() -> LayerStatus {
 
 fn dev_session(hub: &PerfHub, product: u32) -> (String, SessionDir) {
     let id = quiver_core::modsdk::new_session_id();
-    let b = hub.begin(&id, GameRef::ubisoft(product), None, None, &BTreeMap::new(), &[], true).unwrap();
+    let b = hub.begin(&id, GameRef::ubisoft(product), None, None, None, &BTreeMap::new(), &[], true).unwrap();
     let dir = SessionDir::open(std::path::Path::new(&b.plan.env.get("QUIVER_PERF_DIR").cloned().unwrap_or_default())).ok();
     // A dev session always has a dir, even with the HUD off for the product.
     let dir = dir.unwrap_or_else(|| hub.lock().sessions[&id].dir.clone().unwrap());
@@ -299,11 +299,78 @@ fn in_game_keys_count_once_with_two_layers() {
 }
 
 #[test]
-fn hud_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
+fn every_launch_gets_the_layer_with_the_hud_hidden() {
     let e = env();
     let id = quiver_core::modsdk::new_session_id();
-    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, Some(std::path::Path::new("/p")), &BTreeMap::new(), &["mangohud".into()], false).unwrap();
-    assert!(b.plan.env.is_empty(), "off by default: {:?}", b.plan.env);
+    let b = e.hub.begin(&id, GameRef::ubisoft(12), None, None, None, &BTreeMap::new(), &[], false).unwrap();
+    assert_eq!(b.plan.env.get("QUIVER_SIGHT").map(String::as_str), Some("1"), "the layer by default: {:?}", b.plan.env);
+    assert!(b.plan.layer_off.is_none() && b.plan.hud.as_ref().is_some_and(|h| h.enabled && !h.on));
+    let info = e.hub.sessions().into_iter().find(|s| s.session == id).unwrap();
+    assert!(info.hud_enabled && !info.hud_on && info.dir.is_some() && info.layer_off.is_none(), "{info:?}");
+    let st = e.hub.status(Some(&id), None).unwrap();
+    assert!(st.enabled && !st.on && st.layer_off.is_none());
+    // quiver-sight can attach; the model says hidden, and while hidden it's rebuilt rarely.
+    let (c, _rx) = conn(1);
+    let m = e.hub.attach(&c, &id).unwrap();
+    assert!(!m.on);
+    let now = mono_raw_ns();
+    e.hub.publish(now);
+    let next = e.hub.lock().sessions[&id].next_model_ns;
+    assert!(next - now >= 1_900_000_000, "hidden: not at the 2 Hz rate ({} ms)", (next - now) / 1_000_000);
+    // The keys' path (`hud_keys`) works with no per-game step: Shift+F3 shows it.
+    e.hub.hud_keys(&id, 1, 0);
+    assert!(e.hub.status(Some(&id), None).unwrap().on);
+    assert!(e.hub.sessions().into_iter().find(|s| s.session == id).unwrap().hud_on);
+    e.hub.end(&id);
+}
+
+#[test]
+fn anti_cheat_keeps_the_layer_out_unless_the_game_puts_it_in() {
+    let e = env();
+    let install = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(install.path().join("EasyAntiCheat")).unwrap();
+    let begin = |game: GameRef, env: &BTreeMap<String, String>| {
+        let id = quiver_core::modsdk::new_session_id();
+        let b = e.hub.begin(&id, game, None, None, Some(install.path()), env, &[], false).unwrap();
+        (id, b.plan)
+    };
+    let (id, plan) = begin(GameRef::ubisoft(21), &BTreeMap::new());
+    assert!(plan.env.is_empty(), "{:?}", plan.env);
+    let why = plan.layer_off.clone().unwrap();
+    assert!(why.contains("anti-cheat: EasyAntiCheat (EasyAntiCheat/)") && why.contains("quiver hud enable 21"), "{why}");
+    assert!(plan.notes.iter().any(|n| n.contains("no Sight layer")), "{:?}", plan.notes);
+    let info = e.hub.sessions().into_iter().find(|s| s.session == id).unwrap();
+    assert!(!info.hud_enabled && info.layer_off.as_deref() == Some(why.as_str()));
+    let err = e.hub.toggle(Some(&id), None).unwrap_err().to_string();
+    assert!(err.contains("anti-cheat"), "{err}");
+    assert!(e.hub.status(Some(&id), None).unwrap().presenter_reason.contains("anti-cheat"));
+    assert!(e.hub.lock().sessions[&id].anti_cheat);
+    e.hub.end(&id);
+    // On for every game doesn't count for it; on for the game does.
+    e.hub.hud.apply(&HudScopeRef::global(), &HudScope { enabled: Some(true), ..Default::default() }, &[], "test", None).unwrap();
+    let (id, plan) = begin(GameRef::ubisoft(21), &BTreeMap::new());
+    assert!(plan.layer_off.is_some());
+    e.hub.end(&id);
+    e.hub.hud.apply(&HudScopeRef::game(21), &HudScope { enabled: Some(true), ..Default::default() }, &[], "test", None).unwrap();
+    let (id, plan) = begin(GameRef::ubisoft(21), &BTreeMap::new());
+    assert!(plan.layer_off.is_none() && plan.env.contains_key("QUIVER_SIGHT"), "{plan:?}");
+    e.hub.end(&id);
+    // Steam's anti-cheat runtimes say the same, without looking at the folder.
+    let id = quiver_core::modsdk::new_session_id();
+    let steam_env: BTreeMap<String, String> = [("PROTON_BATTLEYE_RUNTIME".to_string(), "/s/BattlEye Runtime".to_string())].into();
+    let b = e.hub.begin(&id, GameRef::steam(359550), None, None, None, &steam_env, &[], false).unwrap();
+    assert!(b.plan.layer_off.as_deref().is_some_and(|w| w.contains("BattlEye")), "{:?}", b.plan.layer_off);
+    e.hub.end(&id);
+}
+
+#[test]
+fn layer_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
+    let e = env();
+    e.hub.hud.apply(&HudScopeRef::game(11), &HudScope { enabled: Some(false), ..Default::default() }, &[], "test", None).unwrap();
+    let id = quiver_core::modsdk::new_session_id();
+    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, Some(std::path::Path::new("/p")), None, &BTreeMap::new(), &["mangohud".into()], false).unwrap();
+    assert!(b.plan.env.is_empty(), "off for the game: {:?}", b.plan.env);
+    assert_eq!(b.plan.layer_off.as_deref(), Some("turned off for this game (quiver hud enable 11)"));
     assert!(e.hub.lock().sessions[&id].dir.is_none());
     let (c, _rx) = conn(1);
     assert!(e.hub.attach(&c, &id).is_err());
@@ -311,11 +378,11 @@ fn hud_off_for_a_game_changes_nothing_and_on_sets_up_the_launch() {
     // System metrics still run, so the session still gets a (sensor-only) summary.
     e.hub.with_session(Some(&id), 11, |s| s.store.push_num("cpu.load", mono_raw_ns(), 40.0));
     assert!(e.hub.end(&id).unwrap().cpu_load.is_some());
-    // Turn it on for the game, hidden in captures.
+    // Back on for the game, hidden in captures.
     e.hub.hud.apply(&HudScopeRef::game(11), &HudScope { enabled: Some(true), captures: Some(Captures::Hidden), ..Default::default() }, &[], "test", None).unwrap();
     let id = quiver_core::modsdk::new_session_id();
     let env_in: BTreeMap<String, String> = [("OBS_VKCAPTURE".to_string(), "1".to_string())].into();
-    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, None, &env_in, &["mangohud".into()], false).unwrap();
+    let b = e.hub.begin(&id, GameRef::ubisoft(11), None, None, None, &env_in, &["mangohud".into()], false).unwrap();
     let dir = std::path::PathBuf::from(&b.plan.env["QUIVER_PERF_DIR"]);
     assert!(dir.join("hud.image").is_file());
     assert_eq!(b.plan.env["QUIVER_SESSION"], id);

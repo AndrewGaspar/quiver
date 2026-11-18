@@ -2,7 +2,9 @@
 //!
 //! Per running session: a [`registry::Store`] (catalog, roles, values), the HUD's state
 //! (settings resolved at launch, shown/hidden, layout, presenter, model revision) and the
-//! session dir with `hud.image` when the HUD is enabled for the game. Producers:
+//! session dir with `hud.image` when the launch has the Sight layer: every Quiver launch
+//! by default, the HUD hidden until Shift+F3, except where the setting turns the layer off
+//! or anti-cheat is found in the install folder ([`PerfHub::launch_config`]). Producers:
 //!
 //! - the Sight layer's ring, drained every 50 ms on its own thread ([`rings`]);
 //! - the system and display producers, polled at 1 Hz on another ([`system`], [`display`]),
@@ -117,9 +119,11 @@ pub struct Session {
     pub last_error: Option<String>,
     /// Mod connections per surface (a surface's producer disconnects with its last one).
     pub mod_conns: HashMap<String, BTreeSet<u64>>,
-    /// The game is flagged anti-cheat: no layer, desktop presenter (decision 16). No source
-    /// of the flag yet; kept for the presenter rule.
+    /// Anti-cheat was found in the install folder (`quiver_core::anticheat`): no layer unless
+    /// the game's own scope puts it in. Kept for the presenter rule (decision 16).
     pub anti_cheat: bool,
+    /// Why the launch has no Sight layer ([`PerfHub::launch_config`]).
+    pub layer_off: Option<String>,
     pub monitor: Option<String>,
     /// The presenter while shown, as last accounted for the summary.
     noted: Option<Presenter>,
@@ -191,6 +195,8 @@ impl Session {
             producers: self.store.producer_infos(),
             presenter: self.cfg.enabled.then(|| self.presenter.as_ref().map(|p| p.0)).flatten(),
             dev: self.dev,
+            hud_on: self.on && (self.cfg.enabled || self.dev),
+            layer_off: self.layer_off.clone(),
         }
     }
 
@@ -203,14 +209,30 @@ impl Session {
             on: self.on,
             layout: self.layout.clone(),
             presenter: self.presenter.as_ref().map(|p| p.0),
-            presenter_reason: self.presenter.as_ref().map(|p| p.1.clone()).unwrap_or_else(|| if self.cfg.enabled { String::new() } else { "the HUD isn't enabled for this game".into() }),
+            presenter_reason: self.presenter.as_ref().map(|p| p.1.clone()).unwrap_or_else(|| match &self.layer_off {
+                _ if self.cfg.enabled || self.dev => String::new(),
+                Some(why) => format!("no Sight layer in this launch: {why}"),
+                None => "no Sight layer in this launch".into(),
+            }),
             image: self.image_view.as_ref().map(|i| i.status(now)),
             layer: self.layer_info(now),
             renderer_attached: !self.attached.is_empty(),
             model_rev: self.model_rev,
             last_error: self.last_error.clone(),
             captures: self.cfg.captures,
+            layer_off: self.layer_off.clone(),
         }
+    }
+
+    /// Why the HUD can't be changed in this session (`toggle`, `attach`): no layer.
+    fn no_hud(&self) -> Option<String> {
+        if self.cfg.enabled || self.dev {
+            return None;
+        }
+        Some(match &self.layer_off {
+            Some(why) => format!("this launch of {} has no Sight layer: {why}", self.game),
+            None => format!("this launch of {} has no Sight layer", self.game),
+        })
     }
 }
 
@@ -235,7 +257,15 @@ pub struct PerfHub {
     steam: steam::SteamSessions,
     /// The Sight panel's last command and report ([`panel`]).
     panel: Mutex<panel::PanelState>,
+    /// Anti-cheat found per install folder, for settings views (launches look again).
+    anti_cheat: Mutex<HashMap<PathBuf, (std::time::Instant, Option<quiver_core::anticheat::Detected>)>>,
 }
+
+/// How long a settings view trusts an earlier look at an install folder.
+const ANTI_CHEAT_CACHE: Duration = Duration::from_secs(60);
+/// A hidden HUD's model is rebuilt this often (its rows aren't drawn; quiver-sight only
+/// needs the extent and presenter): no rendering and no image uploads while hidden.
+const HIDDEN_MODEL_EVERY: Duration = Duration::from_secs(2);
 
 /// What [`PerfHub::begin`] set up for a launch.
 pub struct Began {
@@ -246,6 +276,9 @@ impl PerfHub {
     /// A hub with its threads. `data_dir` is Quiver's (`hud/` settings and layouts go under it).
     pub fn start(data_dir: PathBuf, shm_root: PathBuf) -> Arc<PerfHub> {
         let hub = Self::new(data_dir, shm_root);
+        if let Err(e) = hub.hud.migrate() {
+            tracing::warn!("perf: migrating the HUD settings: {e:#}");
+        }
         match quiver_perf::session::sweep_stale(&hub.shm_root, |_| false) {
             Ok(v) if !v.is_empty() => tracing::info!("perf: removed {} stale session dir(s)", v.len()),
             Ok(_) => {}
@@ -272,6 +305,7 @@ impl PerfHub {
             sight: sight::Spawner::default(),
             steam: Default::default(),
             panel: Mutex::default(),
+            anti_cheat: Mutex::default(),
         })
     }
 
@@ -287,9 +321,57 @@ impl PerfHub {
         let _ = self.broadcast.send(e);
     }
 
-    /// Starts a session's perf state for a launch (or a dev session). With the HUD enabled
-    /// (or `dev`), creates the session dir and `hud.image` and returns the launch's
-    /// environment additions; otherwise only the registry and sensors run.
+    /// Anti-cheat in an install folder, looked at again after [`ANTI_CHEAT_CACHE`] (`fresh`:
+    /// now, as a launch does).
+    pub fn anti_cheat_in(&self, dir: &Path, fresh: bool) -> Option<quiver_core::anticheat::Detected> {
+        let now = std::time::Instant::now();
+        if !fresh
+            && let Some((at, d)) = self.anti_cheat.lock().unwrap_or_else(|e| e.into_inner()).get(dir)
+            && now.duration_since(*at) < ANTI_CHEAT_CACHE
+        {
+            return d.clone();
+        }
+        let d = quiver_core::anticheat::detect(dir);
+        let mut cache = self.anti_cheat.lock().unwrap_or_else(|e| e.into_inner());
+        cache.retain(|_, (at, _)| now.duration_since(*at) < ANTI_CHEAT_CACHE);
+        cache.insert(dir.to_owned(), (now, d.clone()));
+        d
+    }
+
+    /// The HUD settings a launch of `game` starts with, and whether it gets the Sight layer:
+    /// the setting (on by default), then anti-cheat in `install_dir` or Steam's anti-cheat
+    /// runtimes in `env`, which only `enabled = true` at the game's own (or profile's) scope
+    /// overrides. Returns the settings (`enabled` false without the layer), why there's no
+    /// layer, and the anti-cheat found.
+    pub fn launch_config(
+        &self,
+        game: &GameRef,
+        profile: Option<&str>,
+        install_dir: Option<&Path>,
+        env: &BTreeMap<String, String>,
+        fresh: bool,
+    ) -> (HudConfig, Option<String>, Option<quiver_core::anticheat::Detected>) {
+        let mut cfg = self.hud.for_launch(game, profile);
+        let ac = install_dir.and_then(|d| self.anti_cheat_in(d, fresh)).or_else(|| quiver_core::anticheat::detect_env(env));
+        let set = self.hud.layer_set_for_game(game, profile);
+        let off = if !cfg.enabled {
+            Some(match set {
+                Some(false) => format!("turned off for this game (quiver hud enable {})", game.key()),
+                _ => "turned off for every game (quiver hud enable)".to_owned(),
+            })
+        } else if let Some(a) = ac.as_ref().filter(|_| set != Some(true)) {
+            cfg.enabled = false;
+            Some(format!("anti-cheat: {} (quiver hud enable {} puts it in anyway)", a.describe(), game.key()))
+        } else {
+            None
+        };
+        (cfg, off, ac)
+    }
+
+    /// Starts a session's perf state for a launch (or a dev session). With the Sight layer
+    /// ([`Self::launch_config`]; always for `dev`), creates the session dir and `hud.image`
+    /// and returns the launch's environment additions; otherwise only the registry and
+    /// sensors run. `install_dir`: the game's, for the anti-cheat rule.
     #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &self,
@@ -297,14 +379,18 @@ impl PerfHub {
         game: GameRef,
         profile: Option<&str>,
         prefix: Option<&Path>,
+        install_dir: Option<&Path>,
         env: &BTreeMap<String, String>,
         wrappers: &[String],
         dev: bool,
     ) -> Result<Began> {
         let id = SessionId::parse(session_id).with_context(|| format!("bad session id {session_id:?}"))?;
-        let mut cfg = self.hud.for_launch(&game, profile);
+        let (mut cfg, mut layer_off, anti_cheat) = self.launch_config(&game, profile, install_dir, env, true);
         // A dev session plays a launch with the HUD on (its env is what a fake layer needs).
-        cfg.enabled |= dev;
+        if dev {
+            cfg.enabled = true;
+            layer_off = None;
+        }
         let mut notes = Vec::new();
         let (dir, image) = if cfg.enabled {
             let dir = SessionDir::create(&self.shm_root, &id).context("creating the perf session dir")?;
@@ -326,6 +412,10 @@ impl PerfHub {
         };
         let session_env: Vec<(&str, String)> = dir.as_ref().map(|d| d.env().to_vec()).unwrap_or_default();
         let mut plan = launch::plan(&cfg, &session_env, env, wrappers, launch::installed_layer_dir(&self.data_dir).as_deref());
+        if let Some(why) = &layer_off {
+            plan.notes = vec![format!("no Sight layer: {why}; the launch is unchanged")];
+            plan.layer_off = Some(why.clone());
+        }
         plan.notes.extend(notes);
         let now = mono_raw_ns();
         let mut store = Store::new(now, Utc::now());
@@ -368,7 +458,8 @@ impl PerfHub {
             prefix: prefix.map(Path::to_path_buf),
             last_error: None,
             mod_conns: HashMap::new(),
-            anti_cheat: false,
+            anti_cheat: anti_cheat.is_some(),
+            layer_off,
             monitor: None,
             noted: None,
             nv_last: nvidia::Last::default(),
@@ -380,7 +471,7 @@ impl PerfHub {
             }
             st.sessions.insert(session_id.to_owned(), s);
         }
-        tracing::info!(session = session_id, %game, hud = plan.hud.as_ref().is_some_and(|h| h.enabled), "perf session started");
+        tracing::info!(session = session_id, %game, layer = plan.hud.as_ref().is_some_and(|h| h.enabled), layer_off = ?plan.layer_off, "perf session started");
         let other = (!game.is_ubisoft()).then_some(game);
         self.emit(PerfEvent::Session { session: session_id.to_owned(), product_id: game.as_ubisoft().unwrap_or(0), ended: false, summary: None, game: other });
         Ok(Began { plan })
@@ -533,8 +624,8 @@ impl PerfHub {
         {
             let mut st = self.lock();
             let s = st.sessions.get_mut(session).with_context(|| format!("no perf session {session}"))?;
-            if !s.cfg.enabled && !s.dev {
-                bail!("the HUD isn't enabled for this game");
+            if let Some(why) = s.no_hud() {
+                bail!("{why}");
             }
             s.attached.insert(c.id);
             s.dirty = true;
@@ -625,8 +716,8 @@ impl PerfHub {
             let mut st = self.lock();
             let id = Self::pick(&st, session, product_id)?.to_owned();
             let s = st.sessions.get_mut(&id).unwrap();
-            if !s.cfg.enabled && !s.dev {
-                bail!("the HUD isn't enabled for this game (quiver hud enable {})", s.game.key());
+            if let Some(why) = s.no_hud() {
+                bail!("{why}");
             }
             let remember = f(s);
             s.dirty = true;
@@ -709,7 +800,7 @@ impl PerfHub {
                 continue;
             }
             s.dirty = false;
-            s.next_model_ns = now + 1_000_000_000 / s.cfg.rate_hz.max(1) as i64;
+            s.next_model_ns = now + if s.on { 1_000_000_000 / s.cfg.rate_hz.max(1) as i64 } else { HIDDEN_MODEL_EVERY.as_nanos() as i64 };
             let layout = match layout::load(&hud_dir, &s.layout) {
                 Ok(l) => l,
                 Err(e) => {
@@ -834,7 +925,7 @@ fn update(s: &Session, sub: &Sub, now: i64) -> PerfUpdate {
         }
         values.insert(id, per);
     }
-    PerfUpdate { sub: sub.id, session: s.id.clone(), product_id: s.product_id(), at: Utc::now(), values }
+    PerfUpdate { sub: sub.id, session: s.id.clone(), product_id: s.product_id(), at: Utc::now(), values, game: s.other_store() }
 }
 
 /// Built-in metrics, for a game that isn't running.

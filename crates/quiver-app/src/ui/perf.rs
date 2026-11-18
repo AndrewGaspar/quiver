@@ -95,8 +95,8 @@ pub enum HudField {
     Presenter,
 }
 
+/// Shown at launch first (the everyday choice); the Sight layer last (for compatibility).
 pub const HUD_FIELDS: [HudField; 9] = [
-    HudField::Enabled,
     HudField::On,
     HudField::Layout,
     HudField::Anchor,
@@ -105,6 +105,7 @@ pub const HUD_FIELDS: [HudField; 9] = [
     HudField::Rate,
     HudField::Captures,
     HudField::Presenter,
+    HudField::Enabled,
 ];
 
 /// Grid order of the position control (the middle cell has no anchor).
@@ -140,7 +141,7 @@ impl HudField {
 
     pub fn label(self) -> &'static str {
         match self {
-            HudField::Enabled => "Quiver HUD",
+            HudField::Enabled => "Sight layer",
             HudField::On => "Shown at launch",
             HudField::Layout => "Preset",
             HudField::Anchor => "Position",
@@ -154,8 +155,8 @@ impl HudField {
 
     pub fn help(self) -> &'static str {
         match self {
-            HudField::Enabled => "Sets launches up for the HUD: the Sight layer and a session dir. Off: launches don't change.",
-            HudField::On => "Shift+F3 shows or hides it while playing; the game remembers the last state.",
+            HudField::Enabled => "In every launch, so the HUD and Shift+F3 / Shift+F2 work in any game. Turn it off only for a game it causes problems in. Games with anti-cheat are kept out unless turned on for the game.",
+            HudField::On => "Hidden by default. Shift+F3 shows or hides it in any game (the game remembers the last state); Shift+F2 opens the Sight panel.",
             HudField::Layout => "Ctrl+Shift+F3 steps through them in game. Rows a mod doesn't provide are left out.",
             HudField::Anchor => "Toasts own the top right.",
             HudField::Background => "The panel behind the numbers.",
@@ -369,9 +370,10 @@ impl Quiver {
     fn perf_event(&mut self, e: PerfEvent, cx: &mut Context<Self>) {
         match e {
             PerfEvent::Update(u) => {
-                let shown = self.perf_tab_open() == Some(Gid::from(u.product_id));
+                let game = Gid(u.game_ref());
+                let shown = self.perf_tab_open() == Some(game);
                 match &mut self.perf.live {
-                    Some(l) if shown && l.product == u.product_id && l.sub.is_none_or(|s| s == u.sub) => {
+                    Some(l) if shown && l.product == game && l.sub.is_none_or(|s| s == u.sub) => {
                         l.sub = Some(u.sub);
                         l.last = Some(u);
                     }
@@ -385,19 +387,19 @@ impl Quiver {
                     }
                 }
             }
-            PerfEvent::Session { product_id, ended, .. } => {
+            PerfEvent::Session { product_id, ended, game, .. } => {
+                let id = Gid(game.unwrap_or(quiver_api::GameRef::ubisoft(product_id)));
                 self.load_perf_sessions(cx);
-                self.perf.status.remove(&Gid::from(product_id));
+                self.perf.status.remove(&id);
                 if ended {
-                    if self.perf.live.as_ref().is_some_and(|l| l.product == product_id) {
+                    if self.perf.live.as_ref().is_some_and(|l| l.product == id) {
                         self.perf.live = None;
                     }
                     // The summary lands in the play history a moment later.
-                    if self.perf.summaries_for == product_id {
-                        let id = product_id;
+                    if self.perf.summaries_for == id {
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(Duration::from_millis(800)).await;
-                            let _ = this.update(cx, |this, cx| this.load_summaries(Gid::from(id), cx));
+                            let _ = this.update(cx, |this, cx| this.load_summaries(id, cx));
                         })
                         .detach();
                     }
@@ -409,8 +411,12 @@ impl Quiver {
                 for s in keep {
                     self.load_hud(s, cx);
                 }
-                if let Some(p) = product_id {
-                    self.perf.status.remove(&Gid::from(p));
+                // `None`: the global scope or another store's game.
+                match product_id {
+                    Some(p) => {
+                        self.perf.status.remove(&Gid::from(p));
+                    }
+                    None => self.perf.status.clear(),
                 }
             }
             PerfEvent::CatalogChanged { .. } | PerfEvent::HudModel(_) | PerfEvent::Panel(_) => {}
@@ -592,8 +598,27 @@ impl Quiver {
     pub fn hud_cycle(&mut self, scope: HudScopeRef, f: HudField, cx: &mut Context<Self>) {
         let Some(c) = self.hud_effective(&scope).cloned() else { return };
         let layouts = self.hud_layout_ids();
-        let set = f.next(&c, &layouts);
+        let set = self.hud_next(&scope, f, &c, &layouts);
         self.hud_apply(scope, set, vec![], cx);
+    }
+
+    /// `f`'s next value at `scope`; the Sight layer of a game kept out for anti-cheat goes on.
+    fn hud_next(&self, scope: &HudScopeRef, f: HudField, c: &HudConfig, layouts: &[String]) -> HudScope {
+        if f == HudField::Enabled && self.hud_anti_cheat_block(scope).is_some() {
+            return HudScope { enabled: Some(true), ..Default::default() };
+        }
+        f.next(c, layouts)
+    }
+
+    /// The anti-cheat found in the game's install folder, when it keeps the Sight layer out
+    /// of its launches at `scope` (on by setting, and not put in at the game's or profile's
+    /// own scope).
+    pub fn hud_anti_cheat_block(&self, scope: &HudScopeRef) -> Option<String> {
+        scope.game?;
+        let v = self.perf.hud.get(scope)?.ready()?;
+        let a = v.anti_cheat.clone()?;
+        let put_in = scope_chain(scope).iter().filter(|s| s.game.is_some()).find_map(|s| self.perf.hud.get(s)?.ready()?.set.enabled) == Some(true);
+        (v.effective.enabled && !put_in).then_some(a)
     }
 
     fn hud_layout_ids(&self) -> Vec<String> {
@@ -701,13 +726,16 @@ impl Quiver {
         let set = |s: HudScope| (scope.clone(), s);
         match f {
             HudField::Enabled | HudField::On => {
-                let on = if f == HudField::Enabled { c.enabled } else { c.on };
-                let (sc, s) = set(f.next(c, &[]));
+                let blocked = (f == HudField::Enabled).then(|| self.hud_anti_cheat_block(scope)).flatten();
+                let on = if f == HudField::Enabled { c.enabled && blocked.is_none() } else { c.on };
+                let (sc, s) = set(self.hud_next(scope, f, c, &[]));
                 let label = match (f, on) {
-                    (HudField::Enabled, true) => "Used for launches",
+                    (HudField::Enabled, _) if blocked.is_some() => "Off: anti-cheat in its folder",
+                    (HudField::Enabled, true) => "In its launches",
                     (HudField::Enabled, false) => "Off: launches unchanged",
                     (_, true) => "Shown",
-                    (_, false) => "Hidden until Shift+F3",
+                    (_, false) if c.enabled => "Hidden until Shift+F3",
+                    (_, false) => "Hidden (no Sight layer)",
                 };
                 div()
                     .id(SharedString::from(format!("hud-{}", f.key())))
@@ -948,7 +976,11 @@ impl Quiver {
         let summary = c.as_ref().map(|c| {
             format!(
                 "{} · {} · {} · {}",
-                if c.enabled { "On for every game" } else { "Off unless a game turns it on" },
+                match (c.enabled, c.on) {
+                    (false, _) => "Sight layer off for every game",
+                    (true, false) => "In every game, hidden until Shift+F3",
+                    (true, true) => "In every game, shown at launch",
+                },
                 self.perf.layouts.ready().and_then(|l| l.iter().find(|x| x.id == c.layout)).map(|l| l.name.clone()).unwrap_or_else(|| c.layout.clone()),
                 anchor_label(c.anchor),
                 presenter_label(c.presenter),
@@ -974,7 +1006,7 @@ impl Quiver {
                 .gap(px(3.))
                 .child(div().text_size(px(20.)).font_weight(gpui::FontWeight::BOLD).child("Performance HUD"))
                 .child(div().text_color(th.tx3).child(
-                    "Quiver's own HUD, pinned on the game (instead of MangoHud). These are the defaults; a game's page, and its profiles, can change any of them.",
+                    "Quiver's own HUD (instead of MangoHud), in every game Quiver starts and hidden until Shift+F3; Shift+F2 opens the Sight panel. These are the defaults; a game's page, and its profiles, can change any of them.",
                 ))
                 .into_any_element(),
             card(th)
@@ -987,7 +1019,7 @@ impl Quiver {
             card(th).px(px(16.)).pt(px(4.)).pb(px(12.)).child(title("Keys", "Read in the game by the Sight layer")).child(keys).into_any_element(),
             div()
                 .flex()
-                .child(crate::ui::command_line(th, "quiver hud set enabled=true layout=compact captures=shown"))
+                .child(crate::ui::command_line(th, "quiver hud set on=false layout=compact captures=shown"))
                 .into_any_element(),
         ]
     }
@@ -1056,8 +1088,16 @@ impl Quiver {
         };
         if !running {
             let Some(c) = c else { return div().into_any_element() };
+            if let Some(a) = self.hud_anti_cheat_block(&HudScopeRef::of(id.0)) {
+                return line(
+                    Icon::TriangleAlert,
+                    th.warn,
+                    "Anti-cheat in its folder: no Sight layer".into(),
+                    format!("{a}. Its launches stay unchanged, so no HUD and no Shift+F3 or Shift+F2 in it; turning the Sight layer on for this game puts it in anyway."),
+                );
+            }
             if !c.enabled {
-                return line(Icon::CircleDot, th.tx3, "Not set up for launches".into(), "Turn the Quiver HUD on to set up the game's next launch.".into());
+                return line(Icon::CircleDot, th.tx3, "No Sight layer".into(), "Its launches stay unchanged: no HUD and no Shift+F3 or Shift+F2 in the game.".into());
             }
             let what = match c.presenter {
                 PresenterSetting::Auto => "In the game when the Sight layer draws; else over the game",
@@ -1073,6 +1113,10 @@ impl Quiver {
                     Some(Presenter::Desktop) => (Icon::Monitor, th.warn, "Drawn over the game"),
                     None => (Icon::CircleDot, th.tx3, "Not drawn"),
                 };
+                if !s.enabled {
+                    let why = s.layer_off.clone().unwrap_or_else(|| s.presenter_reason.clone());
+                    return line(Icon::CircleDot, th.tx3, "No Sight layer in this launch".into(), why);
+                }
                 let mut sub = vec![s.presenter_reason.clone()];
                 sub.push(if s.on { "shown".into() } else { "hidden (Shift+F3)".into() });
                 if s.renderer_attached {
@@ -1198,7 +1242,9 @@ mod tests {
         assert_eq!(HudField::Anchor.next(&c, &l).anchor, Some(Anchor::Top));
         assert_eq!(HudField::Rate.next(&c, &l).rate_hz, Some(4));
         assert_eq!(HudField::Presenter.next(&c, &l).presenter, Some(PresenterSetting::Game));
-        assert_eq!(HudField::Enabled.next(&c, &l).enabled, Some(true));
+        assert_eq!(HudField::Enabled.next(&c, &l).enabled, Some(false), "the layer is on by default");
+        assert_eq!(HudField::On.next(&c, &l).on, Some(true), "the HUD hidden by default");
+        assert_eq!(HUD_FIELDS[0], HudField::On);
         let last = HudConfig { anchor: Anchor::BottomRight, layout: "standard".into(), ..Default::default() };
         assert_eq!(HudField::Anchor.next(&last, &l).anchor, Some(Anchor::TopLeft));
         assert_eq!(HudField::Layout.next(&last, &l).layout.as_deref(), Some("fps"));

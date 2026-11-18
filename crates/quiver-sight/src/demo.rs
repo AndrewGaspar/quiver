@@ -442,7 +442,7 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
         options: Load::Ready(vec![dlss]),
         tweaks: Load::Ready(tweaks),
         tweak_scope_name: "the DLSS profile".into(),
-        hud: Load::Ready(HudState { status: Some(status), settings: HudSettingsView { scope: Default::default(), set: Default::default(), effective, revision: 4 } }),
+        hud: Load::Ready(HudState { status: Some(status), settings: HudSettingsView { scope: Default::default(), set: Default::default(), effective, revision: 4, anti_cheat: None } }),
         achievements: Load::Ready(Achs::sorted(vec![
             ach("12", "Mysteries of Egypt", "Find every tomb in the Giza necropolis.", false, Some(0)),
             ach("3", "The Medjay", "Complete the main quest's first chapter.", false, Some(9)),
