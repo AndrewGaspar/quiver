@@ -353,7 +353,7 @@ pub(crate) fn full_plan(
 ) -> Result<SteamLaunchPlan> {
     let mut plan = launch_plan(game)?;
     if mods && game.as_steam().is_some() {
-        daemon.steam_mods_prepare(source, game, profile, &mut plan)?;
+        daemon.steam_mods_prepare(source, game, profile, steam_env, &mut plan)?;
     } else if mods || profile.is_some() {
         plan.ignored.push("mods: not applied to Steam copies of Ubisoft games yet".into());
     }

@@ -122,6 +122,13 @@ pub(crate) fn claim(id: &str, game: GameRef) -> Option<Prepared> {
     m.remove(id).filter(|p| p.game == game && p.at.elapsed() < KEEP)
 }
 
+/// The prefix a launch uses: Steam's compatibility folder's `pfx` when Steam set one for this
+/// launch (Proton; Steam may keep it in another library than the game), else none (a native
+/// launch), whatever folders are lying around.
+pub(crate) fn launch_prefix(compat_data: Option<&str>) -> PathBuf {
+    compat_data.map(str::trim).filter(|c| !c.is_empty()).map(|c| PathBuf::from(c).join("pfx")).unwrap_or_default()
+}
+
 /// The overlays of a plan, on the wire.
 pub(crate) fn overlays(plan: &quiver_core::mods::Plan) -> Vec<SteamOverlay> {
     plan.overlays.iter().map(|o| SteamOverlay { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone(), work: o.work.clone() }).collect()
@@ -132,9 +139,19 @@ impl Daemon {
     /// docs) and put them in `plan`: what to mount, and the launch settings resolved through
     /// the profile's stack (the game's settings, then each mod's, then the profile's own
     /// overrides) in place of the game's settings alone.
-    pub(crate) fn steam_mods_prepare(&self, source: &str, game: GameRef, requested: Option<&str>, plan: &mut SteamLaunchPlan) -> Result<()> {
+    pub(crate) fn steam_mods_prepare(
+        &self,
+        source: &str,
+        game: GameRef,
+        requested: Option<&str>,
+        steam_env: &std::collections::BTreeMap<String, String>,
+        plan: &mut SteamLaunchPlan,
+    ) -> Result<()> {
         let app = game.as_steam().context("not a Steam game")?;
-        let inst = mod_game(app)?;
+        let mut inst = mod_game(app)?;
+        // This launch says whether it's Proton: Steam sets `STEAM_COMPAT_DATA_PATH` for Proton
+        // launches only (a native game with an old compatibility folder has no prefix here).
+        inst.prefix = launch_prefix(steam_env.get("STEAM_COMPAT_DATA_PATH").map(String::as_str));
         let name = inst.name.clone();
         let chosen_by = match requested {
             Some(_) => "steam-run --profile",
@@ -249,6 +266,14 @@ mod tests {
         let v = serde_json::to_value(&ubi).unwrap();
         assert!(v.get("game").is_none());
         assert_eq!(serde_json::to_value(&g).unwrap()["game"], "steam:292030");
+    }
+
+    #[test]
+    fn the_launch_says_whether_it_is_proton() {
+        assert_eq!(launch_prefix(Some("/s/steamapps/compatdata/255710")), std::path::Path::new("/s/steamapps/compatdata/255710/pfx"));
+        // A native launch (of a game that may once have run with Proton): no prefix.
+        assert_eq!(launch_prefix(None), std::path::Path::new(""));
+        assert_eq!(launch_prefix(Some(" ")), std::path::Path::new(""));
     }
 
     #[test]

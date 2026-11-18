@@ -210,7 +210,12 @@ async fn run_steam_game(source: &str, a: SteamRunArgs, app_id: u32) -> Result<()
             if a.no_settings {
                 log.line("--no-settings: the game's Quiver launch plan is not applied");
             } else {
-                let steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                let mut steam_env = steamplan::plan_env(std::env::vars().collect::<Vec<_>>().iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                // Whether this launch is Proton, and its prefix: Steam sets this for Proton
+                // launches only (the mods' config patches and prefix folders need it).
+                if let Ok(c) = std::env::var("STEAM_COMPAT_DATA_PATH") {
+                    steam_env.insert("STEAM_COMPAT_DATA_PATH".into(), c);
+                }
                 let req = Request::SteamLaunchPlan { game: game.into(), perf: true, env: steam_env, mods: true, profile: a.profile.clone() };
                 match client.call::<SteamLaunchPlan>(req).await {
                     Ok(p) => {
