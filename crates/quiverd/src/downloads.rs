@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use quiver_api::downloads::{DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, VerifyReport};
-use quiver_api::{Event, Job, JobKind, LibraryEntry, Request};
+use quiver_api::{Event, GameRef, Job, JobKind, LibraryEntry, Request};
 use quiver_core::builds::{self, Latest, RepairPhase};
 use quiver_core::install::{Progress, Throttle, human_bytes, is_cancelled};
 use quiver_core::launcher::{self, Config, Games};
@@ -46,17 +46,17 @@ pub(crate) struct Outcome {
 
 /// What the queue needs from the daemon (a stand-in in tests).
 pub(crate) trait Host: Send + Sync + 'static {
-    fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64;
+    fn new_job(&self, kind: JobKind, game: GameRef, name: String) -> u64;
     fn update_job(&self, id: u64, f: &mut dyn FnMut(&mut Job));
-    fn log(&self, source: &str, action: String, product_id: Option<u32>);
+    fn log(&self, source: &str, action: String, game: Option<GameRef>);
     /// The game is being played: its install waits until it exits.
-    fn playing(&self, product_id: u32) -> bool;
+    fn playing(&self, game: GameRef) -> bool;
     /// The library if the daemon has it cached (never fetches).
     fn library_cache(&self) -> Option<Vec<LibraryEntry>>;
     /// An item finished (whatever the outcome): install state may have changed.
     fn changed(self: Arc<Self>);
     /// Delete what a removed download left, if the game was never installed.
-    fn discard(&self, product_id: u32, name: &str) -> bool;
+    fn discard(&self, game: GameRef, name: &str) -> bool;
     /// Do the work of an item.
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>>;
     /// Whether new items may start (not while quiverd restarts onto a new build).
@@ -91,9 +91,9 @@ pub(crate) struct Downloads {
     settings: Mutex<DownloadSettings>,
     throttle: Arc<Throttle>,
     /// Products whose queued update the user removed (not auto-queued again this run).
-    dismissed: Mutex<HashSet<u32>>,
+    dismissed: Mutex<HashSet<GameRef>>,
     /// Verify-only jobs running: product -> (job id, progress).
-    verifying: Mutex<Vec<(u32, u64, Arc<Progress>)>>,
+    verifying: Mutex<Vec<(GameRef, u64, Arc<Progress>)>>,
 }
 
 fn status_line(e: &QueueEntry, waiting: bool) -> Option<String> {
@@ -148,7 +148,7 @@ impl Downloads {
             let mut items = self.items.lock().unwrap();
             for it in items.iter_mut() {
                 let kind = JobKind::Install;
-                let id = host.new_job(kind, it.entry.product_id, it.entry.name.clone());
+                let id = host.new_job(kind, it.entry.game_ref(), it.entry.name.clone());
                 it.entry.job_id = Some(id);
                 let (status, error) = (status_line(&it.entry, false), it.entry.error.clone());
                 let failed = it.entry.state == QueueState::Failed;
@@ -194,8 +194,8 @@ impl Downloads {
         self.items.lock().unwrap().iter().map(|i| i.entry.clone()).collect()
     }
 
-    pub(crate) fn get(&self, product_id: u32) -> Option<QueueEntry> {
-        self.items.lock().unwrap().iter().find(|i| i.entry.product_id == product_id).map(|i| i.entry.clone())
+    pub(crate) fn get(&self, game: GameRef) -> Option<QueueEntry> {
+        self.items.lock().unwrap().iter().find(|i| i.entry.game_ref() == game).map(|i| i.entry.clone())
     }
 
     fn save(&self) {
@@ -225,7 +225,7 @@ impl Downloads {
             .unwrap()
             .iter()
             .map(|i| {
-                let waiting = i.entry.state == QueueState::Queued && host.playing(i.entry.product_id);
+                let waiting = i.entry.state == QueueState::Queued && host.playing(i.entry.game_ref());
                 (i.entry.job_id, status_line(&i.entry, waiting).or_else(|| i.status.clone()))
             })
             .collect();
@@ -247,30 +247,31 @@ impl Downloads {
         self: &Arc<Self>,
         host: &Arc<H>,
         source: &str,
-        product_id: u32,
+        game: GameRef,
         name: String,
         kind: QueueKind,
         language: Option<String>,
         account: Option<String>,
     ) -> Result<u64> {
-        if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == product_id) {
+        if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == game) {
             bail!("{name} is being verified; wait for it or cancel it first");
         }
         if source != "auto-update" {
-            self.dismissed.lock().unwrap().remove(&product_id);
+            self.dismissed.lock().unwrap().remove(&game);
         }
-        if let Some(e) = self.get(product_id) {
+        if let Some(e) = self.get(game) {
             if e.kind != kind && !matches!((e.kind, kind), (QueueKind::Install | QueueKind::Update, QueueKind::Install | QueueKind::Update)) {
                 bail!("{name} is already in the queue ({:?}); remove it first", e.kind);
             }
             if matches!(e.state, QueueState::Paused | QueueState::Failed) {
-                return self.resume(host, source, product_id);
+                return self.resume(host, source, game);
             }
             return e.job_id.context("queued item has no job");
         }
-        let id = host.new_job(JobKind::Install, product_id, name.clone());
+        let id = host.new_job(JobKind::Install, game, name.clone());
         let entry = QueueEntry {
-            product_id,
+            product_id: game.as_ubisoft().unwrap_or(0),
+            game: (!game.is_ubisoft()).then_some(game),
             name: name.clone(),
             kind,
             state: QueueState::Queued,
@@ -292,16 +293,16 @@ impl Downloads {
             QueueKind::Update => "update",
             QueueKind::Repair => "repair",
         };
-        host.log(source, format!("queued {what} of {name}"), Some(product_id));
+        host.log(source, format!("queued {what} of {name}"), Some(game));
         self.changed(host);
         self.pump(host);
         Ok(id)
     }
 
-    pub(crate) fn move_item<H: Host>(&self, host: &Arc<H>, product_id: u32, to: QueueMove) -> Result<()> {
+    pub(crate) fn move_item<H: Host>(&self, host: &Arc<H>, game: GameRef, to: QueueMove) -> Result<()> {
         {
             let mut items = self.items.lock().unwrap();
-            let i = items.iter().position(|i| i.entry.product_id == product_id).context("not in the queue")?;
+            let i = items.iter().position(|i| i.entry.game_ref() == game).context("not in the queue")?;
             match to {
                 QueueMove::Up if i > 0 => items.swap(i, i - 1),
                 QueueMove::Down if i + 1 < items.len() => items.swap(i, i + 1),
@@ -316,10 +317,10 @@ impl Downloads {
         Ok(())
     }
 
-    pub(crate) fn pause<H: Host>(&self, host: &Arc<H>, source: &str, product_id: u32) -> Result<()> {
+    pub(crate) fn pause<H: Host>(&self, host: &Arc<H>, source: &str, game: GameRef) -> Result<()> {
         let name = {
             let mut items = self.items.lock().unwrap();
-            let it = items.iter_mut().find(|i| i.entry.product_id == product_id).context("not in the queue")?;
+            let it = items.iter_mut().find(|i| i.entry.game_ref() == game).context("not in the queue")?;
             match it.entry.state {
                 QueueState::Queued => it.entry.state = QueueState::Paused,
                 s if s.is_active() => {
@@ -334,20 +335,20 @@ impl Downloads {
             }
             it.entry.name.clone()
         };
-        host.log(source, format!("paused {name}"), Some(product_id));
+        host.log(source, format!("paused {name}"), Some(game));
         self.changed(host);
         Ok(())
     }
 
-    pub(crate) fn resume<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, product_id: u32) -> Result<u64> {
+    pub(crate) fn resume<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: GameRef) -> Result<u64> {
         let (name, job) = {
             let mut items = self.items.lock().unwrap();
-            let it = items.iter_mut().find(|i| i.entry.product_id == product_id).context("not in the queue")?;
+            let it = items.iter_mut().find(|i| i.entry.game_ref() == game).context("not in the queue")?;
             match it.entry.state {
                 QueueState::Paused | QueueState::Failed => {
                     if it.entry.state == QueueState::Failed {
                         // Its job ended with the failure; a retry gets a new one.
-                        it.entry.job_id = Some(host.new_job(JobKind::Install, product_id, it.entry.name.clone()));
+                        it.entry.job_id = Some(host.new_job(JobKind::Install, game, it.entry.name.clone()));
                         it.entry.error = None;
                     }
                     it.entry.state = QueueState::Queued;
@@ -364,17 +365,17 @@ impl Downloads {
             }
             (it.entry.name.clone(), it.entry.job_id)
         };
-        host.log(source, format!("resumed {name}"), Some(product_id));
+        host.log(source, format!("resumed {name}"), Some(game));
         self.changed(host);
         self.pump(host);
         job.context("queued item has no job")
     }
 
     /// Take a game out of the queue; a running item stops first (at a slice boundary).
-    pub(crate) fn remove<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, product_id: u32, discard: bool) -> Result<()> {
+    pub(crate) fn remove<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: GameRef, discard: bool) -> Result<()> {
         let removed = {
             let mut items = self.items.lock().unwrap();
-            let i = items.iter().position(|i| i.entry.product_id == product_id).context("not in the queue")?;
+            let i = items.iter().position(|i| i.entry.game_ref() == game).context("not in the queue")?;
             if items[i].progress.is_some() {
                 let it = &mut items[i];
                 it.stop = Some(Stop::Remove { discard });
@@ -388,7 +389,7 @@ impl Downloads {
             }
         };
         if let Some(it) = &removed {
-            let discarded = discard && host.discard(product_id, &it.entry.name);
+            let discarded = discard && host.discard(game, &it.entry.name);
             if let Some(id) = it.entry.job_id {
                 host.update_job(id, &mut |j| {
                     if !j.done {
@@ -398,8 +399,8 @@ impl Downloads {
                 });
             }
         }
-        self.dismissed.lock().unwrap().insert(product_id);
-        host.log(source, format!("removed {} from the queue{}", host_name(self, product_id, &removed), if discard { ", discarding files" } else { "" }), Some(product_id));
+        self.dismissed.lock().unwrap().insert(game);
+        host.log(source, format!("removed {} from the queue{}", host_name(self, game, &removed), if discard { ", discarding files" } else { "" }), Some(game));
         self.changed(host);
         self.pump(host);
         Ok(())
@@ -408,7 +409,7 @@ impl Downloads {
     /// Refuse while a game has a queue item running or a verify going.
     /// What is running, in words ("installing X", "verifying Y"): these block restarting
     /// onto a new build. Queued, paused and failed items don't (the queue is saved).
-    pub(crate) fn running(&self, mut name: impl FnMut(u32) -> String) -> Vec<String> {
+    pub(crate) fn running(&self, mut name: impl FnMut(GameRef) -> String) -> Vec<String> {
         let mut out: Vec<String> = self
             .items
             .lock()
@@ -424,16 +425,16 @@ impl Downloads {
                 format!("{verb} {}", i.entry.name)
             })
             .collect();
-        let verifying: Vec<u32> = self.verifying.lock().unwrap().iter().map(|(p, ..)| *p).collect();
+        let verifying: Vec<GameRef> = self.verifying.lock().unwrap().iter().map(|(p, ..)| *p).collect();
         out.extend(verifying.into_iter().map(|p| format!("verifying {}", name(p))));
         out
     }
 
-    pub(crate) fn ensure_idle(&self, product_id: u32) -> Result<()> {
-        if self.items.lock().unwrap().iter().any(|i| i.entry.product_id == product_id && i.progress.is_some()) {
+    pub(crate) fn ensure_idle(&self, game: GameRef) -> Result<()> {
+        if self.items.lock().unwrap().iter().any(|i| i.entry.game_ref() == game && i.progress.is_some()) {
             bail!("a download for this game is running; pause or remove it first (quiver queue)");
         }
-        if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == product_id) {
+        if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == game) {
             bail!("this game is being verified");
         }
         Ok(())
@@ -453,7 +454,7 @@ impl Downloads {
                 if active >= max {
                     break;
                 }
-                if it.entry.state != QueueState::Queued || it.progress.is_some() || host.playing(it.entry.product_id) {
+                if it.entry.state != QueueState::Queued || it.progress.is_some() || host.playing(it.entry.game_ref()) {
                     continue;
                 }
                 let progress = Arc::new(Progress { throttle: Some(self.throttle.clone()), ..Progress::default() });
@@ -476,14 +477,14 @@ impl Downloads {
     }
 
     fn spawn<H: Host>(self: &Arc<Self>, host: &Arc<H>, entry: QueueEntry, progress: Arc<Progress>) {
-        let product_id = entry.product_id;
+        let game = entry.game_ref();
         let job = entry.job_id;
         let phase: PhaseFn = {
             let (this, host) = (self.clone(), host.clone());
             Arc::new(move |p: Phase| {
                 let state = match p {
                     Phase::Status(s) => {
-                        if let Some(it) = this.items.lock().unwrap().iter_mut().find(|i| i.entry.product_id == product_id) {
+                        if let Some(it) = this.items.lock().unwrap().iter_mut().find(|i| i.entry.game_ref() == game) {
                             it.status = Some(s.clone());
                         }
                         if let Some(id) = job {
@@ -494,7 +495,7 @@ impl Downloads {
                     Phase::Verifying => QueueState::Verifying,
                     Phase::Downloading => QueueState::Downloading,
                 };
-                if let Some(it) = this.items.lock().unwrap().iter_mut().find(|i| i.entry.product_id == product_id) {
+                if let Some(it) = this.items.lock().unwrap().iter_mut().find(|i| i.entry.game_ref() == game) {
                     it.entry.state = state;
                     if state == QueueState::Downloading {
                         it.status = Some("Downloading…".into());
@@ -558,11 +559,11 @@ impl Downloads {
         let (this, host) = (self.clone(), host.clone());
         tokio::spawn(async move {
             let result = host.clone().run(entry, progress.clone(), phase).await;
-            this.finish(&host, product_id, &progress, result);
+            this.finish(&host, game, &progress, result);
         });
     }
 
-    fn finish<H: Host>(self: &Arc<Self>, host: &Arc<H>, product_id: u32, progress: &Arc<Progress>, result: Result<Outcome>) {
+    fn finish<H: Host>(self: &Arc<Self>, host: &Arc<H>, game: GameRef, progress: &Arc<Progress>, result: Result<Outcome>) {
         let cancelled = result.as_ref().err().is_some_and(is_cancelled);
         let (job, done_job, removed, discard, name) = {
             let mut items = self.items.lock().unwrap();
@@ -598,7 +599,7 @@ impl Downloads {
                 }
             }
         };
-        let discarded = discard && host.discard(product_id, &name);
+        let discarded = discard && host.discard(game, &name);
         if let (Some(id), Some((status, error, detail))) = (job, done_job) {
             let status = if discarded { "Cancelled (files removed)".to_owned() } else { status };
             let downloaded = progress.downloaded.load(Ordering::Relaxed);
@@ -611,7 +612,7 @@ impl Downloads {
             });
         }
         if removed {
-            tracing::info!(product_id, "download finished");
+            tracing::info!(game = %game, "download finished");
         }
         host.clone().changed();
         self.changed(host);
@@ -624,14 +625,14 @@ impl Downloads {
             return;
         }
         let Some(lib) = host.library_cache() else { return };
-        let updates = lib.into_iter().filter(|e| e.installed.is_some() && e.update_available).filter_map(|e| Some((e.ubisoft_id()?, e)));
-        for (product_id, e) in updates {
-            if self.get(product_id).is_some() || self.dismissed.lock().unwrap().contains(&product_id) || host.playing(product_id) {
+        let updates = lib.into_iter().filter(|e| e.installed.is_some() && e.update_available).filter_map(|e| Some((GameRef::ubisoft(e.ubisoft_id()?), e)));
+        for (game, e) in updates {
+            if self.get(game).is_some() || self.dismissed.lock().unwrap().contains(&game) || host.playing(game) {
                 continue;
             }
             let language = e.installed.as_ref().and_then(|g| g.language.clone());
-            if let Err(err) = self.enqueue(host, "auto-update", product_id, e.name.clone(), QueueKind::Update, language, None) {
-                tracing::warn!(product_id, "auto-update: {err:#}");
+            if let Err(err) = self.enqueue(host, "auto-update", game, e.name.clone(), QueueKind::Update, language, None) {
+                tracing::warn!(game = %game, "auto-update: {err:#}");
             }
         }
     }
@@ -653,32 +654,35 @@ impl Downloads {
     }
 }
 
-fn host_name(d: &Downloads, product_id: u32, removed: &Option<Item>) -> String {
+fn host_name(d: &Downloads, game: GameRef, removed: &Option<Item>) -> String {
     removed
         .as_ref()
         .map(|i| i.entry.name.clone())
-        .or_else(|| d.get(product_id).map(|e| e.name))
-        .unwrap_or_else(|| product_id.to_string())
+        .or_else(|| d.get(game).map(|e| e.name))
+        .unwrap_or_else(|| game.to_string())
 }
 
 // ---------------------------------------------------------------------------------------
 // The daemon's side
 
 impl Host for Daemon {
-    fn new_job(&self, kind: JobKind, product_id: u32, name: String) -> u64 {
-        Daemon::new_job(self, kind, product_id, name)
+    fn new_job(&self, kind: JobKind, game: GameRef, name: String) -> u64 {
+        Daemon::new_game_job(self, kind, game, name)
     }
 
     fn update_job(&self, id: u64, f: &mut dyn FnMut(&mut Job)) {
         Daemon::update_job(self, id, |j| f(j))
     }
 
-    fn log(&self, source: &str, action: String, product_id: Option<u32>) {
-        self.log_activity(source, action, product_id)
+    fn log(&self, source: &str, action: String, game: Option<GameRef>) {
+        self.log_activity_game(source, action, game)
     }
 
-    fn playing(&self, product_id: u32) -> bool {
-        self.running.lock().unwrap().contains(&product_id) || self.sessions.list().iter().any(|s| s.product_id == product_id)
+    fn playing(&self, game: GameRef) -> bool {
+        match game.as_ubisoft() {
+            Some(product_id) => self.running.lock().unwrap().contains(&product_id) || self.sessions.list().iter().any(|s| s.product_id == product_id),
+            None => self.running_games.lock().unwrap().contains(&game),
+        }
     }
 
     fn library_cache(&self) -> Option<Vec<LibraryEntry>> {
@@ -696,7 +700,8 @@ impl Host for Daemon {
         });
     }
 
-    fn discard(&self, product_id: u32, name: &str) -> bool {
+    fn discard(&self, game: GameRef, name: &str) -> bool {
+        let Some(product_id) = game.as_ubisoft() else { return crate::epic::discard(self, game) };
         // Only when never registered: then the folder holds just this partial install.
         if Games::load().map(|g| g.get(product_id).is_some()).unwrap_or(true) {
             return false;
@@ -707,6 +712,9 @@ impl Host for Daemon {
 
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>> {
         Box::pin(async move {
+            if !item.game_ref().is_ubisoft() {
+                return crate::epic::run_queued(self, item, progress, phase).await;
+            }
             let product_id = item.product_id;
             let online = self.account_for(product_id, item.account.as_deref()).await?;
             let cfg = self.cfg.clone();
@@ -753,19 +761,19 @@ fn language_for(product_id: u32) -> String {
         .unwrap_or_else(|| "en-US".into())
 }
 
-fn report_path(product_id: u32) -> PathBuf {
-    quiver_core::paths::game_dir(&quiver_api::GameRef::ubisoft(product_id)).join("verify.json")
+pub(crate) fn report_path(game: GameRef) -> PathBuf {
+    quiver_core::paths::game_dir(&game).join("verify.json")
 }
 
-fn save_report(r: &VerifyReport) {
-    let path = report_path(r.product_id);
+pub(crate) fn save_report(r: &VerifyReport) {
+    let path = report_path(r.game.unwrap_or(GameRef::ubisoft(r.product_id)));
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     if let Err(e) = serde_json::to_vec_pretty(r).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(&path, b)?)) {
         tracing::warn!("saving {}: {e:#}", path.display());
     }
 }
 
-fn summary(r: &VerifyReport) -> String {
+pub(crate) fn summary(r: &VerifyReport) -> String {
     let bad = r.missing.len() + r.corrupt.len();
     match (bad, r.repaired_files) {
         (0, _) => format!("All {} files OK", r.files),
@@ -774,7 +782,7 @@ fn summary(r: &VerifyReport) -> String {
     }
 }
 
-fn report_lines(r: &VerifyReport) -> Vec<String> {
+pub(crate) fn report_lines(r: &VerifyReport) -> Vec<String> {
     let mut out: Vec<String> = r.missing.iter().map(|p| format!("missing: {p}")).collect();
     out.extend(r.corrupt.iter().map(|c| {
         let size = if c.size != c.expected_size { format!(", {} bytes, expected {}", c.size, c.expected_size) } else { String::new() };
@@ -800,7 +808,7 @@ pub(crate) async fn install(daemon: &Arc<Daemon>, source: &str, product_id: u32,
     let installed = Games::load()?.get(product_id).is_some();
     let kind = if installed { QueueKind::Update } else { QueueKind::Install };
     let language = language.or_else(|| Some(language_for(product_id)));
-    daemon.downloads.enqueue(daemon, source, product_id, name, kind, language, None)
+    daemon.downloads.enqueue(daemon, source, GameRef::ubisoft(product_id), name, kind, language, None)
 }
 
 /// `Request::Cancel` for a queue (`Install`) or verify job: removes the queue item.
@@ -811,24 +819,77 @@ pub(crate) fn cancel(daemon: &Arc<Daemon>, source: &str, job: &Job, discard: boo
         p.cancel.store(true, Ordering::Relaxed);
         return Ok(());
     }
-    let Some(product_id) = job.game.as_ubisoft() else { bail!("job {} is not in the download queue", job.id) };
-    match daemon.downloads.get(product_id) {
-        Some(e) if e.job_id == Some(job.id) => daemon.downloads.remove(daemon, source, product_id, discard),
+    match daemon.downloads.get(job.game) {
+        Some(e) if e.job_id == Some(job.id) => daemon.downloads.remove(daemon, source, job.game, discard),
         _ => bail!("job {} is not in the download queue", job.id),
     }
 }
 
+/// Start a verify-only job for `game`: refuses while it downloads or is being verified.
+/// Returns the job id and the progress the verify reports to.
+pub(crate) fn begin_verify(daemon: &Arc<Daemon>, source: &str, game: GameRef, name: &str) -> Result<(u64, Arc<Progress>)> {
+    if daemon.downloads.get(game).is_some_and(|e| e.state.is_active()) {
+        bail!("{name} is downloading; verify it once that finishes");
+    }
+    if daemon.downloads.verifying.lock().unwrap().iter().any(|(p, ..)| *p == game) {
+        bail!("{name} is already being verified");
+    }
+    let id = daemon.new_game_job(JobKind::Verify, game, name.to_owned());
+    let progress = Arc::new(Progress::default());
+    daemon.downloads.verifying.lock().unwrap().push((game, id, progress.clone()));
+    daemon.log_activity_game(source, format!("verify {name}"), Some(game));
+    daemon.update_job(id, |j| j.status = "Verifying…".into());
+    Ok((id, progress))
+}
+
+/// End a verify-only job started by [`begin_verify`].
+pub(crate) fn end_verify(daemon: &Arc<Daemon>, id: u64, progress: &Progress, result: Result<VerifyReport>) {
+    daemon.downloads.verifying.lock().unwrap().retain(|(_, j, _)| *j != id);
+    daemon.update_job(id, |j| {
+        j.done = true;
+        j.downloaded = progress.hashed.load(Ordering::Relaxed);
+        match &result {
+            Ok(r) => {
+                j.status = summary(r);
+                j.detail = report_lines(r);
+            }
+            Err(e) if is_cancelled(e) => j.status = "Cancelled".into(),
+            Err(e) => {
+                j.status = "Failed".into();
+                j.error = Some(format!("{e:#}"));
+            }
+        }
+    });
+    if let Ok(r) = &result {
+        save_report(r);
+    }
+}
+
+/// A ticker copying a verify's hashing progress to its job every half second.
+pub(crate) fn verify_ticker(daemon: &Arc<Daemon>, id: u64, progress: Arc<Progress>) -> tokio::task::JoinHandle<()> {
+    let this = daemon.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            this.update_job(id, |j| {
+                j.downloaded = progress.hashed.load(Ordering::Relaxed);
+                j.total = progress.hash_total.load(Ordering::Relaxed);
+            });
+        }
+    })
+}
+
 fn verify_now(daemon: &Arc<Daemon>, source: &str, product_id: u32) -> Result<u64> {
     let game = Games::load()?.get(product_id).cloned().context("not installed")?;
-    if daemon.downloads.get(product_id).is_some_and(|e| e.state.is_active()) {
+    if daemon.downloads.get(GameRef::ubisoft(product_id)).is_some_and(|e| e.state.is_active()) {
         bail!("{} is downloading; verify it once that finishes", game.name);
     }
-    if daemon.downloads.verifying.lock().unwrap().iter().any(|(p, ..)| *p == product_id) {
+    if daemon.downloads.verifying.lock().unwrap().iter().any(|(p, ..)| *p == GameRef::ubisoft(product_id)) {
         bail!("{} is already being verified", game.name);
     }
     let id = daemon.new_job(JobKind::Verify, product_id, game.name.clone());
     let progress = Arc::new(Progress::default());
-    daemon.downloads.verifying.lock().unwrap().push((product_id, id, progress.clone()));
+    daemon.downloads.verifying.lock().unwrap().push((GameRef::ubisoft(product_id), id, progress.clone()));
     daemon.log_activity(source, format!("verify {}", game.name), Some(product_id));
     daemon.update_job(id, |j| j.status = "Verifying…".into());
     let this = daemon.clone();
@@ -885,46 +946,57 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
     let d = &daemon.downloads;
     Ok(match req {
         Request::Queue => json!(d.list()),
-        Request::QueueMove { product_id, to } => {
-            d.move_item(daemon, product_id, to)?;
+        Request::QueueMove { game, to } => {
+            d.move_item(daemon, game.0, to)?;
             json!(d.list())
         }
-        Request::QueuePause { product_id } => {
-            d.pause(daemon, source, product_id)?;
+        Request::QueuePause { game } => {
+            d.pause(daemon, source, game.0)?;
             Value::Null
         }
-        Request::QueueResume { product_id } => json!(d.resume(daemon, source, product_id)?),
-        Request::QueueRemove { product_id } => {
-            d.remove(daemon, source, product_id, false)?;
+        Request::QueueResume { game } => json!(d.resume(daemon, source, game.0)?),
+        Request::QueueRemove { game } => {
+            d.remove(daemon, source, game.0, false)?;
             Value::Null
         }
-        Request::InstallPreview { product_id, language } => {
+        Request::InstallPreview { game, .. } if !game.is_ubisoft() => json!(crate::epic::install_preview(daemon, game.0).await?),
+        Request::UpdatePreview { game } if !game.is_ubisoft() => json!(crate::epic::update_preview(daemon, game.0).await?),
+        Request::Update { game } if !game.is_ubisoft() => json!(crate::epic::install(daemon, source, game.0).await?),
+        Request::Verify { game, repair } if !game.is_ubisoft() => json!(crate::epic::verify(daemon, source, game.0, repair).await?),
+        Request::VerifyResult { game } if !game.is_ubisoft() => {
+            let r: Option<VerifyReport> = std::fs::read_to_string(report_path(game.0)).ok().and_then(|t| serde_json::from_str(&t).ok());
+            json!(r)
+        }
+        Request::InstallPreview { game, language } => {
+            let product_id = ubisoft(game.0)?;
             let lang = language.unwrap_or_else(|| language_for(product_id));
             let (latest, _) = latest(daemon, product_id).await?;
             let cfg = daemon.cfg.clone();
             json!(tokio::task::spawn_blocking(move || builds::install_preview(&cfg, product_id, &latest, &lang)).await??)
         }
-        Request::UpdatePreview { product_id } => {
+        Request::UpdatePreview { game } => {
+            let product_id = ubisoft(game.0)?;
             let game = Games::load()?.get(product_id).cloned().context("not installed")?;
             let lang = language_for(product_id);
             let (latest, _) = latest(daemon, product_id).await?;
             json!(tokio::task::spawn_blocking(move || builds::update_preview(&game, &latest, &lang)).await??)
         }
-        Request::Update { product_id } => {
+        Request::Update { game } => {
+            let product_id = ubisoft(game.0)?;
             Games::load()?.get(product_id).context("not installed")?;
             daemon.account_for(product_id, None).await?;
             let name = product_name(daemon, product_id).await;
-            json!(d.enqueue(daemon, source, product_id, name, QueueKind::Update, Some(language_for(product_id)), None)?)
+            json!(d.enqueue(daemon, source, game.0, name, QueueKind::Update, Some(language_for(product_id)), None)?)
         }
-        Request::Verify { product_id, repair: false } => json!(verify_now(daemon, source, product_id)?),
-        Request::Verify { product_id, repair: true } => {
-            let game = Games::load()?.get(product_id).cloned().context("not installed")?;
+        Request::Verify { game, repair: false } => json!(verify_now(daemon, source, ubisoft(game.0)?)?),
+        Request::Verify { game, repair: true } => {
+            let product_id = ubisoft(game.0)?;
+            let g = Games::load()?.get(product_id).cloned().context("not installed")?;
             daemon.account_for(product_id, None).await?;
-            json!(d.enqueue(daemon, source, product_id, game.name, QueueKind::Repair, Some(language_for(product_id)), None)?)
+            json!(d.enqueue(daemon, source, game.0, g.name, QueueKind::Repair, Some(language_for(product_id)), None)?)
         }
-        Request::VerifyResult { product_id } => {
-            let r: Option<VerifyReport> =
-                std::fs::read_to_string(report_path(product_id)).ok().and_then(|t| serde_json::from_str(&t).ok());
+        Request::VerifyResult { game } => {
+            let r: Option<VerifyReport> = std::fs::read_to_string(report_path(game.0)).ok().and_then(|t| serde_json::from_str(&t).ok());
             json!(r)
         }
         Request::DownloadSettings { max_active, bandwidth_limit, auto_update } => {
@@ -953,6 +1025,11 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
         }
         other => bail!("not a downloads request: {other:?}"),
     })
+}
+
+/// A Ubisoft product id, or why a request for another store's game can't be served here.
+pub(crate) fn ubisoft(game: GameRef) -> Result<u32> {
+    game.as_ubisoft().with_context(|| format!("{game}: not a Ubisoft game"))
 }
 
 /// Load the queue for the daemon.

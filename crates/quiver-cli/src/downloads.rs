@@ -117,14 +117,14 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
         }
         Some(QueueAction::Move { game, to }) => {
             let e = resolve(client, &game).await?;
-            let q: Vec<QueueEntry> = client.call(Request::QueueMove { product_id: e.product_id, to }).await?;
+            let q: Vec<QueueEntry> = client.call(Request::QueueMove { game: e.product_id.into(), to }).await?;
             for e in q {
                 println!("{:>2}  {:<11} {}", e.position, state_word(e.state), e.name);
             }
         }
         Some(QueueAction::Remove { game }) => {
             let e = resolve(client, &game).await?;
-            let () = client.call(Request::QueueRemove { product_id: e.product_id }).await?;
+            let () = client.call(Request::QueueRemove { game: e.product_id.into()}).await?;
             println!("removed {} from the queue (files kept; install again to resume)", e.name);
         }
         Some(QueueAction::Settings { max_active, limit, auto_update }) => {
@@ -143,14 +143,14 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
 
 pub async fn pause(client: &Client, game: &str) -> Result<()> {
     let e = resolve(client, game).await?;
-    let () = client.call(Request::QueuePause { product_id: e.product_id }).await?;
+    let () = client.call(Request::QueuePause { game: e.product_id.into()}).await?;
     println!("pausing {} (quiver resume {} to continue)", e.name, e.product_id);
     Ok(())
 }
 
 pub async fn resume(client: &Client, game: &str) -> Result<()> {
     let e = resolve(client, game).await?;
-    let id: u64 = client.call(Request::QueueResume { product_id: e.product_id }).await?;
+    let id: u64 = client.call(Request::QueueResume { game: e.product_id.into()}).await?;
     println!("resumed {} (job {id})", e.name);
     Ok(())
 }
@@ -182,7 +182,7 @@ fn print_update(u: &UpdatePreview, files: bool) {
 
 pub async fn dry_run(client: &Client, game: &str, language: Option<String>, json: bool) -> Result<()> {
     let e = resolve(client, game).await?;
-    let p: InstallPreview = client.call(Request::InstallPreview { product_id: e.product_id, language }).await?;
+    let p: InstallPreview = client.call(Request::InstallPreview { game: e.product_id.into(), language }).await?;
     if json {
         return print_json(&p);
     }
@@ -213,7 +213,7 @@ pub async fn dry_run(client: &Client, game: &str, language: Option<String>, json
 pub async fn update(client: &Client, game: &str, preview: bool, detach: bool, json: bool) -> Result<()> {
     let e = resolve(client, game).await?;
     if preview {
-        let u: UpdatePreview = client.call(Request::UpdatePreview { product_id: e.product_id }).await?;
+        let u: UpdatePreview = client.call(Request::UpdatePreview { game: e.product_id.into()}).await?;
         if json {
             return print_json(&u);
         }
@@ -221,7 +221,7 @@ pub async fn update(client: &Client, game: &str, preview: bool, detach: bool, js
         return Ok(());
     }
     let events = client.subscribe().await?;
-    let id: u64 = client.call(Request::Update { product_id: e.product_id }).await?;
+    let id: u64 = client.call(Request::Update { game: e.product_id.into()}).await?;
     eprintln!("updating {} (job {id})", e.name);
     if !detach {
         follow(client, events, id).await?;
@@ -232,13 +232,13 @@ pub async fn update(client: &Client, game: &str, preview: bool, detach: bool, js
 pub async fn verify(client: &Client, game: &str, repair: bool, detach: bool, json: bool) -> Result<()> {
     let e = resolve(client, game).await?;
     let events = client.subscribe().await?;
-    let id: u64 = client.call(Request::Verify { product_id: e.product_id, repair }).await?;
+    let id: u64 = client.call(Request::Verify { game: e.product_id.into(), repair }).await?;
     eprintln!("{} {} (job {id})", if repair { "repairing" } else { "verifying" }, e.name);
     if detach {
         return Ok(());
     }
     follow(client, events, id).await?;
-    let r: Option<VerifyReport> = client.call(Request::VerifyResult { product_id: e.product_id }).await?;
+    let r: Option<VerifyReport> = client.call(Request::VerifyResult { game: e.product_id.into()}).await?;
     match r {
         Some(r) if json => print_json(&r)?,
         Some(r) if !r.is_ok() && !repair => {

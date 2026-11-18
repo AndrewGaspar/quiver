@@ -226,7 +226,8 @@ impl Demo {
             Request::Sessions => json!(st.sessions),
             Request::ProtonList => json!(["GE-Proton10-26", "GE-Proton10-25", "Proton 9.0 (Beta)"]),
             Request::Subscribe => Value::Null,
-            Request::Install { product_id, .. } => {
+            Request::Install { game, .. } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
                 let name = name_of(&st, product_id)?;
                 let id = st.next_job;
                 st.next_job += 1;

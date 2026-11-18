@@ -818,7 +818,7 @@ async fn main() -> Result<()> {
         Cmd::Install { game, language, detach, .. } => {
             let e = resolve(&client, &game).await?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Install { product_id: e.product_id, language }).await?;
+            let id: u64 = client.call(Request::Install { game: e.product_id.into(), language }).await?;
             eprintln!("installing {} (job {id})", e.name);
             if !detach {
                 follow(&client, events, id).await?;
@@ -828,13 +828,13 @@ async fn main() -> Result<()> {
             let e = resolve(&client, &game).await?;
             let path = path.canonicalize().with_context(|| format!("{} not found", path.display()))?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Import { product_id: e.product_id, path, language }).await?;
+            let id: u64 = client.call(Request::Import { game: e.product_id.into(), path, language }).await?;
             eprintln!("importing {} (job {id})", e.name);
             follow(&client, events, id).await?;
         }
         Cmd::Uninstall { game, prefix } => {
             let e = resolve(&client, &game).await?;
-            let () = client.call(Request::Uninstall { product_id: e.product_id, remove_prefix: prefix }).await?;
+            let () = client.call(Request::Uninstall { game: e.product_id.into(), remove_prefix: prefix }).await?;
             println!("uninstalled {}", e.name);
         }
         Cmd::Play { game, profile, profile_id, vanilla, detach } => {

@@ -346,6 +346,7 @@ fn bad_queue_file_is_ignored_and_states_restored() {
     assert!(Downloads::load(path.clone(), DownloadSettings::default()).list().is_empty());
     let entry = |id: u32, state| QueueEntry {
         product_id: id,
+        game: None,
         name: id.to_string(),
         kind: QueueKind::Update,
         state,

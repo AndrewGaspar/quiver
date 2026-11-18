@@ -11,10 +11,11 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use quiver_api::art::SpaceArt;
 use quiver_api::stores::{Dlc, GameDetail, Relation, StoreRecord};
-use quiver_api::{Art, GameRef, LibraryEntry, Playtime, StoreId};
+use quiver_api::{Art, Game, GameRef, LibraryEntry, Playtime, StoreId};
 use quiver_core::stores::{AccountInfo, AccountState, BoxFuture, Capabilities, Launched, StoreProvider, Support};
 
 use crate::Epic;
+use crate::installs::Installed;
 use crate::library::Title;
 
 pub struct EpicProvider {
@@ -28,7 +29,7 @@ impl EpicProvider {
 }
 
 pub fn capabilities() -> Capabilities {
-    Capabilities { library: Support::Quiver, ..Capabilities::default() }
+    Capabilities { library: Support::Quiver, install: Support::Quiver, launch: Support::Quiver, settings: Support::Quiver, mods: Support::Quiver, ..Capabilities::default() }
 }
 
 /// `epic:<app>`, when the app name is a valid game id.
@@ -40,8 +41,23 @@ fn ubisoft_of(t: &Title) -> Option<GameRef> {
     t.third_party.as_ref().filter(|p| p.is_ubisoft()).and_then(|p| p.ubisoft_product).map(GameRef::ubisoft)
 }
 
-/// The library entry for a title.
-pub fn entry(t: &Title) -> Option<LibraryEntry> {
+/// A Quiver install as the launcher, mods and settings see a game: Epic's folder and
+/// prefix, the manifest's launch executable and arguments.
+pub fn game_of(i: &Installed) -> Option<Game> {
+    Some(Game {
+        product_id: 0,
+        name: i.title.clone(),
+        install_dir: i.dir.clone(),
+        prefix: i.prefix.clone(),
+        exe: i.exe.clone(),
+        args: None,
+        language: None,
+        game: Some(game_ref(&i.app_name)?),
+    })
+}
+
+/// The library entry for a title, installed or not.
+pub fn entry(t: &Title, installed: Option<&Installed>) -> Option<LibraryEntry> {
     let game = game_ref(&t.app_name)?;
     let records = match (ubisoft_of(t), &t.third_party) {
         (Some(u), _) => vec![StoreRecord { game: u, relation: Relation::Linked, owned_by: Vec::new(), note: Some("Managed by Ubisoft Connect".into()) }],
@@ -50,12 +66,13 @@ pub fn entry(t: &Title) -> Option<LibraryEntry> {
     Some(LibraryEntry {
         game,
         name: t.title.clone(),
-        installed: None,
+        installed: installed.and_then(game_of),
         update_available: false,
         running: false,
         art: Art { epic: SpaceArt { tile: t.art.tall.clone(), hero: t.art.wide.clone(), logo: t.art.logo.clone(), icon: None }, ..Default::default() },
         owned_by: t.owners.clone(),
-        installable: false,
+        // Ubisoft games sold on Epic install through Ubisoft; other launchers' games aren't tiles.
+        installable: t.third_party.is_none(),
         steam: None,
         space_id: None,
         client: None,
@@ -115,7 +132,8 @@ impl StoreProvider for EpicProvider {
             for e in &lib.errors {
                 tracing::info!("Epic library: {e}");
             }
-            Ok(lib.titles.iter().filter_map(entry).collect())
+            let installed = self.epic.installed().unwrap_or_default();
+            Ok(lib.titles.iter().filter_map(|t| entry(t, installed.iter().find(|i| i.app_name == t.app_name || t.apps.contains(&i.app_name)))).collect())
         })
     }
 
@@ -141,7 +159,16 @@ impl StoreProvider for EpicProvider {
                 publisher: None,
                 release_date: None,
                 store_url: None,
-                install: None,
+                install: self.epic.installed_game(&t.app_name).map(|i| quiver_api::stores::ClientInstall {
+                    dir: i.dir.clone(),
+                    library: None,
+                    size_bytes: i.size,
+                    complete: true,
+                    update_pending: false,
+                    build_id: Some(i.version.clone()),
+                    platforms: vec!["windows".into()],
+                    ..Default::default()
+                }),
                 playtime: None,
                 achievements: None,
                 cloud: None,
@@ -172,7 +199,7 @@ impl StoreProvider for EpicProvider {
             if let Some(tp) = &t.third_party {
                 bail!("{} is managed by {}, which Quiver doesn't run yet", t.title, tp.client_name());
             }
-            bail!("{} isn't installed: installing and playing Epic games comes in the next Quiver build", t.title)
+            bail!("{} isn't installed: install it first (quiver install epic:{})", t.title, t.app_name)
         })
     }
 }

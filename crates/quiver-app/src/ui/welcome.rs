@@ -548,7 +548,7 @@ impl Quiver {
                 let Some(f) = self.found().get(i).cloned() else { return };
                 let Some(product_id) = f.product_id else { return };
                 let path = f.path.clone();
-                self.call::<u64, _>(Request::Import { product_id, path: f.path.clone(), language: f.language.clone() }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Import { game: product_id.into(), path: f.path.clone(), language: f.language.clone() }, cx, move |this, r, cx| match r {
                     Ok(job) => {
                         this.wc.imports.insert(path, job);
                     }

@@ -441,7 +441,7 @@ impl Quiver {
             Btn::PauseAll => {
                 for e in self.dl.queue.clone() {
                     if e.state == QueueState::Queued || e.state.is_active() {
-                        self.queue_req(Request::QueuePause { product_id: e.product_id }, None, cx);
+                        self.queue_req(Request::QueuePause { game: e.product_id.into()}, None, cx);
                     }
                 }
                 self.show_toast("Pausing every download (each stops at a slice boundary)", cx);
@@ -449,7 +449,7 @@ impl Quiver {
             Btn::ResumeAll => {
                 for e in self.dl.queue.clone() {
                     if e.state == QueueState::Paused {
-                        self.queue_req(Request::QueueResume { product_id: e.product_id }, None, cx);
+                        self.queue_req(Request::QueueResume { game: e.product_id.into()}, None, cx);
                     }
                 }
                 self.show_toast("Resuming downloads", cx);
@@ -457,13 +457,13 @@ impl Quiver {
             Btn::Import => self.open_import(cx),
             Btn::Pause(id) => {
                 let m = format!("Pausing {}: it keeps its place", name(self, id));
-                self.queue_req(Request::QueuePause { product_id: id.pid() }, Some(m), cx);
+                self.queue_req(Request::QueuePause { game: id.pid().into()}, Some(m), cx);
             }
-            Btn::Resume(id) => self.queue_req(Request::QueueResume { product_id: id.pid() }, Some(format!("Resuming {}", name(self, id))), cx),
-            Btn::Retry(id) => self.queue_req(Request::QueueResume { product_id: id.pid() }, Some(format!("Retrying {}", name(self, id))), cx),
+            Btn::Resume(id) => self.queue_req(Request::QueueResume { game: id.pid().into()}, Some(format!("Resuming {}", name(self, id))), cx),
+            Btn::Retry(id) => self.queue_req(Request::QueueResume { game: id.pid().into()}, Some(format!("Retrying {}", name(self, id))), cx),
             Btn::Remove(id) => {
                 let m = format!("Removed {} from the queue; its files stay, so installing again resumes", name(self, id));
-                self.queue_req(Request::QueueRemove { product_id: id.pid() }, Some(m), cx);
+                self.queue_req(Request::QueueRemove { game: id.pid().into()}, Some(m), cx);
             }
             Btn::Up(id) | Btn::Down(id) => {
                 let to = if matches!(b, Btn::Up(_)) { QueueMove::Up } else { QueueMove::Down };
@@ -475,7 +475,7 @@ impl Quiver {
                         self.follow_row(Row::Queued(id));
                     }
                 }
-                self.call::<Vec<QueueEntry>, _>(Request::QueueMove { product_id: id.pid(), to }, cx, |this, r, cx| match r {
+                self.call::<Vec<QueueEntry>, _>(Request::QueueMove { game: id.pid().into(), to }, cx, |this, r, cx| match r {
                     Ok(q) => this.dl.queue = q,
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
@@ -1586,7 +1586,7 @@ impl Quiver {
     }
 
     fn request_install_preview(&mut self, id: Gid, language: Option<String>, cx: &mut Context<Self>) {
-        self.call::<InstallPreview, _>(Request::InstallPreview { product_id: id.pid(), language: language.clone() }, cx, move |this, r, _| {
+        self.call::<InstallPreview, _>(Request::InstallPreview { game: id.pid().into(), language: language.clone() }, cx, move |this, r, _| {
             if let Some(DlDialog::Install { id: did, preview, language: lang, .. }) = &mut this.dl.dialog
                 && *did == id
                 && *lang == language
@@ -1604,7 +1604,7 @@ impl Quiver {
         self.nav.close_overlay();
         self.dl.dialog = Some(DlDialog::Update { id, preview: None });
         self.dl.dsel = usize::MAX;
-        self.call::<UpdatePreview, _>(Request::UpdatePreview { product_id: id.pid() }, cx, move |this, r, _| {
+        self.call::<UpdatePreview, _>(Request::UpdatePreview { game: id.pid().into()}, cx, move |this, r, _| {
             if let Some(DlDialog::Update { id: did, preview }) = &mut this.dl.dialog
                 && *did == id
             {
@@ -1624,7 +1624,7 @@ impl Quiver {
     }
 
     fn load_verify_report(&mut self, id: Gid, cx: &mut Context<Self>) {
-        self.call::<Option<VerifyReport>, _>(Request::VerifyResult { product_id: id.pid() }, cx, move |this, r, _| {
+        self.call::<Option<VerifyReport>, _>(Request::VerifyResult { game: id.pid().into()}, cx, move |this, r, _| {
             if let Some(DlDialog::Verify { id: did, report, .. }) = &mut this.dl.dialog
                 && *did == id
             {
@@ -1733,7 +1733,7 @@ impl Quiver {
                 let name = self.game_name(id);
                 let busy = self.dl.queue.iter().any(|e| e.state.is_active());
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Install { product_id: id.pid(), language }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Install { game: id.pid().into(), language }, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         if after != After::default() {
                             this.dl.after.insert(id, after);
@@ -1747,7 +1747,7 @@ impl Quiver {
             Do::Update(id) => {
                 let name = self.game_name(id);
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Update { product_id: id.pid() }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Update { game: id.pid().into()}, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         this.show_toast(format!("Updating {name}"), cx);
                         this.load_queue(cx);
@@ -1757,7 +1757,7 @@ impl Quiver {
             }
             Do::OpenVerify(id) => self.open_verify_dialog(id, cx),
             Do::Verify(id) => {
-                self.call::<u64, _>(Request::Verify { product_id: id.pid(), repair: false }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Verify { game: id.pid().into(), repair: false }, cx, move |this, r, cx| match r {
                     Ok(j) => {
                         if let Some(DlDialog::Verify { id: did, job, .. }) = &mut this.dl.dialog
                             && *did == id
@@ -1772,7 +1772,7 @@ impl Quiver {
             Do::Repair(id) => {
                 let name = self.game_name(id);
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Verify { product_id: id.pid(), repair: true }, cx, move |this, r, cx| match r {
+                self.call::<u64, _>(Request::Verify { game: id.pid().into(), repair: true }, cx, move |this, r, cx| match r {
                     Ok(_) => {
                         this.show_toast(format!("Repair of {name} queued: it re-downloads only the slices that failed"), cx);
                         this.nav.open_section(Section::Downloads);

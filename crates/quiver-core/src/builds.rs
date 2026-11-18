@@ -187,6 +187,7 @@ pub fn update_preview(game: &Game, latest: &Latest, language: &str) -> Result<Up
     let installed_hash = manifest::manifest_hash(&raw)?;
     let mut out = UpdatePreview {
         product_id: game.product_id,
+        game: None,
         name: game.name.clone(),
         installed_version: manifest::parse_manifest(&raw)?.game_version,
         latest_version: latest.manifest.game_version.clone(),
@@ -225,6 +226,7 @@ pub fn install_preview(cfg: &Config, product_id: u32, latest: &Latest, language:
     };
     Ok(InstallPreview {
         product_id,
+        game: None,
         name: latest.name.clone(),
         dest,
         version: latest.manifest.game_version.clone(),

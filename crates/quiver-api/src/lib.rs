@@ -521,10 +521,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all_stores: bool,
     },
-    Install { product_id: u32, language: Option<String> },
+    /// Install a game, or update it if installed (any store that installs: Ubisoft, Epic).
+    Install {
+        #[serde(flatten)]
+        game: game::GameField,
+        language: Option<String>,
+    },
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
-    Import { product_id: u32, path: PathBuf, language: Option<String> },
-    Uninstall { product_id: u32, remove_prefix: bool },
+    Import {
+        #[serde(flatten)]
+        game: game::GameField,
+        path: PathBuf,
+        language: Option<String>,
+    },
+    Uninstall {
+        #[serde(flatten)]
+        game: game::GameField,
+        remove_prefix: bool,
+    },
     /// Launch a game. `profile`: a mod profile's name or id, or `vanilla` for the unmodded
     /// game; `None` (what older clients send): the game's default profile (its `profile`
     /// setting; vanilla when unset, or with a warning when that profile was deleted).
@@ -612,26 +626,56 @@ pub enum Request {
     /// The download queue in order (`Vec<downloads::QueueEntry>`).
     Queue,
     /// Move a game's queue item up, down or to the top.
-    QueueMove { product_id: u32, to: downloads::QueueMove },
+    QueueMove {
+        #[serde(flatten)]
+        game: game::GameField,
+        to: downloads::QueueMove,
+    },
     /// Pause a game's download (it stops at a slice boundary and resumes where it was).
-    QueuePause { product_id: u32 },
+    QueuePause {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Resume a paused item, or retry a failed one.
-    QueueResume { product_id: u32 },
+    QueueResume {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Take a game out of the queue, stopping it if it is running. Downloaded files stay,
     /// so installing again resumes.
-    QueueRemove { product_id: u32 },
+    QueueRemove {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Sizes, free space and languages for installing (or updating) a game, without
     /// starting it (`downloads::InstallPreview`).
-    InstallPreview { product_id: u32, language: Option<String> },
+    InstallPreview {
+        #[serde(flatten)]
+        game: game::GameField,
+        language: Option<String>,
+    },
     /// What updating an installed game would change (`downloads::UpdatePreview`).
-    UpdatePreview { product_id: u32 },
+    UpdatePreview {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Queue an update for an installed game. Returns the job id.
-    Update { product_id: u32 },
+    Update {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Hash a game's installed files against its manifest. With `repair`, queue
     /// re-downloading only what is missing or corrupt. Returns the job id.
-    Verify { product_id: u32, repair: bool },
+    Verify {
+        #[serde(flatten)]
+        game: game::GameField,
+        repair: bool,
+    },
     /// The last verify report for a game (`Option<downloads::VerifyReport>`).
-    VerifyResult { product_id: u32 },
+    VerifyResult {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
     /// Read download settings, changing the ones given (`bandwidth_limit: 0` = unlimited).
     /// Returns `downloads::DownloadSettings`.
     DownloadSettings {

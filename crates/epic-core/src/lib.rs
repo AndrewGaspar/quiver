@@ -24,7 +24,9 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod http;
+pub mod installs;
 pub mod library;
+pub mod ops;
 pub mod provider;
 pub mod secrets;
 
@@ -87,6 +89,8 @@ pub struct Epic {
     refreshing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// One library read at a time, and the last one.
     library: tokio::sync::Mutex<Option<(Instant, Arc<Library>)>>,
+    /// Installed games (`<data>/epic/installed.json`, `manifests/`).
+    installs: installs::Installs,
 }
 
 impl Epic {
@@ -101,6 +105,7 @@ impl Epic {
         let dir = data_dir.join("epic");
         Epic {
             cache: Cache::new(&dir),
+            installs: installs::Installs::new(&dir),
             dir,
             api: Api::new(transport, config),
             secrets,

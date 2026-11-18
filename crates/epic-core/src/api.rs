@@ -10,7 +10,11 @@
 //! | end a session | `DELETE account …/account/api/oauth/sessions/kill/<access token>` |
 //! | account, linked accounts | `GET account …/account/api/public/account/<id>[/externalAuths]` |
 //! | owned items | `GET library-service …/library/api/public/items?includeMetadata=true[&cursor=]` |
-//! | catalog | `GET catalog …/catalog/api/shared/namespace/<ns>/bulk/items?id=<ids>` |
+//! | catalog | `GET catalog …/catalog/api/shared/namespace/<ns>/bulk/items?id=<id>` |
+//! | build (manifest URLs, hash, secrets) | `GET launcher …/launcher/api/public/assets/v2/platform/Windows/namespace/<ns>/catalogItem/<id>/app/<app>/label/Live` |
+//! | manifest file | `GET <CDN uri>?<signed query>` (no session) |
+//! | exchange code (per launch) | `GET account …/account/api/oauth/exchange` |
+//! | ownership token (per launch) | `POST ecommerceintegration …/platforms/EPIC/identities/<account>/ownershipToken` |
 
 use std::collections::HashMap;
 use std::fmt;
@@ -20,12 +24,16 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use quiver_core::secret::Secret;
+
 use crate::config::ClientConfig;
 use crate::http::{Method, Request, Response, Transport};
 
 pub const ACCOUNT_HOST: &str = "https://account-public-service-prod03.ol.epicgames.com";
 pub const LIBRARY_HOST: &str = "https://library-service.live.use1a.on.epicgames.com";
 pub const CATALOG_HOST: &str = "https://catalog-public-service-prod06.ol.epicgames.com";
+pub const LAUNCHER_HOST: &str = "https://launcher-public-service-prod06.ol.epicgames.com";
+pub const ECOMMERCE_HOST: &str = "https://ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 
 /// Library pages followed at most (a page holds hundreds of records).
 const MAX_PAGES: usize = 100;
@@ -253,12 +261,101 @@ pub struct ReleaseInfo {
     pub date_added: Option<DateTime<Utc>>,
 }
 
+/// A game's current build (`assets/v2`): where its manifest is, its SHA-1, and the keys
+/// for an encrypted build.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BuildInfo {
+    pub elements: Vec<BuildElement>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BuildElement {
+    pub app_name: String,
+    pub label_name: String,
+    pub build_version: String,
+    /// SHA-1 (hex) of the manifest file.
+    pub hash: String,
+    pub is_preloaded: bool,
+    pub manifests: Vec<ManifestLocation>,
+    /// Keys for encrypted manifests and chunks: secret guid (hex) → AES key (hex).
+    /// Licence material: never logged or written.
+    pub secrets: Option<HashMap<String, String>>,
+}
+
+impl fmt::Debug for BuildElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BuildElement")
+            .field("app_name", &self.app_name)
+            .field("build_version", &self.build_version)
+            .field("hash", &self.hash)
+            .field("manifests", &self.manifests.len())
+            .field("secrets", &self.secrets.as_ref().map(|s| s.len()))
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ManifestLocation {
+    pub uri: String,
+    pub query_params: Vec<QueryParam>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QueryParam {
+    pub name: String,
+    pub value: String,
+}
+
+impl ManifestLocation {
+    /// The URL to fetch the manifest from (signed query included).
+    pub fn url(&self) -> String {
+        if self.query_params.is_empty() {
+            return self.uri.clone();
+        }
+        let q: Vec<String> = self.query_params.iter().map(|p| format!("{}={}", p.name, p.value)).collect();
+        format!("{}?{}", self.uri, q.join("&"))
+    }
+
+    /// The chunks' base URL: the manifest's folder.
+    pub fn base_url(&self) -> String {
+        self.uri.rsplit_once('/').map(|(b, _)| b.to_owned()).unwrap_or_default()
+    }
+}
+
+impl BuildElement {
+    /// Chunk base URLs, in the order Epic lists them, without duplicates.
+    pub fn base_urls(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for m in &self.manifests {
+            let b = m.base_url();
+            if !b.is_empty() && !out.contains(&b) {
+                out.push(b);
+            }
+        }
+        out
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ExchangeReply {
+    code: String,
+}
+
 /// The token grants Quiver uses.
 pub enum Grant<'a> {
     /// The code from Epic's sign-in page.
     AuthorizationCode(&'a str),
     RefreshToken(&'a str),
 }
+
+/// `Windows` builds, `Live` label: what EGL installs.
+pub const PLATFORM: &str = "Windows";
+pub const LABEL: &str = "Live";
 
 /// Epic's API for one client config, over a transport.
 #[derive(Clone)]
@@ -339,6 +436,59 @@ impl Api {
         }
         tracing::warn!("Epic library: stopped after {MAX_PAGES} pages");
         Ok(out)
+    }
+
+    /// A game's current build: manifest locations, hash and secrets.
+    pub async fn build_info(&self, access_token: &str, namespace: &str, catalog_item_id: &str, app_name: &str) -> Result<BuildElement> {
+        let url = format!(
+            "{LAUNCHER_HOST}/launcher/api/public/assets/v2/platform/{PLATFORM}/namespace/{}/catalogItem/{}/app/{}/label/{LABEL}",
+            urlencode(namespace),
+            urlencode(catalog_item_id),
+            urlencode(app_name),
+        );
+        let info: BuildInfo = self.json(Request::new("build info", Method::Get, url).bearer(access_token)).await?;
+        let mut elements = info.elements;
+        anyhow::ensure!(!elements.is_empty(), "Epic has no {PLATFORM} build of {app_name}");
+        anyhow::ensure!(elements.len() == 1, "Epic listed {} builds of {app_name}; expected one", elements.len());
+        let e = elements.remove(0);
+        anyhow::ensure!(!e.manifests.is_empty(), "Epic gave no manifest location for {app_name}");
+        Ok(e)
+    }
+
+    /// The manifest file of a build, from the first location that answers, checked
+    /// against the build's SHA-1. Manifest URLs are signed: never logged.
+    pub async fn manifest_file(&self, build: &BuildElement) -> Result<Vec<u8>> {
+        use sha1::Digest as _;
+        let mut last = None;
+        for m in &build.manifests {
+            match self.call(Request::new("manifest", Method::Get, m.url())).await {
+                Ok(r) => {
+                    let got = hex::encode(sha1::Sha1::digest(&r.body));
+                    if !build.hash.is_empty() && !got.eq_ignore_ascii_case(&build.hash) {
+                        last = Some(anyhow::anyhow!("the manifest's SHA-1 didn't match what Epic said"));
+                        continue;
+                    }
+                    return Ok(r.body);
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no manifest location")).context(format!("download the manifest of {}", build.app_name)))
+    }
+
+    /// A one-time exchange code for a game to sign in with (`-AUTH_PASSWORD`).
+    pub async fn exchange_code(&self, access_token: &str) -> Result<Secret<String>> {
+        let r: ExchangeReply = self.json(Request::new("exchange code", Method::Get, format!("{ACCOUNT_HOST}/account/api/oauth/exchange")).bearer(access_token)).await?;
+        anyhow::ensure!(!r.code.is_empty(), "Epic's exchange-code reply had no code");
+        Ok(Secret::new(r.code))
+    }
+
+    /// The ownership token a game with `OwnershipToken=true` reads from `-epicovt=<file>`.
+    pub async fn ownership_token(&self, access_token: &str, account_id: &str, namespace: &str, catalog_item_id: &str) -> Result<Secret<Vec<u8>>> {
+        let url = format!("{ECOMMERCE_HOST}/ecommerceintegration/api/public/platforms/EPIC/identities/{}/ownershipToken", urlencode(account_id));
+        let item = format!("{namespace}:{catalog_item_id}");
+        let r = self.call(Request::new("ownership token", Method::Post, url).bearer(access_token).form(&[("nsCatalogItemId", item.as_str())])).await?;
+        Ok(Secret::new(r.body))
     }
 
     /// One catalog item, with its DLC and main game. The reply maps ids to items; an id
