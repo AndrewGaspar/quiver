@@ -4462,6 +4462,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "quiver-perf",
  "regex",
  "serde",
@@ -4652,6 +4653,15 @@ dependencies = [
  "tempfile",
  "tracing",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "quiver-webview"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -1,25 +1,30 @@
-//! Settings › Accounts › Epic Games (design/STORE-EPIC.md §5): Epic accounts, and signing
-//! in with the browser and a pasted code. "Sign in to Epic" opens Epic's page in the
-//! browser and shows a field for the code that page ends on; quiverd exchanges it.
+//! Settings › Accounts › Epic Games (design/STORE-EPIC.md §5, §9.6): Epic accounts, and
+//! signing in. "Sign in to Epic" opens Epic's page in Quiver's sign-in window
+//! (`quiver-webview`), which hands back the code Epic's page ends on; quiverd exchanges
+//! it. Without that window (no WebKitGTK), or when asked, it falls back to the browser and
+//! a field for pasting the code.
 
 use gpui::{AnyElement, Context, Entity, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use quiver_api::Request;
+use quiver_api::epic::webview::{self, Outcome};
 use quiver_api::epic::{EpicAccount, EpicRequest, LoginStart};
 use quiver_api::stores::AccountState;
 
 use super::{SettingsAction, account_colors, card_head, head_row, note_row, short_id};
 use crate::app::Quiver;
-use crate::err_text;
 use crate::model::initials;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{Icon, Kind, PillKind, SEMIBOLD, avatar, card, mono, pill};
+use crate::{err_text, on_tokio};
 
 /// A focusable Epic control in Settings › Accounts.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EpicAction {
-    /// Open Epic's sign-in page and show the code field.
+    /// Open Epic's sign-in page in the sign-in window.
     SignIn,
+    /// Open Epic's sign-in page in the browser and show the code field.
+    PasteInstead,
     /// Send the pasted code.
     Submit,
     Cancel,
@@ -33,8 +38,12 @@ pub enum EpicAction {
 #[derive(Default)]
 pub struct EpicUi {
     pub accounts: Option<Result<Vec<EpicAccount>, String>>,
-    /// Signing in: the page opened, and the code field.
+    /// Signing in by pasting: the page opened, and the code field.
     pub signing_in: Option<(String, Entity<TextInput>)>,
+    /// The sign-in window is open.
+    pub window_open: bool,
+    /// How the last sign-in window ended, when it didn't sign in.
+    pub note: Option<String>,
     pub busy: bool,
     /// The account whose Sign out was pressed once.
     pub confirm_sign_out: Option<String>,
@@ -60,7 +69,12 @@ impl Quiver {
         if self.ui.epic.signing_in.is_some() {
             v.extend([EpicAction::Submit, EpicAction::Reopen, EpicAction::Cancel]);
         } else {
-            v.push(EpicAction::SignIn);
+            if !self.ui.epic.window_open {
+                v.push(EpicAction::SignIn);
+            }
+            if self.ui.epic.window_open || self.ui.epic.note.is_some() {
+                v.push(EpicAction::PasteInstead);
+            }
         }
         for (i, a) in self.epic_accounts().iter().enumerate() {
             if !a.default {
@@ -76,18 +90,21 @@ impl Quiver {
             self.ui.epic.confirm_sign_out = None;
         }
         match a {
-            EpicAction::SignIn | EpicAction::Reopen => {
+            EpicAction::SignIn => {
+                if self.ui.epic.window_open {
+                    return;
+                }
+                self.ui.epic.note = None;
+                self.call::<LoginStart, _>(Request::Epic(EpicRequest::LoginBegin), cx, |this, r, cx| match r {
+                    Ok(s) => this.epic_window(s.url, cx),
+                    Err(e) => this.show_toast(err_text(&e), cx),
+                });
+            }
+            EpicAction::PasteInstead | EpicAction::Reopen => {
                 let reopen = a == EpicAction::Reopen;
+                self.ui.epic.note = None;
                 self.call::<LoginStart, _>(Request::Epic(EpicRequest::LoginBegin), cx, move |this, r, cx| match r {
-                    Ok(s) => {
-                        cx.open_url(&s.url);
-                        if !reopen || this.ui.epic.signing_in.is_none() {
-                            let input = cx.new(|cx| TextInput::new(cx, "Paste the code (or the whole page) here", false).compact(true));
-                            cx.observe(&input, |_, _, cx| cx.notify()).detach();
-                            this.ui.epic.signing_in = Some((s.url, input));
-                        }
-                        this.show_toast("Epic's sign-in page is open in your browser", cx);
-                    }
+                    Ok(s) => this.epic_paste(s.url, reopen, cx),
                     Err(e) => this.show_toast(err_text(&e), cx),
                 });
             }
@@ -98,22 +115,7 @@ impl Quiver {
                     self.show_toast("Paste the code from Epic's page first", cx);
                     return;
                 }
-                if self.ui.epic.busy {
-                    return;
-                }
-                self.ui.epic.busy = true;
-                self.call::<EpicAccount, _>(Request::Epic(EpicRequest::LoginComplete { code }), cx, |this, r, cx| {
-                    this.ui.epic.busy = false;
-                    match r {
-                        Ok(a) => {
-                            this.ui.epic.signing_in = None;
-                            this.show_toast(format!("Signed in to Epic as {}. Its games are joining the library.", a.display_name), cx);
-                            this.load_epic_accounts(cx);
-                            this.load_library(false, cx);
-                        }
-                        Err(e) => this.show_toast(err_text(&e), cx),
-                    }
-                });
+                self.epic_submit(code, cx);
             }
             EpicAction::Cancel => self.ui.epic.signing_in = None,
             EpicAction::MakeDefault(i) => {
@@ -145,10 +147,73 @@ impl Quiver {
         }
     }
 
+    /// Sign in in the sign-in window (off the UI thread); the code goes straight to
+    /// quiverd. No window here: the browser and the code field instead.
+    fn epic_window(&mut self, url: String, cx: &mut Context<Self>) {
+        self.ui.epic.window_open = true;
+        let u = url.clone();
+        let rx = on_tokio(async move { webview::sign_in(&u, webview::DEFAULT_TIMEOUT).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = rx.await.unwrap_or_else(|_| Outcome::Failed("cancelled".into()));
+            this.update(cx, |this, cx| {
+                this.ui.epic.window_open = false;
+                match outcome {
+                    Outcome::Code(code) => this.epic_submit(code.into_inner(), cx),
+                    Outcome::Cancelled => this.ui.epic.note = Some("Sign-in cancelled: the window was closed.".into()),
+                    Outcome::TimedOut => this.ui.epic.note = Some("The sign-in window timed out. Sign in again when you're ready.".into()),
+                    Outcome::Failed(e) => this.ui.epic.note = Some(format!("The sign-in window failed: {e}")),
+                    Outcome::Unavailable(why) => {
+                        this.show_toast(format!("The sign-in window isn't available ({why}); install webkit2gtk-4.1 for it. Sign in in your browser instead."), cx);
+                        this.epic_paste(url, false, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open the page in the browser and show the code field.
+    fn epic_paste(&mut self, url: String, reopen: bool, cx: &mut Context<Self>) {
+        cx.open_url(&url);
+        if !reopen || self.ui.epic.signing_in.is_none() {
+            let input = cx.new(|cx| TextInput::new(cx, "Paste the code (or the whole page) here", false).compact(true));
+            cx.observe(&input, |_, _, cx| cx.notify()).detach();
+            self.ui.epic.signing_in = Some((url, input));
+        }
+        self.show_toast("Epic's sign-in page is open in your browser", cx);
+    }
+
+    fn epic_submit(&mut self, code: String, cx: &mut Context<Self>) {
+        if self.ui.epic.busy {
+            return;
+        }
+        self.ui.epic.busy = true;
+        self.call::<EpicAccount, _>(Request::Epic(EpicRequest::LoginComplete { code }), cx, |this, r, cx| {
+            this.ui.epic.busy = false;
+            match r {
+                Ok(a) => {
+                    this.ui.epic.signing_in = None;
+                    this.ui.epic.note = None;
+                    this.show_toast(format!("Signed in to Epic as {}. Its games are joining the library.", a.display_name), cx);
+                    this.load_epic_accounts(cx);
+                    this.load_library(false, cx);
+                }
+                Err(e) => {
+                    let e = err_text(&e);
+                    this.ui.epic.note = Some(e.clone());
+                    this.show_toast(e, cx);
+                }
+            }
+        });
+    }
+
     pub(super) fn settings_epic(&mut self, th: &Theme, actions: &[SettingsAction], cx: &mut Context<Self>) -> Vec<AnyElement> {
         let accounts = self.epic_accounts();
         let signing_in = self.ui.epic.signing_in.clone();
-        let sign_in = (signing_in.is_none()).then(|| {
+        let window_open = self.ui.epic.window_open;
+        let sign_in = (signing_in.is_none() && !window_open).then(|| {
             self.action_button(
                 th,
                 actions,
@@ -165,8 +230,36 @@ impl Quiver {
         }
         if let Some((_, input)) = signing_in {
             out.push(self.epic_sign_in_card(th, actions, input, cx));
+        } else if window_open || self.ui.epic.note.is_some() {
+            let (sub, text) = if window_open {
+                (
+                    "in Quiver's sign-in window",
+                    "Sign in on Epic's page in the window that just opened (password, two-factor code, captcha: all on Epic's site). Quiver takes the code when Epic shows it, and the window keeps no cookies.".to_owned(),
+                )
+            } else {
+                ("didn't finish", self.ui.epic.note.clone().unwrap_or_default())
+            };
+            let busy = self.ui.epic.busy;
+            out.push(
+                card(th)
+                    .child(card_head(th, "Sign in to Epic", sub, None))
+                    .child(div().px(px(16.)).pb(px(12.)).text_size(px(12.5)).text_color(th.tx2).child(if busy { "Signing in…".to_owned() } else { text }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(16.))
+                            .py(px(12.))
+                            .border_t_1()
+                            .border_color(th.line1)
+                            .child(self.action_button(th, actions, SettingsAction::Epic(EpicAction::PasteInstead), Kind::Ghost, Some(Icon::ExternalLink), "Paste a code instead", cx)),
+                    )
+                    .into_any_element(),
+            );
         } else if accounts.is_empty() && matches!(self.ui.epic.accounts, Some(Ok(_))) {
-            out.push(card(th).p(px(18.)).text_color(th.tx2).child("No Epic account is signed in. Sign in on Epic's own page in your browser; Quiver never sees your password.").into_any_element());
+            out.push(card(th).p(px(18.)).text_color(th.tx2).child("No Epic account is signed in. Sign in on Epic's own page, in Quiver's sign-in window; Quiver never sees your password.").into_any_element());
         }
         let games = |id: &str| self.games.iter().filter(|g| g.entry.owned_by.iter().any(|o| o == id) || g.entry.records.iter().any(|r| r.owned_by.iter().any(|o| o == id))).count();
         let rows: Vec<(EpicAccount, usize)> = accounts.iter().map(|a| (a.clone(), games(&a.account_id))).collect();
