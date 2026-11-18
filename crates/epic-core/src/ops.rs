@@ -54,7 +54,7 @@ pub struct Build {
 }
 
 impl Build {
-    fn source(&self, user_agent: &str) -> Result<HttpChunks> {
+    pub(crate) fn source(&self, user_agent: &str) -> Result<HttpChunks> {
         HttpChunks::new(self.element.base_urls(), user_agent)
     }
 }
@@ -133,7 +133,7 @@ impl Epic {
     }
 
     /// A title in the library (owned by a signed-in account), for installing.
-    async fn owned(&self, app: &str) -> Result<Title> {
+    pub(crate) async fn owned(&self, app: &str) -> Result<Title> {
         let lib = self.library(false).await?;
         match lib.title(app) {
             Some(t) => Ok(t.clone()),
@@ -145,7 +145,7 @@ impl Epic {
     }
 
     /// The account to use for a game: the one it was installed with, else its first owner.
-    fn account_for(&self, t: &Title, installed: Option<&Installed>) -> Result<String> {
+    pub(crate) fn account_for(&self, t: &Title, installed: Option<&Installed>) -> Result<String> {
         if let Some(a) = installed.map(|i| i.account.clone()).filter(|a| !a.is_empty() && t.owners.contains(a)) {
             return Ok(a);
         }
@@ -641,7 +641,7 @@ impl Epic {
 }
 
 /// A folder name from the catalog that is safe to use as one path component.
-fn is_plain_name(s: &str) -> bool {
+pub(crate) fn is_plain_name(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0']) && s.len() <= 128
 }
 

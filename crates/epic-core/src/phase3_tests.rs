@@ -29,6 +29,10 @@ struct Cloud {
     puts: Mutex<Vec<String>>,
     /// Answer PUTs to pre-signed links with this status (0: 200).
     put_status: Mutex<u16>,
+    /// Every savesync call and pre-signed read: `list <app>`, `read <key>`.
+    log: Mutex<Vec<String>>,
+    /// No connection to the cloud.
+    offline: std::sync::atomic::AtomicBool,
 }
 
 fn key(app: &str, rel: &str) -> String {
@@ -53,11 +57,17 @@ impl Transport for Cloud {
     fn send(&self, req: Request) -> quiver_core::stores::BoxFuture<'_, anyhow::Result<Response>> {
         Box::pin(async move {
             let ok = |body: Vec<u8>| Ok(Response { status: 200, body });
+            if self.offline.load(std::sync::atomic::Ordering::Relaxed) && (req.url.contains("/savesync/") || req.url.starts_with("https://cloud.test/")) {
+                anyhow::bail!("error sending request: connection refused");
+            }
             if let Some(rest) = req.url.strip_prefix(&format!("{}/api/v1/access/egstore/savesync/{ID}/", saves::DATASTORAGE_HOST)) {
                 let app = rest.trim_end_matches('/').to_owned();
                 assert!(req.headers.iter().any(|(k, v)| k == "Authorization" && v.starts_with("bearer ")));
                 return match req.method {
-                    Method::Get => ok(self.listing(&app).into_bytes()),
+                    Method::Get => {
+                        self.log.lock().unwrap().push(format!("list {app}"));
+                        ok(self.listing(&app).into_bytes())
+                    }
                     Method::Post => {
                         let body: serde_json::Value = serde_json::from_slice(&req.body.as_ref().unwrap().1).unwrap();
                         let mut out = serde_json::Map::new();
@@ -72,6 +82,7 @@ impl Transport for Cloud {
             }
             if let Some(k) = req.url.strip_prefix("https://cloud.test/r/") {
                 assert!(!req.headers.iter().any(|(k, _)| k == "Authorization"), "no token goes to a pre-signed link");
+                self.log.lock().unwrap().push(format!("read {k}"));
                 return match self.files.lock().unwrap().get(k) {
                     Some(d) => ok(d.clone()),
                     None => Ok(Response { status: 404, body: b"<Error>NoSuchKey</Error>".to_vec() }),
@@ -490,4 +501,124 @@ async fn the_game_page_carries_epics_progress() {
     let c = d.cloud.unwrap();
     assert_eq!((c.files, c.unsynced), (1, 1));
     assert!(d.unavailable.is_empty(), "{:?}", d.unavailable);
+}
+
+impl Rig {
+    /// The launcher set the prefix up (background checks wait for that).
+    fn prefix_ready(&self) {
+        std::fs::create_dir_all(self.prefix()).unwrap();
+        std::fs::write(self.prefix().join(quiver_core::launcher::PLAIN_PREFIX_READY), "").unwrap();
+    }
+    /// Make the last background check an hour old, so the next one is due.
+    fn age(&self, app: &str) {
+        self.epic.edit_state(app, |st| st.fresh.values_mut().for_each(|f| f.attempted_at = f.attempted_at.map(|t| t - chrono::Duration::hours(1)))).unwrap();
+    }
+    /// The savesync calls and reads since the last call.
+    fn calls(&self) -> Vec<String> {
+        std::mem::take(&mut *self.cloud.log.lock().unwrap())
+    }
+}
+
+/// Between sessions the cloud is checked with one listing; what's newer there comes down
+/// with the pre-launch rules (backup first, conflicts left alone), and nothing goes up.
+#[tokio::test]
+async fn background_checks_download_newer_saves_and_never_upload() {
+    let r = rig().await;
+    r.epic.allow_writes(progress::WriteKind::Saves).unwrap();
+    r.write("slot1.sav", "mine");
+    let p = r.epic.before_launch("Wren", &r.prefix(), None).await;
+    r.epic.after_exit(&p, None, true).await.saves.unwrap().unwrap();
+    let puts = r.cloud.puts.lock().unwrap().len();
+    // Not before the launcher has set the prefix up.
+    let o = r.epic.freshen("Wren", true).await.unwrap();
+    assert!(matches!(&o, fresh::Outcome::Skipped(why) if why.contains("prefix isn't set up")), "{o:?}");
+    r.prefix_ready();
+    r.age("Wren");
+    r.calls();
+    // Nothing new: one listing, no manifest read.
+    assert_eq!(r.epic.freshen("Wren", true).await.unwrap(), fresh::Outcome::UpToDate);
+    assert_eq!(r.calls(), ["list Wren"]);
+    // Not due again for a while; a nudge waits for the gap too.
+    assert_eq!(r.epic.freshen("Wren", false).await.unwrap(), fresh::Outcome::Skipped("not due".into()));
+    assert_eq!(r.epic.freshen("Wren", true).await.unwrap(), fresh::Outcome::Skipped("not due".into()));
+    assert!(r.calls().is_empty());
+    // Another machine plays: the next check brings its saves down, this machine's copy
+    // backed up first.
+    r.upload_elsewhere("2030.01.01-00.00.00", &[("slot1.sav", "theirs"), ("slot2.sav", "new slot")]);
+    r.age("Wren");
+    let fresh::Outcome::Downloaded(rep) = r.epic.freshen("Wren", false).await.unwrap() else { panic!() };
+    assert_eq!(rep.downloaded, ["slot1.sav", "slot2.sav"]);
+    assert_eq!((r.read("slot1.sav").as_str(), r.read("slot2.sav").as_str()), ("theirs", "new slot"));
+    assert_eq!(std::fs::read_to_string(rep.backup.unwrap().path.join("slot1.sav")).unwrap(), "mine");
+    assert_eq!(r.cloud.puts.lock().unwrap().len(), puts, "background work never uploads");
+    let s = r.epic.saves_report("Wren", true).await.unwrap();
+    assert_eq!(s.state, SyncState::InSync);
+    assert_eq!(s.last_sync.as_ref().unwrap().by, "in the background");
+    let b = s.background.unwrap();
+    assert!(b.enabled && b.checked_at.is_some() && b.downloaded_at.is_some() && b.conflicts.is_empty());
+    assert_eq!((b.downloaded, b.cloud_version.as_deref()), (vec!["slot1.sav".to_owned(), "slot2.sav".to_owned()], Some("2030.01.01-00.00.00")));
+    // Nothing new again: the base is the cloud's newest, so nothing is read.
+    r.calls();
+    r.age("Wren");
+    assert_eq!(r.epic.freshen("Wren", false).await.unwrap(), fresh::Outcome::UpToDate);
+    assert_eq!(r.calls(), ["list Wren"]);
+    // The same file changed on both sides: left alone, reported once as new.
+    r.write("slot1.sav", "mine again");
+    r.upload_elsewhere("2030.01.02-00.00.00", &[("slot1.sav", "theirs again"), ("slot2.sav", "new slot")]);
+    r.age("Wren");
+    assert_eq!(r.epic.freshen("Wren", false).await.unwrap(), fresh::Outcome::Conflict { files: vec!["slot1.sav".into()], new: true });
+    assert_eq!(r.read("slot1.sav"), "mine again");
+    r.calls();
+    r.age("Wren");
+    assert_eq!(r.epic.freshen("Wren", false).await.unwrap(), fresh::Outcome::Conflict { files: vec!["slot1.sav".into()], new: false });
+    assert_eq!(r.calls(), ["list Wren"], "same cloud, same files: the manifest isn't read again");
+    assert_eq!(r.epic.saves_report("Wren", false).await.unwrap().background.unwrap().conflicts, ["slot1.sav"]);
+    // While the game is played, background syncs stand aside.
+    let p = r.epic.before_launch("Wren", &r.prefix(), None).await;
+    r.age("Wren");
+    let o = r.epic.freshen("Wren", true).await.unwrap();
+    assert!(matches!(&o, fresh::Outcome::Skipped(why) if why.contains("being played")), "{o:?}");
+    let held = r.epic.sync_saves(p.location.as_ref().unwrap(), Trigger::Background).await.unwrap();
+    assert!(held.held.unwrap().contains("being played") && held.downloaded.is_empty());
+    r.epic.after_exit(&p, None, true).await;
+    assert_eq!(r.cloud.puts.lock().unwrap().len(), puts);
+    // Offline: the failure is recorded and the next check backs off.
+    r.cloud.offline.store(true, std::sync::atomic::Ordering::Relaxed);
+    r.age("Wren");
+    assert!(r.epic.freshen("Wren", false).await.is_err());
+    let b = r.epic.saves_report("Wren", false).await.unwrap().background.unwrap();
+    assert_eq!(b.failures, 1);
+    assert!(b.error.unwrap().contains("connection refused"));
+    assert!(b.next_check.unwrap() > Utc::now() + chrono::Duration::minutes(55));
+}
+
+/// A session whose upload failed at exit (offline) is finished between sessions, but only
+/// once the person has said yes to uploads.
+#[tokio::test]
+async fn a_sessions_failed_upload_is_retried_in_the_background_once_allowed() {
+    let r = rig().await;
+    r.prefix_ready();
+    // Uploads not allowed yet; offline at exit.
+    let p = r.epic.before_launch("Wren", &r.prefix(), None).await;
+    r.write("slot1.sav", "played offline");
+    r.cloud.offline.store(true, std::sync::atomic::Ordering::Relaxed);
+    let f = r.epic.after_exit(&p, None, true).await;
+    assert!(f.note.contains("tried again in the background"), "{}", f.note);
+    let b = r.epic.saves_report("Wren", false).await.unwrap().background.unwrap();
+    assert!(b.upload_pending.is_some() && b.upload_error.is_some());
+    // Back online: the check runs (download only), but the upload waits for the yes.
+    r.cloud.offline.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(r.epic.freshen("Wren", true).await.unwrap(), fresh::Outcome::UpToDate);
+    assert!(r.cloud.puts.lock().unwrap().is_empty());
+    assert!(r.epic.saves_report("Wren", false).await.unwrap().background.unwrap().upload_pending.is_some());
+    // Once uploads are allowed, the next check finishes the session's upload.
+    r.epic.allow_writes(progress::WriteKind::Saves).unwrap();
+    r.age("Wren");
+    let fresh::Outcome::Uploaded(rep) = r.epic.freshen("Wren", false).await.unwrap() else { panic!() };
+    assert_eq!(rep.uploaded, ["slot1.sav"]);
+    let s = r.epic.saves_report("Wren", true).await.unwrap();
+    assert_eq!(s.state, SyncState::InSync);
+    assert_eq!(s.last_sync.unwrap().by, "after exit (retried)");
+    let b = s.background.unwrap();
+    assert!(b.upload_pending.is_none() && b.upload_error.is_none() && b.error.is_none());
 }

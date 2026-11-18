@@ -9,7 +9,7 @@
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use quiver_api::Request;
 use quiver_api::epic::EpicRequest;
-use quiver_api::epicgame::{EpicBackup, EpicGameRequest, EpicPlaytime, EpicSaves, FileState, Resolve, SaveMode, SessionReport, SyncReport, SyncState};
+use quiver_api::epicgame::{EpicBackup, EpicGameRequest, EpicPlaytime, EpicSaves, FileState, Resolve, SaveMode, SavesFreshness, SessionReport, SyncReport, SyncState};
 
 use super::page::{Load, kv, load_note, note, small};
 use crate::app::Quiver;
@@ -84,6 +84,19 @@ impl Quiver {
             }
             this.load_epic_saves(id, cx);
             this.load_store_detail(id, true, cx);
+        });
+    }
+
+    /// Turn keeping Epic saves fresh between sessions on or off (one setting for every
+    /// Epic game).
+    fn epic_background(&mut self, id: Gid, on: bool, cx: &mut Context<Self>) {
+        self.call::<serde_json::Value, _>(game_req(EpicGameRequest::SavesBackground { enabled: Some(on) }), cx, move |this, r, cx| {
+            match r {
+                Ok(_) if on => this.show_toast("Epic cloud saves are kept fresh between sessions", cx),
+                Ok(_) => this.show_toast("Epic cloud saves sync only around launches and on Sync now", cx),
+                Err(e) => this.show_toast(err_text(&e), cx),
+            }
+            this.load_epic_saves(id, cx);
         });
     }
 
@@ -241,6 +254,9 @@ impl Quiver {
         if let Some(l) = &s.last_sync {
             body = body.child(kv(th, "Last sync", div().child(format!("{} ({})", when(Some(l.at)), l.by))));
         }
+        if let Some(b) = &s.background {
+            body = body.child(kv(th, "Between sessions", self.epic_background_row(th, id, b, cx)));
+        }
         if let Some(n) = &s.next {
             body = body.child(div().text_size(px(12.)).text_color(if s.state == SyncState::Conflict { th.bad } else { th.tx3 }).child(n.clone()));
         }
@@ -262,6 +278,42 @@ impl Quiver {
         }
         body = body.child(buttons);
         card(th).child(card_header(th, "Epic cloud saves").child(div().flex_1()).child(pill(th, k, None, label))).child(body)
+    }
+
+    /// Keeping the saves fresh between sessions: when the cloud was last checked, the last
+    /// download, a conflict a check found, a session's upload still waiting; and the switch.
+    fn epic_background_row(&self, th: &Theme, id: Gid, b: &SavesFreshness, cx: &mut Context<Self>) -> gpui::Div {
+        let line = |t: String, c| div().text_size(px(12.)).text_color(c).child(t);
+        let mut col = div().flex().flex_col().gap(px(3.));
+        if !b.enabled {
+            col = col.child(line("Off: synced only around launches and with Sync now".into(), th.tx3));
+        } else {
+            let mut first = format!("Checked {}", when(b.checked_at));
+            if let Some(t) = b.downloaded_at {
+                first.push_str(&format!(" · downloaded {} ({} file(s))", when(Some(t)), b.downloaded.len()));
+            }
+            col = col.child(line(first, th.tx2));
+            if let Some(n) = &b.note {
+                col = col.child(line(format!("Not checked: {n}"), th.tx3));
+            }
+            if let Some(e) = &b.error {
+                col = col.child(line(format!("Last check failed: {e} (next {})", when(b.next_check)), th.tx3));
+            }
+            if !b.conflicts.is_empty() {
+                col = col.child(line(format!("Changed on both sides: {}. Choose which to keep; nothing syncs until then.", b.conflicts.join(", ")), th.bad));
+            }
+            if let Some(t) = b.upload_pending {
+                col = col.child(line(format!("The session of {} didn't upload: tried again once Epic answers{}", when(Some(t)), if b.enabled { "" } else { " (background is off)" }), th.tx3));
+            }
+            col = col.child(line("Newer cloud saves come down on their own (this PC's copies backed up first), so the game is ready offline. Never uploads on its own.".into(), th.tx3));
+        }
+        let on = b.enabled;
+        col.child(
+            div().flex().pt(px(2.)).child(
+                small(("epic-bg", usize::from(on)), th, Some(if on { Icon::Pause } else { Icon::CloudDownload }), if on { "Stop background checks" } else { "Keep fresh in the background" })
+                    .on_click(cx.listener(move |this, _, _, cx| this.epic_background(id, !on, cx))),
+            ),
+        )
     }
 
     fn epic_files_card(&self, th: &Theme, s: &EpicSaves) -> gpui::Div {

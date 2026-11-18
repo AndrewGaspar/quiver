@@ -25,6 +25,8 @@ pub mod auth;
 pub mod chunk;
 pub mod config;
 pub mod content;
+pub mod extras;
+pub mod fresh;
 pub mod http;
 pub mod installs;
 pub mod library;
@@ -327,6 +329,7 @@ impl Epic {
         }
         let lib = Arc::new(self.read_library(refresh).await?);
         *slot = Some((Instant::now(), lib.clone()));
+        self.p3.library_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(lib)
     }
 

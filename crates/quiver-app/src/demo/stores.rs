@@ -182,6 +182,7 @@ fn detail(f: &SteamFixture, hooked: bool) -> GameDetail {
         steam_hook: Some(hook_state(f, hooked)),
         description: None,
         linked: None,
+        extras: Vec::new(),
     }
 }
 

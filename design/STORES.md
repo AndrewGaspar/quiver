@@ -380,6 +380,24 @@ pub struct SaveLocation { pub name: String, pub path_in_prefix: PathBuf, pub kin
   cloud; all five docs agree.
 - The slot view (`saves.rs`) applies to `Slots` locations; `Tree` locations get a file list with
   per-file cloud state.
+- **Between sessions (offline play).** A game is ready to play offline only if its newest saves
+  came down while there was a network. Per store, as built (2026-11-18):
+  - **Epic** (`Quiver`): quiverd keeps them fresh: each installed game that isn't running is
+    checked every 30 minutes (backing off to 6 hours after failures), and sooner when the
+    network comes back, the library is read or quiverd starts. One cheap listing per check;
+    the manifest and chunks only when the cloud moved. What's newer comes down with the
+    pre-launch rules (backup first, conflicts never settled, base moved after). **Download
+    only**: the one upload it does is a session's upload that failed at exit, and only once
+    the person's first yes was given. Shown in the Saves tab and `quiver epic saves <game>`;
+    off with `epic_saves_background` (`quiver epic saves-background off`). STORE-EPIC.md §9.13.
+  - **Ubisoft** (`Quiver`): pulled before a Quiver launch and pushed after it, over the
+    daemon's one demux login for the account (in a real Connect install, Connect does the same
+    while it runs). Nothing between sessions. A background pull fits the rules (it reuses the
+    daemon's existing login; there is never a second one) if it only uses an already-connected
+    socket, never runs while any session for the account is live (a game, a container bridge,
+    Connect), and keeps the `.upload`-marker rule. Not built.
+  - **Steam** (`Delegated`): the Steam client syncs at launch and exit while it runs and is
+    online; nothing between sessions, and nothing Quiver can do short of running the client.
 
 ### 3.8 Achievements, progress and Sight toasts
 

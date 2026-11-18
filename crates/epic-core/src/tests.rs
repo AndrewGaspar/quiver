@@ -555,3 +555,45 @@ async fn adopt_an_existing_folder() {
     let e = r.epic.adopt("Kestrel", &empty, &roots, &progress, &|_| {}).await.unwrap_err();
     assert!(e.to_string().contains("is it the right folder"), "{e}");
 }
+
+/// A digital extra (Origins' soundtrack in the fixtures) is on its game's page, and
+/// downloads into a folder next to the game's, never into it.
+#[tokio::test]
+async fn extras_download_next_to_their_game() {
+    let r = rig();
+    r.login("eg1~a1", "eg1~r1", ID, "Player One").await;
+    script_library(&r.fake, ID, include_str!("../tests/fixtures/library_page1.json"), Some(include_str!("../tests/fixtures/library_page2.json")));
+    script_catalog(&r.fake);
+    let lib = r.epic.library(false).await.unwrap();
+    let t = lib.title("Camellia").unwrap();
+    assert!(t.dlc.iter().all(|d| d.app_name.as_deref() != Some("CamelliaOST")));
+    assert!(lib.title("CamelliaOST").is_none());
+    let p = EpicProvider::new(r.epic.clone());
+    let d = p.detail(GameRef::new(quiver_api::StoreId::Epic, "Camellia").unwrap(), false).await.unwrap();
+    assert_eq!(d.extras.iter().map(|e| (e.id.as_str(), e.name.as_str(), e.installable, e.installed.is_some())).collect::<Vec<_>>(), [("CamelliaOST", "Origins Soundtrack", true, false)]);
+
+    let files: &[(&str, &[u8], &[&str])] = &[("Music/01 Origins.mp3", b"ID3 music", &[]), ("Booklet.pdf", b"%PDF-1.4", &[])];
+    let (mut m, mut chunks) = crate::manifest::tests::build(18, files, 1024, None);
+    m.meta.app_name = "CamelliaOST".into();
+    m.meta.build_version = "ost-1".into();
+    let bytes = crate::manifest::write(&m, true);
+    chunks.insert("m.manifest".into(), bytes.clone());
+    let base = cdn(chunks).await;
+    r.fake.reply("/assets/v2/platform/Windows/namespace/ns-origins/catalogItem/item-aco-ost/app/CamelliaOST/label/Live", 200, &build_reply(&base, &bytes, "ost-1"));
+    r.fake.reply_bytes("/cdn/m.manifest?sig=s3cr3t", 200, bytes.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = ops::Roots { library: tmp.path().join("Games"), prefixes: tmp.path().join("Prefixes"), taken_prefixes: Vec::new() };
+    let progress = quiver_core::install::Progress::default();
+    let rec = r.epic.install_extra("Camellia", "CamelliaOST", &roots, &progress, &|_| {}).await.unwrap();
+    let game_dir = r.epic.folders(t, &roots).0;
+    assert_eq!(rec.dir.parent().unwrap(), extras::extras_root(&game_dir));
+    assert!(!rec.dir.starts_with(&game_dir), "extras never go into the game's folder");
+    assert_eq!(std::fs::read(rec.dir.join("Booklet.pdf")).unwrap(), b"%PDF-1.4");
+    assert_eq!((rec.version.as_str(), rec.game.as_str()), ("ost-1", "Camellia"));
+    let d = p.detail(GameRef::new(quiver_api::StoreId::Epic, "Camellia").unwrap(), false).await.unwrap();
+    assert_eq!((d.extras[0].installed.as_deref(), d.extras[0].dir.as_deref()), (Some("ost-1"), Some(rec.dir.as_path())));
+    // Unknown extras are refused with the way to list them.
+    let e = r.epic.install_extra("Camellia", "Nope", &roots, &progress, &|_| {}).await.unwrap_err();
+    assert!(e.to_string().contains("has no extra Nope"), "{e}");
+    assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
+}

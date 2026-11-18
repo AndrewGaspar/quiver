@@ -65,6 +65,7 @@ impl StoreProvider for Ubisoft {
                 steam_hook: None,
                 description: None,
                 linked: None,
+                extras: Vec::new(),
             })
         })
     }

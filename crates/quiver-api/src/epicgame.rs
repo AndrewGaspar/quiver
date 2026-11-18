@@ -4,7 +4,8 @@
 //! - **Cloud saves.** Games whose catalog names a `CloudSaveFolder` keep their saves in
 //!   Epic's launcher cloud (EGS savesync), which Quiver syncs: pulled before a launch
 //!   (this machine's copies backed up first), pushed after it, with a conflict when both
-//!   sides changed since the last sync. One cloud store per game, the game's real save
+//!   sides changed since the last sync; between sessions quiverd keeps them fresh,
+//!   download only ([`SavesFreshness`]). One cloud store per game, the game's real save
 //!   folder in its prefix. Games without one sync their saves in the game, through Epic
 //!   Online Services, if at all ([`SaveMode::InGame`]).
 //! - **Play time.** Epic's own total is the headline. Sessions are reported to Epic after
@@ -78,6 +79,12 @@ pub enum EpicGameRequest {
         game: GameRef,
         #[serde(default)]
         refresh: bool,
+    },
+    /// Read (and with `enabled`, change) whether quiverd keeps Epic cloud saves fresh
+    /// between sessions ([`SavesFreshness`]): `{ "enabled": bool }` (appended).
+    SavesBackground {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
     },
 }
 
@@ -277,6 +284,54 @@ pub struct EpicSaves {
     /// What a sync would do, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+    /// Between sessions: when the cloud was last checked and what came down (appended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<SavesFreshness>,
+}
+
+/// Background freshness of a game's cloud saves: between sessions quiverd checks Epic's
+/// cloud now and then and downloads what is newer there (this machine's copies backed up
+/// first; a conflict is left for the person), so the saves are ready when the game is
+/// played offline. It never uploads, except to finish a session's upload that couldn't go
+/// at exit (offline), once uploads are allowed ([`WriteGate`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavesFreshness {
+    /// The setting (`epic_saves_background`, on by default). Off: saves sync only around
+    /// launches and on request.
+    pub enabled: bool,
+    /// The last time the cloud was read in the background (successfully).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<DateTime<Utc>>,
+    /// The newest cloud version then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_version: Option<String>,
+    /// The last background download, and its files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloaded: Vec<String>,
+    /// Files a background check found changed on both sides (nothing synced until the
+    /// person chooses).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    /// Why the last check failed (offline, signed out …), and how many in a row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub failures: u32,
+    /// When the next check is due (sooner when the network comes back or the library is
+    /// read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check: Option<DateTime<Utc>>,
+    /// A session's upload that didn't go at exit (since then), retried in the background
+    /// once uploads are allowed; and why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_pending: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_error: Option<String>,
+    /// Why the game isn't checked (its prefix isn't set up yet, it's running …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl EpicSaves {
@@ -301,6 +356,7 @@ impl EpicSaves {
             backups: Vec::new(),
             uploads: WriteGate::default(),
             next: None,
+            background: None,
         }
     }
 }

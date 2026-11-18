@@ -148,6 +148,40 @@ pub async fn saves(client: &Client, source: &str, game: &str, json: bool, local:
     Ok(())
 }
 
+/// The Saves view's lines about keeping saves fresh between sessions.
+pub fn background_lines(b: &quiver_api::epicgame::SavesFreshness, game: GameRef) -> Vec<String> {
+    let mut out = Vec::new();
+    if !b.enabled {
+        out.push("background  off: saves sync only around launches and on request (quiver epic saves-background on)".to_owned());
+        return out;
+    }
+    let mut first = format!("background  checked {}", when(b.checked_at));
+    if let Some(v) = &b.cloud_version {
+        first.push_str(&format!(" (cloud {v})"));
+    }
+    match b.downloaded_at {
+        Some(t) => first.push_str(&format!(" · last download {} ({} file(s))", when(Some(t)), b.downloaded.len())),
+        None => first.push_str(" · nothing downloaded in the background yet"),
+    }
+    out.push(first);
+    if let Some(n) = &b.note {
+        out.push(format!("            not checked: {n}"));
+    }
+    if let Some(e) = &b.error {
+        out.push(format!("            last check failed ({} in a row): {e}; next {}", b.failures, when(b.next_check)));
+    } else if b.note.is_none() {
+        out.push(format!("            next check {}", when(b.next_check)));
+    }
+    if !b.conflicts.is_empty() {
+        out.push(format!("            CONFLICT: {} changed here and in the cloud; nothing syncs until you choose (quiver epic saves {game} sync --keep local|cloud)", b.conflicts.join(", ")));
+    }
+    if let Some(t) = b.upload_pending {
+        let why = b.upload_error.as_deref().map(|e| format!(": {e}")).unwrap_or_default();
+        out.push(format!("            the session of {} didn't upload{why}; tried again in the background once uploads are allowed", when(Some(t))));
+    }
+    out
+}
+
 fn state_word(s: FileState) -> &'static str {
     match s {
         FileState::InSync => "in sync",
@@ -187,6 +221,11 @@ pub fn print_saves(name: &str, s: &EpicSaves) {
     }
     if !s.uploads.open() {
         println!("  uploads     wait for your first yes (quiver epic saves {} sync --yes)", s.game);
+    }
+    if let Some(b) = &s.background {
+        for line in background_lines(b, s.game) {
+            println!("  {line}");
+        }
     }
     if !s.files.is_empty() {
         println!("\n  {:<40} {:<26} {:<26} state", "file", "here", "cloud");

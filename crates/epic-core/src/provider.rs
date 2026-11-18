@@ -205,6 +205,7 @@ impl StoreProvider for EpicProvider {
                 steam_hook: None,
                 description: t.description.clone(),
                 linked: ubisoft_of(&t),
+                extras: self.epic.extras_of(&t, None),
             };
             // Play time, achievements and cloud saves (phase 3; `progress`). A game another
             // store's client manages keeps its progress there.

@@ -231,6 +231,7 @@ impl Scan {
             steam_hook: None,
             description: None,
             linked: None,
+            extras: Vec::new(),
         })
     }
 }

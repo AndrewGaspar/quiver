@@ -9,12 +9,19 @@
 //! - **only playable games and apps are titles**, each with a real name and art. A tile
 //!   never shows a hex id: everything else is in [`Built::hidden`] with the reason, for
 //!   `quiver library --all`. Left out: Unreal Engine marketplace assets (namespace `ue`),
-//!   private sandboxes, engines, plugins and assets, digital extras (soundtracks, art
-//!   books), audience entitlements, items with no Windows build, games another launcher
+//!   private sandboxes, engines, plugins and assets, digital extras (on their game's page
+//!   when it is owned, below), audience entitlements, items with no Windows build, games another launcher
 //!   (not Ubisoft's) runs, and records whose catalog item Epic didn't return (asked again
 //!   at every read until it does);
 //! - **DLC** goes on its game's list as owned (by `mainGameItem`, the games' `dlcItemList`,
 //!   or the one game in the namespace), never as a title of its own;
+//! - **digital extras** (soundtracks, art books, wallpapers: the `digitalextras` category,
+//!   and items whose `mainGameItem` chain passes through one) go on their game's
+//!   [`Title::extras`], never on its DLC list (a game install never pulls them into the
+//!   game's folder) and never as tiles. Epic often hangs them off a container item ("Death
+//!   Stranding Content") that doesn't point at the game, so the game is the first title the
+//!   chain reaches, else the one game in the namespace; with neither they stay hidden. The
+//!   hidden list keeps them too, as "extra for <game>";
 //! - **one game, one title:** a game owned by several accounts, or listed under several
 //!   app names (one catalog item, or one namespace with the same name), is one title;
 //! - **Ubisoft games sold on Epic** (`ThirdPartyManagedApp`/`ThirdPartyManagedProvider`
@@ -24,7 +31,7 @@
 //! Both are cached under `<data>/epic/cache/`: the library per account (the last good
 //! read, used when Epic can't be reached) and catalog items (they rarely change).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -50,6 +57,9 @@ pub struct Title {
     pub developer: Option<String>,
     pub art: TitleArt,
     pub dlc: Vec<DlcInfo>,
+    /// Owned digital extras (soundtracks, art books, wallpapers): their own downloads,
+    /// installed next to the game's folder, never into it.
+    pub extras: Vec<ExtraInfo>,
     pub third_party: Option<ThirdParty>,
     pub attributes: Attributes,
     pub platforms: Vec<String>,
@@ -75,6 +85,17 @@ pub struct DlcInfo {
     /// The DLC's own app (installable DLC), when the account owns it.
     pub app_name: Option<String>,
     pub owned: bool,
+}
+
+/// An owned digital extra of a game (its own app, with files of its own: music, a PDF, …).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtraInfo {
+    pub app_name: String,
+    pub catalog_item_id: String,
+    pub title: String,
+    /// The catalog's `FolderName`, for its folder next to the game's.
+    pub folder_name: Option<String>,
+    pub owners: Vec<String>,
 }
 
 /// A game Epic sells but another store's client manages.
@@ -122,6 +143,9 @@ pub enum Kind {
     /// DLC or an add-on of the game whose catalog item id this is (empty: the game in the
     /// same namespace).
     Addon { main: String },
+    /// A digital extra (soundtrack, art book…), or a container of extras; `main` is its
+    /// `mainGameItem` (empty: none). [`build`] finds its game.
+    Extra { main: String },
     /// Not a tile, and why (for `quiver library --all`).
     Skip(String),
 }
@@ -169,6 +193,37 @@ fn is_entitlement_only(item: &CatalogItem) -> bool {
     item.entitlement_type.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("AUDIENCE")) || has_category(item, "audience")
 }
 
+/// Most links followed up a `mainGameItem` chain.
+const CHAIN_MAX: usize = 6;
+
+/// The catalog ids above an item, nearest first: its `mainGameItem`, that one's, and so
+/// on (or the item whose `dlcItemList` lists it), and whether any item on the way (the
+/// item too) is a digital extra.
+fn ancestry(ns: &str, item: &CatalogItem, catalog: &HashMap<String, CatalogItem>, dlc_of: &HashMap<String, String>) -> (Vec<String>, bool) {
+    let mut ids: Vec<String> = Vec::new();
+    let mut extra = has_category(item, "digitalextras");
+    let up = |i: &CatalogItem| i.main_game_item.as_ref().map(|m| m.id.clone()).filter(|m| !m.is_empty() && *m != i.id).or_else(|| dlc_of.get(&i.id).cloned());
+    let mut next = up(item);
+    // The embedded `mainGameItem` carries its categories even when the catalog cache
+    // doesn't have that item.
+    if item.main_game_item.as_ref().is_some_and(|m| has_category(m, "digitalextras")) {
+        extra = true;
+    }
+    while let Some(id) = next.take() {
+        if ids.len() >= CHAIN_MAX || ids.contains(&id) || id == item.id {
+            break;
+        }
+        ids.push(id.clone());
+        if let Some(i) = catalog.get(&catalog_key(ns, &id)) {
+            extra |= has_category(i, "digitalextras") || i.main_game_item.as_ref().is_some_and(|m| has_category(m, "digitalextras"));
+            next = up(i);
+        } else {
+            next = dlc_of.get(&id).cloned();
+        }
+    }
+    (ids, extra)
+}
+
 /// What a record is, from the record and (when read) its catalog item. `dlc_of` maps DLC
 /// catalog ids to their game's, from every item's `dlcItemList`.
 pub fn classify(r: &LibraryRecord, item: Option<&CatalogItem>, dlc_of: &HashMap<String, String>) -> Kind {
@@ -190,7 +245,7 @@ pub fn classify(r: &LibraryRecord, item: Option<&CatalogItem>, dlc_of: &HashMap<
         return skip("engine, plugin or asset");
     }
     if has_category(item, "digitalextras") {
-        return skip("digital extra (soundtrack, art book…)");
+        return Kind::Extra { main: item.main_game_item.as_ref().map(|m| m.id.clone()).filter(|m| *m != item.id).unwrap_or_default() };
     }
     if is_entitlement_only(item) {
         return skip("an entitlement inside another game");
@@ -283,6 +338,7 @@ fn title_of(r: &LibraryRecord, item: &CatalogItem) -> Title {
         description,
         developer: item.developer.clone().filter(|d| !d.trim().is_empty()),
         art: art_of(item),
+        extras: Vec::new(),
         dlc: item
             .dlc_item_list
             .iter()
@@ -372,12 +428,25 @@ pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String
         });
         push_unique(&mut h.owners, account.to_owned());
     }
+    // Digital extras, with the catalog ids above each (nearest first).
+    let mut extras: Vec<(String, &LibraryRecord, Option<&CatalogItem>, Vec<String>)> = Vec::new();
     for (account, records) in accounts {
         for r in records {
             let item = catalog.get(&catalog_key(&r.namespace, &r.catalog_item_id));
             match (classify(r, item, &dlc_of), item) {
                 (Kind::Skip(why), _) => hide(&mut hidden, account, r, item, why),
-                (Kind::Addon { main }, _) => addons.push((account.clone(), main, r, item)),
+                (Kind::Extra { main }, _) => {
+                    let chain = match item {
+                        Some(i) => ancestry(&r.namespace, i, catalog, &dlc_of).0,
+                        None => vec![main].into_iter().filter(|m| !m.is_empty()).collect(),
+                    };
+                    extras.push((account.clone(), r, item, chain));
+                }
+                (Kind::Addon { main }, _) => match item.map(|i| ancestry(&r.namespace, i, catalog, &dlc_of)) {
+                    // Hung off an extra (a soundtrack under "<Game> Content"): an extra too.
+                    Some((chain, true)) => extras.push((account.clone(), r, item, chain)),
+                    _ => addons.push((account.clone(), main, r, item)),
+                },
                 (Kind::Game, None) => hide(&mut hidden, account, r, None, UNRESOLVED.into()),
                 (Kind::Game, Some(item)) => {
                     let t = games.entry(catalog_key(&r.namespace, &r.catalog_item_id)).or_insert_with(|| title_of(r, item));
@@ -407,8 +476,7 @@ pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String
     for (account, main, r, item) in addons {
         // The main game by catalog id, else the one game in the same namespace.
         let by_id = titles.iter().position(|t| !main.is_empty() && t.catalog_item_id == main);
-        let in_ns: Vec<usize> = titles.iter().enumerate().filter(|(_, t)| t.namespace == r.namespace).map(|(i, _)| i).collect();
-        let base = by_id.or(if in_ns.len() == 1 { Some(in_ns[0]) } else { None });
+        let base = by_id.or_else(|| only_in(&titles, &r.namespace));
         let Some(t) = base.map(|i| &mut titles[i]) else {
             let main_title = item.and_then(|i| i.main_game_item.as_ref()).map(|m| m.title.trim().to_owned()).filter(|m| !m.is_empty());
             let reason = match main_title {
@@ -429,9 +497,63 @@ pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String
             }
         }
     }
+    // Extras go on the first title up their chain, else on the namespace's one game. An
+    // extra that other owned extras hang off ("Death Stranding Content") is a container:
+    // it holds them and isn't listed itself.
+    let owned_items: HashSet<&str> = extras.iter().map(|(_, r, _, _)| r.catalog_item_id.as_str()).collect();
+    let containers: HashSet<String> = extras.iter().filter_map(|(_, _, _, chain)| chain.first()).filter(|id| owned_items.contains(id.as_str())).cloned().collect();
+    // (title, account, record, item, container): hidden once the title's fate is known.
+    let mut attached: Vec<(usize, String, &LibraryRecord, Option<&CatalogItem>, bool)> = Vec::new();
+    for (account, r, item, chain) in extras {
+        let by_chain = chain.iter().find_map(|id| titles.iter().position(|t| &t.catalog_item_id == id));
+        let Some(i) = by_chain.or_else(|| only_in(&titles, &r.namespace)) else {
+            // Named after the nearest item up the chain that isn't an extra itself.
+            let main_title = chain
+                .iter()
+                .filter_map(|id| catalog.get(&catalog_key(&r.namespace, id)))
+                .find(|i| !has_category(i, "digitalextras"))
+                .map(|i| i.title.trim().to_owned())
+                .filter(|t| !t.is_empty() && !is_hex_id(t));
+            let reason = match main_title {
+                Some(m) => format!("extra for {m}, which isn't in your library"),
+                None => "digital extra (soundtrack, art book…) for a game that isn't in your library".to_owned(),
+            };
+            hide(&mut hidden, &account, r, item, reason);
+            continue;
+        };
+        let container = containers.contains(&r.catalog_item_id);
+        let t = &mut titles[i];
+        t.dlc.retain(|d| d.catalog_item_id != r.catalog_item_id);
+        if !container {
+            match t.extras.iter_mut().find(|e| e.app_name == r.app_name) {
+                Some(e) => push_unique(&mut e.owners, account.clone()),
+                None => {
+                    let name = item.map(|i| i.title.trim().to_owned()).filter(|n| !n.is_empty() && !is_hex_id(n));
+                    t.extras.push(ExtraInfo {
+                        app_name: r.app_name.clone(),
+                        catalog_item_id: r.catalog_item_id.clone(),
+                        title: name.unwrap_or_else(|| r.app_name.clone()),
+                        folder_name: item.and_then(|i| attr(i, "FolderName")).map(str::to_owned),
+                        owners: vec![account.clone()],
+                    });
+                }
+            }
+        }
+        attached.push((i, account, r, item, container));
+    }
+    let unfit_reasons: Vec<Option<String>> = titles.iter().map(unfit).collect();
+    for (i, account, r, item, container) in attached {
+        let name = &titles[i].title;
+        let reason = match &unfit_reasons[i] {
+            Some(why) => format!("extra for {name}, which isn't in the library ({why})"),
+            None if container => format!("extra for {name} (holds its other extras)"),
+            None => format!("extra for {name} (on its page)"),
+        };
+        hide(&mut hidden, &account, r, item, reason);
+    }
     let mut visible = Vec::new();
-    for t in titles {
-        match unfit(&t) {
+    for (t, why) in titles.into_iter().zip(unfit_reasons) {
+        match why {
             Some(reason) => {
                 hidden.insert(
                     t.app_name.clone(),
@@ -453,6 +575,15 @@ pub fn build(accounts: &[(String, Vec<LibraryRecord>)], catalog: &HashMap<String
     let mut hidden: Vec<Hidden> = hidden.into_values().collect();
     hidden.sort_by(|a, b| (&a.reason, a.title.as_deref().unwrap_or(&a.sandbox)).cmp(&(&b.reason, b.title.as_deref().unwrap_or(&b.sandbox))));
     Built { titles: visible, hidden }
+}
+
+/// The one title in a namespace, when there is exactly one.
+fn only_in(titles: &[Title], ns: &str) -> Option<usize> {
+    let mut it = titles.iter().enumerate().filter(|(_, t)| t.namespace == ns).map(|(i, _)| i);
+    match (it.next(), it.next()) {
+        (Some(i), None) => Some(i),
+        _ => None,
+    }
 }
 
 // ---- caches
@@ -560,13 +691,16 @@ pub(crate) mod tests {
         assert_eq!(ac.owners, ["acct-one", "acct-two"]);
         let owned: Vec<(&str, bool)> = ac.dlc.iter().map(|d| (d.title.as_str(), d.owned)).collect();
         assert_eq!(owned, [("The Hidden Ones", true), ("The Curse of the Pharaohs", false)]);
+        // Its soundtrack (a digital extra) is on the game, not on its DLC list.
+        let extras: Vec<&str> = ac.extras.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(extras, ["Origins Soundtrack"]);
         let hidden: Vec<(&str, &str)> = built.hidden.iter().map(|h| (h.app_name.as_str(), h.reason.as_str())).collect();
         assert_eq!(
             hidden,
             [
                 ("MysteryApp", UNRESOLVED),
                 ("ForestPack", "Unreal Engine marketplace asset"),
-                ("CamelliaOST", "digital extra (soundtrack, art book…)"),
+                ("CamelliaOST", "extra for Assassin's Creed Origins (on its page)"),
                 ("MobileOnly", "no Windows build"),
                 ("PrivateThing", "private sandbox (a developer or test build)"),
             ]
@@ -686,4 +820,84 @@ pub(crate) mod tests {
         c.forget_library("a");
         assert!(c.library("a").is_none());
     }
+
+    /// Death Stranding's shape in a real library (ids invented): the game, a "Content"
+    /// container in `digitalextras` that names no main game, and three extras whose
+    /// `mainGameItem` is the container.
+    #[test]
+    fn extras_under_their_game() {
+        let item = |ns: &str, id: &str, title: &str, cats: &[&str], main: Option<serde_json::Value>| -> CatalogItem {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "namespace": ns, "title": title,
+                "categories": cats.iter().map(|c| serde_json::json!({"path": c})).collect::<Vec<_>>(),
+                "keyImages": [{"type": "DieselGameBoxTall", "url": format!("https://cdn1.epicgames.com/{id}-tall.jpg")}],
+                "customAttributes": {"FolderName": {"type": "STRING", "value": title.replace(' ', "")}},
+                "releaseInfo": [{"id": format!("rel-{id}"), "appId": format!("app-{id}"), "platform": ["Windows"]}],
+                "entitlementType": "EXECUTABLE",
+                "mainGameItem": main,
+            }))
+            .unwrap()
+        };
+        let embedded = |ns: &str, id: &str, title: &str| serde_json::json!({"id": id, "namespace": ns, "title": title, "categories": [{"path": "public"}, {"path": "digitalextras"}, {"path": "games"}]});
+        let rec = |ns: &str, id: &str, app: &str| LibraryRecord {
+            namespace: ns.into(),
+            catalog_item_id: id.into(),
+            app_name: app.into(),
+            sandbox_name: "Death Stranding".into(),
+            sandbox_type: "PUBLIC".into(),
+            record_type: "APPLICATION".into(),
+            ..Default::default()
+        };
+        let ga = ["public", "games", "applications"];
+        let mut items = vec![
+            item("ns-ds", "ds", "Death Stranding", &ga, None),
+            item("ns-ds", "ds-content", "Death Stranding Content", &["public", "digitalextras", "games", "applications"], None),
+            item("ns-ds", "ds-ost", "DEATH STRANDING DIGITAL SOUNDTRACK", &ga, Some(embedded("ns-ds", "ds-content", "Death Stranding Content"))),
+            item("ns-ds", "ds-art", "SELECTIONS OF TITAN ART BOOK", &ga, Some(embedded("ns-ds", "ds-content", "Death Stranding Content"))),
+            item("ns-ds", "ds-wall", "HD Wallpaper", &ga, Some(embedded("ns-ds", "ds-content", "Death Stranding Content"))),
+            // Two games in one namespace: an extra under a container nobody owns (and the
+            // catalog cache doesn't have) can't be placed; one whose chain names a game can.
+            item("ns-two", "two-a", "Game A", &ga, None),
+            item("ns-two", "two-b", "Game B", &ga, None),
+            item("ns-two", "two-ost", "Two Soundtrack", &ga, Some(embedded("ns-two", "two-content", "Two Content"))),
+            item("ns-two", "b-art", "Game B Art Book", &["digitalextras/artbook"], Some(serde_json::json!({"id": "two-b", "namespace": "ns-two", "title": "Game B"}))),
+        ];
+        let catalog: HashMap<String, CatalogItem> = items.drain(..).map(|i| (catalog_key(&i.namespace, &i.id), i)).collect();
+        let records = vec![
+            rec("ns-ds", "ds", "Boga"),
+            rec("ns-ds", "ds-content", "5bf67f3153364181b54cb9e40ca7fa82"),
+            rec("ns-ds", "ds-ost", "84067e3ec8f149b2bbf2342d7a136065"),
+            rec("ns-ds", "ds-art", "c311b22f878749449886949eeb588999"),
+            rec("ns-ds", "ds-wall", "f8bf1e29bbef480a9b28115ad0d644a0"),
+            rec("ns-two", "two-a", "GameA"),
+            rec("ns-two", "two-b", "GameB"),
+            rec("ns-two", "two-ost", "TwoOST"),
+            rec("ns-two", "b-art", "GameBArt"),
+        ];
+        let built = build(&[("acct".into(), records)], &catalog);
+        // Only real games are tiles.
+        let names: Vec<&str> = built.titles.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(names, ["Death Stranding", "Game A", "Game B"]);
+        let ds = &built.titles[0];
+        assert!(ds.dlc.is_empty(), "extras are never DLC (a game install would pull them in): {:?}", ds.dlc);
+        let extras: Vec<(&str, &str, Option<&str>)> = ds.extras.iter().map(|e| (e.title.as_str(), e.app_name.as_str(), e.folder_name.as_deref())).collect();
+        assert_eq!(
+            extras,
+            [
+                ("DEATH STRANDING DIGITAL SOUNDTRACK", "84067e3ec8f149b2bbf2342d7a136065", Some("DEATHSTRANDINGDIGITALSOUNDTRACK")),
+                ("SELECTIONS OF TITAN ART BOOK", "c311b22f878749449886949eeb588999", Some("SELECTIONSOFTITANARTBOOK")),
+                ("HD Wallpaper", "f8bf1e29bbef480a9b28115ad0d644a0", Some("HDWallpaper")),
+            ]
+        );
+        assert_eq!(ds.extras[0].owners, ["acct"]);
+        assert!(built.titles[1].extras.is_empty());
+        assert_eq!(built.titles[2].extras.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), ["Game B Art Book"]);
+        let hidden: BTreeMap<&str, &str> = built.hidden.iter().map(|h| (h.app_name.as_str(), h.reason.as_str())).collect();
+        assert_eq!(hidden["5bf67f3153364181b54cb9e40ca7fa82"], "extra for Death Stranding (holds its other extras)");
+        assert_eq!(hidden["84067e3ec8f149b2bbf2342d7a136065"], "extra for Death Stranding (on its page)");
+        assert_eq!(hidden["GameBArt"], "extra for Game B (on its page)");
+        assert_eq!(hidden["TwoOST"], "digital extra (soundtrack, art book…) for a game that isn't in your library");
+        assert_eq!(hidden.len(), 6);
+    }
 }
+

@@ -854,7 +854,8 @@ What changed:
   Each owned record is one of: a **game** (`games` or `applications`, executable, Windows,
   no main game), **DLC** (`mainGameItem`, listed in an owned game's `dlcItemList`, or
   `addons`; shown on its game's page as owned, never a tile), or **hidden with a reason**:
-  UE asset, private sandbox, engine/plugin/asset, digital extra, audience entitlement, not a
+  UE asset, private sandbox, engine/plugin/asset, digital extra (on its game's page since
+  §9.13), audience entitlement, not a
   game or app, nothing to install, no Windows build, DLC whose game isn't owned, the catalog
   didn't describe it, no name (a hex title), no art, or managed by a launcher Quiver doesn't
   run (the EA app: STAR WARS Battlefront II). Ubisoft titles still fold into their Ubisoft
@@ -1204,6 +1205,111 @@ only through its game (DLC updates with it).
 installed, `quiver library --refresh --updates` lists it only when Epic has a newer build;
 `cat ~/.local/share/quiver/epic/builds.json` shows the versions checked (no keys);
 `grep "update check\|Epic build check\|new builds" ~/.local/share/quiver/quiverd.log`.
+
+### 9.13 As built: saves kept fresh between sessions, and digital extras (2026-11-18)
+
+**Why.** Cloud saves synced only before a launch (download), after a session (download, then
+upload) and on request. A game played on another machine stayed behind here until its next
+launch, so a launch with no network started on old saves. Now quiverd keeps them fresh between
+sessions, so an installed Epic game is ready to play offline.
+
+**Background freshness** (`epic_core::fresh`, quiverd `epicgame::fresh_loop`):
+
+- **Schedule.** Every installed Epic game is due **every 30 minutes**, and sooner on a
+  *nudge*: quiverd started (a pass a minute after start), **the network came back** (a default
+  route appeared in `/proc/net/route` or `/proc/net/ipv6_route`: read from the kernel, nothing
+  sent), or **the library was read from Epic** (`Epic::library_reads` moved). A nudge skips the
+  wait and the backoff but not a 5-minute gap since the game's last check. After failures the
+  wait doubles (30 min, 1 h, 2 h …) up to **6 hours**; a success resets it. With no default
+  route nothing is tried, and nothing counts as a failure. The loop wakes every 30 s to look at
+  these triggers; each game's due check reads only its small `saves/<app>.json`, so an idle
+  tick costs no network and no catalog parse.
+- **Which games.** Installed through Quiver, with a launcher save folder (`CloudSaveFolder`),
+  not running (quiverd's running games and local sessions, and inside epic-core every game
+  between `before_launch` and `after_exit`: a background sync that gets the lock while a launch
+  starts stands aside), and whose **prefix a launch has set up** (`.quiver-prefix-ready`;
+  before that the first launch downloads the saves, and nothing is written into a prefix
+  Proton hasn't created). Games whose saves sync in game, and games not placeable now, are
+  skipped until their next scheduled check.
+- **Gentle on Epic.** One savesync listing per check. It stops there when the cloud's newest
+  version is the one the last sync left (the base), or when the newest version and this
+  machine's files (a fingerprint of paths and SHA-1s) are what the last look saw (the same
+  answer: a conflict stays a conflict without reading the manifest again). Only otherwise is
+  the newest manifest read, and chunks are fetched only for files that come down.
+- **Rules: exactly the pre-launch download's** (`Trigger::Background`): per file against the
+  newest version and the base; this machine's copies backed up first
+  (`<save_backups>/epic-<app>/<time>/`, "before cloud download"); a conflict is never settled
+  (nothing moves, it is shown, the activity log says so once); the base moves only after the
+  download. `last sync` says "in the background".
+- **Download only.** Background work never uploads, with one exception: a session whose
+  upload failed at exit (offline) is marked *pending* (`after_exit` notes "tried again in the
+  background once Epic answers"), and a later check finishes it with the exit's own sync
+  (`Trigger::Retry`: download what's newer, then upload; "after exit (retried)"), **only once
+  uploads are allowed** (the first yes, `writes.json`). Until then the pending upload is shown
+  and waits. Any later upload (a session, Sync now) clears it.
+- **Seen in** the game's Saves tab ("Between sessions": checked, last download and its files,
+  a conflict a check found, a failed check and when the next is, a session's pending upload;
+  and a button to turn it off or on), in `quiver epic saves <game>` (`background` lines;
+  `EpicSaves.background`, `SavesFreshness`), and in the activity log ("downloaded 2 newer Epic
+  cloud save file(s) of Wren in the background (this PC's copies backed up as …)", "uploaded
+  Wren's saves from its last session, which couldn't go at exit", a new conflict).
+- **Off switch:** `epic_saves_background` in Quiver's config (on by default),
+  `quiver epic saves-background on|off`, `EpicGameRequest::SavesBackground { enabled }`, or
+  the Saves tab's button. Off: saves sync only around launches and on request.
+
+**Ubisoft and Steam, offline** (investigated, not changed; STORES.md §3.7):
+
+- **Ubisoft, launched through Quiver:** Quiver itself pulls before the launch and pushes
+  after exit (`quiver_core::launcher::play` → `savesync::pull` / `push`, `cloudsave_service`
+  over the daemon's one demux socket for the account; Connect isn't in the prefix, the bridge
+  stands in for it). Nothing syncs between sessions, so the newest saves come down only at a
+  launch that has a network. In a real Ubisoft Connect install (the Lutris prefix), Connect
+  syncs at its own launches and exits while it runs; nothing syncs when it isn't running.
+- **A background pull for Ubisoft is possible within Quiver's rules, but not built.** The
+  rule is one live demux login per account (a second login closes the first). quiverd already
+  holds that one login (`Online` per account, shared by installs, the broker and launches), so
+  a background `savesync::pull` (cloud wins except slots with a pending `.upload` marker,
+  backups first) would be a new use of the existing socket, not a new login. It would have to:
+  use only a demux that is already connected (never authenticate just for this), never run
+  while any session for the account is live (a game, a container bridge with its own login, a
+  Lutris Connect), and keep the pull's marker rule. Ubisoft's pull has no base, so "conflict"
+  isn't detectable the way Epic's is: a slot changed here without a marker would be overwritten
+  (after a backup), as at a launch.
+- **Steam:** Steam Cloud is the Steam client's (Delegated): it syncs at the game's launch and
+  exit, and only while the client runs and is online. Quiver doesn't sync Steam saves; it
+  shows `remotecache.vdf`. Offline (Steam's offline mode) the game plays the local files.
+
+**Digital extras under their game** (`library::build`, `epic_core::extras`):
+
+- Epic's taxonomy hangs extras off a container that names no game. Death Stranding in a real
+  library (one namespace): the game (`Boga`); "Death Stranding Content" (`digitalextras`,
+  `games`, `applications`, no `mainGameItem`); and "DEATH STRANDING DIGITAL SOUNDTRACK",
+  "SELECTIONS OF TITAN ART BOOK" and "HD Wallpaper", each with `mainGameItem` = the container.
+  Before this change the three were taken as **DLC** of Death Stranding (the one game in the
+  namespace), so installing the game would have installed them into its folder; the container
+  was hidden as "digital extra".
+- Now an item is an **extra** when it is in `digitalextras`, or when its `mainGameItem` chain
+  (followed through the catalog cache and the embedded `mainGameItem`, up to 6 links, or a
+  `dlcItemList` that lists it) passes through one. Its game is the first title up the chain,
+  else the namespace's one game; with neither it stays hidden ("digital extra (soundtrack, art
+  book…) for a game that isn't in your library", or "extra for <name>, which isn't in your
+  library"). Extras go on `Title::extras`, **never on the DLC list** (a game install never pulls
+  them in), and are never tiles. A container that other owned extras hang off isn't listed
+  itself.
+- **Hidden view** (`quiver library --all`, `EpicRequest::Hidden`) keeps them, with "extra for
+  Death Stranding (on its page)" and, for the container, "extra for Death Stranding (holds its
+  other extras)".
+- **On the game's page:** `GameDetail.extras` (`quiver_api::stores::Extra`: id, name, folder,
+  installed version, installable, note) and an **Extras** card on the Overview with
+  **Download**, then **Open** (the folder, with the desktop's handler). CLI:
+  `quiver epic extras <game> [--json]`, `quiver epic extras <game> install <id|name>
+  [--detach]`.
+- **Downloads** (`EpicRequest::ExtraInstall { game, extra }`, a job of its own, not on the
+  download queue): the extra's current `Live` build through the content engine into
+  `<library>/<game folder> Extras/<FolderName>`, next to the game's folder and never in it;
+  records in `<data>/epic/extras.json`, the manifest in `manifests/<app>.manifest`. Uninstalling
+  the game leaves its extras. Not verified live: that Epic serves a build for each extra (EGL
+  installs them as apps of their own, so it should).
 
 ---
 

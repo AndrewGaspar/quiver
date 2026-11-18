@@ -75,6 +75,33 @@ pub enum EpicAction {
         #[arg(long)]
         json: bool,
     },
+    /// Whether quiverd keeps Epic cloud saves fresh between sessions (it checks the cloud
+    /// now and then and downloads what's newer, so games are ready offline; it never
+    /// uploads on its own). With on/off, changes it.
+    SavesBackground {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
+    /// A game's digital extras (soundtracks, art books, wallpapers); `install EXTRA`
+    /// downloads one into a folder next to the game's (never into it).
+    Extras {
+        game: String,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<ExtrasAction>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExtrasAction {
+    /// Download (or update) an extra: its id from the list, or its name.
+    Install {
+        extra: String,
+        /// Don't follow the download; it runs on in quiverd.
+        #[arg(long)]
+        detach: bool,
+    },
 }
 
 fn epic(r: EpicRequest) -> Request {
@@ -181,6 +208,49 @@ pub async fn run(client: &Client, source: &str, action: EpicAction) -> Result<()
         }
         EpicAction::Saves { game, json, local, action } => crate::epicgame::saves(client, source, &game, json, local, action).await?,
         EpicAction::Playtime { game, json, send, yes, discard } => crate::epicgame::playtime(client, game, json, send, yes, discard).await?,
+        EpicAction::SavesBackground { state } => {
+            let enabled = state.map(|s| s == "on");
+            let v: serde_json::Value = client.call(epic(EpicRequest::Game(quiver_api::epicgame::EpicGameRequest::SavesBackground { enabled }))).await?;
+            if v["enabled"].as_bool().unwrap_or(false) {
+                println!("on: quiverd checks installed Epic games' cloud saves every 30 minutes (and when the network comes back) and downloads what's newer, backing this PC's copies up first");
+            } else {
+                println!("off: Epic cloud saves sync only around launches and on request");
+            }
+        }
+        EpicAction::Extras { game, json, action } => {
+            let e = crate::resolve_any(client, &game).await?;
+            anyhow::ensure!(e.game.store == quiver_api::StoreId::Epic, "{} isn't an Epic game (extras are Epic's)", e.name);
+            match action {
+                None => {
+                    let d: quiver_api::stores::GameDetail = client.call(Request::GameDetail { game: e.game, refresh: false }).await?;
+                    if json {
+                        return print_json(&d.extras);
+                    }
+                    if d.extras.is_empty() {
+                        println!("{}: no digital extras", e.name);
+                        return Ok(());
+                    }
+                    println!("{} ({}): {} digital extra(s), each its own download next to the game's folder", e.name, e.game, d.extras.len());
+                    for x in &d.extras {
+                        let state = match (&x.installed, &x.dir) {
+                            (Some(v), Some(dir)) => format!("downloaded ({v}): {}", dir.display()),
+                            (None, Some(dir)) => format!("not downloaded (goes to {})", dir.display()),
+                            _ => "not downloaded".to_owned(),
+                        };
+                        println!("  {:<40} {}  {state}", x.name, x.id);
+                    }
+                    println!("download one: quiver epic extras {} install <id>", e.game);
+                }
+                Some(ExtrasAction::Install { extra, detach }) => {
+                    let events = client.subscribe().await?;
+                    let id: u64 = client.call(epic(EpicRequest::ExtraInstall { game: e.game, extra })).await?;
+                    eprintln!("downloading an extra of {} (job {id})", e.name);
+                    if !detach {
+                        crate::follow(client, events, id).await?;
+                    }
+                }
+            }
+        }
         EpicAction::Manifest { game, json } => {
             let e = crate::resolve_installable(client, &game).await?;
             anyhow::ensure!(e.game.store == quiver_api::StoreId::Epic, "{} isn't an Epic game", e.name);

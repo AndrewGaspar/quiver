@@ -46,6 +46,9 @@ pub enum EpicRequest {
     /// executable, prerequisites; `serde_json::Value`), read without downloading it. For
     /// checking a build before installing it.
     Manifest { game: crate::GameRef },
+    /// Download (or update) one of a game's digital extras (`GameDetail.extras`, by `id`)
+    /// into its folder next to the game's. Returns the job id (`Request::Jobs`).
+    ExtraInstall { game: crate::GameRef, extra: String },
 }
 
 impl fmt::Debug for EpicRequest {
@@ -60,6 +63,7 @@ impl fmt::Debug for EpicRequest {
             EpicRequest::Hidden => f.write_str("Hidden"),
             EpicRequest::Game(r) => f.debug_tuple("Game").field(r).finish(),
             EpicRequest::Manifest { game } => f.debug_struct("Manifest").field("game", game).finish(),
+            EpicRequest::ExtraInstall { game, extra } => f.debug_struct("ExtraInstall").field("game", game).field("extra", extra).finish(),
         }
     }
 }

@@ -69,6 +69,7 @@ pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicRequest) -> Res
             json!(a)
         }
         EpicRequest::Game(r) => crate::epicgame::handle(d, source, r).await?,
+        EpicRequest::ExtraInstall { game, extra } => json!(install_extra(d, source, game, extra).await?),
     })
 }
 
@@ -197,6 +198,68 @@ pub(crate) async fn verify(d: &Arc<Daemon>, source: &str, game: GameRef, repair:
         let result = this.epic.verify(&a, &progress).await;
         ticker.abort();
         crate::downloads::end_verify(&this, id, &progress, result);
+    });
+    Ok(id)
+}
+
+/// Extras being downloaded (their app names), one job each.
+static EXTRAS: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
+
+/// `EpicRequest::ExtraInstall`: download one of a game's digital extras into its folder
+/// next to the game's, as a job of its own (not on the download queue: extras are small,
+/// and never part of the game's install). Returns the job id.
+async fn install_extra(d: &Arc<Daemon>, source: &str, game: GameRef, extra: String) -> Result<u64> {
+    let a = app(game)?;
+    let lib = d.epic.library(false).await?;
+    let t = lib.title(&a).cloned().with_context(|| format!("{game} is not a game in your Epic library"))?;
+    let e = t
+        .extras
+        .iter()
+        .find(|e| e.app_name == extra || e.catalog_item_id == extra || e.title.eq_ignore_ascii_case(&extra))
+        .cloned()
+        .with_context(|| format!("{} has no extra {extra:?} (quiver epic extras {game})", t.title))?;
+    if !EXTRAS.lock().unwrap().insert(e.app_name.clone()) {
+        bail!("{} is already downloading", e.title);
+    }
+    let id = d.new_game_job(JobKind::Install, game, format!("{} ({}'s extra)", e.title, t.title));
+    d.log_activity_game(source, format!("download {}, an extra of {}", e.title, t.title), Some(game));
+    let this = d.clone();
+    let source = source.to_owned();
+    tokio::spawn(async move {
+        let progress = Arc::new(Progress::default());
+        let ticker = {
+            let (this, progress) = (this.clone(), progress.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    this.update_job(id, |j| {
+                        j.downloaded = progress.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+                        j.total = progress.total.load(std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+            })
+        };
+        let status = {
+            let this = this.clone();
+            move |s: String| this.update_job(id, |j| j.status = s.clone())
+        };
+        let result = this.epic.install_extra(&a, &e.app_name, &roots(&this), &progress, &status).await;
+        ticker.abort();
+        EXTRAS.lock().unwrap().remove(&e.app_name);
+        this.update_job(id, |j| {
+            j.done = true;
+            match &result {
+                Ok(rec) => j.status = format!("Downloaded {} to {}", rec.title, rec.dir.display()),
+                Err(e) => {
+                    j.status = "Failed".into();
+                    j.error = Some(format!("{e:#}"));
+                }
+            }
+        });
+        if let Ok(rec) = &result {
+            this.log_activity_game(&source, format!("downloaded {} ({}) to {}", rec.title, rec.version, rec.dir.display()), Some(game));
+        }
+        this.emit(Event::LibraryChanged);
     });
     Ok(id)
 }
