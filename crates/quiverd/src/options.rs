@@ -266,7 +266,7 @@ impl Daemon {
                     Some(self.options_set(&src, game, profile.clone(), ops, live, message.clone(), confirmed, None).await?)
                 };
                 if !tweak_ops.is_empty() {
-                    let scope = quiver_api::tweaks::Scope::Profile { game: game, profile: profile.clone() };
+                    let scope = quiver_api::tweaks::Scope::Profile { game, profile: profile.clone() };
                     let t = self.tweaks_set_ops(&src, scope, tweak_ops, message, confirmed).await?;
                     out = Some(match out {
                         None => t,

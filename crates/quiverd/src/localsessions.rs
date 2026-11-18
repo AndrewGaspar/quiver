@@ -187,12 +187,7 @@ impl crate::Daemon {
 
     /// A local session's process exited: end its perf session and record it.
     async fn end_local(self: &std::sync::Arc<Self>, id: u64, name: &str) {
-        let Some(l) = self.local.remove(id) else { return };
-        // Its options session (outside edits imported, crash correlation), as for a Quiver
-        // launch. Steam doesn't say how the game exited.
-        if let Some((launch, _)) = &l.mods {
-            self.options_session_end(launch, None).await;
-        }
+        let Some(l) = self.local.lock().get(&id).cloned() else { return };
         let ended = Utc::now();
         // Only the perf session this launch began (a newer launch may have its own by now).
         let perf = l.perf_session.as_deref().and_then(|s| self.perf.end_steam_session(&l.game, s));
@@ -203,6 +198,13 @@ impl crate::Daemon {
         }
         let mins = session.seconds / 60;
         self.log_activity_game("steam", format!("played {name} for {mins} min (Steam, through quiver steam-run)"), Some(l.game));
+        // Its options session (outside edits imported, crash correlation), as for a Quiver
+        // launch. Steam doesn't say how the game exited. Then the session goes, once it's
+        // all recorded.
+        if let Some((launch, _)) = &l.mods {
+            self.options_session_end(launch, None).await;
+        }
+        self.local.remove(id);
         self.emit(quiver_api::Event::SessionsChanged { sessions: self.all_sessions() });
     }
 }

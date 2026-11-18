@@ -519,6 +519,12 @@ mod tests {
         assert_eq!(p.ignored.len(), 1);
         assert!(p.ignored[0].starts_with("proton=GE-Proton10-34"));
         assert!(plan_from(GameRef::ubisoft(1), Default::default(), 0).ignored.is_empty());
+        // A Ubisoft copy's Steam profile is stored but not applied yet; a Steam game's is (by
+        // the mods part of the plan, not here).
+        let mut s = quiver_api::GameSettings::default();
+        s.apply(&quiver_api::SettingOp::parse("steam_profile=p1").unwrap()).unwrap();
+        assert!(plan_from(GameRef::ubisoft(1), s.clone(), 0).ignored[0].starts_with("steam_profile=p1"));
+        assert!(plan_from(GameRef::steam(1), s, 0).ignored.is_empty());
         // Any other Steam game: the same plan from its own settings, product 0.
         let mut s = quiver_api::GameSettings::default();
         for op in ["env.PROTON_LOG=1", "wrappers=gamemoderun", "args=-dx12"] {

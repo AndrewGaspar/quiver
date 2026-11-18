@@ -2760,4 +2760,86 @@ mod tests {
         assert_eq!(undone.len(), 1);
         assert_eq!(std::fs::read_to_string(g.prefix.join(&engine)).unwrap(), fixture("PCConsole-ACCEngine.ini"));
     }
+
+    fn steam_game(t: &Path, app: u32, proton: bool) -> Game {
+        Game {
+            product_id: 0,
+            name: "The Witcher 3".into(),
+            install_dir: t.join("steamapps/common/The Witcher 3"),
+            prefix: if proton { t.join(format!("steamapps/compatdata/{app}/pfx")) } else { PathBuf::new() },
+            exe: String::new(),
+            args: None,
+            language: None,
+            game: Some(quiver_api::GameRef::steam(app)),
+        }
+    }
+
+    /// A Steam game's mods live under `steam-<appid>` folders (never a Ubisoft product's),
+    /// run with the game's real saves, and a native game (no prefix) gets install files only.
+    #[test]
+    fn steam_games_have_stores_of_their_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let data = t.join("data");
+        let g = steam_game(t, 292030, true);
+        folder(&g.install_dir, &[("bin/x64/witcher3.exe", "e"), ("content/intro.usm", "intro")]);
+        let ini = "drive_c/users/steamuser/Documents/The Witcher 3/user.settings";
+        folder(&g.prefix, &[(ini, "[Visuals]\nMotionBlur=true\n")]);
+        let pkg = folder(
+            &t.join("pkg"),
+            &[
+                ("quiver-mod.toml", "id = \"w3-hud\"\nname = \"Better HUD\"\nsave_compatible = true\ngames = [\"steam:292030\"]\n[launch]\nargs = [\"-net\"]\n[[patch]]\nfile = \"drive_c/users/steamuser/Documents/The Witcher 3/user.settings\"\nsection = \"Visuals\"\nset = { MotionBlur = \"false\" }\n"),
+                ("files/content/hud.bundle", "hud"),
+            ],
+        );
+        let store = ModStore::new(&data, 0).with_game(&g, None);
+        assert_eq!(store.game_ref(), quiver_api::GameRef::steam(292030));
+        let l = store.install(&Package::Dir { path: pkg.clone(), name: None }, "cli").unwrap().layer;
+        assert!(data.join(format!("mods/steam-292030/layers/{}/content/hud.bundle", l.id)).is_file());
+        assert!(!data.join("mods/0").exists() && !data.join("games/0").exists(), "nothing under a Ubisoft-looking folder");
+        // A manifest for another game is refused.
+        let other = ModStore::new(&data, 0).with_game(&steam_game(t, 1, true), None);
+        assert!(other.install(&Package::Dir { path: pkg, name: None }, "cli").unwrap_err().to_string().contains("not steam:1"));
+
+        // A profile: the real saves, even with a saves-changing stack; `saves=new` refused.
+        let r = store.create_profile_with("HUD", std::slice::from_ref(&l.id), None, "cli", None).unwrap();
+        assert_eq!(r.0.profile.saves.as_deref(), Some(crate::savestores::DEFAULT_STORE));
+        assert!(r.1.reason.contains("Steam Cloud"), "{}", r.1.reason);
+        assert!(store.create_profile_with("Fork", &[], Some("new"), "cli", None).unwrap_err().to_string().contains("real saves"));
+        assert!(data.join(format!("games/steam-292030/profiles/{}.jsonl", r.0.profile.id)).is_file());
+        let p = store.plan(Some("HUD")).unwrap();
+        assert!(p.api.saves.reason.contains("Steam Cloud") && !p.api.saves.separate);
+        assert!(p.api.problems.is_empty(), "{:?}", p.api.problems);
+        assert_eq!(p.api.settings.args, ["-net"], "the mod's launch settings");
+        assert_eq!(p.overlays.len(), 1);
+        assert_eq!(p.overlays[0].target, g.install_dir);
+        assert_eq!(p.overlays[0].upper, data.join(format!("mods/steam-292030/profiles/{}/upper", r.0.profile.id)));
+        // Its config patch goes to Steam's prefix, recorded the Quiver way.
+        let st = p.apply_patches().unwrap();
+        assert_eq!(st[0].state, PatchState::Applied, "{st:#?}");
+        assert!(std::fs::read_to_string(g.prefix.join(ini)).unwrap().contains("MotionBlur=false"));
+        assert!(data.join("mods/steam-292030/patches.json").is_file());
+        let state = store.state().unwrap();
+        assert_eq!((state.product_id, state.game_ref()), (0, quiver_api::GameRef::steam(292030)));
+        assert!(state.save_stores.is_empty());
+        assert_eq!(store.undo_patches(None).unwrap()[0].state, PatchState::Undone);
+        assert!(std::fs::read_to_string(g.prefix.join(ini)).unwrap().contains("MotionBlur=true"));
+
+        // A native game: install files mount, prefix patches and folders can't apply.
+        let n = steam_game(&t.join("native"), 620, false);
+        folder(&n.install_dir, &[("portal2.sh", "x")]);
+        let native = ModStore::new(&data, 0).with_game(&n, None);
+        let npkg = folder(&t.join("npkg"), &[("quiver-mod.toml", "id = \"cfg\"\nname = \"Cfg\"\n[[patch]]\nfile = \"drive_c/x.ini\"\nsection = \"S\"\nset = { a = \"1\" }\n"), ("files/cfg/autoexec.cfg", "x")]);
+        let nl = native.install(&Package::Dir { path: npkg, name: None }, "cli").unwrap().layer;
+        native.create_profile("P", std::slice::from_ref(&nl.id), "cli", None).unwrap();
+        let p = native.plan(Some("P")).unwrap();
+        assert!(p.patches.is_empty() && p.apply_patches().unwrap().is_empty());
+        assert!(p.api.warnings.iter().any(|w| w.contains("no Wine prefix")), "{:?}", p.api.warnings);
+        assert_eq!((p.overlays.len(), p.overlays[0].target.clone()), (1, n.install_dir.clone()));
+        // Ubisoft games' folders are as they always were.
+        let ubi = ModStore::new(&data, 3539);
+        assert_eq!(ubi.profile_dir("p"), data.join("mods/3539/profiles/p"));
+        assert_eq!(ubi.layer_history_path("l"), data.join("games/3539/layers/l.jsonl"));
+        assert!(ubi.has_save_stores());
+    }
 }
