@@ -62,6 +62,9 @@ pub enum ReportState {
     DryRun,
     /// Ubisoft already had it when Quiver checked (nothing sent).
     AlreadyEarned,
+    /// The game reported it to its store itself (Epic, through EOS); Quiver only read it
+    /// (appended).
+    ByGame,
 }
 
 impl ReportState {
@@ -73,6 +76,7 @@ impl ReportState {
             Self::Off => "kept locally (reporting off)",
             Self::DryRun => "dry run (not sent)",
             Self::AlreadyEarned => "already on Ubisoft",
+            Self::ByGame => "reported by the game",
         }
     }
 }
@@ -162,6 +166,8 @@ mod tests {
             image: None,
             unlocked_at: "2026-11-17T00:00:00Z".parse().unwrap(),
             report: ReportState::Pending,
+            game: None,
+            key: None,
         };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["type"], "achievement_unlocked");

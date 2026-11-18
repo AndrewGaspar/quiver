@@ -49,7 +49,7 @@ pub struct EpicError {
 }
 
 impl EpicError {
-    fn from_response(label: &str, r: &Response) -> EpicError {
+    pub(crate) fn from_response(label: &str, r: &Response) -> EpicError {
         let mut e: EpicError = serde_json::from_slice(&r.body).unwrap_or_default();
         e.status = r.status;
         // Epic quotes the token it refused ("the refresh token 'eg1~…' is invalid").
@@ -272,12 +272,12 @@ impl Api {
         Api { transport, config }
     }
 
-    async fn send(&self, req: Request) -> Result<Response> {
+    pub(crate) async fn send(&self, req: Request) -> Result<Response> {
         self.transport.send(req).await
     }
 
     /// Send, and turn an error reply into an [`EpicError`].
-    async fn call(&self, req: Request) -> Result<Response> {
+    pub(crate) async fn call(&self, req: Request) -> Result<Response> {
         let label = req.label;
         let r = self.send(req).await?;
         if !r.ok() {
@@ -286,7 +286,7 @@ impl Api {
         Ok(r)
     }
 
-    async fn json<T: serde::de::DeserializeOwned>(&self, req: Request) -> Result<T> {
+    pub(crate) async fn json<T: serde::de::DeserializeOwned>(&self, req: Request) -> Result<T> {
         let label = req.label;
         let r = self.call(req).await?;
         serde_json::from_slice(&r.body).with_context(|| format!("Epic {label}: unexpected reply"))

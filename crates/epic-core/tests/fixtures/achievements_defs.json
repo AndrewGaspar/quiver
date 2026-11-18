@@ -1,0 +1,10 @@
+{"data": {"Achievement": {"productAchievementsRecordBySandbox": {
+  "sandboxId": "ns-wren", "totalAchievements": 3, "totalProductXP": 250,
+  "achievementSets": [{"achievementSetId": "set-base", "isBase": true, "totalAchievements": 3, "totalXP": 250}],
+  "platinumRarity": {"percent": 1.2},
+  "achievements": [
+    {"achievement": {"name": "FIRST_STEPS", "hidden": false, "isBase": true, "unlockedDisplayName": "First Steps", "lockedDisplayName": "First Steps", "unlockedDescription": "Leave the lighthouse.", "lockedDescription": "Leave the lighthouse.", "unlockedIconId": "i1", "lockedIconId": "i1l", "XP": 50, "flavorText": null, "unlockedIconLink": "https://cdn1.epicgames.com/fixture/first.png", "lockedIconLink": "https://cdn1.epicgames.com/fixture/first-locked.png", "tier": {"name": "BRONZE", "hexColor": "#cd7f32", "min": 5, "max": 50}, "rarity": {"percent": 80.1}}},
+    {"achievement": {"name": "DEEP_DIVE", "hidden": false, "isBase": true, "unlockedDisplayName": "Deep Dive", "lockedDisplayName": "Deep Dive", "unlockedDescription": "Reach the trench.", "lockedDescription": "Reach the trench.", "unlockedIconId": "i2", "lockedIconId": "i2l", "XP": 100, "flavorText": null, "unlockedIconLink": "https://cdn1.epicgames.com/fixture/deep.png", "lockedIconLink": "https://cdn1.epicgames.com/fixture/deep-locked.png", "tier": null, "rarity": {"percent": 20.0}}},
+    {"achievement": {"name": "SECRET_END", "hidden": true, "isBase": true, "unlockedDisplayName": "The Other Shore", "lockedDisplayName": "Hidden achievement", "unlockedDescription": "See the other ending.", "lockedDescription": "Keep playing to discover this.", "unlockedIconId": "i3", "lockedIconId": "i3l", "XP": 100, "flavorText": null, "unlockedIconLink": "https://cdn1.epicgames.com/fixture/secret.png", "lockedIconLink": "https://cdn1.epicgames.com/fixture/secret-locked.png", "tier": null, "rarity": {"percent": 2.5}}}
+  ]
+}}}}

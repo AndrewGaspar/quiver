@@ -647,7 +647,179 @@ nothing is written to your Epic account.
 9. **Undo**, if you want: `quiver epic logout` (ends Quiver's session at Epic and deletes
    its keyring entry; other launchers' sessions are separate).
 
-### 9.5 Library cleanup (2026-11-18)
+### 9.5 As built: phase 3, cloud saves, play time, achievements (2026-11-18)
+
+Built alongside stage 2 (installs and launch), on its own branch, so the launch calls two
+hooks this phase provides (below). Nothing here called Epic: every endpoint is exercised on
+recorded-shape or synthesized JSON through the fake transport, and the savesync tests run
+against an in-memory savesync with Epic's listing, link and pre-signed-URL behaviour. The
+protocol was checked against legendary 0.21 master (170964e), Heroic (2dbb802), egs-api-rs
+(fc78686) and the community endpoint docs (cb7f1bc), read as references; no code was taken.
+
+**epic-core, new modules** (stage 1's and stage 2's files only gained small additive
+changes: `Method::Put` and a raw body on `http::Request`, `pub(crate)` on `Api`'s send
+helpers, one `p3` field in `Epic`, the provider's capabilities and a `fill_detail` call):
+
+- `savefmt`: the binary manifest (header, meta, chunk list, file list, custom fields;
+  FString ASCII/UTF-16) and chunk (header v3, zlib, SHA-1 and Epic's rolling hash) formats,
+  read and written, for saves only. Every length from the network is checked; an encrypted
+  or JSON manifest, a part outside its chunk or a hash mismatch is an error, never a panic.
+  Packaging follows EGL's: one 1 MiB stream across files sorted case-insensitively, windows
+  zero-padded, `ChunksV4/<group>/<hash>_<guid>.chunk`, feature level 18, meta app name
+  `<app><account id>`, `CloudSaveFolder` (and `_MAC`) in the custom fields.
+- `savepaths`: `CloudSaveFolder` in a Proton prefix. `{AppData}` is `AppData/Local` (the
+  catalog writes `{AppData}/../LocalLow` and `/../Roaming`), `{UserDir}` Documents,
+  `{UserProfile}`, `{UserSavedGames}`, `{InstallDir}`, `{EpicID}`, a written-out `C:\…`;
+  components matched case-insensitively as Wine does; macOS-only variables, unknown ones and
+  placeholders (`C:\Users[username]\…`, one real catalog entry) say why they can't be placed.
+  `CloudIncludeList` / `CloudExcludeList` (comma-separated globs, `dir/` prefixes).
+  Tested on the real values from this machine's catalog cache (43 of 88 titles have a folder).
+- `saves`: savesync list (`GET …/savesync/<account>/<app>/`), links (`POST` the same with
+  `{"files": [names relative to the app]}`), pre-signed GET/PUT. The sync engine as
+  STORES.md §3.7 sets it: per file against the newest cloud version and a **base** (the
+  state both sides had at the last sync, `<data>/epic/saves/<app>.json`, per account);
+  changed on one side → that side wins; on both → a conflict that nothing settles on its
+  own; no base yet → EGL's time rule (±60 s, inside it a conflict). Before launch: download
+  only. After exit and on request: download, then upload a whole new version (chunks first,
+  manifest last), read back before the base moves. A backup of every file a download or
+  restore replaces (`<save_backups>/epic-<app>/<time>/`). Deletions aren't synced: a file
+  deleted here isn't downloaded again and the next version leaves it out (older versions keep
+  it; Quiver never deletes a cloud file). `MaxSizeMB` is respected.
+- `playtime`: totals (`GET …/playtime/account/<id>/all`, cached 10 minutes) and session
+  reports (`PUT …/playtime/account/<id>`, `machineId` (random, stable, `<data>/epic/
+  machine-id`), `artifactId`, `startTime`, `endTime`, both segment flags true). The queue
+  (`playtime-queue.json`) never sends a session twice: one entry per session id; written as
+  `unconfirmed` before it goes; only Epic's answer moves it on (accepted → `reported`; 5xx,
+  429, 401 → back to `queued`, up to 10 tries; other errors → `failed`; no connection →
+  `queued`, uncounted); a request with no answer stays `unconfirmed` and isn't resent.
+- `achievements`: store GraphQL (`launcher.store.epicgames.com/graphql`, bearer token,
+  EGL's store user agent): `productAchievementsRecordBySandbox` (definitions, cached a day,
+  a stale copy used when the store fails) and `playerAchievementGameRecordsBySandbox` (the
+  account's unlocks, cached 3 minutes), merged as the store shows them (locked names and
+  descriptions until unlocked, `hidden` masked). `new_unlocks` keeps the unlocks already seen
+  per account and game (`achievements/<account>/<app>.json`); the first look only records,
+  so earlier unlocks never toast, and each new one toasts once. Icons are downloaded once for
+  toasts.
+- `progress`: phase 3's shared state, the account a game's progress is for (the default if
+  it owns the game, else the first owner), the one-time yes for account writes
+  (`writes.json`), and `fill_detail`, which puts Epic's play time, achievements and cloud
+  state on the game page (`GameDetail.{playtime, achievements, cloud}`), which the app's
+  Overview and Sight's Achievements section already read.
+- `session`: `before_launch` (remember the prefix and install, pull) and `after_exit` (last
+  unlock check, queue and send the session, push), and `Poller` (unlocks every 5 minutes).
+  None of it fails a launch: an unreachable cloud or a conflict is in the status line and the
+  game starts with this machine's saves.
+
+**Protocol (additive).** `EpicRequest::Game(EpicGameRequest::{Saves, SavesSync, SavesRestore,
+Playtime, PlaytimeSend, Achievements})` with its types in `quiver_api::epicgame`;
+`Event::AchievementUnlocked.{game, key}` (Epic: `product_id` 0, the store's id in `key`);
+`ReportState::ByGame`; Epic's capabilities say `cloud_saves: quiver`, `achievements:
+read_only`, `playtime: quiver`.
+
+**quiverd** (`epicgame.rs`): the requests; backups go to Quiver's `save_backups`; queued
+sessions are retried every 10 minutes. Gates (STORES.md §7 item 10): the **first upload of
+saves** and the **first play-time report** are writes to the person's Epic account, so they
+need a person (`confirmed`, from the app or a terminal) once; after that they happen on their
+own (steer 11 (a): on by default once verified, under `report_playtime`). Until then sessions
+queue as `held` and uploads wait (the status says so). Settling a conflict and restoring a
+backup need `confirmed` from agents. The hooks for the launch:
+
+```rust
+let s = epicgame::begin(&daemon, app, &prefix, Some(&install_dir), session_id).await; // pull, start polling
+job.status = s.note().to_owned();
+/* run the game */
+let note = epicgame::end(&daemon, s).await;                                           // unlocks, play time, push
+```
+
+Unlocks become `AchievementUnlocked` events (Sight toasts, the open page reloads) and
+activity lines. **Stage 2 wires these into its launch** (they are `allow(dead_code)` until it
+does); stage 2 should also call `Epic::remember_place` at install, so the Saves tab shows the
+folder before the first launch.
+
+**CLI.** `quiver epic saves <game> [--json] [--local]`, `… sync [--keep local|cloud] [--yes]`,
+`… restore <backup|latest>`; `quiver epic playtime [<game>]`, `--send [--yes]` (asks at the
+terminal when the first write needs a yes). `quiver progress`, `quiver playtime` and `quiver
+saves` show Epic's side for Epic games.
+
+**App.** Epic games' pages get the Saves & progress tab: Epic's play time and the report
+queue (Report to Epic / Send now), the cloud saves card (account, folder, this PC's folder,
+newest cloud version and how many are kept, last sync, what a sync would do; Sync now, or for
+a conflict Keep this PC's / Keep the cloud's), the file list side by side with the conflicting
+files marked, backups with Restore, and the achievements. Account writes and anything that
+replaces files ask by relabelling the button first. "Saves sync in game" for games without a
+folder. The Overview's Play time stat is Epic's total.
+
+**Sight.** The Achievements section already reads `GameDetail.achievements`, so it lists
+Epic's. Toasts for Epic unlocks match their session by `game` (not `product_id`, which is 0).
+
+### 9.6 Differences from the design
+
+- **One store per Epic game, the real folder.** Steer 7 asked for Ubisoft's rule (one cloud
+  store, others local). Other stores need the folder bind-mounted per launch (STORES.md §3.7
+  `Tree` locations), which isn't built for any store yet, so every profile of an Epic game
+  shares its real save folder, as Steam games do. The base and the conflict view are per
+  account.
+- **Uploads are whole versions** (as EGL's are), so "newer file wins per file" means the
+  newer files on each side are merged into the next version: cloud-newer files come down
+  first, then the merged folder goes up.
+- **Play time is reported after each session** (`AfterSession`), not periodically: EGL sends
+  both segment flags true for a session, and one PUT per session is what the never-twice
+  queue can guarantee. A session quiverd loses (a daemon crash mid-game) isn't reported.
+- **"Saves sync in game"** is shown for every title whose catalog names no `CloudSaveFolder`:
+  the catalog can't tell an EOS-storage game from one without cloud saves, so the wording
+  says "if the game has them".
+- **The EOS overlay** (phase 3's last bullet) isn't built: it belongs with stage 2's launch
+  (a registry entry in the prefix), and steer 8 keeps it off by default.
+- **Not verified live** (unconfirmed in every reference): the first two segments of a cloud
+  key (Quiver keeps them as given and finds chunks beside `manifests/`), the PUT status of a
+  savesync upload (any 2xx), what the play-time segment flags mean, and whether the store
+  GraphQL wants more than EGL's user agent. The steps below settle them.
+
+### 9.7 Your first Epic session: Alan Wake Remastered (`epic:7315f614b0504081bcdceef138075c9c`)
+
+Once stage 2's installer is merged and installed (`tools/install-user.sh`), and Alan Wake
+Remastered is installed through Quiver. Steps 1–5 only read; **steps 6 and 8 write to your
+Epic account and need your OK** (they are what opens the two one-time gates).
+
+1. **Reads first.** `quiver progress epic:7315f614b0504081bcdceef138075c9c` prints Epic's
+   play time for the game and its achievements with your unlocks (the first real store
+   GraphQL read; an error line there means the queries or the user agent need adjusting).
+   `quiver epic playtime` lists Epic's totals for all your games.
+2. `quiver epic saves epic:7315f614b0504081bcdceef138075c9c` should say **saves sync in
+   game**: Alan Wake Remastered's catalog names no save folder (checked in this machine's
+   catalog cache), so the launcher cloud isn't involved for it.
+3. **Play** it through Quiver for ten minutes or more, with Sight open if you like (Shift+F2;
+   its Achievements section lists Epic's). If you earn an achievement, a toast should appear
+   within about five minutes, and once more at the end at the latest; never twice.
+4. Exit the game. `quiver epic playtime epic:7315f614b0504081bcdceef138075c9c` lists the
+   session as **waiting for your first yes** (reporting is on, the gate is closed).
+5. `grep -i "epic" ~/.local/share/quiver/quiverd.log | tail -30` (or `journalctl --user -u
+   quiverd`): labels and statuses only (`playtime totals`, `achievements`, `player
+   achievements`), never tokens.
+6. **Account write (your OK): the first play-time report.** `quiver epic playtime --send --yes`
+   should print the session as `reported`. A few minutes later, `quiver epic playtime
+   epic:7315f614b0504081bcdceef138075c9c` (it asks Epic again) should show the total up by
+   about the session's length, and the Epic Games Launcher (or epicgames.com › your library)
+   should agree. From now on sessions are reported when they end. If Epic refused it, the
+   line says `refused by Epic` with Epic's reason: send that back.
+7. **For the save round trip, pick a small owned game that has a save folder** (Alan Wake
+   Remastered has none): for example Loop Hero (`{AppData}/Loop_hero/`) or The Bridge.
+   Install it through Quiver, play until it saves, exit. `quiver epic saves <game>` shows the
+   files as **newer on this PC** and "uploads wait for your first yes".
+8. **Account write (your OK): the first save upload.** `quiver epic saves <game> sync --yes`
+   (or Upload to Epic, pressed twice, in the game's Saves & progress tab) should print the
+   files and `new cloud version <UTC time>`. Then `quiver epic saves <game>` should say In sync
+   with one version kept. To see it from Epic's side, read-only: `legendary list-saves` (if
+   you use legendary) or the Epic Games Launcher's cloud-save prompt for that game.
+9. **Pull back** (optional, read-only for your account): move the save folder aside
+   (`quiver epic saves <game>` prints it), then `quiver epic saves <game> sync`: the files come
+   back from the cloud. Moving the folder back and syncing again shows a conflict only if
+   both sides changed; pick one with `--keep local|cloud` (the other side is backed up first).
+10. **Send back:** the output of steps 1, 2, 4, 6 and 8, and the quiverd log lines.
+    **Undo**, if you want: uploaded versions can be deleted only in Epic's launcher (Quiver
+    never deletes cloud files); a reported session can't be taken back.
+
+### 9.8 Library cleanup (2026-11-18)
 
 After the first real sign-in the library had 120 Epic entries, no art on any of them, and
 about 30 tiles named by a 32-hex id. What they were, from quiverd's own caches
@@ -713,7 +885,7 @@ library (N)": expect Battlefront II (the EA app) and any item Epic still doesn't
 `grep "Epic catalog" ~/.local/share/quiver/quiverd.log` names any item that failed. In the
 app every Epic tile has box art, and an Epic game's page lists its DLC with what's owned.
 
-### 9.6 Sign-in window (quiver-webview), 2026-11-18
+### 9.9 Sign-in window (quiver-webview), 2026-11-18
 
 The user asked for sign-in inside Quiver instead of copying `authorizationCode` out of Epic's
 JSON page by hand. `quiver epic login` and the app's **Sign in to Epic** now open Epic's own

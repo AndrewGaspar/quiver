@@ -50,11 +50,11 @@ pub struct ToastData {
 
 /// `AchievementUnlocked` → a toast.
 pub fn from_event(e: &Event) -> Option<ToastData> {
-    let Event::AchievementUnlocked { achievement_id, name, description, image, .. } = e else { return None };
+    let Event::AchievementUnlocked { achievement_id, name, description, image, key, .. } = e else { return None };
     Some(ToastData {
         kind: ToastKind::Achievement,
         caption: "Achievement unlocked".into(),
-        title: name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Achievement {achievement_id}")),
+        title: name.clone().filter(|n| !n.trim().is_empty()).or_else(|| key.clone()).unwrap_or_else(|| format!("Achievement {achievement_id}")),
         body: description.clone().filter(|d| !d.trim().is_empty()),
         image: image.as_ref().map(PathBuf::from).filter(|p| p.is_file()),
         level: Level::Accent,
@@ -361,5 +361,12 @@ mod tests {
         assert_eq!(t.image, None, "a missing icon file falls back to the trophy");
         assert_eq!(t.duration, Duration::from_secs(6));
         assert!(from_event(&Event::LibraryChanged).is_none());
+        // An Epic unlock (polled from Epic's store): named, keyed by the store's id.
+        let e: Event = serde_json::from_value(json!({
+            "type": "achievement_unlocked", "product_id": 0, "account": "8645b494", "achievement_id": 0,
+            "name": null, "unlocked_at": "2026-11-18T19:40:00Z", "report": "by_game", "game": "epic:Wren", "key": "DEEP_DIVE"
+        }))
+        .unwrap();
+        assert_eq!(from_event(&e).unwrap().title, "DEEP_DIVE");
     }
 }
