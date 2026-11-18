@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration as Span, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -287,7 +287,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 }))
                 .collect(),
         }),
-        Request::ExportDesktop { product_id, remove } => {
+        Request::ExportDesktop { game, remove } => {
+            let product_id = game.as_ubisoft().context("demo mode exports Ubisoft games only")?;
             let key = format!("quiver:{product_id}");
             let path = home().join(format!(".local/share/applications/quiver-{product_id}.desktop"));
             d.exports.retain(|e| !(e.record.key == key && e.record.kind == ExportKind::Desktop));
@@ -300,7 +301,8 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 json!(rec)
             }
         }
-        Request::ExportSteam { product_id, remove, .. } => {
+        Request::ExportSteam { game, remove, .. } => {
+            let product_id = game.as_ubisoft().context("demo mode exports Ubisoft games only")?;
             let key = format!("quiver:{product_id}");
             d.exports.retain(|e| !(e.record.key == key && e.record.kind == ExportKind::Steam));
             if !remove {
@@ -317,6 +319,42 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
                 staged: d.steam_running,
                 applied_staged: 0,
             })
+        }
+        // As quiverd does: refused while running, the exports go with the game.
+        Request::Uninstall { game, remove_prefix } => {
+            let product_id = game.as_ubisoft().context("demo mode uninstalls Ubisoft games only")?;
+            let e = entry(st, product_id)?.clone();
+            let g = e.installed.clone().with_context(|| format!("{} is not installed", e.name))?;
+            if e.running || st.sessions.iter().any(|s| s.product_id == product_id) {
+                bail!("stop the game first");
+            }
+            let key = format!("quiver:{product_id}");
+            let mut exports_removed = Vec::new();
+            for kind in [ExportKind::Desktop, ExportKind::Steam] {
+                if d.exports.iter().any(|x| x.record.key == key && x.record.kind == kind) {
+                    exports_removed.push(match kind {
+                        ExportKind::Desktop => "the .desktop entry".to_owned(),
+                        ExportKind::Steam if d.steam_running => "the Steam shortcut (when Steam restarts)".to_owned(),
+                        ExportKind::Steam => "the Steam shortcut".to_owned(),
+                    });
+                }
+            }
+            d.exports.retain(|x| x.record.key != key);
+            if let Some(e) = st.entries.iter_mut().find(|e| e.ubisoft_id() == Some(product_id)) {
+                e.installed = None;
+                e.update_available = false;
+            }
+            st.activity.insert(
+                0,
+                quiver_api::ActivityEntry {
+                    at: Utc::now(),
+                    source: "gui".into(),
+                    action: format!("uninstalled {}{}", e.name, if remove_prefix { " (and its compatibility folder)" } else { "" }),
+                    game: Some(game.0),
+                },
+            );
+            events.push(Event::LibraryChanged);
+            json!(quiver_api::UninstallResult { name: e.name, dir: g.install_dir, prefix: g.prefix, prefix_removed: remove_prefix, exports_removed })
         }
         Request::SteamRestart { confirmed } => {
             if !confirmed {
@@ -1902,7 +1940,7 @@ mod tests {
         let (demo, _events) = Demo::start();
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
         assert!(list.iter().any(|e| e.record.game == quiver_api::GameRef::ubisoft(5059) && e.state == ExportState::WaitingForSteam));
-        let r: SteamExportResult = call(&demo, Request::ExportSteam { product_id: 1651, remove: false, steam_user: None });
+        let r: SteamExportResult = call(&demo, Request::ExportSteam { game: 1651.into(), remove: false, steam_user: None });
         assert!(r.staged);
         assert!(demo.handle(Request::SteamApplyStaged).is_err(), "Steam is running");
         // Only once the person confirmed.
@@ -1912,9 +1950,28 @@ mod tests {
         assert_eq!((r.was_running, r.applied), (true, 3));
         let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
         assert!(list.iter().all(|e| e.state != ExportState::WaitingForSteam));
-        let _: ExportRecord = call(&demo, Request::ExportDesktop { product_id: 1651, remove: false });
-        let v: Value = call(&demo, Request::ExportDesktop { product_id: 1651, remove: true });
+        let _: ExportRecord = call(&demo, Request::ExportDesktop { game: 1651.into(), remove: false });
+        let v: Value = call(&demo, Request::ExportDesktop { game: 1651.into(), remove: true });
         assert_eq!(v["removed"], true);
+    }
+
+    #[tokio::test]
+    async fn uninstall_takes_the_exports_and_waits_for_the_game() {
+        let (demo, _events) = Demo::start();
+        let _: ExportRecord = call(&demo, Request::ExportDesktop { game: 1651.into(), remove: false });
+        let _: SteamExportResult = call(&demo, Request::ExportSteam { game: 1651.into(), remove: false, steam_user: None });
+        // Not while it runs.
+        let _: u64 = call(&demo, Request::Play { game: 1651.into(), profile: None });
+        assert!(demo.handle(Request::Uninstall { game: 1651.into(), remove_prefix: false }).unwrap_err().to_string().contains("stop the game"));
+        let _: Value = call(&demo, Request::Stop { game: 1651.into() });
+        let r: quiver_api::UninstallResult = call(&demo, Request::Uninstall { game: 1651.into(), remove_prefix: true });
+        assert!(r.prefix_removed);
+        assert_eq!(r.exports_removed, ["the .desktop entry", "the Steam shortcut (when Steam restarts)"]);
+        let list: Vec<ExportStatus> = call(&demo, Request::ExportList);
+        assert!(list.iter().all(|e| e.record.game != quiver_api::GameRef::ubisoft(1651)));
+        let lib: Vec<LibraryEntry> = call(&demo, Request::Library { refresh: false, all_stores: true });
+        assert!(lib.iter().find(|e| e.ubisoft_id() == Some(1651)).unwrap().installed.is_none());
+        assert!(demo.handle(Request::Uninstall { game: 1651.into(), remove_prefix: false }).is_err(), "not installed any more");
     }
 
     #[tokio::test]

@@ -864,8 +864,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Uninstall { game, prefix } => {
             let e = resolve_installable(&client, &game).await?;
-            let _: serde_json::Value = client.call(Request::Uninstall { game: e.game.into(), remove_prefix: prefix }).await?;
+            let v: serde_json::Value = client.call(Request::Uninstall { game: e.game.into(), remove_prefix: prefix }).await?;
             println!("uninstalled {}", e.name);
+            // Daemons from before the reply had fields answered null.
+            if let Ok(r) = serde_json::from_value::<quiver_api::UninstallResult>(v) {
+                for x in &r.exports_removed {
+                    println!("  removed {x}");
+                }
+            }
         }
         Cmd::Play { game, profile, profile_id, vanilla, detach } => {
             let any = resolve_any(&client, &game).await?;

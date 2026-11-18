@@ -1058,7 +1058,7 @@ impl Quiver {
                 rows.push(table_head(th, &names, &widths));
                 for (i, x) in list.clone().iter().enumerate() {
                     let r = &x.record;
-                    let g = r.game.as_ubisoft().and_then(|id| self.game(Gid::from(id))).cloned();
+                    let g = self.game(Gid(r.game)).cloned();
                     let art = match &g {
                         Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                         None => crate::art::ArtState::Failed,
@@ -1077,7 +1077,7 @@ impl Quiver {
                         (ExportKind::Steam, Some(u)) => format!("Steam user {u}"),
                         _ => tilde(&r.path),
                     };
-                    let id = r.game.as_ubisoft().unwrap_or_default();
+                    let id = Gid(r.game);
                     rows.push(
                         div()
                             .flex()
@@ -1096,7 +1096,7 @@ impl Quiver {
                                     .items_center()
                                     .gap(px(10.))
                                     .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| this.open_game(Gid::from(id), cx)))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.open_game(id, cx)))
                                     .child(div().w(px(22.)).h(px(26.)).flex_none().child(art_fill(th, &art, "", 4., false)))
                                     .child(div().truncate().child(crate::model::short_name(&r.name)))
                                     .child(chip(th, Some(kind_icon), kind, false).h(px(22.)).text_size(px(11.))),

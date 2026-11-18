@@ -387,7 +387,9 @@ impl Quiver {
         let info = self.gp.info.ready().filter(|_| self.gp.id == id).cloned();
         let verify = button("verify", th, Kind::Ghost, Size::Small, Some(Icon::ShieldCheck), "Verify…")
             .on_click(cx.listener(move |this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Verify(id), cx)));
-        let mut c = card(th).child(card_header(th, "This install").child(div().flex_1()).when(g.installed(), |d| d.child(verify)));
+        let uninstall = button("uninstall", th, Kind::Ghost, Size::Small, Some(Icon::Trash), "Uninstall…")
+            .on_click(cx.listener(move |this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Uninstall(id), cx)));
+        let mut c = card(th).child(card_header(th, "This install").child(div().flex_1()).when(g.installed(), |d| d.child(verify).child(uninstall)));
         let txt = |s: String| div().child(s).into_any_element();
         let muted = |s: String| div().text_color(th.tx3).child(s).into_any_element();
         let mut kvs = div().flex().flex_col().gap(px(8.)).p(px(16.));

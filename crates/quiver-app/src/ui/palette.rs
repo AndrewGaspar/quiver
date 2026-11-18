@@ -4,6 +4,7 @@
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
+use super::downloads::DlCmd;
 use super::global::{GlobalCmd, SourceFilter};
 use super::{Icon, MEDIUM, PillKind, SEMIBOLD, art_fill, caption, glyph, icon, kbd, mono, pill, soft_shadow};
 use crate::app::{Cmd, Command, InputMode, Quiver};
@@ -269,6 +270,16 @@ impl Quiver {
                     cmd(Icon::Monitor, format!("Add {name} to the app launcher"), Some(".desktop entry".into()), Some(format!("quiver export desktop {id}")), Cmd::Global(GlobalCmd::ExportDesktop(id))),
                     &format!("{words} desktop entry launcher shortcut export"),
                 );
+                add(
+                    cmd(
+                        Icon::Trash,
+                        format!("Uninstall {name}…"),
+                        Some("Shows the folder and size first; the compatibility folder only if you ask".into()),
+                        Some(format!("quiver uninstall {id}")),
+                        Cmd::Downloads(DlCmd::Uninstall(id)),
+                    ),
+                    &format!("{words} uninstall remove delete free space"),
+                );
             }
             add(
                 cmd(Icon::Activity, format!("Activity for {name}"), None, Some("quiver activity".into()), Cmd::Global(GlobalCmd::ActivityGame(id))),
@@ -305,6 +316,7 @@ impl Quiver {
         let per_game = |c: &Command| match c.action {
             Cmd::Tab(id, _) => Some(id),
             Cmd::Global(GlobalCmd::ExportSteam(id) | GlobalCmd::ExportDesktop(id) | GlobalCmd::ActivityGame(id)) => Some(id),
+            Cmd::Downloads(DlCmd::Uninstall(id)) => Some(id),
             _ => None,
         };
         let mut commands: Vec<(u32, Command)> = self

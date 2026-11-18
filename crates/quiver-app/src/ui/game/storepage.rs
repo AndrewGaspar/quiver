@@ -15,7 +15,7 @@ use crate::app::Quiver;
 use crate::err_text;
 use crate::model::{GameRow, Gid, day, gb, hours};
 use crate::theme::Theme;
-use crate::ui::{Icon, MEDIUM, PillKind, SEMIBOLD, caption, card, card_header, icon, mono, pill, progress};
+use crate::ui::{Icon, Kind, MEDIUM, PillKind, SEMIBOLD, Size, button, caption, card, card_header, icon, mono, pill, progress};
 
 /// Achievements shown on the page before "… and N more".
 const ACH_SHOWN: usize = 12;
@@ -73,7 +73,8 @@ impl Quiver {
                 if !d.extras.is_empty() {
                     left = left.child(self.render_extras(th, id, d, cx));
                 }
-                right = right.children(self.render_steam_hook_card(th, g, cx)).child(render_store_about(th, d, label)).child(render_store_install(th, d, label));
+                let install = if g.installed() { self.render_quiver_install(th, g, d, cx) } else { render_store_install(th, d, label) };
+                right = right.children(self.render_steam_hook_card(th, g, cx)).child(render_store_about(th, d, label)).child(install);
                 if let Some(c) = &d.cloud {
                     let pending = if c.unsynced > 0 { format!(" · {} not synced yet", c.unsynced) } else { String::new() };
                     right = right.child(
@@ -225,6 +226,36 @@ fn render_store_install(th: &Theme, d: &GameDetail, label: &str) -> AnyElement {
 }
 
 impl Quiver {
+    /// The install card of a game Quiver installed from another store (Epic): its folder,
+    /// size and build, with Verify and Uninstall.
+    fn render_quiver_install(&self, th: &Theme, g: &GameRow, d: &GameDetail, cx: &mut Context<Self>) -> AnyElement {
+        let id = g.id();
+        let label = g.entry.store().label();
+        let dir = g.entry.installed.as_ref().map(|i| i.install_dir.clone()).or_else(|| d.install.as_ref().map(|i| i.dir.clone())).unwrap_or_default();
+        let state = match &d.install {
+            Some(i) if i.update_pending => pill(th, PillKind::Warn, Some(Icon::ArrowDownToLine), "Update available"),
+            _ => pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Installed"),
+        };
+        let verify = button("st-verify", th, Kind::Ghost, Size::Small, Some(Icon::ShieldCheck), "Verify…")
+            .on_click(cx.listener(move |this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Verify(id), cx)));
+        let uninstall = button("st-uninstall", th, Kind::Ghost, Size::Small, Some(Icon::Trash), "Uninstall…")
+            .on_click(cx.listener(move |this, _, _, cx| this.run_dl(crate::ui::downloads::DlCmd::Uninstall(id), cx)));
+        card(th)
+            .child(card_header(th, "This install").child(div().flex_1()).child(state).child(verify).child(uninstall))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .p(px(16.))
+                    .children(d.install.as_ref().filter(|i| i.size_bytes > 0).map(|i| kv(th, "Size", div().child(gb(i.size_bytes)))))
+                    .child(kv(th, "Folder", mono(12., th.tx2).child(crate::model::tilde(&dir))))
+                    .children(d.install.as_ref().and_then(|i| i.build_id.clone()).map(|b| kv(th, "Build", mono(12., th.tx2).child(b))))
+                    .child(div().text_size(px(12.)).text_color(th.tx3).child(format!("Quiver installed it from {label} and updates, verifies and plays it, in its own compatibility folder."))),
+            )
+            .into_any_element()
+    }
+
     /// Digital extras (Epic: soundtracks, art books, wallpapers): their own downloads, in a
     /// folder next to the game's. Download, or Open once downloaded.
     fn render_extras(&self, th: &Theme, id: Gid, d: &GameDetail, cx: &mut Context<Self>) -> AnyElement {

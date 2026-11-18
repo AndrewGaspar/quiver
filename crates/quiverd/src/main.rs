@@ -430,15 +430,28 @@ impl Daemon {
                     bail!("stop the game first");
                 }
                 self.downloads.ensure_idle(game.0)?;
+                let gref = game.0;
                 let game = launcher::uninstall(product_id, remove_prefix)?;
+                let exports_removed = exports::remove_game_exports(gref);
                 *self.library.lock().await = None;
                 self.log_activity(
                     source,
-                    format!("uninstalled {}{}", game.name, if remove_prefix { " (and its compatibility folder)" } else { "" }),
+                    format!(
+                        "uninstalled {}{}{}",
+                        game.name,
+                        if remove_prefix { " (and its compatibility folder)" } else { "" },
+                        exports::removed_note(&exports_removed)
+                    ),
                     Some(product_id),
                 );
                 self.emit(Event::LibraryChanged);
-                Value::Null
+                json!(quiver_api::UninstallResult {
+                    name: game.name,
+                    dir: game.install_dir,
+                    prefix: game.prefix,
+                    prefix_removed: remove_prefix,
+                    exports_removed,
+                })
             }
             Request::Cancel { job_id, discard } => {
                 let job = self.jobs.lock().unwrap().get(&job_id).cloned().context("no such job")?;

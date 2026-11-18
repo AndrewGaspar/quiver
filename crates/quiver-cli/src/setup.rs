@@ -204,9 +204,9 @@ pub async fn run(client: &Client) -> Result<()> {
         if !missing.is_empty() && yes(&format!("Add {} installed game(s) to Steam now?", missing.len()), false)? {
             let user = exports::pick_user(client, None).await?;
             let mut staged = false;
-            for (e, product_id) in missing.into_iter().filter_map(|e| Some((e, e.ubisoft_id()?))) {
+            for e in missing {
                 match client
-                    .call::<SteamExportResult>(Request::ExportSteam { product_id, remove: false, steam_user: user.clone() })
+                    .call::<SteamExportResult>(Request::ExportSteam { game: e.game.into(), remove: false, steam_user: user.clone() })
                     .await
                 {
                     Ok(r) => {
