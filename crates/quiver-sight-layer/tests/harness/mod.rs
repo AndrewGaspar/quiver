@@ -197,6 +197,31 @@ pub struct Opts<'a> {
     pub present_id: bool,
     /// A debug messenger collects validation messages (needs the validation layer enabled).
     pub debug_utils: bool,
+    /// Drive `VK_NV_low_latency2` as a Reflex game does (the device must have it).
+    pub reflex: Option<ReflexOpts>,
+}
+
+/// How the app drives Reflex (`VK_NV_low_latency2`), per application-rendered frame.
+#[derive(Clone, Debug, Default)]
+pub struct ReflexOpts {
+    /// `vkSetLatencySleepModeNV` after each swapchain creation: (low latency, boost, µs).
+    pub mode: Option<(bool, bool, u32)>,
+    /// `vkLatencySleepNV` (and the wait on its semaphore) at the start of every frame.
+    pub sleep: bool,
+    /// Simulation, render-submit and present markers, presentID = 1000 × (frame + 1).
+    pub markers: bool,
+    /// Further presents after the frame's own one (what a frame generator adds).
+    pub extra_presents: u32,
+    /// Wrap every present in out-of-band present markers with the frame's presentID.
+    pub out_of_band: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReflexReport {
+    /// `vkGetLatencyTimingsNV` read twice in a row at the end: (count, presentIDs) each.
+    pub timings: [(u32, Vec<u64>); 2],
+    /// The newest usable report of the first read: sim start → GPU render end, µs.
+    pub last_render_us: Option<u64>,
 }
 
 impl Default for Opts<'_> {
@@ -214,6 +239,7 @@ impl Default for Opts<'_> {
             second: None,
             present_id: true,
             debug_utils: false,
+            reflex: None,
         }
     }
 }
@@ -230,6 +256,7 @@ pub struct Report {
     /// CPU time of each vkQueuePresentKHR call as the app saw it.
     pub present_ns: Vec<u64>,
     pub messages: Vec<String>,
+    pub reflex: Option<ReflexReport>,
 }
 
 static MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -288,7 +315,9 @@ pub fn run(mut o: Opts<'_>) -> Report {
         let entry = ash::Entry::load().unwrap();
         let app = CString::new("quiver-sight-harness").unwrap();
         let engine = CString::new("QuiverSightTest").unwrap();
-        let app_info = vk::ApplicationInfo::default().application_name(&app).engine_name(&engine).engine_version(7).api_version(vk::API_VERSION_1_1);
+        // Reflex's sleep signals a timeline semaphore (core in 1.2).
+        let api = if o.reflex.is_some() { vk::API_VERSION_1_2 } else { vk::API_VERSION_1_1 };
+        let app_info = vk::ApplicationInfo::default().application_name(&app).engine_name(&engine).engine_version(7).api_version(api);
         let mut exts: Vec<*const i8> = vec![ash::khr::surface::NAME.as_ptr()];
         let xcb = match &o.surface {
             Surface::Headless => {
@@ -335,6 +364,11 @@ pub fn run(mut o: Opts<'_>) -> Report {
             if o.device.as_ref().is_some_and(|f| !name.contains(f.as_str())) {
                 continue;
             }
+            if o.reflex.is_some()
+                && !instance.enumerate_device_extension_properties(pd).unwrap().iter().any(|e| e.extension_name_as_c_str().ok() == Some(ash::nv::low_latency2::NAME))
+            {
+                continue;
+            }
             let fams = instance.get_physical_device_queue_family_properties(pd);
             if let Some(f) = (0..fams.len() as u32)
                 .find(|&f| fams[f as usize].queue_flags.contains(vk::QueueFlags::GRAPHICS) && surface_fn.get_physical_device_surface_support(pd, f, surface).unwrap_or(false))
@@ -356,10 +390,27 @@ pub fn run(mut o: Opts<'_>) -> Report {
             dexts.push(ash::khr::present_id::NAME.as_ptr());
             dci = dci.push_next(&mut pid_features);
         }
+        let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
+        if o.reflex.is_some() {
+            dexts.push(ash::nv::low_latency2::NAME.as_ptr());
+            dci = dci.push_next(&mut timeline);
+        }
         dci = dci.enabled_extension_names(&dexts);
         let device = instance.create_device(pd, &dci, None).unwrap();
         let queue = device.get_device_queue(family, 0);
         let sc_fn = ash::khr::swapchain::Device::new(&instance, &device);
+        let ll2 = o.reflex.as_ref().map(|_| ash::nv::low_latency2::Device::new(&instance, &device));
+        let reflex = o.reflex.clone();
+        let mut sleep_value = 0u64;
+        let sleep_sem = ll2.as_ref().map(|_| {
+            let mut t = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE).initial_value(0);
+            device.create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut t), None).unwrap()
+        });
+        let marker = |sc: vk::SwapchainKHR, id: u64, m: vk::LatencyMarkerNV| {
+            if let Some(l) = &ll2 {
+                l.set_latency_marker(sc, &vk::SetLatencyMarkerInfoNV::default().present_id(id).marker(m));
+            }
+        };
 
         let want = if o.srgb { vk::Format::B8G8R8A8_SRGB } else { vk::Format::B8G8R8A8_UNORM };
         let formats = surface_fn.get_physical_device_surface_formats(pd, surface).unwrap();
@@ -373,9 +424,14 @@ pub fn run(mut o: Opts<'_>) -> Report {
             let extent = if caps.current_extent.width != u32::MAX { caps.current_extent } else { vk::Extent2D { width: o.extent.0, height: o.extent.1 } };
             let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count });
             // No COLOR_ATTACHMENT usage on purpose: the layer adds it.
+            let mut latency_ci = vk::SwapchainLatencyCreateInfoNV::default().latency_mode_enable(true);
+            let mut sci = vk::SwapchainCreateInfoKHR::default();
+            if ll2.is_some() {
+                sci = sci.push_next(&mut latency_ci);
+            }
             let swapchain = sc_fn
                 .create_swapchain(
-                    &vk::SwapchainCreateInfoKHR::default()
+                    &sci
                         .surface(surface)
                         .min_image_count(count)
                         .image_format(fmt.format)
@@ -392,6 +448,10 @@ pub fn run(mut o: Opts<'_>) -> Report {
                     None,
                 )
                 .unwrap();
+            if let (Some(l), Some((low, boost, us))) = (&ll2, reflex.as_ref().and_then(|r| r.mode)) {
+                l.set_latency_sleep_mode(swapchain, Some(&vk::LatencySleepModeInfoNV::default().low_latency_mode(low).low_latency_boost(boost).minimum_interval_us(us)))
+                    .unwrap();
+            }
             let images = sc_fn.get_swapchain_images(swapchain).unwrap();
             let rendered: Vec<_> = images.iter().map(|_| device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap()).collect();
             (swapchain, images, extent, rendered)
@@ -455,7 +515,24 @@ pub fn run(mut o: Opts<'_>) -> Report {
                 use x11rb::connection::Connection as _;
                 while let Ok(Some(_)) = x.conn.poll_for_event() {}
             }
-            let k = frame as usize % INFLIGHT;
+            let extra = reflex.as_ref().map_or(0, |r| r.extra_presents);
+            let fid = 1000 * (frame as u64 + 1);
+            if let (Some(l), Some(sem), true) = (&ll2, sleep_sem, reflex.as_ref().is_some_and(|r| r.sleep)) {
+                sleep_value += 1;
+                l.latency_sleep(swapchain, &vk::LatencySleepInfoNV::default().signal_semaphore(sem).value(sleep_value)).unwrap();
+                let (sems, vals) = ([sem], [sleep_value]);
+                device.wait_semaphores(&vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&vals), 1_000_000_000).unwrap();
+            }
+            let marked = reflex.as_ref().is_some_and(|r| r.markers);
+            let oob = reflex.as_ref().is_some_and(|r| r.out_of_band);
+            if marked {
+                marker(swapchain, fid, vk::LatencyMarkerNV::SIMULATION_START);
+                marker(swapchain, fid, vk::LatencyMarkerNV::INPUT_SAMPLE);
+                marker(swapchain, fid, vk::LatencyMarkerNV::SIMULATION_END);
+            }
+            for sub in 0..=extra {
+            let step = frame as usize * (extra as usize + 1) + sub as usize;
+            let k = step % INFLIGHT;
             device.wait_for_fences(&[fences[k]], true, u64::MAX).unwrap();
             let mut recreate = |swapchain: &mut vk::SwapchainKHR, images: &mut Vec<vk::Image>, extent: &mut vk::Extent2D, rendered: &mut Vec<vk::Semaphore>| {
                 device.device_wait_idle().unwrap();
@@ -475,10 +552,11 @@ pub fn run(mut o: Opts<'_>) -> Report {
                 }
                 Err(e) => panic!("acquire: {e:?}"),
             };
-            let index2 = second.as_ref().map(|(sc, _, _, acq, _)| sc_fn.acquire_next_image(*sc, u64::MAX, acq[k], vk::Fence::null()).unwrap().0);
+            let second_now = if sub == 0 { second.as_ref() } else { None };
+            let index2 = second_now.map(|(sc, _, _, acq, _)| sc_fn.acquire_next_image(*sc, u64::MAX, acq[k], vk::Fence::null()).unwrap().0);
             device.reset_fences(&[fences[k]]).unwrap();
             let mut targets = vec![images[index as usize]];
-            if let (Some((_, _, imgs, _, _)), Some(i2)) = (&second, index2) {
+            if let (Some((_, _, imgs, _, _)), Some(i2)) = (second_now, index2) {
                 targets.push(imgs[i2 as usize]);
             }
             let cmd = cmds[k];
@@ -524,8 +602,8 @@ pub fn run(mut o: Opts<'_>) -> Report {
             let mut signal = vec![rendered[index as usize]];
             let mut scs = vec![swapchain];
             let mut idx = vec![index];
-            let mut ids = vec![frame as u64 + 1];
-            if let (Some((sc, _, _, acq, ren)), Some(i2)) = (&second, index2) {
+            let mut ids = vec![step as u64 + 1];
+            if let (Some((sc, _, _, acq, ren)), Some(i2)) = (second_now, index2) {
                 waits.push(acq[k]);
                 signal.push(ren[i2 as usize]);
                 scs.push(*sc);
@@ -534,9 +612,19 @@ pub fn run(mut o: Opts<'_>) -> Report {
             }
             let stages = vec![vk::PipelineStageFlags::TRANSFER; waits.len()];
             let cb = [cmd];
+            if marked && sub == 0 {
+                marker(swapchain, fid, vk::LatencyMarkerNV::RENDERSUBMIT_START);
+            }
             device
                 .queue_submit(queue, &[vk::SubmitInfo::default().wait_semaphores(&waits).wait_dst_stage_mask(&stages).command_buffers(&cb).signal_semaphores(&signal)], fences[k])
                 .unwrap();
+            if marked && sub == 0 {
+                marker(swapchain, fid, vk::LatencyMarkerNV::RENDERSUBMIT_END);
+                marker(swapchain, fid, vk::LatencyMarkerNV::PRESENT_START);
+            }
+            if oob {
+                marker(swapchain, fid, vk::LatencyMarkerNV::OUT_OF_BAND_PRESENT_START);
+            }
             let mut pid = vk::PresentIdKHR::default().present_ids(&ids);
             let mut pi = vk::PresentInfoKHR::default().wait_semaphores(&signal).swapchains(&scs).image_indices(&idx);
             if present_id {
@@ -545,10 +633,17 @@ pub fn run(mut o: Opts<'_>) -> Report {
             let t0 = Instant::now();
             let r = sc_fn.queue_present(queue, &pi);
             present_ns.push(t0.elapsed().as_nanos() as u64);
+            if oob {
+                marker(swapchain, fid, vk::LatencyMarkerNV::OUT_OF_BAND_PRESENT_END);
+            }
+            if marked && sub == 0 {
+                marker(swapchain, fid, vk::LatencyMarkerNV::PRESENT_END);
+            }
             match r {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => recreate(&mut swapchain, &mut images, &mut extent, &mut rendered),
                 Err(e) => panic!("present: {e:?}"),
+            }
             }
             next_at += if o.hitches.contains(&frame) { Duration::from_millis(45) } else { frame_time };
             let now = Instant::now();
@@ -559,6 +654,25 @@ pub fn run(mut o: Opts<'_>) -> Report {
             }
         }
         device.device_wait_idle().unwrap();
+        // The app's own timing reads, twice in a row: does a read consume the reports?
+        let reflex_report = ll2.as_ref().map(|l| {
+            let mut rep = ReflexReport::default();
+            for i in 0..2 {
+                let mut buf = vec![vk::LatencyTimingsFrameReportNV::default(); 64];
+                let mut info = vk::GetLatencyMarkerInfoNV::default().timings(&mut buf);
+                l.get_latency_timings(swapchain, &mut info);
+                let n = info.timing_count as usize;
+                rep.timings[i] = (n as u32, buf[..n].iter().map(|r| r.present_id).collect());
+                if i == 0 {
+                    rep.last_render_us = buf[..n]
+                        .iter()
+                        .rev()
+                        .find(|r| r.sim_start_time_us > 0 && r.gpu_render_end_time_us > r.sim_start_time_us)
+                        .map(|r| r.gpu_render_end_time_us - r.sim_start_time_us);
+                }
+            }
+            rep
+        });
 
         let pixels = o.readback.then(|| {
             // The next image to come back was presented a few frames ago, with the HUD in it.
@@ -625,7 +739,7 @@ pub fn run(mut o: Opts<'_>) -> Report {
                 device.destroy_semaphore(s, None);
             }
         }
-        for s in acquired.into_iter().chain(rendered) {
+        for s in acquired.into_iter().chain(rendered).chain(sleep_sem) {
             device.destroy_semaphore(s, None);
         }
         for f in fences {
@@ -640,7 +754,7 @@ pub fn run(mut o: Opts<'_>) -> Report {
         }
         instance.destroy_instance(None);
         drop(xcb);
-        Report { device_name, recreations, extent: (extent.width, extent.height), format: fmt.format, present_id, pixels, present_ns, messages: std::mem::take(&mut *MESSAGES.lock().unwrap()) }
+        Report { device_name, recreations, extent: (extent.width, extent.height), format: fmt.format, present_id, pixels, present_ns, messages: std::mem::take(&mut *MESSAGES.lock().unwrap()), reflex: reflex_report }
     }
 }
 
