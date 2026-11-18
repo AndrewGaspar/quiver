@@ -210,8 +210,9 @@ impl Epic {
                 d.unavailable.push("achievements".into());
             }
         }
-        match self.saves_report(&app, true).await {
-            Ok(s) if s.mode == quiver_api::epicgame::SaveMode::Launcher => {
+        // The cloud is listed only on a refresh: pages and Sight load this often.
+        match self.saves_report(&app, refresh).await {
+            Ok(s) if s.mode == quiver_api::epicgame::SaveMode::Launcher && s.cloud.is_some() => {
                 let files = s.files.iter().filter(|f| f.cloud.is_some()).count();
                 let bytes = s.files.iter().filter_map(|f| f.cloud.as_ref()).map(|c| c.size).sum();
                 let unsynced = s.files.iter().filter(|f| f.state != quiver_api::epicgame::FileState::InSync).count();

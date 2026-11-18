@@ -462,9 +462,11 @@ async fn the_game_page_carries_epics_progress() {
     f.reply("/graphql", 200, include_str!("../tests/fixtures/achievements_player.json"));
     r.epic.remember_place("Wren", &r.prefix(), None).unwrap();
     let mut d: quiver_api::stores::GameDetail = serde_json::from_value(serde_json::json!({"game": "epic:Wren", "name": "Wren", "unavailable": ["play time", "achievements", "cloud saves"]})).unwrap();
-    r.epic.fill_detail(&mut d, false).await;
+    r.upload_elsewhere("2026.11.17-21.00.00", &[("slot1.sav", "cloud")]);
+    r.epic.fill_detail(&mut d, true).await;
     assert_eq!(d.playtime.unwrap().total_seconds, 125);
     assert_eq!(d.achievements.unwrap().unlocked, 1);
-    assert_eq!(d.cloud.unwrap().files, 0);
+    let c = d.cloud.unwrap();
+    assert_eq!((c.files, c.unsynced), (1, 1));
     assert!(d.unavailable.is_empty(), "{:?}", d.unavailable);
 }
