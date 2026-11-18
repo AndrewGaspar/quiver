@@ -60,8 +60,9 @@ pub struct HudSettings {
     dir: PathBuf,
 }
 
-const KEYS: [&str; 14] = [
-    "enabled", "on", "layout", "presenter", "captures", "anchor", "offset", "scale", "background", "text_opacity", "level_colors", "graph_span_ms", "safe_area", "rate_hz",
+const KEYS: [&str; 16] = [
+    "enabled", "on", "layout", "presenter", "captures", "anchor", "offset", "scale", "background", "text_opacity", "level_colors", "graph_span_ms", "safe_area", "rate_hz", "ngx_log",
+    "reflex_timings",
 ];
 
 fn profile_key(game: &GameRef, profile: &str) -> String {
@@ -72,7 +73,7 @@ fn merge(into: &mut HudScope, set: &HudScope) {
     macro_rules! take {
         ($($f:ident),*) => { $( if set.$f.is_some() { into.$f = set.$f.clone(); } )* };
     }
-    take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz);
+    take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz, ngx_log, reflex_timings);
 }
 
 fn unset(into: &mut HudScope, key: &str) -> Result<()> {
@@ -91,6 +92,8 @@ fn unset(into: &mut HudScope, key: &str) -> Result<()> {
         "graph_span_ms" => into.graph_span_ms = None,
         "safe_area" => into.safe_area = None,
         "rate_hz" => into.rate_hz = None,
+        "ngx_log" => into.ngx_log = None,
+        "reflex_timings" => into.reflex_timings = None,
         k => bail!("unknown HUD setting '{k}' ({})", KEYS.join(", ")),
     }
     Ok(())

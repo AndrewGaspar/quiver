@@ -69,7 +69,13 @@ pub struct Store {
     presenter_mark: Option<(Presenter, i64)>,
     /// Ring timestamps rejected for being outside the session's window.
     pub out_of_window: u64,
+    /// NVIDIA Smooth Motion is on for the launch: frames are generated above the layer, so
+    /// `fg.ratio` isn't shown (`nv.fg.driver` says so instead).
+    pub smooth_motion: bool,
 }
+
+/// A counter that fills a rate role is current within this.
+const COUNTER_FRESH_NS: i64 = 2_000_000_000;
 
 fn period_ns(d: &MetricDescriptor) -> Option<i64> {
     match d.sample {
@@ -94,6 +100,7 @@ impl Store {
             presenter_ns: [0, 0],
             presenter_mark: None,
             out_of_window: 0,
+            smooth_motion: false,
         };
         s.producer(catalog::PRODUCER_QUIVERD, "Quiver", true);
         s
@@ -148,6 +155,11 @@ impl Store {
         m.roles.clear();
         m.conflicts.clear();
         for role in claims {
+            if catalog::GENERIC_ROLES.contains(&role.as_str()) && !catalog::agnostic(producer) {
+                // Generic roles come from agnostic sources only (§3.4).
+                self.metrics.get_mut(&id).unwrap().conflicts.push(role);
+                continue;
+            }
             match self.roles.get(&role) {
                 Some(holder) if holder != &id && self.metrics.get(holder).is_some_and(|h| self.producer_connected(&h.producer)) => {
                     self.metrics.get_mut(&id).unwrap().conflicts.push(role);
@@ -202,6 +214,21 @@ impl Store {
             s.push(t, v);
         }
         m.last_ns = Some(t);
+    }
+
+    /// Forgets a metric's value (it's declared, with nothing to show: the HUD drops it).
+    pub fn clear(&mut self, id: &str) {
+        if let Some(m) = self.metrics.get_mut(id) {
+            m.values = Values::Empty;
+            m.last_ns = None;
+        }
+    }
+
+    /// The metric filling a rate role, if its counter moved recently.
+    fn fresh_role(&self, role: &str, now: i64) -> Option<&str> {
+        let id = self.role(role)?;
+        let m = self.metrics.get(id)?;
+        m.last_ns.is_some_and(|t| now - t < COUNTER_FRESH_NS).then_some(id)
     }
 
     pub fn push_counter(&mut self, id: &str, t: i64, total: u64) {
@@ -356,16 +383,24 @@ impl Store {
                 };
                 v.is_finite().then_some(Raw::Num(v))
             }
-            Source::CounterRate(role) => match self.role(role) {
+            Source::CounterRate(role) => match self.fresh_role(role, now) {
                 Some(src) => self.value(src, Stat::Rate, window_ns, now),
                 // No base provider: base = presented (§3.4).
                 None if c.desc.id == "fps.base" => self.value("fps", stat, window_ns, now),
                 None => None,
             },
             Source::FgRatio => {
-                self.role(catalog::ROLE_BASE_COUNT)?;
+                if self.smooth_motion {
+                    return None;
+                }
+                let base = self.fresh_role(catalog::ROLE_BASE_COUNT, now)?;
+                let b = self.value(base, Stat::Rate, window_ns, now)?.num()?;
+                if let Some(generated) = self.fresh_role(catalog::ROLE_GENERATED_COUNT, now) {
+                    // The same counters, sampled together: exact presents per frame.
+                    let g = self.value(generated, Stat::Rate, window_ns, now)?.num()?;
+                    return (b > 0.0).then(|| Raw::Num((b + g) / b));
+                }
                 let p = self.value("fps", Stat::Mean, window_ns, now)?.num()?;
-                let b = self.value("fps.base", Stat::Mean, window_ns, now)?.num()?;
                 (b > 0.0).then(|| Raw::Num(p / b))
             }
             Source::FgActive => Some(Raw::State(self.fg_active(now) as usize)),
@@ -387,7 +422,7 @@ impl Store {
 
     /// Frame generation is on: a base provider exists and its FG state (if any) isn't off.
     pub fn fg_active(&self, now: i64) -> bool {
-        if self.role(catalog::ROLE_BASE_COUNT).is_none() {
+        if self.fresh_role(catalog::ROLE_BASE_COUNT, now).is_none() {
             return false;
         }
         let state = self.role(catalog::ROLE_FG_STATE).and_then(|id| self.metrics.get(id)).and_then(|m| match &m.values {
@@ -398,9 +433,8 @@ impl Store {
             Some(v) => v.value != "off" && !matches!(v.level, Some(quiver_api::perf::Level::Dim | quiver_api::perf::Level::Bad)),
             // No state (yet): on when presents outrun real frames clearly.
             None => {
-                let p = self.value("fps", Stat::Mean, WINDOW_1S, now).and_then(|r| r.num());
-                let b = self.value("fps.base", Stat::Mean, WINDOW_1S, now).and_then(|r| r.num());
-                matches!((p, b), (Some(p), Some(b)) if b > 0.0 && p > b * 1.3)
+                let r = self.value("fg.ratio", Stat::Mean, WINDOW_1S, now).and_then(|r| r.num());
+                r.is_some_and(|r| r > 1.3)
             }
         }
     }
@@ -636,15 +670,18 @@ mod tests {
         d
     }
 
-    /// 160 presents a second for `secs`, and a mod counting 80 real frames a second.
-    fn feed(s: &mut Store, secs: i64, with_mod: bool) -> i64 {
+    /// 160 presents a second for `secs`; with `counted`, the layer's Reflex counters say 80
+    /// game frames and 80 generated presents a second, and a mod says 40 real frames.
+    fn feed(s: &mut Store, secs: i64, counted: bool) -> i64 {
         s.producer("layer", "Sight layer", true);
         let mut t = 0;
         for i in 0..secs * 160 {
             t = 1_000 * MS + i * 6_250_000;
             s.present(7, t, t);
-            if with_mod && i % 16 == 0 {
-                s.push_counter("aco-dlss.frames.real", t, (i / 2) as u64);
+            if counted && i % 16 == 0 {
+                s.push_counter("nv.frames.app", t, (i / 2) as u64);
+                s.push_counter("nv.frames.generated", t, (i / 2) as u64);
+                s.push_counter("aco-dlss.frames.real", t, (i / 4) as u64);
             }
         }
         t
@@ -674,46 +711,59 @@ mod tests {
     }
 
     #[test]
-    fn base_fps_from_a_mod_counter_and_fg_state() {
+    fn base_fps_and_fg_from_the_layers_counters_never_a_mods() {
         let mut s = store();
+        super::super::nvidia::ensure(&mut s);
+        // A mod claims the generic roles too: not bound (§3.4), kept under its namespace.
         s.producer("mod:aco-dlss", "aco-dlss", true);
         s.declare("mod:aco-dlss", counter("aco-dlss.frames.real", catalog::ROLE_BASE_COUNT));
         s.declare("mod:aco-dlss", fg_state("aco-dlss.fg.state"));
         let now = feed(&mut s, 3, true);
-        let v = |s: &Store, id| s.value(id, Stat::Mean, WINDOW_1S, now).and_then(|r| r.num()).unwrap();
-        assert!((v(&s, "fps.base") - 80.0).abs() < 1.0, "{}", v(&s, "fps.base"));
-        assert!((v(&s, "fg.ratio") - 2.0).abs() < 0.05);
-        // No FG state yet: inferred from the ratio.
-        assert!(s.fg_active(now));
+        let v = |s: &Store, id, now| s.value(id, Stat::Mean, WINDOW_1S, now).and_then(|r| r.num()).unwrap();
+        assert!((v(&s, "fps.base", now) - 80.0).abs() < 1.0, "{}", v(&s, "fps.base", now));
+        assert!((v(&s, "fg.ratio", now) - 2.0).abs() < 0.01);
+        assert!((v(&s, "fps.generated", now) - 80.0).abs() < 1.0);
+        // The mod's FG state doesn't gate the generic one: the ratio does.
         s.push_state_value("aco-dlss.fg.state", now, "off");
-        assert!(!s.fg_active(now));
-        assert_eq!(s.formatted("fg.active", Stat::Last, WINDOW_1S, now).unwrap().text, "off");
-        s.push_state_value("aco-dlss.fg.state", now, "on");
         assert!(s.fg_active(now));
+        assert_eq!(s.role(catalog::ROLE_BASE_COUNT), Some("nv.frames.app"));
+        let cat = s.catalog(now);
+        let m = cat.iter().find(|m| m.descriptor.id == "aco-dlss.frames.real").unwrap();
+        assert!(m.roles.is_empty() && m.conflicts == [catalog::ROLE_BASE_COUNT.to_string()]);
+        assert!(s.value("aco-dlss.frames.real", Stat::Rate, WINDOW_1S, now).is_some(), "the mod's own number stays");
         let sum = s.summary(now);
         assert!((sum.fps_base.unwrap().mean - 80.0).abs() < 1.0);
         assert!((sum.fg_ratio.unwrap() - 2.0).abs() < 0.05);
-        // The mod goes away: its roles are released, base falls back to presented.
-        s.disconnect("mod:aco-dlss");
-        assert!(!s.fg_active(now));
-        assert!((v(&s, "fps.base") - 160.0).abs() < 0.1);
-        assert_eq!(s.state("aco-dlss.fg.state", now), MetricState::Gone);
-        assert!(s.summary(now).fps_base.is_some(), "a finished mod still counts in the summary");
+        // Counting stops (Reflex off): after 2 s, base falls back to presented, no ratio.
+        let later = now + 2_500 * MS;
+        for i in 0..400 {
+            s.present(7, now + i * 6_250_000, later);
+        }
+        assert!((v(&s, "fps.base", later) - 160.0).abs() < 0.5);
+        assert!(s.value("fg.ratio", Stat::Mean, WINDOW_1S, later).is_none());
+        assert!(!s.fg_active(later));
+        // Smooth Motion on: no ratio at all (its frames are above the layer).
+        s.smooth_motion = true;
+        assert!(s.value("fg.ratio", Stat::Mean, WINDOW_1S, now).is_none());
     }
 
     #[test]
     fn roles_first_claim_wins() {
         let mut s = store();
-        s.producer("mod:a", "a", true);
-        s.producer("mod:b", "b", true);
-        s.declare("mod:a", counter("a.real", catalog::ROLE_BASE_COUNT));
-        s.declare("mod:b", counter("b.real", catalog::ROLE_BASE_COUNT));
+        s.producer("nvidia", "a", true);
+        s.producer("other", "b", true);
+        s.declare("nvidia", counter("a.real", catalog::ROLE_BASE_COUNT));
+        s.declare("other", counter("b.real", catalog::ROLE_BASE_COUNT));
         assert_eq!(s.role(catalog::ROLE_BASE_COUNT), Some("a.real"));
         let cat = s.catalog(0);
         let b = cat.iter().find(|m| m.descriptor.id == "b.real").unwrap();
         assert_eq!(b.conflicts, vec![catalog::ROLE_BASE_COUNT.to_string()]);
         let base = cat.iter().find(|m| m.descriptor.id == "fps.base").unwrap();
         assert_eq!(base.source.as_deref(), Some("a.real"));
+        // A mod's own roles (not generic ones) bind as before.
+        s.producer("mod:m", "m", true);
+        s.declare("mod:m", counter("m.custom", "m.thing"));
+        assert_eq!(s.role("m.thing"), Some("m.custom"));
     }
 
     #[test]

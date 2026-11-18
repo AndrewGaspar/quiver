@@ -329,7 +329,7 @@ pub fn builtin(id: &str) -> Option<Layout> {
             l.name = "Compact".into();
             let mut r = fps_pair(Some("FPS"));
             r.extend([m("frametime"), ms("fps.p1low", "1%↓"), sep(), ms("gpu.load", "GPU"), m("gpu.temp"), m("gpu.power"), sep(), ms("cpu.load", "CPU"), m("cpu.temp"), sep()]);
-            r.extend([badge(m("upscaler")), when(m("render.resolution"), "upscaler"), when(ms("fg.ratio", "FG"), "fg.active"), ms("latency.render", "LAT")]);
+            r.extend([badge(m("upscaler")), when(m("render.resolution"), "upscaler"), when(ms("fg.ratio", "FG"), "fg.active"), ms("nv.fg.driver", "FG"), ms("latency.render", "LAT"), ms("latency.pc", "PC")]);
             l.rows = vec![row(r)];
         }
         "standard" | "full" => {
@@ -343,10 +343,15 @@ pub fn builtin(id: &str) -> Option<Layout> {
                 row(vec![ms("gpu.load", "GPU"), m("gpu.temp"), m("gpu.power"), m("gpu.vram.used")]),
                 row(vec![ms("cpu.load", "CPU"), m("cpu.temp"), ms("mem.used", "RAM")]),
                 row(vec![badge(m("upscaler")), when(m("render.resolution"), "upscaler"), when(t("→"), "upscaler"), when(m("output.resolution"), "upscaler")]),
-                row(vec![ms("latency.render", "LAT")]),
+                // Reflex (SIGHT-HUD §3.17): game-to-render (opt-in timings) and PC latency.
+                row(vec![ms("latency.render", "LAT"), ms("latency.pc", "PC")]),
             ];
             if id == "full" {
                 l.rows.extend([
+                    // NVIDIA: Reflex mode and cap, the FG multiplier the layer sees (or
+                    // Smooth Motion's note), then DLSS's quality, model, DLLs and override.
+                    row(vec![when(ms("nv.reflex.mode", "RFX"), "nv.reflex.mode"), ms("nv.reflex.cap", "CAP"), when(ms("fg.ratio", "FG"), "fg.active"), ms("nv.fg.driver", "FG")]),
+                    row(vec![ms("dlss.sr.quality", "SR"), m("dlss.sr.model"), ms("dlss.version", "DLL"), ms("dlss.fg.version", "FG"), ms("dlss.sr.requested", "REQ")]),
                     row(vec![ms("gpu.clock", "CLK"), m("cpu.clock")]),
                     row(vec![ms("gpu.vram.total", "VRAM"), ms("proc.rss", "GAME"), m("proc.cpu")]),
                     row(vec![ms("bat.level", "BAT"), m("bat.power"), badge(m("bat.status"))]),
@@ -511,7 +516,7 @@ cells = [
         assert_eq!(s.size(true), [260.0, 188.0]);
         assert_eq!(s.size(false), [260.0, 174.0]);
         assert_eq!(builtin("compact").unwrap().size(true), [780.0, 34.0]);
-        assert_eq!(builtin("full").unwrap().size(true)[1], 12.0 * 20.0 + 30.0 + 12.0 * 4.0 + 14.0);
+        assert_eq!(builtin("full").unwrap().size(true)[1], 14.0 * 20.0 + 30.0 + 14.0 * 4.0 + 14.0);
         // A user layout: defaults by orientation, or what it asks for.
         let one = parse("x", "[[row]]\ncells = [{ metric = \"fps\" }]").unwrap();
         assert_eq!(one.size(true), [hud_card::DEFAULT_WIDTH_ROW, 34.0]);

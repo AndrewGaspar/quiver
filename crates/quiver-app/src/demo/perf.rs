@@ -371,7 +371,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                 macro_rules! take {
                     ($($f:ident),*) => { $( if set.$f.is_some() { cur.$f = set.$f.clone(); } )* };
                 }
-                take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz);
+                take!(enabled, on, layout, presenter, captures, anchor, offset, scale, background, text_opacity, level_colors, graph_span_ms, safe_area, rate_hz, ngx_log, reflex_timings);
                 for k in &unset {
                     match k.as_str() {
                         "enabled" => cur.enabled = None,
@@ -385,6 +385,8 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
                         "background" => cur.background = None,
                         "text_opacity" => cur.text_opacity = None,
                         "rate_hz" => cur.rate_hz = None,
+                        "ngx_log" => cur.ngx_log = None,
+                        "reflex_timings" => cur.reflex_timings = None,
                         k => bail!("unknown HUD setting '{k}'"),
                     }
                 }

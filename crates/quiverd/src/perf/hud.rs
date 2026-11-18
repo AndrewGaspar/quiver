@@ -335,16 +335,19 @@ mod tests {
             .join("\n")
     }
 
-    /// A session at 160 presented fps, with system metrics and, optionally, aco-dlss
-    /// reporting 80 real frames a second with FG on.
-    fn session(with_mod: bool) -> (Store, i64) {
+    /// A session at 160 presented fps, with system metrics and, optionally, the layer
+    /// counting 80 game frames a second (2× frame generation) with Reflex, PC latency 21 ms
+    /// and NGX's log saying DLSS K. A mod claims the same roles with other numbers: they
+    /// never show as the generic metrics.
+    fn session(with_nv: bool) -> (Store, i64) {
         let mut s = Store::new(0, Utc::now());
         s.producer("layer", "Sight layer", true);
         s.producer("system", "System", true);
         for d in catalog::system() {
             s.declare("system", d);
         }
-        if with_mod {
+        if with_nv {
+            super::super::nvidia::ensure(&mut s);
             s.producer("mod:aco-dlss", "aco-dlss", true);
             let mut c = MetricDescriptor::new("aco-dlss.frames.real", MetricKind::Counter);
             c.roles = vec![RoleClaim { role: catalog::ROLE_BASE_COUNT.into(), flags: vec![], on: None }];
@@ -370,8 +373,10 @@ mod tests {
         for i in 0..2 * 160 {
             t = 1_000 * MS + i * 6_250_000;
             s.present(7, t, t);
-            if with_mod && i % 16 == 0 {
-                s.push_counter("aco-dlss.frames.real", t, (i / 2) as u64);
+            if with_nv && i % 16 == 0 {
+                s.push_counter("nv.frames.app", t, (i / 2) as u64);
+                s.push_counter("nv.frames.generated", t, (i / 2) as u64);
+                s.push_counter("aco-dlss.frames.real", t, (i / 4) as u64);
             }
         }
         s.push_num("gpu.load", t, 97.0);
@@ -379,10 +384,12 @@ mod tests {
         s.push_num("gpu.power", t, 92.0);
         s.push_num("cpu.load", t, 38.0);
         s.push_num("cpu.temp", t, 64.0);
-        if with_mod {
-            s.push_state_value("aco-dlss.fg.state", t, "on");
-            s.push_text("aco-dlss.upscaler", t, "DLSS K".into());
-            s.push_num("aco-dlss.latency.mean", t, 21.0);
+        if with_nv {
+            s.push_state_value("aco-dlss.fg.state", t, "off");
+            s.push_text("aco-dlss.upscaler", t, "TAA".into());
+            s.push_num("aco-dlss.latency.mean", t, 99.0);
+            s.push_text("dlss.sr", t, "DLSS K".into());
+            s.push_num("nv.latency.pc", t, 21.0);
         }
         (s, t)
     }
@@ -402,7 +409,7 @@ mod tests {
         assert_eq!(m.text_px, 1600.0 * 0.016);
         let (s, now) = session(true);
         let m = model(&s, "compact", now);
-        assert_eq!(text_of(&m), "FPS 80 → 160 6.2 ms 1%↓ 160 │ GPU 97% 71° 92 W │ CPU 38% 64° │ DLSS K FG 2.0× LAT 21.0 ms");
+        assert_eq!(text_of(&m), "FPS 80 → 160 6.2 ms 1%↓ 160 │ GPU 97% 71° 92 W │ CPU 38% 64° │ DLSS K FG 2.0× PC 21.0 ms");
     }
 
     #[test]
@@ -415,7 +422,8 @@ mod tests {
         assert!(!t.contains("LAT"), "no latency provider: the row is gone");
         let (s, now) = session(true);
         assert_eq!(text_of(&model(&s, "fps", now)), "80 → 160");
-        assert!(text_of(&model(&s, "standard", now)).contains("LAT 21.0 ms"));
+        let t = text_of(&model(&s, "standard", now));
+        assert!(t.contains("PC 21.0 ms") && !t.contains("99") && !t.contains("TAA"), "{t}");
         // Stale frames show —, and the model says so.
         let m = model(&s, "fps", now + 5_000 * MS);
         assert!(text_of(&m).contains('—'));

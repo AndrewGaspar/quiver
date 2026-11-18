@@ -564,6 +564,8 @@ fn kv_scope(changes: &[String]) -> Result<(HudScope, Vec<String>)> {
             "graph_span_ms" => set.graph_span_ms = Some(millis(v)?),
             "safe_area" => set.safe_area = Some(f()?),
             "rate_hz" => set.rate_hz = Some(v.trim_end_matches("Hz").parse()?),
+            "ngx_log" => set.ngx_log = Some(b()?),
+            "reflex_timings" => set.reflex_timings = Some(b()?),
             k => bail!("unknown HUD setting '{k}'"),
         }
     }
@@ -593,6 +595,9 @@ fn print_view(v: &HudSettingsView) {
         e.safe_area,
         e.rate_hz
     );
+    if e.ngx_log || e.reflex_timings {
+        println!("  NVIDIA detail: NGX log {}  Reflex timings {}", if e.ngx_log { "on" } else { "off" }, if e.reflex_timings { "on" } else { "off" });
+    }
     let set = serde_json::to_value(&v.set).unwrap_or_default();
     if set.as_object().is_some_and(|o| !o.is_empty()) {
         println!("  set here: {set}");
