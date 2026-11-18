@@ -1,5 +1,6 @@
 //! The HUD's keys, read in the game (SIGHT-HUD §1.3, as built): Shift+F3 shows or hides the
-//! HUD, Ctrl+Shift+F3 steps to the next preset. Two sources, serviced by one thread at the
+//! HUD, Ctrl+Shift+F3 steps to the next preset; and Shift+F2 opens the Sight panel (SIGHT
+//! §14; closing is the panel's own job, since it has the keyboard while open). Two sources, serviced by one thread at the
 //! same cadence (about every 50 ms while the game presents):
 //!
 //! - **X11**: like MangoHud and vkBasalt, the layer polls the X server's keymap
@@ -13,8 +14,9 @@
 //!
 //! A press counts on the trigger key's edge (up → down) with exactly the chord's modifiers
 //! held: Ctrl+Shift+F3 is "next", never also "toggle", and holding a chord doesn't repeat.
-//! Presses go into the status block (`key_toggles`, `key_nexts`); quiverd's ring thread
-//! sees the counters change and does what `quiver hud toggle` / `next` do for the session.
+//! Presses go into the status block (`key_toggles`, `key_nexts`, `key_panels`); quiverd's
+//! ring thread sees the counters change and does what `quiver hud toggle` / `next` /
+//! `quiver sight toggle` do for the session.
 //!
 //! **Threading.** The poll runs on its own thread, not in `vkQueuePresentKHR`: an X round
 //! trip can block (a stalled XWayland, an unreachable `DISPLAY`), and the present path makes
@@ -57,11 +59,13 @@ pub fn note_surface(flag: u32) {
 
 // ---- Chords (no X here: unit-tested with fake keymaps) ------------------------------------
 
-/// What a chord does: what `quiver hud toggle` / `quiver hud next` do.
+/// What a chord does: what `quiver hud toggle` / `quiver hud next` / `quiver sight toggle` do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Toggle,
     Next,
+    /// The Sight panel (Shift+F2).
+    Panel,
 }
 
 pub const MOD_SHIFT: u8 = 1;
@@ -71,6 +75,7 @@ pub const MOD_SUPER: u8 = 8;
 
 /// X keysyms (X11/keysymdef.h).
 pub mod keysym {
+    pub const F2: u64 = 0xffbf;
     pub const F3: u64 = 0xffc0;
     pub const SHIFT_L: u64 = 0xffe1;
     pub const SHIFT_R: u64 = 0xffe2;
@@ -103,10 +108,12 @@ pub struct Binding {
     pub action: Action,
 }
 
-/// SIGHT-HUD decision 4; quiverd's `perf::keybinds::binds` describes the same two.
-pub const DEFAULT_BINDINGS: [Binding; 2] = [
+/// SIGHT-HUD decision 4 and SIGHT steer 4; quiverd's `perf::keybinds::binds` describes the
+/// same three.
+pub const DEFAULT_BINDINGS: [Binding; 3] = [
     Binding { keysym: keysym::F3, mods: MOD_SHIFT, action: Action::Toggle },
     Binding { keysym: keysym::F3, mods: MOD_CTRL | MOD_SHIFT, action: Action::Next },
+    Binding { keysym: keysym::F2, mods: MOD_SHIFT, action: Action::Panel },
 ];
 
 /// A 256-bit keymap, as `XQueryKeymap` returns it: bit `code % 8` of byte `code / 8` is set
@@ -213,6 +220,7 @@ pub mod evdev {
     pub const KEY_LEFTSHIFT: u32 = 42;
     pub const KEY_RIGHTSHIFT: u32 = 54;
     pub const KEY_LEFTALT: u32 = 56;
+    pub const KEY_F2: u32 = 60;
     pub const KEY_F3: u32 = 61;
     pub const KEY_RIGHTCTRL: u32 = 97;
     pub const KEY_RIGHTALT: u32 = 100;
@@ -224,6 +232,7 @@ pub mod evdev {
     pub fn code_of(sym: u64) -> Option<u32> {
         use super::keysym as k;
         Some(match sym {
+            k::F2 => KEY_F2,
             k::F3 => KEY_F3,
             k::SHIFT_L => KEY_LEFTSHIFT,
             k::SHIFT_R => KEY_RIGHTSHIFT,
@@ -438,7 +447,7 @@ fn open_x11() -> Result<(X11Keys, Chords), u32> {
     }
     let x = X11Keys::open(None).inspect_err(|&why| log!("keys: {}", if why == KEYS_NO_LIBX11 { "libX11.so.6 not loadable" } else { "XOpenDisplay failed" }))?;
     let Some(codes) = x.keycodes(&DEFAULT_BINDINGS) else {
-        log!("keys: F3/Shift not in the X keymap");
+        log!("keys: F2/F3/Shift not in the X keymap");
         return Err(KEYS_NO_KEYCODES);
     };
     log!("keys: polling X11 ({:?})", codes.bindings);
@@ -502,6 +511,7 @@ mod tests {
 
     // Codes as on a PC keyboard under evdev: F3 69, Shift_L 50, Shift_R 62, Control_L 37,
     // Control_R 105, Alt_L 64, Super_L 133.
+    const F2: u8 = 68;
     const F3: u8 = 69;
     const SHL: u8 = 50;
     const SHR: u8 = 62;
@@ -512,6 +522,7 @@ mod tests {
 
     fn lookup(sym: u64) -> u8 {
         match sym {
+            keysym::F2 => F2,
             keysym::F3 => F3,
             keysym::SHIFT_L => SHL,
             keysym::SHIFT_R => SHR,
@@ -538,6 +549,15 @@ mod tests {
         assert!(k.down(F3) && k.down(255) && k.down(8));
         assert!(!k.down(SHL) && !k.down(0));
         assert_eq!(k.0[F3 as usize / 8], 1 << (F3 % 8));
+    }
+
+    #[test]
+    fn shift_f2_opens_the_panel_and_nothing_else() {
+        let mut c = chords();
+        let got = run(&mut c, &[&[], &[SHL], &[SHL, F2], &[SHL, F2], &[SHL], &[F2], &[], &[CTL, SHL, F2], &[], &[SHR, F2]]);
+        assert_eq!(got, [None, None, Some(Action::Panel), None, None, None, None, None, None, Some(Action::Panel)]);
+        // F2 and F3 are separate keys: Shift+F2 then Shift+F3 while Shift stays down.
+        assert_eq!(run(&mut c, &[&[], &[SHL, F2], &[SHL], &[SHL, F3]]), [None, Some(Action::Panel), None, Some(Action::Toggle)]);
     }
 
     #[test]
@@ -597,6 +617,15 @@ mod tests {
             assert_eq!(code_of(keysym::SUPER_L).and_then(keycode), Some(super::SUP));
             assert_eq!(keycode(248), None);
             assert_eq!(keycode(u32::MAX), None);
+        }
+
+        #[test]
+        fn shift_f2_over_wayland() {
+            let mut k = EvdevKeys::new();
+            k.enter(&[]);
+            let got = keys(&mut k, &[(KEY_LEFTSHIFT, DOWN), (KEY_F2, DOWN), (KEY_F2, UP), (KEY_LEFTSHIFT, UP), (KEY_F2, DOWN), (KEY_F2, UP)]);
+            assert_eq!(got, [None, Some(Action::Panel), None, None, None, None]);
+            assert_eq!(code_of(keysym::F2).and_then(keycode), Some(super::F2));
         }
 
         #[test]
@@ -681,11 +710,16 @@ mod tests {
         let k = Keycodes::resolve(&DEFAULT_BINDINGS, |s| if matches!(s, keysym::F3 | keysym::SHIFT_L | keysym::CONTROL_L) { lookup(s) } else { 0 }).unwrap();
         assert_eq!(k.bindings, [(F3, MOD_SHIFT, Action::Toggle), (F3, MOD_CTRL | MOD_SHIFT, Action::Next)]);
         assert_eq!(k.modifiers, [(SHL, MOD_SHIFT), (CTL, MOD_CTRL)]);
+        // With F2 in the keymap, the panel's chord too.
+        let k = Keycodes::resolve(&DEFAULT_BINDINGS, |s| if matches!(s, keysym::F2 | keysym::F3 | keysym::SHIFT_L) { lookup(s) } else { 0 }).unwrap();
+        assert_eq!(k.bindings, [(F3, MOD_SHIFT, Action::Toggle), (F2, MOD_SHIFT, Action::Panel)]);
         // No Ctrl: only the toggle (its chord can't be held).
         let k = Keycodes::resolve(&DEFAULT_BINDINGS, |s| if matches!(s, keysym::F3 | keysym::SHIFT_L) { lookup(s) } else { 0 }).unwrap();
         assert_eq!(k.bindings, [(F3, MOD_SHIFT, Action::Toggle)]);
-        // No F3, or no Shift: nothing to poll for.
-        assert!(Keycodes::resolve(&DEFAULT_BINDINGS, |s| if s == keysym::F3 { 0 } else { lookup(s) }).is_none());
+        // No F3: only the panel's Shift+F2. No F2 or F3, or no Shift: nothing to poll for.
+        let k = Keycodes::resolve(&DEFAULT_BINDINGS, |s| if s == keysym::F3 { 0 } else { lookup(s) }).unwrap();
+        assert_eq!(k.bindings, [(F2, MOD_SHIFT, Action::Panel)]);
+        assert!(Keycodes::resolve(&DEFAULT_BINDINGS, |s| if matches!(s, keysym::F2 | keysym::F3) { 0 } else { lookup(s) }).is_none());
         assert!(Keycodes::resolve(&DEFAULT_BINDINGS, |s| if matches!(s, keysym::SHIFT_L | keysym::SHIFT_R) { 0 } else { lookup(s) }).is_none());
     }
 }

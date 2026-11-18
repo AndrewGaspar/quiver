@@ -395,3 +395,50 @@ fn static_catalog_and_session_picking() {
     e.hub.end(&a);
     e.hub.end(&b);
 }
+
+/// Shift+F2 read by the layer becomes a panel toggle broadcast to `quiver-sight` for the
+/// session; the CLI's commands go out the same way; reports show in the status.
+#[test]
+fn panel_key_and_commands() {
+    use quiver_api::sight::{Backdrop, PanelAction, PanelReport, PanelSection};
+    use quiver_perf::layout::KEYS_ACTIVE;
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 10);
+    let w = fake_layer(&dir, 1);
+    let mut events = e.hub.broadcast.subscribe();
+    let mut s = fake_status();
+    s.keys = KEYS_ACTIVE;
+    s.key_panels = 7;
+    assert!(w.set_layer_status(&s));
+    let mut watched = HashMap::new();
+    drain_once(&e.hub, &mut watched);
+    let panel = |ev: &mut tokio::sync::broadcast::Receiver<PerfEvent>| {
+        std::iter::from_fn(|| ev.try_recv().ok()).find_map(|e| match e {
+            PerfEvent::Panel(c) => Some(c),
+            _ => None,
+        })
+    };
+    assert!(panel(&mut events).is_none(), "the first value read is a baseline");
+    s.key_panels = 8;
+    assert!(w.set_layer_status(&s));
+    drain_once(&e.hub, &mut watched);
+    let c = panel(&mut events).expect("Shift+F2 toggles the panel");
+    assert_eq!((c.action, c.session.as_deref(), c.by.as_str()), (PanelAction::Toggle, Some(sid.as_str()), "keys"));
+    // It didn't touch the HUD.
+    assert!(!e.hub.status(Some(&sid), None).unwrap().on);
+    // The CLI: open on a section, the only session; then close (no session needed).
+    let o = e.hub.panel_command(PanelAction::Open, None, Some(PanelSection::Mods), "cli").unwrap();
+    assert!(o.seq > c.seq);
+    assert_eq!((o.session.as_deref(), o.section), (Some(sid.as_str()), Some(PanelSection::Mods)));
+    assert!(e.hub.panel_command(PanelAction::Toggle, Some("s-nope"), None, "cli").is_err());
+    let cl = e.hub.panel_command(PanelAction::Close, None, None, "cli").unwrap();
+    assert_eq!(cl.session, None);
+    let st = e.hub.panel_status();
+    assert_eq!(st.last_command.map(|c| c.seq), Some(cl.seq));
+    assert_eq!(st.keys.iter().find(|k| k.session == sid).map(|k| (k.keys.as_str(), k.presses)), Some(("active", 1)));
+    e.hub.panel_report(PanelReport { open: true, session: Some(sid.clone()), backdrop: Backdrop::Dim, backdrop_detail: "blur is off".into(), ..Default::default() });
+    assert_eq!(e.hub.panel_status().panel.map(|p| (p.open, p.backdrop)), Some((true, Backdrop::Dim)));
+    e.hub.end(&sid);
+    assert_eq!(e.hub.panel_status().panel.map(|p| p.open), Some(false), "the session ended");
+    assert!(e.hub.panel_command(PanelAction::Toggle, None, None, "cli").is_err(), "no game running");
+}

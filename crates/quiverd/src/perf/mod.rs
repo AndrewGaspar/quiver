@@ -24,6 +24,7 @@ pub mod launch;
 pub mod layout;
 pub mod mods;
 pub mod nvml;
+pub mod panel;
 pub mod registry;
 pub mod rings;
 pub mod sight;
@@ -229,6 +230,8 @@ pub struct PerfHub {
     pub sight: sight::Spawner,
     /// Perf sessions of `quiver steam-run` launches (`steam.rs`).
     steam: steam::SteamSessions,
+    /// The Sight panel's last command and report ([`panel`]).
+    panel: Mutex<panel::PanelState>,
 }
 
 /// What [`PerfHub::begin`] set up for a launch.
@@ -265,6 +268,7 @@ impl PerfHub {
             next_sub: AtomicU64::new(1),
             sight: sight::Spawner::default(),
             steam: Default::default(),
+            panel: Mutex::default(),
         })
     }
 
@@ -374,6 +378,7 @@ impl PerfHub {
     /// removed, attached renderers told (an `on: false` model).
     pub fn end(&self, session_id: &str) -> Option<PerfSummary> {
         let mut s = self.lock().sessions.remove(session_id)?;
+        self.panel_session_ended(session_id);
         let now = mono_raw_ns();
         s.store.note_presenter(None, now);
         let summary = s.store.summary(now);
@@ -896,8 +901,10 @@ pub fn drain_once(h: &PerfHub, watched: &mut HashMap<String, rings::SessionRings
         // One layer per session reads the keys for it: every layer polls the same X server
         // keymap, so a launcher and its game would both count each press.
         if let Some(pid) = key_source {
-            let (t, n) = drained.keys.iter().filter(|k| k.0 == pid).fold((0, 0), |a, k| (a.0 + k.1, a.1 + k.2));
+            let (t, n, p) = drained.keys.iter().filter(|k| k.0 == pid).fold((0, 0, 0), |a, k| (a.0 + k.1, a.1 + k.2, a.2 + k.3));
             h.hud_keys(&id, t, n);
+            // Shift+F2: the Sight panel (SIGHT §14).
+            h.panel_keys(&id, p);
         }
     }
 }

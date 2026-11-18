@@ -247,6 +247,9 @@ impl LayerStatus {
         keys: 0,
         key_toggles: 0,
         key_nexts: 0,
+        key_panels: 0,
+        _pad0: 0,
+        _reserved0: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -260,7 +263,7 @@ impl LayerStatus {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 256).
+        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 264).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }
     }
 
@@ -358,7 +361,9 @@ mod tests {
         s.extent_w = 2560;
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
-        assert_eq!(b.len(), 256);
+        assert_eq!(b.len(), 264);
+        // A layer from before the panel key wrote 256 bytes: the rest reads as zero.
+        assert_eq!(LayerStatus::from_bytes(&b[..256]).key_panels, 0);
         let t = LayerStatus::from_bytes(b);
         assert_eq!(t, s);
         assert_eq!(LayerStatus::get_str(&t.engine_name), Some("DXVK"));

@@ -201,6 +201,9 @@ typedef struct qv_layer_status {
     uint32_t keys;              /* QV_KEYS_* | QV_KEYS_WL_* << QV_KEYS_WL_SHIFT */
     uint16_t key_toggles;       /* HUD toggle / next-preset chord presses, wrapping */
     uint16_t key_nexts;
+    uint16_t key_panels;        /* Shift+F2 (Sight panel) presses, wrapping (appended) */
+    uint16_t _pad0;
+    uint32_t _reserved0;
 } qv_layer_status;
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
@@ -290,7 +293,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 256);
+QV_ASSERT_SIZE(qv_layer_status, 264);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -316,6 +319,7 @@ QV_ASSERT_OFFSET(qv_layer_status, device_name, 184);
 QV_ASSERT_OFFSET(qv_layer_status, keys, 248);
 QV_ASSERT_OFFSET(qv_layer_status, key_toggles, 252);
 QV_ASSERT_OFFSET(qv_layer_status, key_nexts, 254);
+QV_ASSERT_OFFSET(qv_layer_status, key_panels, 256);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

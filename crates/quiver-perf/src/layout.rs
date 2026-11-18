@@ -196,6 +196,12 @@ pub struct LayerStatus {
     /// difference from the last value it read (the first value it reads is the baseline).
     pub key_toggles: u16,
     pub key_nexts: u16,
+    // ---- appended (the Sight panel, SIGHT §14): layers from before stop at `key_nexts`
+    // (256 bytes) and read as zero here.
+    /// Shift+F2 (the Sight panel) presses the layer saw, wrapping, like `key_toggles`.
+    pub key_panels: u16,
+    pub _pad0: u16,
+    pub _reserved0: u32,
 }
 
 pub const LAYER_DRAWING: u32 = 1 << 0;
@@ -356,7 +362,7 @@ const _: () = {
     assert!(size_of::<StatusBlock>() == RING_STATUS_BYTES);
     assert!(size_of::<Record>() == SLOT_BYTES);
     assert!(align_of::<Record>() == 8);
-    assert!(size_of::<LayerStatus>() == 256);
+    assert!(size_of::<LayerStatus>() == 264);
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
@@ -441,6 +447,7 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, keys),
     o!("qv_layer_status", LayerStatus, key_toggles),
     o!("qv_layer_status", LayerStatus, key_nexts),
+    o!("qv_layer_status", LayerStatus, key_panels),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
