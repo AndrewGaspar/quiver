@@ -539,6 +539,11 @@ pub fn win_path(p: &Path) -> String {
     format!("Z:{}", p.display()).replace('/', "\\")
 }
 
+/// The launched game's ref (`ubisoft:3539`, `epic:Hornbill`, `steam:582160`) in its
+/// environment: a stable way for anything outside (hyprpad, scripts) to tell a window
+/// belongs to a game Quiver started, whatever its window class.
+pub const ENV_GAME: &str = "QUIVER_GAME";
+
 struct Proton<'a> {
     cfg: &'a Config,
     prefix: &'a Path,
@@ -839,6 +844,9 @@ pub async fn play(
     if let Some(s) = &plan.session {
         bridge.env("QUIVER_SESSION", s);
     }
+    if let Some(g) = &plan.game {
+        bridge.env(ENV_GAME, g.to_string());
+    }
     // The bridge is the prefix's first Wine process, so the wineserver and Wine's services
     // (winedevice's controller bus, …) start with *its* environment. Give it the game's
     // env settings, or settings such as PROTON_DISABLE_HIDRAW never reach winebus.
@@ -881,6 +889,9 @@ pub async fn play(
     // pipe the bridge created (from the same context) from us.
     if let Some(s) = &ctx.session {
         cmd.env("QUIVER_SESSION", s);
+    }
+    if let Some(g) = &plan.game {
+        cmd.env(ENV_GAME, g.to_string());
     }
     if let Some(pipe) = &ctx.mods_pipe {
         cmd.env("QUIVER_MODS_PIPE", pipe);
@@ -1051,6 +1062,9 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     }
     if let Some(s) = &plan.session {
         cmd.env("QUIVER_SESSION", s);
+    }
+    if let Some(g) = &plan.game {
+        cmd.env(ENV_GAME, g.to_string());
     }
     cmd.current_dir(workdir).stdout(Stdio::null()).stderr(std::fs::File::create(run_dir.join("game.log"))?).kill_on_drop(true);
     let mut child = cmd.spawn()?;

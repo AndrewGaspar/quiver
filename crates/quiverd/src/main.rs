@@ -732,6 +732,7 @@ impl Daemon {
         // (`QUIVER_SESSION`), and the profile's option files rendered and patched.
         let session_id = options::new_session_id();
         plan.session = Some(session_id.clone());
+        plan.game = Some(quiver_api::GameRef::ubisoft(product_id));
         let mut detail = mods::plan_lines(&plan.api);
         detail.extend(self.options_launch(&game, &mut plan, &session_id));
         // Perf (design/SIGHT-HUD.md): the session's metrics, and with the HUD enabled for

@@ -362,6 +362,10 @@ pub(crate) fn full_plan(
     // Quiver Tweaks: the same compiled environment a Quiver launch gets (Steam picks the
     // Proton build; design/TWEAKS.md §8.1).
     crate::tweaks::steam_plan(&daemon.cfg, &mut plan, steam_env);
+    // Steam starts the game, so its window is `steam_app_<id>` anyway; the ref is set for
+    // the same reason as on Quiver's own launches (one variable to key off). After the mods,
+    // which replace the plan's env with their resolved one.
+    plan.env.insert(quiver_core::launcher::ENV_GAME.into(), game.to_string());
     if perf {
         daemon.perf_steam_launch(&mut plan, steam_env);
     }

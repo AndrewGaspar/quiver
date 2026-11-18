@@ -391,6 +391,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
     let id = d.new_game_job(JobKind::Play, game, g.name.clone());
     let session_id = crate::options::new_session_id();
     plan.session = Some(session_id.clone());
+    plan.game = Some(game);
     let mut detail = crate::mods::plan_lines(&plan.api);
     detail.extend(d.options_launch(&g, &mut plan, &session_id));
     let (tweak_lines, tweak_revisions) = d.tweaks_launch(&g, &mut plan, &session_id);

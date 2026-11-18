@@ -87,6 +87,9 @@ pub struct Plan {
     /// The launch's session id (`QUIVER_SESSION` for the bridge and the game), set by the
     /// daemon.
     pub session: Option<String>,
+    /// The game being launched (`QUIVER_GAME`, e.g. `epic:Hornbill`, for the game and
+    /// anything outside that wants to know a window is a Quiver game), set by the daemon.
+    pub game: Option<quiver_api::GameRef>,
 }
 
 impl Plan {
@@ -1893,7 +1896,7 @@ impl ModStore {
             resolved: st.resolved,
         };
         let saves_folder = saves.folder.trim_start_matches("savegames/<user>/").to_owned();
-        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder, session: None })
+        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder, session: None, game: None })
     }
 
     /// Make older data explicit: every live profile without a save store gets one (see

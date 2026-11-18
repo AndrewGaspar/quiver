@@ -228,6 +228,7 @@ fn any_steam_game_gets_its_launch_plan_and_a_local_session() {
     assert_eq!(var("QUIVER_TEST_WRAPPED").as_deref(), Some("1"), "the wrapper ran in front of Steam's command");
     assert_eq!(var("PROTON_LOG").as_deref(), Some("1"), "the game's settings");
     assert_eq!(var("QUIVER_SESSION").as_deref(), Some(perf_session.as_str()));
+    assert_eq!(var("QUIVER_GAME").as_deref(), Some(game.as_str()), "the game's ref, for hyprpad and scripts");
     assert_eq!(var("QUIVER_SIGHT").as_deref(), Some("1"), "the HUD is on for the game");
     assert!(var("QUIVER_PERF_DIR").is_some_and(|d| d.starts_with(e.dir("shm").to_str().unwrap())), "the scratch shm root");
     assert_eq!(var("VK_INSTANCE_LAYERS").as_deref(), Some("VK_LAYER_VKBASALT_post_processing:VK_LAYER_QUIVER_sight"), "Sight below the person's vkBasalt");
