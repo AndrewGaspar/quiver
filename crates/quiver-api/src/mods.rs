@@ -39,10 +39,20 @@ use crate::{GameSettings, SettingOp};
 /// The fixed id (and reserved name) of the implicit unmodded profile.
 pub const VANILLA: &str = "vanilla";
 
-/// Sources treated as a person at a front end. Anything else (`agent`, scripts, MCP…)
-/// gets the "Ask" rules of the agent policy.
+/// Sources treated as a person at a front end: the CLI, the app, and the in-game Sight
+/// panel (`sight`, which acts only on the person's own keys or controller). Anything else
+/// (`agent`, scripts, MCP…) gets the "Ask" rules of the agent policy.
 pub fn is_human_source(source: &str) -> bool {
-    matches!(source, "cli" | "gui")
+    matches!(source, "cli" | "gui" | "sight")
+}
+
+#[cfg(test)]
+mod human_tests {
+    #[test]
+    fn the_sight_panel_is_a_person() {
+        assert!(super::is_human_source("sight") && super::is_human_source("gui") && super::is_human_source("cli"));
+        assert!(!super::is_human_source("agent") && !super::is_human_source("mcp") && !super::is_human_source("in-game"));
+    }
 }
 
 /// A directory of files overlaid on the install folder (stored under

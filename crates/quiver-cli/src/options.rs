@@ -143,6 +143,7 @@ pub enum OptionsAction {
 fn who(source: &str) -> String {
     match source {
         "cli" | "gui" => "you".into(),
+        "sight" => "you, in game".into(),
         "in-game" => "in game".into(),
         "game" => "the game".into(),
         "file" => "hand edit".into(),

@@ -357,7 +357,7 @@ pub enum Actor {
 
 pub fn actor(source: &str) -> Actor {
     match source {
-        "gui" | "app" => Actor::App,
+        "gui" | "app" | "sight" => Actor::App,
         "cli" => Actor::Cli,
         "system" | "daemon" | "quiverd" | "" => Actor::System,
         _ => Actor::Agent,
@@ -366,6 +366,7 @@ pub fn actor(source: &str) -> Actor {
 
 pub fn actor_label(source: &str) -> String {
     match actor(source) {
+        Actor::App if source == "sight" => "You · in game".into(),
         Actor::App => "You · app".into(),
         Actor::Cli => "You · CLI".into(),
         Actor::System => "System".into(),
