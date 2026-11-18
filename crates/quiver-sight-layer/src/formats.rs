@@ -1,12 +1,28 @@
-//! Which swapchains the compositor draws on (SIGHT-HUD §2.8 "Formats and colour").
+//! Which swapchains the compositor draws on (SIGHT-HUD §2.8 "Formats and colour"), and which
+//! it can blur behind the Sight panel (SIGHT §14).
 //!
 //! The HUD image is sRGB-encoded and premultiplied. UNORM swapchains blend it as is (how the
 //! app's own windows look); sRGB swapchains sample it through an `_SRGB` texture and blend in
 //! linear. HDR10 (ST 2084) and scRGB swapchains are phase 2: the layer reports "can't draw"
 //! and quiverd uses the desktop presenter.
+//!
+//! The backdrop blur doesn't care about the colour space: it reads the swapchain image and
+//! writes the blur back in the same encoding, so SDR UNORM and sRGB, HDR10
+//! (`A2B10G10R10`/`A2R10G10B10` + ST 2084) and scRGB (`R16G16B16A16_SFLOAT` + extended
+//! linear) all work, as does any other format the device can sample with a linear filter
+//! and blend into ([`BLUR_FEATURES`]).
 
 use ash::vk;
-use quiver_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_NO_IMAGE, DRAW_ERR_USAGE};
+use quiver_perf::layout::{BACKDROP_ERR_FORMAT, BACKDROP_ERR_USAGE, DRAW_ERR_FORMAT, DRAW_ERR_NO_IMAGE, DRAW_ERR_USAGE};
+
+/// What the swapchain format must support for the backdrop blur (optimal tiling): sampling
+/// it with a linear filter (the first downsample reads it) and blending into it (the fade).
+pub const BLUR_FEATURES: vk::FormatFeatureFlags = vk::FormatFeatureFlags::from_raw(
+    vk::FormatFeatureFlags::SAMPLED_IMAGE.as_raw()
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR.as_raw()
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT.as_raw()
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND.as_raw(),
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -43,13 +59,26 @@ pub fn encoding_of(format: vk::Format) -> Option<Encoding> {
     }
 }
 
-/// Decides from the create info whether the compositor can draw on a swapchain, and how.
-/// `Err` is the `DRAW_ERR_*` reason the status block reports.
+/// Decides from the create info whether the compositor can draw the HUD on a swapchain, and
+/// how. `Err` is the `DRAW_ERR_*` reason the status block reports.
 pub fn classify(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<Encoding, u32> {
     if ci.image_color_space != vk::ColorSpaceKHR::SRGB_NONLINEAR {
         // HDR10_ST2084, EXTENDED_SRGB_LINEAR (scRGB), and the rest: phase 2 or never.
         return Err(DRAW_ERR_FORMAT);
     }
+    drawable(ci)?;
+    encoding_of(ci.image_format).ok_or(DRAW_ERR_FORMAT)
+}
+
+/// Whether the backdrop blur can work on a swapchain, from its create info alone (the format's
+/// features and the surface's usage flags are checked by the caller). `Err` is the
+/// `BACKDROP_ERR_*` reason.
+pub fn blur_class(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<(), u32> {
+    drawable(ci).map_err(|e| if e == DRAW_ERR_USAGE { BACKDROP_ERR_USAGE } else { BACKDROP_ERR_FORMAT })
+}
+
+/// The checks any drawing on a swapchain needs, whatever its format and colour space.
+pub fn drawable(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<(), u32> {
     if ci.image_extent.width == 0 || ci.image_extent.height == 0 {
         // Not valid Vulkan, but cheap to refuse: nothing to draw on.
         return Err(DRAW_ERR_NO_IMAGE);
@@ -65,7 +94,7 @@ pub fn classify(ci: &vk::SwapchainCreateInfoKHR<'_>) -> Result<Encoding, u32> {
         // Shared presentable images live in SHARED_PRESENT layout; not handled.
         return Err(DRAW_ERR_USAGE);
     }
-    encoding_of(ci.image_format).ok_or(DRAW_ERR_FORMAT)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -105,5 +134,26 @@ mod tests {
         empty.image_extent.height = 0;
         assert_eq!(classify(&empty), Err(DRAW_ERR_NO_IMAGE));
         assert_eq!(Encoding::Srgb.texture_format(), vk::Format::R8G8B8A8_SRGB);
+    }
+
+    #[test]
+    fn blur_takes_any_colour_space() {
+        let srgb = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+        for (f, cs) in [
+            (vk::Format::B8G8R8A8_UNORM, srgb),
+            (vk::Format::B8G8R8A8_SRGB, srgb),
+            (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
+            (vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
+            (vk::Format::A2R10G10B10_UNORM_PACK32, vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT),
+        ] {
+            assert_eq!(blur_class(&ci(f, cs)), Ok(()), "{f:?} {cs:?}");
+        }
+        let mut layered = ci(vk::Format::B8G8R8A8_UNORM, srgb);
+        layered.image_array_layers = 2;
+        assert_eq!(blur_class(&layered), Err(BACKDROP_ERR_FORMAT));
+        let mut shared = ci(vk::Format::B8G8R8A8_UNORM, srgb);
+        shared.present_mode = vk::PresentModeKHR::SHARED_CONTINUOUS_REFRESH;
+        assert_eq!(blur_class(&shared), Err(BACKDROP_ERR_USAGE));
+        assert!(BLUR_FEATURES.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND));
     }
 }

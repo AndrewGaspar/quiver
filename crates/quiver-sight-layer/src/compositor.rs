@@ -12,17 +12,24 @@
 //! 4. submit, waiting on the app's present semaphores and signalling the semaphore of this
 //!    image index, which the present then waits on instead.
 //!
+//! While the Sight panel's backdrop request in `hud.image` is live (or its fade-out runs),
+//! the backdrop blur ([`crate::blur`]) goes into the same command buffer before step 3, so
+//! the HUD is drawn sharp over the blurred game. A swapchain the HUD can't draw on (HDR) still
+//! gets a compositor when it can be blurred.
+//!
 //! Everything is allocated when the swapchain is created, except the staging buffer and the
-//! texture (on the first image, and the texture again only when an image outgrows it).
+//! texture (on the first image, and the texture again only when an image outgrows it) and the
+//! blur's images (the first time a panel asks).
 
 use std::ptr::NonNull;
 use std::sync::Arc;
 
 use ash::vk;
 use quiver_perf::HudBufferHeader;
-use quiver_perf::hud::HudPoll;
-use quiver_perf::layout::{DRAW_ERR_DEVICE_LOST, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_QUEUE, HUD_MAX_BUFFER_BYTES, HUD_MAX_DIM};
+use quiver_perf::hud::{BackdropRequest, HudPoll};
+use quiver_perf::layout::{BACKDROP_ERR_INTERNAL, DRAW_ERR_DEVICE_LOST, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_QUEUE, HUD_MAX_BUFFER_BYTES, HUD_MAX_DIM};
 
+use crate::blur::{self, BlurPipes, Chain, Fade};
 use crate::formats::Encoding;
 use crate::graph::{self, History, VERTS_PER_GRAPH, Vertex};
 use crate::log;
@@ -40,15 +47,28 @@ const TEX_STEP: u32 = 256;
 /// What a present got from the compositor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drawn {
-    /// Nothing to draw (`DRAW_ERR_*` reason); pass the app's semaphores through.
-    Nothing(u32),
-    /// The current image has opacity 0: the HUD is toggled off.
-    Off,
     /// This present only: every slot in flight, or the command pool is changing queue
     /// family. Nothing drawn, state unchanged.
     Skipped,
-    /// Work submitted: present waits on `semaphore`; `hud` is false for an upload-only submit.
-    Submitted { semaphore: vk::Semaphore, hud: bool },
+    /// `semaphore`: work submitted, the present waits on it (else pass the app's semaphores
+    /// through); what happened to the HUD; whether the game was blurred.
+    Done { semaphore: Option<vk::Semaphore>, hud: Hud, blurred: bool },
+}
+
+impl Drawn {
+    fn nothing(reason: u32) -> Drawn {
+        Drawn::Done { semaphore: None, hud: Hud::Nothing(reason), blurred: false }
+    }
+}
+
+/// The HUD's part of a present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hud {
+    Drawn,
+    /// The current image has opacity 0: the HUD is toggled off.
+    Off,
+    /// Not drawn (`DRAW_ERR_*` reason).
+    Nothing(u32),
 }
 
 struct Buffer {
@@ -74,12 +94,18 @@ struct Slot {
     /// The fence belongs to a submission that went through (a failed submit leaves it reset
     /// and never signalled).
     submitted: bool,
+    /// That submission wrote the blur's timestamps for this slot.
+    timed: bool,
 }
 
 pub struct Compositor {
     pipes: Arc<Pipelines>,
-    enc: Encoding,
+    /// How the HUD is blended; `None`: the HUD can't draw here (`hud_error`), only the blur.
+    enc: Option<Encoding>,
+    hud_error: u32,
+    format: vk::Format,
     extent: vk::Extent2D,
+    images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
     /// Signalled by our submit for image `i`, waited on by its present. Reusing semaphore `i`
@@ -113,20 +139,33 @@ pub struct Compositor {
     last_queue: vk::Queue,
     /// Presents skipped because every slot was in flight.
     pub skipped: u64,
+    /// Why the backdrop blur can't work here (`BACKDROP_ERR_*`), 0 when it can.
+    blur_error: u32,
+    /// The blur's pipelines and images, once a panel asked.
+    blur: Option<(Arc<BlurPipes>, Chain)>,
+    fade: Fade,
+    /// The last live request (its dim and radius carry the fade-out).
+    backdrop: BackdropRequest,
 }
 
 // SAFETY: the mapped pointers are only used under the swapchain's mutex.
 unsafe impl Send for Compositor {}
 
 impl Compositor {
+    /// `hud`: the HUD's encoding, or why it can't draw here; `blur`: whether the backdrop
+    /// blur can (the swapchain has `SAMPLED` usage), or why not.
+    ///
     /// # Safety
     /// `images` are the swapchain's images; `d` is its live device.
-    pub unsafe fn new(d: &DeviceData, images: &[vk::Image], format: vk::Format, extent: vk::Extent2D, enc: Encoding) -> Result<Compositor, vk::Result> {
+    pub unsafe fn new(d: &DeviceData, images: &[vk::Image], format: vk::Format, extent: vk::Extent2D, hud: Result<Encoding, u32>, blur: Result<(), u32>) -> Result<Compositor, vk::Result> {
         let pipes = d.pipelines_for(format)?;
         let mut c = Compositor {
             pipes,
-            enc,
+            enc: hud.ok(),
+            hud_error: hud.err().unwrap_or(0),
+            format,
             extent,
+            images: images.to_vec(),
             views: Vec::with_capacity(images.len()),
             framebuffers: Vec::with_capacity(images.len()),
             semaphores: Vec::with_capacity(images.len()),
@@ -148,6 +187,10 @@ impl Compositor {
             reupload: false,
             last_queue: vk::Queue::null(),
             skipped: 0,
+            blur_error: blur.err().unwrap_or(0),
+            blur: None,
+            fade: Fade::default(),
+            backdrop: BackdropRequest::NONE,
         };
         // SAFETY: as documented; on error everything made so far is destroyed (nothing is in
         // flight yet).
@@ -190,7 +233,7 @@ impl Compositor {
             // Images in flight plus one, so a free slot is normally there without waiting.
             for _ in 0..images.len() + 1 {
                 let fence = dev.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)?;
-                self.slots.push(Slot { cmd: vk::CommandBuffer::null(), fence, submitted: false });
+                self.slots.push(Slot { cmd: vk::CommandBuffer::null(), fence, submitted: false, timed: false });
             }
             self.vertices = make_buffer(d, (self.slots.len() * VB_SLOT_BYTES) as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
             let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 }];
@@ -299,7 +342,7 @@ impl Compositor {
         // SAFETY: our objects; the set written is one no pending submission uses (the other
         // set when a texture exists, and when none exists nothing has drawn yet).
         unsafe {
-            let t = make_texture(d, self.enc.texture_format(), step(w), step(h)).map_err(|_| DRAW_ERR_INTERNAL)?;
+            let t = make_texture(d, self.enc.unwrap_or(Encoding::Unorm).texture_format(), step(w), step(h)).map_err(|_| DRAW_ERR_INTERNAL)?;
             let set = if self.texture.is_some() { 1 - self.cur_set } else { self.cur_set };
             let info = [vk::DescriptorImageInfo { sampler: self.pipes.sampler, image_view: t.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
             let write = [vk::WriteDescriptorSet::default()
@@ -346,14 +389,24 @@ impl Compositor {
     }
 
     /// Step 2: picks up a new `hud.image` buffer into staging if one was published and staging
-    /// is free. Returns whether the HUD image is fresh (heartbeat within 3 s).
-    unsafe fn poll_hud(&mut self, d: &DeviceData, now: i64) -> Result<bool, u32> {
+    /// is free. Returns whether the HUD image is fresh (heartbeat within 3 s), and the panel's
+    /// backdrop request.
+    unsafe fn poll_hud(&mut self, d: &DeviceData, now: i64) -> Result<(bool, BackdropRequest), u32> {
         // The heartbeat thread holds the lock only while (re)opening the file: then skip.
         let mut hud = match HUD.try_lock() {
             Ok(h) => h,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(self.current.is_some()),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok((self.current.is_some(), self.backdrop)),
         };
+        let req = hud.reader.as_ref().map_or(BackdropRequest::NONE, |r| r.backdrop(now));
+        if self.enc.is_none() {
+            return Ok((false, req));
+        }
+        // SAFETY: as documented.
+        unsafe { self.poll_image(d, now, &mut hud).map(|fresh| (fresh, req)) }
+    }
+
+    unsafe fn poll_image(&mut self, d: &DeviceData, now: i64, hud: &mut telemetry::Hud) -> Result<bool, u32> {
         if hud.generation != self.hud_generation || self.reupload {
             self.reupload = false;
             self.hud_generation = hud.generation;
@@ -427,15 +480,15 @@ impl Compositor {
         let dev = &d.dev;
         let image = image_index as usize;
         if image >= self.framebuffers.len() {
-            return Ok(Drawn::Nothing(DRAW_ERR_INTERNAL));
+            return Ok(Drawn::nothing(DRAW_ERR_INTERNAL));
         }
         if !d.families.get(family as usize).is_some_and(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS)) {
             // Presenting from a queue that can't draw: nothing this time (the game may
             // present from another queue later).
-            return Ok(Drawn::Nothing(DRAW_ERR_QUEUE));
+            return Ok(Drawn::nothing(DRAW_ERR_QUEUE));
         }
         if waits.len() > MAX_WAITS {
-            return Ok(Drawn::Nothing(DRAW_ERR_INTERNAL));
+            return Ok(Drawn::nothing(DRAW_ERR_INTERNAL));
         }
         // SAFETY: our objects throughout; the queue is externally synchronized by the app's
         // present call, which we are inside.
@@ -464,7 +517,23 @@ impl Compositor {
             }
 
             self.reap_retired(dev)?;
-            let fresh = self.poll_hud(d, now)?;
+            // The slot's last blur is done (its fence signalled): its GPU time.
+            if std::mem::take(&mut self.slots[slot].timed)
+                && let (Some((_, chain)), Some(period)) = (&self.blur, d.timestamps(family))
+                && let Some(ns) = chain.elapsed_ns(dev, slot, period)
+            {
+                telemetry::note_blur_gpu(ns);
+            }
+            let (fresh, req) = self.poll_hud(d, now)?;
+
+            // The backdrop blur: fade toward the panel's request; build on first use.
+            let live = req.is_live(now);
+            if live {
+                self.backdrop = req;
+            }
+            let alpha = if self.blur_error == 0 { self.fade.step(live, now) } else { 0.0 };
+            let blur = alpha > 0.0 && self.ensure_blur(d, family);
+
             let mut copy = None;
             if let Some(p) = self.pending
                 && self.ensure_texture(d, p.width, p.height)?
@@ -475,8 +544,17 @@ impl Compositor {
             let visible = self.current.filter(|c| {
                 fresh && c.opacity > 0.0 && c.extent_w == self.extent.width && c.extent_h == self.extent.height && self.texture.as_ref().is_some_and(|t| t.filled || copy.is_some())
             });
-            if visible.is_none() && copy.is_none() {
-                return Ok(if fresh && self.current.is_some_and(|c| c.opacity == 0.0) { Drawn::Off } else { Drawn::Nothing(DRAW_ERR_NO_IMAGE) });
+            let hud = if self.enc.is_none() {
+                Hud::Nothing(self.hud_error)
+            } else if visible.is_some() {
+                Hud::Drawn
+            } else if fresh && self.current.is_some_and(|c| c.opacity == 0.0) {
+                Hud::Off
+            } else {
+                Hud::Nothing(DRAW_ERR_NO_IMAGE)
+            };
+            if visible.is_none() && copy.is_none() && !blur {
+                return Ok(Drawn::Done { semaphore: None, hud, blurred: false });
             }
 
             let cmd = self.slots[slot].cmd;
@@ -486,6 +564,12 @@ impl Compositor {
             if let Some(p) = copy {
                 self.record_copy(dev, cmd, &p);
                 self.staging_reader = Some(slot);
+            }
+            let mut timed = false;
+            if blur && let Some((pipes, chain)) = &self.blur {
+                let plan = blur::plan((self.extent.width, self.extent.height), self.backdrop.radius_fraction());
+                chain.record(dev, pipes, cmd, image, self.images[image], self.framebuffers[image], slot, &plan, alpha, self.backdrop.dim_fraction());
+                timed = chain.queries.is_some();
             }
             if let Some(c) = visible {
                 self.record_draw(dev, cmd, image, slot, &c, history);
@@ -504,13 +588,52 @@ impl Compositor {
             self.slots[slot].submitted = false;
             dev.reset_fences(&[fence]).map_err(fail)?;
             match dev.queue_submit(queue, &[submit], fence) {
-                Ok(()) => self.slots[slot].submitted = true,
+                Ok(()) => {
+                    self.slots[slot].submitted = true;
+                    self.slots[slot].timed = timed;
+                }
                 Err(vk::Result::ERROR_DEVICE_LOST) => return Err(DRAW_ERR_DEVICE_LOST),
                 Err(_) => return Err(DRAW_ERR_INTERNAL),
             }
             self.next_slot = (slot + 1) % self.slots.len();
             self.last_queue = queue;
-            Ok(Drawn::Submitted { semaphore: signal[0], hud: visible.is_some() })
+            Ok(Drawn::Done { semaphore: Some(signal[0]), hud, blurred: blur })
+        }
+    }
+
+    /// Why the backdrop blur can't work on this swapchain (`BACKDROP_ERR_*`), 0 when it can.
+    pub fn blur_error(&self) -> u32 {
+        self.blur_error
+    }
+
+    /// The blur's pipelines and images, made the first time a panel asks. `false` (and the
+    /// blur off for this swapchain, the status saying why) if they can't be made.
+    unsafe fn ensure_blur(&mut self, d: &DeviceData, family: u32) -> bool {
+        if self.blur.is_some() {
+            return true;
+        }
+        if self.blur_error != 0 {
+            return false;
+        }
+        let extent = (self.extent.width, self.extent.height);
+        let made = d.blur_pipes_for(self.format).and_then(|p| {
+            // SAFETY: the swapchain's views (it has SAMPLED usage: blur_error is 0), our device.
+            unsafe { Chain::new(d, &p, &self.views, extent, self.slots.len(), d.timestamps(family).is_some()) }.map(|c| (p, c))
+        });
+        match made {
+            Ok(b) => {
+                log!("backdrop blur set up for {}x{} {:?}", extent.0, extent.1, self.format);
+                self.blur = Some(b);
+                true
+            }
+            Err(e) => {
+                log!("backdrop blur setup failed: {e:?}");
+                self.blur_error = BACKDROP_ERR_INTERNAL;
+                if let Some(t) = telemetry::get() {
+                    t.blur_error.store(BACKDROP_ERR_INTERNAL, std::sync::atomic::Ordering::Relaxed);
+                }
+                false
+            }
         }
     }
 
@@ -568,7 +691,7 @@ impl Compositor {
             origin: [c.x as f32, c.y as f32],
             size: [c.width as f32, c.height as f32],
             opacity: c.opacity,
-            flags: if self.enc == Encoding::Srgb { PUSH_SRGB_DECODE } else { 0 },
+            flags: if self.enc == Some(Encoding::Srgb) { PUSH_SRGB_DECODE } else { 0 },
         };
         // Graph vertices into this slot's part of the vertex buffer (not in use: its fence
         // is signalled).
@@ -654,11 +777,14 @@ impl Compositor {
             for t in self.texture.take().into_iter().chain(self.retired.take().map(|r| r.0)) {
                 destroy_texture(dev, &t);
             }
+            if let Some((_, mut c)) = self.blur.take() {
+                c.destroy(dev);
+            }
         }
     }
 }
 
-fn color_range() -> vk::ImageSubresourceRange {
+pub(crate) fn color_range() -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }
 }
 

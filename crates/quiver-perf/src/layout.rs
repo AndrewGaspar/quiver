@@ -227,8 +227,12 @@ pub struct LayerStatus {
     // reserved; layers from before read as zero here.
     /// Shift+F2 (the Sight panel) presses the layer saw, wrapping, like `key_toggles`.
     pub key_panels: u16,
-    pub _pad0: u16,
-    pub _reserved0: u32,
+    /// Why the layer can't blur the game behind the panel on the target swapchain
+    /// (`BACKDROP_ERR_*`), 0 when it can ([`LAYER_BLUR_READY`]) or for a layer from before.
+    pub backdrop_error: u16,
+    /// GPU time of the backdrop blur per present, ns (a running mean over the recent blurred
+    /// presents, from timestamp queries); 0 when it hasn't blurred or can't time it.
+    pub backdrop_gpu_ns: u32,
 }
 
 /// `LayerStatus::reflex_flags`: the app called `vkSetLatencySleepModeNV` on the swapchain.
@@ -263,6 +267,29 @@ pub const LAYER_HUD_OFF: u32 = 1 << 5;
 pub const LAYER_WAYLAND_SURFACE: u32 = 1 << 6;
 /// The game created an Xlib or XCB `VkSurfaceKHR`.
 pub const LAYER_X11_SURFACE: u32 = 1 << 7;
+/// The layer can blur the game behind the Sight panel on the target swapchain (sampled usage
+/// added at creation, a filterable and blendable format; SIGHT §14). Zero from a layer before
+/// the backdrop blur.
+pub const LAYER_BLUR_READY: u32 = 1 << 8;
+/// The layer blurred a present within the last half second (the panel's request is live and
+/// the game is presenting).
+pub const LAYER_BLURRING: u32 = 1 << 9;
+
+/// `LayerStatus::backdrop_error`: why the layer can't blur behind the panel.
+pub const BACKDROP_ERR_NONE: u32 = 0;
+/// The swapchain's format can't be sampled with a linear filter and blended into, or the
+/// swapchain is layered, protected, shared or has deferred memory.
+pub const BACKDROP_ERR_FORMAT: u32 = 1;
+/// The surface doesn't allow `SAMPLED` usage on swapchain images (or creating the swapchain
+/// with it failed).
+pub const BACKDROP_ERR_USAGE: u32 = 2;
+/// The game presents from a queue family without graphics.
+pub const BACKDROP_ERR_QUEUE: u32 = 3;
+pub const BACKDROP_ERR_DEVICE_LOST: u32 = 4;
+/// Building the blur's pipelines or images failed.
+pub const BACKDROP_ERR_INTERNAL: u32 = 6;
+/// `QUIVER_SIGHT_BLUR=0` or `QUIVER_SIGHT_DRAW=0`, or drawing was disabled after a panic.
+pub const BACKDROP_ERR_OFF: u32 = 7;
 
 /// `LayerStatus::keys & 0xff` (X11 keymap polling): not reported (polling not started yet,
 /// or a layer from before it).
@@ -333,8 +360,33 @@ pub struct HudHeader {
     /// quiver-sight's CLOCK_MONOTONIC_RAW ns, ≥ 1/s.
     pub heartbeat: u64,
     pub writer_pid: u32,
-    pub _pad1: [u8; HUD_HEADER_BYTES - 84],
+    pub _pad1: [u8; 44],
+    /// Offset 128, own cache line: the Sight panel's backdrop request for this session's game
+    /// (SIGHT §14), written by quiver-sight, read by the layer each present. Appended in what
+    /// was padding (zeroed at creation), so zero means "none" for writers and readers from
+    /// before. `HUD_BACKDROP_*`.
+    pub backdrop: u32,
+    /// How much the layer darkens the blurred game, 1/1000 (0: not at all; the panel draws its
+    /// own tint over it).
+    pub backdrop_dim: u16,
+    /// Blur radius, 1/1000 of the swapchain height; 0: the layer's default
+    /// ([`HUD_BACKDROP_DEFAULT_RADIUS`]).
+    pub backdrop_radius: u16,
+    /// CLOCK_MONOTONIC_RAW ns: the request lapses after this (the writer renews it while the
+    /// panel is open, so a writer that dies stops the blur within a few seconds).
+    pub backdrop_until: u64,
+    pub _pad2: [u8; HUD_HEADER_BYTES - 144],
 }
+
+/// `qv_hud_header.backdrop`: nothing behind the panel (or no panel).
+pub const HUD_BACKDROP_NONE: u32 = 0;
+/// Blur the game's frames behind the panel.
+pub const HUD_BACKDROP_BLUR: u32 = 1;
+/// `backdrop_radius = 0`: 2.5% of the swapchain height.
+pub const HUD_BACKDROP_DEFAULT_RADIUS: u32 = 25;
+/// A request whose `backdrop_until` is further ahead than this is treated as ending then
+/// (a bogus or corrupted deadline can't pin the blur on).
+pub const HUD_BACKDROP_MAX_HOLD_NS: u64 = 10_000_000_000;
 
 /// `qv_hud_graph`: a rectangle the layer fills with the live frame-time graph.
 #[repr(C)]
@@ -412,6 +464,8 @@ const _: () = {
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
+    assert!(offset_of!(HudHeader, backdrop) == 128);
+    assert!(offset_of!(HudHeader, backdrop_until) == 136);
     assert!(size_of::<HudGraph>() == 60);
     assert!(size_of::<HudBufferHeader>() == HUD_PIXELS_OFFSET);
     assert!(offset_of!(HudBufferHeader, model_rev) == 176);
@@ -504,6 +558,8 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, render_latency_frames),
     o!("qv_layer_status", LayerStatus, render_latency_sum_us),
     o!("qv_layer_status", LayerStatus, key_panels),
+    o!("qv_layer_status", LayerStatus, backdrop_error),
+    o!("qv_layer_status", LayerStatus, backdrop_gpu_ns),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
@@ -511,6 +567,10 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_hud_header", HudHeader, published),
     o!("qv_hud_header", HudHeader, heartbeat),
     o!("qv_hud_header", HudHeader, writer_pid),
+    o!("qv_hud_header", HudHeader, backdrop),
+    o!("qv_hud_header", HudHeader, backdrop_dim),
+    o!("qv_hud_header", HudHeader, backdrop_radius),
+    o!("qv_hud_header", HudHeader, backdrop_until),
     o!("qv_hud_graph", HudGraph, x),
     o!("qv_hud_graph", HudGraph, y),
     o!("qv_hud_graph", HudGraph, w),
@@ -573,6 +633,10 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_HUD_MAX_DIM", HUD_MAX_DIM as u64),
     ("QV_HUD_MAX_GRAPHS", HUD_MAX_GRAPHS as u64),
     ("QV_HUD_FORMAT_RGBA8_PREMUL_SRGB", HUD_FORMAT_RGBA8_PREMUL_SRGB as u64),
+    ("QV_HUD_BACKDROP_NONE", HUD_BACKDROP_NONE as u64),
+    ("QV_HUD_BACKDROP_BLUR", HUD_BACKDROP_BLUR as u64),
+    ("QV_HUD_BACKDROP_DEFAULT_RADIUS", HUD_BACKDROP_DEFAULT_RADIUS as u64),
+    ("QV_HUD_BACKDROP_MAX_HOLD_NS", HUD_BACKDROP_MAX_HOLD_NS),
     ("QV_CLOCK_QPC", CLOCK_QPC as u64),
     ("QV_CLOCK_MONO_RAW_NS", CLOCK_MONO_RAW_NS as u64),
     ("QV_PRODUCER_LAYER", PRODUCER_LAYER as u64),
@@ -596,6 +660,15 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_LAYER_HUD_OFF", LAYER_HUD_OFF as u64),
     ("QV_LAYER_WAYLAND_SURFACE", LAYER_WAYLAND_SURFACE as u64),
     ("QV_LAYER_X11_SURFACE", LAYER_X11_SURFACE as u64),
+    ("QV_LAYER_BLUR_READY", LAYER_BLUR_READY as u64),
+    ("QV_LAYER_BLURRING", LAYER_BLURRING as u64),
+    ("QV_BACKDROP_ERR_NONE", BACKDROP_ERR_NONE as u64),
+    ("QV_BACKDROP_ERR_FORMAT", BACKDROP_ERR_FORMAT as u64),
+    ("QV_BACKDROP_ERR_USAGE", BACKDROP_ERR_USAGE as u64),
+    ("QV_BACKDROP_ERR_QUEUE", BACKDROP_ERR_QUEUE as u64),
+    ("QV_BACKDROP_ERR_DEVICE_LOST", BACKDROP_ERR_DEVICE_LOST as u64),
+    ("QV_BACKDROP_ERR_INTERNAL", BACKDROP_ERR_INTERNAL as u64),
+    ("QV_BACKDROP_ERR_OFF", BACKDROP_ERR_OFF as u64),
     ("QV_REFLEX_MODE_SET", REFLEX_MODE_SET as u64),
     ("QV_REFLEX_LOW_LATENCY", REFLEX_LOW_LATENCY as u64),
     ("QV_REFLEX_BOOST", REFLEX_BOOST as u64),

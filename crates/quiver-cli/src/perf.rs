@@ -634,6 +634,9 @@ fn print_status(s: &HudStatus) {
         if !l.keys.is_empty() {
             println!("  keys: {} — {}  (presses: {} toggle, {} next)", l.keys, l.keys_detail, l.key_toggles, l.key_nexts);
         }
+        if !l.backdrop.is_empty() {
+            println!("  panel backdrop blur: {}", l.backdrop);
+        }
     } else {
         println!("  layer: not seen");
     }

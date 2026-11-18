@@ -4,25 +4,37 @@
 //! hyprpad chord or `quiver sight toggle`, and driven with the controller.
 //!
 //! - **Opening**: remembers the focused window (to give focus back on close) and finds the
-//!   game's window (for Quit), asks Hyprland for the blur rule (the user's own
-//!   `decoration:blur`; else the plain dim), opens the surface, and loads the session's data
-//!   through the link. Live metrics are subscribed while it's open.
+//!   game's window (for Quit), picks the backdrop, opens the surface, and loads the session's
+//!   data through the link. Live metrics are subscribed while it's open.
+//! - **Backdrop** (SIGHT §14): when the session's HUD model says its Sight layer can blur
+//!   (`HudModel::backdrop`), the request goes into the session's `hud.image` and the layer
+//!   blurs the game's own frames under any compositor ([`Backdrop::GameBlur`]); it is renewed
+//!   every half second and dropped if the layer doesn't report blurring within 2.5 s.
+//!   Otherwise (OpenGL, no layer, the layer can't) Hyprland's blur rule when its blur is on,
+//!   else the plain dim.
 //! - **Input**: the keyboard (the surface has it), the mouse, and the controller two ways:
 //!   hyprpad's `quiver-sight` mode types keys into the surface while the game's pad is held
 //!   neutral (`tools/hyprpad/quiver-sight.lua`), and gilrs reads pads directly where it can
 //!   (no hyprpad, or a pad hyprpad doesn't own). Both end up as the same [`Input`]s.
-//! - **Closing**: B at the top, Escape, Shift+F2, the chord again: the surface goes, the blur
-//!   rule is turned off, focus goes back to the game's window (Hyprland `focuswindow`).
+//! - **Closing**: B at the top, Escape, Shift+F2, the chord again: the surface goes, the
+//!   layer's blur request is cleared (it fades out) or the blur rule turned off, focus goes back
+//!   to the game's window (Hyprland `focuswindow`).
 
 pub mod data;
 pub mod state;
 pub mod view;
 
-use anyhow::Result;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui::{App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size};
+use quiver_api::perf::LayerBackdrop;
 use quiver_api::sight::{Backdrop, PanelAction, PanelCommand, PanelReport, PanelSection};
+use quiver_perf::hud::{BackdropRequest, HudWriter};
+use quiver_perf::shm::Mapping;
 use quiver_ui::gamepad::PadEvent;
 use quiver_ui::input::Input;
 
@@ -68,6 +80,43 @@ struct Open {
     session: String,
 }
 
+/// How long the request lasts without renewal: quiver-sight renews it every half second
+/// while the panel is open, so a quiver-sight that dies stops the blur within this.
+const GAME_BLUR_HOLD: Duration = Duration::from_secs(2);
+/// The layer must report blurring within this, else the panel falls back (the game stopped
+/// presenting when it lost focus, or the layer can't after all).
+const GAME_BLUR_CONFIRM: Duration = Duration::from_millis(2500);
+
+/// The Sight layer's blur of the game behind the open panel (design/SIGHT.md §14): the
+/// request in the session's `hud.image`, renewed while the panel is open.
+struct GameBlur {
+    session: String,
+    writer: HudWriter<Mapping>,
+    since: Instant,
+    confirmed: bool,
+}
+
+impl GameBlur {
+    fn start(session: &str, image: &std::path::Path) -> Result<GameBlur> {
+        let writer = quiver_perf::session::open_hud_writer(image).with_context(|| format!("opening {}", image.display()))?;
+        let g = GameBlur { session: session.to_owned(), writer, since: Instant::now(), confirmed: false };
+        g.renew();
+        Ok(g)
+    }
+
+    fn renew(&self) {
+        let until = quiver_perf::clock::mono_raw_ns() + GAME_BLUR_HOLD.as_nanos() as i64;
+        // No dim from the layer: the panel draws its own (theme-aware) tint over the blur.
+        self.writer.set_backdrop(&BackdropRequest::blur(0, 0, until));
+    }
+}
+
+impl Drop for GameBlur {
+    fn drop(&mut self) {
+        self.writer.set_backdrop(&BackdropRequest::NONE);
+    }
+}
+
 pub struct PanelCtl {
     open: Option<Open>,
     link: Option<tokio::sync::mpsc::UnboundedSender<LinkReq>>,
@@ -84,6 +133,10 @@ pub struct PanelCtl {
     settings: Settings,
     /// The namespace to open with (`--demo panel` uses a test one).
     pub namespace: String,
+    /// Each session's Sight layer blur state, from its HUD model.
+    layers: HashMap<String, LayerBackdrop>,
+    /// The layer blurring the game behind the open panel.
+    game_blur: Option<GameBlur>,
 }
 
 impl PanelCtl {
@@ -103,6 +156,72 @@ impl PanelCtl {
             pad_unavailable: None,
             settings,
             namespace: NAMESPACE.into(),
+            layers: HashMap::new(),
+            game_blur: None,
+        }
+    }
+
+    /// A session's HUD model said whether its Sight layer can blur the game (or `None`: it has
+    /// no `hud.image`, or the session ended).
+    pub fn layer_backdrop(&mut self, session: &str, b: Option<LayerBackdrop>, cx: &mut App) {
+        match b {
+            Some(b) => {
+                self.layers.insert(session.to_owned(), b);
+            }
+            None => {
+                self.layers.remove(session);
+            }
+        }
+        self.check_game_blur(cx);
+    }
+
+    /// Every half second: renews the open panel's blur request, and gives up on it if the
+    /// layer can't (or doesn't) blur.
+    pub fn keepalive(&mut self, cx: &mut App) {
+        if let Some(g) = &self.game_blur {
+            g.renew();
+        }
+        self.check_game_blur(cx);
+    }
+
+    fn check_game_blur(&mut self, cx: &mut App) {
+        let Some(g) = &mut self.game_blur else { return };
+        let layer = self.layers.get(&g.session);
+        if layer.is_some_and(|l| l.blurring) {
+            if !g.confirmed {
+                tracing::info!(session = %g.session, after = ?g.since.elapsed(), "the Sight layer blurs the game behind the panel");
+            }
+            g.confirmed = true;
+            return;
+        }
+        let why = match layer {
+            None => "the session has no Sight layer state any more".to_owned(),
+            Some(l) if !l.ready => format!("the Sight layer can't blur: {}", l.reason),
+            Some(_) if !g.confirmed && g.since.elapsed() > GAME_BLUR_CONFIRM => "the Sight layer didn't blur (is the game still presenting?)".to_owned(),
+            Some(_) => return,
+        };
+        self.game_blur = None;
+        let (backdrop, detail) = self.compositor_backdrop();
+        let detail = format!("{why}; {detail}");
+        tracing::info!(backdrop = backdrop.as_str(), %detail, "panel backdrop changed");
+        self.with_view(cx, |v, _| v.backdrop = backdrop);
+        self.report.backdrop = backdrop;
+        self.report.backdrop_detail = detail;
+        self.report_now();
+    }
+
+    /// The backdrop without the Sight layer: Hyprland's blur rule when its blur is on, else
+    /// the plain dim.
+    fn compositor_backdrop(&mut self) -> (Backdrop, String) {
+        let namespace = self.namespace.clone();
+        let Some(h) = self.hypr() else { return (Backdrop::Dim, "not Hyprland: plain dim".to_owned()) };
+        let blur = h.blur();
+        if !blur.enabled {
+            return (Backdrop::Dim, "blur is off in Hyprland (decoration:blur:enabled): plain dim".to_owned());
+        }
+        match h.blur_on(&namespace) {
+            Ok(()) => (Backdrop::Blur, format!("Hyprland layer rule ({:?} syntax), your blur: size {} × {} passes", h.flavor, blur.size, blur.passes)),
+            Err(e) => (Backdrop::Dim, format!("the blur rule failed ({e}): plain dim")),
         }
     }
 
@@ -194,33 +313,40 @@ impl PanelCtl {
             anyhow::bail!("no layer-shell here (not a Wayland session, or headless)");
         }
         self.start_pad();
-        let namespace = self.namespace.clone();
         // Where the game is, before the panel takes focus.
-        let (return_to, game_addr, mon, backdrop, detail) = {
-            let h = self.hypr();
-            match h {
-                None => (None, None, None, Backdrop::Dim, "not Hyprland: plain dim".to_owned()),
-                Some(h) => {
-                    let active = h.active_window();
-                    let clients = h.clients();
-                    let game = hypr::game_window(&clients, active.as_ref(), session, &[], std::path::Path::new("/proc")).map(|w| w.address.clone());
-                    let monitors = h.monitors();
-                    let mon = monitor
-                        .and_then(|m| monitors.iter().find(|x| x.name == m))
-                        .or_else(|| active.as_ref().and_then(|a| monitors.iter().find(|m| m.id == a.monitor)))
-                        .or_else(|| monitors.iter().find(|m| m.focused))
-                        .cloned();
-                    let blur = h.blur();
-                    let (backdrop, detail) = if !blur.enabled {
-                        (Backdrop::Dim, "blur is off in Hyprland (decoration:blur:enabled): plain dim".to_owned())
-                    } else {
-                        match h.blur_on(&namespace) {
-                            Ok(()) => (Backdrop::Blur, format!("Hyprland layer rule ({:?} syntax), your blur: size {} × {} passes", h.flavor, blur.size, blur.passes)),
-                            Err(e) => (Backdrop::Dim, format!("the blur rule failed ({e}): plain dim")),
-                        }
-                    };
-                    (active.map(|a| a.address), game, mon, backdrop, detail)
+        let (return_to, game_addr, mon) = match self.hypr() {
+            None => (None, None, None),
+            Some(h) => {
+                let active = h.active_window();
+                let clients = h.clients();
+                let game = hypr::game_window(&clients, active.as_ref(), session, &[], std::path::Path::new("/proc")).map(|w| w.address.clone());
+                let monitors = h.monitors();
+                let mon = monitor
+                    .and_then(|m| monitors.iter().find(|x| x.name == m))
+                    .or_else(|| active.as_ref().and_then(|a| monitors.iter().find(|m| m.id == a.monitor)))
+                    .or_else(|| monitors.iter().find(|m| m.focused))
+                    .cloned();
+                (active.map(|a| a.address), game, mon)
+            }
+        };
+        // The backdrop: the Sight layer blurs the game's own frames when it can (any
+        // compositor); else the compositor's blur, else the dim.
+        self.game_blur = None;
+        let (backdrop, detail) = match self.layers.get(session) {
+            Some(l) if l.ready => match GameBlur::start(session, &l.image) {
+                Ok(g) => {
+                    self.game_blur = Some(g);
+                    (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
                 }
+                Err(e) => {
+                    let (b, d) = self.compositor_backdrop();
+                    (b, format!("asking the Sight layer to blur failed ({e:#}); {d}"))
+                }
+            },
+            l => {
+                let why = l.map_or_else(|| "no Sight layer state for this session".to_owned(), |l| format!("the Sight layer can't blur: {}", l.reason));
+                let (b, d) = self.compositor_backdrop();
+                (b, format!("{why}; {d}"))
             }
         };
         let logical = mon.as_ref().map(|m| m.logical()).unwrap_or((1920.0, 1080.0));
@@ -238,6 +364,7 @@ impl PanelCtl {
         nav.open(section);
         let footer = Footer { pad: self.pad_name.clone().unwrap_or_default(), pad_shared: self.pad_name.is_some() && !hyprpad_running() };
         let sid = session.to_owned();
+        let namespace = self.namespace.clone();
         let opts = WindowOptions {
             titlebar: None,
             window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(logical.0), px(logical.1)) })),
@@ -297,9 +424,14 @@ impl PanelCtl {
             self.nav.confirm = None;
         }
         self.send(LinkReq::Unsubscribe);
+        // The layer fades the blur out over the game's next frames.
+        self.game_blur = None;
         let back = self.report.return_to.clone();
+        let rule = self.report.backdrop == Backdrop::Blur;
         if let Some(h) = self.hypr() {
-            h.blur_off();
+            if rule {
+                h.blur_off();
+            }
             if let Some(a) = &back
                 && let Err(e) = h.focus(a)
             {

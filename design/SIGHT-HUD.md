@@ -615,6 +615,16 @@ phase 2). Anything else (exotic formats, no `COLOR_ATTACHMENT` usage that can be
 swapchain creation, a present queue family without graphics): the layer reports "can't draw"
 and quiverd falls back to the desktop presenter.
 
+**The Sight panel's backdrop blur** (SIGHT §14, added 2026-11-18). While `quiver-sight`'s
+request in `hud.image`'s header is live, the same submit first blurs the game's frame (a
+dual-filter Kawase blur through quarter-size `R16G16B16A16_SFLOAT` images, `src/blur.rs`) and
+then draws the HUD sharp over it, so the panel's backdrop doesn't depend on the compositor. It
+needs `SAMPLED` usage, which the layer adds at swapchain creation when the surface lists it and
+the format can be sampled linearly and blended into; the blur works in any colour space (it
+writes back the encoding it read), so a swapchain the HUD can't draw on (HDR) still gets a
+compositor for the blur. Status: `LAYER_BLUR_READY`, `LAYER_BLURRING`, `backdrop_error`,
+`backdrop_gpu_ns` (§3.8). Off with `QUIVER_SIGHT_BLUR=0`.
+
 **Resize.** The descriptor names the swapchain extent it was laid out for. After a resize the
 layer stops drawing until an image for the new extent arrives (quiverd sees the new extent in
 the status block and sends a new model; normally well under 100 ms).
@@ -1053,7 +1063,10 @@ typedef struct qv_ring_header {
     qv_status_block status;     /* offset 192: the layer's qv_layer_status (swapchain extent,
                                    format, colour space, present mode, low_latency2, drawn and
                                    present counters, draw error, device and engine names, HUD
-                                   key polling state and chord press counters, §1.3) */
+                                   key polling state and chord press counters, §1.3; the
+                                   panel's backdrop blur: LAYER_BLUR_READY / LAYER_BLURRING
+                                   flags, backdrop_error, backdrop_gpu_ns in the last 8 bytes,
+                                   zero from older layers, SIGHT §14) */
     uint8_t  _pad3[1856];
 } qv_ring_header;
 
@@ -1114,6 +1127,13 @@ typedef struct qv_hud_header {      /* offset 0, one 4 KiB page */
     _Alignas(64) uint64_t published;/* publish counter; buffer (published % 2) is current */
     uint64_t heartbeat;             /* quiver-sight, CLOCK_MONOTONIC_RAW ns, ≥ 1/s */
     uint32_t writer_pid;
+    /* As built 2026-11-18, in what was padding (zero = none, so older readers and writers are
+     * unaffected): the Sight panel's backdrop request (SIGHT §14), quiver-sight → layer. */
+    _Alignas(64) uint32_t backdrop; /* 0 none, 1 blur; with the next two, one 64-bit word */
+    uint16_t backdrop_dim;          /* darkening, 1/1000 */
+    uint16_t backdrop_radius;       /* 1/1000 of the swapchain height; 0: 25 (2.5%) */
+    uint64_t backdrop_until;        /* CLOCK_MONOTONIC_RAW ns; renewed while the panel is
+                                       open, stored before the word, at most now + 10 s */
 } qv_hud_header;
 
 typedef struct qv_hud_graph {       /* a rectangle the layer fills with the live graph */

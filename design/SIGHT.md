@@ -1066,7 +1066,68 @@ Shift+F2, hyprpad holding the game's pad neutral (5a), and the panel taking keyb
   quiver-sight-test`): mapped on eDP-2 at the full 2048×1280 logical size, took the keyboard,
   gave focus back on close.
 
-**Backdrop: compositor blur, else dim** (`quiver-sight/src/hypr.rs`)
+**Backdrop: the game blurred by the Sight layer, else compositor blur, else dim**
+
+In that order, picked when the panel opens (`quiver-sight/src/panel/mod.rs`); `quiver sight
+status` prints the one in use (`PanelReport.backdrop`: `game_blur`, `blur`, `dim`) and why.
+Both blurs get the same light tint from the panel; the dim is darker.
+
+*The game blurred by the Sight layer* (added 2026-11-18; Quiver owns the blur, so it works
+under any compositor, and with Hyprland's blur off, as on this machine). The layer already sits
+on the game's swapchain at present time, so while the panel is open it blurs the game's own
+frame there, under the HUD, and the compositor draws the panel over an already-blurred game.
+
+- **The request** goes from `quiver-sight` straight into the session's `hud.image` header, the
+  per-session channel the layer already maps (`qv_hud_header.backdrop`: mode, dim and radius in
+  one 64-bit word, and a deadline `backdrop_until`; SIGHT-HUD §3.8). Only that session's game
+  reads it, so only that game blurs. `quiver-sight` renews the deadline (now + 2 s) every half
+  second while the panel is open and clears it on close; if `quiver-sight` dies, the request
+  lapses with the panel's surface. quiverd doesn't relay it: it keeps no panel state (above),
+  and the writer that owns open/close owning the request too means no stale blur after a crash.
+  quiverd's part is telling `quiver-sight` what the layer can do: every `HudModel` carries
+  `backdrop` (`LayerBackdrop`: the `hud.image` path whatever the HUD's presenter, `ready`,
+  `blurring`, and why not), from the layer's status block.
+- **The layer** (`quiver-sight-layer/src/blur.rs`) adds `SAMPLED` (with `COLOR_ATTACHMENT`)
+  usage at `vkCreateSwapchainKHR` when the surface allows it and the format can be sampled with
+  a linear filter and blended into, and reports `LAYER_BLUR_READY` (or `backdrop_error`:
+  `format`, `usage`, `queue`, `internal`, `off`). On a live request it records, before the HUD's
+  render pass in the same submit: the swapchain image to `SHADER_READ_ONLY`, a 4×4 box filter to
+  a quarter-size `R16G16B16A16_SFLOAT` image, a dual-filter (Kawase) blur of 1–5 levels down and
+  back up, and a full-size pass that writes the result over the swapchain image. The radius is
+  2.5% of the swapchain height by default (levels and filter offset from the height, so 1080p
+  and 4K look the same). It fades in over 160 ms and out over 200 ms of the game's own presents,
+  and the HUD is drawn sharp on top. Images and pipelines are made the first time a panel asks
+  (about 5.5 MiB at 4K) and kept with the swapchain; with no request the present path is one
+  extra 64-bit load. `QUIVER_SIGHT_BLUR=0` turns it off (no usage added).
+- **Formats**: any colour space, because the blur reads the image and writes it back in the
+  same encoding: SDR UNORM (blurred as encoded, like a compositor), `_SRGB` (in linear light),
+  HDR10 (`A2B10G10R10`/`A2R10G10B10` + ST 2084, in PQ), scRGB (`R16G16B16A16_SFLOAT`, linear).
+  The HUD itself still can't draw on HDR swapchains; the blur can, since its compositor exists
+  for either. DXVK and vkd3d-proton games are Vulkan games here. The layer sits below vkBasalt
+  and frame generators (SIGHT-HUD §2.4), so it blurs the post-processed frame and every
+  generated one.
+- **Fallback**: the panel uses the layer when the session's model says `ready`; it expects
+  `blurring` within 2.5 s (the layer sets it for half a second after each blurred present) and
+  otherwise drops the request and switches to the compositor blur or the dim, as when the layer
+  isn't there (OpenGL games, the layer not loaded or disabled, no `hud.image`), can't blur this
+  swapchain, or the game stops presenting when it loses focus.
+- **Cost**, GPU time per present from timestamp queries (`quiver hud status` shows the layer's
+  running mean, `backdrop_gpu_ns` in its status block): on the AMD 890M iGPU (shared LPDDR5x,
+  RADV) 0.21 ms at 1080p, 0.37 ms at 1440p, 0.42 ms at 2560×1600, 0.66 ms at 4K; it is
+  bandwidth-bound (one full-size read, one full-size write, small passes), so a discrete GPU
+  should be several times faster (estimated ≤ 0.15 ms at 4K at 500 GB/s; NVIDIA's driver has
+  no headless surface, so the harness couldn't measure the RTX 5070). Paid only while the panel
+  is open. `tests/vulkan_blur.rs` (opt-in, a GPU with `VK_EXT_headless_surface`) checks the blur,
+  the sharp HUD over it, dim, fade-out, an expired request, sRGB in linear light, HDR formats
+  when the surface offers them (RADV's headless surface doesn't), and prints the cost;
+  `examples/sight_harness -- --blur` measures it on any device.
+- **Known limits**: the blur needs the game to keep presenting (it's done on the game's
+  frames): a game that stops rendering when it loses focus keeps its last frame, partly faded
+  in, until the fallback; an app that doesn't redraw its whole swapchain image each frame
+  would blur what it left (games redraw); presenting from a queue without graphics, or
+  switching present queues every frame, skips it like the HUD.
+
+*Compositor blur* (`quiver-sight/src/hypr.rs`), used only when the layer can't:
 
 - On Hyprland with `decoration:blur:enabled` on, opening adds a runtime layer rule that blurs
   the panel's surface with the user's own blur settings (size, passes: nothing overridden),
@@ -1089,9 +1150,8 @@ Shift+F2, hyprpad holding the game's pad neutral (5a), and the panel taking keyb
   effect noted in Hyprland's source: every `eval` clears Hyprland's stored config-error list.
 - The blur keeps the game composited while the panel is open, but nothing is lost by it:
   direct scan-out is already off while any Sight surface is on the game's monitor (§4.1 (c)).
-  For compositors without layer blur, the Sight layer could blur the game's own image in the
-  game (a shader pass when the panel is up): a possible phase 3 alternative next to
-  presenter 2, not built.
+  (The first version noted the in-game blur above as a possible phase 3 alternative; it is now
+  the first choice.)
 
 **Sections** (`panel/state.rs` builds rows from `PanelData`; `panel/view.rs` draws them)
 
@@ -1162,8 +1222,12 @@ mapping (`panel::state`), Hyprland command forms, flavor detection, game-window 
 status layout, and quiverd's key → command path, commands and reports (`perf::tests::
 panel_key_and_commands`). `quiver-sight --demo panel` shows the fixture on a desktop;
 `cargo run -p quiver-sight --example panel_png -- OUT [--backdrop dim]` renders every section
-off-screen. Not verified: a real game (Shift+F2 → panel → focus back), hyprpad's keys
-reaching the surface, the blur (it's off on this machine), spike S1.
+off-screen. The layer's backdrop blur: `blur::tests` (levels and offset per resolution, the
+fade), `formats::tests`, the request word (`quiver-perf` `hud::tests::backdrop_request`, the C
+header's asserts), quiverd's `layer_backdrop_state`, and the GPU test above. Not verified: a
+real game (Shift+F2 → panel → focus back, the layer's blur under the panel, the fallback when
+a game stops presenting unfocused), hyprpad's keys reaching the surface, Hyprland's blur rule
+(it's off on this machine), HDR swapchains on a real surface, spike S1.
 
 **Deferred**: per-game "toasts only" / "pause via SDK" fallbacks (6c) and
 `OverlayStateChangedPush` (S7); the quick menu; try-then-keep (`live: Only` + Revert); mod

@@ -114,7 +114,7 @@ fn main() {
                 .unwrap();
             windows.push((handle, shot, name));
         }
-        let blurred = backdrop == Backdrop::Blur;
+        let blurred = backdrop.blurred();
         let tag = if blurred { "" } else { "-dim" };
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(150)).await;

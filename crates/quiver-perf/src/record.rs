@@ -274,8 +274,8 @@ impl LayerStatus {
         render_latency_frames: 0,
         render_latency_sum_us: 0,
         key_panels: 0,
-        _pad0: 0,
-        _reserved0: 0,
+        backdrop_error: 0,
+        backdrop_gpu_ns: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).

@@ -176,6 +176,7 @@ impl Session {
             keys_detail: keys_detail.into(),
             key_toggles: key_status.map_or(0, |k| k.key_toggles as u32),
             key_nexts: key_status.map_or(0, |k| k.key_nexts as u32),
+            backdrop: key_status.as_ref().map(hud::backdrop_status).unwrap_or_default(),
         })
     }
 
@@ -719,6 +720,7 @@ impl PerfHub {
             };
             let (p, why) = s.presenter.clone().unwrap();
             let image = s.image.clone();
+            let backdrop = hud::layer_backdrop(image.as_deref(), s.key_layer().or(s.live_layer()), now);
             let inp = hud::ModelInput {
                 session: &s.id,
                 product_id: s.product_id(),
@@ -729,6 +731,7 @@ impl PerfHub {
                 reason: &why,
                 image: image.as_deref().filter(|_| p == Presenter::Game),
                 monitor: s.monitor.as_deref(),
+                backdrop,
             };
             let mut m = hud::build_model(&inp, &s.store, now);
             if s.model.as_ref().is_some_and(|old| hud::same(old, &m)) {

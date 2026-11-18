@@ -8,14 +8,14 @@
 //! `try_lock`s the HUD reader.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use quiver_perf::LayerStatus;
 use quiver_perf::clock::mono_raw_ns;
 use quiver_perf::hud::HudReader;
-use quiver_perf::layout::{HUD_HEADER_BYTES, KEYS_WL_SHIFT, LAYER_PANICKED};
+use quiver_perf::layout::{BACKDROP_ERR_OFF, HUD_HEADER_BYTES, KEYS_WL_SHIFT, LAYER_BLUR_READY, LAYER_BLURRING, LAYER_PANICKED};
 use quiver_perf::ring::RingWriter;
 use quiver_perf::session::{FileKind, SessionDir, open_hud_reader};
 use quiver_perf::shm::Mapping;
@@ -42,7 +42,16 @@ pub struct Telemetry {
     pub key_toggles: AtomicU32,
     pub key_nexts: AtomicU32,
     pub key_panels: AtomicU32,
+    /// The backdrop blur (crate::blur): the last blurred present (CLOCK_MONOTONIC_RAW ns), its
+    /// GPU time (running mean, ns), and an error found at present time (`BACKDROP_ERR_*`)
+    /// that overrides the target swapchain's readiness until the target changes.
+    pub blur_last_ns: AtomicI64,
+    pub backdrop_gpu_ns: AtomicU32,
+    pub blur_error: AtomicU32,
 }
+
+/// `LAYER_BLURRING` stays set this long after a blurred present.
+const BLURRING_FOR_NS: i64 = 500_000_000;
 
 /// The current `hud.image` reader. `generation` bumps whenever the thread (re)opens or drops
 /// it, so the compositor knows to forget what it uploaded.
@@ -59,6 +68,15 @@ static TELEMETRY: OnceLock<Option<Telemetry>> = OnceLock::new();
 #[inline]
 pub fn get() -> Option<&'static Telemetry> {
     TELEMETRY.get().and_then(|t| t.as_ref())
+}
+
+/// One backdrop blur's GPU time: folded into the running mean the status block reports.
+pub fn note_blur_gpu(ns: u64) {
+    let Some(t) = get() else { return };
+    let ns = ns.min(u32::MAX as u64) as u32;
+    let _ = t.backdrop_gpu_ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+        Some(if old == 0 { ns } else { (old as i64 + (ns as i64 - old as i64) / 8) as u32 })
+    });
 }
 
 /// Sets up the ring and thread the first time a swapchain is created. `None` when the game
@@ -101,6 +119,9 @@ pub fn init() -> Option<&'static Telemetry> {
                 key_toggles: AtomicU32::new(0),
                 key_nexts: AtomicU32::new(0),
                 key_panels: AtomicU32::new(0),
+                blur_last_ns: AtomicI64::new(0),
+                backdrop_gpu_ns: AtomicU32::new(0),
+                blur_error: AtomicU32::new(0),
             })
         })
         .as_ref()
@@ -131,8 +152,21 @@ impl Telemetry {
         // Wrapping u16s on the wire: quiverd reads every 50 ms, far below 65 536 presses.
         s.key_toggles = self.key_toggles.load(Ordering::Relaxed) as u16;
         s.key_nexts = self.key_nexts.load(Ordering::Relaxed) as u16;
-        crate::latency::fill_status(&mut s, mono_raw_ns());
+        let now = mono_raw_ns();
+        crate::latency::fill_status(&mut s, now);
         s.key_panels = self.key_panels.load(Ordering::Relaxed) as u16;
+        // The backdrop blur: readiness from the target swapchain (retarget), unless drawing
+        // went off or a present found it can't.
+        let err = if !crate::draw_enabled() { BACKDROP_ERR_OFF } else { self.blur_error.load(Ordering::Relaxed) };
+        if err != 0 && s.flags & LAYER_BLUR_READY != 0 {
+            s.flags &= !LAYER_BLUR_READY;
+            s.backdrop_error = err as u16;
+        }
+        let last = self.blur_last_ns.load(Ordering::Relaxed);
+        if last > 0 && now - last < BLURRING_FOR_NS {
+            s.flags |= LAYER_BLURRING;
+        }
+        s.backdrop_gpu_ns = self.backdrop_gpu_ns.load(Ordering::Relaxed);
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }

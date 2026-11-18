@@ -80,6 +80,7 @@ impl Sight {
             Msg::Model(m) => self.model(*m, cx),
             Msg::Ended(s) => {
                 self.panel.ended(&s, cx);
+                self.panel.layer_backdrop(&s, None, cx);
                 if let Some(mut h) = self.huds.remove(&s) {
                     let (rss, hwm) = game::rss_mib();
                     tracing::info!(session = %s, rss_mib = rss, peak_mib = hwm, "HUD closed: {}", h.game.stats.line());
@@ -135,7 +136,9 @@ impl Sight {
         if h.model.as_ref().is_none_or(|old| old.presenter != m.presenter) {
             tracing::info!(session = %m.session, presenter = ?m.presenter, reason = %m.presenter_reason, "HUD presenter");
         }
+        let (session, backdrop) = (m.session.clone(), m.backdrop.as_deref().cloned());
         h.model = Some(m);
+        self.panel.layer_backdrop(&session, backdrop, cx);
         self.place_toasts();
     }
 
@@ -153,6 +156,8 @@ impl Sight {
             for h in self.huds.values() {
                 h.game.heartbeat(now);
             }
+            // The open panel's request to the Sight layer to blur the game.
+            self.panel.keepalive(cx);
         }
         for h in self.huds.values_mut() {
             h.game.tick(cx);

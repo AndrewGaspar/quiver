@@ -10,6 +10,8 @@
 //!                                            publishing its hud.image) instead of a test one
 //!   --png <path.png>                         headless: save the last presented image
 //!   --extent WxH                             headless swapchain size (default 1280x720)
+//!   --blur [DIM]                             ask for the Sight panel's backdrop blur (dim in
+//!                                            1/1000) and print its GPU time; striped frames
 //! ```
 //!
 //! `off`: no layer. `passthrough`: the layer without `QUIVER_PERF_DIR`. `telemetry`: ring and
@@ -27,12 +29,15 @@ use quiver_perf::record::LayerPresent;
 use quiver_perf::session::open_ring_reader;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let args = std::env::args().skip(1);
     let (mut mode, mut frames, mut fps, mut srgb, mut device, mut validation, mut window, mut shot) =
         ("hud".to_owned(), 1000u32, 240.0, false, None, false, false, None);
     let (mut perf_dir, mut png, mut extent): (Option<String>, Option<String>, Option<(u32, u32)>) = (None, None, None);
+    let mut blur: Option<u16> = None;
+    let mut args = args.peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--blur" => blur = Some(args.next_if(|v| v.parse::<u16>().is_ok()).map_or(0, |v| v.parse().unwrap())),
             "--layer" => mode = args.next().unwrap(),
             "--frames" => frames = args.next().unwrap().parse().unwrap(),
             "--fps" => fps = args.next().unwrap().parse().unwrap(),
@@ -85,7 +90,11 @@ fn main() {
         extent: extent.unwrap_or(Opts::default().extent),
         hitches: (1..frames / 100).map(|k| k * 100 + 37).collect(),
         debug_utils: validation,
+        stripes: blur.is_some(),
         on_frame: Some(Box::new(|_, t, extent| {
+            if let Some(dim) = blur {
+                session.backdrop(&quiver_perf::hud::BackdropRequest::blur(dim, 0, quiver_perf::clock::mono_raw_ns() + 2_000_000_000));
+            }
             let variant = (t.as_millis() / 500) as u32;
             // quiver-sight publishes a new image on a model change or a new extent (with
             // --perf-dir the real one does).
@@ -148,6 +157,19 @@ fn main() {
             percentile(&hud, 0.99) as f64 / 1e3,
             percentile(&hud, 1.0) as f64 / 1e3
         );
+        if blur.is_some() {
+            // The heartbeat writes the status at least every 250 ms.
+            std::thread::sleep(Duration::from_millis(300));
+            if let Some(st) = ring.layer_status() {
+                println!(
+                    "backdrop blur at {}x{}: GPU {:.3} ms per present (running mean), backdrop_error {}",
+                    r.extent.0,
+                    r.extent.1,
+                    st.backdrop_gpu_ns as f64 / 1e6,
+                    st.backdrop_error
+                );
+            }
+        }
     }
 }
 

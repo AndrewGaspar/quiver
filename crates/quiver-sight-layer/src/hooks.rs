@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use ash::vk::{self, Handle as _};
 use quiver_perf::LayerStatus;
-use quiver_perf::layout::{DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_USAGE, LAYER_WAYLAND_SURFACE, LAYER_X11_SURFACE};
+use quiver_perf::layout::{
+    BACKDROP_ERR_FORMAT, BACKDROP_ERR_INTERNAL, BACKDROP_ERR_OFF, BACKDROP_ERR_USAGE, DRAW_ERR_FORMAT, DRAW_ERR_INTERNAL, DRAW_ERR_USAGE, LAYER_WAYLAND_SURFACE,
+    LAYER_X11_SURFACE,
+};
 
 use crate::compositor::Compositor;
 use crate::ffi::{self, LayerDeviceCreateInfo, LayerInstanceCreateInfo, find_in_chain};
@@ -200,6 +203,11 @@ pub unsafe extern "system" fn destroy_device(device: vk::Device, alloc: *const v
                 // SAFETY: nothing of ours is in flight (compositors waited).
                 unsafe { p.destroy(&d.dev) };
             }
+            let blur: Vec<_> = lock(&d.blur_pipes).drain(..).collect();
+            for p in blur {
+                // SAFETY: as above.
+                unsafe { p.destroy(&d.dev) };
+            }
             d.destroy_retired_semaphores();
         }
         state::retarget();
@@ -240,24 +248,46 @@ pub unsafe extern "system" fn create_swapchain_khr(
     let next = d.swapchain_fn.create_swapchain_khr;
     // SAFETY: the app's create info.
     let orig = unsafe { *ci };
-    // Decide before creating, so COLOR_ATTACHMENT usage can be added for the compositor.
+    // Decide before creating, so COLOR_ATTACHMENT usage can be added for the compositor (and
+    // SAMPLED for the backdrop blur, which reads the image).
     let plan = guard("vkCreateSwapchainKHR", || {
         telemetry::init()?;
-        Some(if !draw_enabled() { Err(DRAW_ERR_INTERNAL) } else { formats::classify(&orig).and_then(|enc| check_blend(&d, orig.image_format).map(|_| enc)) })
+        Some(plan_swapchain(&d, &orig))
     })
     .flatten();
-    let mut plan = plan.unwrap_or(Err(DRAW_ERR_INTERNAL));
-    let mut patched = orig;
-    if plan.is_ok() {
-        patched.image_usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
-    }
-    // SAFETY: the app's arguments, maybe with one more usage bit (always supported for
-    // swapchains: VkSurfaceCapabilitiesKHR::supportedUsageFlags includes COLOR_ATTACHMENT).
+    let mut plan = plan.unwrap_or(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL) });
+    let with = |usage: vk::ImageUsageFlags| {
+        let mut p = orig;
+        p.image_usage |= usage;
+        p
+    };
+    let blur_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+    let patched = if plan.blur.is_ok() {
+        with(blur_usage)
+    } else if plan.hud.is_ok() {
+        with(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+    } else {
+        orig
+    };
+    // SAFETY: the app's arguments, maybe with more usage bits: COLOR_ATTACHMENT is always
+    // supported for swapchains (VkSurfaceCapabilitiesKHR::supportedUsageFlags includes it),
+    // SAMPLED only added when the surface lists it.
     let mut r = unsafe { next(device, &patched, alloc, out) };
-    if r != vk::Result::SUCCESS && patched.image_usage != orig.image_usage && orig.old_swapchain == vk::SwapchainKHR::null() {
+    // A failed create retires a non-null oldSwapchain: retries only without one.
+    let retry = orig.old_swapchain == vk::SwapchainKHR::null();
+    if r != vk::Result::SUCCESS && retry && plan.blur.is_ok() {
+        log!("swapchain creation with SAMPLED usage failed ({r:?}): no backdrop blur");
+        plan.blur = Err(BACKDROP_ERR_USAGE);
+        if plan.hud.is_ok() {
+            // SAFETY: as above, COLOR_ATTACHMENT only.
+            r = unsafe { next(device, &with(vk::ImageUsageFlags::COLOR_ATTACHMENT), alloc, out) };
+        }
+    }
+    if r != vk::Result::SUCCESS && retry && patched.image_usage != orig.image_usage {
         // SAFETY: as the app asked.
         r = unsafe { next(device, ci, alloc, out) };
-        plan = Err(DRAW_ERR_USAGE);
+        plan.hud = Err(DRAW_ERR_USAGE);
+        plan.blur = Err(BACKDROP_ERR_USAGE);
     }
     if r != vk::Result::SUCCESS {
         return r;
@@ -271,17 +301,59 @@ pub unsafe extern "system" fn create_swapchain_khr(
     r
 }
 
-/// The compositor blends into the swapchain image: its format must support blending as a
-/// colour attachment with optimal tiling.
-fn check_blend(d: &DeviceData, format: vk::Format) -> Result<(), u32> {
-    let Some(i) = &d.instance else { return Err(DRAW_ERR_INTERNAL) };
-    // SAFETY: the device's physical device.
-    let fp = unsafe { i.fns.get_physical_device_format_properties(d.physical, format) };
-    let want = vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
-    if fp.optimal_tiling_features.contains(want) { Ok(()) } else { Err(DRAW_ERR_FORMAT) }
+/// What the compositor will do on a new swapchain: draw the HUD (and how), blur behind the
+/// Sight panel; each `Err` is why not (`DRAW_ERR_*`, `BACKDROP_ERR_*`).
+struct Plan {
+    hud: Result<Encoding, u32>,
+    blur: Result<(), u32>,
 }
 
-unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainCreateInfoKHR<'_>, plan: Result<Encoding, u32>) {
+fn plan_swapchain(d: &DeviceData, ci: &vk::SwapchainCreateInfoKHR<'_>) -> Plan {
+    if !draw_enabled() {
+        return Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_OFF) };
+    }
+    let features = format_features(d, ci.image_format);
+    let blend = vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
+    // The compositor blends into the swapchain image: its format must support blending as a
+    // colour attachment with optimal tiling.
+    let hud = formats::classify(ci).and_then(|enc| if features.contains(blend) { Ok(enc) } else { Err(DRAW_ERR_FORMAT) });
+    let blur = if !crate::blur_enabled() {
+        Err(BACKDROP_ERR_OFF)
+    } else {
+        formats::blur_class(ci).and_then(|()| {
+            if !features.contains(formats::BLUR_FEATURES) {
+                Err(BACKDROP_ERR_FORMAT)
+            } else if !surface_usage(d, ci.surface).is_some_and(|u| u.contains(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::COLOR_ATTACHMENT)) {
+                Err(BACKDROP_ERR_USAGE)
+            } else {
+                Ok(())
+            }
+        })
+    };
+    Plan { hud, blur }
+}
+
+fn format_features(d: &DeviceData, format: vk::Format) -> vk::FormatFeatureFlags {
+    let Some(i) = &d.instance else { return vk::FormatFeatureFlags::empty() };
+    // SAFETY: the device's physical device.
+    unsafe { i.fns.get_physical_device_format_properties(d.physical, format) }.optimal_tiling_features
+}
+
+/// The usage flags the surface allows on swapchain images, asked down the chain.
+fn surface_usage(d: &DeviceData, surface: vk::SurfaceKHR) -> Option<vk::ImageUsageFlags> {
+    let i = d.instance.as_ref()?;
+    // SAFETY: a valid query down the chain; the function has this type.
+    let f = unsafe { load_fn(i.next_gipa, i.handle, c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR") };
+    if f.is_null() || surface == vk::SurfaceKHR::null() {
+        return None;
+    }
+    let f = unsafe { std::mem::transmute::<*const c_void, vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(f) };
+    let mut caps = vk::SurfaceCapabilitiesKHR::default();
+    // SAFETY: the app's surface (valid for its vkCreateSwapchainKHR), our output struct.
+    (unsafe { f(d.physical, surface, &mut caps) } == vk::Result::SUCCESS).then_some(caps.supported_usage_flags)
+}
+
+unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainCreateInfoKHR<'_>, plan: Plan) {
     if telemetry::get().is_none() {
         return;
     }
@@ -301,35 +373,38 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
     };
     let id = state::next_swapchain_id();
     let latency = Arc::new(crate::latency::Latency::default());
-    let mut draw_error = 0;
-    let comp = match plan {
-        Ok(_) if images.is_empty() => {
-            draw_error = DRAW_ERR_INTERNAL;
-            None
-        }
+    // The HUD's reason sets draw_error; a compositor exists when either the HUD or the blur
+    // can draw.
+    let mut draw_error = plan.hud.err().unwrap_or(0);
+    let mut blur_error = plan.blur.err().unwrap_or(0);
+    let comp = if plan.hud.is_err() && plan.blur.is_err() {
+        None
+    } else if images.is_empty() {
+        draw_error = DRAW_ERR_INTERNAL;
+        blur_error = BACKDROP_ERR_INTERNAL;
+        None
+    } else {
         // SAFETY: the swapchain's own images.
-        Ok(enc) => match unsafe { Compositor::new(d, &images, ci.image_format, ci.image_extent, enc) } {
+        match unsafe { Compositor::new(d, &images, ci.image_format, ci.image_extent, plan.hud, plan.blur) } {
             Ok(c) => Some(c),
             Err(e) => {
                 log!("compositor setup failed: {e:?}");
                 draw_error = DRAW_ERR_INTERNAL;
+                blur_error = BACKDROP_ERR_INTERNAL;
                 None
             }
-        },
-        Err(e) => {
-            draw_error = e;
-            None
         }
     };
     log!(
-        "swapchain {id}: {}x{} {:?} {:?} {:?}, {} images, {}",
+        "swapchain {id}: {}x{} {:?} {:?} {:?}, {} images, {}, {}",
         ci.image_extent.width,
         ci.image_extent.height,
         ci.image_format,
         ci.image_color_space,
         ci.present_mode,
         images.len(),
-        if comp.is_some() { "compositing".to_owned() } else { format!("not drawing (draw_error {draw_error})") }
+        if comp.is_some() && draw_error == 0 { "compositing".to_owned() } else { format!("no HUD (draw_error {draw_error})") },
+        if comp.is_some() && blur_error == 0 { "backdrop blur ready".to_owned() } else { format!("no backdrop blur (error {blur_error})") }
     );
     let sc = Swapchain {
         id,
@@ -342,6 +417,7 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         comp,
         disabled: Vec::new(),
         draw_error,
+        blur_error,
         latency: latency.clone(),
     };
     d.add_latency(handle, latency);
