@@ -23,6 +23,7 @@ pub mod exports;
 pub mod game;
 pub mod mods;
 pub mod info;
+pub mod lab;
 pub mod options;
 pub mod perf;
 pub mod savestores;
@@ -960,6 +961,32 @@ pub enum Request {
     // ---- The Sight panel (appended; design/SIGHT.md §14)
     /// Open, close or toggle the in-game panel; its status (see [`sight`]).
     Sight(sight::SightRequest),
+    // ---- Lab instances (appended; design/LAB.md)
+    /// Launch material for one launch of an installed game that something other than
+    /// quiverd's launcher starts (a `quiver lab` instance): the store's licence, minted from
+    /// quiverd's own session for this launch only (`lab::LaunchMaterial`). Nothing is
+    /// launched and no login is made.
+    LaunchMaterial {
+        #[serde(alias = "product_id")]
+        game: GameRef,
+        /// The launch's session id (`lab::is_lab_session`): the bridge's play session is
+        /// then a lab one (tracked, never reported as play time).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        /// Ubisoft: Windows path for SDK savegames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        savegame_path: Option<String>,
+        /// Ubisoft: host path of the install, for its installed chunks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        install_dir: Option<std::path::PathBuf>,
+        /// Epic: the Windows folder (as the game sees it) the ownership token will be
+        /// written to; its `-epicovt=` argument names a file there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ovt_dir: Option<String>,
+        /// Account (Ubisoft username or user id); default: the game's launch account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
 }
 
 fn yes() -> bool {

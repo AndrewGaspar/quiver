@@ -33,6 +33,28 @@ pub struct Broker {
     achievements: std::sync::OnceLock<Arc<crate::achievements::Engine>>,
 }
 
+/// The broker's answer to a lab instance's request that must not reach the person's
+/// records, or `None` to handle it as usual:
+/// - an earned achievement is answered `Ok` and neither recorded nor reported;
+/// - a mod channel is refused: Options, perf history and mod revisions are the person's (a
+///   lab mod is configured through its files, `quiver lab set`).
+///
+/// Play sessions are handled as usual but held as `playsession::LAB_HOLDER` (never
+/// reported, never in the play history); Denuvo tokens and the achievement list are reads.
+pub fn lab_answer(req: &BrokerRequest) -> Option<BrokerResponse> {
+    use quiver_api::lab::is_lab_session;
+    match req {
+        BrokerRequest::AchievementEarned { session: Some(s), uplay_id, achievement_id, .. } if is_lab_session(s) => {
+            tracing::info!(uplay_id, achievement_id, session = %s, "lab session earned an achievement: not recorded or reported");
+            Some(BrokerResponse::Ok)
+        }
+        BrokerRequest::ModChannel { session: Some(s), .. } if is_lab_session(s) => Some(BrokerResponse::Error {
+            message: "lab sessions have no mod channel (their mods are configured through files: quiver lab set)".into(),
+        }),
+        _ => None,
+    }
+}
+
 impl Broker {
     /// `sessions`: where bridges' play sessions are tracked (none: answered but not tracked).
     pub fn new(accounts: Arc<Accounts>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
@@ -77,7 +99,19 @@ impl Broker {
         // A play-session lease, held until the bridge closes this connection.
         let mut _lease = None;
         while let Some(line) = lines.next_line().await? {
-            let rsp = match serde_json::from_str::<BrokerRequest>(&line) {
+            let parsed = serde_json::from_str::<BrokerRequest>(&line);
+            // A lab instance's requests that would reach the person's records (design/LAB.md).
+            if let Some(rsp) = parsed.as_ref().ok().and_then(lab_answer) {
+                let close = matches!(parsed, Ok(BrokerRequest::ModChannel { .. }));
+                let mut out = serde_json::to_vec(&rsp)?;
+                out.push(b'\n');
+                w.write_all(&out).await?;
+                if close {
+                    return Ok(());
+                }
+                continue;
+            }
+            let rsp = match parsed {
                 Ok(BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid }) => {
                     let Some(registry) = self.mods.get().cloned() else {
                         let rsp = BrokerResponse::Error { message: "this quiverd takes no mod channels".into() };
@@ -93,9 +127,11 @@ impl Broker {
                     let origin = crate::modsdk::ChannelOrigin { product_id: uplay_id, account: account_id, session, profile, bridge_conn: conn, client_pid };
                     return registry.serve(origin, lines.into_inner(), w).await;
                 }
-                Ok(BrokerRequest::PlaySession { uplay_id, account_id }) => {
-                    tracing::info!(uplay_id, "bridge reports game running");
-                    _lease = self.sessions.as_ref().map(|s| s.begin(account_id.as_deref(), uplay_id, "bridge"));
+                Ok(BrokerRequest::PlaySession { uplay_id, account_id, session }) => {
+                    // A lab instance's bridge (design/LAB.md): tracked, never reported.
+                    let holder = crate::playsession::bridge_holder(session.as_deref());
+                    tracing::info!(uplay_id, holder, "bridge reports game running");
+                    _lease = self.sessions.as_ref().map(|s| s.begin(account_id.as_deref(), uplay_id, holder));
                     BrokerResponse::Ok
                 }
                 Ok(BrokerRequest::Achievements { uplay_id, account_id, language }) => match self.achievements.get() {
@@ -110,7 +146,7 @@ impl Broker {
                         }
                     }
                 },
-                Ok(BrokerRequest::AchievementEarned { uplay_id, account_id, achievement_id }) => match self.achievements.get() {
+                Ok(BrokerRequest::AchievementEarned { uplay_id, account_id, achievement_id, .. }) => match self.achievements.get() {
                     None => BrokerResponse::Error { message: "this quiverd doesn't take achievement reports".into() },
                     Some(engine) => {
                         tracing::info!(uplay_id, achievement_id, "bridge reports an earned achievement");
@@ -219,5 +255,21 @@ impl Broker {
                 Ok(BrokerResponse::GameToken { game_token })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lab_tests {
+    use super::*;
+
+    #[test]
+    fn lab_earns_are_not_recorded_and_lab_mod_channels_refused() {
+        let earn = |session: Option<&str>| BrokerRequest::AchievementEarned { uplay_id: 3539, account_id: None, achievement_id: 7, session: session.map(str::to_owned) };
+        assert!(matches!(lab_answer(&earn(Some("lab-t1-r1"))), Some(BrokerResponse::Ok)));
+        assert!(lab_answer(&earn(Some("s-4kq2"))).is_none() && lab_answer(&earn(None)).is_none());
+        let chan = BrokerRequest::ModChannel { uplay_id: 3539, account_id: None, session: Some("lab-t1-r1".into()), profile: None, conn: 1, client_pid: None };
+        assert!(matches!(lab_answer(&chan), Some(BrokerResponse::Error { .. })));
+        let play = BrokerRequest::PlaySession { uplay_id: 3539, account_id: None, session: Some("lab-t1-r1".into()) };
+        assert!(lab_answer(&play).is_none(), "play sessions are held, as lab sessions");
     }
 }

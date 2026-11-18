@@ -106,6 +106,27 @@ pub struct Finished {
 /// The holder name of quiverd's own launches.
 pub const LAUNCHER_HOLDER: &str = "launcher";
 
+/// A lab instance's bridge (design/LAB.md): such sessions are tracked but never reported to
+/// Ubisoft as play time, and never recorded in the game's play history, while only lab
+/// holders hold them. An agent driving a headless instance isn't the person playing.
+pub use quiver_api::lab::LAB_HOLDER;
+
+/// The holder name for a bridge whose launch context carries `session`.
+pub fn bridge_holder(session: Option<&str>) -> &'static str {
+    if session.is_some_and(quiver_api::lab::is_lab_session) { LAB_HOLDER } else { "bridge" }
+}
+
+/// Whether a session held by `holders` may be reported upstream (the `report` setting, and
+/// not only lab instances holding it).
+fn reportable<'a>(report: bool, holders: impl Iterator<Item = &'a str>) -> bool {
+    report && !lab_only(holders)
+}
+
+/// Only lab instances hold it (nothing to report, nothing to record).
+fn lab_only<'a>(mut holders: impl Iterator<Item = &'a str>) -> bool {
+    holders.all(|h| h == LAB_HOLDER)
+}
+
 struct Active {
     online: Arc<Online>,
     started: chrono::DateTime<Utc>,
@@ -228,7 +249,7 @@ async fn run(
                         a.steam_app_id = steam_app_id;
                     } else {
                         tracing::info!(product_id, %holder, "game started");
-                        let reported = report && match start(&online, product_id).await {
+                        let reported = reportable(report, [holder.as_str()].into_iter()) && match start(&online, product_id).await {
                             Ok(()) => { tracing::info!(product_id, "play session started"); true }
                             Err(e) => { tracing::warn!(product_id, "play session start failed: {e:#}"); false }
                         };
@@ -258,7 +279,7 @@ async fn run(
                         if let Some(f) = finished(&key, a.started, &a.ever, a.steam_app_id, Utc::now()) {
                             on_finished(f);
                         }
-                        if report {
+                        if report && !lab_only(a.ever.iter().map(String::as_str)) {
                             match end(&a.online, product_id).await {
                                 Ok(()) => tracing::info!(product_id, "play session ended"),
                                 Err(e) => tracing::warn!(product_id, "play session end failed: {e:#}"),
@@ -273,6 +294,10 @@ async fn run(
                     let online = a.online.clone();
                     // Heartbeat on schedule; a failed start is retried on the same schedule.
                     if a.last_beat.elapsed() < HEARTBEAT {
+                        continue;
+                    }
+                    // Lab sessions aren't play time; one the person joins is reported from then.
+                    if !a.reported && !reportable(true, a.holders.iter().map(|h| h.1.as_str())) {
                         continue;
                     }
                     a.last_beat = Instant::now();
@@ -319,7 +344,7 @@ fn finished(
     steam_app_id: Option<u32>,
     ended: chrono::DateTime<Utc>,
 ) -> Option<Finished> {
-    (!ever.iter().any(|h| h == LAUNCHER_HOLDER)).then(|| Finished {
+    (!ever.iter().any(|h| h == LAUNCHER_HOLDER) && !lab_only(ever.iter().map(String::as_str))).then(|| Finished {
         product_id: key.1,
         account: key.0.clone(),
         started,
@@ -352,5 +377,23 @@ mod tests {
         assert!(finished(&key, t0, &["bridge".into()], None, t1).is_some());
         // quiverd's own launch (its bridge joins the launcher's session): the job records it.
         assert!(finished(&key, t0, &[LAUNCHER_HOLDER.into(), "bridge".into()], None, t1).is_none());
+        // A lab instance isn't the person playing; once the person joins, it is.
+        assert!(finished(&key, t0, &[LAB_HOLDER.into()], None, t1).is_none());
+        assert!(finished(&key, t0, &[LAB_HOLDER.into(), "bridge".into()], None, t1).is_some());
+    }
+
+    #[test]
+    fn lab_bridges_are_lab_holders() {
+        assert_eq!(bridge_holder(Some("lab-t1-r3")), LAB_HOLDER);
+        assert_eq!(bridge_holder(Some("s-4kq2")), "bridge");
+        assert_eq!(bridge_holder(None), "bridge");
+        assert!(lab_only([LAB_HOLDER, LAB_HOLDER].into_iter()));
+        // A lab launch produces no report; a session the person holds does.
+        assert!(!reportable(true, [LAB_HOLDER].into_iter()));
+        assert!(!reportable(true, [LAB_HOLDER, LAB_HOLDER].into_iter()));
+        assert!(reportable(true, [LAB_HOLDER, "bridge"].into_iter()));
+        assert!(reportable(true, [LAUNCHER_HOLDER].into_iter()));
+        assert!(!reportable(false, [LAUNCHER_HOLDER].into_iter()));
+        assert!(!lab_only([LAB_HOLDER, "bridge"].into_iter()));
     }
 }

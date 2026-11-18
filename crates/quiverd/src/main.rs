@@ -9,6 +9,7 @@ mod exports;
 mod mods;
 mod perf;
 mod info;
+mod lab;
 mod lifecycle;
 mod localsessions;
 mod options;
@@ -630,6 +631,10 @@ impl Daemon {
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
             Request::Sight(req) => self.handle_sight(source, req)?,
+            Request::LaunchMaterial { game, session, savegame_path, install_dir, ovt_dir, account } => {
+                let r = lab::MaterialRequest { game, session, savegame_path, install_dir, ovt_dir, account };
+                lab::launch_material(self, source, r).await?
+            }
             Request::Achievements(req) => achievements::handle(self, source, req).await?,
             // The connection loop passes its connection (holds without a time limit).
             Request::Daemon(req) => self.handle_daemon(source, None, req)?,

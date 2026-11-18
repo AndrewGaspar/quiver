@@ -4738,6 +4738,7 @@ name = "quiverd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "epic-core",
  "flate2",
@@ -4747,6 +4748,7 @@ dependencies = [
  "quiver-api",
  "quiver-core",
  "quiver-perf",
+ "quiver-proto",
  "serde",
  "serde_json",
  "serde_yaml",

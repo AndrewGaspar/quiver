@@ -57,6 +57,11 @@ pub struct CdKey {
     pub key: String,
 }
 
+/// What a bridge that keeps lab sessions out of the person's records carries in its
+/// binary (it sends its context's session with `PlaySession` and `AchievementEarned`).
+/// `quiver lab` refuses to put a bridge without it into an instance.
+pub const LAB_PROTOCOL_MARKER: &str = "quiver-bridge-lab-protocol-1";
+
 /// Requests from `quiver-bridge` to the native broker (in `quiverd`), one JSON object per line
 /// over TCP. The broker holds the Ubisoft session; the bridge never sees account credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +82,11 @@ pub enum BrokerRequest {
         uplay_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
+        /// The launch context's session id (appended; older bridges omit it). A lab
+        /// launch's (`lab-…`, `quiver_api::lab::is_lab_session`) is held as a lab session:
+        /// never reported upstream as play time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     /// A mod inside the game connected to the bridge's mod pipe. The broker answers `Ok`,
     /// then the connection carries the mod SDK's JSON messages, one per line, both ways
@@ -114,6 +124,10 @@ pub enum BrokerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account_id: Option<String>,
         achievement_id: u32,
+        /// The launch context's session id (appended). A lab session's earn is answered
+        /// `Ok` and neither recorded nor reported (design/LAB.md).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
 }
 
