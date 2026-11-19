@@ -61,6 +61,11 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     animations: Vec<SpriteAnimation>,
+    /// Quiver: each paint operation's stereo depth ([`Scene::set_stereo_depth`]), index-aligned
+    /// with `paint_operations`. Unread unless the window packs a stereo frame.
+    paint_depths: Vec<f32>,
+    /// Quiver: the depth primitives inserted now are tagged with.
+    current_depth: f32,
 }
 
 #[expect(missing_docs)]
@@ -79,6 +84,20 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.animations.clear();
+        self.paint_depths.clear();
+        self.current_depth = 0.0;
+    }
+
+    /// Quiver: tags the primitives inserted from now on with a stereo `depth` (HypXRland's
+    /// unitless rung, 0 = the window's plane) and returns the previous one. Only
+    /// [`Scene::pack_side_by_side`] reads it.
+    pub fn set_stereo_depth(&mut self, depth: f32) -> f32 {
+        std::mem::replace(&mut self.current_depth, depth)
+    }
+
+    /// Quiver: the stereo depth primitives are being tagged with.
+    pub fn stereo_depth(&self) -> f32 {
+        self.current_depth
     }
 
     /// Inserts a sprite that [`Self::advance_animations`] keeps moving. The
@@ -136,6 +155,7 @@ impl Scene {
             max_shared_kind: PrimitiveKind::Surface,
         });
         self.paint_operations.push(PaintOperation::StartLayer);
+        self.paint_depths.push(self.current_depth);
     }
 
     pub fn pop_layer(&mut self) {
@@ -146,6 +166,7 @@ impl Scene {
             }
         }
         self.paint_operations.push(PaintOperation::EndLayer);
+        self.paint_depths.push(self.current_depth);
     }
 
     fn insert_layer(&mut self, layer: Layer) {
@@ -194,6 +215,7 @@ impl Scene {
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
+        self.paint_depths.push(self.current_depth);
         true
     }
 
@@ -225,7 +247,13 @@ impl Scene {
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
-        for operation in &prev_scene.paint_operations[range] {
+        let outer_depth = self.current_depth;
+        for (operation, &depth) in prev_scene.paint_operations[range.clone()]
+            .iter()
+            .zip(&prev_scene.paint_depths[range])
+        {
+            // A cached view keeps the depths it was painted at.
+            self.current_depth = depth;
             match operation {
                 PaintOperation::Primitive(primitive) => {
                     // Animation ids index the scene they were inserted into.
@@ -242,6 +270,72 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
+        self.current_depth = outer_depth;
+    }
+
+    /// Quiver: this (finished) scene drawn twice, side by side, into a frame two eyes wide:
+    /// HypXRland's `stereo:sbs` packing (the left eye is the left half). `eye` is one eye's
+    /// size in device pixels; `shift(depth)` gives each eye's horizontal offset for primitives
+    /// at `depth`, in device pixels (`[left, right]`; crossed disparity, in front of the
+    /// screen, is the left eye's content moving right and the right eye's moving left). Each
+    /// primitive's content mask moves with it and is clipped to its eye, so nothing crosses
+    /// the seam. Animated sprites are drawn at their current pose.
+    pub fn pack_side_by_side(
+        &self,
+        eye: Size<ScaledPixels>,
+        shift: &dyn Fn(f32) -> [f32; 2],
+    ) -> Scene {
+        let mut out = Scene::default();
+        let mut shifts: SmallVec<[(f32, [f32; 2]); 8]> = SmallVec::new();
+        for index in 0..2 {
+            let eye_rect = Bounds {
+                origin: Point {
+                    x: ScaledPixels(eye.width.0 * index as f32),
+                    y: ScaledPixels(0.0),
+                },
+                size: eye,
+            };
+            for (operation, &depth) in self.paint_operations.iter().zip(&self.paint_depths) {
+                match operation {
+                    PaintOperation::StartLayer => out.push_layer(),
+                    PaintOperation::EndLayer => out.pop_layer(),
+                    PaintOperation::Primitive(primitive) => {
+                        let per_eye = match shifts.iter().find(|(d, _)| *d == depth) {
+                            Some((_, s)) => *s,
+                            None => {
+                                let s = shift(depth);
+                                shifts.push((depth, s));
+                                s
+                            }
+                        };
+                        let dx = eye_rect.origin.x.0 + per_eye[index];
+                        let primitive = match primitive {
+                            Primitive::MonochromeSprite(sprite)
+                                if sprite.animation != SpriteAnimationId::NONE =>
+                            {
+                                let mut current = *sprite;
+                                if let Some(now) = self
+                                    .animations
+                                    .get(sprite.animation.0 as usize)
+                                    .and_then(|a| self.monochrome_sprites.get(a.sprite_index))
+                                {
+                                    current.transformation = now.transformation;
+                                    current.color = now.color;
+                                }
+                                current.animation = SpriteAnimationId::NONE;
+                                Primitive::MonochromeSprite(current)
+                            }
+                            other => other.clone(),
+                        };
+                        out.current_depth = depth;
+                        out.insert_primitive(primitive.translated(dx, &eye_rect));
+                    }
+                }
+            }
+        }
+        out.current_depth = 0.0;
+        out.finish();
+        out
     }
 
     pub fn finish(&mut self) {
@@ -433,6 +527,77 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+        }
+    }
+
+    /// Quiver: moved right by `dx` device pixels, its content mask moved with it and clipped
+    /// to `clip` (one eye of a packed stereo frame).
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Primitive {
+        fn mv(b: Bounds<ScaledPixels>, dx: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: Point {
+                    x: ScaledPixels(b.origin.x.0 + dx),
+                    y: b.origin.y,
+                },
+                size: b.size,
+            }
+        }
+        let mask = |m: &ContentMask<ScaledPixels>| ContentMask {
+            bounds: mv(m.bounds, dx).intersect(clip),
+        };
+        // p' = R(p - s) + t + s: the same transform about the moved origin (row-major R, as
+        // `transform_bounds` reads it).
+        let tf = |t: TransformationMatrix| {
+            let r = t.rotation_scale;
+            TransformationMatrix {
+                rotation_scale: r,
+                translation: [
+                    t.translation[0] + dx - r[0][0] * dx,
+                    t.translation[1] - r[1][0] * dx,
+                ],
+            }
+        };
+        match self {
+            Primitive::Shadow(p) => Primitive::Shadow(Shadow {
+                bounds: mv(p.bounds, dx),
+                shape_bounds: mv(p.shape_bounds, dx),
+                content_mask: mask(&p.content_mask),
+                ..*p
+            }),
+            Primitive::Quad(p) => Primitive::Quad(Quad {
+                bounds: mv(p.bounds, dx),
+                content_mask: mask(&p.content_mask),
+                ..*p
+            }),
+            Primitive::Path(p) => Primitive::Path(p.translated(dx, clip)),
+            Primitive::Underline(p) => Primitive::Underline(Underline {
+                bounds: mv(p.bounds, dx),
+                content_mask: mask(&p.content_mask),
+                ..*p
+            }),
+            Primitive::MonochromeSprite(p) => Primitive::MonochromeSprite(MonochromeSprite {
+                bounds: mv(p.bounds, dx),
+                content_mask: mask(&p.content_mask),
+                transformation: tf(p.transformation),
+                ..*p
+            }),
+            Primitive::SubpixelSprite(p) => Primitive::SubpixelSprite(SubpixelSprite {
+                bounds: mv(p.bounds, dx),
+                content_mask: mask(&p.content_mask),
+                transformation: tf(p.transformation),
+                ..*p
+            }),
+            Primitive::PolychromeSprite(p) => Primitive::PolychromeSprite(PolychromeSprite {
+                bounds: mv(p.bounds, dx),
+                content_mask: mask(&p.content_mask),
+                ..*p
+            }),
+            Primitive::Surface(p) => {
+                let mut p = p.clone();
+                p.bounds = mv(p.bounds, dx);
+                p.content_mask = mask(&p.content_mask);
+                Primitive::Surface(p)
+            }
         }
     }
 
@@ -1134,6 +1299,27 @@ impl PaintedPath {
 
     pub fn tile_count(&self) -> usize {
         self.tiles.tiles().len()
+    }
+
+    /// Quiver: moved right by `dx` device pixels, clipped to `clip` (see
+    /// [`Scene::pack_side_by_side`]).
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        let mv = |b: Bounds<ScaledPixels>| Bounds {
+            origin: Point {
+                x: ScaledPixels(b.origin.x.0 + dx),
+                y: b.origin.y,
+            },
+            size: b.size,
+        };
+        let mut paint = self.paint;
+        paint.bounds = mv(paint.bounds);
+        paint.content_mask.bounds = mv(paint.content_mask.bounds).intersect(clip);
+        Self {
+            order: self.order,
+            bounds: mv(self.bounds),
+            tiles: Rc::new(self.tiles.translated(dx)),
+            paint,
+        }
     }
 
     pub fn append_to(

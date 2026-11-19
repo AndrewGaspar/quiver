@@ -301,6 +301,10 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
+    /// Quiver: the stereo depth this element and its children are painted at (see
+    /// [`crate::Window::with_stereo_depth`]); `None` keeps the parent's.
+    pub stereo_depth: Option<f32>,
+
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
@@ -809,6 +813,7 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            stereo_depth: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

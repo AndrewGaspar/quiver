@@ -748,6 +748,14 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Quiver: paints this element and its children at a stereo depth (HypXRland's unitless
+    /// rung, 0..1); see [`crate::Window::with_stereo_depth`]. Does nothing unless the window
+    /// packs stereo frames.
+    fn stereo_depth(mut self, depth: f32) -> Self {
+        self.style().stereo_depth = Some(depth);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {

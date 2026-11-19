@@ -120,6 +120,9 @@ pub struct WaylandWindowState {
     renderer: Option<WgpuRenderer>,
     bounds: Bounds<Pixels>,
     scale: f32,
+    /// Quiver: frames are packed side by side for two eyes (`stereo:sbs`): the buffer is
+    /// twice the window's width and the viewport shows it at the window's size.
+    stereo_sbs: bool,
     input_handler: Option<PlatformInputHandler>,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
@@ -622,6 +625,7 @@ impl WaylandWindowState {
             renderer: Some(renderer),
             bounds: options.bounds,
             scale: 1.0,
+            stereo_sbs: false,
             input_handler: None,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
@@ -646,6 +650,17 @@ impl WaylandWindowState {
             client_corner_radii: Corners::default(),
             accesskit_adapter: None,
         })
+    }
+
+    /// The buffer's size: the window's in device pixels, twice as wide while stereo frames
+    /// are packed (each eye rounded as `gpui::Window::present` rounds it).
+    fn drawable_size(&self) -> Size<DevicePixels> {
+        let mut size = self.bounds.to_device_pixels(self.scale).size;
+        if self.stereo_sbs {
+            let eye = (f32::from(self.bounds.size.width) * self.scale).round() as i32;
+            size.width = DevicePixels((eye * 2).max(2));
+        }
+        size
     }
 
     pub fn is_transparent(&self) -> bool {
@@ -1542,9 +1557,9 @@ impl WaylandWindowStatePtr {
             if let Some(scale) = scale {
                 state.scale = scale;
             }
-            let device_bounds = state.bounds.to_device_pixels(state.scale);
+            let device_size = state.drawable_size();
             if let Some(renderer) = &mut state.renderer {
-                renderer.update_drawable_size(device_bounds.size);
+                renderer.update_drawable_size(device_size);
             }
             (state.bounds.size, state.scale)
         };
@@ -2097,6 +2112,35 @@ impl PlatformWindow for WaylandWindow {
 
     fn schedule_frame(&self) {
         self.0.schedule_frame();
+    }
+
+    fn set_stereo_side_by_side(&self, enabled: bool) -> bool {
+        let mut state = self.borrow_mut();
+        // The viewport is what keeps a 2x-wide buffer at the window's size.
+        if state.viewport.is_none() {
+            return false;
+        }
+        if state.stereo_sbs == enabled {
+            return true;
+        }
+        state.stereo_sbs = enabled;
+        let size = state.bounds.size;
+        if let Some(viewport) = &state.viewport {
+            viewport.set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
+        }
+        let device_size = state.drawable_size();
+        if let Some(renderer) = &mut state.renderer {
+            renderer.update_drawable_size(device_size);
+        }
+        // HypXRland's contract: exactly `stereo:sbs` / `stereo:mono` (05-configuration §8.6).
+        if let (Some(manager), Some(toplevel)) = (
+            state.globals.toplevel_tag_manager.as_ref(),
+            state.surface_state.toplevel(),
+        ) {
+            manager.set_toplevel_tag(toplevel, if enabled { "stereo:sbs" } else { "stereo:mono" }.into());
+        }
+        state.redraw_requested = true;
+        true
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

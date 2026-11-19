@@ -1371,6 +1371,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
+    /// Quiver: present frames packed side by side for two eyes (HypXRland's `stereo:sbs`):
+    /// the drawable becomes twice the window's width while the window keeps its size, and a
+    /// Wayland toplevel is tagged `stereo:sbs` (`stereo:mono` when turned off again). The
+    /// scenes [`PlatformWindow::draw`] gets are then already packed. Returns whether the
+    /// platform can; the default can't.
+    fn set_stereo_side_by_side(&self, _enabled: bool) -> bool {
+        false
+    }
 
     // macOS specific methods
     fn get_title(&self) -> String {

@@ -30,6 +30,8 @@ struct OffscreenWindowState {
     input_handler: Option<PlatformInputHandler>,
     resize_callback: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     title: String,
+    /// Quiver: frames are packed side by side for two eyes, so the image is twice as wide.
+    stereo: bool,
 }
 
 /// What the frame scheduler shares with the window.
@@ -113,6 +115,7 @@ impl OffscreenWindow {
             input_handler: None,
             resize_callback: None,
             title: String::new(),
+            stereo: false,
         }));
         let frames = Rc::new(FrameSource {
             request_frame: RefCell::new(None),
@@ -326,7 +329,12 @@ impl PlatformWindow for OffscreenWindow {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
         let scale_factor = state.scale_factor;
-        let size = device_size(state.size, scale_factor);
+        let mut size = device_size(state.size, scale_factor);
+        if state.stereo {
+            // Each eye is the window's size, rounded as `Window::present` rounds it.
+            let eye = (f32::from(state.size.width) * scale_factor).round() as i32;
+            size.width = DevicePixels((eye * 2).max(2));
+        }
         let on_frame = &mut state.on_frame;
         let started = Instant::now();
         let result = state.renderer.render_and_read(scene, size, |frame| {
@@ -346,6 +354,11 @@ impl PlatformWindow for OffscreenWindow {
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.borrow().renderer.atlas()
+    }
+
+    fn set_stereo_side_by_side(&self, enabled: bool) -> bool {
+        self.state.borrow_mut().stereo = enabled;
+        true
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
