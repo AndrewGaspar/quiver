@@ -10,6 +10,8 @@
 #   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
 #               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
 #               skills/quiver/SKILL.md (the agent skill: how agents use Quiver)
+#               lab/eos-filter/<arch>/secur32.dll (the lab's EOS filter; built by
+#               contrib/lab/eos-filter/build.sh <cargo target dir>/eos-filter)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer (built for i686-unknown-linux-gnu)
@@ -63,6 +65,15 @@ sight_layer "$target/release/libquiver_sight_layer.so" x86_64
 if [[ ${SIGHT_LAYER_I686:-0} == 1 ]]; then
     sight_layer "$target/i686-unknown-linux-gnu/release/libquiver_sight_layer.so" i686
 fi
+
+# The lab's EOS filter (contrib/lab/eos-filter, design/LAB.md section 3.1): a secur32.dll per
+# architecture, copied into lab instances of EOS games (never into a person's own install).
+# Built by contrib/lab/eos-filter/build.sh <cargo target dir>/eos-filter.
+for arch in x86_64 i686; do
+    dll=$target/eos-filter/$arch/secur32.dll
+    [[ -f $dll ]] || { echo "layout.sh: $dll is missing; run contrib/lab/eos-filter/build.sh $target/eos-filter" >&2; exit 1; }
+    install -Dm644 "$dll" "$root$LIBDIR/lab/eos-filter/$arch/secur32.dll"
+done
 
 install -d "$root$DATADIR/applications"
 sed -e "s|^Exec=.*|Exec=$BINDIR/quiver-app|" -e "s|^Icon=.*|Icon=quiver|" \

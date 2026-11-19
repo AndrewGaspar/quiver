@@ -59,12 +59,12 @@ A game Quiver launched has `QUIVER_GAME=<ref>` and `QUIVER_SESSION=<id>` in its 
 
 ## Modding a game: `quiver lab`
 
-A lab instance is a disposable headless copy of an installed game: a reflink clone of its prefix and install, in podman with gamescope headless and the GPU. It runs with the person's real licence from quiverd (Ubisoft bridge, Epic exchange codes; DRM-free games need none). Store logins never enter it, saves are never uploaded, and play time, achievements and stats are never reported.
+A lab instance is a disposable headless copy of an installed game: a reflink clone of its prefix and install, in podman with gamescope headless and the GPU. It runs with the person's real licence from quiverd (Ubisoft bridge, Epic exchange codes; DRM-free games need none). Store logins never enter it, saves are never uploaded, and play time, achievements and stats are never reported. Games on Epic Online Services (any Epic game, or any game shipping `EOSSDK-*.dll`) get the EOS filter, a `secur32.dll` in the instance's clone that lets only sign-in, the SDK's config and ownership checks reach `api.epicgames.dev` and blocks EOS cloud saves, achievements, stats and telemetry; the launch refuses without it. Its decisions are in the run's `eos-filter.log` (`quiver lab logs NAME` sums them up); if sign-in needs a blocked path, extend `contrib/lab/eos-filter/allowlist.h` (design/LAB.md 3.1), never with anything that writes to the account.
 
 Start here. `brief` prints everything a new agent needs for that game: store, exe, graphics API, engine hints, config and save files, anti-cheat, commands and rules.
 
 ```sh
-quiver lab doctor                          # what's missing (podman, CDI, image, reflinks, bridge)
+quiver lab doctor                          # what's missing (podman, CDI, image, reflinks, bridge, EOS filter)
 quiver lab brief GAME                      # the onboarding brief for that game
 quiver lab create GAME --name NAME --display 1920x1080@60
 quiver lab up NAME

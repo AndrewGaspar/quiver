@@ -111,12 +111,113 @@ sees a refresh token, a password or a store login.
   exchange code from quiverd (`epic_core::Epic::launch_material`), and the ownership token when
   the game wants one, written 0600 into the run folder (`-epicovt=Z:\lab\runs\rN\<ns><item>.ovt`)
   and deleted at the next kill. The refresh token stays in quiverd's keyring. EOS then talks to
-  Epic itself over the container's network. **Caveat:** a game that syncs its saves through
-  EOS Player Data Storage does that itself; nothing in Quiver can stop it without touching the
-  game's own code. The brief tells the agent to check and to keep such games' cloud sync off.
+  Epic itself over the container's network, through the **EOS filter** (3.1): sign-in and
+  ownership reach Epic; EOS cloud saves (Player Data Storage), achievements, stats,
+  leaderboards, presence and telemetry are blocked before a byte of them is sent. A game with
+  the EOS SDK doesn't launch in the lab without the filter.
 - **DRM-free** (`licence = "none"`): nothing to mint. Today that is Steam games without
   Steamworks or SteamStub (below). GOG has no provider in Quiver yet (not built).
 - **Steam**: see section 7.
+
+### 3.1 The EOS filter
+
+A game built on the Epic Online Services SDK talks to Epic itself, with the person's real
+licence: it syncs cloud saves, unlocks achievements, sends stats, leaderboard scores and
+telemetry. A lab run with test or modded saves would overwrite the person's real cloud saves
+and earn achievements. Blocking the host isn't possible: AWR's `EOSSDK-Win64-Shipping.dll`
+(EOS SDK 1.7.1) names one host, `api.epicgames.dev`, for everything, sign-in included; the
+services differ only by URL path. So the lab filters by path, in plaintext, before TLS.
+
+**How.** The SDK is libcurl over Windows schannel: it imports `Secur32.dll` and `CRYPT32`
+and bundles no certificates, so there is no fake CA or MITM. `contrib/lab/eos-filter` is a
+`secur32.dll` (`shim.c`, built for x86_64 and i686 by `build.sh`, installed as
+`<libdir>/lab/eos-filter/<arch>/secur32.dll`) whose exports jump to Wine's own secur32,
+except:
+
+- `InitializeSecurityContextA/W` remember each new TLS context's server name (SNI);
+- `EncryptMessage` (and `SealMessage`): on a connection to a filtered host, the write's
+  plaintext goes through `filter.c` first, a streaming HTTP/1.x parser per connection
+  (request line, `Host`, `Content-Length`, chunked bodies, keep-alive and pipelined requests,
+  heads and bodies split over many writes). Each request is decided from its request line
+  before any byte of it is encrypted. A blocked write is zeroed and fails with
+  `SEC_E_ENCRYPT_FAILURE`, so nothing of it reaches the socket and the SDK sees a send error;
+  the connection stays blocked. A request whose request line is split across writes, a
+  request line that isn't HTTP/1.x (HTTP/2's preface), malformed or conflicting framing, and
+  any path with `%`, `\`, `.` or `..` segments are blocked: the filter fails safe;
+- `InitSecurityInterfaceA/W` return the same table with those three replaced, except to the
+  real secur32's own calls (through Wine's `schannel.dll`, which forwards to `secur32`, i.e.
+  the filter): those get the real table, or secur32 would load the filter as a provider and
+  recurse until the stack overflows (the lesson of `tools/recon/tls-tap`).
+
+Connections to every other host are not parsed and pass untouched. A context whose server
+name the filter never saw is judged by its requests' `Host` headers (an unlisted request to
+the filtered host, or one with no `Host` in its first write, is blocked).
+
+**The allowlist** (`contrib/lab/eos-filter/allowlist.h`, the one place to change it; each
+entry has a comment and its source). Everything else on `api.epicgames.dev` is blocked.
+`{}` is one path segment, `{v}` a version (`v1`…`v99`); the query string is ignored.
+
+| Method and path | What | Source |
+|---|---|---|
+| `GET /sdk/v1/default`, `GET /sdk/v1/product/{}` | the SDK's config (service URLs, flags); without it the SDK never starts | SDK strings (`[SDKConfigService] BaseUrl=https://api.epicgames.dev/sdk`, `/v1/default`, `/v1/product/{productId}`) |
+| `POST /epic/oauth/{v}/token` | Epic account sign-in: the launch's exchange code, then its refresh token | SDK (`/epic/oauth/v1/token`); Auth web API (`/epic/oauth/v2/token`) |
+| `POST`/`GET /epic/oauth/{v}/tokenInfo` | checks that token | SDK; Auth web API |
+| `POST /epic/oauth/{v}/revoke` | the SDK ending its own token at logout (only this launch's session, never quiverd's) | SDK; Auth web API |
+| `GET /epic/oauth/{v}/.well-known/jwks.json` | Epic's public keys, to verify ID tokens | Auth web API |
+| `POST /auth/v1/oauth/token` | EOS Connect sign-in and the SDK's client credentials | SDK; Connect web API |
+| `GET /epic/ecom/{v}/platforms/{}/identities/{}/ownership` | does the account own the game | SDK (`/v1/platforms/{platform}/identities/{identityId}/ownership`); Ecom web API (v3) |
+| `POST /epic/ecom/{v}/platforms/{}/identities/{}/ownershipToken` | a signed statement of that | SDK; Ecom web API (v3) |
+| `GET /epic/ecom/{v}/identities/{}/entitlements` | the account's entitlements (game, DLC), read only | SDK; Ecom web API (v4) |
+| `POST /epic/ecom/{v}/platforms/{}/identities/{}/entitlementToken` | a signed statement of those (newer SDKs) | Ecom web API (v4) |
+| the three ecom reads under `/ecom/{v}/…` | the same resources without `/epic` | the EOS OpenAPI mirror on apis.io |
+
+Blocked on purpose, though sign-in-adjacent: `/auth/v1/users` (creates a product user),
+`/auth/v1/accounts*` (links accounts, makes device ids), `…/entitlements/redeem` (marks
+entitlements used), offers and purchases, `/epic/oauth/{v}/deviceAuthorization`, user info
+(`/epic/id/…`, `/user/…`). Blocked as reporting: Player Data Storage and Title Storage,
+`/v1/{deployment}/achievements/{puid}/unlock` and definitions, stats, leaderboards, presence,
+friends, sessions, lobbies, and the SDK's telemetry (`[SDKAnalytics]
+BaseUrl=https://api.epicgames.dev/telemetry/data/`, `datarouter/api/v1/public/data`). Sources:
+the SDK's own route strings in AWR's `EOSSDK-Win64-Shipping.dll`, and Epic's web API reference
+(dev.epicgames.com/docs/web-api-ref: authentication, connect-web-api, ecom-web-apis). The
+filter only removes reporting: it never answers for Epic, fakes a response or touches what
+the ownership checks return.
+
+**The log.** Each decision goes to `runs/r<N>/eos-filter.log` (`QUIVER_EOS_FILTER_LOG`, set
+by the launch): time, `allow`/`block`, the method, the path and the query's keys (values
+replaced by `…`: they can be ids or codes), and the allowlist entry or the reason. Never
+headers or bodies (they carry tokens). A `--- EOS filter (<arch>) loaded in pid …` line shows
+which processes loaded it. `quiver lab logs <i>` sums it up (allowed, blocked, each blocked
+request). An agent that finds sign-in or ownership needs a blocked path adds an entry to
+`allowlist.h` with its source, rebuilds (`tools/install-user.sh`) and documents it here;
+never an entry that writes to the account or reports.
+
+**Where it goes.** At each launch (`lab::eosfilter`, the supervisor), after the mod's files:
+the game executable's folder (Windows looks there first) and every folder of the install
+holding an `EOSSDK-Win64/Win32-Shipping.dll`, each with the matching architecture, in the
+instance's clone only. A folder that resolves outside the instance (a symlink back to the
+person's files) is refused; a `secur32.dll` there that isn't a filter build (the game's or a
+mod's) is refused, not replaced. The launch's `WINEDLLOVERRIDES` gets `secur32=n,b`, over
+any `secur32` setting in the manifest. Every Epic instance gets it; a game of any store
+that ships the EOS SDK must: **the launch refuses** with the reason if the filter can't be
+installed (not built, a foreign `secur32.dll`, the folder outside the instance). There is no
+opt-out. `quiver lab doctor` checks the build, `quiver lab brief` explains it.
+
+**Tests.** `crates/quiver-core/tests/eos_filter.rs`: `test_filter.c` (the parser and
+allowlist: split writes, keep-alive and pipelining, chunked bodies, other hosts, unknown
+paths, path tricks, unknown servers; ASan and UBSan); both DLLs build with the marker and all
+80 of Wine's secur32 exports; and, opt-in (`QUIVER_TEST_PROTON=… cargo test -p quiver-core
+--test eos_filter -- --ignored`), a schannel client under Wine against a local TLS server for
+both architectures, through the function table (as libcurl) and the exports: allowed
+requests and another host's arrive, blocked ones never do (not a byte), the log says each;
+the same run without the filter shows the server would have seen them. Nothing in the tests
+talks to Epic.
+
+**Not covered.** HTTP/2 to `api.epicgames.dev` (its preface is blocked, so such a game
+would get no EOS at all; the log would show `PRI *`); a game whose EOS traffic doesn't go
+through schannel (its own TLS library) or goes to another Epic host (the filter names only
+`api.epicgames.dev`, the one AWR's SDK uses); sharing a folder with a game's own
+`secur32.dll` (refused).
 
 ## 4. Safety invariants
 
@@ -129,6 +230,7 @@ Each is enforced in code, not by convention, and has a test.
 | Instance processes are identified by container, never by name alone | `procs`: the libpod cgroup of each process, then `WINEPREFIX`; kill-all is `wineserver -k`, then SIGKILL of what is left in the container's cgroup. No `pkill -f` anywhere. |
 | Kill everything before every launch | the supervisor's launch starts with kill-all (a stale wineserver or bridge hangs the next game before its SDK answers) |
 | One live login per account | launch material comes from quiverd; no store client runs in an instance; no credential file is read |
+| An EOS game reports nothing to Epic | the EOS filter (3.1) in the instance's clone, `secur32=n,b` in every such launch, the launch refused without it (`lab::eosfilter`; tests `eosfilter::tests`, `tests/eos_filter.rs`) |
 | **Nothing is reported** (section 5) | quiverd, by session kind |
 
 ## 5. Nothing is reported
@@ -144,7 +246,8 @@ quiverd decides by that id, never by what a script remembers to pass:
 | Mod channel (Options, perf metrics, mod revisions) | served | refused for lab sessions (`broker::lab_answer`, and `ModRegistry::serve` again); the perf hub never files a lab session's metrics under the user's session (`PerfHub::with_session`). A lab mod is configured through its files (`quiver lab set`). |
 | Ubisoft cloud saves | pulled before, pushed after | never: the bridge never uploads, Connect's `syncsavegames` is forced off, and quiverd's save sync is only around its own launches |
 | Epic play time | queued after the session, reported | `Epic::queue_session` refuses a lab session id (never queued, held or sent); lab launches never go through quiverd's Epic session (`epicgame::begin/end`: no save sync, no achievement polling) |
-| Epic cloud saves (EGS savesync) | around quiverd's launches | never (see the EOS caveat in section 3) |
+| Epic cloud saves (EGS savesync) | around quiverd's launches | never: lab launches don't go through quiverd's Epic session |
+| EOS cloud saves, achievements, stats, leaderboards, presence, telemetry (the game's own EOS SDK) | the game's | blocked by the EOS filter (3.1): only sign-in, the SDK's config, Connect and ownership/entitlement reads reach `api.epicgames.dev`; a game with the SDK doesn't launch without the filter |
 | Steam play time, achievements, cloud | Steam's | a lab never talks to Steam (section 7), so nothing reaches it |
 | `quiver sessions` | the game, holders `launcher`/`bridge`/`steam` | shown with the holder `lab`, so lab runs are visibly not the user's |
 
@@ -255,7 +358,11 @@ quiver lab kill origins && quiver lab down origins
 Check afterwards: `quiver activity` shows "issued lab launch material … session lab-origins-r1";
 quiverd's log has "bridge reports game running holder=lab" and no "play session started";
 no new entry in Origins' play history. Then the same for Epic: `quiver lab create "Alan Wake
-Remastered" --name awr && quiver lab up awr && quiver lab launch awr --wait frame`.
+Remastered" --name awr && quiver lab up awr && quiver lab launch awr --wait frame`. The
+launch notes say where the EOS filter went; `quiver lab logs awr` then shows the filter
+loaded in the game's process, sign-in (`/epic/oauth/v1/token`), the SDK config and the
+ownership checks allowed, and what was blocked. If the game stops at sign-in, the blocked
+lines say which path it needed (section 3.1 says how to extend the allowlist).
 
 ## 10. Not built yet
 
