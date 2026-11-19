@@ -144,6 +144,10 @@ pub struct SteamOverlay {
     pub lower: Vec<std::path::PathBuf>,
     pub upper: std::path::PathBuf,
     pub work: std::path::PathBuf,
+    /// Folders under `target` kept as they are on the host (bound over the overlay): the
+    /// saves inside a profile's own settings folder. Appended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared: Vec<std::path::PathBuf>,
 }
 
 impl SteamLaunchPlan {

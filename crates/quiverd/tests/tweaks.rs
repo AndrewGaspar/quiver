@@ -133,7 +133,7 @@ async fn tweaks_end_to_end() {
 
     // With the DLSS mod in a profile: it provides the cap; Quiver's DXVK limiter stands down.
     let _: Value = cli.call(Request::Mods(ModsRequest::Install { game: 3539.into(), builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
-    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { game: 3539.into(), name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
+    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { game: 3539.into(), name: "DLSS".into(), layers: Some(vec!["DLSS".into()]), message: None, saves: Some("default".into()), from: None, own_settings: None })).await.unwrap();
     let p: TweaksPlan = tweaks(&cli, TweaksRequest::Plan { game, profile: Some("DLSS".into()) }).await.unwrap();
     assert!(matches!(&p.entry("fps.cap").unwrap().planned, Planned::Provided { by, option, .. } if by == "Pharos" && option == "reflex.fps_limit"), "{:?}", p.entry("fps.cap"));
     assert!(!p.env["DXVK_CONFIG"].contains("maxFrameRate"));

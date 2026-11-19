@@ -37,6 +37,11 @@ pub struct OverlaySpec {
     /// missing).
     pub upper: PathBuf,
     pub work: PathBuf,
+    /// Folders inside `target` that stay the host's: each is cloned (`open_tree`) before
+    /// the overlay is mounted and moved back on top of it after, so writes there reach the
+    /// host folder, never `upper`. A profile's own settings folder keeps the saves inside it
+    /// shared this way (design/PROFILES.md decision 4). Created if missing.
+    pub shared: Vec<PathBuf>,
 }
 
 /// Escape a path for overlayfs's option string (`\`, `:` and `,` are separators).
@@ -77,11 +82,22 @@ impl OverlaySpec {
                 bail!("{} must not be inside a lower layer", p.display());
             }
         }
+        for s in &self.shared {
+            if !s.starts_with(&self.target) || s == &self.target {
+                bail!("{} must be a folder inside {}", s.display(), self.target.display());
+            }
+            std::fs::create_dir_all(s).with_context(|| format!("creating {}", s.display()))?;
+        }
         std::fs::create_dir_all(&self.upper)?;
         std::fs::create_dir_all(&self.work)?;
         Ok(())
     }
 }
+
+// The new mount API's flags (linux/mount.h), not all in the libc crate.
+const OPEN_TREE_CLONE: u32 = 1;
+const AT_RECURSIVE: u32 = 0x8000;
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
 
 fn cstr(s: impl AsRef<OsStr>) -> Result<CString> {
     CString::new(s.as_ref().as_bytes()).context("path contains a NUL byte")
@@ -118,6 +134,10 @@ impl Namespace {
         let options: Vec<String> = specs.iter().map(|s| s.options()).collect::<Result<_>>()?;
         let mounts: Vec<(CString, CString)> =
             specs.iter().zip(&options).map(|(s, o)| Ok((cstr(&s.target)?, CString::new(o.clone())?))).collect::<Result<_>>()?;
+        // Folders that stay the host's, with a slot each for the cloned tree's descriptor
+        // (filled in the child: no allocation after fork).
+        let shared: Vec<CString> = specs.iter().flat_map(|s| &s.shared).map(cstr).collect::<Result<_>>()?;
+        let mut shared_fds: Vec<libc::c_int> = vec![-1; shared.len()];
         let options = options.join(" | ");
         let (mut err_r, err_w) = io::pipe()?;
         let err_fd = err_w.as_raw_fd();
@@ -159,6 +179,19 @@ impl Namespace {
                 {
                     return fail(b"making / a slave mount");
                 }
+                // Clone the shared folders while they're still the host's.
+                for (path, fd) in shared.iter().zip(shared_fds.iter_mut()) {
+                    let r = libc::syscall(
+                        libc::SYS_open_tree,
+                        libc::AT_FDCWD,
+                        path.as_ptr(),
+                        (OPEN_TREE_CLONE | libc::O_CLOEXEC as u32 | AT_RECURSIVE) as libc::c_uint,
+                    );
+                    if r < 0 {
+                        return fail(b"open_tree(shared folder)");
+                    }
+                    *fd = r as libc::c_int;
+                }
                 for (target, data) in &mounts {
                     if libc::mount(c"overlay".as_ptr(), target.as_ptr(), c"overlay".as_ptr(), 0, data.as_ptr().cast()) != 0 {
                         let e = io::Error::last_os_error();
@@ -167,6 +200,13 @@ impl Namespace {
                         libc::write(err_fd, target.as_ptr().cast(), target.as_bytes().len());
                         return Err(e);
                     }
+                }
+                // Put them back on top of the overlays.
+                for (path, fd) in shared.iter().zip(shared_fds.iter()) {
+                    if libc::syscall(libc::SYS_move_mount, *fd, c"".as_ptr(), libc::AT_FDCWD, path.as_ptr(), MOVE_MOUNT_F_EMPTY_PATH) != 0 {
+                        return fail(b"move_mount(shared folder)");
+                    }
+                    libc::close(*fd);
                 }
                 Ok(())
             });
@@ -251,6 +291,7 @@ mod tests {
             lower: vec!["/m/top".into(), "/m/a:b,c".into()],
             upper: "/m/up".into(),
             work: "/m/work".into(),
+            shared: vec![],
         };
         assert_eq!(
             spec.options().unwrap(),

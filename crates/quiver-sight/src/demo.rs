@@ -435,6 +435,7 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
             profile_id: Some("p-dlss".into()),
             profile_name: Some("DLSS".into()),
             mods: vec!["DLSS v3 (current)".into(), "Skip intro videos".into()],
+            settings: Some("its own (Documents/Assassin's Creed Origins)".into()),
             started: Some(now - chrono::Duration::minutes(72)),
             total_secs: Some(212 * 3600),
             copy: "Quiver install".into(),

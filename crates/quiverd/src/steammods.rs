@@ -131,7 +131,7 @@ pub(crate) fn launch_prefix(compat_data: Option<&str>) -> PathBuf {
 
 /// The overlays of a plan, on the wire.
 pub(crate) fn overlays(plan: &quiver_core::mods::Plan) -> Vec<SteamOverlay> {
-    plan.overlays.iter().map(|o| SteamOverlay { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone(), work: o.work.clone() }).collect()
+    plan.overlays.iter().map(|o| SteamOverlay { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone(), work: o.work.clone(), shared: o.shared.clone() }).collect()
 }
 
 impl Daemon {

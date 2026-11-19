@@ -260,7 +260,7 @@ impl Quiver {
                     }))
                     .child(div().flex_1()),
             )
-            .when(rows.is_empty(), |d| d.child(note(th, "Play this game and its sessions show up here, with the launch options and mod profile each one used.")))
+            .when(rows.is_empty(), |d| d.child(note(th, "Play this game and its sessions show up here, with the launch options and profile each one used.")))
             .children(rows)
             .when(more > 0, |d| d.child(div().px(px(16.)).py(px(8.)).border_t_1().border_color(th.line1).text_size(px(12.)).text_color(th.tx3).child(format!("{more} older sessions"))))
     }

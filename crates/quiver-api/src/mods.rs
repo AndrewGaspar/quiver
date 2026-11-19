@@ -710,6 +710,16 @@ pub struct ProfileInfo {
     /// Mod versions: each stack entry and the version it runs now (missing ones left out).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved: Vec<ResolvedMod>,
+    /// Options values the profile sets (Quiver Tweaks not counted), and profile-scope
+    /// Tweaks (design/PROFILES.md: both are its game settings).
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub option_values: u32,
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub tweak_values: u32,
+}
+
+fn is_zero32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A game's layers and profiles.
@@ -749,6 +759,15 @@ pub struct ModsState {
     /// Who syncs the game's saves with a cloud (`None`: not known, or an older daemon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_sync: Option<crate::savestores::SaveSync>,
+    /// The prefix folders that hold the game's settings: what a profile with its own
+    /// settings has a copy of (design/PROFILES.md decision 5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_dirs: Vec<SettingsDir>,
+    /// Vanilla's Options values and game-scope Tweaks, counted as for profiles.
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub vanilla_option_values: u32,
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub vanilla_tweak_values: u32,
 }
 
 impl ModsState {
@@ -869,6 +888,48 @@ pub struct SavesPlan {
     pub cloud_note: Option<String>,
 }
 
+/// Where Quiver learned that a prefix folder holds the game's settings.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsSource {
+    /// Quiver's audited list (`quiver_core::gamesettings::KNOWN`).
+    Catalog,
+    /// A mod's config patch or an Options surface names a file in it.
+    Mods,
+    /// A folder the game made in its own prefix's user folders.
+    #[default]
+    Inferred,
+    /// Only a profile's `profile_config` names it.
+    Profile,
+}
+
+impl SettingsSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSource::Catalog => "known",
+            SettingsSource::Mods => "a mod's settings",
+            SettingsSource::Inferred => "found in the prefix",
+            SettingsSource::Profile => "set by hand",
+        }
+    }
+}
+
+/// A prefix folder that holds the game's settings (`ModsState::settings_dirs`): what a
+/// profile with its own settings has a copy of.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SettingsDir {
+    /// Relative to the prefix.
+    pub dir: String,
+    pub source: SettingsSource,
+    /// Subfolders (relative to `dir`) that hold saves: always the prefix's, in every
+    /// profile, so own settings never fork saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared: Vec<String>,
+    /// The folder exists in the prefix (the game has written it).
+    #[serde(default)]
+    pub exists: bool,
+}
+
 /// A prefix folder a profile has its own copy of.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConfigDir {
@@ -882,6 +943,9 @@ pub struct ConfigDir {
     /// Files the profile has its own copy of (relative to `dir`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// Subfolders (relative to `dir`) kept shared with the prefix: its saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1197,18 +1261,38 @@ pub enum ModsRequest {
         game: crate::game::GameField,
         layer: String,
     },
-    /// A new profile. `saves`: a save store (id, name, `default` or `new`); `None` follows
-    /// the advice (Default if every mod is save-compatible, else a new store).
+    /// A new profile (design/PROFILES.md). `from`: a profile (or `vanilla`) to copy: its
+    /// launch overrides, Options values and profile-scope Tweaks, its game settings (a
+    /// snapshot of its files) and, unless `saves` is given, its save store. `layers`: the
+    /// mod stack (`None`: `from`'s stack, or none). `own_settings`: give it its own copy of
+    /// the game's settings folders (`None`: yes, where Quiver knows them). `saves`: a save
+    /// store (id, name, `default` or `new`); `None`: `from`'s, else the advice (Default if
+    /// every mod is save-compatible, else a new store).
     ProfileCreate {
         #[serde(flatten)]
         game: crate::game::GameField,
         name: String,
-        #[serde(default)]
-        layers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<Vec<String>>,
         #[serde(default)]
         message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         saves: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        own_settings: Option<bool>,
+    },
+    /// Give a profile its own copy of the game's settings folders (`own`: a snapshot of the
+    /// files it sees now, unless it kept a copy from before), or make it share the prefix's
+    /// again (its copy stays on disk). Replies with the `ProfileRevision`.
+    ProfileSettings {
+        #[serde(flatten)]
+        game: crate::game::GameField,
+        profile: String,
+        own: bool,
+        #[serde(default)]
+        message: Option<String>,
     },
     /// Edit a profile (see [`Profile::apply`] for the keys); records a revision.
     ProfileSet {

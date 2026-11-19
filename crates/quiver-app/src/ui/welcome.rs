@@ -1823,7 +1823,7 @@ impl Quiver {
                 .flex()
                 .when(stack, |d| d.flex_col())
                 .gap(px(10.))
-                .child(option(FixesChoice::Yes, "Yes, apply them", "Unmodded games get the recommended fixes. Mod profiles choose their own.", cx))
+                .child(option(FixesChoice::Yes, "Yes, apply them", "Unmodded games get the recommended fixes. Profiles choose their own.", cx))
                 .child(option(FixesChoice::No, "No, keep games as shipped", "Unmodded games run exactly as Ubisoft ships them.", cx))
                 .child(option(FixesChoice::Later, "Ask me later", "Nothing changes now; Quiver asks again next time.", cx))
                 .into_any_element(),

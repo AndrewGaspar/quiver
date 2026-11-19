@@ -154,7 +154,7 @@ impl Tab {
         match self {
             Tab::Overview => "Overview",
             Tab::LaunchOptions => "Launch options",
-            Tab::Mods => "Mods",
+            Tab::Mods => "Profiles",
             Tab::Tweaks => "Tweaks",
             Tab::Performance => "Performance",
             Tab::Saves => "Saves & progress",

@@ -48,6 +48,9 @@ pub struct SessionView {
     pub profile_name: Option<String>,
     /// "DLSS v3 (current)", bottom to top.
     pub mods: Vec<String>,
+    /// The profile's game settings in words ("its own (Remedy/AlanWakeRemastered)",
+    /// "Vanilla's files"); `None`: vanilla, or not known (design/PROFILES.md).
+    pub settings: Option<String>,
     pub started: Option<DateTime<Utc>>,
     /// The store's total play time, before this session.
     pub total_secs: Option<u64>,
@@ -67,6 +70,7 @@ impl Default for SessionView {
             profile_id: None,
             profile_name: None,
             mods: Vec::new(),
+            settings: None,
             started: None,
             total_secs: None,
             copy: String::new(),
@@ -267,6 +271,7 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
                 for (i, m) in s.mods.iter().enumerate() {
                     out.push(fact(if i == 0 { "Mods" } else { "" }, m.clone()));
                 }
+                out.push(fact("Settings", s.settings.clone().unwrap_or_else(|| "the game's own files".into())));
                 let this = s.started.map(|t| (now - t).num_seconds().max(0) as u64);
                 let mut play = this.map(|x| format!("This session {}", hm(x))).unwrap_or_else(|| "This session —".into());
                 if let Some(t) = s.total_secs {
@@ -302,7 +307,12 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
                     }
                 }
                 if !any {
-                    out.push(Row::Note("No mod in this profile has options to change in game.".into()));
+                    let no_mods = d.session.ready().is_some_and(|s| s.mods.is_empty());
+                    out.push(Row::Note(if no_mods {
+                        "This profile has no mods: it's a setup of the game's settings. Tweaks has the ones Quiver can change in game.".into()
+                    } else {
+                        "No mod in this profile has options to change in game.".into()
+                    }));
                 }
             }
         }
@@ -641,6 +651,9 @@ mod tests {
         assert!(matches!(&r[0], Row::Heading { title, .. } if title == "DLSS v3"));
         let empty = PanelData { options: Load::Ready(vec![]), ..Default::default() };
         assert!(matches!(&rows(PanelSection::Mods, &empty, Utc::now())[0], Row::Note(_)));
+        // A profile without mods is a settings profile, not an error.
+        let settings_only = PanelData { options: Load::Ready(vec![]), session: Load::Ready(SessionView::default()), ..Default::default() };
+        assert!(matches!(&rows(PanelSection::Mods, &settings_only, Utc::now())[0], Row::Note(n) if n.starts_with("This profile has no mods")));
         assert!(matches!(&rows(PanelSection::Mods, &PanelData::default(), Utc::now())[0], Row::Note(n) if n.starts_with("Loading")));
     }
 
@@ -661,6 +674,7 @@ mod tests {
         let r = rows(PanelSection::Session, &d, now);
         assert!(r.contains(&Row::Fact { label: "Play time".into(), value: "This session 1 h 12 m  ·  Total 212 h 12 m".into() }));
         assert!(r.contains(&Row::Fact { label: "".into(), value: "Skip intro".into() }));
+        assert!(r.contains(&Row::Fact { label: "Settings".into(), value: "the game's own files".into() }));
         assert_eq!(r.iter().filter(|r| r.focusable()).count(), 2, "Quit and Force quit");
         // Quit is there even while the session is still loading.
         assert!(rows(PanelSection::Session, &PanelData::default(), now).contains(&Row::Button(Button::ForceQuit)));

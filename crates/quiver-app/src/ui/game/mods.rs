@@ -73,7 +73,7 @@ impl Quiver {
                 Some(p) => self.render_stack(th, g, &m, p, cx).into_any_element(),
                 None => self.render_vanilla_stack(th, g, &m).into_any_element(),
             })
-            .child(self.render_layer_store(th, g, &m, cx));
+            .child(self.render_game_settings(th, g, &m, selected.as_ref(), cx));
         let right = div()
             .flex()
             .flex_col()
@@ -84,14 +84,28 @@ impl Quiver {
             })
             .when(selected.is_some(), |d| d.child(self.render_profile_history(th, g, cx)))
             .when(!m.deleted.is_empty(), |d| d.child(self.render_deleted(th, g, &m, cx)));
+        // Profiles first (each a setup of mods and game settings), then the Mods library
+        // they draw on (design/PROFILES.md decision 1).
+        let section = |title: &str, sub: String| {
+            div()
+                .flex()
+                .items_baseline()
+                .gap(px(10.))
+                .child(div().font_weight(SEMIBOLD).text_size(px(15.)).child(title.to_owned()))
+                .child(div().text_size(px(12.)).text_color(th.tx3).child(sub))
+        };
+        let n = m.all_mods().len();
         div()
             .flex()
             .flex_col()
             .gap(px(18.))
             .children(hook)
+            .child(section("Profiles", "each a setup of the game: its mods, its game settings and its saves".into()))
             .child(self.render_profile_cards(th, g, &m, &sel, cx))
             .child(self.render_mods_views(th, id, cx))
             .child(crate::ui::responsive::columns(self.pane_bp(), 20., 380., left, right))
+            .child(section("Mods", format!("{n} in this game's library · profiles pick from them")).mt(px(8.)))
+            .child(self.render_layer_store(th, g, &m, cx))
             .into_any_element()
     }
 
@@ -175,16 +189,21 @@ impl Quiver {
             Some(s) => (if s.cloud && !no_cloud { Icon::Cloud } else { Icon::HardDrive }, s.store_name.clone().unwrap_or_else(|| "Own saves".into())),
             None => (if no_cloud { Icon::HardDrive } else { Icon::Cloud }, "Default".to_owned()),
         };
-        cards.push(entry(0, None, "Vanilla".into(), "Base game only, never mounted".into(), store_label(m.vanilla_saves.as_ref()), Icon::ShieldCheck, false, self, cx));
+        cards.push(entry(0, None, "Vanilla".into(), "Base game · the game's own settings".into(), store_label(m.vanilla_saves.as_ref()), Icon::ShieldCheck, false, self, cx));
         for (i, p) in m.profiles.iter().enumerate() {
             let pr = &p.profile;
             let n = pr.layers.len();
             let pins = p.resolved.iter().filter(|r| r.pinned).count();
             let sub = format!(
-                "{n} mod{}{}{}",
-                if n == 1 { "" } else { "s" },
+                "{}{}{} · {}",
+                match n {
+                    0 => "No mods".to_owned(),
+                    1 => "1 mod".to_owned(),
+                    n => format!("{n} mods"),
+                },
                 if pins == 0 { String::new() } else { format!(" · {pins} pinned") },
-                if p.conflicts.is_empty() { String::new() } else { format!(" · {} conflicts", p.conflicts.len()) }
+                if p.conflicts.is_empty() { String::new() } else { format!(" · {} conflicts", p.conflicts.len()) },
+                super::profiles::settings_summary(p)
             );
             let saves = store_label(p.saves.as_ref());
             cards.push(entry(i + 1, Some(pr.id.clone()), pr.name.clone(), sub, saves, Icon::Layers, pr.pinned, self, cx));
@@ -293,7 +312,7 @@ impl Quiver {
             .gap(px(8.))
             .child(div().flex().items_center().child(caption("Vanilla · nothing mounted", th.tx3)))
             .child(note(th, if m.layers.is_empty() {
-                "Vanilla runs the base install directly. Add a mod from a folder below, then create a profile that stacks it on top."
+                "Vanilla runs the base install directly with the game's own settings. A profile can change its settings, its mods, or both."
             } else {
                 "Vanilla runs the base install directly with the game's own saves. Pick a profile above to see its mods."
             }).px(px(0.)).py(px(4.)))
@@ -460,7 +479,7 @@ impl Quiver {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(caption("Mod stack · top wins", th.tx3))
+                    .child(caption("Mods in this profile · top wins", th.tx3))
                     .child(badge(th, format!("{n_on} on"), true))
                     .child(div().flex_1())
                     .child(div().text_size(px(11.5)).text_color(th.tx3).child("Tick a mod to add it on top; arrows reorder")),
@@ -481,7 +500,7 @@ impl Quiver {
                         .child(div().flex_1().min_w_0().child(format!("Uses {} mod(s) or version(s) that were removed ({}); launching it fails until you update its mods.", missing.len(), missing.join(", ")))),
                 )
             })
-            .when(rows.is_empty(), |d| d.child(note(th, "No mods in the store yet. Add one from a folder below.").px(px(0.))))
+            .when(rows.is_empty(), |d| d.child(note(th, "No mods in this game's library yet: this profile is a setup of the game's settings. Add mods in the Mods section below.").px(px(0.))))
             .children(rows)
             .children(self.base_rows(th, g))
             .child(
@@ -653,7 +672,7 @@ impl Quiver {
         let path = self.gp.layer_path.clone();
         card(th)
             .child(
-                card_header(th, "Mod store")
+                card_header(th, "Mod library")
                     .child(div().text_size(px(12.)).text_color(th.tx3).child(format!("{} mod{} · copied into Quiver, reflinked where possible", all.len(), if all.len() == 1 { "" } else { "s" })))
                     .child(div().flex_1()),
             )
@@ -773,7 +792,6 @@ impl Quiver {
         let id = g.id();
         let prof = p.profile.clone();
         let pid = prof.id.clone();
-        let overrides = super::page::flatten(&prof.settings);
         let row = |label: &str, help: Option<&str>, control: AnyElement| {
             div()
                 .flex()
@@ -830,21 +848,6 @@ impl Quiver {
             )
             .child(stores)
             .when(!steam, |c| c.child(row("Pin to library", Some("Its own tile and list row"), pinned)))
-            .child(row(
-                "Launch overrides",
-                None,
-                if overrides.is_empty() {
-                    div().text_color(th.tx3).child("None").into_any_element()
-                } else {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap(px(2.))
-                        .children(overrides.iter().map(|(k, v)| mono(11.5, th.tx2).child(format!("{k}={v}"))))
-                        .into_any_element()
-                },
-            ))
             .child(self.cli_line("prof-cli", th, cli, cx))
             .child(
                 div()

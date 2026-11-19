@@ -52,7 +52,7 @@ impl ModsView {
 
     pub fn label(self) -> &'static str {
         match self {
-            ModsView::Stack => "Mod stack",
+            ModsView::Stack => "Mods & settings",
             ModsView::Options => "Options",
             ModsView::Changes => "History & changes",
             ModsView::Keys => "Keys",

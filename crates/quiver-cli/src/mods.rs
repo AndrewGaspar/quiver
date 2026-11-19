@@ -33,7 +33,7 @@ pub enum ModsAction {
         #[command(subcommand)]
         action: LayerAction,
     },
-    /// Mod profiles: named stacks of mods plus your own overrides.
+    /// Profiles: named setups of the game's mods and settings (also `quiver profiles <game>`).
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
@@ -266,15 +266,20 @@ pub enum VersionAction {
 
 #[derive(Subcommand)]
 pub enum ProfileAction {
-    /// A new profile; `--layers a,b` stacks layer b on top of a. Its save store is Default
-    /// when every mod is save-compatible, else a new one, unless `--saves` says.
+    /// A new blank profile; `--layers a,b` (or `--mods`) stacks mod b on top of a. It gets
+    /// its own copy of the game's settings folders where Quiver knows them. Its save store is
+    /// Default when every mod is save-compatible, else a new one, unless `--saves` says.
+    /// (`quiver profiles <game> create` copies a profile instead.)
     Create {
         name: String,
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, alias = "mods", value_delimiter = ',')]
         layers: Vec<String>,
         /// Save store: default, new, or a store's name or id (quiver saves <game> stores).
         #[arg(long)]
         saves: Option<String>,
+        /// Share the game's settings files with Vanilla instead of having its own copy.
+        #[arg(long)]
+        shared_settings: bool,
         #[arg(short, long)]
         message: Option<String>,
     },
@@ -488,7 +493,7 @@ fn versions_note(r: &ModRecord) -> String {
 }
 
 /// A stack entry in words: "DLSS v3 (current)", "Skip intro videos", "lxyz (missing)".
-fn entry_label(s: &ModsState, e: &str) -> String {
+pub(crate) fn entry_label(s: &ModsState, e: &str) -> String {
     s.resolve(e).map_or(format!("{e} (missing)"), |r| r.describe())
 }
 
@@ -594,7 +599,7 @@ fn print_state(name: &str, s: &ModsState) {
 }
 
 /// "DLSS store, savegames/<user>/3539-ptkzxpv (why); note" for a saves plan.
-fn saves_line(s: &quiver_api::mods::SavesPlan) -> String {
+pub(crate) fn saves_line(s: &quiver_api::mods::SavesPlan) -> String {
     let mut out = format!("{} ({})", s.folder, s.reason);
     if let Some(n) = &s.cloud_note {
         out.push_str(&format!("; note: {n}"));
@@ -744,7 +749,7 @@ fn print_detail(d: &ModDetail) {
 }
 
 /// Parse the reply to a profile change, printing the daemon's notes about the stack.
-fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
+pub(crate) fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
     if let Some(notes) = v.get("warnings").and_then(|w| w.as_array()) {
         for n in notes.iter().filter_map(|n| n.as_str()) {
             eprintln!("note: {n}");
@@ -896,8 +901,10 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
         }
         ModsAction::Profile { action } => {
             let rev: ProfileRevision = match action {
-                ProfileAction::Create { name, layers, saves, message } => {
-                    profile_reply(call(ModsRequest::ProfileCreate { game: product_id.into(), name, layers, message, saves }).await?)?
+                ProfileAction::Create { name, layers, saves, shared_settings, message } => {
+                    let own_settings = shared_settings.then_some(false);
+                    let req = ModsRequest::ProfileCreate { game: product_id.into(), name, layers: Some(layers), message, saves, from: None, own_settings };
+                    profile_reply(call(req).await?)?
                 }
                 ProfileAction::Set { profile, changes, message } => {
                     let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;

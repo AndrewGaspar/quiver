@@ -357,6 +357,24 @@ Profile changes are revisions in `games/<product>/profiles/<id>.jsonl` (`profile
 `cli`/`gui`) need a person's confirmation to delete or restore profiles, restore layer
 revisions and remove layers; adding layers and changing their deletions are normal edits.
 
+### Profiles: mods and game settings
+
+A **profile** is a named setup of a game: its mods (none is fine: "HDR on" and "Performance"
+can differ only in settings), its own copy of the game's settings files, its Options values and
+profile-scope Tweaks, launch overrides, and its save store (design/PROFILES.md). Quiver knows
+where a game keeps its settings from an audited list, the files mods patch, and the folders the
+game made in its own prefix; a new profile gets a snapshot of those folders (saves inside them,
+like Alan Wake Remastered's `savegames/`, stay shared). New profiles copy the current one by
+default; *Blank* starts from vanilla. The app's game page has a **Profiles** tab with a
+Profiles section and the Mods library below it.
+
+```
+quiver profiles awr                               # every profile: mods, settings, saves
+quiver profiles awr create "HDR on" --from vanilla --mods ''
+quiver profiles awr settings                      # the game's settings folders, who has a copy
+quiver profiles awr settings Torchbearer own      # give an older profile its own copy
+```
+
 ### Mods v2: packages, stacks, config patches
 
 A **mod** is a folder with a manifest, `quiver-mod.toml` (TOML; `quiver-mod.json` with the

@@ -97,13 +97,15 @@ fn store_chips(
 }
 
 /// The new-profile dialog's saves section: the advice for the ticked layers and a choice
-/// (`choice` `None`: follow the advice). `sync`: [`sync_of`].
+/// (`choice` `None`: the source profile's store, `inherit` (its id and the profile's name),
+/// else the advice). `sync`: [`sync_of`].
 pub fn new_profile_saves(
     th: &Theme,
     m: Option<&ModsState>,
     sync: Option<SaveSync>,
     layers: &[(String, String, bool)],
     choice: Option<&str>,
+    inherit: Option<(String, String)>,
     cx: &mut Context<Quiver>,
 ) -> AnyElement {
     let Some(m) = m else { return div().into_any_element() };
@@ -113,8 +115,9 @@ pub fn new_profile_saves(
     let ticked: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
     let advice = advice_for(m, &ticked);
     let recommended = if advice.share_default { DEFAULT_STORE } else { NEW_STORE };
-    let chosen = choice.unwrap_or(recommended);
     let stores = live(m, sync);
+    let inherit = inherit.filter(|(s, _)| stores.iter().any(|x| &x.id == s));
+    let chosen = choice.or(inherit.as_ref().map(|(s, _)| s.as_str())).unwrap_or(recommended);
     let chips = store_chips(th, "np-store", &stores, chosen, recommended, |this, id, _| {
         if let Some(Dialog::NewProfile { saves, .. }) = &mut this.gp.dialog {
             *saves = Some(id);
@@ -130,6 +133,9 @@ pub fn new_profile_saves(
         .gap(px(6.))
         .child(caption("Save store", th.tx3))
         .child(chips)
+        .when_some(inherit.filter(|_| choice.is_none()), |d, (_, from)| {
+            d.child(line(Icon::Layers, th.tx3, format!("The same store as {from}, so the copy plays the same saves.")))
+        })
         .child(line(if advice.share_default { Icon::Info } else { Icon::TriangleAlert },
             if risky_shared { th.warn } else { th.tx3 },
             format!("Recommended: {}. {}", if advice.share_default { "Default" } else { "a new store" }, capitalize(&advice.reason)),
@@ -295,7 +301,7 @@ impl Quiver {
             .child(
                 card_header(th, "Save stores")
                     .child(div().text_size(px(12.)).text_color(th.tx3).child(format!(
-                        "{} · each profile picks one on the Mods tab",
+                        "{} · each profile picks one on the Profiles tab",
                         match (&cloud_store_name, no_cloud) {
                             (_, true) => "this game has no cloud saves: every store stays on this PC".to_owned(),
                             (Some(n), _) => format!("only {n} syncs with {}", cloud_name(quiver_api::StoreId::Ubisoft)),

@@ -39,6 +39,54 @@ fn available() -> bool {
     false
 }
 
+/// A profile's own settings folder with the saves inside it kept shared
+/// (design/PROFILES.md decision 4): settings writes land in the profile's copy, save writes
+/// in the real folder, and both are visible inside.
+#[test]
+fn shared_folder_inside_an_overlay_stays_the_hosts() {
+    if !available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let dir = t.join("pfx/Documents/Remedy/AlanWakeRemastered");
+    write(&dir.join("resolution.xml"), "vanilla");
+    write(&dir.join("savegames/aw1/savegame.aws"), "chapter 3");
+    let upper = t.join("profile/prefix/AlanWakeRemastered");
+    write(&upper.join("resolution.xml"), "hdr on");
+    // A copy of the saves from before (a profile that forked them) is hidden, not used.
+    write(&upper.join("savegames/aw1/savegame.aws"), "stale fork");
+    let spec = OverlaySpec {
+        target: dir.clone(),
+        lower: vec![],
+        upper: upper.clone(),
+        work: t.join("profile/work"),
+        shared: vec![dir.join("savegames"), dir.join("not-yet")],
+    };
+    let ns = Namespace::create(&spec).unwrap();
+    let d = dir.display();
+    let out = run(
+        &ns,
+        None,
+        &format!(
+            "cat '{d}/resolution.xml'; echo; cat '{d}/savegames/aw1/savegame.aws'; echo; \
+             echo 'chapter 4' > '{d}/savegames/aw1/savegame.aws'; echo new > '{d}/savegames/aw2'; \
+             echo hdr > '{d}/resolution.xml'; echo later > '{d}/not-yet/x'"
+        ),
+    );
+    assert_eq!(out, "hdr on\nchapter 3\n");
+    // Saves went to the real folder; settings to the profile's copy.
+    assert_eq!(read(&dir.join("savegames/aw1/savegame.aws")), "chapter 4\n");
+    assert_eq!(read(&dir.join("savegames/aw2")), "new\n");
+    assert_eq!(read(&dir.join("not-yet/x")), "later\n", "a shared folder made for the launch");
+    assert_eq!(read(&dir.join("resolution.xml")), "vanilla");
+    assert_eq!(read(&upper.join("resolution.xml")), "hdr\n");
+    assert_eq!(read(&upper.join("savegames/aw1/savegame.aws")), "stale fork");
+    // A shared folder outside the target is refused.
+    let bad = OverlaySpec { shared: vec![t.join("elsewhere")], ..spec };
+    assert!(Namespace::create(&bad).is_err());
+}
+
 #[test]
 fn overlay_in_user_namespace() {
     if !available() {
@@ -57,7 +105,7 @@ fn overlay_in_user_namespace() {
     write(&layer_b.join("data/b.txt"), "layer b");
     write(&layer_b.join("extra/new.txt"), "new");
 
-    let spec = OverlaySpec { target: install.clone(), lower: vec![layer_b.clone(), layer_a.clone()], upper: upper.clone(), work };
+    let spec = OverlaySpec { target: install.clone(), lower: vec![layer_b.clone(), layer_a.clone()], upper: upper.clone(), work, shared: vec![] };
     let ns = Namespace::create(&spec).unwrap();
 
     // Layers stack over the install at its own path; the top layer wins.
@@ -279,11 +327,12 @@ fn bad_layer_is_reported() {
         lower: vec![t.join("missing")],
         upper: t.join("up"),
         work: t.join("work"),
+        shared: vec![],
     };
     let err = Namespace::create(&spec).unwrap_err().to_string();
     assert!(err.contains("missing"), "{err}");
     // Upper inside the install would loop.
-    let spec = OverlaySpec { target: t.join("install"), lower: vec![], upper: t.join("install/up"), work: t.join("work") };
+    let spec = OverlaySpec { target: t.join("install"), lower: vec![], upper: t.join("install/up"), work: t.join("work"), shared: vec![] };
     assert!(Namespace::create(&spec).is_err());
 }
 
@@ -305,7 +354,7 @@ fn wine_through_overlay() {
     let layer = t.join("layer");
     write(&install.join("a.txt"), "vanilla");
     write(&layer.join("a.txt"), "from the layer");
-    let spec = OverlaySpec { target: install.clone(), lower: vec![layer], upper: t.join("upper"), work: t.join("work") };
+    let spec = OverlaySpec { target: install.clone(), lower: vec![layer], upper: t.join("upper"), work: t.join("work"), shared: vec![] };
     let ns = Namespace::create(&spec).unwrap();
     let wine = |args: &[&str]| {
         let mut cmd = Command::new(proton.join("files/bin/wine"));
@@ -380,7 +429,7 @@ fn wine_sees_prefix_config_overlay() {
     write(&dir.join("settings.ini"), "Quality=low\r\n");
     let upper = t.join("profile/prefix/drive_c/quiver-test/MyGame");
     write(&upper.join("settings.ini"), "Quality=ultra\r\n");
-    let spec = OverlaySpec { target: dir.clone(), lower: vec![], upper: upper.clone(), work: t.join("profile/work") };
+    let spec = OverlaySpec { target: dir.clone(), lower: vec![], upper: upper.clone(), work: t.join("profile/work"), shared: vec![] };
     let ns = Namespace::create(&spec).unwrap();
     let (ok, out, err) = wine(Some(&ns), &["cmd", "/c", r"type C:\quiver-test\MyGame\settings.ini & echo mine> C:\quiver-test\MyGame\new.txt"]);
     assert!(ok, "{out}\n{err}");
@@ -408,7 +457,7 @@ fn proton_run_through_overlay() {
     let layer = t.join("layer");
     write(&install.join("data/a.txt"), "vanilla");
     write(&layer.join("data/a.txt"), "from the layer");
-    let spec = OverlaySpec { target: install.clone(), lower: vec![layer], upper: t.join("upper"), work: t.join("work") };
+    let spec = OverlaySpec { target: install.clone(), lower: vec![layer], upper: t.join("upper"), work: t.join("work"), shared: vec![] };
     let ns = Namespace::create(&spec).unwrap();
     let prefix = t.join("pfx");
     std::fs::create_dir_all(&prefix).unwrap();
