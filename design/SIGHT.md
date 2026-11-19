@@ -1589,6 +1589,22 @@ presenter, capture and failsafe releases. The preload's release lines now name t
 epoch and the reason (`input back to the game (panel N): failsafe: …`), from the same snapshot
 as the decision (quiver-perf `panel::capture_why`).
 
+**HDR, in a lab instance** (design/LAB.md §13). On an HDR10 or scRGB swapchain the layer still
+can't draw the HUD or the panel (`DRAW_ERR_FORMAT`). On the desktop the panel moves to its
+layer-shell window. In a headless instance there's no layer-shell: Shift+F2 leaves the panel
+closed, with the reason in its report, and the game keeps its input (no capture without the
+panel in the frames). Shift+F3 turns the lab HUD on, but nothing is drawn. Measured with the
+D3D12 test program under gamescope's forced-HDR headless output.
+
+Two changes to the layer:
+- **`vkSetHdrMetadataEXT`:** the layer now intercepts it and passes it on unchanged, putting
+  the last metadata in its status block (`hdr_*`).
+- **Captures:** with `QUIVER_SIGHT_CAPTURE=1` (lab launches only), it captures the presented
+  image in its own format on request (`capture.req` → `capture-<n>.raw/.json`).
+
+Under gamescope the layer has to sit above gamescope's WSI layer to see the HDR swapchain at
+all (`sightenv::layer_order` names it below Sight when `ENABLE_GAMESCOPE_WSI=1`).
+
 **Known limits.** Several held raw-input buttons across an open are paired by count, not code.
 A game that keeps its own cursor visible and confines the pointer shows it under the panel's
 (they coincide on X11; on Wayland the panel follows deltas). Wine's client-side key repeat on

@@ -132,6 +132,10 @@ pub fn launch_env(session_dir: &Path, env: &BTreeMap<String, String>) -> Vec<(St
     if !env.contains_key("QUIVER_SIGHT_LOG") {
         out.push(("QUIVER_SIGHT_LOG".into(), "1".into()));
     }
+    // Swapchains readable for `quiver lab shot --hdr` (TRANSFER_SRC usage; lab launches only).
+    if !env.contains_key("QUIVER_SIGHT_CAPTURE") {
+        out.push(("QUIVER_SIGHT_CAPTURE".into(), "1".into()));
+    }
     out
 }
 
@@ -193,6 +197,7 @@ mod tests {
         assert_eq!(e["VK_INSTANCE_LAYERS"], "VK_LAYER_QUIVER_sight");
         assert_eq!(e["LD_PRELOAD"], "/opt/quiver/sight/$PLATFORM/libquiver_sight_input.so");
         assert_eq!(e["QUIVER_SIGHT_LOG"], "1");
+        assert_eq!(e["QUIVER_SIGHT_CAPTURE"], "1");
         // The manifest's own: kept, ours after; frame generation above Sight; opt-out.
         let e: BTreeMap<String, String> =
             launch_env(dir, &env(&[("LD_PRELOAD", "/x/a.so"), ("ENABLE_VKBASALT", "1"), ("VK_ADD_IMPLICIT_LAYER_PATH", "/y"), ("QUIVER_SIGHT_LOG", "0")])).into_iter().collect();

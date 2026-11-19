@@ -39,9 +39,16 @@ pub fn uses_obs_capture(env: &BTreeMap<String, String>, wrappers: &[String]) -> 
     truthy(env, "OBS_VKCAPTURE") || wrappers.iter().any(|w| Path::new(w).file_name().is_some_and(|n| n == "obs-gamecapture"))
 }
 
+/// gamescope's WSI layer (both arches' names; the loader skips the other arch's). It turns the
+/// game's HDR swapchain into an sRGB one for the driver and keeps the HDR metadata to itself,
+/// so Sight must sit above it to see what the game asked for. It's implicit, which the loader
+/// puts above every `VK_INSTANCE_LAYERS` layer, unless it's named there too.
+pub const GAMESCOPE_WSI_LAYERS: [&str; 2] = ["VK_LAYER_FROG_gamescope_wsi_x86_64", "VK_LAYER_FROG_gamescope_wsi_i686"];
+
 /// The Vulkan layer order captures imply, application first: the launch's own
 /// `VK_INSTANCE_LAYERS`, the frame-generation and post-processing layers it turns on, then
-/// Sight (and obs-vkcapture on the side `captures` says). Without it the loader may put Sight
+/// Sight (and obs-vkcapture on the side `captures` says), then gamescope's WSI layer when the
+/// launch turns it on (`ENABLE_GAMESCOPE_WSI=1`). Without it the loader may put Sight
 /// above them and the HUD gets post-processed or interpolated.
 pub fn layer_order(captures: Captures, env: &BTreeMap<String, String>, obs: bool) -> Vec<String> {
     let mut out: Vec<String> = env.get("VK_INSTANCE_LAYERS").map(|v| v.split(':').filter(|l| !l.is_empty() && *l != SIGHT_LAYER && *l != OBS_LAYER).map(str::to_owned).collect()).unwrap_or_default();
@@ -55,6 +62,11 @@ pub fn layer_order(captures: Captures, env: &BTreeMap<String, String>, obs: bool
         (Captures::Hidden, true) => out.extend([OBS_LAYER.into(), SIGHT_LAYER.into()]),
         (Captures::Shown, true) => out.extend([SIGHT_LAYER.into(), OBS_LAYER.into()]),
         (_, false) => out.push(SIGHT_LAYER.into()),
+    }
+    if truthy(env, "ENABLE_GAMESCOPE_WSI") {
+        // Below Sight: moved there if the launch listed it above.
+        out.retain(|l| !GAMESCOPE_WSI_LAYERS.contains(&l.as_str()));
+        out.extend(GAMESCOPE_WSI_LAYERS.map(String::from));
     }
     out
 }
@@ -116,6 +128,15 @@ pub fn layer_manifest_json(library_path: &Path, is_64bit: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamescope_wsi_goes_below_sight() {
+        let e = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        assert_eq!(layer_order(Captures::Shown, &e(&[]), false), [SIGHT_LAYER]);
+        let o = layer_order(Captures::Shown, &e(&[("ENABLE_GAMESCOPE_WSI", "1"), ("VK_INSTANCE_LAYERS", "VK_LAYER_FROG_gamescope_wsi_x86_64:VK_LAYER_X")]), false);
+        assert_eq!(o, ["VK_LAYER_X", SIGHT_LAYER, "VK_LAYER_FROG_gamescope_wsi_x86_64", "VK_LAYER_FROG_gamescope_wsi_i686"]);
+        assert_eq!(layer_order(Captures::Shown, &e(&[("ENABLE_GAMESCOPE_WSI", "0")]), false), [SIGHT_LAYER]);
+    }
 
     #[test]
     fn preload_joins_after_the_launchs_own() {

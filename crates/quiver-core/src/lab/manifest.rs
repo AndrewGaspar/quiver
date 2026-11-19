@@ -42,20 +42,30 @@ pub struct Display {
     pub height: u32,
     /// gamescope's refresh rate (`-r`), Hz.
     pub refresh: u32,
+    /// HDR (design/LAB.md §13): gamescope's headless output forced to HDR10 PQ, and the
+    /// game's environment for HDR ([`super::hdr`]). `WxH@HZ+hdr`, `display.hdr=on`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hdr: bool,
 }
 
 impl Default for Display {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, refresh: 60 }
+        Self { width: 1920, height: 1080, refresh: 60, hdr: false }
     }
 }
 
 impl Display {
-    /// `WxH[@HZ]`.
+    /// `WxH[@HZ][+hdr]`.
     pub fn parse(s: &str) -> Result<Self> {
-        let (res, hz) = match s.split_once('@') {
+        let t = s.trim();
+        let lower = t.to_ascii_lowercase();
+        let (t, hdr) = match ["+hdr", " hdr"].iter().find(|x| lower.ends_with(*x)) {
+            Some(x) => (&t[..t.len() - x.len()], true),
+            None => (t, false),
+        };
+        let (res, hz) = match t.split_once('@') {
             Some((r, h)) => (r, Some(h)),
-            None => (s, None),
+            None => (t, None),
         };
         let (w, h) = res.split_once(['x', 'X']).with_context(|| format!("'{s}': expected WIDTHxHEIGHT[@HZ]"))?;
         let d = Self {
@@ -65,6 +75,7 @@ impl Display {
                 Some(h) => h.trim().trim_end_matches("Hz").parse().with_context(|| format!("'{s}': bad refresh"))?,
                 None => 60,
             },
+            hdr,
         };
         d.check()?;
         Ok(d)
@@ -86,7 +97,7 @@ impl Display {
 
 impl std::fmt::Display for Display {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}x{}@{}", self.width, self.height, self.refresh)
+        write!(f, "{}x{}@{}{}", self.width, self.height, self.refresh, if self.hdr { "+hdr" } else { "" })
     }
 }
 
@@ -256,7 +267,7 @@ pub(crate) mod tests {
             licence: Licence::UbisoftBridge,
             created: "2026-11-18T10:00:00Z".parse().unwrap(),
             created_by: "agent".into(),
-            display: Display { width: 2560, height: 1600, refresh: 165 },
+            display: Display { width: 2560, height: 1600, refresh: 165, hdr: false },
             runtime: Runtime {
                 proton: "GE-Proton11-12-x86_64".into(),
                 proton_path: "/p/GE-Proton11-12-x86_64".into(),
@@ -298,10 +309,15 @@ pub(crate) mod tests {
 
     #[test]
     fn displays() {
-        assert_eq!(Display::parse("2560x1600@165").unwrap(), Display { width: 2560, height: 1600, refresh: 165 });
+        assert_eq!(Display::parse("2560x1600@165").unwrap(), Display { width: 2560, height: 1600, refresh: 165, hdr: false });
+        let h = Display::parse("1920x1080@60+HDR").unwrap();
+        assert!(h.hdr && h.refresh == 60);
+        assert_eq!(h.to_string(), "1920x1080@60+hdr");
+        assert_eq!(Display::parse(&h.to_string()).unwrap(), h);
+        assert!(Display::parse("1280x720 hdr").unwrap().hdr);
         assert_eq!(Display::parse("1280x720").unwrap().refresh, 60);
         assert!(Display::parse("10x10").is_err() && Display::parse("axb").is_err());
-        let d = Display { width: 1920, height: 1080, refresh: 60 };
+        let d = Display { width: 1920, height: 1080, refresh: 60, hdr: false };
         assert_eq!(d.at(0.5, 0.5), (960, 540));
         assert_eq!(d.at(1.0, 2.0), (1919, 1079));
         assert_eq!(d.to_string(), "1920x1080@60");

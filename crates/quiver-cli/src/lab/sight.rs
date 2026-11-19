@@ -101,7 +101,15 @@ pub fn prepare(inst: &Inst, m: &Manifest, session: &str, run_mount: &str) -> Res
     for (name, json) in labsight::layer_manifests(up.i686) {
         quiver_core::lab::write_atomic(&layer_dir.join(name), json.as_bytes())?;
     }
-    let env = labsight::launch_env(dir.path(), &m.env);
+    // The launch's env as the game gets it: an HDR instance's (gamescope's WSI layer, which the
+    // layer order puts below Sight), then the manifest's.
+    let mut game_env = m.env.clone();
+    if m.display.hdr {
+        for (k, v) in quiver_core::lab::hdr::launch_env() {
+            game_env.entry(k).or_insert(v);
+        }
+    }
+    let env = labsight::launch_env(dir.path(), &game_env);
     let cmd = labsight::sight_cmd(dir.path(), &format!("{run_mount}/{STATUS_FILE}"), &format!("{run_mount}/{LOG_FILE}"), &m.title, &m.game.to_string());
     let mut notes = vec![format!(
         "Sight: the layer (HUD, the panel drawn in the game), the input preload{} and a lab quiver-sight (read-only: no quiverd); logs in {LOG_FILE} and game.log; quiver lab sight {} for its state",
@@ -239,22 +247,30 @@ pub fn print_summary(run_dir: &Path) {
 }
 
 /// `quiver lab sight N status`.
+/// The run's session dir on the host (in the instance's shared-memory root), when the
+/// container has Sight mounted and the run made one.
+pub fn session_dir(inst: &Inst, run_dir: Option<&Path>) -> Option<PathBuf> {
+    let u = marker(inst)?;
+    let id = run_dir.and_then(|d| d.file_name()).and_then(|n| n.to_str()).and_then(|r| r.strip_prefix('r')).and_then(|r| r.parse().ok()).map(|run| quiver_api::lab::session_id(&inst.name, run))?;
+    let p = u.shm.join(format!("quiver-{}", uid())).join(id);
+    p.is_dir().then_some(p)
+}
+
+/// The newest layer ring's status block in a session dir.
+pub fn layer_status(dir: &Path) -> Option<quiver_perf::LayerStatus> {
+    let sd = SessionDir::open(dir).ok()?;
+    let ring = sd.list().ok()?.into_iter().filter(|(k, _)| matches!(k, FileKind::Layer { .. })).filter_map(|(_, p)| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).max()?.1;
+    open_ring_reader(&ring).ok()?.layer_status()
+}
+
 pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
     let m = inst.load()?;
     let up = marker(inst);
     let st = run_dir.and_then(read_status);
-    let dir = up.as_ref().and_then(|u| {
-        let id = run_dir.and_then(|d| d.file_name()).and_then(|n| n.to_str()).and_then(|r| r.strip_prefix('r')).and_then(|r| r.parse().ok()).map(|run| quiver_api::lab::session_id(&inst.name, run))?;
-        let p = u.shm.join(format!("quiver-{}", uid())).join(id);
-        p.is_dir().then_some(p)
-    });
+    let dir = session_dir(inst, run_dir);
     let panel = dir.as_ref().and_then(|d| quiver_perf::panel::open_panel_input(&d.join(quiver_perf::panel::PANEL_INPUT_FILE), false).ok());
     let now = quiver_perf::clock::mono_raw_ns();
-    let layer_status = dir.as_ref().and_then(|d| {
-        let sd = SessionDir::open(d).ok()?;
-        let ring = sd.list().ok()?.into_iter().filter(|(k, _)| matches!(k, FileKind::Layer { .. })).filter_map(|(_, p)| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).max()?.1;
-        open_ring_reader(&ring).ok()?.layer_status()
-    });
+    let layer_status = dir.as_deref().and_then(layer_status);
     let alive = st.as_ref().is_some_and(|s| s.at.is_some_and(|t| (chrono::Utc::now() - t).num_seconds() < 5));
     if json {
         let p = panel.as_ref().map(|p| serde_json::json!({ "control": format!("{:?}", p.control()), "capturing": p.capture(now), "input": format!("{:?}", p.input()), "layer": format!("{:?}", p.layer()), "cursor": p.cursor() }));

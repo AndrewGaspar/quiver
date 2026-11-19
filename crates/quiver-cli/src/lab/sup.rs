@@ -520,6 +520,12 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
         ("QUIVER_SESSION".into(), session.clone()),
         ("QUIVER_GAME".into(), m.game.to_string()),
     ];
+    // HDR (design/LAB.md §13): gamescope's WSI layer and Proton's HDR switch; the manifest's
+    // env can override them.
+    if m.display.hdr {
+        env.extend(lab::hdr::launch_env());
+        notes.push("HDR: gamescope's output is HDR10 PQ; the game gets ENABLE_GAMESCOPE_WSI=1 and PROTON_ENABLE_HDR=1 (quiver lab hdr)".into());
+    }
     for (k, v) in &m.env {
         env.retain(|(ek, _)| ek != k);
         env.push((k.clone(), v.clone()));

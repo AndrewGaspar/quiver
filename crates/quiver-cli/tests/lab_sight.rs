@@ -142,7 +142,7 @@ fn sight_in_a_lab_instance() {
         licence: Licence::None,
         created: chrono::Utc::now(),
         created_by: "test".into(),
-        display: Display { width: 1280, height: 720, refresh: 60 },
+        display: Display { width: 1280, height: 720, refresh: 60, hdr: false },
         runtime: Runtime { proton: proton.file_name().unwrap().to_string_lossy().into(), proton_path: proton.clone(), dxvk: None, vkd3d: None, nvapi: None, image: quiver_core::lab::IMAGE.into() },
         paths: GamePaths { install: "/opt/qtest/install".into(), prefix: "/opt/qtest/pfx".into(), exe: "d3d12_present.exe".into(), args: vec!["1000000".into(), "quiver-lab-sight".into(), "0".into(), "0".into()] },
         env: BTreeMap::from([("WINEDEBUG".to_owned(), "-all".to_owned()), ("PROTON_USE_XALIA".to_owned(), "0".to_owned()), ("QUIVER_PROBE_LOG".to_owned(), r"Z:\lab\probe.log".to_owned())]),

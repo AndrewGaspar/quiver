@@ -4,6 +4,7 @@
 
 mod bench;
 mod create;
+mod hdr;
 mod jobs;
 mod ops;
 mod sight;
@@ -64,6 +65,11 @@ pub enum LabAction {
         /// and a lab quiver-sight (read-only: nothing reaches your settings). `quiver lab sight`.
         #[arg(long)]
         sight: bool,
+        /// HDR: gamescope's headless output forced to HDR10 PQ and the game's HDR environment
+        /// (also `--display WxH@HZ+hdr`). Turns Sight on too, which reads the swapchain:
+        /// `quiver lab hdr`, `quiver lab shot --hdr`.
+        #[arg(long)]
+        hdr: bool,
     },
     /// Instances, with their game, display and state.
     List {
@@ -141,6 +147,11 @@ pub enum LabAction {
         /// Also print metrics (blank, sharpness, mean level).
         #[arg(long)]
         metrics: bool,
+        /// The game's own frame in its swapchain format, from the Sight layer (sight = on):
+        /// `<file>.raw` exact, `<file>.png` 16-bit (PQ), `<file>.json` with the format, colour
+        /// space, HDR metadata and nits (max, average, above 203 and 1000).
+        #[arg(long)]
+        hdr: bool,
     },
     /// Press keys (xdotool names), each held for --hold ms.
     Key {
@@ -265,6 +276,15 @@ pub enum LabAction {
         /// `status` (the only one; open the panel with `quiver lab key N shift+F2`).
         #[arg(default_value = "status")]
         what: String,
+        #[arg(long)]
+        run: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// HDR in the instance: the game's swapchain (format, colour space), the HDR metadata it
+    /// set (vkSetHdrMetadataEXT), and whether gamescope sees it as HDR. Needs sight = on.
+    Hdr {
+        instance: String,
         #[arg(long)]
         run: Option<u32>,
         #[arg(long)]
@@ -444,11 +464,15 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{} {}", lab::IMAGE, if ok { "present" } else { "missing (quiver lab image build)" });
             }
         },
-        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight } => {
+        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight, hdr } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
             let src = create::source(&client, &game, exe.as_deref(), true).await?;
             let name = name.unwrap_or_else(|| default_name(&src.title));
-            let o = create::CreateOpts { name, display: Display::parse(&display)?, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight };
+            let mut display = Display::parse(&display)?;
+            display.hdr |= hdr;
+            // quiver lab hdr and shot --hdr read the swapchain through the Sight layer.
+            let sight = sight || display.hdr;
+            let o = create::CreateOpts { name, display, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight };
             println!("cloning {} (reflinks; a big game takes a minute)…", src.title);
             let (inst, notes) = create::create(&lab, &src, &o)?;
             for n in notes {
@@ -592,12 +616,22 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             println!();
         }
-        LabAction::Shot { instance, file, settle, crop, metrics } => {
+        LabAction::Shot { instance, file, settle, crop, metrics, hdr } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             if settle > 0.0 {
                 std::thread::sleep(Duration::from_secs_f64(settle));
             }
             let run = read_state(&inst).run.map(|r| format!("-r{}", r.id)).unwrap_or_default();
+            if hdr {
+                if crop.is_some() || metrics {
+                    bail!("--hdr writes the whole frame and its own numbers (no --crop or --metrics)");
+                }
+                let out = file.unwrap_or_else(|| inst.shots().join(format!("hdr-{}{run}.png", chrono::Local::now().format("%H%M%S%.3f"))));
+                let run_dir = read_state(&inst).run.map(|r| inst.run_dir(r.id));
+                let s = hdr::shot(&inst, run_dir.as_deref(), &out)?;
+                hdr::print_shot(&s);
+                return Ok(());
+            }
             let out = file.unwrap_or_else(|| inst.shots().join(format!("shot-{}{run}.png", chrono::Local::now().format("%H%M%S%.3f"))));
             ops::shot(&inst, &out)?;
             if let Some(c) = &crop {
@@ -770,6 +804,12 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let dir = run.map(|r| inst.run_dir(r));
             sight::status(&inst, dir.as_deref(), json)?;
         }
+        LabAction::Hdr { instance, run, json } => {
+            let (inst, _) = inst_of(&lab, &instance)?;
+            let run = run.or(read_state(&inst).run.map(|r| r.id));
+            let dir = run.map(|r| inst.run_dir(r));
+            hdr::status(&inst, dir.as_deref(), json)?;
+        }
         LabAction::Brief { game, instance, display, out, exe } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
             let text = brief(&lab, &client, &game, instance, &display, exe).await?;
@@ -801,7 +841,23 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
     let (k, v) = change.split_once('=').with_context(|| format!("'{change}': expected key=value"))?;
     let opt = |v: &str| (!v.is_empty()).then(|| v.to_owned());
     match k {
-        "display" => m.display = Display::parse(v)?,
+        "display" => {
+            // The size and refresh; HDR stays as it was unless the value says +hdr.
+            let hdr = m.display.hdr;
+            m.display = Display::parse(v)?;
+            m.display.hdr |= hdr;
+        }
+        "display.hdr" => {
+            m.display.hdr = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" | "" => false,
+                _ => bail!("display.hdr=on or display.hdr=off"),
+            };
+            if m.display.hdr {
+                // quiver lab hdr and shot --hdr read the swapchain through the Sight layer.
+                m.sight = true;
+            }
+        }
         "proton" => {
             let p = quiver_core::launcher::resolve_proton(v)?;
             (m.runtime.dxvk, m.runtime.vkd3d, m.runtime.nvapi) = layer_versions(&p);
@@ -1192,6 +1248,16 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
         ),
         Err(e) => check("Sight for instances (sight = on)", false, e),
     }
+    // HDR instances (display.hdr = on; design/LAB.md §13): gamescope's WSI layer in the image.
+    if image {
+        let wsi = "/usr/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.x86_64.json";
+        let ok = ops::podman_cmd(&["run".into(), "--rm".into(), "--network=none".into(), lab::IMAGE.into(), "test".into(), "-f".into(), wsi.into()]).status().is_ok_and(|s| s.success());
+        check(
+            "HDR for instances (display.hdr = on)",
+            ok,
+            if ok { "gamescope's WSI layer in the image; gamescope headless forced to HDR10 PQ".into() } else { format!("{wsi} missing in {}: HDR games will see only SDR formats", lab::IMAGE) },
+        );
+    }
     if json {
         return print_json(&checks.iter().map(|(n, ok, d)| serde_json::json!({ "check": n, "ok": ok, "detail": d })).collect::<Vec<_>>());
     }
@@ -1266,6 +1332,14 @@ mod tests {
         edit(&mut m, "env.DXVK_HUD=").unwrap();
         assert!(m.env.is_empty());
         assert!(edit(&mut m, "bogus=1").is_err() && edit(&mut m, "throttle+=nope").is_err() && edit(&mut m, "reload_pattern=(").is_err());
+        // HDR: on turns Sight on (it reads the swapchain); a new size keeps it; off clears it.
+        edit(&mut m, "display.hdr=on").unwrap();
+        assert!(m.display.hdr && m.sight);
+        edit(&mut m, "display=1920x1080@120").unwrap();
+        assert_eq!(m.display.to_string(), "1920x1080@120+hdr");
+        edit(&mut m, "display.hdr=off").unwrap();
+        assert!(!m.display.hdr && m.sight);
+        assert!(edit(&mut m, "display.hdr=maybe").is_err());
     }
 
     #[test]
