@@ -19,6 +19,53 @@ use crate::confpatch::Ini;
 
 /// Parse a schema (TOML, or JSON with the same fields).
 pub fn parse(text: &str, json: bool) -> Result<Schema> {
+    parse_noted(text, json).map(|(s, _)| s)
+}
+
+/// [`parse`], plus a warning for each default written as the wrong type that was converted
+/// (`default = "1"` on a bool option becomes `true`). Every reader then sees the typed value:
+/// the app's switch used to show a text "1" as off while the resolver used it as on.
+pub fn parse_noted(text: &str, json: bool) -> Result<(Schema, Vec<LintFinding>)> {
+    let mut schema = parse_raw_schema(text, json)?;
+    let notes = normalize_defaults(&mut schema);
+    Ok((schema, notes))
+}
+
+/// Convert defaults to their option's type where they parse as it (`"1"`, `"true"`, `"on"` for
+/// a bool; `"60"` for a number). A default that doesn't parse is left as written, for `lint`.
+pub fn normalize_defaults(schema: &mut Schema) -> Vec<LintFinding> {
+    let mut notes = Vec::new();
+    for (id, d) in schema.options.iter_mut() {
+        let Some(v) = &d.default else { continue };
+        if d.special_of(v).is_some() {
+            continue;
+        }
+        if let Ok(typed) = d.normalize(v)
+            && typed != *v
+        {
+            notes.push(LintFinding {
+                severity: Severity::Warning,
+                at: format!("option {id}"),
+                message: format!("default {v} is {}; write {typed} (Quiver reads it as {typed})", json_kind(v)),
+            });
+            d.default = Some(typed);
+        }
+    }
+    notes
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "text",
+        Value::Number(_) => "a number",
+        Value::Bool(_) => "a boolean",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "a table",
+        Value::Null => "nothing",
+    }
+}
+
+fn parse_raw_schema(text: &str, json: bool) -> Result<Schema> {
     let mut value: Value = if json {
         serde_json::from_str(text).context("not valid JSON")?
     } else {
@@ -694,6 +741,23 @@ pub fn lint_files(schema: &Schema, files: &BTreeMap<String, Option<String>>) -> 
 
 #[cfg(test)]
 mod tests {
+
+    /// Torchbearer 0.4.0 had `type = "bool"` with `default = "1"`: lint passed it, the resolver
+    /// read it as on and the app's switch showed it as off. Parsing now converts it and warns.
+    #[test]
+    fn text_defaults_become_typed_with_a_warning() {
+        let text = "format = 1\nsurface = \"t\"\n[option.blur]\ntype = \"bool\"\ndefault = \"1\"\n[option.grain]\ntype = \"bool\"\ndefault = \"0\"\n[option.fps]\ntype = \"int\"\ndefault = \"60\"\n[option.ok]\ntype = \"bool\"\ndefault = true\n";
+        let (s, notes) = parse_noted(text, false).unwrap();
+        assert_eq!(s.options["blur"].default, Some(Value::Bool(true)));
+        assert_eq!(s.options["grain"].default, Some(Value::Bool(false)));
+        assert_eq!(s.options["fps"].default, Some(Value::from(60)));
+        assert_eq!(s.options["ok"].default, Some(Value::Bool(true)));
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes.iter().all(|n| n.severity == Severity::Warning));
+        assert!(notes.iter().any(|n| n.at == "option blur" && n.message.contains("\"1\"") && n.message.contains("true")), "{notes:?}");
+        assert_eq!(parse(text, false).unwrap().options["blur"].default, Some(Value::Bool(true)));
+    }
+
     use super::*;
 
     pub(crate) const DOC_EXAMPLE: &str = include_str!("../../../../options/aco-dlss.toml");

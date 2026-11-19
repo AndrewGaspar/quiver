@@ -898,7 +898,9 @@ fn schema_info(game: GameRef, mod_id: &str, version: Option<&str>) -> Result<Sch
         .filter(|(_, f)| f.root == quiver_api::options::FileRoot::Install)
         .map(|(id, f)| (id.clone(), std::fs::read_to_string(dir.join(&f.path)).ok()))
         .collect();
-    let mut lint = opt::schema::lint(&r.schema);
+    // Defaults written as the wrong type were converted on parse; say so (from the text).
+    let mut lint = r.text.as_deref().and_then(|t| opt::schema::parse_noted(t, false).or_else(|_| opt::schema::parse_noted(t, true)).ok()).map(|(_, n)| n).unwrap_or_default();
+    lint.extend(opt::schema::lint(&r.schema));
     lint.extend(opt::schema::lint_files(&r.schema, &texts).1);
     Ok(SchemaInfo {
         key: format!("{}/{}", rec.id, r.schema.surface),
@@ -926,8 +928,8 @@ pub fn lint_folder(path: &std::path::Path) -> Result<LintReport> {
         _ => dir.clone(),
     };
     let text = std::fs::read_to_string(&file)?;
-    let mut schema = opt::schema::parse(&text, file.extension().is_some_and(|e| e == "json")).with_context(|| file.display().to_string())?;
-    let mut findings = opt::schema::lint(&schema);
+    let (mut schema, mut findings) = opt::schema::parse_noted(&text, file.extension().is_some_and(|e| e == "json")).with_context(|| file.display().to_string())?;
+    findings.extend(opt::schema::lint(&schema));
     opt::pin_file_names(&mut schema, &files_dir);
     let texts = schema
         .files
