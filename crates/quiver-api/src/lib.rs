@@ -663,6 +663,14 @@ pub enum Request {
     Mods(ModsRequest),
     /// The download queue in order (`Vec<downloads::QueueEntry>`).
     Queue,
+    /// Throughput history of the queue's items, in queue order (`Vec<downloads::Throughput>`;
+    /// items that haven't run since quiverd started have none). `last`: only the newest
+    /// that many samples of each: a front end reads the whole window once (on opening, on
+    /// reconnecting), then just the samples it hasn't seen.
+    DownloadThroughput {
+        #[serde(default)]
+        last: Option<usize>,
+    },
     /// Move a game's queue item up, down or to the top.
     QueueMove {
         #[serde(flatten)]
@@ -1669,5 +1677,41 @@ mod tests {
         )
         .unwrap();
         assert!(e.owned_by.is_empty());
+    }
+
+    #[test]
+    fn download_throughput_wire() {
+        use downloads::{SampleState, Throughput, ThroughputSample};
+        let v = serde_json::to_value(Request::DownloadThroughput { last: Some(60) }).unwrap();
+        assert_eq!(v, serde_json::json!({ "method": "download_throughput", "params": { "last": 60 } }));
+        let r: Request = serde_json::from_str(r#"{"method":"download_throughput","params":{}}"#).unwrap();
+        assert!(matches!(r, Request::DownloadThroughput { last: None }));
+        let t = Throughput {
+            game: GameRef::new(StoreId::Epic, "Kestrel").unwrap(),
+            interval_ms: 1000,
+            at: "2026-11-19T10:00:00Z".parse().unwrap(),
+            samples: vec![
+                ThroughputSample { bytes: 84_000_000, state: SampleState::Downloading, retries: 0 },
+                ThroughputSample { bytes: 0, state: SampleState::Retrying, retries: 2 },
+                ThroughputSample { bytes: 0, state: SampleState::Paused, retries: 0 },
+            ],
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "game": "epic:Kestrel", "interval_ms": 1000, "at": "2026-11-19T10:00:00Z",
+                "samples": [
+                    { "bytes": 84_000_000, "state": "downloading" },
+                    { "bytes": 0, "state": "retrying", "retries": 2 },
+                    { "bytes": 0, "state": "paused" }
+                ]
+            })
+        );
+        assert_eq!(serde_json::from_value::<Throughput>(v).unwrap(), t);
+        // A state from a newer daemon still reads.
+        let s: ThroughputSample = serde_json::from_str(r#"{"bytes":5,"state":"throttled"}"#).unwrap();
+        assert_eq!((s.state, s.retries), (SampleState::Other, 0));
+        assert!(!s.state.is_gap() && SampleState::Waiting.is_gap());
     }
 }

@@ -790,6 +790,7 @@ async fn fetch_chunk(job: &Job<'_>, info: &ChunkInfo, secrets: &Arc<Secrets>, do
         match tried {
             Ok((data, len)) => {
                 progress.downloaded.fetch_add(len, Ordering::Relaxed);
+                progress.received.fetch_add(len, Ordering::Relaxed);
                 downloaded.fetch_add(len, Ordering::Relaxed);
                 return Ok(Arc::new(data));
             }

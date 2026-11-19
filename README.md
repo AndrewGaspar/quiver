@@ -190,6 +190,7 @@ quiver setup                                   # first-run choices (the app's we
                                                # Connect downloads, Steam games and shortcuts, fixes; --show prints them
 quiver install origins --dry-run               # sizes, free space, languages; nothing starts
 quiver queue                                   # the download queue: state, progress, speed
+quiver queue history origins                   # throughput quiverd sampled: 1/s, last 10 min, pauses as gaps
 quiver queue move origins top                  # or up / down
 quiver pause origins                           # stops at a slice boundary; keeps its place
 quiver resume origins                          # also retries a failed item

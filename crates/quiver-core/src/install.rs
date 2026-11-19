@@ -387,7 +387,11 @@ impl Throttle {
 pub struct Progress {
     /// Bytes to download in total (set once the plan is known).
     pub total: AtomicU64,
+    /// Bytes downloaded of `total`, counting what an earlier run left on disk.
     pub downloaded: AtomicU64,
+    /// Bytes received from the network by this run only: never counts what was already on
+    /// disk and is never reset, so throughput can be sampled from it.
+    pub received: AtomicU64,
     pub written: AtomicU64,
     pub files_done: AtomicU64,
     /// Verifying: bytes hashed so far, of `hash_total`.
@@ -696,6 +700,7 @@ pub async fn install(
                     return Ok(None);
                 };
                 progress.downloaded.fetch_add(body.len() as u64, Ordering::Relaxed);
+                progress.received.fetch_add(body.len() as u64, Ordering::Relaxed);
                 let job_file = job.file.clone();
                 let slice = job.slice.clone();
                 let written = tokio::task::spawn_blocking(move || -> Result<u64> {
