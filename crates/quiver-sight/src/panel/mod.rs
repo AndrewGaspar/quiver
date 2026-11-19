@@ -122,6 +122,18 @@ struct Open {
     interactivity: KeyboardInteractivity,
     /// Drawn in the game instead of a surface.
     game: Option<ingame::InGame>,
+    /// While drawn in the game: an invisible marker surface in the panel's namespace (see
+    /// [`Panel::map_marker`]).
+    marker: Option<WindowHandle<Marker>>,
+}
+
+/// The marker surface's view: nothing to draw.
+pub struct Marker;
+
+impl gpui::Render for Marker {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+    }
 }
 
 /// `$XDG_RUNTIME_DIR/quiver/sight-panel`: `open <pid> <game|desktop> <session>` while the panel
@@ -600,6 +612,7 @@ impl PanelCtl {
             away_since: None,
             interactivity: KeyboardInteractivity::OnDemand,
             game: None,
+            marker: None,
         });
         self.report = PanelReport {
             open: true,
@@ -639,6 +652,9 @@ impl PanelCtl {
                     self.report_now();
                 }
             }
+        }
+        if in_game {
+            self.map_marker(cx);
         }
         write_state(Some((session, if in_game { "game" } else { "desktop" })));
         self.send(LinkReq::Load { session: session.to_owned(), part: Part::All, view: None });
@@ -690,6 +706,47 @@ impl PanelCtl {
         self.report.hidden = None;
         self.report_now();
         Ok(())
+    }
+
+    /// The panel drawn in the game has no surface, so nothing tells the compositor it's open:
+    /// hyprpad's `quiver-sight` mode, which holds the game's pad neutral and types the pad
+    /// into the panel, never engaged (its rule's state-file check isn't re-run when nothing
+    /// in the compositor changes). A 1x1 surface in the panel's namespace on the background
+    /// layer, under the game (invisible, no input, no keyboard, no effect on the game's
+    /// direct scanout or VRR), makes Hyprland announce the namespace (`openlayer`), which
+    /// hyprpad's `ctx.layers:has("quiver-sight")` follows at once. Removed on close.
+    fn map_marker(&mut self, cx: &mut App) {
+        if !self.layer_shell {
+            return;
+        }
+        let Some(o) = &mut self.open else { return };
+        if o.marker.is_some() {
+            return;
+        }
+        let display_id = o.monitor.as_deref().and_then(|m| crate::desktop::display_named(cx, m));
+        let opts = WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(1.), px(1.)) })),
+            app_id: Some("quiver-sight".into()),
+            focus: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            display_id,
+            kind: WindowKind::LayerShell(LayerShellOptions {
+                namespace: self.namespace.clone(),
+                layer: Layer::Background,
+                anchor: Anchor::TOP | Anchor::LEFT,
+                keyboard_interactivity: KeyboardInteractivity::None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match cx.open_window(opts, |_, cx| cx.new(|_| Marker)) {
+            Ok(h) => {
+                tracing::info!(session = %o.session, namespace = %self.namespace, "panel marker surface mapped (hyprpad's quiver-sight mode)");
+                o.marker = Some(h);
+            }
+            Err(e) => tracing::warn!("panel marker surface: {e:#}"),
+        }
     }
 
     /// Puts the open panel on screen (at open, and each time the game is in front again):
@@ -856,6 +913,9 @@ impl PanelCtl {
     pub fn close(&mut self, cx: &mut App) {
         let Some(mut o) = self.open.take() else { return };
         write_state(None);
+        if let Some(m) = o.marker.take() {
+            let _ = m.update(cx, |_, w, _| w.remove_window());
+        }
         let shown = o.window.is_some();
         if let Some(h) = &o.window {
             let _ = h.update(cx, |_, w, _| w.remove_window());
