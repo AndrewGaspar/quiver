@@ -4804,6 +4804,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-sight-input"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "quiver-perf",
+ "tempfile",
+ "x11rb",
+]
+
+[[package]]
 name = "quiver-sight-layer"
 version = "0.1.0"
 dependencies = [

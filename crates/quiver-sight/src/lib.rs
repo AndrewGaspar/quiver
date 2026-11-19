@@ -256,6 +256,7 @@ impl Sight {
                 self.recheck = None;
                 self.apply_front(cx);
             }
+            Msg::GameInput { session, events } => self.panel.game_input(&session, &events, cx),
         }
     }
 
@@ -298,6 +299,9 @@ impl Sight {
 
     fn tick(&mut self, cx: &mut App) {
         self.ticks = self.ticks.wrapping_add(1);
+        // The panel drawn in the game holds the game's input only while this keeps renewing it
+        // (a quiver-sight that hangs gives it back within a second).
+        self.panel.renew_in_game();
         if self.ticks.is_multiple_of(HEARTBEAT_EVERY) {
             let now = quiver_perf::clock::mono_raw_ns();
             for h in self.huds.values() {
@@ -388,7 +392,11 @@ pub fn run() -> anyhow::Result<()> {
     let args = args()?;
     let _lock = if args.demo.is_none() {
         match single_instance()? {
-            Some(l) => Some(l),
+            Some(l) => {
+                // A panel state file left by a quiver-sight that died.
+                panel::write_state(None);
+                Some(l)
+            }
             None => {
                 tracing::info!("another quiver-sight is running; exiting");
                 return Ok(());

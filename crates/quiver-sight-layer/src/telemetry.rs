@@ -232,8 +232,12 @@ impl Telemetry {
     }
 
     fn tick(&self) {
-        self.ring.heartbeat(mono_raw_ns());
+        let now = mono_raw_ns();
+        self.ring.heartbeat(now);
         self.refresh_hud();
+        if let Some(dir) = self.hud_path.parent() {
+            crate::panel::tick(dir, now);
+        }
         crate::latency::poll_timings();
         self.write_status();
     }

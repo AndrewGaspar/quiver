@@ -39,6 +39,10 @@ pub const HUD_PIXELS_OFFSET: usize = 256;
 /// Capacity of each buffer, descriptor included (SIGHT-HUD §3.8, open question 1).
 pub const HUD_MAX_BUFFER_BYTES: u32 = 4 << 20;
 pub const HUD_MAX_DIM: u32 = 2048;
+/// `panel.image` (the Sight panel drawn in the game, SIGHT §14): the same format as
+/// `hud.image`, sized for a full-screen image up to 4096 px a side.
+pub const PANEL_MAX_DIM: u32 = 4096;
+pub const PANEL_MAX_BUFFER_BYTES: u32 = 64 * 1024 * 1024 + 4096;
 pub const HUD_MAX_GRAPHS: usize = 2;
 pub const HUD_FORMAT_RGBA8_PREMUL_SRGB: u32 = 1;
 
@@ -458,7 +462,14 @@ pub struct HudBufferHeader {
     pub _pad0: u32,
     /// The HUD model revision this image shows.
     pub model_rev: u64,
-    pub _reserved: [u8; HUD_PIXELS_OFFSET - 184],
+    /// Rows `dirty_y0..dirty_y1` are all that changed since the image published as
+    /// `dirty_base` (the Sight panel's `panel.image`, SIGHT §14): a reader whose texture holds
+    /// that publish may upload only those rows. The buffer always holds the whole image.
+    /// `dirty_base = 0`: no such promise (every `hud.image` writer leaves these zero).
+    pub dirty_y0: u32,
+    pub dirty_y1: u32,
+    pub dirty_base: u64,
+    pub _reserved: [u8; HUD_PIXELS_OFFSET - 200],
 }
 
 const _: () = {
@@ -479,6 +490,7 @@ const _: () = {
     assert!(size_of::<HudGraph>() == 60);
     assert!(size_of::<HudBufferHeader>() == HUD_PIXELS_OFFSET);
     assert!(offset_of!(HudBufferHeader, model_rev) == 176);
+    assert!(offset_of!(HudBufferHeader, dirty_base) == 192);
     assert!(RING_MAGIC.to_le_bytes()[0] == b'Q' && RING_MAGIC.to_le_bytes()[7] == b'G');
     assert!(HUD_MAGIC.to_le_bytes()[4] == b'H' && HUD_MAGIC.to_le_bytes()[7] == b'I');
 };
@@ -610,6 +622,8 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_hud_buffer", HudBufferHeader, ngraphs),
     o!("qv_hud_buffer", HudBufferHeader, graph),
     o!("qv_hud_buffer", HudBufferHeader, model_rev),
+    o!("qv_hud_buffer", HudBufferHeader, dirty_y0),
+    o!("qv_hud_buffer", HudBufferHeader, dirty_base),
             ];
 
 const SIZES: &[(&str, usize)] = &[

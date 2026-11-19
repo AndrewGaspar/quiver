@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "fixed_card"
 harness = false
 
+[[test]]
+name = "ingame_panel"
+harness = false
+
 [dependencies]
 quiver-api.workspace = true
 quiver-perf.workspace = true

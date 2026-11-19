@@ -413,6 +413,7 @@ impl PerfHub {
         };
         let session_env: Vec<(&str, String)> = dir.as_ref().map(|d| d.env().to_vec()).unwrap_or_default();
         let mut plan = launch::plan(&cfg, &session_env, env, wrappers, launch::installed_layer_dir(&self.data_dir).as_deref());
+        launch::add_input_preload(&mut plan, env, launch::installed_input_preload().as_deref());
         if let Some(why) = &layer_off {
             plan.notes = vec![format!("no Sight layer: {why}; the launch is unchanged")];
             plan.layer_off = Some(why.clone());

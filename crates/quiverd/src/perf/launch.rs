@@ -12,6 +12,7 @@
 //! | `MANGOHUD_CONFIG` | `…,toggle_logging=Shift_L+F7` | only when the launch runs MangoHud: moves its logging key off Sight's Shift+F2 |
 //! | `__NGX_LOG_LEVEL`, `__NGX_ENABLE_OVERRIDE_LOG_PATH`, `__NGX_LOG_PATH_OVERRIDE` | `1`, `1`, `Z:\…\<session>\ngx\` | only with `ngx_log` on: NGX's own log, for the DLSS preset, quality and render resolution (SIGHT-HUD §3.17) |
 //! | `QUIVER_SIGHT_REFLEX_TIMINGS` | `1` | only with `reflex_timings` on: the layer reads Reflex's timing reports |
+//! | `LD_PRELOAD` | the launch's own, then `<lib>/sight/$PLATFORM/libquiver_sight_input.so` | the Sight panel's input in the game ([`add_input_preload`], design/SIGHT.md §14); with the layer, never without it. `$PLATFORM` is ld.so's (`x86_64`, `i686`), so 32-bit processes load the 32-bit build. Steam copies keep Steam's own first (STORE-STEAM G6) |
 //!
 //! Layer order, application first: the user's own `VK_INSTANCE_LAYERS`, then the
 //! frame-generation and post-processing layers the launch turns on (the HUD must not be
@@ -141,6 +142,54 @@ pub fn plan(cfg: &HudConfig, session_env: &[(&str, String)], env: &BTreeMap<Stri
     p
 }
 
+/// The Sight panel's input preload (`libquiver_sight_input.so`, design/SIGHT.md §14): with the
+/// layer (it shares the layer's per-game switch, `quiver hud enable/disable GAME`), appended
+/// to the launch's own `LD_PRELOAD`. Without it the panel opens on the desktop.
+pub fn add_input_preload(p: &mut LaunchPerfPlan, env: &BTreeMap<String, String>, preload: Option<&str>) {
+    if !p.env.contains_key(ENV_SIGHT) {
+        return;
+    }
+    if env.get(ENV_INPUT).is_some_and(|v| v == "0") {
+        p.notes.push(format!("{ENV_INPUT}=0: no Sight input preload; the panel opens on the desktop"));
+        return;
+    }
+    let Some(so) = preload else {
+        p.notes.push("the Sight input preload isn't installed: the panel opens on the desktop".into());
+        return;
+    };
+    let joined = match env.get("LD_PRELOAD").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        Some(v) if v.split([' ', ':']).any(|x| x == so) => v.to_owned(),
+        Some(v) => format!("{v}:{so}"),
+        None => so.to_owned(),
+    };
+    p.env.insert("LD_PRELOAD".into(), joined);
+    p.notes.push("Sight input preload: the panel draws in the game and takes its keyboard and mouse while open".into());
+}
+
+/// `QUIVER_SIGHT_INPUT=0` in a launch's settings: no input preload (the preload honours it
+/// too, passing everything through).
+pub const ENV_INPUT: &str = "QUIVER_SIGHT_INPUT";
+
+/// The installed input preload, as an `LD_PRELOAD` entry: `<prefix>/lib/quiver/sight/$PLATFORM/
+/// libquiver_sight_input.so` when quiverd runs from `<prefix>/bin` and the 64-bit build is
+/// there, else a dev build beside quiverd (64-bit only).
+pub fn installed_input_preload() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    input_preload_in(exe.parent()?, |p| p.is_file())
+}
+
+pub fn input_preload_in(exe_dir: &Path, exists: impl Fn(&Path) -> bool) -> Option<String> {
+    const SO: &str = "libquiver_sight_input.so";
+    if let Some(prefix) = exe_dir.parent() {
+        let sight = prefix.join("lib/quiver/sight");
+        if exists(&sight.join("x86_64").join(SO)) {
+            return Some(format!("{}/$PLATFORM/{SO}", sight.display()));
+        }
+    }
+    let beside = exe_dir.join(SO);
+    exists(&beside).then(|| beside.display().to_string())
+}
+
 /// A Quiver-installed layer: `<data>/sight/layer/` with a manifest in it.
 pub fn installed_layer_dir(data_dir: &Path) -> Option<std::path::PathBuf> {
     let d = data_dir.join("sight").join("layer");
@@ -227,6 +276,45 @@ mod tests {
         assert_eq!(p.env["__NGX_ENABLE_OVERRIDE_LOG_PATH"], "1");
         assert!(!p.env.contains_key("__NGX_LOG_LEVEL"), "the launch's own level wins");
         assert_eq!(p.env["QUIVER_SIGHT_REFLEX_TIMINGS"], "1");
+    }
+
+    #[test]
+    fn input_preload_with_the_layer_after_the_launchs_own() {
+        let so = "/usr/lib/quiver/sight/$PLATFORM/libquiver_sight_input.so";
+        let mut p = plan(&on(), &sess(), &BTreeMap::new(), &[], None);
+        add_input_preload(&mut p, &BTreeMap::new(), Some(so));
+        assert_eq!(p.env["LD_PRELOAD"], so);
+        let e = env(&[("LD_PRELOAD", "/x/libmine.so")]);
+        let mut p = plan(&on(), &sess(), &e, &[], None);
+        add_input_preload(&mut p, &e, Some(so));
+        assert_eq!(p.env["LD_PRELOAD"], format!("/x/libmine.so:{so}"));
+        // Already there: not twice.
+        let both = format!("{so} /y.so");
+        let e = env(&[("LD_PRELOAD", both.as_str())]);
+        let mut p = plan(&on(), &sess(), &e, &[], None);
+        add_input_preload(&mut p, &e, Some(so));
+        assert_eq!(p.env["LD_PRELOAD"], both);
+        // Without the layer (turned off, anti-cheat): never.
+        let mut p = plan(&off(), &sess(), &BTreeMap::new(), &[], None);
+        add_input_preload(&mut p, &BTreeMap::new(), Some(so));
+        assert!(!p.env.contains_key("LD_PRELOAD"));
+        // Not installed, or turned off for the launch: a note, no variable.
+        let mut p = plan(&on(), &sess(), &BTreeMap::new(), &[], None);
+        add_input_preload(&mut p, &BTreeMap::new(), None);
+        assert!(!p.env.contains_key("LD_PRELOAD") && p.notes.iter().any(|n| n.contains("isn't installed")));
+        let e = env(&[(ENV_INPUT, "0")]);
+        let mut p = plan(&on(), &sess(), &e, &[], None);
+        add_input_preload(&mut p, &e, Some(so));
+        assert!(!p.env.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn input_preload_paths() {
+        let installed = |p: &Path| p == Path::new("/usr/lib/quiver/sight/x86_64/libquiver_sight_input.so");
+        assert_eq!(input_preload_in(Path::new("/usr/bin"), installed).as_deref(), Some("/usr/lib/quiver/sight/$PLATFORM/libquiver_sight_input.so"));
+        let dev = |p: &Path| p == Path::new("/src/q/target/release/libquiver_sight_input.so");
+        assert_eq!(input_preload_in(Path::new("/src/q/target/release"), dev).as_deref(), Some("/src/q/target/release/libquiver_sight_input.so"));
+        assert_eq!(input_preload_in(Path::new("/usr/bin"), |_| false), None);
     }
 
     #[test]

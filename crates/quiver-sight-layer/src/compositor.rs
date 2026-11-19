@@ -17,8 +17,14 @@
 //! the HUD is drawn sharp over the blurred game. A swapchain the HUD can't draw on (HDR) still
 //! gets a compositor when it can be blurred.
 //!
-//! Everything is allocated when the swapchain is created, except the staging buffer and the
-//! texture (on the first image, and the texture again only when an image outgrows it) and the
+//! While the Sight panel is open in the game ([`crate::panel`], design/SIGHT.md §14), its
+//! `panel.image` goes through a second plane the same way (staging buffer, texture, two
+//! descriptor sets; only the rows that changed are copied when the image says which), drawn
+//! after the HUD in a second render pass, with the panel's cursor on top; a present that drew
+//! it tells the input preload ([`crate::panel::mark_drawn`]).
+//!
+//! Everything is allocated when the swapchain is created, except the staging buffers and the
+//! textures (on the first image, and a texture again only when an image outgrows it) and the
 //! blur's images (the first time a panel asks).
 
 use std::ptr::NonNull;
@@ -27,19 +33,22 @@ use std::sync::Arc;
 use ash::vk;
 use quiver_perf::HudBufferHeader;
 use quiver_perf::hud::{BackdropRequest, HudPoll};
-use quiver_perf::layout::{BACKDROP_ERR_INTERNAL, DRAW_ERR_DEVICE_LOST, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_QUEUE, HUD_MAX_BUFFER_BYTES, HUD_MAX_DIM};
+use quiver_perf::layout::{BACKDROP_ERR_INTERNAL, DRAW_ERR_DEVICE_LOST, DRAW_ERR_INTERNAL, DRAW_ERR_NO_IMAGE, DRAW_ERR_QUEUE, HUD_MAX_BUFFER_BYTES, HUD_MAX_DIM, PANEL_MAX_DIM};
 
 use crate::blur::{self, BlurPipes, Chain, Fade};
 use crate::formats::Encoding;
 use crate::graph::{self, History, VERTS_PER_GRAPH, Vertex};
 use crate::log;
+use crate::panel::{self as sight_panel, CURSOR_VERTS};
 use crate::pipelines::{PUSH_SRGB_DECODE, Pipelines, Push};
 use crate::state::DeviceData;
 use crate::telemetry::{self, HUD};
 
 /// Most wait semaphores a present may carry for us to draw (more: pass through).
 pub const MAX_WAITS: usize = 16;
-const VB_SLOT_BYTES: usize = 2 * VERTS_PER_GRAPH * std::mem::size_of::<Vertex>();
+const VB_SLOT_BYTES: usize = (2 * VERTS_PER_GRAPH + CURSOR_VERTS) * std::mem::size_of::<Vertex>();
+/// Where the cursor's vertices start in a slot's part of the vertex buffer.
+const VB_CURSOR_OFFSET: usize = 2 * VERTS_PER_GRAPH * std::mem::size_of::<Vertex>();
 /// Texture sizes grow in steps of this, so a HUD that changes size a little doesn't
 /// reallocate.
 const TEX_STEP: u32 = 256;
@@ -53,6 +62,26 @@ pub enum Drawn {
     /// `semaphore`: work submitted, the present waits on it (else pass the app's semaphores
     /// through); what happened to the HUD; whether the game was blurred.
     Done { semaphore: Option<vk::Semaphore>, hud: Hud, blurred: bool },
+}
+
+/// The Sight panel's plane (`panel.image`): like the HUD's, with partial uploads.
+#[derive(Default)]
+struct PanelPlane {
+    desc_pool: vk::DescriptorPool,
+    sets: [vk::DescriptorSet; 2],
+    cur_set: usize,
+    staging: Option<Buffer>,
+    staging_reader: Option<usize>,
+    texture: Option<Texture>,
+    retired: Option<(Texture, u64)>,
+    /// In staging, not yet in the texture; with the rows when only those changed.
+    pending: Option<(HudBufferHeader, Option<(u32, u32)>)>,
+    current: Option<HudBufferHeader>,
+    /// The publish the texture holds whole (0: none), for partial uploads.
+    have: u64,
+    pending_published: u64,
+    generation: u64,
+    last_published: u64,
 }
 
 impl Drawn {
@@ -146,6 +175,7 @@ pub struct Compositor {
     fade: Fade,
     /// The last live request (its dim and radius carry the fade-out).
     backdrop: BackdropRequest,
+    panel: PanelPlane,
 }
 
 // SAFETY: the mapped pointers are only used under the swapchain's mutex.
@@ -191,6 +221,7 @@ impl Compositor {
             blur: None,
             fade: Fade::default(),
             backdrop: BackdropRequest::NONE,
+            panel: PanelPlane { generation: u64::MAX, ..Default::default() },
         };
         // SAFETY: as documented; on error everything made so far is destroyed (nothing is in
         // flight yet).
@@ -241,6 +272,9 @@ impl Compositor {
             let layouts = [self.pipes.set_layout; 2];
             let sets = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&layouts))?;
             self.desc_sets = [sets[0], sets[1]];
+            self.panel.desc_pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(2).pool_sizes(&sizes), None)?;
+            let sets = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.panel.desc_pool).set_layouts(&layouts))?;
+            self.panel.sets = [sets[0], sets[1]];
         }
         Ok(())
     }
@@ -291,6 +325,12 @@ impl Compositor {
             }
             self.current = None;
             self.reupload = true;
+            if let Some(t) = self.panel.texture.as_mut() {
+                t.filled = false;
+            }
+            self.panel.current = None;
+            self.panel.have = 0;
+            self.panel.generation = u64::MAX;
         }
         let internal = |_| DRAW_ERR_INTERNAL;
         // SAFETY: valid create info; command buffers get the loader's dispatch pointer.
@@ -461,6 +501,214 @@ impl Compositor {
         Ok(fresh)
     }
 
+    /// The panel's texture can hold `w × h` (as [`Compositor::ensure_texture`], its own sets).
+    unsafe fn ensure_panel_texture(&mut self, d: &DeviceData, w: u32, h: u32) -> Result<bool, u32> {
+        if self.panel.texture.as_ref().is_some_and(|t| t.w >= w && t.h >= h) {
+            return Ok(true);
+        }
+        if self.panel.retired.is_some() {
+            return Ok(false);
+        }
+        let dev = &d.dev;
+        let step = |v: u32| v.div_ceil(TEX_STEP).saturating_mul(TEX_STEP).clamp(TEX_STEP, PANEL_MAX_DIM);
+        // SAFETY: as ensure_texture, with the panel's sets.
+        unsafe {
+            let t = make_texture(d, self.enc.unwrap_or(Encoding::Unorm).texture_format(), step(w), step(h)).map_err(|_| DRAW_ERR_INTERNAL)?;
+            let set = if self.panel.texture.is_some() { 1 - self.panel.cur_set } else { self.panel.cur_set };
+            let info = [vk::DescriptorImageInfo { sampler: self.pipes.sampler, image_view: t.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+            let write = [vk::WriteDescriptorSet::default().dst_set(self.panel.sets[set]).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&info)];
+            dev.update_descriptor_sets(&write, &[]);
+            if let Some(old) = self.panel.texture.replace(t) {
+                let mut busy = 0u64;
+                for i in 0..self.slots.len().min(64) {
+                    if !self.idle(dev, i)? {
+                        busy |= 1 << i;
+                    }
+                }
+                if busy == 0 {
+                    destroy_texture(dev, &old);
+                } else {
+                    self.panel.retired = Some((old, busy));
+                }
+            }
+            self.panel.cur_set = set;
+            // A new texture holds nothing yet.
+            self.panel.have = 0;
+        }
+        Ok(true)
+    }
+
+    unsafe fn reap_panel_retired(&mut self, dev: &ash::Device) -> Result<(), u32> {
+        let Some((_, mut busy)) = self.panel.retired else { return Ok(()) };
+        for i in 0..self.slots.len().min(64) {
+            // SAFETY: our fences.
+            if busy & (1 << i) != 0 && unsafe { self.idle(dev, i)? } {
+                busy &= !(1 << i);
+            }
+        }
+        if busy == 0 {
+            let (old, _) = self.panel.retired.take().unwrap();
+            // SAFETY: nothing in flight uses it any more.
+            unsafe { destroy_texture(dev, &old) };
+        } else if let Some(r) = self.panel.retired.as_mut() {
+            r.1 = busy;
+        }
+        Ok(())
+    }
+
+    /// Picks up a new `panel.image` into the panel's staging buffer (only the changed rows when
+    /// the texture holds the image they changed from). Returns whether the image is fresh.
+    unsafe fn poll_panel(&mut self, d: &DeviceData, now: i64) -> Result<bool, u32> {
+        let mut img = match sight_panel::IMAGE.try_lock() {
+            Ok(h) => h,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(self.panel.current.is_some()),
+        };
+        if img.generation != self.panel.generation {
+            self.panel.generation = img.generation;
+            self.panel.pending = None;
+            self.panel.current = None;
+            self.panel.last_published = 0;
+            self.panel.have = 0;
+            if let Some(r) = img.reader.as_mut() {
+                r.reset();
+            }
+        }
+        let Some(reader) = img.reader.as_mut() else { return Ok(false) };
+        let fresh = !reader.is_stale(now);
+        let published = reader.published();
+        if published == self.panel.last_published || self.panel.pending.is_some() {
+            return Ok(fresh);
+        }
+        let dev = &d.dev;
+        // SAFETY: our fences and buffers.
+        unsafe {
+            if let Some(s) = self.panel.staging_reader
+                && !self.idle(dev, s)?
+            {
+                return Ok(fresh);
+            }
+            let need = reader.info().buffer_bytes as usize;
+            if self.panel.staging.as_ref().is_some_and(|b| b.size < need) {
+                // Not in use (checked above): a bigger file (a bigger swapchain) needs more.
+                let old = self.panel.staging.take().unwrap();
+                destroy_buffer(dev, &old);
+                self.panel.staging_reader = None;
+                self.panel.have = 0;
+            }
+            if self.panel.staging.is_none() {
+                self.panel.staging = Some(make_buffer(d, need as u64, vk::BufferUsageFlags::TRANSFER_SRC).map_err(|_| DRAW_ERR_INTERNAL)?);
+                // Fresh staging holds nothing: the next image is copied whole.
+                self.panel.have = 0;
+            }
+        }
+        let staging = self.panel.staging.as_ref().unwrap();
+        // SAFETY: mapped for `size` bytes, host-coherent, not in use.
+        let dst = unsafe { std::slice::from_raw_parts_mut(staging.ptr.as_ptr(), staging.size) };
+        match reader.poll_since((self.extent.width, self.extent.height), dst, self.panel.have) {
+            (HudPoll::Image { published, desc }, rows) => {
+                self.panel.last_published = published;
+                self.panel.pending = Some((desc, rows));
+                self.panel.pending_published = published;
+            }
+            (HudPoll::Invalid(e), _) => {
+                self.panel.last_published = published;
+                self.panel.current = None;
+                log!("panel.image rejected: {e}");
+            }
+            (HudPoll::Unchanged, _) => self.panel.last_published = published,
+            (HudPoll::Busy | HudPoll::Torn, _) => {}
+        }
+        Ok(fresh)
+    }
+
+    unsafe fn record_panel_copy(&mut self, dev: &ash::Device, cmd: vk::CommandBuffer, p: &HudBufferHeader, rows: Option<(u32, u32)>) {
+        let (Some(t), Some(s)) = (self.panel.texture.as_mut(), self.panel.staging.as_ref()) else { return };
+        let (y0, y1) = rows.filter(|_| t.filled).unwrap_or((0, p.height));
+        let to_dst = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(if t.filled { vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL } else { vk::ImageLayout::UNDEFINED })
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(t.image)
+            .subresource_range(color_range());
+        let region = vk::BufferImageCopy {
+            // Validated by quiver-perf: stride ≥ width × 4, a multiple of 4, rows within the
+            // buffer; y0 < y1 ≤ height.
+            buffer_offset: y0 as u64 * p.stride as u64,
+            buffer_row_length: p.stride / 4,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+            image_offset: vk::Offset3D { x: 0, y: y0 as i32, z: 0 },
+            image_extent: vk::Extent3D { width: p.width, height: y1 - y0, depth: 1 },
+        };
+        let to_read = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(t.image)
+            .subresource_range(color_range());
+        // SAFETY: recording into our command buffer; objects are ours.
+        unsafe {
+            dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_dst]);
+            dev.cmd_copy_buffer_to_image(cmd, s.buf, t.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+            dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[to_read]);
+        }
+        t.filled = true;
+        self.panel.have = self.panel.pending_published;
+    }
+
+    /// The panel's image and its cursor, in a render pass of their own after the HUD's.
+    unsafe fn record_panel_draw(&self, dev: &ash::Device, cmd: vk::CommandBuffer, image: usize, slot: usize, c: &HudBufferHeader, cursor: Option<(i32, i32)>) {
+        let (ew, eh) = (self.extent.width, self.extent.height);
+        let full = vk::Rect2D { offset: vk::Offset2D::default(), extent: self.extent };
+        let scissor = vk::Rect2D { offset: vk::Offset2D { x: c.x.max(0), y: c.y.max(0) }, extent: vk::Extent2D { width: c.width.min(ew), height: c.height.min(eh) } };
+        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: ew as f32, height: eh as f32, min_depth: 0.0, max_depth: 1.0 };
+        let srgb = if self.enc == Some(Encoding::Srgb) { PUSH_SRGB_DECODE } else { 0 };
+        let push = Push { extent: [ew as f32, eh as f32], origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: srgb };
+        let pc = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+        let base = slot * VB_SLOT_BYTES + VB_CURSOR_OFFSET;
+        if let Some(tip) = cursor {
+            let mut v = [Vertex::default(); CURSOR_VERTS];
+            sight_panel::cursor_vertices(tip, c.scale, &mut v);
+            // SAFETY: this slot's part of the mapped vertex buffer (its fence is signalled).
+            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), self.vertices.ptr.as_ptr().add(base).cast::<Vertex>(), CURSOR_VERTS) };
+        }
+        // SAFETY: recording into our command buffer with our objects.
+        unsafe {
+            dev.cmd_begin_render_pass(
+                cmd,
+                &vk::RenderPassBeginInfo::default().render_pass(self.pipes.render_pass).framebuffer(self.framebuffers[image]).render_area(full),
+                vk::SubpassContents::INLINE,
+            );
+            dev.cmd_set_viewport(cmd, 0, &[viewport]);
+            dev.cmd_set_scissor(cmd, 0, &[scissor]);
+            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
+            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.panel.sets[self.panel.cur_set]], &[]);
+            dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
+            dev.cmd_draw(cmd, 4, 1, 0, 0);
+            if cursor.is_some() {
+                let cpush = Push { opacity: 1.0, ..push };
+                dev.cmd_set_scissor(cmd, 0, &[full]);
+                dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
+                dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, cpush.bytes());
+                dev.cmd_bind_vertex_buffers(cmd, 0, &[self.vertices.buf], &[base as u64]);
+                dev.cmd_draw(cmd, CURSOR_VERTS as u32, 1, 0, 0);
+            }
+            dev.cmd_end_render_pass(cmd);
+        }
+    }
+
+    /// The HUD can be drawn here (and so can the panel): a known blend encoding.
+    pub fn can_draw_images(&self) -> bool {
+        self.enc.is_some()
+    }
+
     /// The per-present work (module docs). `waits` are the app's present semaphores.
     ///
     /// # Safety
@@ -517,6 +765,7 @@ impl Compositor {
             }
 
             self.reap_retired(dev)?;
+            self.reap_panel_retired(dev)?;
             // The slot's last blur is done (its fence signalled): its GPU time.
             if std::mem::take(&mut self.slots[slot].timed)
                 && let (Some((_, chain)), Some(period)) = (&self.blur, d.timestamps(family))
@@ -553,7 +802,24 @@ impl Compositor {
             } else {
                 Hud::Nothing(DRAW_ERR_NO_IMAGE)
             };
-            if visible.is_none() && copy.is_none() && !blur {
+            // The Sight panel, while it's open in the game.
+            let open = if self.enc.is_some() { sight_panel::open_now() } else { None };
+            let panel_fresh = open.is_some() && self.poll_panel(d, now)?;
+            let mut panel_copy = None;
+            if open.is_some()
+                && let Some((p, rows)) = self.panel.pending
+            {
+                let ready = if rows.is_some() { self.panel.texture.as_ref().is_some_and(|t| t.filled) } else { self.ensure_panel_texture(d, p.width, p.height)? };
+                if ready {
+                    panel_copy = Some((p, rows));
+                    self.panel.current = Some(p);
+                    self.panel.pending = None;
+                }
+            }
+            let panel_shown = open.zip(self.panel.current.filter(|c| {
+                panel_fresh && c.opacity > 0.0 && c.extent_w == self.extent.width && c.extent_h == self.extent.height && self.panel.texture.as_ref().is_some_and(|t| t.filled || panel_copy.is_some())
+            }));
+            if visible.is_none() && copy.is_none() && !blur && panel_shown.is_none() && panel_copy.is_none() {
                 return Ok(Drawn::Done { semaphore: None, hud, blurred: false });
             }
 
@@ -565,6 +831,10 @@ impl Compositor {
                 self.record_copy(dev, cmd, &p);
                 self.staging_reader = Some(slot);
             }
+            if let Some((p, rows)) = panel_copy {
+                self.record_panel_copy(dev, cmd, &p, rows);
+                self.panel.staging_reader = Some(slot);
+            }
             let mut timed = false;
             if blur && let Some((pipes, chain)) = &self.blur {
                 let plan = blur::plan((self.extent.width, self.extent.height), self.backdrop.radius_fraction());
@@ -573,6 +843,9 @@ impl Compositor {
             }
             if let Some(c) = visible {
                 self.record_draw(dev, cmd, image, slot, &c, history);
+            }
+            if let Some((o, c)) = &panel_shown {
+                self.record_panel_draw(dev, cmd, image, slot, c, o.cursor);
             }
             dev.end_command_buffer(cmd).map_err(fail)?;
 
@@ -591,6 +864,9 @@ impl Compositor {
                 Ok(()) => {
                     self.slots[slot].submitted = true;
                     self.slots[slot].timed = timed;
+                    if let Some((o, _)) = panel_shown {
+                        sight_panel::mark_drawn(o.epoch, now);
+                    }
                 }
                 Err(vk::Result::ERROR_DEVICE_LOST) => return Err(DRAW_ERR_DEVICE_LOST),
                 Err(_) => return Err(DRAW_ERR_INTERNAL),
@@ -770,9 +1046,13 @@ impl Compositor {
                 dev.destroy_image_view(v, None);
             }
             dev.destroy_descriptor_pool(self.desc_pool, None);
+            dev.destroy_descriptor_pool(self.panel.desc_pool, None);
             destroy_buffer(dev, &self.vertices);
-            if let Some(s) = self.staging.take() {
+            for s in self.staging.take().into_iter().chain(self.panel.staging.take()) {
                 destroy_buffer(dev, &s);
+            }
+            for t in self.panel.texture.take().into_iter().chain(self.panel.retired.take().map(|r| r.0)) {
+                destroy_texture(dev, &t);
             }
             for t in self.texture.take().into_iter().chain(self.retired.take().map(|r| r.0)) {
                 destroy_texture(dev, &t);
