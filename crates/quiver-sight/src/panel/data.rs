@@ -56,6 +56,7 @@ pub async fn session(client: &Client, id: &str) -> Result<SessionView> {
                 if let Some(p) = m.profiles.iter().find(|p| p.profile.id == pid) {
                     v.profile_name = Some(p.profile.name.clone());
                     v.mods = p.resolved.iter().map(|r| r.describe()).collect();
+                    v.settings = Some(settings_words(p));
                 }
             }
             Err(e) => tracing::debug!("mods: {e:#}"),
@@ -65,6 +66,22 @@ pub async fn session(client: &Client, id: &str) -> Result<SessionView> {
         }
     }
     Ok(v)
+}
+
+/// A profile's game settings in words, for the Session section.
+pub fn settings_words(p: &quiver_api::mods::ProfileInfo) -> String {
+    if p.config_dirs.is_empty() {
+        return "Vanilla's files (shared)".into();
+    }
+    let dirs: Vec<String> = p
+        .config_dirs
+        .iter()
+        .map(|d| {
+            let parts: Vec<&str> = d.dir.split('/').filter(|x| !x.is_empty()).collect();
+            parts[parts.len().saturating_sub(2)..].join("/")
+        })
+        .collect();
+    format!("its own ({})", dirs.join(", "))
 }
 
 /// The running profile's option surfaces, without Quiver's own (the Tweaks section has

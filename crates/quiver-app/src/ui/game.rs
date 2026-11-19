@@ -10,6 +10,7 @@ mod mods;
 mod options;
 mod overview;
 mod page;
+mod profiles;
 mod perf;
 mod saves;
 mod steamhook;

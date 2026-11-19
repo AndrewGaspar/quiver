@@ -2,7 +2,7 @@
 
 Status: agreed direction (2026-11-16); built (core, daemon, API, CLI, app). Mods are
 versioned (decision 7–12, "Mod versions (as built)"). See "As built" at the end and README
-"Mods v2" and "Mod versions".
+"Mods v2" and "Mod versions". Profiles as setups of mods *and* game settings: design/PROFILES.md.
 
 ## Problem
 

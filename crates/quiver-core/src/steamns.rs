@@ -57,7 +57,7 @@ pub fn start_for(mods: Option<&SteamMods>) -> Start {
 
 /// The overlays as mount specs.
 pub fn specs(overlays: &[SteamOverlay]) -> Vec<OverlaySpec> {
-    overlays.iter().map(|o| OverlaySpec { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone(), work: o.work.clone() }).collect()
+    overlays.iter().map(|o| OverlaySpec { target: o.target.clone(), lower: o.lower.clone(), upper: o.upper.clone(), work: o.work.clone(), shared: o.shared.clone() }).collect()
 }
 
 /// Signals forwarded to the child.

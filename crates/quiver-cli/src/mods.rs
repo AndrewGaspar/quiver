@@ -33,7 +33,7 @@ pub enum ModsAction {
         #[command(subcommand)]
         action: LayerAction,
     },
-    /// Mod profiles: named stacks of mods plus your own overrides.
+    /// Profiles: named setups of the game's mods and settings (also `quiver profiles <game>`).
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
@@ -266,15 +266,20 @@ pub enum VersionAction {
 
 #[derive(Subcommand)]
 pub enum ProfileAction {
-    /// A new profile; `--layers a,b` stacks layer b on top of a. Its save store is Default
-    /// when every mod is save-compatible, else a new one, unless `--saves` says.
+    /// A new blank profile; `--layers a,b` (or `--mods`) stacks mod b on top of a. It gets
+    /// its own copy of the game's settings folders where Quiver knows them. Its save store is
+    /// Default when every mod is save-compatible, else a new one, unless `--saves` says.
+    /// (`quiver profiles <game> create` copies a profile instead.)
     Create {
         name: String,
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, alias = "mods", value_delimiter = ',')]
         layers: Vec<String>,
         /// Save store: default, new, or a store's name or id (quiver saves <game> stores).
         #[arg(long)]
         saves: Option<String>,
+        /// Share the game's settings files with Vanilla instead of having its own copy.
+        #[arg(long)]
+        shared_settings: bool,
         #[arg(short, long)]
         message: Option<String>,
     },
@@ -358,13 +363,16 @@ pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<Gam
 }
 
 /// For a Steam game, what decides whether its mods reach the game: the hook, and the saves.
-pub(crate) async fn steam_note(client: &Client, game: GameRef) -> Option<String> {
+pub(crate) async fn steam_note(client: &Client, game: GameRef, state: &ModsState) -> Option<String> {
     let app = game.as_steam()?;
     let hooked = client
         .call::<quiver_api::exports::SteamHook>(Request::SteamHookStatus { app_id: app, steam_user: None })
         .await
         .is_ok_and(|h| h.hooked());
-    let saves = "every profile uses the game's real saves, which Steam Cloud syncs (profiles with saves of their own aren't built for Steam games yet)";
+    let saves = format!(
+        "every profile uses the game's real saves; {} (profiles with saves of their own aren't built for Steam games yet)",
+        quiver_api::savestores::real_saves_sync(game.store, state.saves_sync())
+    );
     Some(if hooked {
         format!("it starts through quiver steam-run, so Steam's Play runs this profile; {saves}")
     } else {
@@ -485,7 +493,7 @@ fn versions_note(r: &ModRecord) -> String {
 }
 
 /// A stack entry in words: "DLSS v3 (current)", "Skip intro videos", "lxyz (missing)".
-fn entry_label(s: &ModsState, e: &str) -> String {
+pub(crate) fn entry_label(s: &ModsState, e: &str) -> String {
     s.resolve(e).map_or(format!("{e} (missing)"), |r| r.describe())
 }
 
@@ -591,7 +599,7 @@ fn print_state(name: &str, s: &ModsState) {
 }
 
 /// "DLSS store, savegames/<user>/3539-ptkzxpv (why); note" for a saves plan.
-fn saves_line(s: &quiver_api::mods::SavesPlan) -> String {
+pub(crate) fn saves_line(s: &quiver_api::mods::SavesPlan) -> String {
     let mut out = format!("{} ({})", s.folder, s.reason);
     if let Some(n) = &s.cloud_note {
         out.push_str(&format!("; note: {n}"));
@@ -741,7 +749,7 @@ fn print_detail(d: &ModDetail) {
 }
 
 /// Parse the reply to a profile change, printing the daemon's notes about the stack.
-fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
+pub(crate) fn profile_reply(v: serde_json::Value) -> Result<ProfileRevision> {
     if let Some(notes) = v.get("warnings").and_then(|w| w.as_array()) {
         for n in notes.iter().filter_map(|n| n.as_str()) {
             eprintln!("note: {n}");
@@ -767,7 +775,7 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
                 println!("{}", serde_json::to_string_pretty(&state)?);
             } else {
                 print_state(&g.name, &state);
-                if let Some(n) = steam_note(client, product_id.0).await {
+                if let Some(n) = steam_note(client, product_id.0, &state).await {
                     println!("note: {n}");
                 }
             }
@@ -782,7 +790,7 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
             if product_id.0.as_steam().is_some() {
                 // Its `steam_profile` setting: what Play in Steam runs through quiver steam-run.
                 println!("{}: Play in Steam runs {}", g.name, default_label(&state));
-                if let Some(n) = steam_note(client, product_id.0).await {
+                if let Some(n) = steam_note(client, product_id.0, &state).await {
                     println!("note: {n}");
                 }
             } else {
@@ -893,8 +901,10 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
         }
         ModsAction::Profile { action } => {
             let rev: ProfileRevision = match action {
-                ProfileAction::Create { name, layers, saves, message } => {
-                    profile_reply(call(ModsRequest::ProfileCreate { game: product_id.into(), name, layers, message, saves }).await?)?
+                ProfileAction::Create { name, layers, saves, shared_settings, message } => {
+                    let own_settings = shared_settings.then_some(false);
+                    let req = ModsRequest::ProfileCreate { game: product_id.into(), name, layers: Some(layers), message, saves, from: None, own_settings };
+                    profile_reply(call(req).await?)?
                 }
                 ProfileAction::Set { profile, changes, message } => {
                     let ops = changes.iter().map(|c| SettingOp::parse(c)).collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::msg)?;
@@ -945,7 +955,10 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
             let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
             let names: Vec<String> = p.layers.iter().map(|e| entry_label(&state, e)).collect();
             let store = p.saves.as_deref().map(|id| {
-                state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced" } else { ", this PC only" }))
+                if !state.has_save_stores() {
+                    return format!("the game's real saves; {}", quiver_api::savestores::real_saves_sync(state.game_ref().store, state.saves_sync()));
+                }
+                state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced with Ubisoft Connect's cloud" } else { ", this PC only" }))
             });
             println!(
                 "{}: profile {} '{}' revision {} (mods: {}; saves: {}{}{})",

@@ -62,9 +62,34 @@ fn fixes_on_vanilla() -> Option<bool> {
     Config::load().ok().and_then(|c| c.fixes_on_vanilla)
 }
 
-/// The store for an installed game, with its prefix and the app-level settings.
+/// The store for an installed game, with its prefix, the app-level settings and who syncs
+/// its saves.
 pub(crate) fn store_for(game: &launcher::Game) -> ModStore {
-    ModStore::open(game.game_ref()).with_game(game, fixes_on_vanilla())
+    ModStore::open(game.game_ref()).with_game(game, fixes_on_vanilla()).with_save_sync(save_sync(game.game_ref()))
+}
+
+/// Who syncs a game's saves, from what's on disk (no network): Ubisoft Connect's cloud for
+/// a Ubisoft game; for an Epic game its cached catalog entry (a `CloudSaveFolder`, or none:
+/// it syncs in game, if at all); for a Steam game its appinfo (a Steam Cloud quota).
+/// `None`: not known.
+pub(crate) fn save_sync(game: GameRef) -> Option<quiver_api::savestores::SaveSync> {
+    use quiver_api::StoreId;
+    use quiver_api::epicgame::SaveMode;
+    use quiver_api::savestores::SaveSync;
+    match game.store {
+        StoreId::Ubisoft => Some(SaveSync::Ubisoft),
+        StoreId::Epic => {
+            let mode = epic_core::saves::cached_save_mode(&launcher::data_dir().join("epic"), game.id.as_str())?;
+            Some(if mode == SaveMode::Launcher { SaveSync::EpicLauncher } else { SaveSync::EpicInGame })
+        }
+        StoreId::Steam => {
+            let app = game.as_steam()?;
+            let steam = quiver_core::exports::steam::Steam::find(&quiver_core::exports::Paths::from_env().home)?;
+            let info = quiver_core::steamlocal::appinfo::read(&steam.root, |id| id == app).ok()?.remove(&app)?;
+            Some(if info.steam_cloud() { SaveSync::SteamCloud } else { SaveSync::SteamNone })
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn store(game: GameRef) -> Result<ModStore> {
@@ -245,24 +270,54 @@ impl Daemon {
                 );
                 json!(layer)
             }
-            ModsRequest::ProfileCreate { game: GameField(game), name, layers, message, saves } => {
+            ModsRequest::ProfileCreate { game: GameField(game), name, layers, message, saves, from, own_settings } => {
                 let store = store(game)?;
-                let followed = saves.is_none();
+                let followed = saves.is_none() && from.is_none();
+                let copied_from = from.clone();
                 let (rev, notes, advice) = blocking(move || {
-                    let (rev, advice) = store.create_profile_with(&name, &layers, saves.as_deref(), &src, message)?;
+                    let (rev, advice, copied) =
+                        store.create_profile_from(&name, layers.as_deref(), from.as_deref(), own_settings, saves.as_deref(), &src, message)?;
                     let notes = stack_notes(&store, &rev);
-                    Ok((rev, notes, advice))
+                    Ok((rev, notes, (advice, copied)))
                 })
                 .await?;
+                let (advice, copied) = advice;
+                let what = match &copied_from {
+                    Some(f) => format!(" from {f}"),
+                    None => String::new(),
+                };
                 self.mods_changed(
                     source,
                     game,
-                    format!("created mod profile '{}' ({}) for {}", rev.profile.name, rev.profile.id, self.name_of(game)),
+                    format!("created profile '{}' ({}){what} for {}", rev.profile.name, rev.profile.id, self.name_of(game)),
                 );
                 let mut v = with_notes(json!(rev), notes);
-                // Why the store was picked, when the daemon picked it.
-                if let Some(o) = v.as_object_mut().filter(|_| followed) {
-                    o.insert("saves_advice".into(), json!(advice));
+                if let Some(o) = v.as_object_mut() {
+                    // What it got from where (settings snapshot, Options values).
+                    if !copied.is_empty() {
+                        o.insert("copied".into(), json!(copied));
+                    }
+                    // Why the store was picked, when the daemon picked it.
+                    if followed {
+                        o.insert("saves_advice".into(), json!(advice));
+                    }
+                }
+                v
+            }
+            ModsRequest::ProfileSettings { game: GameField(game), profile, own, message } => {
+                let store = store(game)?;
+                self.not_running(game, "changing a profile's game settings")?;
+                let (rev, notes, copied) = blocking(move || {
+                    let (rev, copied) = store.set_profile_settings(&profile, own, &src, message)?;
+                    let notes = stack_notes(&store, &rev);
+                    Ok((rev, notes, copied))
+                })
+                .await?;
+                let what = if own { "its own game settings" } else { "the game's shared settings" };
+                self.mods_changed(source, game, format!("profile '{}' r{} uses {what} for {}", rev.profile.name, rev.revision, self.name_of(game)));
+                let mut v = with_notes(json!(rev), notes);
+                if let Some(o) = v.as_object_mut().filter(|_| !copied.is_empty()) {
+                    o.insert("copied".into(), json!(copied));
                 }
                 v
             }

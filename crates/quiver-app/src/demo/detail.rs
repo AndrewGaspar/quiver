@@ -1330,9 +1330,23 @@ fn launch_profile(d: &Detail, st: &State, product_id: u32, requested: Option<&st
     let live = |q: &str| mods.and_then(|m| m.live().find(|r| r.profile.id == q || r.profile.name.eq_ignore_ascii_case(q))).map(|r| r.profile.id.clone());
     Ok(match requested {
         Some(p) if p.eq_ignore_ascii_case(VANILLA) => None,
-        Some(p) => Some(live(p).ok_or_else(|| anyhow!("no mod profile '{p}' for {}", name(st, product_id)))?),
+        Some(p) => Some(live(p).ok_or_else(|| anyhow!("no profile '{p}' for {}", name(st, product_id)))?),
         None => st.settings.get(&product_id).and_then(|s| s.profile.as_deref()).and_then(live),
     })
+}
+
+/// A demo game's settings folders (the daemon's catalog and inference, simplified).
+fn demo_settings_dirs(id: u32) -> Vec<quiver_api::mods::SettingsDir> {
+    let dir = match id {
+        3539 => "Assassin's Creed Origins".to_owned(),
+        _ => format!("My Games/{id}"),
+    };
+    vec![quiver_api::mods::SettingsDir {
+        dir: format!("drive_c/users/steamuser/Documents/{dir}"),
+        source: if id == 3539 { quiver_api::mods::SettingsSource::Catalog } else { quiver_api::mods::SettingsSource::Inferred },
+        shared: Vec::new(),
+        exists: true,
+    }]
 }
 
 impl Mods {
@@ -1352,7 +1366,7 @@ impl Mods {
             .collect();
         match hits[..] {
             [i] => Ok(i),
-            [] => bail!("no mod profile '{q}'"),
+            [] => bail!("no profile '{q}'"),
             _ => bail!("'{q}' matches several profiles; use the id"),
         }
     }
@@ -1430,7 +1444,35 @@ impl Mods {
         let stores = self.all_stores(id);
         let store = stores.iter().find(|s| Some(&s.id) == r.profile.saves.as_ref());
         let warnings = store.and_then(|s| quiver_api::savestores::shared_store_warning(&mods, s, self.vanilla() == s.id)).into_iter().collect();
-        ProfileInfo { profile: r.profile.clone(), revision: r.revision, missing_layers: missing, conflicts, warnings, saves: Some(saves), resolved, ..Default::default() }
+        let known = demo_settings_dirs(id);
+        let config_dirs = r
+            .profile
+            .profile_config
+            .iter()
+            .map(|d| quiver_api::mods::ConfigDir {
+                dir: d.clone(),
+                prefix_path: None,
+                upper: super::home().join(format!(".local/share/quiver/mods/{id}/profiles/{}/prefix/{d}", r.profile.id)),
+                files: vec!["ACO.ini".into(), "ControlMappings.xml".into()],
+                shared: known.iter().find(|k| &k.dir == d).map(|k| k.shared.clone()).unwrap_or_default(),
+            })
+            .collect();
+        // Demo values: a stack with mods sets a few options; every profile but the first a tweak.
+        let option_values = if r.profile.layers.is_empty() { 0 } else { 3 + r.profile.layers.len() as u32 };
+        let tweak_values = if r.profile.name.contains("Benchmark") { 0 } else { 2 };
+        ProfileInfo {
+            profile: r.profile.clone(),
+            revision: r.revision,
+            missing_layers: missing,
+            conflicts,
+            warnings,
+            saves: Some(saves),
+            resolved,
+            config_dirs,
+            option_values,
+            tweak_values,
+            ..Default::default()
+        }
     }
 
     fn state(&self, id: u32) -> ModsState {
@@ -1443,6 +1485,9 @@ impl Mods {
             save_stores: self.all_stores(id),
             vanilla_saves: Some(self.saves_plan(id, Some(&self.vanilla()))),
             mods: self.all_mods(),
+            save_sync: Some(quiver_api::savestores::SaveSync::Ubisoft),
+            settings_dirs: demo_settings_dirs(id),
+            vanilla_tweak_values: 1,
             ..Default::default()
         }
     }
@@ -1463,15 +1508,12 @@ impl Mods {
         let cloud = stores.iter().find(|s| s.cloud && !s.retired);
         SavesPlan {
             separate: !s.is_default(),
-            reason: format!("uses the '{}' store; {}", s.name, if s.cloud { "synced with the cloud" } else { "kept on this PC (not the cloud store)" }),
+            reason: format!("uses the '{}' store; {}", s.name, if s.cloud { "synced with Ubisoft Connect's cloud" } else { "kept on this PC (not the cloud store)" }),
             folder: format!("savegames/<user>/{}", s.folder),
             cloud: s.cloud,
             store: Some(s.id.clone()),
             store_name: Some(s.name.clone()),
-            cloud_note: (!s.cloud).then(|| match cloud {
-                Some(c) => format!("'{}' stays on this PC: Ubisoft's cloud keeps one set of saves per game, and '{}' is the store that syncs with it", s.name, c.name),
-                None => format!("'{}' stays on this PC: no save store syncs with Ubisoft's cloud", s.name),
-            }),
+            cloud_note: (!s.cloud).then(|| quiver_api::savestores::store_sync_note(Some(&s), cloud, Some(quiver_api::savestores::SaveSync::Ubisoft))),
         }
     }
 
@@ -1607,6 +1649,7 @@ impl Detail {
             | ModsRequest::LayerAdd { game, .. }
             | ModsRequest::LayerRemove { game, .. }
             | ModsRequest::ProfileCreate { game, .. }
+            | ModsRequest::ProfileSettings { game, .. }
             | ModsRequest::ProfileSet { game, .. }
             | ModsRequest::ProfileDelete { game, .. }
             | ModsRequest::ProfileHistory { game, .. }
@@ -1701,7 +1744,7 @@ impl Detail {
                 m.records.retain(|r| r.id != rec.id);
                 (json!(gone), Some(id))
             }
-            ModsRequest::ProfileCreate { name, layers, message, saves, .. } => {
+            ModsRequest::ProfileCreate { name, layers, message, saves, from, own_settings, .. } => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
                     bail!("a profile needs a name");
@@ -1712,13 +1755,25 @@ impl Detail {
                 if m.live().any(|r| r.profile.name.eq_ignore_ascii_case(&name)) {
                     bail!("there is already a profile called '{name}'");
                 }
-                let layers = layers.iter().map(|l| m.resolve_layer(l)).collect::<Result<Vec<_>>>()?;
+                // A copy of another profile (design/PROFILES.md): its stack, overrides and store.
+                let src_p = match from.as_deref().filter(|f| !f.eq_ignore_ascii_case(VANILLA)) {
+                    Some(f) => Some(m.history[m.find(f, false)?].last().unwrap().profile.clone()),
+                    None => None,
+                };
+                let layers = match layers {
+                    Some(l) => l.iter().map(|l| m.resolve_layer(l)).collect::<Result<Vec<_>>>()?,
+                    None => src_p.as_ref().map(|p| p.layers.clone()).unwrap_or_default(),
+                };
                 // The daemon's steering: Default when every mod is save-compatible.
                 let advice = quiver_api::savestores::saves_advice(&m.stack_layers(&layers));
+                let saves = saves.or_else(|| src_p.as_ref().and_then(|p| p.saves.clone()));
                 let wanted = saves.unwrap_or_else(|| if advice.share_default { DEFAULT_STORE.into() } else { NEW_STORE.into() });
                 let store = m.resolve_store(id, &wanted, &name, n)?;
-                let p = Profile { id: random_id('p', n), name, layers, saves: Some(store), ..Default::default() };
-                let r = ProfileRevision { revision: 1, at: now, source: src.into(), message, deleted: false, profile: p };
+                let profile_config = if own_settings == Some(false) { Vec::new() } else { demo_settings_dirs(id).into_iter().map(|d| d.dir).collect() };
+                let settings = src_p.as_ref().map(|p| p.settings.clone()).unwrap_or_default();
+                let msg = message.or_else(|| from.as_ref().map(|_| format!("copied from {}", src_p.as_ref().map_or("Vanilla", |p| p.name.as_str()))));
+                let p = Profile { id: random_id('p', n), name, layers, saves: Some(store), profile_config, settings, ..Default::default() };
+                let r = ProfileRevision { revision: 1, at: now, source: src.into(), message: msg, deleted: false, profile: p };
                 m.history.push(vec![r.clone()]);
                 (json!(r), Some(id))
             }
@@ -1754,6 +1809,16 @@ impl Detail {
             ModsRequest::ProfileHistory { profile, .. } => {
                 let i = m.find(&profile, true)?;
                 (json!(m.history[i]), None)
+            }
+            ModsRequest::ProfileSettings { profile, own, message, .. } => {
+                let i = m.find(&profile, false)?;
+                let mut p = m.history[i].last().unwrap().profile.clone();
+                p.profile_config = if own { demo_settings_dirs(id).into_iter().map(|d| d.dir).collect() } else { Vec::new() };
+                let revision = m.history[i].last().unwrap().revision + 1;
+                let msg = message.or_else(|| Some(if own { "its own game settings".into() } else { "shares the game's settings".into() }));
+                let r = ProfileRevision { revision, at: now, source: src.into(), message: msg, deleted: false, profile: p };
+                m.history[i].push(r.clone());
+                (json!(r), Some(id))
             }
             ModsRequest::ProfileRestore { profile, revision, .. } => {
                 let i = m.find(&profile, true)?;
@@ -1885,7 +1950,15 @@ mod tests {
         let l: Layer = call(&demo, Request::Mods(ModsRequest::LayerAdd { game: 5059.into(), name: "Mine".into(), path: "/tmp/x".into(), deletes: Vec::new() }));
         let r: ProfileRevision = call(
             &demo,
-            Request::Mods(ModsRequest::ProfileCreate { game: 5059.into(), name: "Test".into(), layers: vec![l.id.clone()], message: None, saves: None }),
+            Request::Mods(ModsRequest::ProfileCreate {
+                game: 5059.into(),
+                name: "Test".into(),
+                layers: Some(vec![l.id.clone()]),
+                message: None,
+                saves: None,
+                from: None,
+                own_settings: None,
+            }),
         );
         assert_eq!(r.profile.layers, vec![l.id.clone()]);
         // A layer of unknown save compatibility: steered to a store of its own.

@@ -152,7 +152,7 @@ fn resolve(d: &Detail, st: &State, scope: &Scope) -> Result<At> {
             At { kind: ScopeKind::Game, game: Some(*game), profile, layers: vec![(ScopeKind::Global, "global".into()), (ScopeKind::Game, game_key(game))], above }
         }
         Scope::Profile { game, profile } => {
-            let p = game.as_ubisoft().ok_or_else(|| anyhow!("{game} has no mod profiles: set its tweaks for the game or globally"))?;
+            let p = game.as_ubisoft().ok_or_else(|| anyhow!("{game} has no profiles: set its tweaks for the game or globally"))?;
             let profile = match profile.as_deref() {
                 Some(q) => launch_profile(d, st, p, Some(q))?,
                 None => launch_profile(d, st, p, None)?,

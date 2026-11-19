@@ -113,7 +113,7 @@ impl Quiver {
                             .text_size(px(11.5))
                             .text_color(th.tx3)
                             .child(icon(Icon::Info, 12., th.tx3))
-                            .child(div().flex_1().min_w_0().child("Mod profiles never write to the install folder: their files and what the game writes go to the profile's own layer.")),
+                            .child(div().flex_1().min_w_0().child("Profiles never write to the install folder: their mods and what the game writes there go to the profile's own layer.")),
                     ),
             div()
                     .flex()

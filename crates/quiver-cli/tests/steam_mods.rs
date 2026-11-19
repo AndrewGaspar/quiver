@@ -274,7 +274,7 @@ fn a_steam_games_mods_reach_steams_command_through_the_namespace() {
     // The mod and a profile, through `quiver mods steam:<appid>`.
     let out = e.stdout(&["mods", &game, "install", e.dir("w3-mod").to_str().unwrap()]);
     assert!(out.contains("Test mod"), "{out}");
-    let out = e.stdout(&["mods", &game, "profile", "create", "Modded", "--layers", "w3-test"]);
+    let out = e.stdout(&["mods", &game, "profile", "create", "Modded", "--layers", "w3-test", "--shared-settings"]);
     assert!(out.contains("Modded"), "{out}");
     let out = e.stdout(&["mods", &game, "default", "Modded"]);
     assert!(out.contains("Play in Steam runs Modded") && out.contains("real saves") && out.contains("steam hook"), "{out}");
@@ -394,6 +394,24 @@ fn a_steam_games_mods_reach_steams_command_through_the_namespace() {
     let _ = launch.wait();
     wait_gone(&f["mnt"]);
     wait_no_session(&e);
+
+    // 7. Profiles as setups (design/PROFILES.md): a settings-only copy of Modded gets its
+    //    own snapshot of the game's settings folder, `quiver profiles` says so, and it can
+    //    go back to sharing (the copy stays).
+    let out = e.stdout(&["profiles", &game, "create", "HDR", "--from", "Modded", "--mods", ""]);
+    assert!(out.contains("created profile") && out.contains("from Modded") && out.contains("mods:      none"), "{out}");
+    assert!(out.contains("its own game settings: Documents/The Witcher 3"), "{out}");
+    let list = e.stdout(&["profiles", &game]);
+    assert!(list.contains("Vanilla (the base game)") && list.contains("shares Vanilla's game settings files") && list.contains("Test mod"), "{list}");
+    let dirs = e.stdout(&["profiles", &game, "settings"]);
+    assert!(dirs.contains("drive_c/users/steamuser/Documents/The Witcher 3") && dirs.contains("own copy: HDR"), "{dirs}");
+    let hdr_id = list.lines().find(|l| l.contains("  HDR  ")).and_then(|l| l.split_whitespace().next()).unwrap().to_owned();
+    let own = e.data().join(format!("mods/steam-{APP}/profiles/{hdr_id}/prefix/drive_c/users/steamuser/Documents/The Witcher 3/user.settings"));
+    assert!(own.is_file(), "the snapshot: {}", own.display());
+    let out = e.stdout(&["profiles", &game, "settings", "HDR", "shared"]);
+    assert!(out.contains("shares Vanilla's game settings files") && own.is_file(), "{out}");
+    // The old spelling still works.
+    assert!(e.stdout(&["mods", &game, "profile", "set", "HDR", "pinned=on"]).contains("pinned"));
 }
 
 fn libc_sigterm() -> i32 {
@@ -407,7 +425,7 @@ fn quiver_overlay_works() -> bool {
         std::fs::create_dir_all(t.path().join(d)).unwrap();
     }
     // The mechanism steam-run uses.
-    let spec = quiver_core::overlay::OverlaySpec { target: t.path().join("target"), lower: vec![t.path().join("lower")], upper: t.path().join("upper"), work: t.path().join("work") };
+    let spec = quiver_core::overlay::OverlaySpec { target: t.path().join("target"), lower: vec![t.path().join("lower")], upper: t.path().join("upper"), work: t.path().join("work"), shared: vec![] };
     quiver_core::overlay::Namespace::create(&spec).is_ok()
 }
 

@@ -65,6 +65,15 @@ pub struct AppInfo {
     pub dlc: Vec<u32>,
     /// `common/review_percentage`, when Steam has a review score.
     pub review_percentage: Option<u32>,
+    /// `ufs/quota`: the app's Steam Cloud allowance in bytes (`None` or 0: no Steam Cloud).
+    pub cloud_quota: Option<u64>,
+}
+
+impl AppInfo {
+    /// Whether Steam Cloud syncs the app's saves (it has a cloud quota).
+    pub fn steam_cloud(&self) -> bool {
+        self.cloud_quota.is_some_and(|q| q > 0)
+    }
 }
 
 struct Cursor<'a> {
@@ -195,6 +204,7 @@ fn extract(app_id: u32, kv: &Kv) -> AppInfo {
         release: date("original_release_date").or_else(|| date("steam_release_date")),
         dlc: list(estr("listofdlc")).iter().filter_map(|d| d.parse().ok()).collect(),
         review_percentage: common.and_then(|c| c.int_at("review_percentage")).and_then(|p| u32::try_from(p).ok()),
+        cloud_quota: root.get("ufs").and_then(|u| u.int_at("quota")).and_then(|q| u64::try_from(q).ok()),
     }
 }
 

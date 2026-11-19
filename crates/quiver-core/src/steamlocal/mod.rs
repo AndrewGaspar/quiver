@@ -117,6 +117,8 @@ mod tests {
             *kinds.entry(a.kind.clone().unwrap_or_default()).or_insert(0) += 1;
         }
         println!("  kinds {kinds:?}");
+        let games: Vec<&AppInfo> = all.values().filter(|a| a.kind.as_deref() == Some("game")).collect();
+        println!("  games {}, with a Steam Cloud quota {}", games.len(), games.iter().filter(|a| a.steam_cloud()).count());
         // A ~100 MB file: the app entries repeated, the string table after them.
         let off = i64::from_le_bytes(buf[8..16].try_into().unwrap()) as usize;
         let reps = (100 << 20) / off + 1;

@@ -134,8 +134,10 @@ pub enum Dialog {
     DeleteProfile { game: Gid, profile: Profile },
     RestoreProfile { game: Gid, id: String, name: String, revision: u32 },
     RemoveLayer { game: Gid, layer: Layer },
-    /// `saves`: the store picked (`None`: follow the advice for the ticked layers).
-    NewProfile { game: Gid, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String> },
+    /// `layers`: the mod library, ticked for the new profile. `saves`: the store picked
+    /// (`None`: the source's, else the advice for the ticked mods). `from`: a profile id,
+    /// `vanilla`, or "" (blank). `own_settings`: its own copy of the game's settings.
+    NewProfile { game: Gid, name: Entity<TextInput>, layers: Vec<(String, String, bool)>, saves: Option<String>, from: String, own_settings: bool },
     SteamRestart { waiting: Vec<String> },
     SteamUser { game: Gid, users: Vec<SteamUser> },
 }
@@ -1050,7 +1052,7 @@ impl Quiver {
     // -----------------------------------------------------------------------------------
     // Launch options
 
-    fn text_input(&self, placeholder: &str, text: &str, mono: bool, cx: &mut Context<Self>) -> Entity<TextInput> {
+    pub(super) fn text_input(&self, placeholder: &str, text: &str, mono: bool, cx: &mut Context<Self>) -> Entity<TextInput> {
         let text = text.to_owned();
         let e = cx.new(|cx| {
             let mut t = TextInput::new(cx, placeholder, false).compact(mono);
@@ -1296,17 +1298,6 @@ impl Quiver {
         });
     }
 
-    pub fn new_profile_dialog(&mut self, id: Gid, cx: &mut Context<Self>) {
-        let layers = self
-            .gp
-            .mods
-            .ready()
-            .map(|m| m.all_mods().iter().map(|r| (r.id.clone(), r.name.clone(), false)).collect())
-            .unwrap_or_default();
-        let name = self.text_input("Profile name, e.g. Visual overhaul", "", false, cx);
-        self.open_dialog(Dialog::NewProfile { game: id, name, layers, saves: None });
-    }
-
     // -----------------------------------------------------------------------------------
     // Dialogs
 
@@ -1419,28 +1410,7 @@ impl Quiver {
                     },
                 );
             }
-            Dialog::NewProfile { game, name, layers, saves } => {
-                let n = name.read(cx).text().trim().to_owned();
-                if n.is_empty() {
-                    self.show_toast("A profile needs a name", cx);
-                    self.gp.dialog = Some(Dialog::NewProfile { game, name, layers, saves });
-                    self.gp.dialog_btn = 1;
-                    return;
-                }
-                let chosen: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
-                self.call::<ProfileRevision, _>(
-                    Request::Mods(ModsRequest::ProfileCreate { game: game.0.into(), name: n, layers: chosen, message: None, saves }),
-                    cx,
-                    move |this, r, cx| match r {
-                        Ok(rev) => {
-                            this.show_toast(format!("Created {} ({})", rev.profile.name, rev.profile.id), cx);
-                            this.load_mods(game, cx);
-                            this.select_profile(game, Some(rev.profile.id), cx);
-                        }
-                        Err(e) => this.show_toast(err_text(&e), cx),
-                    },
-                );
-            }
+            d @ Dialog::NewProfile { .. } => self.create_profile_from_dialog(d, cx),
         }
     }
 
@@ -1666,7 +1636,7 @@ impl Quiver {
             game.prefix.join("drive_c/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/savegames")
         });
         vec![
-            ("Install folder", game.install_dir.clone(), "The base install; mod profiles never change it"),
+            ("Install folder", game.install_dir.clone(), "The base install; profiles never change it"),
             ("Compatibility folder", game.prefix.clone(), "This game's own Windows setup (its Proton prefix)"),
             ("Save folder", saves, "savegames/<user>/<product> in the compatibility folder"),
             ("Launch logs", quiver_api::launch_logs_dir(&game.prefix), "bridge.log, game.log, bridge-proton.log"),
@@ -1914,6 +1884,7 @@ impl Quiver {
 
     /// The open dialog, drawn over the whole window.
     pub fn render_dialog(&mut self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mut new_profile = matches!(self.gp.dialog, Some(Dialog::NewProfile { .. })).then(|| self.render_new_profile(th, cx));
         let d = self.gp.dialog.as_ref()?;
         let pad = self.mode != InputMode::Pointer;
         let (ic, tone, title, body): (Icon, gpui::Hsla, String, Vec<AnyElement>) = match d {
@@ -2034,52 +2005,7 @@ impl Quiver {
                     ))
                     .into_any_element()],
             ),
-            Dialog::NewProfile { name, layers, saves, .. } => {
-                let rows: Vec<AnyElement> = layers
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (_, n, on))| {
-                        div()
-                            .id(("np-layer", i))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .px(px(10.))
-                            .py(px(7.))
-                            .rounded(px(8.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(th.ink3))
-                            .child(checkbox(th, *on))
-                            .child(div().flex_1().child(n.clone()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(Dialog::NewProfile { layers, .. }) = &mut this.gp.dialog
-                                    && let Some(l) = layers.get_mut(i)
-                                {
-                                    l.2 = !l.2;
-                                }
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    })
-                    .collect();
-                (
-                    Icon::Layers,
-                    th.acc_hi,
-                    "New mod profile".into(),
-                    vec![
-                        div().child(name.clone()).into_any_element(),
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(crate::ui::caption("Layers, bottom to top", th.tx3).mb(px(4.)))
-                            .when(rows.is_empty(), |d| d.child(div().text_color(th.tx3).text_size(px(12.)).child("No layers yet: add one from a folder first, or create an empty profile.")))
-                            .children(rows)
-                            .into_any_element(),
-                        super::stores::new_profile_saves(th, self.gp.mods.ready(), layers, saves.as_deref(), cx),
-                    ],
-                )
-            }
+            Dialog::NewProfile { .. } => (Icon::Layers, th.acc_hi, "New profile".into(), new_profile.take().unwrap_or_default()),
         };
         let buttons = self.dialog_buttons();
         let focus = self.gp.dialog_btn.min(buttons.len().saturating_sub(1));

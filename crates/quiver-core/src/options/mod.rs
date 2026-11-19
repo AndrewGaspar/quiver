@@ -1187,7 +1187,7 @@ pub fn prepare_launch(ctx: &Ctx, plan: &mut Plan) -> Result<LaunchOptions> {
     let wants_install = ctx.surfaces.iter().any(|s| s.files.iter().any(|f| f.install() && f.write.exists()));
     if ctx.profile.is_none() && wants_install && !plan.overlays.iter().any(|o| o.target == ctx.install) {
         let state = ctx.store.profile_dir(VANILLA);
-        plan.overlays.push(OverlaySpec { target: ctx.install.clone(), lower: ctx.lowers.clone(), upper: state.join("upper"), work: state.join("work") });
+        plan.overlays.push(OverlaySpec { target: ctx.install.clone(), lower: ctx.lowers.clone(), upper: state.join("upper"), work: state.join("work"), shared: Vec::new() });
     }
     Ok(out)
 }

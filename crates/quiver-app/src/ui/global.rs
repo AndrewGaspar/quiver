@@ -1235,6 +1235,26 @@ impl Quiver {
                                 this.open_game(id, cx);
                             }
                         }
+                        // A game page's tab by its label (`game=3539,tab=profiles`).
+                        "tab" => {
+                            if let Some(t) = crate::nav::Tab::ALL.into_iter().find(|t| t.label().to_lowercase().starts_with(&v.to_lowercase())) {
+                                this.nav.tab = t;
+                            }
+                        }
+                        // With `game=` and `tab=profiles`: open the New profile dialog once the
+                        // game's profiles have loaded (`dialog=new-profile`).
+                        "dialog" if v == "new-profile" => {
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if let Page::Game(id) = this.nav.page {
+                                        this.new_profile_dialog(id, cx);
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
                         // The library's store filter (`store=steam`).
                         "store" => this.store_filter = quiver_api::StoreId::parse(v),
                         // Unsaved launch-options edits on a game (`unsaved=3539`).

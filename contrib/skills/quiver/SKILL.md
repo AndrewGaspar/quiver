@@ -26,7 +26,8 @@ Most commands also take a title, e.g. `quiver play "Alan Wake Remastered"`. `qui
 | Install / update / verify / uninstall | `quiver install GAME`, `quiver update GAME [--preview]`, `quiver verify GAME [--repair]`, `quiver uninstall GAME` |
 | Launch / stop | `quiver play GAME [--profile P] [--detach]`, `quiver stop GAME` |
 | Launch settings (Proton, env, DLLs, args, wrappers) | `quiver get GAME`, `quiver set GAME key=value` (`key=` unsets), `quiver history GAME`, `quiver restore GAME REV`; `quiver protons` lists the Proton builds |
-| Mods and profiles | `quiver mods GAME list / catalog / install … / profile … / plan` |
+| Profiles (named setups: mods + game settings files, Options, Tweaks, launch overrides, save store) | `quiver profiles GAME` (list), `show P`, `create NAME [--from P \| --blank] [--mods a,b] [--shared-settings]` (copies the default profile unless told otherwise; a profile needs no mods), `set P k=v`, `settings [P own\|shared]`, `default P` |
+| Mods (the library profiles pick from) | `quiver mods GAME list / catalog / install … / version … / plan`; `quiver mods GAME profile …` still works |
 | Tweaks (fps cap, vsync, Reflex, DLSS, frame gen) | `quiver tweaks …` (`explain`, `plan GAME` to preview) |
 | HUD and in-game panel | `quiver hud status GAME`, `quiver hud enable/disable GAME` (the Vulkan layer and the panel's input preload, together: the per-game off switch, e.g. for anti-cheat), `quiver hud show/hide GAME`; `quiver sight toggle/open/close`, `quiver sight status` (`drawn:` says whether the panel is in the game, taking the game's keyboard and mouse while open, or on the desktop, and why) |
 | Performance data | `quiver perf sessions`, `quiver perf watch GAME` |

@@ -52,7 +52,8 @@ pub use quiver_api::mods::{
 };
 use quiver_api::mods::{
     AppliedKey, CatalogEntry, ConfigDir, LaunchPlan, MigrationReport, ModDetail, ModKind, ModManifest, Mount, PatchState,
-    PatchStatus, PatchedFile, SavesPlan, SettingConflict, ValueFrom, mods_of, resolve_entry, split_entry, stack_entry,
+    PatchStatus, PatchedFile, SavesPlan, SettingConflict, SettingsDir, SettingsSource, ValueFrom, mods_of, resolve_entry, split_entry,
+    stack_entry,
 };
 use quiver_api::{Game, GameSettings, SettingOp};
 
@@ -128,6 +129,8 @@ pub struct ModStore {
     game: Option<Game>,
     /// The app-level `fixes_on_vanilla` setting.
     fixes_on_vanilla: Option<bool>,
+    /// Who syncs the game's saves (`None`: the store's usual, see [`ModStore::save_sync`]).
+    save_sync: Option<quiver_api::savestores::SaveSync>,
 }
 
 /// A fresh random id: `prefix` and 6 base-36 characters.
@@ -318,6 +321,25 @@ pub fn match_install_case(install: &Path, rel: &str) -> (String, bool) {
     (out.join("/"), found)
 }
 
+/// A settings folder in a few words: its last two components ("Remedy/AlanWakeRemastered").
+pub fn short_dir(dir: &str) -> String {
+    let parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    parts[parts.len().saturating_sub(2)..].join("/")
+}
+
+/// The folders live profiles name in `profile_config`.
+fn live_profiles_config(all: &[ProfileRevision]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in all.iter().filter(|r| !r.deleted) {
+        for d in &r.profile.profile_config {
+            if !out.iter().any(|o| same_path(o, d)) {
+                out.push(d.clone());
+            }
+        }
+    }
+    out
+}
+
 fn same_path(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
@@ -496,7 +518,7 @@ fn short_hash(s: &str) -> String {
 impl ModStore {
     /// The store of `game` (a Ubisoft product id, or any [`quiver_api::GameRef`]).
     pub fn new(data: &Path, game: impl Into<quiver_api::GameRef>) -> Self {
-        Self { data: data.to_owned(), key: game.into(), game: None, fixes_on_vanilla: None }
+        Self { data: data.to_owned(), key: game.into(), game: None, fixes_on_vanilla: None, save_sync: None }
     }
 
     /// The store under Quiver's data directory.
@@ -511,6 +533,19 @@ impl ModStore {
         self.game = Some(game.clone());
         self.fixes_on_vanilla = fixes_on_vanilla;
         self
+    }
+
+    /// With who syncs the game's saves, as the daemon found out (an Epic game's catalog
+    /// entry, a Steam app's appinfo).
+    pub fn with_save_sync(mut self, sync: Option<quiver_api::savestores::SaveSync>) -> Self {
+        self.save_sync = sync;
+        self
+    }
+
+    /// Who syncs the game's saves: what [`ModStore::with_save_sync`] gave, else Ubisoft
+    /// Connect's cloud for a Ubisoft game, else not known.
+    pub fn save_sync(&self) -> Option<quiver_api::savestores::SaveSync> {
+        self.save_sync.or_else(|| self.key.is_ubisoft().then_some(quiver_api::savestores::SaveSync::Ubisoft))
     }
 
     fn record_path(&self) -> PathBuf {
@@ -1500,7 +1535,7 @@ impl ModStore {
         if !self.has_save_stores() {
             // Steam and Epic games: the real saves, whatever the mods (and say so).
             advice.share_default = true;
-            advice.reason = crate::savestores::real_saves(self.game_ref()).0.into();
+            advice.reason = self.real_saves().0;
         }
         let wanted = saves.unwrap_or(if advice.share_default { crate::savestores::DEFAULT_STORE } else { crate::savestores::NEW_STORE });
         let store = self.resolve_store(wanted, name, source)?;
@@ -1585,7 +1620,32 @@ impl ModStore {
             Err(e) => (Vec::new(), Vec::new(), vec![format!("{e:#}")], Vec::new(), None),
         };
         let config_dirs = self.config_dirs(&r.profile);
-        ProfileInfo { profile: r.profile, revision: r.revision, missing_layers, conflicts, setting_conflicts, problems, warnings, saves, config_dirs, resolved }
+        let (option_values, tweak_values) = self.option_counts(&r.profile.id);
+        ProfileInfo {
+            profile: r.profile,
+            revision: r.revision,
+            missing_layers,
+            conflicts,
+            setting_conflicts,
+            problems,
+            warnings,
+            saves,
+            config_dirs,
+            resolved,
+            option_values,
+            tweak_values,
+        }
+    }
+
+    /// How many Options values a profile (or `vanilla`) sets, and how many Tweaks at its scope.
+    fn option_counts(&self, profile: &str) -> (u32, u32) {
+        let Ok(cur) = crate::options::current(self, profile) else { return (0, 0) };
+        let count = |tweaks: bool| -> u32 {
+            let n: usize = cur.values.iter().filter(|(s, _)| (s.as_str() == quiver_api::tweaks::SURFACE_KEY) == tweaks).map(|(_, m)| m.len()).sum();
+            let raw: usize = if tweaks { 0 } else { cur.raw.values().map(|m| m.len()).sum() };
+            (n + raw) as u32
+        };
+        (count(false), count(true))
     }
 
     pub fn state(&self) -> Result<ModsState> {
@@ -1603,7 +1663,210 @@ impl ModStore {
             save_stores: if self.has_save_stores() { self.save_stores().current()?.stores } else { Vec::new() },
             vanilla_saves: Some(self.saves_plan(None, &[])),
             mods: self.mods()?,
+            save_sync: self.save_sync(),
+            settings_dirs: self.settings_dirs_with(&live_profiles_config(&self.all_profiles()?)),
+            vanilla_option_values: self.option_counts(VANILLA).0,
+            vanilla_tweak_values: self.option_counts(VANILLA).1,
         })
+    }
+
+    // -- Profiles: game settings (design/PROFILES.md) ---------------------------------------
+
+    /// The prefix folders that hold the game's settings: the catalog's, the folders of
+    /// prefix files the installed mods' config patches name, and the folders the game made in
+    /// its prefix (see [`crate::gamesettings`]). A folder inside another listed one is left
+    /// out (the outer one covers it).
+    pub fn settings_dirs(&self) -> Vec<SettingsDir> {
+        self.settings_dirs_with(&[])
+    }
+
+    /// [`Self::settings_dirs`] plus folders only profiles name (`extra`).
+    fn settings_dirs_with(&self, extra: &[String]) -> Vec<SettingsDir> {
+        let mut cands: Vec<(String, SettingsSource)> = Vec::new();
+        let key = self.key.to_string();
+        cands.extend(crate::gamesettings::known(&key).map(|k| (k.dir.to_owned(), SettingsSource::Catalog)));
+        for l in self.layers().unwrap_or_default() {
+            for p in l.patches() {
+                // The folder above the file, or above the first wildcard component.
+                let comps: Vec<&str> = p.file.split('/').collect();
+                let upto = comps.iter().position(|c| c.contains('*')).unwrap_or(comps.len().saturating_sub(1));
+                if upto >= 2 {
+                    cands.push((comps[..upto].join("/"), SettingsSource::Mods));
+                }
+            }
+        }
+        if let Some(prefix) = self.prefix() {
+            cands.extend(crate::gamesettings::infer(prefix).into_iter().map(|d| (d, SettingsSource::Inferred)));
+        }
+        cands.extend(extra.iter().map(|d| (d.clone(), SettingsSource::Profile)));
+        let mut out: Vec<SettingsDir> = Vec::new();
+        for (dir, source) in &cands {
+            // An outer folder covers an inner one; the same folder keeps its first source.
+            if cands.iter().any(|(o, _)| is_under(dir, o)) || out.iter().any(|s| same_path(&s.dir, dir)) {
+                continue;
+            }
+            out.push(SettingsDir {
+                dir: dir.clone(),
+                source: *source,
+                shared: self.shared_subdirs(dir),
+                exists: self.prefix().is_some_and(|p| p.join(dir).is_dir()),
+            });
+        }
+        out
+    }
+
+    /// Subfolders of a settings folder that hold saves (relative to it): the catalog's and
+    /// those whose name says so. They stay the prefix's in every profile.
+    pub fn shared_subdirs(&self, dir: &str) -> Vec<String> {
+        let key = self.key.to_string();
+        let mut out: Vec<String> =
+            crate::gamesettings::known(&key).filter(|k| same_path(k.dir, dir)).flat_map(|k| k.shared.iter().map(|s| (*s).to_owned())).collect();
+        if let Some(prefix) = self.prefix() {
+            for s in crate::gamesettings::save_subdirs(&prefix.join(dir)) {
+                if !out.iter().any(|o| same_path(o, &s) || is_under(&s, o)) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// Snapshot the files a profile (or vanilla, `None`) sees in each of `dirs` into
+    /// `into`'s own copy. Returns how many files were copied.
+    fn snapshot_settings(&self, from: Option<&Profile>, into: &str, dirs: &[String]) -> Result<usize> {
+        let Some(prefix) = self.prefix() else { return Ok(0) };
+        let mut n = 0;
+        for d in dirs {
+            let shared = self.shared_subdirs(d);
+            let own = from.filter(|p| p.profile_config.iter().any(|c| same_path(c, d))).map(|p| self.profile_prefix(&p.id).join(d));
+            let mut layers: Vec<&Path> = Vec::new();
+            if let Some(o) = &own {
+                layers.push(o);
+            }
+            let real = prefix.join(d);
+            layers.push(&real);
+            n += crate::gamesettings::snapshot(&layers, &self.profile_prefix(into).join(d), &shared)?.len();
+        }
+        Ok(n)
+    }
+
+    /// The settings folders a new profile gets its own copy of (`own`: `None` means yes):
+    /// the ones that exist in the prefix.
+    fn own_settings_dirs(&self, own: Option<bool>) -> Vec<String> {
+        if own == Some(false) || self.prefix().is_none() {
+            return Vec::new();
+        }
+        self.settings_dirs().into_iter().filter(|s| s.exists).map(|s| s.dir).collect()
+    }
+
+    /// A new profile, maybe copied from another (design/PROFILES.md decision 3): see
+    /// `ModsRequest::ProfileCreate`. Returns the revision, the save advice and notes on what
+    /// was copied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_profile_from(
+        &self,
+        name: &str,
+        layers: Option<&[String]>,
+        from: Option<&str>,
+        own_settings: Option<bool>,
+        saves: Option<&str>,
+        source: &str,
+        message: Option<String>,
+    ) -> Result<(ProfileRevision, quiver_api::savestores::SavesAdvice, Vec<String>)> {
+        // The source: a profile, or vanilla (`None` too).
+        let src: Option<Profile> = match from.filter(|f| !same_name(f, VANILLA)) {
+            Some(f) => Some(self.find(f, false)?.profile),
+            None => None,
+        };
+        let src_name = src.as_ref().map_or("Vanilla".to_owned(), |p| p.name.clone());
+        let layers: Vec<String> = match layers {
+            Some(l) => l.to_vec(),
+            None => src.as_ref().map(|p| p.layers.clone()).unwrap_or_default(),
+        };
+        let saves = saves.map(str::to_owned).or_else(|| if from.is_some() { src.as_ref().and_then(|p| p.saves.clone()) } else { None });
+        let (rev, advice) = self.create_profile_with(name, &layers, saves.as_deref(), source, message.clone())?;
+        let mut p = rev.profile.clone();
+        let mut notes = Vec::new();
+        let mut changes = Vec::new();
+        if let Some(s) = &src {
+            if s.settings != GameSettings::default() {
+                p.settings = s.settings.clone();
+                changes.push("launch overrides");
+            }
+        }
+        let dirs = self.own_settings_dirs(own_settings);
+        if !dirs.is_empty() {
+            let n = self.snapshot_settings(src.as_ref(), &p.id, &dirs)?;
+            p.profile_config = dirs.clone();
+            notes.push(format!(
+                "its own game settings: {} ({n} file{} copied from {src_name})",
+                dirs.iter().map(|d| short_dir(d)).collect::<Vec<_>>().join(", "),
+                if n == 1 { "" } else { "s" }
+            ));
+            changes.push("game settings");
+        } else if own_settings != Some(false) {
+            notes.push(if self.prefix().is_none() {
+                "it shares the game's settings (the game has no Wine prefix)".to_owned()
+            } else {
+                "it shares the game's settings files with Vanilla: Quiver doesn't know where this game keeps them yet (after a first run: quiver profiles <game> settings PROFILE own)".to_owned()
+            });
+        }
+        let rev = if p != rev.profile {
+            let what = if changes.is_empty() { String::new() } else { format!(" ({})", changes.join(", ")) };
+            self.append(p.clone(), false, source, Some(message.unwrap_or_else(|| format!("copied from {src_name}{what}"))))?
+        } else {
+            rev
+        };
+        // Options values, with its profile-scope Tweaks (one file).
+        if from.is_some() {
+            let src_id = src.as_ref().map_or(VANILLA, |p| p.id.as_str());
+            let cur = crate::options::current(self, src_id)?;
+            if !cur.values.is_empty() || !cur.raw.is_empty() {
+                let msg = format!("copied from {src_name} (options r{})", cur.revision);
+                crate::options::append(self, &p.id, cur.values, cur.raw, source, None, Some(msg), Vec::new())?;
+                let (o, t) = self.option_counts(&p.id);
+                notes.push(format!("{o} Options value{} and {t} Tweak{} copied from {src_name}", if o == 1 { "" } else { "s" }, if t == 1 { "" } else { "s" }));
+            }
+        }
+        Ok((rev, advice, notes))
+    }
+
+    /// Give a profile its own copy of the game's settings folders (`own`), snapshotting what
+    /// it sees now into folders it has no copy of yet (a copy kept from before is used as
+    /// it is), or make it share the prefix's again (`!own`; the copy stays on disk).
+    pub fn set_profile_settings(&self, query: &str, own: bool, source: &str, message: Option<String>) -> Result<(ProfileRevision, Vec<String>)> {
+        let cur = self.find(query, false)?;
+        let mut p = cur.profile.clone();
+        let mut notes = Vec::new();
+        if own {
+            let dirs = self.own_settings_dirs(Some(true));
+            if dirs.is_empty() {
+                bail!("Quiver doesn't know where this game keeps its settings yet: run it once, or name the folders (profile_config=DIR,…)");
+            }
+            let fresh: Vec<String> = dirs.iter().filter(|d| !walk(&self.profile_prefix(&p.id).join(d)).is_ok_and(|f| !f.is_empty())).cloned().collect();
+            let n = self.snapshot_settings(None, &p.id, &fresh)?;
+            let kept = dirs.len() - fresh.len();
+            notes.push(format!(
+                "{n} file{} copied from the prefix{}",
+                if n == 1 { "" } else { "s" },
+                if kept > 0 { format!("; {kept} folder(s) use the copy it kept from before") } else { String::new() }
+            ));
+            for d in &dirs {
+                if !p.profile_config.iter().any(|c| same_path(c, d)) {
+                    p.profile_config.push(d.clone());
+                }
+            }
+        } else {
+            if !p.profile_config.is_empty() {
+                notes.push(format!("its copy stays in {} (giving it its own settings again uses it)", self.profile_prefix(&p.id).display()));
+            }
+            p.profile_config.clear();
+        }
+        if p == cur.profile {
+            return Ok((cur, notes));
+        }
+        let msg = message.unwrap_or_else(|| if own { "its own game settings".into() } else { "shares the game's settings".into() });
+        Ok((self.append(p, false, source, Some(msg))?, notes))
     }
 
     // -- Mods v2: stacks, saves, per-profile folders, launch plans --------------------------
@@ -1780,6 +2043,7 @@ impl ModStore {
                     prefix_path: self.prefix().map(|x| x.join(d)),
                     files: walk(&upper).unwrap_or_default().into_iter().map(|f| f.0).collect(),
                     upper,
+                    shared: self.shared_subdirs(d),
                 }
             })
             .collect()
@@ -1814,7 +2078,7 @@ impl ModStore {
         };
         if let Some(state) = state {
             let lower = file_mods.iter().rev().map(|m| self.layer_dir(&m.id)).collect();
-            overlays.push(OverlaySpec { target: game.install_dir.clone(), lower, upper: state.join("upper"), work: state.join("work") });
+            overlays.push(OverlaySpec { target: game.install_dir.clone(), lower, upper: state.join("upper"), work: state.join("work"), shared: Vec::new() });
         }
         let mut config_dirs = Vec::new();
         let prefix = game.prefix();
@@ -1834,6 +2098,8 @@ impl ModStore {
                     lower: Vec::new(),
                     upper: info.upper.clone(),
                     work: self.profile_dir(&p.id).join("prefix-work").join(short_hash(d)),
+                    // Saves inside stay the prefix's (design/PROFILES.md decision 4).
+                    shared: info.shared.iter().map(|s| prefix.join(d).join(s)).collect(),
                 });
                 config_dirs.push(info);
             }
@@ -1931,7 +2197,7 @@ impl ModStore {
             lower.push(dir);
         }
         let state = self.profile_dir(&profile.id);
-        let overlay = OverlaySpec { target: install_dir.to_owned(), lower, upper: state.join("upper"), work: state.join("work") };
+        let overlay = OverlaySpec { target: install_dir.to_owned(), lower, upper: state.join("upper"), work: state.join("work"), shared: Vec::new() };
         Ok(Some(ProfileLaunch { profile, revision, overlay }))
     }
 }
@@ -2844,5 +3110,146 @@ mod tests {
         assert_eq!(ubi.profile_dir("p"), data.join("mods/3539/profiles/p"));
         assert_eq!(ubi.layer_history_path("l"), data.join("games/3539/layers/l.jsonl"));
         assert!(ubi.has_save_stores());
+    }
+
+    /// Profiles are setups of mods and game settings (design/PROFILES.md): a new profile
+    /// gets its own snapshot of the game's settings folders (never the saves inside them),
+    /// "from" copies another profile's overrides, settings files, Options and Tweaks.
+    #[test]
+    fn profiles_copy_settings_not_saves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let awr = quiver_api::GameRef::parse("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+        let g = Game { game: Some(awr), product_id: 0, ..game(t, 0) };
+        folder(&g.install_dir, &[("AlanWake.exe", "e")]);
+        let dir = "drive_c/users/steamuser/Documents/Remedy/AlanWakeRemastered";
+        folder(
+            &g.prefix,
+            &[
+                (&format!("{dir}/resolution.xml"), "<hdr>off</hdr>"),
+                (&format!("{dir}/config/input.cfg"), "keys"),
+                (&format!("{dir}/savegames/savegame_aw1/savegame.aws"), "chapter 3"),
+                (&format!("{dir}/AlanWake_1.dmp"), "crash"),
+                ("drive_c/users/steamuser/AppData/Local/Microsoft/x", "wine"),
+            ],
+        );
+        let store = ModStore::new(&t.join("data"), awr).with_game(&g, None);
+        let dirs = store.settings_dirs();
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        assert_eq!((dirs[0].dir.as_str(), dirs[0].source, dirs[0].shared.clone(), dirs[0].exists), (dir, SettingsSource::Catalog, vec!["savegames".to_owned()], true));
+
+        // A settings-only profile from vanilla: no mods, its own copy of the settings.
+        let (on, _, notes) = store.create_profile_from("HDR on", None, Some("vanilla"), None, None, "cli", None).unwrap();
+        assert!(on.profile.layers.is_empty() && on.profile.profile_config == [dir], "{:?}", on.profile);
+        assert!(notes[0].contains("Remedy/AlanWakeRemastered") && notes[0].contains("2 files copied from Vanilla"), "{notes:?}");
+        let own_on = store.profile_prefix(&on.profile.id).join(dir);
+        assert_eq!(std::fs::read_to_string(own_on.join("resolution.xml")).unwrap(), "<hdr>off</hdr>");
+        assert!(!own_on.join("savegames").exists() && !own_on.join("AlanWake_1.dmp").exists());
+        // The launch overlays the folder but keeps the saves inside it the prefix's.
+        let p = store.plan(Some("HDR on")).unwrap();
+        let o = p.overlays.iter().find(|o| o.target == g.prefix.join(dir)).unwrap();
+        assert_eq!(o.shared, [g.prefix.join(dir).join("savegames")]);
+        assert_eq!(p.api.config_dirs[0].shared, ["savegames"]);
+
+        // Its settings change; Options and Tweaks too; then a copy of it.
+        std::fs::write(own_on.join("resolution.xml"), "<hdr>on</hdr>").unwrap();
+        let mut values = quiver_api::options::Values::new();
+        values.entry(quiver_api::tweaks::SURFACE_KEY.into()).or_default().insert("hdr".into(), serde_json::json!("on"));
+        values.entry("awr-fixes".into()).or_default().insert("fov".into(), serde_json::json!(90));
+        crate::options::append(&store, &on.profile.id, values, Default::default(), "cli", None, None, Vec::new()).unwrap();
+        store.set_profile("HDR on", &ops(&["proton=GE-Proton10-25"]), "cli", None).unwrap();
+        let (copy, _, notes) = store.create_profile_from("HDR on (2)", None, Some("HDR on"), None, None, "gui", None).unwrap();
+        assert_eq!(copy.profile.settings.proton.as_deref(), Some("GE-Proton10-25"));
+        assert!(copy.message.as_deref().unwrap().contains("copied from HDR on"), "{:?}", copy.message);
+        assert!(notes.iter().any(|n| n.contains("1 Options value and 1 Tweak copied from HDR on")), "{notes:?}");
+        let own_copy = store.profile_prefix(&copy.profile.id).join(dir);
+        assert_eq!(std::fs::read_to_string(own_copy.join("resolution.xml")).unwrap(), "<hdr>on</hdr>");
+        let info = store.state().unwrap().profiles.into_iter().find(|i| i.profile.id == copy.profile.id).unwrap();
+        assert_eq!((info.option_values, info.tweak_values), (1, 1));
+        // A snapshot, not a view: changing the source later leaves the copy alone.
+        std::fs::write(own_on.join("resolution.xml"), "<hdr>off again</hdr>").unwrap();
+        assert_eq!(std::fs::read_to_string(own_copy.join("resolution.xml")).unwrap(), "<hdr>on</hdr>");
+
+        // Blank, sharing the game's settings.
+        let (blank, _, _) = store.create_profile_from("Shared", Some(&[]), None, Some(false), None, "cli", None).unwrap();
+        assert!(blank.profile.profile_config.is_empty() && blank.profile.settings == GameSettings::default());
+        // Give it its own later, then share again (the copy stays), then own again (reused).
+        let (r, notes) = store.set_profile_settings("Shared", true, "cli", None).unwrap();
+        assert_eq!(r.profile.profile_config, [dir]);
+        assert!(notes[0].starts_with("2 files copied"), "{notes:?}");
+        let own_shared = store.profile_prefix(&r.profile.id).join(dir);
+        std::fs::write(own_shared.join("resolution.xml"), "mine").unwrap();
+        let (r, _) = store.set_profile_settings("Shared", false, "cli", None).unwrap();
+        assert!(r.profile.profile_config.is_empty() && own_shared.join("resolution.xml").is_file());
+        let (r, notes) = store.set_profile_settings("Shared", true, "cli", None).unwrap();
+        assert_eq!(r.profile.profile_config, [dir]);
+        assert!(notes[0].contains("use the copy it kept"), "{notes:?}");
+        assert_eq!(std::fs::read_to_string(own_shared.join("resolution.xml")).unwrap(), "mine");
+        // Histories say what happened.
+        let hist = store.history(&r.profile.id).unwrap();
+        assert_eq!(hist.iter().map(|h| h.message.clone().unwrap_or_default()).collect::<Vec<_>>()[1..], ["its own game settings", "shares the game's settings", "its own game settings"]);
+    }
+
+    /// Existing data reads unchanged under the profiles model: point `QUIVER_TEST_DATA` at a
+    /// copy of a data directory (`games/` and `mods/*/layers/*.json` are enough). Nothing is
+    /// written: every history file has the same bytes afterwards.
+    /// `QUIVER_TEST_DATA=… cargo test -p quiver-core --lib existing_profiles_read -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn existing_profiles_read_unchanged() {
+        let data = PathBuf::from(std::env::var("QUIVER_TEST_DATA").expect("QUIVER_TEST_DATA"));
+        let snapshot = |d: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+            let mut v: Vec<(PathBuf, Vec<u8>)> = walk(d).unwrap().into_iter().map(|(f, _)| (d.join(&f), std::fs::read(d.join(&f)).unwrap())).collect();
+            v.sort();
+            v
+        };
+        let before = snapshot(&data);
+        for e in std::fs::read_dir(data.join("games")).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let game = match name.parse::<u32>() {
+                Ok(id) => quiver_api::GameRef::ubisoft(id),
+                Err(_) => match quiver_api::GameRef::parse(&name.replacen('-', ":", 1)) {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                },
+            };
+            let s = ModStore::new(&data, game).state().unwrap();
+            for p in &s.profiles {
+                println!("{game}: {} ({}) r{}: mods {:?}, own settings {:?}, saves {:?}, values {}+{}", p.profile.name, p.profile.id, p.revision, p.profile.layers, p.profile.profile_config, p.profile.saves, p.option_values, p.tweak_values);
+                assert!(p.profile.profile_config.is_empty(), "no profile gains settings folders on its own");
+            }
+        }
+        assert!(before == snapshot(&data), "reading wrote nothing");
+    }
+
+    /// Who syncs the saves decides the words: an Epic game whose catalog names no save
+    /// folder (Alan Wake Remastered) claims no cloud, and nothing says Ubisoft.
+    #[test]
+    fn saves_wording_follows_the_store() {
+        use quiver_api::savestores::SaveSync;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let awr = quiver_api::GameRef::parse("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+        let store = ModStore::new(&data, awr).with_save_sync(Some(SaveSync::EpicInGame));
+        let (_, advice) = store.create_profile_with("HDR on", &[], None, "cli", None).unwrap();
+        assert!(advice.share_default && advice.reason.contains("Epic's launcher doesn't sync"), "{}", advice.reason);
+        let state = store.state().unwrap();
+        assert_eq!(state.save_sync, Some(SaveSync::EpicInGame));
+        let plan = state.vanilla_saves.unwrap();
+        assert!(!plan.cloud, "{plan:?}");
+        let note = plan.cloud_note.unwrap();
+        assert!(note.contains("stay on this PC") && !note.contains("Ubisoft"), "{note}");
+        let synced = ModStore::new(&data, awr).with_save_sync(Some(SaveSync::EpicLauncher)).state().unwrap();
+        assert!(synced.vanilla_saves.unwrap().cloud);
+        // A Ubisoft game says Ubisoft Connect's cloud, and a store that isn't the cloud one says which is.
+        let ubi = ModStore::new(&data, 3539);
+        assert_eq!(ubi.save_sync(), Some(SaveSync::Ubisoft));
+        let (_, rev) = ubi.save_stores().create("Run", None, "cli", None).unwrap();
+        let s = ubi.save_stores();
+        let run = rev.stores.iter().find(|x| x.name == "Run").unwrap().clone();
+        ubi.edit_stores(&crate::savestores::SaveStoreOp::Vanilla { store: run.id.clone() }, "cli", None).unwrap();
+        let v = ubi.state().unwrap().vanilla_saves.unwrap();
+        assert!(v.cloud_note.unwrap().contains("Ubisoft Connect's cloud keeps one set of saves per game"));
+        assert_eq!(s.current().unwrap().cloud_store().unwrap().id, crate::savestores::DEFAULT_STORE);
     }
 }

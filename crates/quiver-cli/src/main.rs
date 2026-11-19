@@ -11,6 +11,7 @@ mod epicgame;
 mod exports;
 mod mods;
 mod perf;
+mod profiles;
 mod options;
 mod info;
 mod lab;
@@ -274,6 +275,16 @@ enum Cmd {
         json: bool,
         #[command(subcommand)]
         action: Option<tweaks::TweaksAction>,
+    },
+    /// A game's profiles, each a named setup of its mods and game settings (settings files,
+    /// Options, Tweaks, launch overrides, save store): `quiver profiles <game> [list | show P |
+    /// create NAME [--from P|--blank] | set P k=v | settings [P own|shared] | default P | …]`.
+    Profiles {
+        game: String,
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<profiles::ProfilesAction>,
     },
     /// Mods and profiles: `quiver mods <game> list | catalog | install … | profile … | plan …`.
     Mods {
@@ -1120,6 +1131,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mods { game, action } => mods::run(&client, &game, action).await?,
+        Cmd::Profiles { game, json, action } => profiles::run(&client, &game, action, json).await?,
         Cmd::Perf { action } => perf::run(&client, action).await?,
         Cmd::Tweaks { json, action } => tweaks::run(&client, json, action).await?,
         Cmd::Hud { action } => perf::hud(&client, action).await?,

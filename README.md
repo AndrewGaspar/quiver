@@ -357,6 +357,24 @@ Profile changes are revisions in `games/<product>/profiles/<id>.jsonl` (`profile
 `cli`/`gui`) need a person's confirmation to delete or restore profiles, restore layer
 revisions and remove layers; adding layers and changing their deletions are normal edits.
 
+### Profiles: mods and game settings
+
+A **profile** is a named setup of a game: its mods (none is fine: "HDR on" and "Performance"
+can differ only in settings), its own copy of the game's settings files, its Options values and
+profile-scope Tweaks, launch overrides, and its save store (design/PROFILES.md). Quiver knows
+where a game keeps its settings from an audited list, the files mods patch, and the folders the
+game made in its own prefix; a new profile gets a snapshot of those folders (saves inside them,
+like Alan Wake Remastered's `savegames/`, stay shared). New profiles copy the current one by
+default; *Blank* starts from vanilla. The app's game page has a **Profiles** tab with a
+Profiles section and the Mods library below it.
+
+```
+quiver profiles awr                               # every profile: mods, settings, saves
+quiver profiles awr create "HDR on" --from vanilla --mods ''
+quiver profiles awr settings                      # the game's settings folders, who has a copy
+quiver profiles awr settings Torchbearer own      # give an older profile its own copy
+```
+
 ### Mods v2: packages, stacks, config patches
 
 A **mod** is a folder with a manifest, `quiver-mod.toml` (TOML; `quiver-mod.json` with the
@@ -522,9 +540,13 @@ new store named after it otherwise, saying why ("Skip intros (unknown save compa
 could change saves"); `profile create --saves STORE` overrides that. Changing a profile's mods
 later only warns when the stack could change saves while it shares vanilla's store or Default.
 
-Ubisoft's cloud keeps one set of slots per game and account, so **one store per game syncs
-with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
-launches with any other store keep their saves on this PC and say so. `quiver saves <game>`
+Ubisoft Connect's cloud keeps one set of slots per game and account, so **one store per game
+syncs with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
+launches with any other store keep their saves on this PC and say so. Save stores are for
+Ubisoft games: every profile of an Epic or Steam game uses the game's real saves, which Epic's
+cloud syncs only when the game's catalog entry names a save folder (others sync in game through
+Epic Online Services, if at all) and Steam Cloud only for apps that use it; the app and `quiver
+mods <game> list` say which. `quiver saves <game>`
 shows the cloud store's slots against the cloud, and `restore` brings a backup back into it.
 Its backup list includes folders named by hand (`save-backups/<product>-<name>`), dated by the
 folder's modification time.

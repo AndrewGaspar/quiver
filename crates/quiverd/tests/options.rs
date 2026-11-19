@@ -115,7 +115,7 @@ async fn options_end_to_end() {
     let d = e.daemon(None);
     let cli = connect(&e, "cli").await;
     let _: Value = cli.call(Request::Mods(ModsRequest::Install { game: 3539.into(), builtin: None, path: Some(e.dir("dlss")), name: Some("DLSS".into()) })).await.unwrap();
-    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { game: 3539.into(), name: "DLSS".into(), layers: vec!["DLSS".into()], message: None, saves: Some("default".into()) })).await.unwrap();
+    let _: Value = cli.call(Request::Mods(ModsRequest::ProfileCreate { game: 3539.into(), name: "DLSS".into(), layers: Some(vec!["DLSS".into()]), message: None, saves: Some("default".into()), from: None, own_settings: None })).await.unwrap();
 
     // Discovery: the catalog schema, defaults from the shipped file.
     let list: Vec<SurfaceState> = options(&cli, OptionsRequest::List { game: 3539.into(), profile: Some("DLSS".into()), level: None }).await.unwrap();
