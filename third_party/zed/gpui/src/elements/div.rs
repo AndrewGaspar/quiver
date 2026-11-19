@@ -2639,6 +2639,7 @@ impl Interactivity {
                     tab_group = self.tab_index;
                 }
 
+                window.with_stereo_depth(style.stereo_depth, |window| {
                 window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
@@ -2729,6 +2730,7 @@ impl Interactivity {
                             );
                         });
                     });
+                });
                 });
 
                 ((), element_state)

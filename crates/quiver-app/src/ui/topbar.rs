@@ -311,6 +311,6 @@ impl Quiver {
                     ),
             )
             .child(accounts);
-        div().flex().flex_col().flex_none().child(bar).children(nav_row)
+        div().flex().flex_col().flex_none().stereo_depth(crate::stereo_ui::depth::CHROME).child(bar).children(nav_row)
     }
 }
