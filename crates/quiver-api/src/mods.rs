@@ -1639,6 +1639,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(r, crate::Request::Mods(ModsRequest::ProfileDelete { .. })));
+        // Older clients always send `layers` (a blank profile); newer ones may leave it out
+        // to copy `from`'s stack.
+        let old: crate::Request =
+            serde_json::from_str(r#"{"method":"mods","params":{"op":"profile_create","product_id":5,"name":"x","layers":[]}}"#).unwrap();
+        assert!(matches!(old, crate::Request::Mods(ModsRequest::ProfileCreate { layers: Some(ref l), from: None, own_settings: None, .. }) if l.is_empty()));
+        let new: crate::Request =
+            serde_json::from_str(r#"{"method":"mods","params":{"op":"profile_create","product_id":5,"name":"x","from":"DLSS"}}"#).unwrap();
+        assert!(matches!(new, crate::Request::Mods(ModsRequest::ProfileCreate { layers: None, from: Some(_), .. })));
         // Older clients send no profile (the game's default applies); `vanilla` forces vanilla.
         let r: crate::Request = serde_json::from_str(r#"{"method":"play","params":{"product_id":5}}"#).unwrap();
         assert!(matches!(r, crate::Request::Play { profile: None, .. }));
