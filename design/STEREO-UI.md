@@ -5,7 +5,7 @@ frame is verified off-screen ([§9](#9-evidence-2026-11-19)); the live window pa
 viewport, xdg tag, Hyprland events) compiles and is unit-tested but has **not** been seen on a
 stereo output yet. Companion to [SIGHT.md §15](SIGHT.md#15-stereo-the-hud-and-the-panel-in-each-eye-2026-11-19)
 (Sight in each eye), which shares this document's layout names and depth vocabulary. Sight's
-rung table is to be added in [§4](#4-depth-vocabulary-shared-with-sight).
+depth is built and verified on the GPU ([§12](#12-sight-depth-in-the-game-built-2026-11-19)).
 
 **Why.** The person wears an XReal Air 2 Ultra (a flat side-by-side output) and a Quest 3
 (OpenXR) under HypXRland, their Hyprland fork. HypXRland already lifts whole windows (its depth
@@ -144,8 +144,31 @@ Steps between rungs are 1, 1, 2 and 1 px: under the ~3 px foveal-fusion step
 0.6 already, so a dialog sits at roughly 0.6 + 0.8 of HypXRland's scale above the wallpaper,
 ≈9 px total, still well under 1°. `QUIVER_STEREO_UI_STRENGTH` (0..2) multiplies the rise.
 
-*Sight's rungs go here* (the caller's table: HUD, panel, toasts over a game). Sight draws in the
-game's own frame, where the game's plane is 0.
+**Sight's rungs** (`quiver_perf::stereo::rung`, thousandths in the descriptors; P = the eye's
+logical width, 1920 here; strength 100%). Sight draws inside the game's own packed frame, where
+the game's plane is 0 (a fullscreen game is pinned to 0 by the compositor too, so the game, its
+own HUD at zero disparity, and the screen plane coincide):
+
+| Rung | Depth | Total px | Left / right eye | What |
+|---|---|---|---|---|
+| (the game) | 0 | 0 | 0 / 0 | the game, its HUD; the panel's scrim and the backdrop blur |
+| `HUD` | 0.3 | 2 | +1 / −1 | the perf HUD (and its graph) |
+| `PANEL` | 0.45 | 3 | +2 / −1 | the panel's card |
+| `FOCUS` | 0.75 | 5 | +3 / −2 | the focused row or section |
+| `DIALOG` | 0.75 | 5 | +3 / −2 | a dialog's box (over the card's scrim, which is at card depth) |
+| `DIALOG_FOCUS` | 1.0 | 7 | +4 / −3 | the dialog's focused button |
+
+Every step between two things seen together is 2 px total (≈0.05° on the XReal); the nearest
+part is 7 px (≈0.17°). The focused row and a dialog never coexist (a dialog takes the focus), so
+they share a rung. `quiver_perf::stereo::disparity_px` is the shared formula (whole pixels,
+rounded); the app's prototype has a local copy (`stereo_ui::disparity_px`) to fold into it when
+the app's version is built.
+
+**Toasts** are layer-shell surfaces on the desktop, not part of the game's frame: on a stereo
+output HypXRland lifts them with every `top`/`overlay` layer (`depth_layers` 0.8, ≈5 px). Nothing
+for Sight to do; a `layerrule` can pin them to Sight's HUD rung if 0.8 feels too near:
+`hl.layer_rule({ match = { namespace = "^quiver-sight-toast$" }, depth = 0.3 })` (optional, not
+proposed).
 
 ## 5. Comfort
 
@@ -296,3 +319,124 @@ off. What remains:
 
 About **3.5–4.5 days** of agent time, most of it in applying depth well across screens and
 in a live tuning session, not in GPUI.
+
+## 12. Sight: depth in the game (built, 2026-11-19)
+
+Sight already drew its HUD and panel once per eye on a packed frame at zero disparity
+([SIGHT.md §15](SIGHT.md#15-stereo-the-hud-and-the-panel-in-each-eye-2026-11-19)). Each part now
+gets a horizontal shift per eye from its rung.
+
+**Wire** (zero from writers before: everything at the game's plane).
+- `qv_hud_buffer.depth` (offset 200, u16 thousandths): the whole image's depth. quiver-sight
+  writes `HUD` for the perf HUD and 0 for the panel.
+- `qv_hud_buffer.nlifts` / `lifts[4]` (`qv_hud_lift`: x, y, w, h in image px, depth): parts of the
+  image at their own depth, back to front. The panel sends its card, then the focused row or
+  section, or a dialog and its focused button. quiver-perf validates them (inside the image,
+  ≤ 1000).
+- `qv_layer_status.depth_setting` / `depth_drawn` (appended; the struct is 416 bytes): the
+  strength and the largest total disparity the layer last drew. `quiver hud status`,
+  `quiver sight status` and `quiver lab sight N status` print `depth 100% (…; last drawn 5 px)`.
+
+**Where the parts come from.** The panel view (`panel/view.rs`) puts an invisible marker canvas
+in the card, the focused row or section, the dialog and its focused button. Each records its
+element's bounds at prepaint, padded 6 px (the focus ring sits 5 px outside the element) and
+clipped to the content mask (a row scrolled under the header isn't lifted over it). The in-game
+publisher turns them into lifts in image pixels. A frame whose pixels didn't change but whose
+lifts did is published whole.
+
+**Drawing** (`compositor::Eyes::of`, `shaders/quad.frag`).
+- The whole image is moved by its eye's share of its own depth. The shift goes in the push
+  constants (`shift`), and the quad, its graph and the scissor all move with it.
+- A lift is drawn in the same single quad pass. A fragment shows the front-most lift whose moved
+  rectangle covers it, else the image as it lies.
+- When a lift moves, it leaves a strip of its own pixels behind. Those fragments are filled from
+  the column just beside the lift, on the side it left. The 6 px pad makes that column
+  background, so there's no second copy of the lift's edge.
+- Every fragment is written once (no double blending of translucent parts), and shifts are whole
+  logical pixels, so text stays crisp. For `hsbs`, a logical pixel is half a physical one: the
+  2:1 box filter just pairs different texels, so it's as sharp as `hsbs` gets.
+- The push constants are 128 bytes, Vulkan's guaranteed minimum. The shader indexes them only by
+  its (uniform) loop counter. Indexing them by a fragment's own layer, which differs across a
+  wave, drew garbage on RADV, caught by the GPU test.
+
+**Frame edges.** A shift is clamped to the greater of the part's margin from the eye's edge and
+2 px, HypXRland's rule. Parts are also kept inside their image.
+
+**The cursor** is drawn at the depth of the front-most lift under its tip, else the card's (never
+behind the panel). In each eye it lands on what it points at, so a click hits what it looks to be
+over. Pointer mapping is unchanged: the X11 position maps into the eye it's over
+(`Stereo::to_logical`) and the panel gets that logical point.
+
+**The blur** stays at the game's plane and inside each eye, as before. The scrim over it is part
+of the image at depth 0.
+
+**Knobs** (`sight.depth`, Display page, Advanced, applies at launch):
+
+| Value | Strength | Env |
+|---|---|---|
+| Normal (default) | 100% | unset |
+| Off | 0, the screen plane, as before depth | `QUIVER_SIGHT_DEPTH=off` |
+| Subtle | 50% | `QUIVER_SIGHT_DEPTH=50` |
+| Strong | 150% | `QUIVER_SIGHT_DEPTH=150` |
+| Strongest | 200%, ≈14 px at the nearest | `QUIVER_SIGHT_DEPTH=200` |
+
+The layer reads it like `QUIVER_SIGHT_STEREO`. Any whole percent from 0 to 200 works there. In
+a lab, set it with `quiver lab edit N env.QUIVER_SIGHT_DEPTH=150`.
+
+**Apparent depth on the XReal.** The XReal's numbers: 1920 px across 46° per eye, ≈41.7 px/°
+(the factory calibration says 42.2°, ≈45.5 px/°). The angles are robust. The distance needs the
+virtual screen's distance D, which HypXRland's docs don't give for the glasses, so two Ds are
+shown. 1.5 m is HypXRland's model; ≈4 m is the vendor's figure for the virtual image.
+
+| Part | Total px | Angle | In front at D = 1.5 m | In front at D = 4 m |
+|---|---|---|---|---|
+| HUD | 2 | 2.9′ (0.048°) | 3 cm | 21 cm |
+| panel card | 3 | 4.3′ (0.072°) | 5 cm | 31 cm |
+| focused row / dialog | 5 | 7.2′ (0.12°) | 8 cm | 49 cm |
+| dialog's focused button | 7 | 10.1′ (0.17°) | 10 cm | 66 cm |
+| (200%, the nearest) | 14 | 20′ (0.34°) | 19 cm | 113 cm |
+
+All of these are far inside the 1° ceiling (≈42 px on the XReal). The steps are about half the
+foveal ≈0.1° limit.
+
+**The desktop panel** (the layer-shell fallback) can't draw itself packed. `xdg-toplevel-tag-v1`
+tags toplevels only, and HypXRland has no `layerrule = stereo`. A layer surface can't declare
+stereo content, so the compositor would show a packed panel whole in both eyes. On a stereo
+output today it's an `overlay` layer at `depth_layers` 0.8. It spans the monitor (the scrim), so
+the frame-violation clamp holds it to the 2 px slack: a slight lift as a whole, with no
+per-element depth. Getting per-element depth there needs one of these:
+- a HypXRland `layerrule = stereo` with the same contract as §8.6 (small, but in the compositor);
+- the panel as a fullscreen xdg toplevel. It would lose the layer-shell semantics the panel relies
+  on: above everything, keyboard exclusivity, never in the window list.
+
+Neither is cheap, so it isn't built. The in-game panel is the usual path whenever the layer and
+the preload are in the game.
+
+**Verification.**
+- Unit tests:
+  - the ladder against HypXRland's table, the eye split, the frame clamp and the setting
+    (`stereo::depth_tests`);
+  - descriptor validation and round trip (`hud::tests::depth_and_lifts`);
+  - the status block's zero-extension (`layer_status_bytes`);
+  - the layer's per-eye shifts, lifts, cursor depth, hsbs and the edge clamp
+    (`compositor::eye_tests::depth_per_eye`);
+  - the Tweak's plan.
+- GPU, opt-in: `tests/vulkan_depth.rs` (headless RADV, 3840x400 sbs) reads back a panel drawn
+  through the real layer:
+  - the whole image at the HUD rung: the card's edge at 101 / 99 (2 px);
+  - the card and focused row as lifts: card 102 / 99 (3 px), row 403 / 398 (5 px), its contents
+    with it (423 / 418);
+  - the strip the row moved off shows the card, not the row's edge again;
+  - the cursor over the row is 5 px apart;
+  - the status block reports 100% and 5 px.
+- quiver-sight (`tests/ingame_panel.rs`): a panel reopened for an sbs frame publishes depth 0 with
+  the card as its only lift. After Left, the card and the focused section follow, at their rungs,
+  the section inside the card.
+
+**Not verified.**
+- A real game in the lab. The root disk was full during this work, so no instance could be made
+  (see the report).
+- How it looks in the glasses: whether the ladder reads as intended and the steps are
+  comfortable over an evening. The numbers are HypXRland's provisional ones.
+- Depth changes snap. HypXRland eases its own over about 80–200 ms; Sight's focus moves are 2 px
+  steps, so they snap.
