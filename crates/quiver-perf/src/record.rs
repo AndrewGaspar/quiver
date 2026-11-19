@@ -276,6 +276,14 @@ impl LayerStatus {
         key_panels: 0,
         backdrop_error: 0,
         backdrop_gpu_ns: 0,
+        hdr_flags: 0,
+        hdr_metadata_calls: 0,
+        hdr_max_cll: 0,
+        hdr_max_fall: 0,
+        hdr_max_luminance: 0,
+        hdr_min_luminance: 0,
+        hdr_primaries: [0; 8],
+        capture_done: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -289,7 +297,7 @@ impl LayerStatus {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 336).
+        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 400).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }
     }
 
@@ -392,7 +400,13 @@ mod tests {
         s.extent_w = 2560;
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
-        assert_eq!(b.len(), 336);
+        assert_eq!(b.len(), 400);
+        // A layer from before HDR wrote 336 bytes: the HDR fields read as zero.
+        let mut h = s;
+        h.hdr_max_cll = 4000 * 10000;
+        h.capture_done = 3;
+        let old = LayerStatus::from_bytes(&h.as_bytes()[..336]);
+        assert_eq!((old.hdr_max_cll, old.capture_done, old.extent_w), (0, 0, 2560));
         // A layer from before the panel key left these 8 bytes reserved (zero).
         assert_eq!(LayerStatus::from_bytes(b).key_panels, 0);
         let t = LayerStatus::from_bytes(b);

@@ -244,7 +244,20 @@ typedef struct qv_layer_status {
     uint16_t key_panels;        /* Shift+F2 (Sight panel) presses, wrapping (in the former reflex_reserved) */
     uint16_t backdrop_error;    /* QV_BACKDROP_ERR_*: why the layer can't blur behind the panel */
     uint32_t backdrop_gpu_ns;   /* GPU time of the backdrop blur per present (running mean), 0 none */
+    /* appended (HDR): zero from layers before */
+    uint32_t hdr_flags;         /* QV_HDR_* */
+    uint32_t hdr_metadata_calls; /* vkSetHdrMetadataEXT calls on the target swapchain */
+    uint32_t hdr_max_cll;       /* the last VkHdrMetadataEXT, 1/10000 nit */
+    uint32_t hdr_max_fall;
+    uint32_t hdr_max_luminance;
+    uint32_t hdr_min_luminance;
+    uint32_t hdr_primaries[8];  /* r x,y g x,y b x,y white x,y, CIE 1931 xy in 1/100000 */
+    uint64_t capture_done;      /* the last capture request written out (capture-<n>.raw/.json) */
 } qv_layer_status;
+
+#define QV_HDR_METADATA_SET   (1u << 0)
+#define QV_HDR_CAPTURE_READY  (1u << 1)
+#define QV_HDR_COLOR_SPACE    (1u << 2)
 
 QV_INLINE qv_record *qv_ring_slots(qv_ring_header *h)
 { return (qv_record *)((char *)h + QV_RING_HEADER_BYTES); }
@@ -343,7 +356,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 336);
+QV_ASSERT_SIZE(qv_layer_status, 400);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -382,6 +395,10 @@ QV_ASSERT_OFFSET(qv_layer_status, render_latency_sum_us, 320);
 QV_ASSERT_OFFSET(qv_layer_status, key_panels, 328);
 QV_ASSERT_OFFSET(qv_layer_status, backdrop_error, 330);
 QV_ASSERT_OFFSET(qv_layer_status, backdrop_gpu_ns, 332);
+QV_ASSERT_OFFSET(qv_layer_status, hdr_flags, 336);
+QV_ASSERT_OFFSET(qv_layer_status, hdr_max_cll, 344);
+QV_ASSERT_OFFSET(qv_layer_status, hdr_primaries, 360);
+QV_ASSERT_OFFSET(qv_layer_status, capture_done, 392);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

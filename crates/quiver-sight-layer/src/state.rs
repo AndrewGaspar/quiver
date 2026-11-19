@@ -349,6 +349,7 @@ pub fn retarget() {
                 }
                 st.backdrop_error = blur_error as u16;
                 crate::panel::set_target(s.comp.as_ref().is_some_and(|c| c.can_draw_images()), (s.extent.width, s.extent.height));
+                crate::hdr::set_target(s.comp.as_ref().is_some_and(|c| c.can_capture()), s.color_space);
                 best = Some((area, s.id, st));
                 best_latency = Some((d.handle, *handle, s.latency.clone()));
             }
@@ -357,6 +358,7 @@ pub fn retarget() {
     let target = best.as_ref().map_or(0, |(_, id, _)| *id);
     if best.is_none() {
         crate::panel::set_target(false, (0, 0));
+        crate::hdr::set_target(false, vk::ColorSpaceKHR::SRGB_NONLINEAR);
     }
     *lock(&latency::TARGET) = best_latency;
     let prev = TARGET.swap(target, Ordering::Relaxed);

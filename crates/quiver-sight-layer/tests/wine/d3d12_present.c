@@ -7,7 +7,11 @@
  *
  * flags (bits): 1 uncapped (no sleep between frames), 2 tearing (ALLOW_TEARING, presents
  * with sync interval 0 map to IMMEDIATE), 4 a 10-bit swapchain (R10G10B10A2_UNORM),
- * 8 sync interval 1 (FIFO), 16 the resize goes to exclusive fullscreen at 640x480.
+ * 8 sync interval 1 (FIFO), 16 the resize goes to exclusive fullscreen at 640x480,
+ * 32 HDR10 (R10G10B10A2_UNORM, SetColorSpace1(G2084 P2020), SetHDRMetaData), 64 scRGB
+ * (R16G16B16A16_FLOAT, SetColorSpace1(G10 P709), SetHDRMetaData). In HDR the pattern is grey
+ * at known luminances: the left half 203 nits, the right half 1000 nits, the band 4000 nits.
+ * The metadata: max CLL 4000, max FALL 600, mastering 1000 / 0.005 nits, BT.2020 primaries.
  *
  * With resize_at > 0 the swapchain's buffers are resized (ResizeBuffers) at that frame, so
  * the Vulkan swapchain is recreated with oldSwapchain.
@@ -21,7 +25,7 @@
 #define WIDL_C_INLINE_WRAPPERS
 #include <windows.h>
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -127,7 +131,7 @@ int main(int argc, char **argv)
     DXGI_SWAP_CHAIN_DESC1 sd = {0};
     sd.Width = w;
     sd.Height = h;
-    sd.Format = (flags & 4) ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.Format = (flags & 64) ? DXGI_FORMAT_R16G16B16A16_FLOAT : (flags & (4 | 32)) ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.Flags = sc_flags;
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -141,6 +145,30 @@ int main(int argc, char **argv)
     }
     IDXGISwapChain1_QueryInterface(sc1, &IID_IDXGISwapChain3, (void **)&sc);
     IDXGISwapChain1_Release(sc1);
+    if (flags & (32 | 64)) {
+        DXGI_COLOR_SPACE_TYPE cs = (flags & 64) ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        UINT support = 0;
+        IDXGISwapChain3_CheckColorSpaceSupport(sc, cs, &support);
+        hr = IDXGISwapChain3_SetColorSpace1(sc, cs);
+        printf("colour space %d: support %#x, set 0x%08lx\n", (int)cs, support, hr);
+        IDXGISwapChain4 *sc4 = NULL;
+        if (SUCCEEDED(IDXGISwapChain3_QueryInterface(sc, &IID_IDXGISwapChain4, (void **)&sc4))) {
+            /* Primaries and white point in 1/50000, luminance in 1/10000 nit (max in nits). */
+            DXGI_HDR_METADATA_HDR10 md = {0};
+            md.RedPrimary[0] = 35400; md.RedPrimary[1] = 14600;
+            md.GreenPrimary[0] = 8500; md.GreenPrimary[1] = 39850;
+            md.BluePrimary[0] = 6550; md.BluePrimary[1] = 2300;
+            md.WhitePoint[0] = 15635; md.WhitePoint[1] = 16450;
+            md.MaxMasteringLuminance = 1000;
+            md.MinMasteringLuminance = 50;
+            md.MaxContentLightLevel = 4000;
+            md.MaxFrameAverageLightLevel = 600;
+            hr = IDXGISwapChain4_SetHDRMetaData(sc4, DXGI_HDR_METADATA_TYPE_HDR10, sizeof(md), &md);
+            printf("HDR metadata: 0x%08lx\n", hr);
+            IDXGISwapChain4_Release(sc4);
+        }
+        fflush(stdout);
+    }
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {0};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -220,6 +248,19 @@ int main(int argc, char **argv)
         rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(heap);
         rtv.ptr += bi * rtv_size;
         float red[4] = {0.8f, 0.1f, 0.1f, 1.0f}, blue[4] = {0.1f, 0.1f, 0.8f, 1.0f}, green[4] = {0.1f, 0.8f, 0.1f, 1.0f};
+        if (flags & 32) {
+            /* PQ code values of 203, 1000 and 4000 nits. */
+            float a = 0.58069f, b = 0.75183f, c = 0.90256f;
+            red[0] = red[1] = red[2] = a;
+            blue[0] = blue[1] = blue[2] = b;
+            green[0] = green[1] = green[2] = c;
+        } else if (flags & 64) {
+            /* scRGB: 1.0 is 80 nits. */
+            float a = 203.0f / 80, b = 1000.0f / 80, c = 4000.0f / 80;
+            red[0] = red[1] = red[2] = a;
+            blue[0] = blue[1] = blue[2] = b;
+            green[0] = green[1] = green[2] = c;
+        }
         D3D12_RECT left = {0, 0, (LONG)w / 2, (LONG)h}, right = {(LONG)w / 2, 0, (LONG)w, (LONG)h};
         LONG y = (LONG)((i * 4) % (h - 40));
         D3D12_RECT band = {0, y, (LONG)w, y + 40};

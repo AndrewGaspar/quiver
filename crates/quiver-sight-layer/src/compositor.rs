@@ -176,6 +176,12 @@ pub struct Compositor {
     /// The last live request (its dim and radius carry the fade-out).
     backdrop: BackdropRequest,
     panel: PanelPlane,
+    /// Captures (crate::hdr): the images have `TRANSFER_SRC`.
+    capture_ok: bool,
+    color_space: vk::ColorSpaceKHR,
+    swapchain_id: u32,
+    /// A capture in flight: its buffer, request number and the slot whose submit fills it.
+    capture: Option<(Buffer, u64, usize)>,
 }
 
 // SAFETY: the mapped pointers are only used under the swapchain's mutex.
@@ -222,6 +228,10 @@ impl Compositor {
             fade: Fade::default(),
             backdrop: BackdropRequest::NONE,
             panel: PanelPlane { generation: u64::MAX, ..Default::default() },
+            capture_ok: false,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            swapchain_id: 0,
+            capture: None,
         };
         // SAFETY: as documented; on error everything made so far is destroyed (nothing is in
         // flight yet).
@@ -704,6 +714,95 @@ impl Compositor {
         }
     }
 
+    /// Captures can be taken here (the swapchain was made with `TRANSFER_SRC`).
+    pub fn set_capture(&mut self, ok: bool, color_space: vk::ColorSpaceKHR, swapchain_id: u32) {
+        self.capture_ok = ok;
+        self.color_space = color_space;
+        self.swapchain_id = swapchain_id;
+    }
+
+    pub fn can_capture(&self) -> bool {
+        self.capture_ok
+    }
+
+    /// A finished capture's bytes to [`crate::hdr::CAPTURED`], once its submit is done.
+    unsafe fn reap_capture(&mut self, dev: &ash::Device) -> Result<(), u32> {
+        let Some((_, _, slot)) = &self.capture else { return Ok(()) };
+        // SAFETY: our fence.
+        if !unsafe { self.idle(dev, *slot)? } {
+            return Ok(());
+        }
+        let (buf, id, _) = self.capture.take().unwrap();
+        let bpp = crate::hdr::bytes_per_pixel(self.format).unwrap_or(4);
+        let len = (self.extent.width * self.extent.height * bpp) as usize;
+        // SAFETY: the mapped, coherent buffer of `len` bytes or more; the GPU is done with it.
+        let data = unsafe { std::slice::from_raw_parts(buf.ptr.as_ptr(), len.min(buf.size)) }.to_vec();
+        // SAFETY: not in use any more.
+        unsafe { destroy_buffer(dev, &buf) };
+        *crate::hdr::CAPTURED.lock().unwrap_or_else(|p| p.into_inner()) = Some(crate::hdr::Captured {
+            id,
+            format: self.format,
+            color_space: self.color_space,
+            width: self.extent.width,
+            height: self.extent.height,
+            bytes_per_pixel: bpp,
+            swapchain: self.swapchain_id,
+            data,
+        });
+        Ok(())
+    }
+
+    /// Records the copy of `image` (in `PRESENT_SRC_KHR`, the game's pixels) into a new host
+    /// buffer, leaving it in `PRESENT_SRC_KHR` for what follows.
+    unsafe fn record_capture(&mut self, d: &DeviceData, cmd: vk::CommandBuffer, image: usize) -> Option<Buffer> {
+        let dev = &d.dev;
+        let bpp = crate::hdr::bytes_per_pixel(self.format)?;
+        let size = self.extent.width as u64 * self.extent.height as u64 * bpp as u64;
+        // SAFETY: a valid create; ours to destroy.
+        let buf = match unsafe { make_buffer(d, size, vk::BufferUsageFlags::TRANSFER_DST) } {
+            Ok(b) => b,
+            Err(e) => {
+                log!("capture buffer ({size} bytes): {e:?}");
+                return None;
+            }
+        };
+        let to_src = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.images[image])
+            .subresource_range(color_range());
+        let back = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.images[image])
+            .subresource_range(color_range());
+        let host = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::HOST_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(buf.buf)
+            .size(vk::WHOLE_SIZE);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+            .image_extent(vk::Extent3D { width: self.extent.width, height: self.extent.height, depth: 1 });
+        // SAFETY: recording into our command buffer; the image is the app's presented one.
+        unsafe {
+            dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_src]);
+            dev.cmd_copy_image_to_buffer(cmd, self.images[image], vk::ImageLayout::TRANSFER_SRC_OPTIMAL, buf.buf, &[region]);
+            dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS | vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(), &[], &[host], &[back]);
+        }
+        Some(buf)
+    }
+
     /// The HUD can be drawn here (and so can the panel): a known blend encoding.
     pub fn can_draw_images(&self) -> bool {
         self.enc.is_some()
@@ -764,6 +863,7 @@ impl Compositor {
                 return Ok(Drawn::Skipped);
             }
 
+            self.reap_capture(dev)?;
             self.reap_retired(dev)?;
             self.reap_panel_retired(dev)?;
             // The slot's last blur is done (its fence signalled): its GPU time.
@@ -819,7 +919,10 @@ impl Compositor {
             let panel_shown = open.zip(self.panel.current.filter(|c| {
                 panel_fresh && c.opacity > 0.0 && c.extent_w == self.extent.width && c.extent_h == self.extent.height && self.panel.texture.as_ref().is_some_and(|t| t.filled || panel_copy.is_some())
             }));
-            if visible.is_none() && copy.is_none() && !blur && panel_shown.is_none() && panel_copy.is_none() {
+            // A capture asked for (crate::hdr) and none in flight.
+            let want = crate::hdr::REQUEST.load(std::sync::atomic::Ordering::Relaxed);
+            let capture = self.capture_ok && self.capture.is_none() && want > crate::hdr::TAKEN.load(std::sync::atomic::Ordering::Relaxed);
+            if visible.is_none() && copy.is_none() && !blur && panel_shown.is_none() && panel_copy.is_none() && !capture {
                 return Ok(Drawn::Done { semaphore: None, hud, blurred: false });
             }
 
@@ -827,6 +930,12 @@ impl Compositor {
             let fail = |_| DRAW_ERR_INTERNAL;
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(fail)?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(fail)?;
+            // First, so it holds the game's pixels without the blur, HUD or panel.
+            let captured = if capture { self.record_capture(d, cmd, image) } else { None };
+            if capture {
+                // Taken even when the buffer couldn't be made: no retry on every present.
+                crate::hdr::TAKEN.store(want, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(p) = copy {
                 self.record_copy(dev, cmd, &p);
                 self.staging_reader = Some(slot);
@@ -864,6 +973,9 @@ impl Compositor {
                 Ok(()) => {
                     self.slots[slot].submitted = true;
                     self.slots[slot].timed = timed;
+                    if let Some(b) = captured {
+                        self.capture = Some((b, want, slot));
+                    }
                     if let Some((o, _)) = panel_shown {
                         sight_panel::mark_drawn(o.epoch, now);
                     }
@@ -1059,6 +1171,9 @@ impl Compositor {
             }
             if let Some((_, mut c)) = self.blur.take() {
                 c.destroy(dev);
+            }
+            if let Some((b, _, _)) = self.capture.take() {
+                destroy_buffer(dev, &b);
             }
         }
     }
