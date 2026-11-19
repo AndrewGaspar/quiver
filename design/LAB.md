@@ -510,12 +510,14 @@ start-up takes a different real time each run).
 
 **The safety valves**, each counted in the report:
 
-- **Creep.** After `clock.creep_after` (4096) clock reads in one frame, the frame can only be
-  spinning on the clock: each further read moves time on by 1/1024 of a frame, so a frame
-  limiter that waits for more time than a Present can give terminates. The test's QPC
-  busy-wait for two frames and its `Sleep(1)` loop on timeGetTime both end this way. Creep
-  depends on how often the game reads, not on the machine, so it is still repeatable, but
-  those frames aren't exactly 1/N.
+- **Creep.** Once **one thread** has read the clock `clock.creep_after` (4096) times in one
+  frame, it can only be spinning on the clock: each further read by that thread moves time on
+  by 1/1024 of a frame, so a wait for more time than a Present can give terminates. Reads are
+  counted per thread, so many threads that each read a little (a job system, timer threads)
+  don't add up to a spin. The test's QPC busy-wait for two frames and its `Sleep(1)` loop on
+  timeGetTime (both on the presenting thread), and a worker's busy-wait while the presenting
+  thread waits for it, all end this way. Creep depends on how often the game reads, not on the
+  machine, so it is still repeatable, but those frames aren't exactly 1/N.
 - **The real-time escape.** If a frame takes `clock.stuck_ms` (1000) of **real** time, time
   follows real time from there until the next Present. This catches waits that read the clock
   rarely, and loading screens that never present. **When it fires, that frame's timing tracked
@@ -525,9 +527,21 @@ start-up takes a different real time each run).
   `clock.stuck_ms` if loading screens trip it.
 - **Never backwards.** A Present sets time to max(grid, now); a frame where creep or the
   escape had already passed the grid is an **overrun**.
-- **Sleep** never advances virtual time; it only gets shorter in real time (at most
-  `clock.sleep_max_ms`, default 0: a yield), so a sleep-based limiter spins on the clock and
-  creeps.
+- **Sleep** never advances virtual time. Only the **presenting thread's** sleeps get shorter in
+  real time (at most `clock.sleep_max_ms`, default 0: a yield), so a sleep-based frame limiter
+  spins on the clock and creeps. Every other thread's sleeps stay as asked (`clock.sleeps=all`
+  shortens everyone's, `none` no one's). The first live runs showed why: AC Chronicles China
+  (x86) and Rabbids Coding (Unity) have background threads that sleep-poll, 200 million sleeps
+  of 118 ms on average in AC China's 90 s. With every sleep shortened they became clock-read
+  storms (1.9 million reads in one frame in Rabbids), and half the game's frames crept: AC
+  China's census had 160000-tick steps only 4385 times against 9.8 million creep steps. The
+  test reproduces it with two pollers (`Sleep(1)` and `Sleep(100)`); with `clock.sleeps=all`
+  phase A stops being exact.
+- **Other processes.** A game's helper (Unity's crash handler, a launcher) that loads the
+  proxy too runs the clock, but it writes the report only if it presents. The lab names the
+  game's executable (`QUIVER_VCLOCK_EXE`); every log line carries its pid. In Rabbids Coding's
+  first run the crash handler's never-engaged report replaced the game's, which had engaged at
+  37x: "no Present was hooked" was that, not a missed swap chain.
 
 **The report.** The DLL writes `runs/r<N>/vclock.log` (each patched import slot and vtable
 hook, the present path, engagement, a line every 10 s) and `vclock.status` (key=value,
@@ -570,14 +584,20 @@ followed by whether every step was a frame, and the determinism verdict.
   environment (DXVK_CONFIG merged), the report lines and the brief.
 - Opt-in, in Wine: `QUIVER_TEST_PROTON=… cargo test -p quiver-vclock --test wine -- --ignored
   --nocapture --test-threads 1`. `tests/wine/clock_test.c` presents through DXVK on a private
-  Xvfb (display ≥ :400) with the hook as `version.dll`, for D3D11 x64 fast, again, and held to
-  40 fps, then D3D9 x64 and D3D11 x86. Measured 2026-11-18 on GE-Proton11-12:
+  Xvfb (display ≥ :400) with the hook as `version.dll`, for D3D11 x64 fast (with a helper
+  process loading the proxy), again, and held to 40 fps, D3D11 with the device's own factory
+  (Unity's way), every sleep shortened (the old behaviour), D3D9 x64 and D3D11 x86. Two
+  background threads poll the clock with `Sleep(1)` and `Sleep(100)` throughout. Measured
+  2026-11-18 on GE-Proton11-12:
   - every one of 1198 steps on QPC is 160000 ticks, and on timeGetTime, GetTickCount and
     GetTickCount64 every step is 16 ms;
-  - 19.168 s of game time took 1.1-1.4 s of real time with a fast presenter (13-17x) and
+  - 19.168 s of game time took 0.56-0.65 s of real time with a fast presenter (30-34x) and
     30.1 s with the 40 fps one (0.64x);
-  - the three sequence hashes are identical, as are the DLL's census, creep and sleep counts;
-  - the busy-wait and the Sleep loop both terminated (60 creeping frames, no escapes);
+  - the three sequence hashes are identical, as are the creep, overrun and shortened-sleep
+    counts (the census isn't compared: the pollers sample it at real-time moments);
+  - the busy-waits terminated, and exactly their 70 frames crept (no escapes); the pollers'
+    sleeps stayed real and crept nothing. With every sleep shortened, phase A wasn't exact;
+  - the helper process didn't replace the game's report;
   - `GetProcAddress("QueryPerformanceCounter")` gives the virtual value;
   - only the executable's 7 clock imports point into the DLL; none of the other 28 modules'
     (Wine's builtins, DXVK's d3d11, dxgi and d3d9) do.

@@ -10,8 +10,17 @@
 //!   to 25 ms real, 40 fps, below the virtual 62.5 Hz): slower than real time, and still
 //!   exactly 1/62.5 s per frame;
 //! - the virtual-time sequence is identical across runs (fast, fast again, slow);
-//! - a QPC busy-wait for two frames and a `Sleep(1)` loop on timeGetTime both terminate (the
-//!   creep, counted);
+//! - a QPC busy-wait for two frames and a `Sleep(1)` loop on timeGetTime on the presenting
+//!   thread, and a worker's QPC busy-wait while the presenting thread waits for it, all
+//!   terminate (the creep, counted: exactly those 70 frames);
+//! - background threads that poll the clock with `Sleep(1)` and `Sleep(100)` throughout keep
+//!   their real sleeps and don't make the game's frames creep (AC Chronicles China's and
+//!   Rabbids Coding's first live runs: half their frames crept); with every sleep shortened
+//!   (`QUIVER_VCLOCK_SLEEPS=all`, the old behaviour) they do, which the `all` case shows;
+//! - a swap chain made from the device's own factory (D3D11CreateDevice, IDXGIDevice ->
+//!   adapter -> parent, as Unity does) is hooked;
+//! - a second process loading the proxy that never presents (Unity's crash handler, in Rabbids
+//!   Coding's run) doesn't replace the game's report;
 //! - QueryPerformanceCounter looked up with GetProcAddress gives the virtual value;
 //! - only the executable's clock imports point into the hook DLL: none of Wine's modules or
 //!   DXVK's;
@@ -59,6 +68,7 @@ fn stage(dir: &Path, arch: &str) -> PathBuf {
         .status()
         .expect(gcc);
     assert!(st.success(), "{gcc} failed");
+    std::fs::copy(&exe, dir.join("helper.exe")).unwrap();
     for dll in ["d3d11.dll", "dxgi.dll", "d3d9.dll"] {
         std::fs::copy(proton().join("files/lib/wine/dxvk").join(dxvk).join(dll), dir.join(dll)).expect("Proton's DXVK");
     }
@@ -70,6 +80,8 @@ struct Out {
     lines: BTreeMap<String, String>,
     report: Report,
     stdout: String,
+    #[allow(dead_code)]
+    log: String,
 }
 
 impl Out {
@@ -99,7 +111,26 @@ impl Out {
     }
 }
 
-fn run(display: &str, arch: &str, api: &str, frames: u32, slow_ms: u32, tag: &str) -> Out {
+struct Case<'a> {
+    arch: &'a str,
+    api: &'a str,
+    frames: u32,
+    slow_ms: u32,
+    tag: &'a str,
+    /// Start helper.exe (a second process with the proxy) first.
+    helper: bool,
+    /// QUIVER_VCLOCK_SLEEPS.
+    sleeps: Option<&'a str>,
+}
+
+impl Default for Case<'_> {
+    fn default() -> Self {
+        Case { arch: "x64", api: "d3d11", frames: 1200, slow_ms: 0, tag: "", helper: false, sleeps: None }
+    }
+}
+
+fn run(display: &str, c: &Case) -> Out {
+    let Case { arch, api, frames, slow_ms, tag, .. } = *c;
     let scratch = tempfile::tempdir().unwrap();
     let t = scratch.path();
     let exe = stage(t, arch);
@@ -113,6 +144,9 @@ fn run(display: &str, arch: &str, api: &str, frames: u32, slow_ms: u32, tag: &st
     let out = Command::new("python3")
         .arg(proton().join("proton"))
         .args(["runinprefix", &win(&exe), api, &frames.to_string(), &slow_ms.to_string(), &title])
+        .args(c.helper.then(|| win(&t.join("helper.exe"))))
+        .env("QUIVER_VCLOCK_EXE", "clock_test.exe")
+        .env("QUIVER_VCLOCK_SLEEPS", c.sleeps.unwrap_or("present"))
         .current_dir(t)
         .env("STEAM_COMPAT_DATA_PATH", &compat)
         .env("WINEPREFIX", compat.join("pfx"))
@@ -137,6 +171,10 @@ fn run(display: &str, arch: &str, api: &str, frames: u32, slow_ms: u32, tag: &st
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let log = std::fs::read_to_string(t.join("out").join(quiver_vclock::LOG_FILE)).unwrap_or_default();
+    // The helper process's lines would only say it isn't the game.
+    if c.helper {
+        assert!(log.contains("this isn't the game's executable (clock_test.exe)"), "{log}");
+    }
     eprintln!("--- {tag} ({arch} {api}, {frames} frames, slow {slow_ms} ms)\n{stdout}--- vclock.log\n{log}");
     if !stdout.contains("done") {
         eprintln!("stderr:\n{}", String::from_utf8_lossy(&out.stderr));
@@ -149,12 +187,12 @@ fn run(display: &str, arch: &str, api: &str, frames: u32, slow_ms: u32, tag: &st
         let mut w = l.splitn(3, ' ');
         let (a, b, rest) = (w.next().unwrap_or(""), w.next().unwrap_or(""), w.next().unwrap_or(""));
         match a {
-            "A" | "B" | "C" => lines.insert(format!("{a} {b}"), rest.to_owned()),
+            "A" | "B" | "C" | "D" => lines.insert(format!("{a} {b}"), rest.to_owned()),
             "iat" => lines.insert(format!("iat {b}"), rest.to_owned()),
             _ => lines.insert(a.to_owned(), format!("{b} {rest}").trim().to_owned()),
         };
     }
-    Out { lines, report, stdout }
+    Out { lines, report, stdout, log }
 }
 
 /// What every case checks.
@@ -170,7 +208,7 @@ fn check(o: &Out, frames: u32, api: &str) {
     let v = o.num("A frames", "virtual_s");
     assert!((v - (frames - 2) as f64 * 0.016).abs() < 1e-9, "virtual time {v}");
     assert_eq!(o.get("gpa_virtual"), "1", "GetProcAddress(QueryPerformanceCounter) is the virtual clock");
-    assert!(o.lines.contains_key("B frames") && o.lines.contains_key("C frames"), "the waits terminated");
+    assert!(o.lines.contains_key("B frames") && o.lines.contains_key("C frames") && o.lines.contains_key("D frames"), "the waits terminated");
     // Only the exe's clock imports are ours.
     let iats: Vec<(&String, &String)> = o.lines.iter().filter(|(k, _)| k.starts_with("iat ")).collect();
     assert!(iats.len() > 5, "{iats:?}");
@@ -185,8 +223,10 @@ fn check(o: &Out, frames: u32, api: &str) {
     let r = &o.report;
     assert!(r.engaged && r.present_path == if api == "d3d9" { "d3d9" } else { "dxgi" }, "{r:?}");
     assert!(r.deterministic(), "an escape fired: {}", r.counters());
-    // The B and C waits crept (one per frame, give or take the frame each phase starts with).
-    assert!(r.creep_frames >= 55, "{}", r.counters());
+    // Exactly the frames that busy-wait crept: B's 30, C's 30, D's 10. The background pollers
+    // kept their real sleeps and crept nothing.
+    assert_eq!(r.creep_frames, 70, "{}", r.counters());
+    assert!(r.sleeps_real > 100, "the pollers' sleeps stay real: {}", r.counters());
     // The DLL's own census: frame steps, plus the creep's small steps from B and C.
     assert!(r.census_qpc.iter().any(|b| b.0 == TPF && b.1 >= n), "{:?}", r.census_qpc);
     assert!(r.census_ms.iter().any(|b| b.0 == 16 && b.1 >= n), "{:?}", r.census_ms);
@@ -198,8 +238,9 @@ fn the_game_sees_exactly_one_frame_per_present() {
     let x = xvfb::Xvfb::start_size("640x480x24").expect("Xvfb");
     let mut hashes = Vec::new();
 
-    // A presenter faster than 62.5 Hz: faster than real time.
-    let fast = run(&x.display, "x64", "d3d11", 1200, 0, "fast");
+    // A presenter faster than 62.5 Hz: faster than real time. With a second process loading
+    // the proxy (a crash handler's place).
+    let fast = run(&x.display, &Case { tag: "fast", helper: true, ..Default::default() });
     check(&fast, 1200, "d3d11");
     let (v, r) = (fast.num("A frames", "virtual_s"), fast.num("A frames", "real_s"));
     eprintln!("fast: {v:.3} s virtual in {r:.3} s real = {:.2}x", v / r);
@@ -207,12 +248,12 @@ fn the_game_sees_exactly_one_frame_per_present() {
     hashes.push(fast.get("A sequence_hash").to_owned());
 
     // The same again: the same virtual-time sequence.
-    let again = run(&x.display, "x64", "d3d11", 1200, 0, "again");
+    let again = run(&x.display, &Case { tag: "again", ..Default::default() });
     check(&again, 1200, "d3d11");
     hashes.push(again.get("A sequence_hash").to_owned());
 
     // A presenter held to 40 fps (below 62.5 Hz): slower than real time, the same game time.
-    let slow = run(&x.display, "x64", "d3d11", 1200, 25, "slow");
+    let slow = run(&x.display, &Case { tag: "slow", slow_ms: 25, ..Default::default() });
     check(&slow, 1200, "d3d11");
     let (v, r) = (slow.num("A frames", "virtual_s"), slow.num("A frames", "real_s"));
     eprintln!("slow: {v:.3} s virtual in {r:.3} s real = {:.2}x", v / r);
@@ -221,20 +262,35 @@ fn the_game_sees_exactly_one_frame_per_present() {
     hashes.push(slow.get("A sequence_hash").to_owned());
     assert!(hashes.iter().all(|h| *h == hashes[0]), "the virtual-time sequences differ between runs: {hashes:?}");
     // The DLL's own view agrees across the three runs too, the busy-waits included: the same
-    // steps, the same creep, the same shortened sleeps.
+    // creep, the same overruns, the same shortened sleeps. (Not the census: the background
+    // pollers sample the clock at real-time moments while phase C creeps it through
+    // timeGetTime, so how the QPC steps they see bunch up differs. The game thread's values
+    // don't: the sequence hash and the phase counts above.)
     for o in [&again, &slow] {
         let (a, b) = (&fast.report, &o.report);
-        assert_eq!((&a.census_qpc, &a.census_ms, a.creep_frames, a.overruns, a.sleeps), (&b.census_qpc, &b.census_ms, b.creep_frames, b.overruns, b.sleeps));
+        assert_eq!((a.creep_frames, a.overruns, a.sleeps, a.sleep_ms_requested), (b.creep_frames, b.overruns, b.sleeps, b.sleep_ms_requested));
+        assert!(b.census_qpc.contains(&(TPF, a.census_qpc.iter().find(|s| s.0 == TPF).unwrap().1)), "the frame steps");
         assert_eq!(fast.get("C frames").split_whitespace().nth(2), o.get("C frames").split_whitespace().nth(2), "phase C's Sleep(1) count");
     }
 
+    // The swap chain from the device's own factory (Unity's way).
+    let dev = run(&x.display, &Case { tag: "devfactory", api: "d3d11dev", frames: 600, helper: true, ..Default::default() });
+    check(&dev, 600, "d3d11dev");
+
+    // The old behaviour, every sleep shortened: the background pollers spin on the clock and
+    // the game's own frames creep (what the first live runs showed).
+    let all = run(&x.display, &Case { tag: "sleeps-all", frames: 600, sleeps: Some("all"), ..Default::default() });
+    let steps = all.steps("A qpc_steps");
+    eprintln!("sleeps=all: phase A steps {steps:?}, {}", all.report.counters());
+    assert!(steps != vec![(TPF, 598)] && all.report.creep_frames > 70, "the pollers should have made phase A creep with every sleep shortened");
+
     // Direct3D 9.
-    let d9 = run(&x.display, "x64", "d3d9", 600, 0, "d3d9");
+    let d9 = run(&x.display, &Case { tag: "d3d9", api: "d3d9", frames: 600, ..Default::default() });
     check(&d9, 600, "d3d9");
 
     // 32-bit.
     if std::env::var("QUIVER_TEST_VCLOCK_32").as_deref() != Ok("0") && quiver_vclock::unavailable("x86").is_none() {
-        let x86 = run(&x.display, "x86", "d3d11", 600, 0, "x86");
+        let x86 = run(&x.display, &Case { tag: "x86", arch: "x86", frames: 600, helper: true, ..Default::default() });
         check(&x86, 600, "d3d11");
     }
 }
