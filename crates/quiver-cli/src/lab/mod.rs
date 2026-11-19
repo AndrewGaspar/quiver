@@ -85,8 +85,8 @@ pub enum LabAction {
     Down { instance: String },
     /// Delete an instance (its clones and runs; fixtures and the gold copy stay).
     Rm { instance: String },
-    /// Start the game: refuses while you play; kills every Wine process in the instance,
-    /// puts the mod in, gets a fresh licence from quiverd, starts it, optionally waits.
+    /// Start the game: kills every Wine process in the instance, puts the mod in, gets a
+    /// fresh licence from quiverd, starts it, optionally waits.
     Launch {
         instance: String,
         /// A mod folder for this launch (instead of the manifest's).
@@ -239,7 +239,7 @@ pub enum LabAction {
     /// A/B runs: config variants applied live (or with a relaunch), settled, sampled N times,
     /// aggregated, host state recorded per variant.
     Bench(bench::BenchArgs),
-    /// Free memory, load, the GPU and who uses it, whether you are playing.
+    /// Free memory, load, the GPU and who uses it, and who holds the lab's GPU lock.
     Host {
         #[arg(long)]
         json: bool,
@@ -695,18 +695,11 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
         LabAction::Host { json } => {
             let all = procs::scan();
             let hs = host::snapshot(&all, &ops::containers());
-            let client = Client::connect_running(source).await.ok();
-            let sessions = match &client {
-                Some(c) => c.call::<serde_json::Value>(quiver_api::Request::Sessions).await.ok(),
-                None => None,
-            };
-            let playing = ops::person_playing(sessions.as_ref());
             let holder = std::fs::read_to_string(lab.gpu_lock().with_extension("holder")).ok();
             if json {
-                return print_json(&serde_json::json!({ "host": hs, "user_playing": playing, "gpu_lock": holder }));
+                return print_json(&serde_json::json!({ "host": hs, "gpu_lock": holder }));
             }
             println!("{}", hs.summary());
-            println!("user playing: {}", if playing.is_empty() { "no".into() } else { playing.join("; ") });
             println!("gpu lock: {}", holder.as_deref().map(str::trim).unwrap_or("free"));
         }
         LabAction::Logs { instance, run, tail } => {
@@ -1095,8 +1088,6 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
     check("quiverd", quiverd, if quiverd { "running".into() } else { "not running (quiver status)".into() });
     let bridge = ops::lab_bridge();
     check("lab-aware bridge", bridge.is_ok(), match bridge { Ok(p) => p.display().to_string(), Err(e) => format!("{e:#}") });
-    let playing = ops::person_playing(None);
-    check("user not playing", playing.is_empty(), if playing.is_empty() { "nothing on the host".into() } else { playing.join("; ") });
     if json {
         return print_json(&checks.iter().map(|(n, ok, d)| serde_json::json!({ "check": n, "ok": ok, "detail": d })).collect::<Vec<_>>());
     }

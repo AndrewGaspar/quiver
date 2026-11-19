@@ -166,7 +166,6 @@ pub fn render(b: &BriefInput) -> String {
 pub const RULES: &[&str] = &[
     "Never sign in to any store, and never run a store's client (Ubisoft Connect, the Epic launcher, Steam) in an instance. The lab gets the licence from quiverd per launch; Connect is disabled in every instance and a Connect process kills the run.",
     "Never read credential or token files (Connect's `ConnectSecureStorage.dat`, keyrings, `~/.config/*/credentials`).",
-    "The user's play wins: launches are refused while one of their games runs. Don't work around it; wait (`quiver lab launch` says what is running).",
     "Never touch the user's real prefix or install (`quiver lab` never mounts them). Copy saves in as fixtures (`quiver lab fixture`), never link them.",
     "Nothing from an instance is reported: no play time, achievements or cloud saves reach the user's accounts. Don't enable a game's own cloud sync in an instance.",
     "Use `quiver lab launch`, `kill` and `wait`; never assemble pkill/sleep sequences. Never `pkill -f` or `pgrep -f` (it matches your own shell); the lab identifies processes by container and prefix.",
@@ -193,7 +192,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("quiver lab call|where|teleport <i> …", "requests your mod answers through the lab channel; named locations in locations.txt"),
     ("quiver lab gpu [--for <i>] -- CMD…", "run a measurement with the GPU to itself: a lock, other instances throttled through their manifests' throttle lines"),
     ("quiver lab bench <i> --variant A=… --variant B=… [--rounds N --samples N --settle S --crop C --log-metric NAME=REGEX]", "A/B runs: live config variants, settle, N samples (sharpness, temporal noise, log numbers), aggregated, host state per variant"),
-    ("quiver lab host [--json]", "free memory, load, GPU, who uses it, whether the user is playing"),
+    ("quiver lab host [--json]", "free memory, load, GPU, who uses it, who holds the GPU lock"),
     ("quiver lab exec <i> -- CMD…", "a command in the instance's container with its display set"),
     ("quiver lab logs <i> [--run N]", "the run's folder: game.log, bridge.log, DXVK logs, your mod's log"),
     ("quiver lab job list|wait|show", "background jobs started with --bg"),

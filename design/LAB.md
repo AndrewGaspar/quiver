@@ -20,7 +20,7 @@ An **instance** is a disposable, headless copy of a game the user has installed,
 container, launched with the user's real licence, that an agent drives from the command line:
 launch, wait for a real readiness signal, press keys, move the mouse, take screenshots, edit
 config files live, measure, kill, relaunch. Nothing an instance does reaches the user's
-accounts, saves, play time or achievements, and the user's own play always wins.
+accounts, saves, play time or achievements.
 
 ```
 quiver lab create <game> [--name N] [--display 2560x1600@165] [--proton P] [--mod DIR] [--graphics G]
@@ -126,7 +126,6 @@ Each is enforced in code, not by convention, and has a test.
 |---|---|
 | Connect never runs in an instance; no copied login or ticket | `lab::guard`: credentials (`ConnectSecureStorage.dat`, `user.vdat`) and launch material Quiver's own launches left in the prefix (`quiver-run/context.json`, `*.ovt`) deleted and executables renamed `*.quiver-lab-off` in the gold copy and every instance, re-checked before every launch (`guard::enforce` fails the launch if anything is left); Connect's executables disabled in every launch's `WINEDLLOVERRIDES`; a Connect process seen in an instance kills the run and is recorded under `violations` (`procs::connect_in`). |
 | The user's real prefix and install are never mounted or linked | instances are reflink clones; `podman::run_args` mounts only the instance's folders (test `never_host_networking_and_mounts_the_clones`) |
-| The user's play wins | every launch first checks for Windows programs outside every podman container (`procs::host_games`, by cgroup and `WINEPREFIX`) and for quiverd sessions of the user's (launcher, Steam, Epic local sessions); it refuses with what is running. Programs in a prefix under a `…/target/…` build folder (a checkout's own Wine tests) are not the user's. |
 | Instance processes are identified by container, never by name alone | `procs`: the libpod cgroup of each process, then `WINEPREFIX`; kill-all is `wineserver -k`, then SIGKILL of what is left in the container's cgroup. No `pkill -f` anywhere. |
 | Kill everything before every launch | the supervisor's launch starts with kill-all (a stale wineserver or bridge hangs the next game before its SDK answers) |
 | One live login per account | launch material comes from quiverd; no store client runs in an instance; no credential file is read |
@@ -162,7 +161,7 @@ One supervisor per instance (`quiver lab supervise`, started by `up`, detached, 
 so there is never a second; talked to over `supervisor.sock`) owns launches and kills, so
 agents never assemble pkill/sleep sequences:
 
-- **launch**: the user-playing check; kill-all; the Connect guard; the mod folder's files over
+- **launch**: kill-all; the Connect guard; the mod folder's files over
   the install (the previous launch's replaced files put back first); the graphics profile;
   a new run folder with `host.json`; launch material; `podman exec -d … proton run …` (never
   `waitforexitandrun`). The game's environment carries `QUIVER_LAB=Z:\lab`,
@@ -231,7 +230,7 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 | `where`, `teleport`, `locations.txt` | `quiver lab call|where|teleport` over the lab channel |
 | `gpu-exclusive` | `quiver lab gpu [--for N] -- CMD` (a lock others queue on; other running instances throttled through their manifests' `throttle` lines and restored after; host state logged before and after to `gpu.log`) |
 | `bench`, `abtest` | `quiver lab bench`: variants `LABEL=assign;assign`, `--rounds` interleaved, `--samples` shots over `--crop` (Laplacian sharpness, temporal noise, mean level), `--log-metric NAME=REGEX` numbers from the log written meanwhile, host state per variant, `--relaunch --ready STATE` for settings that need a restart, `--gpu`; originals restored; `bench.json` and a table |
-| `userplaying.sh` | built into every launch, and `quiver lab host` |
+| `userplaying.sh` | not built: sharing the machine between lab instances and the user's own games is the user's call (section 11) |
 | `framediff.py`, `perframe.py`, `latency.py` | not built: they read Pharos's own captures. The image metrics (`lab::image`) cover frame differences over crops; a latency analysis needs a mod that logs camera changes per frame (Pharos does) |
 
 Long runs go in the background: `quiver lab … --bg` prints a job id; `quiver lab job wait ID`
@@ -240,8 +239,7 @@ returns with the job's output and exit code.
 ## 9. First live run (for the main session)
 
 Needs the merged build installed (`tools/install-user.sh`: the lab refuses a bridge without
-lab sessions) and quiverd restarted onto it (it restarts itself when idle). Then, with the user
-not playing:
+lab sessions) and quiverd restarted onto it (it restarts itself when idle). Then:
 
 ```sh
 quiver lab doctor                                    # all ok (bridge, image, CDI, reflinks, quiverd)
@@ -277,5 +275,7 @@ Remastered" --name awr && quiver lab up awr && quiver lab launch awr --wait fram
    moves to `quiver lab`.
 2. Should the user's current saves come along in the gold copy (they do: it is a clone of the
    prefix), or should gold copies start without saves and use fixtures only?
-3. The user-playing check refuses on *any* Windows program outside containers (except Wine
-   tests in build folders). Too strict for other host Wine tools?
+3. Decided: resource sharing between lab instances and the user's own games is the user's
+   concern, not Quiver's. Quiver has no user-playing check: a launch never refuses, warns
+   about or reports the user's games (`quiver lab host` lists GPU users as plain facts). The
+   GPU lock (`quiver lab gpu`) only coordinates lab runs with each other.

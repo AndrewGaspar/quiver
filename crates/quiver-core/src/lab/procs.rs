@@ -124,18 +124,6 @@ pub fn scan() -> Vec<Proc> {
     scan_in(Path::new("/proc"))
 }
 
-/// Windows programs running outside every podman container: the person's games (or
-/// another Wine program of theirs). A lab launch is refused while there is one. Programs in
-/// a prefix inside a build folder (`…/target/…`: a checkout's own Wine tests) aren't the
-/// person's.
-pub fn host_games(procs: &[Proc]) -> Vec<&Proc> {
-    procs
-        .iter()
-        .filter(|p| p.container.is_none() && p.is_windows() && !p.is_wine_service())
-        .filter(|p| !p.wineprefix.as_deref().is_some_and(|w| w.contains("/target/")))
-        .collect()
-}
-
 /// The processes in a container.
 pub fn in_container<'a>(procs: &'a [Proc], container_id: &str) -> Vec<&'a Proc> {
     procs.iter().filter(|p| p.container.as_deref() == Some(container_id)).collect()
@@ -220,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn the_persons_games_are_outside_containers() {
+    fn an_instances_game_is_in_its_container() {
         let procs = vec![
             p(10, "ACOrigins.exe", r"C:\Games\ACOrigins.exe", None, Some("/home/u/Games/ubi-prefixes/aco")),
             p(11, "services.exe", r"C:\windows\system32\services.exe", None, Some("/pf")),
@@ -230,8 +218,6 @@ mod tests {
             p(15, "d3d12_present.e", r"Z:\t\d3d12_present.exe", None, Some("/home/u/code/q/target/wine-test/pfx")),
             p(16, "lsass.exe", r"C:\windows\system32\lsass.exe", None, Some("/pf")),
         ];
-        let host: Vec<u32> = host_games(&procs).iter().map(|p| p.pid).collect();
-        assert_eq!(host, [10, 14]);
         assert_eq!(instance_game(&procs, ID, "acorigins.EXE").iter().map(|p| p.pid).collect::<Vec<_>>(), [12]);
         // Same name on the host, not the instance's.
         assert!(instance_game(&procs, &"f".repeat(64), "ACOrigins.exe").is_empty());

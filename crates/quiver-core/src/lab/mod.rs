@@ -1,8 +1,8 @@
 //! `quiver lab`: disposable headless instances of an installed game that an agent drives
 //! (design/LAB.md). This module is the part with no daemon and no container in it: the
-//! instance model (manifest, folders), the podman command lines, the host checks (is the
-//! person playing, who uses the GPU), readiness, image metrics, config edits, A/B
-//! aggregation and the facts a brief is written from. `quiver-cli`'s `lab` module drives
+//! instance model (manifest, folders), the podman command lines, the host state (memory,
+//! load, who uses the GPU), readiness, image metrics, config edits, A/B aggregation and the
+//! facts a brief is written from. `quiver-cli`'s `lab` module drives
 //! podman and the per-instance supervisor with these.
 //!
 //! **Invariants** (each has a test or a check at the point of use):
@@ -15,8 +15,6 @@
 //! - Displays `:0`–`:9` are reserved inside every container ([`podman::boot_script`]), and
 //!   the container has a network namespace of its own (the broker port is forwarded), so it
 //!   can't reach the host's X servers by their abstract sockets.
-//! - The person's play wins: a launch is refused while a game runs outside lab containers
-//!   ([`procs::host_games`]) or quiverd reports a session of theirs.
 
 pub mod bench;
 pub mod brief;

@@ -1,6 +1,6 @@
 //! What the lab does to a container: podman calls, screenshots, input, kill-all, and the
-//! checks before a launch (is the person playing). Blocking; the supervisor and the
-//! commands call these from their own threads.
+//! bridge check before a launch. Blocking; the supervisor and the commands call these from
+//! their own threads.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -141,22 +141,6 @@ pub fn kill_all(inst: &Inst, m: &Manifest, container_id: &str) -> Result<Vec<Str
     Ok(notes)
 }
 
-/// Why a lab launch must wait: the person's games (Windows programs outside every
-/// container), and sessions quiverd holds for them. Empty: go ahead.
-pub fn person_playing(sessions: Option<&serde_json::Value>) -> Vec<String> {
-    let mut out: Vec<String> = procs::host_games(&procs::scan()).iter().map(|p| format!("{} (pid {}) is running on the host", p.program(), p.pid)).collect();
-    for s in sessions.and_then(|v| v.as_array()).into_iter().flatten() {
-        let holders: Vec<&str> = s["holders"].as_array().into_iter().flatten().filter_map(|h| h.as_str()).collect();
-        let local = s["product_id"].as_u64() == Some(0) && s.get("game").is_some_and(|g| !g.is_null());
-        let persons = holders.iter().any(|h| matches!(*h, "launcher" | "steam")) || local;
-        if persons {
-            let what = s.get("game").and_then(|g| g.as_str()).map(str::to_owned).unwrap_or_else(|| format!("ubisoft:{}", s["product_id"]));
-            out.push(format!("quiverd has a play session for {what} ({})", if holders.is_empty() { "local".into() } else { holders.join(", ") }));
-        }
-    }
-    out
-}
-
 /// The bridge for an instance: the configured one, and only if it keeps lab sessions out
 /// of the person's records (`quiver_ipc::LAB_PROTOCOL_MARKER`).
 pub fn lab_bridge() -> Result<PathBuf> {
@@ -170,22 +154,4 @@ pub fn lab_bridge() -> Result<PathBuf> {
         );
     }
     Ok(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sessions_of_the_person() {
-        let v: serde_json::Value = serde_json::json!([
-            { "product_id": 3539, "holders": ["lab"] },
-            { "product_id": 3539, "holders": ["bridge"] },
-            { "product_id": 420, "holders": ["launcher", "bridge"] },
-            { "product_id": 0, "game": "epic:Hornbill", "holders": [] },
-        ]);
-        let p: Vec<String> = person_playing(Some(&v)).into_iter().filter(|s| s.starts_with("quiverd")).collect();
-        assert_eq!(p.len(), 2, "{p:?}");
-        assert!(p[0].contains("ubisoft:420") && p[1].contains("epic:Hornbill"));
-    }
 }
