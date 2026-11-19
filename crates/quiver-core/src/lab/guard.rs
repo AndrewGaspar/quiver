@@ -48,9 +48,20 @@ fn connect_dirs(prefix: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Delete Connect's stored login. Returns what was deleted.
+/// Delete Connect's stored login, and launch material Quiver's own launches left in the
+/// prefix's run folder (a bridge context holds a ticket; an Epic `.ovt` an ownership token).
+/// Returns what was deleted.
 pub fn strip_credentials(prefix: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    for run in ["quiver-run", "ubi-run"] {
+        for e in std::fs::read_dir(prefix.join(run)).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n == "context.json" || n.ends_with(".ovt") {
+                std::fs::remove_file(e.path())?;
+                out.push(e.path());
+            }
+        }
+    }
     for dir in connect_appdata(prefix) {
         for f in CREDENTIAL_FILES {
             let p = dir.join(f);
@@ -166,10 +177,14 @@ mod tests {
             std::fs::write(upc.join(f), b"").unwrap();
         }
         std::fs::write(app.join("ConnectSecureStorage.dat"), b"token").unwrap();
+        std::fs::create_dir_all(pfx.join("quiver-run")).unwrap();
+        std::fs::write(pfx.join("quiver-run/context.json"), b"{}").unwrap();
+        std::fs::write(pfx.join("quiver-run/bridge.log"), b"").unwrap();
         std::fs::write(app.join("settings.yaml"), "overlay:\n  enabled: true\nmisc:\n  syncsavegames: true\n").unwrap();
         assert_eq!(check(pfx).len(), 4);
         let did = enforce(pfx).unwrap();
-        assert_eq!(did.len(), 4, "{did:?}");
+        assert_eq!(did.len(), 5, "{did:?}");
+        assert!(!pfx.join("quiver-run/context.json").exists() && pfx.join("quiver-run/bridge.log").exists());
         assert!(check(pfx).is_empty());
         assert!(upc.join("upc.exe.quiver-lab-off").is_file() && upc.join("uplay_r164.dll").is_file());
         assert!(!app.join("ConnectSecureStorage.dat").exists());

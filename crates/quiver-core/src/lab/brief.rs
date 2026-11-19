@@ -60,7 +60,11 @@ pub fn render(b: &BriefInput) -> String {
         s.push_str(&format!("- Licence in the lab: {}\n", l.describe()));
     }
     s.push_str(&format!("- Install: `{}` (the instance has its own reflink clone; the original is never mounted)\n", b.install));
-    s.push_str(&format!("- Executable: `{}`", f.exe));
+    if f.exe.is_empty() {
+        s.push_str("- Executable: not known (the store doesn't say; give it with `--exe`)");
+    } else {
+        s.push_str(&format!("- Executable: `{}`", f.exe));
+    }
     if let Some(pe) = &f.pe {
         s.push_str(&format!(" ({})", pe.arch));
     }

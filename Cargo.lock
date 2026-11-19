@@ -4583,12 +4583,16 @@ name = "quiver-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "hex",
+ "image",
+ "libc",
  "quiver-api",
  "quiver-core",
  "quiver-ipc",
+ "regex",
  "rpassword",
  "serde",
  "serde_json",

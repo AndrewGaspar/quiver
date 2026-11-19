@@ -166,8 +166,16 @@ impl Inst {
     pub fn events_path(&self) -> PathBuf {
         self.dir.join("events.jsonl")
     }
+    /// The supervisor's socket: in the instance's folder, or (when that path is too long for
+    /// a Unix socket) `$XDG_RUNTIME_DIR/quiver-lab/<name>-<hash of the folder>.sock`.
     pub fn socket(&self) -> PathBuf {
-        self.dir.join("supervisor.sock")
+        let here = self.dir.join("supervisor.sock");
+        if here.as_os_str().len() < 100 {
+            return here;
+        }
+        let run = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("quiver-lab");
+        let _ = std::fs::create_dir_all(&run);
+        run.join(format!("{}-{:08x}.sock", self.name, crc32fast::hash(self.dir.as_os_str().as_encoded_bytes())))
     }
     pub fn supervisor_lock(&self) -> PathBuf {
         self.dir.join("supervisor.lock")

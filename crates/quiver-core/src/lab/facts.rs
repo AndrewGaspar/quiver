@@ -162,7 +162,8 @@ pub fn engine_hints(files: &[(PathBuf, bool)], exe: &str) -> Vec<Hint> {
     add("REDengine", has(&|p, d| !d && ext(p, "archive")));
     add("id Tech", has(&|p, d| !d && ext(p, "resources")));
     add("CryEngine", has(&|p, d| !d && name_of(p) == "crysystem.dll"));
-    add("Godot", has(&|p, d| !d && ext(p, "pck")));
+    let stem = Path::new(exe).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    add("Godot", has(&|p, d| !d && ext(p, "pck") && p.file_stem().is_some_and(|s| s.to_string_lossy().to_ascii_lowercase() == stem)));
     add("Creation Engine (Bethesda)", has(&|p, d| !d && (ext(p, "ba2") || ext(p, "bsa"))));
     add("GameMaker", has(&|p, d| !d && name_of(p) == "data.win"));
     out.into_iter().collect()
@@ -257,8 +258,17 @@ pub fn user_files(prefix: &Path, limit: usize) -> (Vec<String>, Vec<String>) {
             }
         }
     }
+    // Ubisoft SDK saves live in the Connect folder: `savegames/<user>/<product>/`.
+    let sdk = prefix.join(crate::launcher::UPC_REL).join("savegames");
+    for (rel, is_dir) in walk(&sdk, 3, 2000) {
+        if !is_dir {
+            let full = sdk.join(&rel);
+            let mtime = full.metadata().and_then(|m| m.modified()).ok();
+            saves.push((mtime, full.strip_prefix(prefix).unwrap_or(&full).display().to_string()));
+        }
+    }
     let finish = |mut v: Vec<(Option<std::time::SystemTime>, String)>| {
-        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.sort_by_key(|e| std::cmp::Reverse(e.0));
         v.into_iter().take(limit).map(|(_, s)| s).collect::<Vec<_>>()
     };
     (finish(configs), finish(saves))
@@ -289,7 +299,7 @@ pub fn gather(install: &Path, exe: &str, prefix: Option<&Path>) -> Facts {
     let pe = exe_bytes.as_deref().and_then(parse_pe);
     let install_configs = files
         .iter()
-        .filter(|(p, d)| !d && p.components().count() <= 3 && [".ini", ".cfg", ".toml", ".json", ".xml"].iter().any(|e| name_of(p).ends_with(e)))
+        .filter(|(p, d)| !d && p.components().count() <= 3 && !p.starts_with(".quiver-install") && [".ini", ".cfg", ".toml", ".json", ".xml"].iter().any(|e| name_of(p).ends_with(e)))
         .take(40)
         .map(|(p, _)| p.display().to_string())
         .collect();

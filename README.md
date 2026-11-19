@@ -572,6 +572,17 @@ to their `quiver-*` names on next use, existing `~/Games/ubi-library` and `~/Gam
 stay the defaults where they exist, and `C:\ubi\ubi-bridge.exe` (in each prefix) and
 `ubi-bridge.exe` (next to `quiver-bridge.exe`) remain as links or copies of the bridge.
 
+## Lab instances for agentic modding
+
+`quiver lab` runs a disposable, headless copy of an installed game in a container (gamescope
+headless, NVIDIA through CDI), launched with your real licence from quiverd (Ubisoft's bridge
+and broker, Epic's exchange code, or DRM-free), for an agent developing a mod: launch, wait
+for real readiness signals, keys and relative mouse, screenshots, live config edits, A/B
+measurements under a GPU lock, save fixtures. Nothing an instance does is reported to a store
+(no play time, achievements or cloud saves), Ubisoft Connect can't run in it, and your own
+play always wins. `quiver lab brief <game>` writes a ready-to-paste brief for a new agent.
+See design/LAB.md.
+
 ## Roadmap
 
 1. Core and CLI: auth, library, manifests (done)

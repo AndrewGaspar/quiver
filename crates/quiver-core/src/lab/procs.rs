@@ -63,6 +63,10 @@ pub const WINE_SERVICES: &[&str] = &[
     "xalia.exe",
     "mscorsvw.exe",
     "sc.exe",
+    "lsass.exe",
+    "winedbg.exe",
+    "wmiprvse.exe",
+    "msiexec.exe",
     "wineserver",
 ];
 
@@ -121,9 +125,15 @@ pub fn scan() -> Vec<Proc> {
 }
 
 /// Windows programs running outside every podman container: the person's games (or
-/// another Wine program of theirs). A lab launch is refused while there is one.
+/// another Wine program of theirs). A lab launch is refused while there is one. Programs in
+/// a prefix inside a build folder (`…/target/…`: a checkout's own Wine tests) aren't the
+/// person's.
 pub fn host_games(procs: &[Proc]) -> Vec<&Proc> {
-    procs.iter().filter(|p| p.container.is_none() && p.is_windows() && !p.is_wine_service()).collect()
+    procs
+        .iter()
+        .filter(|p| p.container.is_none() && p.is_windows() && !p.is_wine_service())
+        .filter(|p| !p.wineprefix.as_deref().is_some_and(|w| w.contains("/target/")))
+        .collect()
 }
 
 /// The processes in a container.
@@ -217,6 +227,8 @@ mod tests {
             p(12, "ACOrigins.exe", r"C:\Games\ACOrigins.exe", Some(ID), Some("/pf")),
             p(13, "bash", "bash", None, None),
             p(14, "AlanWake.exe", "Z:\\home\\u\\Games\\AlanWake.exe", None, None),
+            p(15, "d3d12_present.e", r"Z:\t\d3d12_present.exe", None, Some("/home/u/code/q/target/wine-test/pfx")),
+            p(16, "lsass.exe", r"C:\windows\system32\lsass.exe", None, Some("/pf")),
         ];
         let host: Vec<u32> = host_games(&procs).iter().map(|p| p.pid).collect();
         assert_eq!(host, [10, 14]);
