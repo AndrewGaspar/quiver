@@ -14,19 +14,27 @@ layout(push_constant) uniform Push {
     float offset;  // filter spread, in source texels
     float alpha;   // composite: the fade
     float dim;     // composite: darkening, 0..1
-    uint mode;     // MODE_*
+    uint mode;     // MODE_*, and SPLIT_* << 8
 } pc;
 
 const uint MODE_PREFILTER = 0u; // 4x4 box: four bilinear taps one source texel off centre
 const uint MODE_DOWN = 1u;      // Kawase down: centre x4 and four diagonal taps
 const uint MODE_UP = 2u;        // Kawase up: four axial and four diagonal (x2) taps
 const uint MODE_COMPOSITE = 3u; // up, then dim, written at alpha
+// A packed stereo frame (design/SIGHT.md §15): every tap stays inside the eye (half) the
+// fragment is in, so neither eye's blur takes colour from the other across the seam. Levels
+// have even sizes, so the seam (uv 0.5) is a texel edge at every level.
+const uint SPLIT_X = 1u;        // left | right (sbs, hsbs)
+const uint SPLIT_Y = 2u;        // top / bottom (tab, htab)
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 
+vec2 lo;
+vec2 hi;
+
 vec3 tap(vec2 d) {
-    return texture(src, uv + d * pc.texel).rgb;
+    return texture(src, clamp(uv + d * pc.texel, lo, hi)).rgb;
 }
 
 vec3 up() {
@@ -38,16 +46,28 @@ vec3 up() {
 }
 
 void main() {
+    uint mode = pc.mode & 0xffu;
+    uint split = pc.mode >> 8;
+    lo = vec2(0.0);
+    hi = vec2(1.0);
+    if (split == SPLIT_X) {
+        if (uv.x < 0.5) hi.x = 0.5; else lo.x = 0.5;
+    } else if (split == SPLIT_Y) {
+        if (uv.y < 0.5) hi.y = 0.5; else lo.y = 0.5;
+    }
+    // Half a source texel in: bilinear taps never reach past the edge (as clamp-to-edge).
+    lo += 0.5 * pc.texel;
+    hi -= 0.5 * pc.texel;
     vec3 c;
-    if (pc.mode == MODE_PREFILTER) {
+    if (mode == MODE_PREFILTER) {
         c = 0.25 * (tap(vec2(-1.0, -1.0)) + tap(vec2(1.0, -1.0)) + tap(vec2(-1.0, 1.0)) + tap(vec2(1.0, 1.0)));
-    } else if (pc.mode == MODE_DOWN) {
+    } else if (mode == MODE_DOWN) {
         float o = pc.offset;
         c = (4.0 * tap(vec2(0.0)) + tap(vec2(-o, -o)) + tap(vec2(o, -o)) + tap(vec2(-o, o)) + tap(vec2(o, o))) / 8.0;
     } else {
         c = up();
     }
-    if (pc.mode == MODE_COMPOSITE) {
+    if (mode == MODE_COMPOSITE) {
         color = vec4(c * (1.0 - pc.dim), pc.alpha);
     } else {
         color = vec4(c, 1.0);

@@ -50,6 +50,8 @@ pub struct Telemetry {
     pub blur_last_ns: AtomicI64,
     pub backdrop_gpu_ns: AtomicU32,
     pub blur_error: AtomicU32,
+    /// `STEREO_DRAWN_VALID | STEREO_*`: the layout of the last image drawn (status block).
+    pub stereo_drawn: AtomicU32,
 }
 
 /// `LAYER_BLURRING` stays set this long after a blurred present.
@@ -79,6 +81,13 @@ pub fn note_blur_gpu(ns: u64) {
     let _ = t.backdrop_gpu_ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
         Some(if old == 0 { ns } else { (old as i64 + (ns as i64 - old as i64) / 8) as u32 })
     });
+}
+
+/// An image of layout `code` (`STEREO_*`) was drawn: the status block says so.
+pub fn note_stereo_drawn(code: u32) {
+    if let Some(t) = get() {
+        t.stereo_drawn.store(quiver_perf::layout::STEREO_DRAWN_VALID | (code & 0xff), Ordering::Relaxed);
+    }
 }
 
 /// Sets up the ring and thread the first time a swapchain is created. `None` when the game
@@ -125,6 +134,7 @@ pub fn init() -> Option<&'static Telemetry> {
                 blur_last_ns: AtomicI64::new(0),
                 backdrop_gpu_ns: AtomicU32::new(0),
                 blur_error: AtomicU32::new(0),
+                stereo_drawn: AtomicU32::new(0),
             })
         })
         .as_ref()
@@ -171,6 +181,8 @@ impl Telemetry {
             s.flags |= LAYER_BLURRING;
         }
         s.backdrop_gpu_ns = self.backdrop_gpu_ns.load(Ordering::Relaxed);
+        s.stereo_setting = crate::stereo_setting().code();
+        s.stereo_drawn = self.stereo_drawn.load(Ordering::Relaxed);
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }

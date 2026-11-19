@@ -25,6 +25,7 @@ const OFF_HEARTBEAT: usize = offset_of!(HudHeader, heartbeat);
 const OFF_PID: usize = offset_of!(HudHeader, writer_pid);
 const OFF_BACKDROP: usize = offset_of!(HudHeader, backdrop);
 const OFF_BACKDROP_UNTIL: usize = offset_of!(HudHeader, backdrop_until);
+const OFF_STEREO: usize = offset_of!(HudHeader, stereo);
 const DESC_WORDS: usize = HUD_PIXELS_OFFSET / 8;
 
 /// The layer stops drawing an image whose writer heartbeat is older than this (§2.8).
@@ -98,7 +99,7 @@ impl HudBufferHeader {
         opacity: 1.0,
         ngraphs: 0,
         graph: [HudGraph::ZERO; HUD_MAX_GRAPHS],
-        _pad0: 0,
+        stereo: 0,
         model_rev: 0,
         dirty_y0: 0,
         dirty_y1: 0,
@@ -161,7 +162,16 @@ impl HudBufferHeader {
         let inside = |x: i32, y: i32, w: i64, h: i64, cw: u32, ch: u32| {
             x >= 0 && y >= 0 && x as i64 + w <= cw as i64 && y as i64 + h <= ch as i64
         };
-        if !inside(self.x, self.y, self.width as i64, self.height as i64, self.extent_w, self.extent_h) {
+        // A stereo image is laid out in one eye's logical space (crate::stereo).
+        let Some(stereo) = crate::stereo::Stereo::from_code(self.stereo) else {
+            return Err(inv("stereo layout"));
+        };
+        let extent = (self.extent_w, self.extent_h);
+        if stereo.is_stereo() && !stereo.fits(extent) {
+            return Err(inv("stereo layout on a frame too small to split"));
+        }
+        let (cw, ch) = stereo.logical_extent(extent);
+        if !inside(self.x, self.y, self.width as i64, self.height as i64, cw, ch) {
             return Err(inv("image outside the swapchain"));
         }
         if self.ngraphs as usize > HUD_MAX_GRAPHS {
@@ -230,14 +240,27 @@ pub struct BackdropRequest {
     pub radius: u16,
     /// CLOCK_MONOTONIC_RAW ns.
     pub until: u64,
+    /// How the game's frames pack their eyes (`qv_hud_header.stereo`, `crate::stereo`): the
+    /// blur stays inside each eye. Written before the word, read after it.
+    pub stereo: u32,
 }
 
 impl BackdropRequest {
-    pub const NONE: BackdropRequest = BackdropRequest { mode: HUD_BACKDROP_NONE, dim: 0, radius: 0, until: 0 };
+    pub const NONE: BackdropRequest = BackdropRequest { mode: HUD_BACKDROP_NONE, dim: 0, radius: 0, until: 0, stereo: 0 };
 
     /// A blur until `until_ns`, dim and radius in 1/1000 (clamped to 1000).
     pub fn blur(dim: u16, radius: u16, until_ns: i64) -> BackdropRequest {
-        BackdropRequest { mode: HUD_BACKDROP_BLUR, dim: dim.min(1000), radius: radius.min(1000), until: until_ns.max(0) as u64 }
+        BackdropRequest { mode: HUD_BACKDROP_BLUR, dim: dim.min(1000), radius: radius.min(1000), until: until_ns.max(0) as u64, stereo: 0 }
+    }
+
+    /// The same request for frames packed as `s`.
+    pub fn with_stereo(self, s: crate::stereo::Stereo) -> BackdropRequest {
+        BackdropRequest { stereo: s.code(), ..self }
+    }
+
+    /// The layout the blur keeps its samples inside (mono for an unknown code).
+    pub fn stereo(&self) -> crate::stereo::Stereo {
+        crate::stereo::Stereo::from_code(self.stereo).unwrap_or_default()
     }
 
     /// The request asks for a blur at `now_ns`.
@@ -261,8 +284,8 @@ impl BackdropRequest {
         self.mode as u64 | (self.dim as u64) << 32 | (self.radius as u64) << 48
     }
 
-    fn from_words(word: u64, until: u64) -> BackdropRequest {
-        BackdropRequest { mode: word as u32, dim: (word >> 32) as u16, radius: (word >> 48) as u16, until }
+    fn from_words(word: u64, until: u64, stereo: u32) -> BackdropRequest {
+        BackdropRequest { mode: word as u32, dim: (word >> 32) as u16, radius: (word >> 48) as u16, until, stereo }
     }
 }
 
@@ -272,6 +295,7 @@ pub fn set_backdrop<R: ShmRegion>(region: &R, b: &BackdropRequest) {
         region.u64_at(OFF_BACKDROP).store(0, Ordering::Release);
         region.u64_at(OFF_BACKDROP_UNTIL).store(0, Ordering::Relaxed);
     } else {
+        region.u32_at(OFF_STEREO).store(b.stereo, Ordering::Relaxed);
         region.u64_at(OFF_BACKDROP_UNTIL).store(b.until, Ordering::Relaxed);
         region.u64_at(OFF_BACKDROP).store(b.word(), Ordering::Release);
     }
@@ -285,8 +309,9 @@ pub fn read_backdrop<R: ShmRegion>(region: &R, now_ns: i64) -> BackdropRequest {
         return BackdropRequest::NONE;
     }
     let until = region.u64_at(OFF_BACKDROP_UNTIL).load(Ordering::Acquire);
+    let stereo = region.u32_at(OFF_STEREO).load(Ordering::Relaxed);
     let cap = (now_ns.max(0) as u64).saturating_add(HUD_BACKDROP_MAX_HOLD_NS);
-    BackdropRequest::from_words(word, until.min(cap))
+    BackdropRequest::from_words(word, until.min(cap), stereo)
 }
 
 /// A validated `hud.image` header.
@@ -675,6 +700,37 @@ mod tests {
         let d = desc(64, 64, 1);
         w.publish(&d, &pixels(&d)).unwrap();
         assert_eq!((r.backdrop(1_000), r.published()), (req, 1));
+    }
+
+    #[test]
+    fn stereo_images_and_requests() {
+        use crate::stereo::Stereo;
+        // The blur's layout travels with the request.
+        let bb = buffer_bytes_for(64, 64).unwrap();
+        let mem = Arc::new(HeapRegion::new(hud_file_bytes(bb)));
+        init_hud(&mem, bb).unwrap();
+        let w = HudWriter::new(mem.clone()).unwrap();
+        let r = HudReader::new(mem.clone()).unwrap();
+        w.set_backdrop(&BackdropRequest::blur(0, 0, 2_000).with_stereo(Stereo::Hsbs));
+        assert_eq!(r.backdrop(1_000).stereo(), Stereo::Hsbs);
+        assert_eq!(mem.u32_at(OFF_STEREO).load(Ordering::Relaxed), crate::stereo::STEREO_HSBS);
+        mem.u32_at(OFF_STEREO).store(77, Ordering::Relaxed);
+        assert_eq!(r.backdrop(1_000).stereo(), Stereo::Mono, "an unknown code blurs as mono");
+        // A stereo image is placed in one eye's logical space: sbs on 3840x1080 is 1920 wide.
+        let bb = buffer_bytes_for(200, 100).unwrap();
+        let mut d = desc(200, 100, 1);
+        (d.extent_w, d.extent_h, d.stereo) = (3840, 1080, Stereo::Sbs.code());
+        d.x = 1700;
+        assert!(d.validate(bb, Some((3840, 1080))).is_ok());
+        d.x = 1800;
+        assert_eq!(d.validate(bb, Some((3840, 1080))), Err(Error::Invalid("image outside the swapchain")), "past the eye");
+        // hsbs keeps the window's width as the logical width.
+        (d.extent_w, d.stereo, d.x) = (1920, Stereo::Hsbs.code(), 1700);
+        assert!(d.validate(bb, Some((1920, 1080))).is_ok());
+        d.stereo = 9;
+        assert_eq!(d.validate(bb, Some((1920, 1080))), Err(Error::Invalid("stereo layout")));
+        (d.stereo, d.extent_w, d.x) = (Stereo::Sbs.code(), 3, 0);
+        assert!(d.validate(bb, Some((3, 1080))).is_err());
     }
 
     #[test]

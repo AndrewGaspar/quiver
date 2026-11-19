@@ -256,7 +256,18 @@ pub struct LayerStatus {
     /// The last capture request (`capture.req` in the session dir) the layer wrote out
     /// (`capture-<n>.raw` and `.json`); 0 none.
     pub capture_done: u64,
+    // ---- appended (stereo, design/SIGHT.md §15, 2026-11-19): zero from layers before.
+    /// The launch's `sight.stereo` setting as the layer's environment has it
+    /// (`QUIVER_SIGHT_STEREO`): 0 unset or `auto`, `STEREO_SETTING_SET | STEREO_*`, or
+    /// `STEREO_SETTING_INVALID`.
+    pub stereo_setting: u32,
+    /// The layout of the last frame the layer drew the HUD or the panel on
+    /// (`STEREO_*`), with [`STEREO_DRAWN_VALID`] once it has drawn one.
+    pub stereo_drawn: u32,
 }
+
+/// `LayerStatus::stereo_drawn`: the layer has drawn an image (the low byte is its layout).
+pub const STEREO_DRAWN_VALID: u32 = 1 << 8;
 
 /// `LayerStatus::hdr_flags`: the app set HDR metadata on the target swapchain.
 pub const HDR_METADATA_SET: u32 = 1 << 0;
@@ -420,7 +431,11 @@ pub struct HudHeader {
     /// CLOCK_MONOTONIC_RAW ns: the request lapses after this (the writer renews it while the
     /// panel is open, so a writer that dies stops the blur within a few seconds).
     pub backdrop_until: u64,
-    pub _pad2: [u8; HUD_HEADER_BYTES - 144],
+    /// Offset 144: how the game's frames pack their eyes (`STEREO_*`, design/SIGHT.md §15),
+    /// written with the backdrop request: the layer keeps the blur's samples inside each eye.
+    /// Was padding: zero (mono) from writers before.
+    pub stereo: u32,
+    pub _pad2: [u8; HUD_HEADER_BYTES - 148],
 }
 
 /// `qv_hud_header.backdrop`: nothing behind the panel (or no panel).
@@ -482,7 +497,8 @@ pub struct HudBufferHeader {
     /// The swapchain extent it was laid out for.
     pub extent_w: u32,
     pub extent_h: u32,
-    /// Where it goes, in swapchain pixels (anchor resolved).
+    /// Where it goes, in swapchain pixels (anchor resolved); with `stereo`, in one eye's
+    /// logical pixels.
     pub x: i32,
     pub y: i32,
     /// Applied by the layer, so fades need no re-render.
@@ -490,7 +506,11 @@ pub struct HudBufferHeader {
     /// ≤ 2.
     pub ngraphs: u32,
     pub graph: [HudGraph; HUD_MAX_GRAPHS],
-    pub _pad0: u32,
+    /// How the frame packs its eyes (`crate::stereo`, `STEREO_*`; design/SIGHT.md §15). Not
+    /// mono: the image is laid out for one eye's logical size and `x`/`y` are in that eye's
+    /// logical pixels; the layer draws it once per eye (squeezed for `hsbs`/`htab`). Was
+    /// padding: zero (mono) from writers before.
+    pub stereo: u32,
     /// The HUD model revision this image shows.
     pub model_rev: u64,
     /// Rows `dirty_y0..dirty_y1` are all that changed since the image published as
@@ -512,14 +532,16 @@ const _: () = {
     assert!(size_of::<StatusBlock>() == RING_STATUS_BYTES);
     assert!(size_of::<Record>() == SLOT_BYTES);
     assert!(align_of::<Record>() == 8);
-    assert!(size_of::<LayerStatus>() == 400);
+    assert!(size_of::<LayerStatus>() == 408);
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
     assert!(offset_of!(HudHeader, backdrop) == 128);
     assert!(offset_of!(HudHeader, backdrop_until) == 136);
+    assert!(offset_of!(HudHeader, stereo) == 144);
     assert!(size_of::<HudGraph>() == 60);
     assert!(size_of::<HudBufferHeader>() == HUD_PIXELS_OFFSET);
+    assert!(offset_of!(HudBufferHeader, stereo) == 172);
     assert!(offset_of!(HudBufferHeader, model_rev) == 176);
     assert!(offset_of!(HudBufferHeader, dirty_base) == 192);
     assert!(RING_MAGIC.to_le_bytes()[0] == b'Q' && RING_MAGIC.to_le_bytes()[7] == b'G');
@@ -617,6 +639,8 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, hdr_max_cll),
     o!("qv_layer_status", LayerStatus, hdr_primaries),
     o!("qv_layer_status", LayerStatus, capture_done),
+    o!("qv_layer_status", LayerStatus, stereo_setting),
+    o!("qv_layer_status", LayerStatus, stereo_drawn),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
@@ -628,6 +652,7 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_hud_header", HudHeader, backdrop_dim),
     o!("qv_hud_header", HudHeader, backdrop_radius),
     o!("qv_hud_header", HudHeader, backdrop_until),
+    o!("qv_hud_header", HudHeader, stereo),
     o!("qv_hud_graph", HudGraph, x),
     o!("qv_hud_graph", HudGraph, y),
     o!("qv_hud_graph", HudGraph, w),
@@ -656,6 +681,7 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_hud_buffer", HudBufferHeader, opacity),
     o!("qv_hud_buffer", HudBufferHeader, ngraphs),
     o!("qv_hud_buffer", HudBufferHeader, graph),
+    o!("qv_hud_buffer", HudBufferHeader, stereo),
     o!("qv_hud_buffer", HudBufferHeader, model_rev),
     o!("qv_hud_buffer", HudBufferHeader, dirty_y0),
     o!("qv_hud_buffer", HudBufferHeader, dirty_base),
@@ -778,4 +804,12 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_PRESENT_F_HUD_NS", crate::record::PRESENT_F_HUD_NS as u64),
     ("QV_PRESENT_NFIELDS", crate::record::PRESENT_NFIELDS as u64),
     ("QV_COMMIT_BUSY", crate::ring::COMMIT_BUSY),
+    ("QV_STEREO_MONO", crate::stereo::STEREO_MONO as u64),
+    ("QV_STEREO_SBS", crate::stereo::STEREO_SBS as u64),
+    ("QV_STEREO_HSBS", crate::stereo::STEREO_HSBS as u64),
+    ("QV_STEREO_TAB", crate::stereo::STEREO_TAB as u64),
+    ("QV_STEREO_HTAB", crate::stereo::STEREO_HTAB as u64),
+    ("QV_STEREO_SETTING_SET", crate::stereo::STEREO_SETTING_SET as u64),
+    ("QV_STEREO_SETTING_INVALID", crate::stereo::STEREO_SETTING_INVALID as u64),
+    ("QV_STEREO_DRAWN_VALID", STEREO_DRAWN_VALID as u64),
 ];

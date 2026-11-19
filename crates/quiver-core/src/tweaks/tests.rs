@@ -75,13 +75,18 @@ fn the_catalog_parses_and_lints_clean_with_the_defaults_game_s_choice() {
     assert!(c.plan.entries.is_empty() && c.plan.env.is_empty());
     for (id, d) in &s.options {
         let v = d.default.clone().unwrap_or_else(|| panic!("{id} has no default"));
-        let off = matches!(scalar_text(&v).as_str(), "app" | "0" | "false") || d.when.is_some();
+        let off = matches!(scalar_text(&v).as_str(), "app" | "auto" | "0" | "false") || d.when.is_some();
         assert!(off, "{id} defaults to {v}");
     }
     // The v1 list (TWEAKS §4.1).
     for id in ["fps.cap", "sync.vsync", "sync.max_latency", "latency.mode", "dlss.sr.model", "dlss.sr.scale", "dlss.rr.model", "dlss.fg.model", "dlss.fg.frames", "dlss.fg.target", "dlss.runtime", "dlss.indicator", "fg.smooth_motion", "tex.anisotropy", "tex.lod_bias", "hdr"] {
         assert!(s.options.contains_key(id), "{id}");
     }
+    // sight.stereo (design/SIGHT.md §15): the Sight layer's environment, nothing for auto.
+    let c = plan_with(json!({"sight.stereo": "hsbs"}), &nvidia(50), &[]);
+    assert_eq!(c.plan.env.get("QUIVER_SIGHT_STEREO").map(String::as_str), Some("hsbs"), "{:?}", c.plan.env);
+    let c = plan_with(json!({"sight.stereo": "auto"}), &nvidia(50), &[]);
+    assert!(c.plan.env.is_empty());
     // Every preset validates.
     for p in &s.presets {
         for (id, v) in &p.set {

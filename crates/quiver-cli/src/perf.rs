@@ -682,6 +682,9 @@ fn print_status(s: &HudStatus) {
             i.heartbeat_age_ms.map(|a| format!("quiver-sight heartbeat {a} ms ago")).unwrap_or_else(|| "no renderer yet".into())
         );
     }
+    if let Some(st) = &s.stereo {
+        println!("  stereo: {}", st.line());
+    }
     println!("  captures: {:?}  model rev {}", s.captures, s.model_rev);
     if let Some(e) = &s.last_error {
         println!("  last error: {e}");

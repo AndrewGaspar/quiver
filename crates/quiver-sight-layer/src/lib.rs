@@ -115,9 +115,15 @@ pub mod env {
     /// its own format ([`crate::hdr`]; `quiver lab` instances set it, games of the person's
     /// don't).
     pub const CAPTURE: &str = "QUIVER_SIGHT_CAPTURE";
+    /// The `sight.stereo` setting (design/SIGHT.md §15): how the game's frames pack their
+    /// eyes when no mod says (`auto`, `mono`, `sbs`, `hsbs`, `tab`, `htab`). The layer only
+    /// reports it (status block); quiver-sight lays the HUD and panel out for the layout
+    /// quiverd resolves and tells the layer per image.
+    pub use quiver_perf::stereo::ENV_STEREO as STEREO;
 }
 
 struct Config {
+    stereo: quiver_perf::stereo::Setting,
     draw: bool,
     blur: bool,
     log: bool,
@@ -129,12 +135,18 @@ fn config() -> &'static Config {
     C.get_or_init(|| {
         let flag = |k: &str| std::env::var(k).ok();
         Config {
+            stereo: quiver_perf::stereo::Setting::parse(flag(env::STEREO).as_deref()),
             draw: flag(env::DRAW).as_deref() != Some("0"),
             blur: flag(env::BLUR).as_deref() != Some("0"),
             log: flag(env::LOG).is_some_and(|v| !v.is_empty() && v != "0"),
             capture: flag(env::CAPTURE).as_deref() == Some("1"),
         }
     })
+}
+
+/// The launch's `sight.stereo` setting, for the status block.
+pub(crate) fn stereo_setting() -> quiver_perf::stereo::Setting {
+    config().stereo
 }
 
 /// Swapchains get `TRANSFER_SRC` for captures ([`hdr`]).

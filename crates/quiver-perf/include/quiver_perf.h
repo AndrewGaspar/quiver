@@ -156,6 +156,16 @@ extern "C" {
 #define QV_HUD_BACKDROP_DEFAULT_RADIUS 25 /* backdrop_radius 0: 2.5% of the swapchain height */
 #define QV_HUD_BACKDROP_MAX_HOLD_NS 10000000000ull /* a later backdrop_until counts as now + this */
 
+/* Packed stereo frames (qv_hud_buffer.stereo, qv_hud_header.stereo, qv_layer_status). */
+#define QV_STEREO_MONO            0
+#define QV_STEREO_SBS             1 /* 2x wide, each half an eye at 1:1 */
+#define QV_STEREO_HSBS            2 /* each half an eye squeezed 2:1 horizontally */
+#define QV_STEREO_TAB             3 /* 2x tall, top half the left eye */
+#define QV_STEREO_HTAB            4 /* each half an eye squeezed 2:1 vertically */
+#define QV_STEREO_SETTING_SET     0x100
+#define QV_STEREO_SETTING_INVALID 0x200
+#define QV_STEREO_DRAWN_VALID     0x100
+
 #define QV_GRAPH_SERIES_PRESENTED      1
 #define QV_GRAPH_SERIES_BASE           2
 #define QV_GRAPH_SERIES_GENERATED_TINT 4
@@ -253,6 +263,9 @@ typedef struct qv_layer_status {
     uint32_t hdr_min_luminance;
     uint32_t hdr_primaries[8];  /* r x,y g x,y b x,y white x,y, CIE 1931 xy in 1/100000 */
     uint64_t capture_done;      /* the last capture request written out (capture-<n>.raw/.json) */
+    /* appended (stereo): zero from layers before */
+    uint32_t stereo_setting;    /* QUIVER_SIGHT_STEREO: 0 auto/unset, QV_STEREO_SETTING_SET | QV_STEREO_*, or _INVALID */
+    uint32_t stereo_drawn;      /* QV_STEREO_DRAWN_VALID | the layout of the last frame drawn on */
 } qv_layer_status;
 
 #define QV_HDR_METADATA_SET   (1u << 0)
@@ -281,7 +294,8 @@ typedef struct qv_hud_header {      /* offset 0, one 4 KiB page */
     uint16_t backdrop_dim;          /* darkening, 1/1000 */
     uint16_t backdrop_radius;       /* blur radius, 1/1000 of the swapchain height; 0: default */
     uint64_t backdrop_until;        /* CLOCK_MONOTONIC_RAW ns; renewed while the panel is open */
-    uint8_t  _pad2[3952];
+    uint32_t stereo;                /* QV_STEREO_*: the blur keeps its samples inside each eye */
+    uint8_t  _pad2[3948];
 } qv_hud_header;
 
 typedef struct qv_hud_graph {       /* a rectangle the layer fills with the live graph */
@@ -299,11 +313,11 @@ typedef struct qv_hud_buffer {      /* at header_bytes + i * buffer_bytes */
     uint32_t format;                /* QV_HUD_FORMAT_RGBA8_PREMUL_SRGB */
     float    scale;                 /* image pixels per logical px */
     uint32_t extent_w, extent_h;    /* the swapchain extent it was laid out for */
-    int32_t  x, y;                  /* where it goes, in swapchain pixels */
+    int32_t  x, y;                  /* where it goes, in swapchain pixels (stereo: one eye's logical px) */
     float    opacity;               /* applied by the layer */
     uint32_t ngraphs;               /* <= 2 */
     qv_hud_graph graph[QV_HUD_MAX_GRAPHS];
-    uint32_t _pad0;
+    uint32_t stereo;                /* QV_STEREO_*: not mono, laid out for one eye, drawn in each */
     uint64_t model_rev;             /* the HUD model revision this image shows */
     uint32_t dirty_y0, dirty_y1;    /* panel.image: rows changed since publish dirty_base */
     uint64_t dirty_base;            /* 0: none promised (hud.image writers leave these 0) */
@@ -356,7 +370,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 400);
+QV_ASSERT_SIZE(qv_layer_status, 408);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -399,6 +413,8 @@ QV_ASSERT_OFFSET(qv_layer_status, hdr_flags, 336);
 QV_ASSERT_OFFSET(qv_layer_status, hdr_max_cll, 344);
 QV_ASSERT_OFFSET(qv_layer_status, hdr_primaries, 360);
 QV_ASSERT_OFFSET(qv_layer_status, capture_done, 392);
+QV_ASSERT_OFFSET(qv_layer_status, stereo_setting, 400);
+QV_ASSERT_OFFSET(qv_layer_status, stereo_drawn, 404);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);
@@ -411,6 +427,7 @@ QV_ASSERT_OFFSET(qv_hud_header, backdrop, 128);
 QV_ASSERT_OFFSET(qv_hud_header, backdrop_dim, 132);
 QV_ASSERT_OFFSET(qv_hud_header, backdrop_radius, 134);
 QV_ASSERT_OFFSET(qv_hud_header, backdrop_until, 136);
+QV_ASSERT_OFFSET(qv_hud_header, stereo, 144);
 QV_ASSERT_SIZE(qv_hud_graph, 60);
 QV_ASSERT_OFFSET(qv_hud_graph, x, 0);
 QV_ASSERT_OFFSET(qv_hud_graph, y, 4);
@@ -441,6 +458,7 @@ QV_ASSERT_OFFSET(qv_hud_buffer, y, 40);
 QV_ASSERT_OFFSET(qv_hud_buffer, opacity, 44);
 QV_ASSERT_OFFSET(qv_hud_buffer, ngraphs, 48);
 QV_ASSERT_OFFSET(qv_hud_buffer, graph, 52);
+QV_ASSERT_OFFSET(qv_hud_buffer, stereo, 172);
 QV_ASSERT_OFFSET(qv_hud_buffer, model_rev, 176);
 QV_ASSERT_OFFSET(qv_hud_buffer, dirty_y0, 184);
 QV_ASSERT_OFFSET(qv_hud_buffer, dirty_base, 192);

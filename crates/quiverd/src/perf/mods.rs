@@ -112,10 +112,33 @@ impl ModMetricsSink for PerfModSink {
         });
     }
 
+    fn stereo(&self, m: &ModSdkConnection) {
+        let Some(hub) = self.hub.upgrade() else { return };
+        let layout = m.stereo.as_deref().and_then(quiver_perf::stereo::Stereo::parse);
+        let r = hub.with_session(m.session.as_deref(), m.product_id, |s| {
+            match layout {
+                Some(l) => s.sdk_stereo = Some((l, m.surface.clone(), m.conn)),
+                // Withdrawn: only this connection's word goes.
+                None if s.sdk_stereo.as_ref().is_some_and(|(_, _, c)| *c == m.conn) => s.sdk_stereo = None,
+                None => {}
+            }
+            s.dirty = true;
+            s.id.clone()
+        });
+        match r {
+            Some(sid) => tracing::info!(session = %sid, surface = %m.surface, stereo = ?m.stereo, "stereo layout from the mod"),
+            None => tracing::debug!(product_id = m.product_id, surface = %m.surface, "a mod's stereo layout for a game without a perf session"),
+        }
+    }
+
     fn disconnected(&self, m: &ModSdkConnection) {
         let Some(hub) = self.hub.upgrade() else { return };
         let pid = producer_id(m);
         let r = hub.with_session(m.session.as_deref(), m.product_id, |s| {
+            if s.sdk_stereo.as_ref().is_some_and(|(_, _, c)| *c == m.conn) {
+                s.sdk_stereo = None;
+                s.dirty = true;
+            }
             let last = match s.mod_conns.get_mut(&m.surface) {
                 Some(c) => {
                     c.remove(&m.conn);
