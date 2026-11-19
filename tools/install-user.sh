@@ -5,6 +5,8 @@
 #                                             quiver-webview: the Epic sign-in window, needs webkit2gtk-4.1 at run time)
 #   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
+#   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_input.so  (the Sight panel's input
+#                                             preload, LD_PRELOADed with the layer)
 #   ~/.local/lib/quiver/skills/quiver/SKILL.md, linked as `quiver` into each agent skills
 #                                             directory that exists (~/.claude/skills,
 #                                             ~/.agents/skills, ~/.codex/skills); a `quiver`
@@ -295,10 +297,10 @@ cargo build --release --locked -p quiver-bridge --target x86_64-pc-windows-gnu
 # i686-unknown-linux-gnu; also needs 32-bit glibc, lib32-glibc on Arch).
 sight_i686=0
 if rustup target list --installed 2>/dev/null | grep -qx i686-unknown-linux-gnu; then
-    if cargo build --release --locked -p quiver-sight-layer --lib --target i686-unknown-linux-gnu; then
+    if cargo build --release --locked -p quiver-sight-layer -p quiver-sight-input --lib --target i686-unknown-linux-gnu; then
         sight_i686=1
     else
-        echo "Note: the 32-bit Sight layer didn't build; installing without it."
+        echo "Note: the 32-bit Sight layer and input preload didn't build; installing without them."
     fi
 else
     echo "Note: no 32-bit Sight layer (rustup target add i686-unknown-linux-gnu to build it)."

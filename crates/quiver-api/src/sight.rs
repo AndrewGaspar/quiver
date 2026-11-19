@@ -154,6 +154,15 @@ pub struct PanelReport {
     /// The game's toplevel the panel is tied to (app id, title, how it was found), when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_window: Option<String>,
+    /// Where the panel is drawn: `game` (composited into the game's frames by the Sight layer,
+    /// input through the preload; design/SIGHT.md §14) or `desktop` (a layer-shell surface
+    /// with the keyboard). Empty from a quiver-sight from before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presenter: String,
+    /// Why that one ("the Sight layer draws it in the game", "the input preload isn't in the
+    /// game …").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presenter_detail: String,
     /// The last command it acted on.
     #[serde(default)]
     pub handled_seq: u64,

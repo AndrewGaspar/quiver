@@ -65,6 +65,7 @@ impl Daemon {
                 let install = crate::mods::installed(game).ok().map(|g| g.install_dir);
                 let (cfg, off, _) = hub.launch_config(&game, profile.as_deref(), install.as_deref(), &s.env, true);
                 let mut plan = super::launch::plan(&cfg, &env, &s.env, &s.wrappers, super::launch::installed_layer_dir(hub.data_dir()).as_deref());
+                super::launch::add_input_preload(&mut plan, &s.env, super::launch::installed_input_preload().as_deref());
                 if let Some(why) = off {
                     plan.notes = vec![format!("no Sight layer: {why}; the launch is unchanged")];
                     plan.layer_off = Some(why);

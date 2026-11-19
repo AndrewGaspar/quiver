@@ -8,11 +8,12 @@
 # <staging root><path>):
 #   BINDIR      quiver, quiverd, quiver-app, quiver-sight, quiver-webview, ubi (the CLI's old name)  (/usr/bin)
 #   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
-#               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
+#               sight/<arch>/libquiver_sight_layer.so,
+#               sight/<arch>/libquiver_sight_input.so         (/usr/lib/quiver)
 #               skills/quiver/SKILL.md (the agent skill: how agents use Quiver)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
-#   SIGHT_LAYER_I686=1  also the 32-bit Sight layer (built for i686-unknown-linux-gnu)
+#   SIGHT_LAYER_I686=1  also the 32-bit Sight layer and input preload (built for i686-unknown-linux-gnu)
 #   UNITDIR     quiverd.service (systemd user unit)          (/usr/lib/systemd/user)
 #   LICENSEDIR  LICENSE and third-party licenses             (/usr/share/licenses/quiver)
 #   EXEC_START  the unit's ExecStart                         ($BINDIR/quiverd)
@@ -62,6 +63,13 @@ sight_layer() { # <built .so> <arch>
 sight_layer "$target/release/libquiver_sight_layer.so" x86_64
 if [[ ${SIGHT_LAYER_I686:-0} == 1 ]]; then
     sight_layer "$target/i686-unknown-linux-gnu/release/libquiver_sight_layer.so" i686
+fi
+# The Sight panel's input preload (crates/quiver-sight-input), libquiver_sight_input.so, next
+# to the layer: quiverd puts $LIBDIR/sight/$PLATFORM/libquiver_sight_input.so in LD_PRELOAD for
+# launches with the layer (ld.so's $PLATFORM is x86_64 or i686, these directories' names).
+install -Dm755 "$target/release/libquiver_sight_input.so" "$root$LIBDIR/sight/x86_64/libquiver_sight_input.so"
+if [[ ${SIGHT_LAYER_I686:-0} == 1 ]]; then
+    install -Dm755 "$target/i686-unknown-linux-gnu/release/libquiver_sight_input.so" "$root$LIBDIR/sight/i686/libquiver_sight_input.so"
 fi
 
 install -d "$root$DATADIR/applications"

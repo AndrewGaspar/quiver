@@ -142,7 +142,7 @@ fn panel_in_a_d3d12_game() {
     let opened = Instant::now();
     eprintln!("panel opened on a {}x{} swapchain", extent.0, extent.1);
 
-    let mut shot = |name: &str| -> Option<Screen> {
+    let shot = |name: &str| -> Option<Screen> {
         let s = Screen::grab(&display, &title)?;
         if let Some(d) = &png {
             s.save(&d.join(format!("panel-{name}.ppm")));

@@ -28,7 +28,7 @@ Most commands also take a title, e.g. `quiver play "Alan Wake Remastered"`. `qui
 | Launch settings (Proton, env, DLLs, args, wrappers) | `quiver get GAME`, `quiver set GAME key=value` (`key=` unsets), `quiver history GAME`, `quiver restore GAME REV`; `quiver protons` lists the Proton builds |
 | Mods and profiles | `quiver mods GAME list / catalog / install … / profile … / plan` |
 | Tweaks (fps cap, vsync, Reflex, DLSS, frame gen) | `quiver tweaks …` (`explain`, `plan GAME` to preview) |
-| HUD and in-game panel | `quiver hud status GAME`, `quiver hud enable/disable GAME` (the Vulkan layer itself), `quiver hud show/hide GAME`; `quiver sight status` |
+| HUD and in-game panel | `quiver hud status GAME`, `quiver hud enable/disable GAME` (the Vulkan layer and the panel's input preload, together: the per-game off switch, e.g. for anti-cheat), `quiver hud show/hide GAME`; `quiver sight toggle/open/close`, `quiver sight status` (`drawn:` says whether the panel is in the game, taking the game's keyboard and mouse while open, or on the desktop, and why) |
 | Performance data | `quiver perf sessions`, `quiver perf watch GAME` |
 | Saves, play time, achievements | `quiver saves GAME`, `quiver playtime`, `quiver achievements GAME`, `quiver progress GAME` |
 | Epic specifics | `quiver epic saves GAME`, `quiver epic playtime`, `quiver epic extras GAME` |

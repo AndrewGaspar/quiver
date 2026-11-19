@@ -695,6 +695,12 @@ writes back the encoding it read), so a swapchain the HUD can't draw on (HDR) st
 compositor for the blur. Status: `LAYER_BLUR_READY`, `LAYER_BLURRING`, `backdrop_error`,
 `backdrop_gpu_ns` (§3.8). Off with `QUIVER_SIGHT_BLUR=0`.
 
+**The Sight panel, in the game** (SIGHT §14, "In the game", 2026-11-18). The panel itself goes
+through the same compositor: `panel.image` (this file's format at full-screen limits, with
+dirty rows) in a second plane, drawn after the HUD with the panel's cursor on top, while
+`panel.input` says the panel is open; every present that drew it marks it drawn there, which is
+what keeps the input preload capturing the game's keyboard and mouse.
+
 **Resize.** The descriptor names the swapchain extent it was laid out for. After a resize the
 layer stops drawing until an image for the new extent arrives (quiverd sees the new extent in
 the status block and sends a new model; normally well under 100 ms).

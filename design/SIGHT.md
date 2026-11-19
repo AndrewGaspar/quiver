@@ -1,7 +1,10 @@
 # Sight: Quiver's in-game overlay (design notes)
 
 Status: designed 2026-11-16; the HUD (SIGHT-HUD.md) and the panel MVP are built, see
-[§14 As built](#14-as-built-the-panel-mvp-2026-11-17). Companion to `design/MOD-CONFIG.md`
+[§14 As built](#14-as-built-the-panel-mvp-2026-11-17). *Decided 2026-11-18:* the panel is
+drawn **in the game** by the Sight layer and takes the game's keyboard and mouse **inside the
+game's process** (an LD_PRELOAD library, as Steam's overlay does), so the game keeps focus; the
+layer-shell panel is the fallback ([§14, "In the game"](#in-the-game-2026-11-18)). Companion to `design/MOD-CONFIG.md`
 (pluggable mod configuration, designed in parallel), which Sight consumes; see
 [Assumptions about MOD-CONFIG](#10-assumptions-about-mod-config). The pinned performance HUD and
 the metrics model are designed, with their steers decided, in [SIGHT-HUD.md](SIGHT-HUD.md); this
@@ -20,6 +23,7 @@ used below:
 | **toast lane** | short notifications while playing |
 | **HUD** | the pinned, always-on performance readout over the game ([SIGHT-HUD.md](SIGHT-HUD.md)); the clock / session timer / battery strip once called the "corner HUD" is its `clock` layout |
 | **Sight layer** | `VK_LAYER_QUIVER_sight`, a Vulkan layer loaded into the game process |
+| **input preload** | `libquiver_sight_input.so`, LD_PRELOADed into the game's processes with the layer: hands the game's keyboard and mouse to the panel while it's open in the game |
 | **presenter** | a way Sight gets pixels on screen (compositor surface, Sight layer, XR HUD, desktop notification) |
 
 Ubisoft's own overlay is called "the Connect overlay" here.
@@ -147,7 +151,12 @@ and `proto/proto_overlay/overlay.proto`)
   MangoHud has a `control=` Unix socket); Steam's overlay on Proton (a Vulkan layer
   `VK_LAYER_VALVE_steam_overlay` plus `gameoverlayrenderer.so` preloaded for X11 input hooks;
   GE-Proton 11.6 moved it to a vkroots implicit layer with a focus/input bridge in lsteamclient so
-  it works under Wine-Wayland); gamescope (overlay windows marked with `GAMESCOPE_EXTERNAL_OVERLAY`,
+  it works under Wine-Wayland: as shipped in GE-Proton11-12, `VK_LAYER_GE_wayland_steam_overlay`,
+  "Steam overlay input compatibility bridge for Wine Wayland", enabled by the proton script
+  (`WINE_WAYLAND_STEAM_OVERLAY_LAYER=1`) when `gameoverlayrenderer.so` is in `LD_PRELOAD`; and
+  Proton's winex11 itself drops key and mouse events in `process_events` while the named event
+  `__wine_steamclient_GameOverlayActivated`, which lsteamclient sets, is signalled — the same
+  idea, at the same place, as Sight's input preload, §14); gamescope (overlay windows marked with `GAMESCOPE_EXTERNAL_OVERLAY`,
   used by mangoapp and Steam); OBS vkcapture (a Vulkan layer that exports swapchain images as
   dma-bufs to another process: the reverse of what Sight's layer would import); discover-overlay
   (Discord overlay on Linux as a layer-shell client); wlx-overlay-s (desktop overlays in VR);
@@ -415,6 +424,15 @@ used. Pieces: one UI process; presenters = compositor surface, Sight layer compo
 texture, hypxrhud, desktop notification; input = compositor focus, hyprpad, in-layer key polling,
 in-process hooks.
 
+*Decided 2026-11-18, after spike S1 failed in the field (§6, "Focus side effects"):* the panel's
+presenter is **(a)**, the Sight layer compositing an image `quiver-sight` renders (the HUD's
+path, at the panel's size), and its input is **in-process, below Wine's drivers**: not (b)'s
+Windows-side hooks (no DLL in the game's address space, no D3D, no window-procedure hooks) but
+an LD_PRELOAD library interposing the Linux calls Wine's X11 and Wayland drivers read input
+with, as Steam's `gameoverlayrenderer.so` does. No surface takes the keyboard, so the game's
+window never deactivates. (c) stays as the fallback for games the layer can't draw in. As built
+in §14, "In the game".
+
 ### 4.2 Evaluation
 
 | Criterion | (a) Vulkan layer | (b) in-process hooks | (c) compositor | (d) gamescope | Recommended hybrid |
@@ -466,7 +484,9 @@ and narrow item 4: the layer composites the pinned HUD from the MVP. See steer 2
    unacceptable. Only built if those cases matter. The HUD doesn't wait for it: its simpler
    path (CPU readback into shared memory, re-uploaded only when it changes) suits a small image
    that changes twice a second; presenter 2 could start from it before needing dma-bufs.
-5. **Input: the compositor and hyprpad.** Keyboard/mouse via the panel surface's focus;
+5. *(Superseded 2026-11-18 for games the layer draws in: the panel takes input in the
+   game's process instead, §14 "In the game"; what follows is the desktop fallback.)*
+   **Input: the compositor and hyprpad.** Keyboard/mouse via the panel surface's focus;
    gamepad via a hyprpad mode that activates when the `quiver-sight` layer namespace is on
    screen (the game gets a neutral pad, Quiver reads the pad read-only). Summon via a Hyprland
    bind and a hyprpad chord, both calling `quiver sight toggle`.
@@ -625,6 +645,9 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
   kept the minimised window's size as its resolution (`resolution.xml`; inferred, not seen). The Sight layer passes vkd3d-proton's swapchain
   creation and presents through unchanged (tests/wine_vkd3d.rs). The panel's keyboard grab
   is what deactivated the game.
+  *Fixed 2026-11-18* by not taking focus at all: the panel is drawn in the game and gets the
+  game's input inside the game's process (§14, "In the game"); the layer-shell panel only opens
+  for games the layer can't draw in.
 - Text entry: hyprpad's OSK (`h.keyboard{…}` on a guide chord, or Sight asks hyprpad to raise it
   when a text field gets focus) types into the Sight surface through the virtual keyboard.
   Fields that matter are short (notes, search, chat quick replies); prefer pickers and steppers.
@@ -1371,3 +1394,194 @@ challenges; cursor hiding for pad use; on-screen keyboard for text options; Shif
 configurable chord; the panel on the game's own monitor when quiverd hasn't seen it focused
 (falls back to the focused monitor); session id ⇄ window matching beyond `QUIVER_SESSION` in
 the environment.
+
+### In the game (2026-11-18)
+
+**Why.** Alan Wake Remastered (exclusive fullscreen, vkd3d-proton) minimised itself when the
+layer-shell panel took the keyboard, vkd3d-proton dropped its swapchain, and the game saved a
+tiny resolution (§6, "Focus side effects"). Any surface with the keyboard deactivates the game's
+window. So the panel no longer takes focus at all: the **Sight layer draws it in the game's
+frames**, and the **game's keyboard and mouse are taken inside the game's process**, below
+Wine, the way Steam's overlay does it (§2, prior art: `gameoverlayrenderer.so` in `LD_PRELOAD`,
+and Proton's own `process_events` filter while the Steam overlay is up). The layer-shell panel
+above stays as the fallback.
+
+```
+ game process (Wine)                                   quiver-sight
+ ───────────────────                                   ────────────
+ winex11 / winewayland ──XCheckIfEvent / listeners──▶ libquiver_sight_input.so
+                                                       │  keeps input from Wine while
+                                                       │  the panel captures; forwards it
+ VK_LAYER_QUIVER_sight ◀── panel.image ───────────┐   ▼
+   composites the panel + cursor,                  │  panel.input (session dir): state,
+   marks it drawn ──────────────────────────────▶ │  deadline, cursor, the layer's and the
+                                                   │  preload's words, an event ring ──▶ PanelView in an
+                                                   └──────────────────────────────────── off-screen GPUI window
+```
+
+**Which presenter** (`quiver-sight/src/panel/mod.rs`, `panel/ingame.rs`). `quiver sight toggle`
+(and Shift+F2, the pad chord, `OverlayShowReq` later) opens the panel **in the game** when the
+session's `panel.input` says the layer can draw on the game's swapchain (its word:
+`PANEL_LAYER_CAN_DRAW`, the HUD's formats, drawing on, fresh within 3 s) and the preload has
+hooked the game's input (its word: `INPUT_X11` or `INPUT_WAYLAND`, fresh); otherwise on the
+desktop (OpenGL games, the layer turned off or anti-cheat, an HDR swapchain, no preload, a
+launch from before). If the layer hasn't composited it within 2 s of opening (the game isn't
+presenting), it moves to the desktop. `quiver sight status` says which and why (`drawn:`,
+`PanelReport.presenter`, `presenter_detail`). `QUIVER_SIGHT_PANEL=desktop` in quiver-sight's
+environment forces the desktop. In the game there is nothing to hide or show when the game
+isn't in front (the panel is in its frames), focus never moves, and nothing is restored on
+close.
+
+**The files** (quiver-perf `panel.rs`; the session dir, next to `hud.image`):
+
+- `panel.input` (4 KiB header + 1024 × 32-byte event slots), made by quiver-sight when it
+  first sees the session. quiver-sight writes `state` (open flag, cursor flag, a new epoch per
+  open), `until` (a deadline at most 2 s ahead, renewed to now + 1 s every 250 ms tick),
+  `opened_ns`, its pid, and the cursor (swapchain px). The layer writes its word (pid,
+  `PANEL_LAYER_CAN_DRAW`, the swapchain extent, a 250 ms heartbeat) and `drawn_ns` /
+  `drawn_epoch` from every present that composited the panel. The preload writes its word
+  (pid, the hooks it has, capturing, counters) and the events.
+- `panel.image`: the `hud.image` format (double buffer, per-buffer seqlock, publish counter,
+  heartbeat) with full-screen limits (4096 px a side, 64 MiB per buffer), made by
+  quiver-sight at open, sized for the swapchain, replaced for a new extent. Its descriptor's
+  new `dirty_y0`, `dirty_y1`, `dirty_base` (in what was padding: zero in every `hud.image`)
+  say which rows changed since an earlier publish; a reader whose texture holds that publish
+  copies only those rows.
+
+**The layer** (`quiver-sight-layer/src/panel.rs`, `compositor.rs`). The heartbeat thread maps
+`panel.input`, writes the layer's word, and maps `panel.image` while the panel is open (dropped
+when it closes: 32-bit games have little address space). Per present, one atomic load while
+closed; while open it takes a new image into a second plane (its own staging buffer, texture,
+descriptor sets; only the dirty rows when its texture holds the base), draws it after the HUD
+in a render pass of its own, and draws the cursor on top (an arrow, two triangles through the
+graph pipeline, at the descriptor's scale). The panel is drawn only while its image is fresh
+(heartbeat within 3 s) and laid out for this extent. The backdrop blur behind it is the
+existing request in `hud.image`, so the order is game, blur, HUD, panel, cursor. Cost: an
+upload only when the panel changes (a few rows for a selection move; the whole image, 16 MiB
+at 2560×1600, for a section change), one full-screen textured quad per present while open.
+
+**quiver-sight** (`panel/ingame.rs`). The same `PanelView` in an off-screen GPUI window (the
+HUD's path, SIGHT-HUD §2.9) at `extent / factor` logical px, where `factor` maps the game's
+monitor's logical height onto the swapchain's (2560×1600 under a 1.25 scale: 1.25, as the
+desktop panel), rendered when it changes (≤ 60 Hz) and published with its dirty rows. A thread
+drains the event ring every 4 ms and the main thread turns events into GPUI input on the view:
+keys into `KeyDown`/`KeyUp` with modifiers (evdev codes, US names; Shift+F2 is skipped, the
+layer's own key reader toggles the panel through quiverd as before), X11 pointer positions as
+they are (the game's window is the swapchain's size; with the game's own cursor shown the two
+coincide), Wayland surface positions and relative motion as deltas, buttons and wheels at the
+cursor. The cursor is shown once the mouse is used and hidden by a key (pad navigation).
+
+**The preload** (`crates/quiver-sight-input`, `libquiver_sight_input.so`). quiverd appends
+`<lib>/quiver/sight/$PLATFORM/libquiver_sight_input.so` to the launch's `LD_PRELOAD` whenever
+the launch has the Sight layer (`quiver hud enable/disable GAME` stays the one per-game switch;
+no separate switch was needed; `QUIVER_SIGHT_INPUT=0` in a launch's env turns it off), and
+`quiver steam-run` keeps Steam's own `LD_PRELOAD` first (STORE-STEAM G6). ld.so's `$PLATFORM`
+is `x86_64` or `i686`, so 32-bit processes load the 32-bit build. It has to be a preload: Wine's
+drivers bind their Xlib and libwayland symbols when Wine loads them, before any Vulkan layer,
+and only an object earlier in the lookup order can interpose a symbol.
+
+What Wine actually calls (GE-Proton11-12's `winex11.so` / `winewayland.so` imports, and the
+Wine 10 source in the GE-Proton10-34 tree):
+
+- **winex11**: every event it handles comes off the queue in `process_events` through
+  **`XCheckIfEvent`** with its `filter_event` predicate. It never calls `XNextEvent`,
+  `XIfEvent`, `XPending` or `XPeekEvent`; `XWindowEvent` (GraphicsExpose) and
+  `XCheckTypedWindowEvent` (clipboard) never return input. XInput2 events are `GenericEvent`
+  cookies through the same call; Wine reads their data with `XGetEventData`, which it resolves
+  with `dlsym` on its own libX11 handle (not interposable, and not needed). Raw input
+  (`RegisterRawInputDevices`) puts it in its XInput2 raw mode, where `WM_INPUT` comes from
+  `XI_RawMotion`/`XI_RawButtonPress`/`Release`. `SetCursorPos` is `XWarpPointer`.
+- **winewayland**: listeners on `wl_keyboard`, `wl_pointer` and `zwp_relative_pointer_v1`,
+  registered with the inline `*_add_listener`, i.e. **`wl_proxy_add_listener`** from
+  libwayland-client (loaded locally as winewayland's dependency, so the real one is found with
+  `dlopen(RTLD_NOLOAD)` when `RTLD_NEXT` doesn't see it). Wine repeats held keys itself.
+
+So it interposes `XCheckIfEvent` (and `XIfEvent`, `XNextEvent` for anything else in the process
+that reads X input that way), `XWarpPointer`, and `wl_proxy_add_listener`, which for those three
+interfaces installs a dispatcher (`wl_proxy_add_dispatcher`, Wine's listener as the
+dispatcher's data and its user data as the proxy's) that calls Wine's handlers or doesn't. The
+Sight layer's own `wl_keyboard` resolves libwayland through its own handle and is never
+wrapped. What the game gets while the panel captures (`filter.rs`, the same rules for both
+drivers):
+
+| Event | While capturing | After the panel closes |
+|---|---|---|
+| key or button press | the panel's (forwarded) | the game's |
+| release of what the game saw pressed (held when the panel opened, Shift+F2 itself) | **the game's**, so nothing sticks | the game's |
+| release of what was pressed in the panel | the panel's | **kept from the game** (no key-up without its key-down: the Escape that closed the panel) |
+| XInput2 key/button press and release (raw input) | paired by count per class (their codes are only in the cookie data, which a predicate can't read) | same |
+| motion, wheel, enter/leave, XInput2 motion and touch, `relative_motion` | the panel's | the game's |
+| focus, configure, keymap, `enter`/`leave`/`modifiers`/`keymap`/`frame` on Wayland | the game's | the game's |
+| `XWarpPointer` (the game re-centring the pointer) | dropped | passed |
+
+It never blocks Wine's threads: the interposed calls load atomics, read the vDSO clock and
+write lock-free ring slots; a thread of its own, started by the first interposed call and only
+with `QUIVER_PERF_DIR` set, maps `panel.input` and does every syscall. Nothing runs at load (it
+is in every process of the prefix: wineserver, explorer, the game). A panic in it passes the
+event through. Same glibc baseline as the layer (newest symbol version 2.34 on both
+architectures; `tests/glibc.rs` keeps it so).
+
+**Failsafe: the game is never left with dead input.** Input is captured only while all of
+these hold (quiver-perf `panel::capture`, checked by every interposed call): the panel is open;
+its deadline is ahead and at most 2 s away (quiver-sight renews it every 250 ms, so a
+quiver-sight that hangs releases within a second, one that exits releases at once); the layer
+marked this open panel drawn within the last second, or it opened less than 1.5 s ago (a game
+that stops presenting, a layer that can't draw, a stale image: released); and quiver-sight's
+pid still exists (checked by the preload's thread every 50 ms while open: a killed
+quiver-sight releases within ~60 ms; a pid namespace that hides it never counts as dead).
+
+**Controller.** hyprpad's `quiver-sight` mode (pad held neutral, buttons typed as keys) used to
+trigger on the panel's layer-shell surface, which the in-game panel doesn't have. quiver-sight
+now writes `$XDG_RUNTIME_DIR/quiver/sight-panel` (`open <pid> <game|desktop> <session>`) while
+the panel is open (removed on close and at startup), and `tools/hyprpad/quiver-sight.lua`'s rule
+is `ctx.layers:has("quiver-sight") or` that file naming a live pid. The keys hyprpad types reach
+the focused window, the game, where the preload hands them to the panel. hyprpad re-runs rules
+on compositor events and on its periodic rescan (500 ms): opening the in-game panel changes no
+window, so the mode follows within that interval.
+
+**Verification** (opt-in tests are `--ignored`; the Wine ones need `QUIVER_TEST_PROTON`):
+
+- Unit: the filter's state machine (held keys, keys pressed in the panel, counted classes,
+  reset, pure decisions), Wayland event classes, `panel.input` (capture rules, cursor, ring
+  order, laps, four concurrent writers), `panel.image` (limits, partial reads), key and pointer
+  translation, factors, the launch's `LD_PRELOAD` (after the launch's own, never without the
+  layer, `QUIVER_SIGHT_INPUT=0`), the preload's install paths, the cursor's shape.
+- `quiver-sight-input/tests/wine_input.rs` (GE-Proton11-12 winex11 on Xvfb, XTEST input, a
+  Windows probe printing every key/mouse/raw-input message): closed, all reaches the game;
+  open, none does (no `WM_KEY*`, button, wheel, move or `WM_INPUT`), the panel's ring has the
+  keys, buttons, wheel and positions; Shift and F2 held at open and W held are released to the
+  game; C pressed in the panel and released after close never reaches it; nothing held
+  afterwards (`GetAsyncKeyState`); the failsafes: the owner killed (released in ~10 ms), the
+  deadline not renewed (~1.0 s), the layer not drawing (~1.5 s); with the cursor clipped and
+  hidden (XInput2 raw mode) and re-centred every 50 ms, no `WM_INPUT` while open and the
+  pointer follows the motion instead of the game's warps.
+- `quiver-sight-input/tests/wayland_input.rs` (GE-Proton11-12's winewayland on a fake
+  compositor, `tests/wayland/fakecomp.c`: libwayland-server, private runtime dir and socket):
+  the same checks for keys, buttons, motion, wheel and relative motion, the held key released
+  to the game, the panel-pressed key kept from it after close, the dead-owner failsafe.
+- `quiver-sight-layer/tests/vulkan_panel.rs` (headless Vulkan, read back): the panel's pixels,
+  a partial update (rows outside the dirty range untouched), the cursor, the layer's word and
+  drawn marks, nothing after close.
+- `quiver-sight-layer/tests/wine_panel.rs` (end to end: a D3D12 program under Proton with
+  vkd3d-proton, the real layer and the real preload, the test standing in for quiver-sight):
+  the panel and its cursor on screen over the game's frames, capture held past the grace by
+  the layer's drawn marks, released 3.9 s after the image stops being refreshed (3 s staleness
+  plus 1 s), the game's frames after close.
+- `quiver-sight/tests/ingame_panel.rs` (quiver-sight's real `PanelCtl`, headless GPUI, the
+  layer's and preload's words faked): the in-game presenter chosen, `panel.input` opened, the
+  image at the extent, a key moving the section with a partial image after it, Shift+F2
+  ignored, the cursor following the pointer, the state file written and removed; with no
+  preload it refuses the in-game presenter and says why.
+- The hyprpad rule, evaluated with Lua against state files (none, a live pid, a dead pid).
+
+Not verified: a real game (AWR, AC Origins), a real compositor under winewayland (only the
+fake one), Steam copies inside pressure-vessel (`$PLATFORM` in `LD_PRELOAD` there, and
+`/dev/shm` shared), 32-bit games, mods that read input their own way (DirectInput, XInput pads
+are unaffected: the pad is hyprpad's), IME text input, multi-monitor, HDR swapchains (the
+panel isn't drawn on them; the desktop panel opens).
+
+**Known limits.** Several held raw-input buttons across an open are paired by count, not code.
+A game that keeps its own cursor visible and confines the pointer shows it under the panel's
+(they coincide on X11; on Wayland the panel follows deltas). Wine's client-side key repeat on
+Wayland repeats a key the game held when the panel opened until it's released. hyprpad's mode
+follows within its rescan interval.

@@ -42,6 +42,9 @@ pub enum Msg {
     PanelKeyboard { map_gen: u64, active: bool },
     /// Ask again whether the game is in front (a hide or grace timer ran out).
     Front,
+    /// Keyboard and mouse input the game's input preload forwarded to the panel drawn in the
+    /// game (`panel::ingame`).
+    GameInput { session: String, events: Vec<quiver_perf::panel::PanelEvent> },
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.
