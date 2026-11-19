@@ -398,7 +398,7 @@ impl Quiver {
             let owned = self.games.iter().filter(|g| g.entry.owned_by.contains(&a.user_id)).count();
             let only = self.games.iter().filter(|g| g.entry.owned_by.len() == 1 && g.entry.owned_by[0] == a.user_id).count();
             let playing: Vec<String> =
-                self.ui.sessions.iter().filter(|s| s.account == a.user_id).map(|s| self.game_name(Gid::from(s.product_id))).collect();
+                self.ui.sessions.iter().filter(|s| s.account == a.user_id && !super::global::is_lab_session(s)).map(|s| self.game_name(Gid::from(s.game_ref()))).collect();
             let (from, to) = account_colors(i);
             let games = if accounts.len() > 1 && only > 0 {
                 format!("{owned} games, {only} only on this account")

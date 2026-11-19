@@ -413,9 +413,8 @@ impl Quiver {
                 }
                 Input::Activate => {
                     self.ui.now_playing_open = false;
-                    if let Some(s) = self.ui.sessions.first() {
-                        let id = s.product_id;
-                        self.open_game(Gid::from(id), cx);
+                    if let Some(s) = self.ui.sessions.iter().find(|s| !is_lab_session(s)).or(self.ui.sessions.first()) {
+                        self.open_game(Gid::from(s.game_ref()), cx);
                     }
                     return true;
                 }
@@ -452,8 +451,8 @@ impl Quiver {
                     .ui
                     .sessions
                     .iter()
-                    .filter(|s| s.account == a.user_id)
-                    .map(|s| self.game_name(Gid::from(s.product_id)))
+                    .filter(|s| s.account == a.user_id && !is_lab_session(s))
+                    .map(|s| self.game_name(Gid::from(s.game_ref())))
                     .collect();
                 let only: usize = self
                     .games
@@ -976,21 +975,41 @@ impl Quiver {
                 _ => "Tracked by quiverd",
             }
         }
-        let sessions = self.ui.sessions.clone();
+        // The person's games first, then lab instances (agents' headless runs) under their own heading.
+        let (play, lab): (Vec<_>, Vec<_>) = self.ui.sessions.iter().cloned().partition(|s| !is_lab_session(s));
+        let only_lab = play.is_empty();
+        let sessions: Vec<_> = play.into_iter().chain(lab).collect();
         let now = chrono::Utc::now();
         let mut cards: Vec<AnyElement> = Vec::new();
         for (i, s) in sessions.iter().enumerate() {
-            let g = self.game(Gid::from(s.product_id)).cloned();
+            let lab_run = is_lab_session(s);
+            if lab_run && !only_lab && (i == 0 || !is_lab_session(&sessions[i - 1])) {
+                cards.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(14.))
+                        .pt(px(10.))
+                        .border_t_1()
+                        .border_color(th.line1)
+                        .child(icon(Icon::Bot, 12., th.tx3))
+                        .child(super::caption("Lab instances", th.tx3))
+                        .into_any_element(),
+                );
+            }
+            let g = self.game(Gid::from(s.game_ref())).cloned();
             let art = match &g {
                 Some(g) => self.art_for(g, ArtSlot::Tile, Variant::Tile, cx),
                 None => crate::art::ArtState::Failed,
             };
-            let name = g.as_ref().map(|g| clean_name(&g.entry.name)).unwrap_or_else(|| format!("Game {}", s.product_id));
+            let name = g.as_ref().map(|g| clean_name(&g.entry.name)).unwrap_or_else(|| s.game_ref().to_string());
             let launcher = s.holders.iter().any(|h| h == "launcher");
             let bridge = s.holders.iter().any(|h| h == "bridge");
             let steam = s.steam_app_id.is_some() || s.holders.iter().any(|h| h == "steam");
-            let how = launched_how(launcher, steam, bridge);
-            let id = s.product_id;
+            let how = if lab_run { "Headless lab instance (quiver lab), run by an agent" } else { launched_how(launcher, steam, bridge) };
+            let inst = lab_instance(s);
+            let id = s.game_ref();
             let row = |label: &str, value: AnyElement| {
                 div()
                     .flex()
@@ -1006,7 +1025,7 @@ impl Quiver {
                     .flex_col()
                     .gap(px(10.))
                     .p(px(14.))
-                    .when(i > 0, |d| d.border_t_1().border_color(th.line1))
+                    .when(i > 0 && !(lab_run && !only_lab && !is_lab_session(&sessions[i - 1])), |d| d.border_t_1().border_color(th.line1))
                     .child(
                         div()
                             .flex()
@@ -1025,7 +1044,11 @@ impl Quiver {
                                         div()
                                             .text_size(px(12.))
                                             .text_color(th.tx3)
-                                            .child(format!("Since {} · {}", clock(s.started), self.account_name(&s.account))),
+                                            .child(match &inst {
+                                                Some(inst) => format!("Lab {inst} · since {}", clock(s.started)),
+                                                None if lab_run => format!("Lab run · since {}", clock(s.started)),
+                                                None => format!("Since {} · {}", clock(s.started), self.account_name(&s.account)),
+                                            }),
                                     ),
                             )
                             .child(
@@ -1034,7 +1057,9 @@ impl Quiver {
                                     .child(elapsed((now - s.started).num_seconds())),
                             ),
                     )
-                    .child(row("Play time", if s.reported {
+                    .child(row("Play time", if lab_run {
+                        pill(th, PillKind::Muted, Some(Icon::Bot), "Not counted: a lab run").into_any_element()
+                    } else if s.reported {
                         pill(th, PillKind::Ok, Some(Icon::CircleCheck), "Reported to Ubisoft").into_any_element()
                     } else {
                         pill(th, PillKind::Muted, None, "Not reported to Ubisoft").into_any_element()
@@ -1053,7 +1078,8 @@ impl Quiver {
                                         cx.notify();
                                     })),
                             )
-                            .when(launcher, |d| {
+                            .when_some(inst.clone().filter(|_| lab_run), |d, inst| d.child(div().flex_1().min_w_0().truncate().child(super::mono(11., th.tx3).child(format!("quiver lab status {inst}")))))
+                            .when(launcher && !lab_run, |d| {
                                 d.child(
                                     button(("np-stop", i), th, Kind::Secondary, Size::Small, Some(Icon::Square), "Stop game")
                                         .text_color(th.bad)
@@ -1096,8 +1122,8 @@ impl Quiver {
                             .px(px(14.))
                             .pt(px(12.))
                             .pb(px(4.))
-                            .child(div().size(px(7.)).rounded_full().bg(th.ok))
-                            .child(super::caption("Now playing", th.tx3))
+                            .when(!only_lab, |d| d.child(div().size(px(7.)).rounded_full().bg(th.ok)).child(super::caption("Now playing", th.tx3)))
+                            .when(only_lab, |d| d.child(icon(Icon::Bot, 12., th.tx3)).child(super::caption("Lab instances", th.tx3)))
                             .child(div().flex_1())
                             .child(super::mono(11., th.tx4).child("quiver sessions")),
                     )
@@ -1109,12 +1135,49 @@ impl Quiver {
     /// The top bar's now-playing pill (any launch path, containers included).
     /// `compact`: icon and clock only (narrower windows), the name as a tooltip.
     pub fn render_now_playing_pill(&mut self, th: &Theme, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let first = self.ui.sessions.first()?.clone();
-        let n = self.ui.sessions.len();
-        let label = if n == 1 { self.game_name(Gid::from(first.product_id)) } else { format!("{n} games") };
-        let secs = (chrono::Utc::now() - first.started).num_seconds();
-        let reported = self.ui.sessions.iter().all(|s| s.reported);
+        // The person's games lead; lab instances alone get a quiet pill of their own.
+        let play: Vec<_> = self.ui.sessions.iter().filter(|s| !is_lab_session(s)).cloned().collect();
+        let labs: Vec<_> = self.ui.sessions.iter().filter(|s| is_lab_session(s)).cloned().collect();
         let open = self.ui.now_playing_open;
+        if play.is_empty() {
+            let first = labs.first()?;
+            let label = match (labs.len(), lab_instance(first)) {
+                (1, Some(inst)) => format!("Lab · {inst}"),
+                (1, None) => "Lab run".to_owned(),
+                (n, _) => format!("Lab · {n} runs"),
+            };
+            return Some(
+                div()
+                    .id("now-playing-pill")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(7.))
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded_full()
+                    .bg(th.ink3)
+                    .border_1()
+                    .border_color(th.line2.opacity(if open { 1.0 } else { 0.7 }))
+                    .text_size(px(12.))
+                    .text_color(th.tx2)
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(th.line2))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ui.now_playing_open = !this.ui.now_playing_open;
+                        cx.notify();
+                    }))
+                    .child(icon(Icon::Bot, 13., th.tx3))
+                    .when(compact, |d| d.tooltip(super::responsive::tip(th, label.clone())))
+                    .when(!compact, |d| d.child(div().max_w(px(150.)).truncate().child(label)))
+                    .into_any_element(),
+            );
+        }
+        let first = play[0].clone();
+        let n = play.len();
+        let label = if n == 1 { self.game_name(Gid::from(first.game_ref())) } else { format!("{n} games") };
+        let secs = (chrono::Utc::now() - first.started).num_seconds();
+        let reported = play.iter().all(|s| s.reported);
         Some(
             div()
                 .id("now-playing-pill")
@@ -1386,5 +1449,40 @@ mod tests {
         assert!(SourceFilter::All.matches("anything"));
         assert_eq!(SourceFilter::All.step(-1), SourceFilter::System);
         assert_eq!(SourceFilter::System.step(1), SourceFilter::All);
+    }
+}
+
+/// A headless lab instance's run (`quiver lab`), not the person playing: held by the lab only,
+/// or a `lab-<instance>-r<N>` session. It counts for nothing (play time, reports).
+pub fn is_lab_session(s: &quiver_api::ActiveSession) -> bool {
+    (!s.holders.is_empty() && s.holders.iter().all(|h| h == "lab")) || s.session.as_deref().is_some_and(|x| x.starts_with("lab-"))
+}
+
+/// The lab instance a lab session runs in (`lab-awr-sight-r3` → `awr-sight`).
+pub fn lab_instance(s: &quiver_api::ActiveSession) -> Option<String> {
+    let id = s.session.as_deref()?.strip_prefix("lab-")?;
+    let (inst, run) = id.rsplit_once("-r")?;
+    run.chars().all(|c| c.is_ascii_digit()).then(|| inst.to_owned())
+}
+
+#[cfg(test)]
+mod lab_session_tests {
+    use super::{is_lab_session, lab_instance};
+    use quiver_api::ActiveSession;
+
+    fn s(holders: &[&str], session: Option<&str>) -> ActiveSession {
+        ActiveSession { holders: holders.iter().map(|h| h.to_string()).collect(), session: session.map(str::to_owned), ..Default::default() }
+    }
+
+    #[test]
+    fn lab_runs_are_told_apart_from_play() {
+        assert!(is_lab_session(&s(&["lab"], None)));
+        assert!(is_lab_session(&s(&["bridge"], Some("lab-awr-sight-r3"))));
+        assert!(!is_lab_session(&s(&["launcher"], Some("s-jcf3jqgzlc"))));
+        assert!(!is_lab_session(&s(&["lab", "launcher"], None)), "the person playing too is play");
+        assert!(!is_lab_session(&s(&[], None)));
+        assert_eq!(lab_instance(&s(&["lab"], Some("lab-awr-sight-r3"))).as_deref(), Some("awr-sight"));
+        assert_eq!(lab_instance(&s(&["lab"], Some("lab-hudmock-rabbids-r12"))).as_deref(), Some("hudmock-rabbids"));
+        assert_eq!(lab_instance(&s(&["lab"], Some("s-abc"))), None);
     }
 }

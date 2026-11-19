@@ -439,7 +439,7 @@ impl Quiver {
             }
             // A Steam copy shows as running while Steam plays it (quiverd's library says so).
             Event::SessionsChanged { sessions } => {
-                let steam_now = sessions.iter().any(|s| self.game(Gid::from(s.product_id)).is_some_and(|g| g.steam_only()));
+                let steam_now = sessions.iter().any(|s| self.game(Gid::from(s.game_ref())).is_some_and(|g| g.steam_only()));
                 let steam_before = self.games.iter().any(|g| g.steam_only() && g.entry.running);
                 if steam_now || steam_before {
                     self.load_library(false, cx);
