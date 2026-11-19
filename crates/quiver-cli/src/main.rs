@@ -10,6 +10,7 @@ mod epic;
 mod epicgame;
 mod exports;
 mod mods;
+mod omarchy;
 mod perf;
 mod profiles;
 mod options;
@@ -103,6 +104,10 @@ enum Cmd {
         action: Option<downloads::QueueAction>,
         #[arg(long)]
         json: bool,
+        /// Don't start quiverd when it isn't running: fail with "quiverd is not running"
+        /// instead (for status bars that poll the queue, such as contrib/omarchy).
+        #[arg(long)]
+        no_start: bool,
     },
     /// Pause a game's download (resumable; it keeps its place in the queue).
     Pause { game: String },
@@ -361,6 +366,12 @@ enum Cmd {
     Epic {
         #[command(subcommand)]
         action: epic::EpicAction,
+    },
+    /// The Omarchy bar widget for the download queue (`quiver.downloads`): install-plugin,
+    /// uninstall-plugin, status. Never run by the installer; only when you ask.
+    Omarchy {
+        #[command(subcommand)]
+        action: omarchy::OmarchyAction,
     },
     /// Lab instances: disposable headless copies of an installed game in a container, with
     /// your real licence from quiverd, for agents developing mods (design/LAB.md):
@@ -705,9 +716,23 @@ async fn main() -> Result<()> {
     if let Cmd::Daemon { action } = cli.cmd {
         return daemon::run(&cli.source, action).await;
     }
-    let client = Client::connect(&cli.source).await?;
+    // The Omarchy bar plugin: files and Omarchy's own commands, no daemon.
+    if let Cmd::Omarchy { action } = cli.cmd {
+        return omarchy::run(action);
+    }
+    // A status bar polling the queue must not bring back a quiverd someone stopped.
+    let client = if matches!(cli.cmd, Cmd::Queue { no_start: true, .. }) {
+        Client::connect_running(&cli.source).await?
+    } else {
+        Client::connect(&cli.source).await?
+    };
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } | Cmd::Lab { .. } => {
+        Cmd::Dev { .. }
+        | Cmd::SteamRun(_)
+        | Cmd::Steam { action: exports::SteamAction::Restart { .. } }
+        | Cmd::Daemon { .. }
+        | Cmd::Lab { .. }
+        | Cmd::Omarchy { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
@@ -860,7 +885,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,
-        Cmd::Queue { action, json } => downloads::queue(&client, action, json).await?,
+        Cmd::Queue { action, json, .. } => downloads::queue(&client, action, json).await?,
         Cmd::Setup { show, json } => {
             if show || json {
                 setup::show(&client, json).await?

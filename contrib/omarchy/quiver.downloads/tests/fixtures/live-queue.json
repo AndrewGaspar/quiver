@@ -1,0 +1,548 @@
+[
+  {
+    "product_id": 0,
+    "game": "epic:dc9d2e595d0e4650b35d659f90d41059",
+    "name": "Alan Wake 2",
+    "kind": "install",
+    "state": "downloading",
+    "position": 1,
+    "job_id": 2,
+    "language": null,
+    "account": null,
+    "source": "gui",
+    "added": "2026-11-19T21:37:28.369371701Z",
+    "error": null,
+    "done_bytes": 18352367051,
+    "total_bytes": 43196906067,
+    "speed": 26726983,
+    "retries": 0,
+    "throughput": {
+      "game": "epic:dc9d2e595d0e4650b35d659f90d41059",
+      "interval_ms": 1000,
+      "at": "2026-11-19T23:00:22.188692165Z",
+      "samples": [
+        {
+          "bytes": 26205169,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27231460,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25132603,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26153816,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26156128,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27167869,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26140633,
+          "state": "downloading"
+        },
+        {
+          "bytes": 16749165,
+          "state": "downloading"
+        },
+        {
+          "bytes": 16743591,
+          "state": "downloading"
+        },
+        {
+          "bytes": 23044659,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27228847,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27212495,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26212868,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25807023,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26002736,
+          "state": "downloading"
+        },
+        {
+          "bytes": 16742701,
+          "state": "downloading"
+        },
+        {
+          "bytes": 24035019,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25829569,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27117580,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26199595,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25164029,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27608802,
+          "state": "downloading"
+        },
+        {
+          "bytes": 5191709,
+          "state": "downloading"
+        },
+        {
+          "bytes": 16633980,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27092941,
+          "state": "downloading"
+        },
+        {
+          "bytes": 2090806,
+          "state": "downloading"
+        },
+        {
+          "bytes": 15498815,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26105087,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25158124,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26162607,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27208268,
+          "state": "downloading"
+        },
+        {
+          "bytes": 20913337,
+          "state": "downloading"
+        },
+        {
+          "bytes": 11513453,
+          "state": "downloading"
+        },
+        {
+          "bytes": 20910612,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27196824,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26145509,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26156166,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26174441,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26161391,
+          "state": "downloading"
+        },
+        {
+          "bytes": 15715721,
+          "state": "downloading"
+        },
+        {
+          "bytes": 20903660,
+          "state": "downloading"
+        },
+        {
+          "bytes": 21939421,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26995650,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27200704,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26150415,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26168451,
+          "state": "downloading"
+        },
+        {
+          "bytes": 23037500,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26171706,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26154498,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26139497,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26174030,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26153445,
+          "state": "downloading"
+        },
+        {
+          "bytes": 9415445,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25111255,
+          "state": "downloading"
+        },
+        {
+          "bytes": 28161793,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27143864,
+          "state": "downloading"
+        },
+        {
+          "bytes": 26193641,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25147467,
+          "state": "downloading"
+        },
+        {
+          "bytes": 27247064,
+          "state": "downloading"
+        },
+        {
+          "bytes": 25123041,
+          "state": "downloading"
+        }
+      ]
+    }
+  },
+  {
+    "product_id": 5059,
+    "name": "Assassin's Creed® Odyssey",
+    "kind": "install",
+    "state": "queued",
+    "position": 2,
+    "job_id": 1,
+    "language": "en-US",
+    "account": null,
+    "source": "gui",
+    "added": "2026-11-19T21:38:03.887734881Z",
+    "error": null,
+    "done_bytes": 556652189,
+    "total_bytes": 102383586228,
+    "speed": 66,
+    "retries": 0,
+    "throughput": {
+      "game": "ubisoft:5059",
+      "interval_ms": 1000,
+      "at": "2026-11-19T23:00:22.188692165Z",
+      "samples": [
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        },
+        {
+          "bytes": 0,
+          "state": "waiting"
+        }
+      ]
+    }
+  },
+  {
+    "product_id": 13504,
+    "name": "Assassin's Creed® Valhalla",
+    "kind": "install",
+    "state": "queued",
+    "position": 3,
+    "job_id": 3,
+    "language": "en-US",
+    "account": null,
+    "source": "gui",
+    "added": "2026-11-19T21:48:04.616485548Z",
+    "error": null,
+    "done_bytes": 0,
+    "total_bytes": 0,
+    "speed": 0,
+    "retries": 0
+  }
+]
