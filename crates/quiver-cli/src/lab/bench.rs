@@ -95,7 +95,7 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
             eprintln!("bench: round {round}, variant {}", v.label);
             if a.relaunch {
                 configset::apply(&inst, &m, &v.assigns).map(|done| remember(&mut originals, &done))?;
-                let r = sup::request(lab, &inst, &sup::SupRequest::Launch { source: source.into(), mod_dir: None, no_mod: false, args: Vec::new() })?;
+                let r = sup::request(lab, &inst, &sup::SupRequest::Launch { source: source.into(), mod_dir: None, no_mod: false, args: Vec::new(), clock: None })?;
                 let id = r["run"].as_u64().map(|x| x as u32);
                 super::wait_for(&inst, &Want::parse(&a.ready), id, Duration::from_secs(600))?;
             } else {

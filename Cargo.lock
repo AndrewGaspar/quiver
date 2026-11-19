@@ -4726,6 +4726,7 @@ dependencies = [
  "quiver-ipc",
  "quiver-perf",
  "quiver-proto",
+ "quiver-vclock",
  "rcgen",
  "regex",
  "reqwest",
