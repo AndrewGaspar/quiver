@@ -202,6 +202,8 @@ pub fn render(b: &BriefInput) -> String {
          for the reload instead of sleeping.\n\n",
     );
 
+    s.push_str(&super::vclock::brief_section(i));
+
     s.push_str("## Mod SDK and docs\n\n");
     s.push_str(&format!(
         "- `{docs}design/LAB.md`: this lab, its invariants and why each exists.\n\
@@ -270,6 +272,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("quiver lab call|where|teleport <i> …", "requests your mod answers through the lab channel; named locations in locations.txt"),
     ("quiver lab gpu [--for <i>] -- CMD…", "run a measurement with the GPU to itself: a lock, other instances throttled through their manifests' throttle lines"),
     ("quiver lab bench <i> --variant A=… --variant B=… [--rounds N --samples N --settle S --crop C --log-metric NAME=REGEX]", "A/B runs: live config variants, settle, N samples (sharpness, temporal noise, log numbers), aggregated, host state per variant"),
+    ("quiver lab edit <i> clock=virtual:62.5 | clock=real", "the fixed-step virtual clock: every frame is exactly 1/62.5 s to the game (faster than real time when frames are cheap, repeatable when the machine is busy); `launch --clock …` for one launch"),
     ("quiver lab host [--json]", "free memory, load, GPU, who uses it, who holds the GPU lock"),
     ("quiver lab exec <i> -- CMD…", "a command in the instance's container with its display set"),
     ("quiver lab logs <i> [--run N]", "the run's folder: game.log, bridge.log, DXVK logs, your mod's log"),
@@ -299,7 +302,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on"] {
+        for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));

@@ -198,6 +198,9 @@ pub struct Manifest {
     /// needs `quiver lab down`/`up` (the container's mounts).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sight: bool,
+    /// The fixed-step virtual clock (`[clock]`, [`super::vclock`]); absent: real time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<super::vclock::VirtualClock>,
 }
 
 impl Manifest {
@@ -289,6 +292,7 @@ pub(crate) mod tests {
             log_file: None,
             notes: String::new(),
             sight: false,
+            clock: None,
         }
     }
 

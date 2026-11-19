@@ -1,0 +1,7 @@
+# dinput8.dll exports: ordinal, then name ('-' for ordinal-only). From Wine's builtin dinput8.dll
+# in GE-Proton11-12 (winedump -j export); its x86_64 and i386 builds export the same set.
+1 DirectInput8Create
+2 DllCanUnloadNow
+3 DllGetClassObject
+4 DllRegisterServer
+5 DllUnregisterServer

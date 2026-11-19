@@ -4727,6 +4727,7 @@ dependencies = [
  "quiver-ipc",
  "quiver-perf",
  "quiver-proto",
+ "quiver-vclock",
  "rcgen",
  "regex",
  "reqwest",
@@ -4843,6 +4844,17 @@ dependencies = [
  "tempfile",
  "tracing",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "quiver-vclock"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "serde",
+ "tempfile",
+ "x11rb",
 ]
 
 [[package]]

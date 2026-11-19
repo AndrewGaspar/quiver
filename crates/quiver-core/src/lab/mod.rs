@@ -35,6 +35,7 @@ pub mod procs;
 pub mod ready;
 pub mod hdr;
 pub mod sight;
+pub mod vclock;
 pub mod wincert;
 
 use std::path::{Path, PathBuf};

@@ -157,6 +157,7 @@ fn sight_in_a_lab_instance() {
         log_file: None,
         notes: String::new(),
         sight: true,
+        clock: None,
     };
     m.save(&inst.join("lab.toml")).unwrap();
     let sd = sight_dir.as_path();

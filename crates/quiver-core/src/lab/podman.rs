@@ -145,7 +145,9 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
         ("STEAM_COMPAT_APP_ID", "0".into()),
         ("QUIVER_LAB_W", m.display.width.to_string()),
         ("QUIVER_LAB_H", m.display.height.to_string()),
-        ("QUIVER_LAB_HZ", m.display.refresh.to_string()),
+        // Higher while the virtual clock runs uncapped (lab::vclock).
+        ("QUIVER_LAB_HZ", super::vclock::boot_refresh(m).to_string()),
+        // HDR forced on (lab::hdr), with whatever refresh the clock asks for.
         ("QUIVER_LAB_GAMESCOPE_ARGS", if m.display.hdr { super::hdr::GAMESCOPE_ARGS.into() } else { String::new() }),
         ("QUIVER_LAB_INSTANCE", inst.name.clone()),
         ("QUIVER_GAME", m.game.to_string()),
@@ -306,6 +308,11 @@ exe = "ACOrigins.exe"
         assert!(boot_script().contains("/tmp/gamescope-wayland"));
         // An exec that enables gamescope's WSI layer gets its Wayland socket.
         assert!(WITH_DISPLAY.contains("ENABLE_GAMESCOPE_WSI") && WITH_DISPLAY.contains("GAMESCOPE_WAYLAND_DISPLAY"));
+        // With the virtual clock uncapped too: its refresh and HDR's flags, both.
+        m.clock = Some(super::super::vclock::VirtualClock::new(62.5));
+        let a = run_args(&inst, &m, &Host::default());
+        assert!(a.contains(&format!("QUIVER_LAB_HZ={}", super::super::vclock::boot_refresh(&m))) && super::super::vclock::boot_refresh(&m) > m.display.refresh, "{a:?}");
+        assert!(gs(&a).ends_with("--hdr-debug-force-output"));
         let e: std::collections::BTreeMap<String, String> = super::super::hdr::launch_env().into_iter().collect();
         assert_eq!((e["ENABLE_GAMESCOPE_WSI"].as_str(), e["PROTON_ENABLE_HDR"].as_str()), ("1", "1"));
     }

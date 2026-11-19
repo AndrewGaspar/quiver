@@ -1,0 +1,18 @@
+[package]
+name = "quiver-vclock"
+description = "quiver lab's virtual clock: a Windows hook DLL (built with mingw, embedded here) that tells a game every frame took 1/N s while it runs uncapped"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb", "xtest"] }

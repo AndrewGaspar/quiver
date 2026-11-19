@@ -84,7 +84,9 @@ pub enum LabAction {
     },
     /// Change an instance's manifest: display=WxH@HZ, proton=NAME, mod_dir=DIR, graphics=NAME,
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
-    /// log_file=PATH, args="…", notes="…", sight=on|off (key= clears).
+    /// log_file=PATH, args="…", notes="…", sight=on|off, display.hdr=on|off (key= clears); the fixed-step virtual clock:
+    /// clock=virtual:HZ|real, clock.modules=A.dll,B.dll, clock.proxy=NAME|auto,
+    /// clock.stuck_ms=N, clock.creep_after=N, clock.sleeps=present|all|none, clock.sleep_max_ms=N, clock.uncap=false.
     Edit {
         instance: String,
         #[arg(required = true)]
@@ -109,6 +111,11 @@ pub enum LabAction {
         /// Extra game arguments.
         #[arg(long = "arg", allow_hyphen_values = true)]
         args: Vec<String>,
+        /// The clock for this launch: `virtual:HZ` (every frame is exactly 1/HZ s to the game:
+        /// faster than real time when frames are cheap, repeatable when they aren't) or `real`.
+        /// Default: the manifest's (`quiver lab edit … clock=…`).
+        #[arg(long)]
+        clock: Option<String>,
         /// Wait for this state (process, window, frame, or a mod state).
         #[arg(long)]
         wait: Option<String>,
@@ -531,6 +538,9 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             if changes.iter().any(|c| c.starts_with("display=") || c.starts_with("sight=")) && ops::running_id(&inst.container()).is_some() {
                 println!("that changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
             }
+            if changes.iter().any(|c| c.starts_with("clock")) && ops::running_id(&inst.container()).is_some() {
+                println!("the clock changes at the next launch; its display refresh (uncapped: 1000 Hz) at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
+            }
         }
         LabAction::Up { instance } => up(&lab, &instance)?,
         LabAction::Down { instance } => {
@@ -553,10 +563,13 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             std::fs::remove_dir_all(&inst.dir).with_context(|| format!("remove {}", inst.dir.display()))?;
             println!("removed {}", inst.name);
         }
-        LabAction::Launch { instance, mod_dir, no_mod, args, wait, timeout } => {
+        LabAction::Launch { instance, mod_dir, no_mod, args, clock, wait, timeout } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             let mod_dir = mod_dir.map(|d| d.canonicalize().with_context(|| format!("{} not found", d.display()))).transpose()?;
-            let r = sup::request(&lab, &inst, &SupRequest::Launch { source: source.into(), mod_dir, no_mod, args })?;
+            if let Some(c) = &clock {
+                lab::vclock::parse_spec(c)?;
+            }
+            let r = sup::request(&lab, &inst, &SupRequest::Launch { source: source.into(), mod_dir, no_mod, args, clock })?;
             for n in r["notes"].as_array().into_iter().flatten() {
                 println!("  {}", n.as_str().unwrap_or_default());
             }
@@ -581,7 +594,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let st = read_state(&inst);
             let hs = host::snapshot(&procs::scan(), &ops::containers());
             if json {
-                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display }));
+                let clock = st.run.as_ref().and_then(|r| lab::vclock::Report::read(&inst.run_dir(r.id)));
+                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock }));
             }
             println!("{} ({}, {}): container {}", inst.name, m.game, m.display, if st.container_up { "up" } else { "down" });
             match &st.run {
@@ -596,6 +610,9 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     }
                     if let Some(e) = &r.exit {
                         println!("  exit: {} {}", e.how, e.detail);
+                    }
+                    for (i, l) in lab::vclock::report_lines(&inst.run_dir(r.id), false).into_iter().flatten().enumerate() {
+                        println!("  {}{l}", if i == 0 { "clock: " } else { "    " });
                     }
                 }
             }
@@ -787,6 +804,13 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             // Sight (design/LAB.md §12): presenter, captures, releases and why.
             sight::print_summary(&dir);
+            // The virtual clock's report (design/LAB.md, "The virtual clock").
+            if let Some(lines) = lab::vclock::report_lines(&dir, true) {
+                println!("virtual clock ({}):", lab::vclock::STATUS_FILE);
+                for l in lines {
+                    println!("  {l}");
+                }
+            }
             if let Some(n) = tail {
                 let text = std::fs::read_to_string(dir.join("game.log")).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
@@ -840,6 +864,9 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
     }
     let (k, v) = change.split_once('=').with_context(|| format!("'{change}': expected key=value"))?;
     let opt = |v: &str| (!v.is_empty()).then(|| v.to_owned());
+    if lab::vclock::edit(m, k, v)? {
+        return Ok(());
+    }
     match k {
         "display" => {
             // The size and refresh; HDR stays as it was unless the value says +hdr.
@@ -1258,6 +1285,8 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
             if ok { "gamescope's WSI layer in the image; gamescope headless forced to HDR10 PQ".into() } else { format!("{wsi} missing in {}: HDR games will see only SDR formats", lab::IMAGE) },
         );
     }
+    let missing: Vec<String> = ["x64", "x86"].iter().filter_map(|a| lab::vclock::unavailable(a)).collect();
+    check("virtual clock DLL (clock=virtual:HZ)", missing.is_empty(), if missing.is_empty() { "x64 and x86, built in".into() } else { missing.join("; ") });
     if json {
         return print_json(&checks.iter().map(|(n, ok, d)| serde_json::json!({ "check": n, "ok": ok, "detail": d })).collect::<Vec<_>>());
     }
