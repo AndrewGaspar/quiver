@@ -472,15 +472,16 @@ pub(crate) async fn resolve(client: &Client, game: &str) -> Result<UbiEntry> {
     Ok(UbiEntry { product_id, entry })
 }
 
-/// A Steam game's launch settings (applied by `quiver steam-run`): `Some` for a Steam ref, or
-/// a name no Ubisoft game matches but a Steam game does; `None` means a Ubisoft game (resolve
-/// it as before, so Ubisoft names resolve exactly as they always did).
+/// Another store's launch settings (a Steam game's applied by `quiver steam-run`; an Epic
+/// game's by Quiver's own launch): `Some` for a Steam or Epic ref, or a name no Ubisoft game
+/// matches but a Steam or Epic game does; `None` means a Ubisoft game (resolve it as before,
+/// so Ubisoft names resolve exactly as they always did).
 pub(crate) async fn resolve_steam_settings(client: &Client, game: &str) -> Result<Option<(String, GameRef)>> {
     if let Some(r) = GameRef::parse_ref(game) {
         if r.is_ubisoft() {
             return Ok(None);
         }
-        if r.as_steam().is_none() {
+        if !matches!(r.store, quiver_api::StoreId::Steam | quiver_api::StoreId::Epic) {
             bail!("{r}: {} games have no Quiver launch settings yet", r.store.label());
         }
         let name = resolve_any(client, game).await.map(|e| e.name).unwrap_or_else(|_| r.to_string());
@@ -490,7 +491,7 @@ pub(crate) async fn resolve_steam_settings(client: &Client, game: &str) -> Resul
         return Ok(None);
     }
     match resolve_any(client, game).await {
-        Ok(e) if e.game.as_steam().is_some() => Ok(Some((e.name, e.game))),
+        Ok(e) if matches!(e.game.store, quiver_api::StoreId::Steam | quiver_api::StoreId::Epic) => Ok(Some((e.name, e.game))),
         _ => Ok(None),
     }
 }

@@ -129,11 +129,12 @@ fn ubisoft_only(game: GameRef) -> Result<u32> {
     game.as_ubisoft().with_context(|| format!("{game}: {} games can't do that in Quiver yet", game.store.label()))
 }
 
-/// A game Quiver keeps launch settings for: a Ubisoft product, or a Steam game (applied to
-/// its Steam launch by `quiver steam-run`).
+/// A game Quiver keeps launch settings for: a Ubisoft product, an Epic game (Quiver launches
+/// it: its default profile, env, args, Proton), or a Steam game (applied to its Steam launch
+/// by `quiver steam-run`).
 fn settings_game(game: GameRef) -> Result<GameRef> {
     match game.store {
-        quiver_api::StoreId::Ubisoft | quiver_api::StoreId::Steam => Ok(game),
+        quiver_api::StoreId::Ubisoft | quiver_api::StoreId::Epic | quiver_api::StoreId::Steam => Ok(game),
         s => bail!("{game}: {} games have no Quiver launch settings yet", s.label()),
     }
 }
