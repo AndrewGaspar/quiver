@@ -384,24 +384,28 @@ impl Daemon {
                 anyhow::bail!("{game}: `{key}` is for Ubisoft games (Steam plays it with the Steam account)");
             }
         }
-        // The mod profile: a Steam game's only launch is Steam's, so `profile` is its
-        // `steam_profile` (STORE-STEAM.md §10, M1), stored as the profile's id.
+        // The mod profile, stored as the profile's id. A Steam game's only launch is Steam's,
+        // so its `profile` is its `steam_profile` (STORE-STEAM.md §10, M1); an Epic game's
+        // Play is Quiver's own launch, which reads `profile` like a Ubisoft game's.
+        let steam = game.as_steam().is_some();
+        let key_for = if steam { "steam_profile" } else { "profile" };
+        let is_profile = |key: &str| key == "profile" || (steam && key == "steam_profile");
         let ops = ops
             .into_iter()
             .map(|op| match op {
-                quiver_api::SettingOp::Set { key, value } if key == "profile" || key == "steam_profile" => {
-                    Ok(quiver_api::SettingOp::Set { key: "steam_profile".into(), value: crate::mods::resolve_default(game, &value)? })
+                quiver_api::SettingOp::Set { key, value } if is_profile(&key) => {
+                    Ok(quiver_api::SettingOp::Set { key: key_for.into(), value: crate::mods::resolve_default(game, &value)? })
                 }
-                quiver_api::SettingOp::Unset { key } if key == "profile" => Ok(quiver_api::SettingOp::Unset { key: "steam_profile".into() }),
+                quiver_api::SettingOp::Unset { key } if is_profile(&key) => Ok(quiver_api::SettingOp::Unset { key: key_for.into() }),
                 op => Ok(op),
             })
             .collect::<Result<Vec<_>>>()?;
-        let profile_changed = ops.iter().any(|op| matches!(op, quiver_api::SettingOp::Set { key, .. } | quiver_api::SettingOp::Unset { key } if key == "steam_profile"));
+        let profile_changed = ops.iter().any(|op| matches!(op, quiver_api::SettingOp::Set { key, .. } | quiver_api::SettingOp::Unset { key } if key == key_for));
         let rev = settings::apply(game, &ops, source, message)?;
         if profile_changed {
             self.emit(crate::mods::mods_event(game));
         }
-        let hooked = crate::steamhook::hooked(game).unwrap_or(false);
+        let hooked = game.as_steam().is_none() || crate::steamhook::hooked(game).unwrap_or(false);
         let note = if hooked { "" } else { " (not hooked: they apply once it starts through quiver steam-run)" };
         self.log_activity_game(source, format!("settings r{} for {game}{note}", rev.revision), Some(game));
         Ok(json!(rev))
