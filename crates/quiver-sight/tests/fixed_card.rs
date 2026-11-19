@@ -50,7 +50,7 @@ fn check(image: &std::path::Path, extent: [u32; 2], cx: &mut App) -> Result<(), 
     let mut reader = open_hud_reader(image).map_err(|e| e.to_string())?;
     let mut dst = vec![0u8; reader.info().buffer_bytes as usize];
     let mut rev = 0;
-    for layout in ["fps", "compact", "standard", "full"] {
+    for layout in quiver_sight::demo::LAYOUTS {
         let mut hud = GameHud::default();
         let mut first: Option<Bounds> = None;
         // Through the variants and back (base, long, short, short, long, base), on one view

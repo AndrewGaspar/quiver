@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result};
 use gpui::{App, AppContext, Hsla, OffscreenWindowOptions, Rgba, WindowHandle, px, size};
 use quiver_api::perf::{HudModel, Presenter};
 use quiver_perf::hud::{HudWriter, rgba_premul};
-use quiver_perf::layout::{GRAPH_SERIES_PRESENTED, HUD_FORMAT_RGBA8_PREMUL_SRGB, HUD_MAX_DIM, HUD_MAX_GRAPHS, HUD_PIXELS_OFFSET};
+use quiver_perf::layout::{GRAPH_SERIES_BASE, GRAPH_SERIES_PRESENTED, HUD_FORMAT_RGBA8_PREMUL_SRGB, HUD_MAX_DIM, HUD_MAX_GRAPHS, HUD_PIXELS_OFFSET};
 use quiver_perf::shm::Mapping;
 use quiver_perf::{HudBufferHeader, HudGraph};
 use quiver_ui::theme::Theme;
@@ -306,14 +306,16 @@ impl GameHud {
                 span_ms: g.span_ms.clamp(1000, 10_000),
                 min_ms: g.min_ms.max(0.0),
                 max_ms,
-                line: premul(th.acc),
-                fill: premul(th.acc.opacity(0.16)),
-                muted: premul(th.tx4),
+                // Presented frames in the layer's blue, rendered (base) ones in the base
+                // series' amber, no fill (the mock-ups' two lines over a reference line).
+                line: premul(th.who_gui),
+                fill: 0,
+                muted: premul(th.warn),
                 warn_above_ms: g.warn_above_ms.max(0.0).round() as u32,
                 bad_above_ms: g.bad_above_ms.max(0.0).round() as u32,
                 warn: premul(th.warn),
                 bad: premul(th.bad),
-                series: GRAPH_SERIES_PRESENTED,
+                series: GRAPH_SERIES_PRESENTED | if g.base { GRAPH_SERIES_BASE } else { 0 },
             };
             n += 1;
         }

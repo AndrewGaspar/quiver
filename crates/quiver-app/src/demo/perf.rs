@@ -405,6 +405,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: PerfRequest) -> Result<Value>
             HudLayoutInfo { id: "compact".into(), name: "Compact".into(), builtin: true, path: None, error: None },
             HudLayoutInfo { id: "standard".into(), name: "Standard".into(), builtin: true, path: None, error: None },
             HudLayoutInfo { id: "full".into(), name: "Full".into(), builtin: true, path: None, error: None },
+            HudLayoutInfo { id: "diagnostics".into(), name: "Diagnostics".into(), builtin: true, path: None, error: None },
             HudLayoutInfo { id: "clock".into(), name: "Clock".into(), builtin: true, path: None, error: None },
             HudLayoutInfo {
                 id: "dlss-tuning".into(),

@@ -184,7 +184,7 @@ impl Row {
 }
 
 /// The HUD presets, in `Ctrl+Shift+F3` order.
-pub const PRESETS: [(&str, &str); 5] = [("fps", "FPS only"), ("compact", "Compact"), ("standard", "Standard"), ("full", "Full"), ("clock", "Clock")];
+pub const PRESETS: [(&str, &str); 6] = [("fps", "FPS only"), ("compact", "Compact"), ("standard", "Standard"), ("full", "Full"), ("diagnostics", "Diagnostics"), ("clock", "Clock")];
 pub const ANCHORS: [(Anchor, &str); 8] = [
     (Anchor::TopLeft, "Top left"),
     (Anchor::Top, "Top"),
@@ -770,7 +770,8 @@ mod tests {
         danger.def.danger = Some("resets your saves".into());
         assert_eq!(step_value(&danger, &json!(false), 1), None, "dangerous options are the app's");
         assert_eq!(step_value(&st(OptionType::String), &json!("x"), 1), None);
-        assert_eq!(cycle(&PRESETS.map(|p| p.0), &"full", 1), "clock");
+        assert_eq!(cycle(&PRESETS.map(|p| p.0), &"full", 1), "diagnostics");
+        assert_eq!(cycle(&PRESETS.map(|p| p.0), &"diagnostics", 1), "clock");
         assert_eq!(cycle(&PRESETS.map(|p| p.0), &"fps", -1), "clock");
         assert_eq!(step_scale(1.0, 1), 1.25);
         assert_eq!(step_scale(2.5, 1), 2.5);

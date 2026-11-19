@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use quiver_api::GameRef;
-use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, LayerBackdrop, LayerStereo, Level, Orientation, PerfValue, Presenter, StereoInfo, hud_card};
+use quiver_api::perf::{Anchor, Captures, CellStyle, Emphasis, HudCell, HudModel, HudRow, LayerBackdrop, LayerStereo, Level, Orientation, PerfValue, Presenter, SourceKind, StereoInfo, hud_card};
 use quiver_api::sight::{PanelAction, PanelCommand, PanelReport};
 use quiver_perf::layout::{LAYER_BLUR_READY, LAYER_BLURRING};
 use quiver_perf::record::LayerPresent;
@@ -108,28 +108,47 @@ fn v(text: String, unit: &str, level: Level) -> PerfValue {
     PerfValue { value: text.parse().ok(), text, unit: unit.into(), level, stale: false }
 }
 
-fn value(metric: &str, label: Option<&str>, pv: PerfValue) -> HudCell {
-    HudCell::Value { metric: metric.into(), label: label.map(String::from), value: pv }
+/// A value from the layer (the lab's only producer), with its emphasis and, for `after`, its
+/// label after it ("144 FPS").
+fn value(metric: &str, label: Option<&str>, pv: PerfValue, emphasis: Emphasis, after: bool) -> HudCell {
+    let style = CellStyle { emphasis, after, source: SourceKind::Layer, source_name: None };
+    HudCell::Value { metric: metric.into(), label: label.map(String::from), value: pv, style }
 }
 
 /// The lab HUD's model: what the layer's ring says, in the preset's shape.
 #[allow(clippy::too_many_arguments)]
 pub fn model(session: &str, rev: u64, on: bool, layout: &str, extent: Option<[u32; 2]>, image: &Path, backdrop: Option<LayerBackdrop>, s: Option<Stats>, run: &str, stereo: Option<StereoInfo>) -> HudModel {
     let num = |x: Option<f64>, prec: usize| x.map_or_else(|| "—".to_owned(), |x| format!("{x:.prec$}"));
-    let fps = value("fps", (layout != "fps").then_some("FPS"), v(num(s.map(|s| s.fps), 0), "", Level::Normal));
-    let low = value("fps.p1low", Some("1% low"), v(num(s.map(|s| s.p1low), 0), "", Level::Normal));
-    let ft = value("frametime", Some("FT"), v(num(s.map(|s| s.frametime_ms), 1), "ms", Level::Normal));
-    let tag = HudCell::Text { text: format!("LAB {run}"), level: Level::Dim };
+    let row = |cells: Vec<HudCell>| HudRow { cells, divider: false };
+    let block = !matches!(layout, "fps" | "compact" | "clock");
+    let fps = value("fps", Some("FPS"), v(num(s.map(|s| s.fps), 0), "", Level::Normal), if block { Emphasis::Hero } else { Emphasis::Strong }, true);
+    let low = if block {
+        value("fps.p1low", Some("1% low"), v(num(s.map(|s| s.p1low), 0), "", Level::Normal), Emphasis::Quiet, false)
+    } else {
+        value("fps.p1low", Some("1% LOW"), v(num(s.map(|s| s.p1low), 0), "", Level::Normal), Emphasis::Quiet, true)
+    };
+    let ft = value("frametime", None, v(num(s.map(|s| s.frametime_ms), 1), "ms", Level::Normal), Emphasis::Quiet, false);
+    let tag = HudCell::Text { text: format!("LAB {run}"), level: Level::Dim, style: CellStyle::emphasis(Emphasis::Tag) };
     let (orientation, background, rows) = match layout {
-        "fps" => (Orientation::Row, 0.0, vec![HudRow { cells: vec![fps] }]),
-        "compact" => (Orientation::Row, 0.45, vec![HudRow { cells: vec![fps, ft, low, HudCell::Separator, tag] }]),
+        "fps" => (Orientation::Row, 0.62, vec![row(vec![fps])]),
+        "compact" | "clock" => (Orientation::Row, 0.62, vec![row(vec![fps, ft, low, HudCell::Separator, tag])]),
         _ => {
-            let graph = HudCell::Graph { series: vec!["frametime".into()], span_ms: 3000, rows: 2, min_ms: 0.0, max_ms: 0.0, warn_above_ms: 33.4, bad_above_ms: 50.0, points: Vec::new() };
-            (Orientation::Block, 0.45, vec![HudRow { cells: vec![fps, low] }, HudRow { cells: vec![ft] }, HudRow { cells: vec![graph] }, HudRow { cells: vec![tag] }])
+            let graph = HudCell::Graph {
+                series: vec!["frametime".into()],
+                span_ms: 3000,
+                rows: 2,
+                min_ms: 0.0,
+                max_ms: 0.0,
+                warn_above_ms: 33.4,
+                bad_above_ms: 50.0,
+                points: Vec::new(),
+                base_points: Vec::new(),
+            };
+            (Orientation::Block, 0.62, vec![row(vec![fps, HudCell::Spacer, tag]), row(vec![graph]), row(vec![ft, HudCell::text("·", Level::Dim), low])])
         }
     };
     let width = hud_card::preset_width(layout).unwrap_or(hud_card::default_width(orientation));
-    let slots: Vec<f32> = rows.iter().map(|r| hud_card::row_slot(&r.cells)).collect();
+    let slots: Vec<f32> = rows.iter().map(hud_card::row_height).collect();
     let size = [width, hud_card::height(orientation, &slots, hud_card::panel(background))];
     HudModel {
         session: session.into(),

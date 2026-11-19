@@ -1028,6 +1028,9 @@ pub fn drain_once(h: &PerfHub, watched: &mut HashMap<String, rings::SessionRings
         for (sc, t) in &drained.presents {
             s.store.present(*sc, *t, now);
         }
+        for (sc, t) in &drained.base {
+            s.store.base_frame(*sc, *t);
+        }
         let alive = drained.layers.iter().any(|l| l.alive && !l.ring.starts_with("invalid"));
         if let Some(l) = drained.layers.iter().rev().find(|l| l.alive && l.status.is_some()) {
             let st = l.status.unwrap();

@@ -37,6 +37,9 @@ const LIST_EVERY: Duration = Duration::from_secs(1);
 pub struct Drained {
     /// (swapchain, entry ns) per present, in order.
     pub presents: Vec<(u32, i64)>,
+    /// (swapchain, entry ns) of the presents that start an application-rendered frame (the
+    /// layer's Reflex counting), in order: the frame-time graph's base series.
+    pub base: Vec<(u32, i64)>,
     /// One per layer ring.
     pub layers: Vec<LayerRing>,
     /// Chord presses each layer read in the game since the last drain (`keys.rs` in
@@ -164,13 +167,19 @@ impl Ring {
         self.state.heartbeat = reader.heartbeat();
         let mut bad = 0u64;
         let mut presents = Vec::new();
+        let mut base = Vec::new();
         let poll = reader.poll(MAX_PER_DRAIN, |_, rec| {
             if rec.check(LAYER_METRIC_PRESENT).is_err() {
                 bad += 1;
                 return;
             }
             match LayerPresent::from_record(rec) {
-                Some(p) => presents.push((p.swapchain, p.entry_ns)),
+                Some(p) => {
+                    if p.app_frame == Some(true) {
+                        base.push((p.swapchain, p.entry_ns));
+                    }
+                    presents.push((p.swapchain, p.entry_ns));
+                }
                 None => bad += 1,
             }
         });
@@ -217,6 +226,7 @@ impl Ring {
             return self.close(Some(format!("{invalid} of {total} records invalid")));
         }
         out.presents.extend(presents);
+        out.base.extend(base);
     }
 }
 

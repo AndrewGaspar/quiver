@@ -618,7 +618,8 @@ impl Default for HudConfig {
             anchor: Anchor::TopLeft,
             offset: [12.0, 12.0],
             scale: 1.0,
-            background: 0.45,
+            // The mock-ups' panel (design canvas: rgba(8,10,14,0.62)).
+            background: 0.62,
             text_opacity: 1.0,
             level_colors: true,
             graph_span_ms: 3000,
@@ -952,10 +953,18 @@ pub struct LayerBackdrop {
 /// scale 1; the image's scale factor (text size × `scale`) or the desktop `scale` multiplies
 /// them.
 pub mod hud_card {
-    use super::{HudCell, Orientation};
+    use super::{Emphasis, HudCell, HudRow, Orientation};
 
     /// A text row's slot height.
     pub const LINE: f32 = 20.0;
+    /// A row with a hero value (the big FPS number).
+    pub const HERO_LINE: f32 = 30.0;
+    /// A row of nothing but a split bar (the latency stages).
+    pub const SPLIT_LINE: f32 = 8.0;
+    /// Added above a row with a divider (the rule and its space).
+    pub const DIVIDER: f32 = 5.0;
+    /// A layout's per-mod strips (`mods = true`) reserve room for this many by default.
+    pub const MOD_STRIPS: u32 = 2;
     /// One graph row (`rows = 2`: 30 px).
     pub const GRAPH_LINE: f32 = 15.0;
     /// Between rows (block) and between cells.
@@ -980,13 +989,22 @@ pub mod hud_card {
     /// and `quiver-sight`'s demo models both use these.
     pub fn preset_width(id: &str) -> Option<f32> {
         Some(match id {
-            "fps" => 100.0,
-            "compact" => 780.0,
-            "standard" => 260.0,
+            "fps" => 150.0,
+            "compact" => 720.0,
+            "standard" => 284.0,
             "full" => 320.0,
+            "diagnostics" => 340.0,
             "clock" => 220.0,
             _ => return None,
         })
+    }
+
+    /// A row's slot from what it holds: a graph's rows, a hero's taller line, a thin line for
+    /// a row of split bars only, else one line; plus the divider's room.
+    pub fn slot_of(graph_rows: Option<u32>, hero: bool, split_only: bool, divider: bool) -> f32 {
+        let base = if split_only { SPLIT_LINE } else if hero { HERO_LINE } else { LINE };
+        let graph = graph_rows.map_or(0.0, |r| slot(Some(r)));
+        base.max(graph) + if divider { DIVIDER } else { 0.0 }
     }
 
     /// A panel is drawn (padding, border) when the background isn't (nearly) transparent.
@@ -1009,9 +1027,17 @@ pub mod hud_card {
         }
     }
 
-    /// The slot of a model row (its tallest cell).
+    /// The slot of a model row's cells (its tallest cell).
     pub fn row_slot(cells: &[HudCell]) -> f32 {
-        cells.iter().map(|c| slot(if let HudCell::Graph { rows, .. } = c { Some(*rows) } else { None })).fold(LINE, f32::max)
+        let graph = cells.iter().filter_map(|c| if let HudCell::Graph { rows, .. } = c { Some(*rows) } else { None }).max();
+        let hero = cells.iter().any(|c| c.style().is_some_and(|s| s.emphasis == Emphasis::Hero));
+        let split_only = !cells.is_empty() && cells.iter().all(|c| matches!(c, HudCell::Split { numbers: false, .. }));
+        slot_of(graph, hero, split_only, false)
+    }
+
+    /// The slot of a model row, its divider included.
+    pub fn row_height(r: &HudRow) -> f32 {
+        row_slot(&r.cells) + if r.divider { DIVIDER } else { 0.0 }
     }
 
     /// The card's height for rows with these slots: stacked (block) or the tallest (row:
@@ -1053,18 +1079,120 @@ pub enum Orientation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HudRow {
     pub cells: Vec<HudCell>,
+    /// A thin rule above the row (the Full preset's per-mod strips). Appended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub divider: bool,
+}
+
+/// How much a cell stands out (SIGHT-HUD §1.1). The HUD's hierarchy is the layout's: a
+/// preset or a user layout sets it per cell (`emphasis = "hero"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Emphasis {
+    /// The one big number (shown FPS); its row is taller ([`hud_card::HERO_LINE`]).
+    Hero,
+    /// Beside the hero, larger than the rest (base FPS while frame generation is on).
+    Secondary,
+    /// Bold at the base size (FPS on a one-line layout).
+    Strong,
+    #[default]
+    Normal,
+    /// Detail beside a value, in a dimmer colour (the temperature after a load).
+    Quiet,
+    /// A small uppercase tag in the label style, tinted by its producer (Reflex's mode).
+    Tag,
+}
+
+impl Emphasis {
+    pub fn is_normal(&self) -> bool {
+        *self == Emphasis::Normal
+    }
+}
+
+/// Who produced a cell's value (SIGHT-HUD §1.2): the renderer tints values by it, from theme
+/// tokens. Values quiverd derives (canonical metrics) take their source's producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    /// quiverd itself (session time, the clock) or unknown.
+    #[default]
+    Quiver,
+    /// The Sight layer (presents, Reflex counting, the NVIDIA producer's hooks and logs).
+    Layer,
+    /// A mod through the SDK (`source_name` says which).
+    Mod,
+    /// quiverd's sensors and the display (`system`, `display`).
+    System,
+    /// Quiver Tweaks.
+    Tweaks,
+}
+
+impl SourceKind {
+    pub fn is_quiver(&self) -> bool {
+        *self == SourceKind::Quiver
+    }
+
+    /// The kind of a producer id ([`ProducerInfo::id`]).
+    pub fn of_producer(id: &str) -> SourceKind {
+        match id {
+            "layer" | "nvidia" => SourceKind::Layer,
+            "system" | "display" => SourceKind::System,
+            "tweaks" => SourceKind::Tweaks,
+            id if id.starts_with("mod:") => SourceKind::Mod,
+            _ => SourceKind::Quiver,
+        }
+    }
+}
+
+/// A value cell's look beyond its level: emphasis, where its label goes, its producer.
+/// Appended to the cells; a quiverd from before sends none (plain).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CellStyle {
+    #[serde(default, skip_serializing_if = "Emphasis::is_normal")]
+    pub emphasis: Emphasis,
+    /// The label is a small one after the value ("118 FPS"), not a prefix ("GPU 87%").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after: bool,
+    #[serde(default, skip_serializing_if = "SourceKind::is_quiver")]
+    pub source: SourceKind,
+    /// A mod's name ("pharos"), for [`SourceKind::Mod`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+}
+
+impl CellStyle {
+    pub fn is_plain(&self) -> bool {
+        *self == CellStyle::default()
+    }
+
+    pub fn emphasis(emphasis: Emphasis) -> CellStyle {
+        CellStyle { emphasis, ..Default::default() }
+    }
+}
+
+/// One part of a [`HudCell::Split`]: a stage of the frame's latency.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SplitPart {
+    pub metric: String,
+    /// "SIM", "RENDER", "QUEUE", "OUT".
+    pub label: String,
+    /// Its share, in the parts' unit (ms).
+    pub value: f32,
 }
 
 /// One cell of a HUD row. Values are formatted; levels are theme levels (§1.2), never colours.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HudCell {
-    /// A number or text value with an optional dim prefix label ("FPS", "GPU").
+    /// A number or text value with an optional label: a dim prefix ("GPU 87%"), or a small
+    /// one after the value with `style.after` ("118 FPS").
     Value {
         metric: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         value: PerfValue,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
     },
     /// A state or text shown as a pill ("FG 2×", "DLSS K").
     Badge {
@@ -1072,6 +1200,8 @@ pub enum HudCell {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         value: PerfValue,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
     },
     /// A bar: `fraction` of the metric's range filled.
     Bar {
@@ -1080,6 +1210,8 @@ pub enum HudCell {
         label: Option<String>,
         value: PerfValue,
         fraction: f32,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
     },
     /// A small line of recent values, each 0–1 of the range, oldest first.
     Sparkline {
@@ -1088,7 +1220,23 @@ pub enum HudCell {
         label: Option<String>,
         value: PerfValue,
         points: Vec<f32>,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
     },
+    /// A stacked bar across the rest of the row: the parts of a whole (the frame's latency:
+    /// simulation, render, queue, present and scan-out), in order. Appended.
+    Split {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        parts: Vec<SplitPart>,
+        /// The parts' numbers in a line ("SIM 6 · RENDER 9 · QUEUE 4 · OUT 9"), not the bar.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        numbers: bool,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
+    },
+    /// Pushes the cells after it to the row's far edge ("118 FPS ······ 59 BASE"). Appended.
+    Spacer,
     /// The live frame-time graph: a placeholder rectangle the layer fills on every present
     /// (game presenter) or quiver-sight draws from `points` (desktop presenter).
     Graph {
@@ -1105,15 +1253,90 @@ pub enum HudCell {
         /// Recent presented frame times, ms (desktop presenter only; empty otherwise).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         points: Vec<f32>,
+        /// Recent application-rendered (base) frame times, ms, while frame generation is on
+        /// and `series` has `frametime.base` (desktop presenter only). Appended.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        base_points: Vec<f32>,
     },
-    /// Literal text ("→", "·").
+    /// Literal text ("→", "·"), or a strip's name tinted by its producer.
     Text {
         text: String,
         #[serde(default, skip_serializing_if = "is_normal")]
         level: Level,
+        #[serde(default, skip_serializing_if = "CellStyle::is_plain")]
+        style: CellStyle,
     },
     /// A thin divider between groups ("│").
     Separator,
+}
+
+impl HudCell {
+    /// A plain value cell.
+    pub fn value(metric: &str, label: Option<&str>, value: PerfValue) -> HudCell {
+        HudCell::Value { metric: metric.into(), label: label.map(String::from), value, style: CellStyle::default() }
+    }
+
+    /// Dim literal text.
+    pub fn text(text: &str, level: Level) -> HudCell {
+        HudCell::Text { text: text.into(), level, style: CellStyle::default() }
+    }
+
+    /// The metric a value cell shows.
+    pub fn metric(&self) -> Option<&str> {
+        match self {
+            HudCell::Value { metric, .. } | HudCell::Badge { metric, .. } | HudCell::Bar { metric, .. } | HudCell::Sparkline { metric, .. } => Some(metric),
+            _ => None,
+        }
+    }
+
+    /// A value cell's label and value.
+    pub fn labelled(&self) -> Option<(Option<&str>, &PerfValue)> {
+        match self {
+            HudCell::Value { label, value, .. } | HudCell::Badge { label, value, .. } | HudCell::Bar { label, value, .. } | HudCell::Sparkline { label, value, .. } => {
+                Some((label.as_deref(), value))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn style(&self) -> Option<&CellStyle> {
+        match self {
+            HudCell::Value { style, .. } | HudCell::Badge { style, .. } | HudCell::Bar { style, .. } | HudCell::Sparkline { style, .. } | HudCell::Split { style, .. } | HudCell::Text { style, .. } => {
+                Some(style)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn style_mut(&mut self) -> Option<&mut CellStyle> {
+        match self {
+            HudCell::Value { style, .. } | HudCell::Badge { style, .. } | HudCell::Bar { style, .. } | HudCell::Sparkline { style, .. } | HudCell::Split { style, .. } | HudCell::Text { style, .. } => {
+                Some(style)
+            }
+            _ => None,
+        }
+    }
+
+    /// The cell as plain text, the way the CLI prints a model ("118 FPS", "GPU 87%").
+    pub fn plain(&self) -> String {
+        match self {
+            HudCell::Value { label, value, style, .. } | HudCell::Badge { label, value, style, .. } | HudCell::Bar { label, value, style, .. } | HudCell::Sparkline { label, value, style, .. } => {
+                match label {
+                    Some(l) if style.after => format!("{} {l}", value.display()),
+                    Some(l) => format!("{l} {}", value.display()),
+                    None => value.display(),
+                }
+            }
+            HudCell::Split { label, parts, .. } => {
+                let parts: Vec<String> = parts.iter().map(|p| format!("{} {:.0}", p.label, p.value)).collect();
+                format!("{}[{}]", label.as_ref().map(|l| format!("{l} ")).unwrap_or_default(), parts.join(" · "))
+            }
+            HudCell::Graph { series, .. } => format!("[graph {}]", series.join("+")),
+            HudCell::Text { text, .. } => text.clone(),
+            HudCell::Spacer => "  ".into(),
+            HudCell::Separator => "│".into(),
+        }
+    }
 }
 
 /// A layout as quiverd resolved it (`HudLayout` request), before values.
@@ -1132,6 +1355,10 @@ pub struct HudLayout {
     #[serde(default)]
     pub size: [f32; 2],
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// Each row's options beside its cells (`{"divider": true}`, `{"mods": true, "max": 2}`
+    /// for a strip per mod; `{}` for a plain row), when any row has some. Appended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_options: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1366,11 +1593,33 @@ mod tests {
         assert_eq!(line, r#"{"perf":{"type":"catalog_changed","session":"s-1","product_id":5}}"#);
         // Clients from before perf don't know the reply and skip it (not a parse of Event).
         assert!(serde_json::from_str::<crate::Event>(&line).is_err());
-        let cell = HudCell::Value { metric: "fps".into(), label: Some("FPS".into()), value: PerfValue { value: Some(158.0), text: "158".into(), ..Default::default() } };
+        let cell = HudCell::value("fps", Some("FPS"), PerfValue { value: Some(158.0), text: "158".into(), ..Default::default() });
         let v = serde_json::to_value(&cell).unwrap();
         assert_eq!(v["kind"], "value");
         assert_eq!(v["value"]["text"], "158");
         assert!(v["value"].get("level").is_none());
+        // A plain style isn't on the wire, so older renderers see what they always did.
+        assert!(v.get("style").is_none());
+        // A styled cell round-trips; a cell from a quiverd before styles reads as plain.
+        let styled = HudCell::Value {
+            metric: "fps".into(),
+            label: Some("FPS".into()),
+            value: PerfValue { text: "118".into(), ..Default::default() },
+            style: CellStyle { emphasis: Emphasis::Hero, after: true, source: SourceKind::Mod, source_name: Some("pharos".into()) },
+        };
+        let v = serde_json::to_value(&styled).unwrap();
+        assert_eq!(v["style"], serde_json::json!({"emphasis": "hero", "after": true, "source": "mod", "source_name": "pharos"}));
+        assert_eq!(serde_json::from_value::<HudCell>(v).unwrap(), styled);
+        let old: HudCell = serde_json::from_str(r#"{"kind":"value","metric":"fps","label":"FPS","value":{"text":"158"}}"#).unwrap();
+        assert!(old.style().unwrap().is_plain());
+        assert_eq!(styled.plain(), "118 FPS");
+        assert_eq!(old.plain(), "FPS 158");
+        let row: HudRow = serde_json::from_str(r#"{"cells":[{"kind":"spacer"},{"kind":"split","parts":[{"metric":"latency.split.sim","label":"SIM","value":6.0}]}],"divider":true}"#).unwrap();
+        assert!(row.divider && matches!(row.cells[1], HudCell::Split { ref parts, .. } if parts.len() == 1));
+        assert_eq!(SourceKind::of_producer("mod:pharos"), SourceKind::Mod);
+        assert_eq!(SourceKind::of_producer("nvidia"), SourceKind::Layer);
+        assert_eq!(SourceKind::of_producer("display"), SourceKind::System);
+        assert_eq!(SourceKind::of_producer("quiverd"), SourceKind::Quiver);
     }
 
     #[test]
@@ -1378,7 +1627,7 @@ mod tests {
         let c = HudConfig::default().with(&HudScope { scale: Some(9.0), rate_hz: Some(3), background: Some(f32::NAN), ..Default::default() });
         assert_eq!(c.scale, 2.5);
         assert!([2, 4].contains(&c.rate_hz));
-        assert_eq!(c.background, 0.45);
+        assert_eq!(c.background, 0.62);
         assert!(c.enabled && !c.on, "the layer is in every launch, the HUD hidden");
         let pv = PerfValue { text: "12.7".into(), unit: "ms".into(), ..Default::default() };
         assert_eq!(pv.display(), "12.7 ms");
@@ -1389,9 +1638,18 @@ mod tests {
     #[test]
     fn card_geometry() {
         use hud_card::*;
-        let graph = HudCell::Graph { series: vec![], span_ms: 3000, rows: 2, min_ms: 0.0, max_ms: 0.0, warn_above_ms: 0.0, bad_above_ms: 0.0, points: vec![] };
+        let graph = HudCell::Graph { series: vec![], span_ms: 3000, rows: 2, min_ms: 0.0, max_ms: 0.0, warn_above_ms: 0.0, bad_above_ms: 0.0, points: vec![], base_points: vec![] };
         assert_eq!(row_slot(&[HudCell::Separator]), LINE);
-        assert_eq!(row_slot(&[graph]), 30.0);
+        assert_eq!(row_slot(std::slice::from_ref(&graph)), 30.0);
+        // A hero row is taller; a split-only row thin; a divider adds its room.
+        let pv = PerfValue { text: "118".into(), ..Default::default() };
+        let hero = HudCell::Value { metric: "fps".into(), label: None, value: pv.clone(), style: CellStyle::emphasis(Emphasis::Hero) };
+        assert_eq!(row_slot(&[hero.clone(), HudCell::value("fps.base", None, pv)]), HERO_LINE);
+        let split = HudCell::Split { label: None, parts: vec![], numbers: false, style: CellStyle::default() };
+        assert_eq!(row_slot(std::slice::from_ref(&split)), SPLIT_LINE);
+        assert_eq!(row_slot(&[split, HudCell::text("x", Level::Dim)]), LINE);
+        assert_eq!(row_height(&HudRow { cells: vec![hero], divider: true }), HERO_LINE + DIVIDER);
+        assert_eq!(row_slot(&[graph, HudCell::Spacer]), 30.0);
         assert_eq!(slot(Some(4)), 60.0);
         // Three lines and a graph in a panel: 20+20+30+20, three gaps, padding and border.
         assert_eq!(height(Orientation::Block, &[LINE, LINE, 30.0, LINE], true), 90.0 + 12.0 + 14.0);

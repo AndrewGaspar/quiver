@@ -3,8 +3,14 @@
 //! A layout is rows of cells over metric ids and canonical metrics. A cell referencing a
 //! metric nobody provides is dropped when the model is built, and a row left with no
 //! metric is dropped, so presets work for any producer set. `when = "<metric>"` shows a
-//! cell only while that metric has a value that isn't off (`fg.active` gates the
-//! "base →" part of `79 → 158`).
+//! cell only while that metric has a value that isn't off (`fg.active` gates base FPS).
+//!
+//! The hierarchy is the layout's (design/SIGHT-HUD.md §1.1, as built 2026-11-19): a cell's
+//! `emphasis` (`hero`, `secondary`, `strong`, `normal`, `quiet`, `tag`) and `suffix` (a small
+//! label after the value: "118 FPS") go into the model's cell style with the value's producer;
+//! `spacer` pushes the rest of a row to its far edge; `{ split = "latency", parts = [...] }`
+//! is a stacked bar (`numbers = true`: its numbers); a row with `mods = true` becomes a strip
+//! per connected mod, `divider = true` draws a rule above a row.
 //!
 //! Every layout has a fixed card size (logical px at scale 1, so it follows the swapchain
 //! height and the `scale` setting like the text does): `width` (default 260, or 640 for a
@@ -19,24 +25,30 @@
 //! name = "DLSS tuning"
 //! anchor = "top-left"
 //! background = 0.45
-//! width = 280            # logical px; height = 20 + 30 + padding unless set
+//! width = 280            # logical px; the height from the rows unless set
 //!
 //! [[row]]
 //! cells = [
-//!   { metric = "fps.base", stat = "mean", short = "FPS" },
-//!   { text = "→" },
-//!   { metric = "fps", stat = "mean" },
-//!   { metric = "fps.p1low", label = "1% low" },
+//!   { metric = "fps", emphasis = "hero", suffix = "FPS" },
+//!   { spacer = true },
+//!   { metric = "fps.base", emphasis = "secondary", suffix = "BASE", when = "fg.active" },
 //! ]
 //!
 //! [[row]]
-//! cells = [{ graph = "frametime", series = ["frametime"], span = "3s" }]
+//! cells = [{ graph = "frametime", series = ["frametime", "frametime.base"], span = "3s" }]
+//!
+//! [[row]]
+//! cells = [{ metric = "fps.p1low", label = "1% low", emphasis = "quiet" }]
+//!
+//! [[row]]
+//! mods = true
+//! divider = true
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use quiver_api::perf::{Anchor, HudLayout, HudLayoutInfo, Level, Orientation, Stat, hud_card};
+use quiver_api::perf::{Anchor, Emphasis, HudLayout, HudLayoutInfo, Level, Orientation, Stat, hud_card};
 use quiver_perf::descriptor::Display;
 
 pub const LAYOUT_FORMAT: u32 = 1;
@@ -45,9 +57,9 @@ const MAX_CELLS: usize = 24;
 const MAX_TEXT: usize = 24;
 const MAX_FILE: u64 = 64 * 1024;
 
-/// The preset cycle (`quiver hud next`), in order.
-pub const PRESETS: [&str; 4] = ["fps", "compact", "standard", "full"];
-pub const BUILTINS: [&str; 5] = ["fps", "compact", "standard", "full", "clock"];
+/// The preset cycle (`quiver hud next`, Ctrl+Shift+F3 in game), in order.
+pub const PRESETS: [&str; 6] = ["fps", "compact", "standard", "full", "diagnostics", "clock"];
+pub const BUILTINS: [&str; 6] = PRESETS;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,13 +73,32 @@ pub struct Cell {
     pub graph: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub separator: bool,
+    /// Pushes the cells after it to the row's far edge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spacer: bool,
+    /// A stacked bar of `parts` across the rest of the row (`split = "latency"`): drawn
+    /// while at least two parts have values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<String>,
+    /// A split's numbers in a line ("SIM 6 · RENDER 9 · QUEUE 4 · OUT 9") instead of the bar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub numbers: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stat: Option<Stat>,
-    /// A short dim prefix ("FPS"); `label` is a longer one ("1% low").
+    /// A short dim prefix ("GPU"); `label` is a longer one ("1% low").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// A small label after the value instead ("FPS" in "118 FPS").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    /// How much the value stands out: `hero` (the one big number; a taller row),
+    /// `secondary`, `strong`, `normal`, `quiet` (dimmer), `tag` (a small label-style word).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<Emphasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<Display>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,8 +145,24 @@ impl Span {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Row {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<Cell>,
+    /// A thin rule above the row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub divider: bool,
+    /// Instead of cells: a strip per connected mod, its name and the metrics it declares
+    /// (up to `max` strips, default [`hud_card::MOD_STRIPS`]; the card keeps room for them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mods: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
+impl Row {
+    /// How many mod strips a `mods` row holds.
+    pub fn strips(&self) -> u32 {
+        self.max.unwrap_or(hud_card::MOD_STRIPS).clamp(1, 4)
+    }
 }
 
 /// A layout file (or a preset).
@@ -154,9 +201,24 @@ impl Layout {
         self.orientation.unwrap_or(if self.rows.len() <= 1 { Orientation::Row } else { Orientation::Block })
     }
 
-    /// Each row's slot height: one line, or a graph's rows.
+    /// Each row's slot height: one line, a hero's taller line, a split bar's thin one, or a
+    /// graph's rows (a `mods` row: a line per strip it can hold), the divider's room added.
+    /// The model's rows come out the same ([`hud_card::row_height`]).
     pub fn slots(&self) -> Vec<f32> {
-        self.rows.iter().map(|r| r.cells.iter().filter(|c| c.graph.is_some()).map(|c| hud_card::slot(Some(c.rows.unwrap_or(2)))).fold(hud_card::LINE, f32::max)).collect()
+        let mut out = Vec::new();
+        for r in &self.rows {
+            if r.mods {
+                for i in 0..r.strips() {
+                    out.push(hud_card::slot_of(None, false, false, r.divider && i == 0));
+                }
+                continue;
+            }
+            let graph = r.cells.iter().filter(|c| c.graph.is_some()).map(|c| c.rows.unwrap_or(2)).max();
+            let hero = r.cells.iter().any(|c| c.emphasis == Some(Emphasis::Hero));
+            let split_only = !r.cells.is_empty() && r.cells.iter().all(|c| c.split.is_some() && !c.numbers);
+            out.push(hud_card::slot_of(graph, hero, split_only, r.divider));
+        }
+        out
     }
 
     /// The card's fixed size `[w, h]` (logical px at scale 1) with or without a panel.
@@ -179,6 +241,11 @@ impl Layout {
             background: self.background,
             size: self.size(hud_card::panel(self.background.unwrap_or(quiver_api::perf::HudConfig::default().background))),
             rows: self.rows.iter().map(|r| r.cells.iter().map(|c| serde_json::to_value(c).unwrap_or_default()).collect()).collect(),
+            row_options: if self.rows.iter().any(|r| r.mods || r.divider) {
+                self.rows.iter().map(|r| serde_json::to_value(Row { cells: Vec::new(), ..r.clone() }).unwrap_or_default()).collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -208,6 +275,12 @@ impl Layout {
             if r.cells.len() > MAX_CELLS {
                 return Err(format!("row {}: more than {MAX_CELLS} cells", i + 1));
             }
+            if r.mods && !r.cells.is_empty() {
+                return Err(format!("row {}: a mods row has no cells of its own", i + 1));
+            }
+            if r.max.is_some_and(|m| !(1..=4).contains(&m)) || (r.max.is_some() && !r.mods) {
+                return Err(format!("row {}: max (1–4) is for a mods row", i + 1));
+            }
             for (j, c) in r.cells.iter().enumerate() {
                 c.validate().map_err(|e| format!("row {} cell {}: {e}", i + 1, j + 1))?;
             }
@@ -222,9 +295,12 @@ fn valid_id(s: &str) -> bool {
 
 impl Cell {
     fn validate(&self) -> Result<(), String> {
-        let kinds = [self.metric.is_some(), self.text.is_some(), self.graph.is_some(), self.separator].iter().filter(|b| **b).count();
+        let kinds = [self.metric.is_some(), self.text.is_some(), self.graph.is_some(), self.separator, self.spacer, self.split.is_some()].iter().filter(|b| **b).count();
         if kinds != 1 {
-            return Err("needs exactly one of metric, text, graph, separator".into());
+            return Err("needs exactly one of metric, text, graph, separator, spacer, split".into());
+        }
+        if self.split.is_some() == self.parts.is_empty() || (self.numbers && self.split.is_none()) || self.parts.len() > 6 || !self.parts.iter().all(|p| valid_id(p)) {
+            return Err("a split needs 1–6 parts (metric ids), and parts need a split".into());
         }
         if let Some(m) = &self.metric
             && !valid_id(m)
@@ -241,7 +317,7 @@ impl Cell {
         {
             return Err(format!("text longer than {MAX_TEXT} characters or with control characters"));
         }
-        for (name, v, max) in [("short", &self.short, 6), ("label", &self.label, 24)] {
+        for (name, v, max) in [("short", &self.short, 6), ("label", &self.label, 24), ("suffix", &self.suffix, 16)] {
             if let Some(v) = v
                 && (v.chars().count() > max || v.chars().any(char::is_control))
             {
@@ -292,27 +368,81 @@ fn badge(mut c: Cell) -> Cell {
     c
 }
 
+/// The frame-time graph: presented frames, and the rendered (base) ones while frame
+/// generation is on.
 fn graph() -> Cell {
-    Cell { graph: Some("frametime".into()), series: vec!["frametime".into()], rows: Some(2), ..Default::default() }
+    Cell { graph: Some("frametime".into()), series: vec!["frametime".into(), "frametime.base".into()], rows: Some(2), ..Default::default() }
 }
 
-/// "79 → 158" with a base provider and FG on, else "158".
-fn fps_pair(short: Option<&str>) -> Vec<Cell> {
-    let mut base = when(m("fps.base"), "fg.active");
-    let mut presented = m("fps");
-    if let Some(s) = short {
-        // The label goes on whichever comes first.
-        base.short = Some(s.into());
-        presented = Cell { short: Some(s.into()), when: None, ..presented };
+fn emph(mut c: Cell, e: Emphasis) -> Cell {
+    c.emphasis = Some(e);
+    c
+}
+
+fn quiet(c: Cell) -> Cell {
+    emph(c, Emphasis::Quiet)
+}
+
+/// A small label after the value ("118 FPS").
+fn after(mut c: Cell, suffix: &str) -> Cell {
+    c.suffix = Some(suffix.into());
+    c
+}
+
+fn labelled(mut c: Cell, label: &str) -> Cell {
+    c.label = Some(label.into());
+    c
+}
+
+fn spacer() -> Cell {
+    Cell { spacer: true, ..Default::default() }
+}
+
+/// The frame's latency stages as a stacked bar.
+fn latency_split() -> Cell {
+    Cell { split: Some("latency".into()), parts: super::catalog::LATENCY_SPLIT.iter().map(|p| p.0.to_owned()).collect(), ..Default::default() }
+}
+
+/// Shown FPS, and the base FPS beside it while frame generation is on.
+fn fps_pair(shown: Emphasis, base: Emphasis, spaced: bool) -> Vec<Cell> {
+    let mut v = vec![emph(after(m("fps"), "FPS"), shown)];
+    if spaced {
+        v.push(spacer());
     }
-    let arrow = when(t("→"), "fg.active");
-    // With FG on, the presented value's label would repeat: the model builder drops a
-    // label equal to the one before it in the same group.
-    vec![base, arrow, presented]
+    v.push(when(emph(after(m("fps.base"), "BASE"), base), "fg.active"));
+    v
+}
+
+/// "87% 72° 96W" after a "GPU" prefix.
+fn gpu(vram: bool) -> Vec<Cell> {
+    let mut v = vec![ms("gpu.load", "GPU"), quiet(m("gpu.temp")), quiet(m("gpu.power"))];
+    if vram {
+        v.push(quiet(m("gpu.vram.used")));
+    }
+    v
+}
+
+fn cpu() -> Vec<Cell> {
+    vec![ms("cpu.load", "CPU"), quiet(m("cpu.temp"))]
+}
+
+/// The FG multiplier the layer counts (or Smooth Motion's note), as a tag.
+fn fg_tag() -> Vec<Cell> {
+    vec![when(emph(ms("fg.ratio", "FG"), Emphasis::Tag), "fg.active"), emph(ms("nv.fg.driver", "FG"), Emphasis::Tag)]
+}
+
+/// "28 MS PC LATENCY ······ REFLEX BOOST"; Full adds game-to-render latency.
+fn latency_row(full: bool) -> Row {
+    let mut v = vec![after(m("latency.pc"), if full { "PC LAT" } else { "PC LATENCY" })];
+    if full {
+        v.push(quiet(after(m("latency.render"), "RENDER")));
+    }
+    v.extend([spacer(), when(emph(ms("nv.reflex.mode", "REFLEX"), Emphasis::Tag), "nv.reflex.mode")]);
+    row(v)
 }
 
 fn row(cells: Vec<Cell>) -> Row {
-    Row { cells }
+    Row { cells, ..Default::default() }
 }
 
 pub fn builtin(id: &str) -> Option<Layout> {
@@ -320,47 +450,63 @@ pub fn builtin(id: &str) -> Option<Layout> {
     let width = hud_card::preset_width(id);
     let mut l = Layout { format: 1, name: String::new(), anchor: None, background: None, orientation: None, width, height: None, rows: Vec::new(), id: id.into(), builtin: true };
     match id {
+        // "118 FPS 59 BASE".
         "fps" => {
             l.name = "FPS only".into();
-            l.background = Some(0.0);
-            l.rows = vec![row(fps_pair(None))];
+            l.rows = vec![row(fps_pair(Emphasis::Strong, Emphasis::Strong, false))];
         }
+        // One line: "118 FPS 59 BASE 8.5 MS 94 1% LOW 28 MS LAT │ GPU 87% 72° 96W │ CPU 41% 78° │ DLSS K FG 2.0×".
         "compact" => {
             l.name = "Compact".into();
-            let mut r = fps_pair(Some("FPS"));
-            r.extend([m("frametime"), ms("fps.p1low", "1%↓"), sep(), ms("gpu.load", "GPU"), m("gpu.temp"), m("gpu.power"), sep(), ms("cpu.load", "CPU"), m("cpu.temp"), sep()]);
-            r.extend([badge(m("upscaler")), when(m("render.resolution"), "upscaler"), when(ms("fg.ratio", "FG"), "fg.active"), ms("nv.fg.driver", "FG"), ms("latency.render", "LAT"), ms("latency.pc", "PC")]);
+            let mut r = fps_pair(Emphasis::Strong, Emphasis::Strong, false);
+            r.extend([quiet(m("frametime")), quiet(after(m("fps.p1low"), "1% LOW")), after(m("latency.pc"), "LAT"), sep()]);
+            r.extend(gpu(false));
+            r.push(sep());
+            r.extend(cpu());
+            r.extend([sep(), badge(m("upscaler"))]);
+            r.extend(fg_tag());
             l.rows = vec![row(r)];
         }
+        // The mock-up's block (design canvas, HudOverGame): the shown FPS big, base FPS beside
+        // it, the dual frame-time graph, frame time and 1% low, latency with Reflex's mode and
+        // its split, then GPU and CPU.
         "standard" | "full" => {
-            l.name = if id == "full" { "Full".into() } else { "Standard".into() };
-            let mut first = fps_pair(Some("FPS"));
-            first.extend([Cell { label: Some("1% low".into()), ..m("fps.p1low") }]);
-            l.rows = vec![
-                row(first),
-                row(vec![ms("frametime", "FT"), when(Cell { label: Some("base".into()), ..m("frametime.base") }, "fg.active")]),
-                row(vec![graph()]),
-                row(vec![ms("gpu.load", "GPU"), m("gpu.temp"), m("gpu.power"), m("gpu.vram.used")]),
-                row(vec![ms("cpu.load", "CPU"), m("cpu.temp"), ms("mem.used", "RAM")]),
-                row(vec![badge(m("upscaler")), when(m("render.resolution"), "upscaler"), when(t("→"), "upscaler"), when(m("output.resolution"), "upscaler")]),
-                // Reflex (SIGHT-HUD §3.17): game-to-render (opt-in timings) and PC latency.
-                row(vec![ms("latency.render", "LAT"), ms("latency.pc", "PC")]),
-            ];
-            if id == "full" {
-                l.rows.extend([
-                    // NVIDIA: Reflex mode and cap, the FG multiplier the layer sees (or
-                    // Smooth Motion's note), then DLSS's quality, model, DLLs and override.
-                    row(vec![when(ms("nv.reflex.mode", "RFX"), "nv.reflex.mode"), ms("nv.reflex.cap", "CAP"), when(ms("fg.ratio", "FG"), "fg.active"), ms("nv.fg.driver", "FG")]),
-                    row(vec![ms("dlss.sr.quality", "SR"), m("dlss.sr.model"), ms("dlss.version", "DLL"), ms("dlss.fg.version", "FG"), ms("dlss.sr.requested", "REQ")]),
-                    row(vec![ms("gpu.clock", "CLK"), m("cpu.clock")]),
-                    row(vec![ms("gpu.vram.total", "VRAM"), ms("proc.rss", "GAME"), m("proc.cpu")]),
-                    row(vec![ms("bat.level", "BAT"), m("bat.power"), badge(m("bat.status"))]),
-                    row(vec![ms("display.mode", "DISP"), ms("display.vrr", "VRR"), ms("display.tearing", "TEAR"), m("display.path")]),
-                    row(vec![ms("session.time", "TIME"), m("clock.time")]),
-                    // Quiver Tweaks' chips (design/TWEAKS.md §6): `CAP 160 · DLSS K · LL on`.
-                    row(vec![when(ms("tweaks.summary", "TWK"), "tweaks.summary")]),
-                ]);
+            let full = id == "full";
+            l.name = if full { "Full".into() } else { "Standard".into() };
+            let mut third = vec![quiet(m("frametime")), t("·"), quiet(labelled(m("fps.p1low"), "1% low")), spacer()];
+            third.extend(fg_tag());
+            l.rows = vec![row(fps_pair(Emphasis::Hero, Emphasis::Secondary, true)), row(vec![graph()]), row(third), latency_row(full), row(vec![latency_split()])];
+            if full {
+                // The split's numbers, then GPU and CPU on their own rows with VRAM and RAM.
+                l.rows.extend([row(vec![Cell { numbers: true, ..latency_split() }]), row(gpu(true)), row([cpu(), vec![quiet(ms("mem.used", "RAM"))]].concat())]);
+                // The display's flags (VRR and tearing explain pacing), Reflex's cap.
+                l.rows.push(row(vec![ms("display.vrr", "VRR"), ms("display.tearing", "TEAR"), quiet(m("display.refresh")), ms("nv.reflex.cap", "CAP")]));
+                // DLSS as the agnostic sources see it: render → output, quality and model.
+                l.rows.push(row(vec![badge(m("upscaler")), quiet(when(m("render.resolution"), "upscaler")), when(t("→"), "upscaler"), quiet(when(m("output.resolution"), "upscaler"))]));
+                l.rows.push(row(vec![ms("dlss.sr.quality", "SR"), quiet(m("dlss.sr.model"))]));
+                // A strip per mod from the metrics it declares.
+                l.rows.push(Row { mods: true, divider: true, ..Default::default() });
+            } else {
+                l.rows.push(row([gpu(false), cpu()].concat()));
             }
+        }
+        // What Full used to carry: clocks, memory, battery, the display path, session and
+        // time of day, DLSS's DLLs and override, Quiver Tweaks.
+        "diagnostics" => {
+            l.name = "Diagnostics".into();
+            l.rows = vec![
+                row(vec![emph(after(m("fps"), "FPS"), Emphasis::Strong), quiet(m("frametime")), spacer(), ms("session.time", "TIME"), quiet(m("clock.time"))]),
+                row(vec![ms("gpu.clock", "GPU"), ms("cpu.clock", "CPU")]),
+                row(vec![ms("gpu.vram.used", "VRAM"), quiet(labelled(m("gpu.vram.total"), "of")), ms("mem.used", "RAM")]),
+                row(vec![ms("proc.rss", "GAME"), quiet(m("proc.cpu"))]),
+                row(vec![ms("bat.level", "BAT"), quiet(m("bat.power")), badge(m("bat.status"))]),
+                row(vec![ms("display.mode", "DISP"), ms("display.vrr", "VRR"), ms("display.tearing", "TEAR")]),
+                // The path on its own row: "composited (blocked: …)" needs the width.
+                row(vec![ms("display.path", "PATH"), quiet(labelled(m("display.blocked"), "blocked by"))]),
+                row(vec![ms("dlss.version", "DLL"), ms("dlss.fg.version", "FG"), ms("dlss.sr.requested", "REQ")]),
+                // Quiver Tweaks' chips (design/TWEAKS.md §6): `CAP 160 · DLSS K · LL on`.
+                row(vec![when(ms("tweaks.summary", "TWK"), "tweaks.summary")]),
+            ];
         }
         "clock" => {
             l.name = "Clock".into();
@@ -447,13 +593,65 @@ mod tests {
         }
         assert_eq!(builtin("compact").unwrap().orientation(), Orientation::Row);
         assert_eq!(builtin("standard").unwrap().orientation(), Orientation::Block);
-        assert_eq!(next_preset("fps"), "compact");
-        assert_eq!(next_preset("full"), "fps");
+        // Ctrl+Shift+F3 goes FPS only → Compact → Standard → Full → Diagnostics → Clock.
+        let mut seen = vec!["fps"];
+        while seen.len() < 7 {
+            seen.push(next_preset(seen.last().unwrap()));
+        }
+        assert_eq!(seen, ["fps", "compact", "standard", "full", "diagnostics", "clock", "fps"]);
         assert_eq!(next_preset("my-layout"), "fps");
-        // Full is Standard plus rows, and has no latency breakdown in this version.
-        let (s, f) = (builtin("standard").unwrap(), builtin("full").unwrap());
-        assert!(f.rows.len() > s.rows.len());
-        assert!(!serde_json::to_string(&f.to_api()).unwrap().contains("breakdown"));
+        assert_eq!(list(std::path::Path::new("/nonexistent")).iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), PRESETS);
+    }
+
+    /// Every metric a preset references, by preset.
+    fn metrics(l: &Layout) -> Vec<String> {
+        l.rows.iter().flat_map(|r| &r.cells).flat_map(|c| c.metric.iter().chain(&c.parts).cloned()).collect()
+    }
+
+    #[test]
+    fn presets_follow_the_mock_ups() {
+        let cell = |l: &Layout, id: &str| l.rows.iter().flat_map(|r| &r.cells).find(|c| c.metric.as_deref() == Some(id)).cloned().unwrap();
+        // One big number, the shown FPS, with base FPS beside it while FG is on; labels after.
+        let s = builtin("standard").unwrap();
+        let first = &s.rows[0].cells;
+        assert_eq!((first[0].metric.as_deref(), first[0].emphasis, first[0].suffix.as_deref()), (Some("fps"), Some(Emphasis::Hero), Some("FPS")));
+        assert!(first[1].spacer);
+        assert_eq!((first[2].metric.as_deref(), first[2].emphasis, first[2].when.as_deref()), (Some("fps.base"), Some(Emphasis::Secondary), Some("fg.active")));
+        // The dual graph, the latency split, and a taller first row.
+        let g = s.rows[1].cells[0].clone();
+        assert_eq!(g.series, ["frametime", "frametime.base"]);
+        assert!(s.rows.iter().any(|r| r.cells.iter().any(|c| c.split.as_deref() == Some("latency") && c.parts.len() == 4)));
+        assert_eq!(s.slots()[0], hud_card::HERO_LINE);
+        assert_eq!(cell(&s, "latency.pc").suffix.as_deref(), Some("PC LATENCY"));
+        assert_eq!(cell(&s, "nv.reflex.mode").emphasis, Some(Emphasis::Tag));
+        // Full = Standard + the split's numbers, VRAM/RAM, the display's flags, DLSS and a
+        // strip per mod; the old long tail moved to Diagnostics.
+        let f = builtin("full").unwrap();
+        let (sm, fm, dm) = (metrics(&s), metrics(&f), metrics(&builtin("diagnostics").unwrap()));
+        for id in &sm {
+            assert!(fm.contains(id), "full lacks standard's {id}");
+        }
+        for id in ["latency.split.sim", "display.vrr", "display.tearing", "upscaler", "render.resolution", "gpu.vram.used"] {
+            assert!(fm.iter().any(|m| m == id), "full: {id}");
+        }
+        assert!(f.rows.iter().any(|r| r.mods && r.divider));
+        // `quiver hud layout show` carries the row options beside the cells.
+        let api = f.to_api();
+        assert_eq!(api.row_options.len(), api.rows.len());
+        assert_eq!(api.row_options.last().unwrap(), &serde_json::json!({"mods": true, "divider": true}));
+        assert!(s.to_api().row_options.is_empty(), "no row options: none on the wire");
+        for id in ["gpu.clock", "cpu.clock", "bat.level", "display.path", "display.mode", "session.time", "clock.time", "proc.rss", "dlss.version", "dlss.sr.requested", "tweaks.summary"] {
+            assert!(!fm.iter().any(|m| m == id), "full still has {id}");
+            assert!(dm.iter().any(|m| m == id), "diagnostics lacks {id}");
+        }
+        // Full's size has room for its mod strips.
+        let strips = hud_card::MOD_STRIPS as usize;
+        assert_eq!(f.slots().len(), f.rows.len() - 1 + strips);
+        // Compact is one line, FPS only shows base FPS beside the shown one.
+        assert_eq!(builtin("compact").unwrap().rows.len(), 1);
+        let fps = builtin("fps").unwrap();
+        assert_eq!(metrics(&fps), ["fps", "fps.base"]);
+        assert_eq!(cell(&fps, "fps.base").suffix.as_deref(), Some("BASE"));
     }
 
     #[test]
@@ -501,6 +699,13 @@ cells = [
             ("[[row]]\ncells=[{graph=\"frametime\", span=\"30s\"}]", "span"),
             ("[[row]]\ncells=[{metric=\"fps\", colour=\"pink\"}]", "unknown field"),
             ("name = \"x\"", "rows"),
+            ("[[row]]\ncells=[{split=\"latency\"}]", "a split needs"),
+            ("[[row]]\ncells=[{metric=\"fps\", parts=[\"a.b\"]}]", "a split needs"),
+            ("[[row]]\ncells=[{spacer=true, metric=\"fps\"}]", "exactly one"),
+            ("[[row]]\ncells=[{metric=\"fps\", suffix=\"a suffix far too long\"}]", "suffix longer"),
+            ("[[row]]\ncells=[{metric=\"fps\", emphasis=\"huge\"}]", "unknown variant"),
+            ("[[row]]\nmods=true\ncells=[{metric=\"fps\"}]", "no cells of its own"),
+            ("[[row]]\nmax=2\ncells=[{metric=\"fps\"}]", "for a mods row"),
         ];
         for (text, want) in bad {
             let e = parse("x", text).unwrap_err();
@@ -511,12 +716,16 @@ cells = [
     #[test]
     fn layouts_have_a_fixed_size() {
         let s = builtin("standard").unwrap();
-        // Seven rows, one of them a two-row graph: 6 × 20 + 30, six gaps of 4, padding 6 and
-        // a 1 px border top and bottom.
-        assert_eq!(s.size(true), [260.0, 188.0]);
-        assert_eq!(s.size(false), [260.0, 174.0]);
-        assert_eq!(builtin("compact").unwrap().size(true), [780.0, 34.0]);
-        assert_eq!(builtin("full").unwrap().size(true)[1], 14.0 * 20.0 + 30.0 + 14.0 * 4.0 + 14.0);
+        // Six rows: the hero's 30, the two-row graph's 30, three lines and the split's 8;
+        // five gaps of 4, padding 6 and a 1 px border top and bottom.
+        assert_eq!(s.size(true), [284.0, 30.0 + 30.0 + 3.0 * 20.0 + 8.0 + 5.0 * 4.0 + 14.0]);
+        assert_eq!(s.size(false), [284.0, 148.0]);
+        assert_eq!(builtin("compact").unwrap().size(true), [720.0, 34.0]);
+        // Full: hero, graph, split, eight lines, and two mod strips (the first with its rule).
+        assert_eq!(builtin("full").unwrap().size(true), [320.0, 30.0 + 30.0 + 8.0 + 8.0 * 20.0 + (20.0 + hud_card::DIVIDER) + 20.0 + 12.0 * 4.0 + 14.0]);
+        // A user layout with a hero, a split row and a mods row.
+        let h = parse("x", "[[row]]\ncells = [{ metric = \"fps\", emphasis = \"hero\", suffix = \"FPS\" }, { spacer = true }]\n[[row]]\ncells = [{ split = \"latency\", parts = [\"a.b\", \"a.c\"] }]\n[[row]]\nmods = true\nmax = 1\ndivider = true").unwrap();
+        assert_eq!(h.slots(), [30.0, 8.0, 20.0 + hud_card::DIVIDER]);
         // A user layout: defaults by orientation, or what it asks for.
         let one = parse("x", "[[row]]\ncells = [{ metric = \"fps\" }]").unwrap();
         assert_eq!(one.size(true), [hud_card::DEFAULT_WIDTH_ROW, 34.0]);

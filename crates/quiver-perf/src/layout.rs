@@ -474,7 +474,9 @@ pub struct HudGraph {
     /// Vertical range; `max_ms == 0`: auto.
     pub min_ms: f32,
     pub max_ms: f32,
-    /// Premultiplied RGBA8 (byte order R, G, B, A in memory), resolved from theme levels.
+    /// Premultiplied RGBA8 (byte order R, G, B, A in memory), resolved from theme levels:
+    /// the presented frames' line, the fill under it (0: none), and `muted`, the base
+    /// series' line ([`GRAPH_SERIES_BASE`]).
     pub line: u32,
     pub fill: u32,
     pub muted: u32,

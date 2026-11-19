@@ -133,6 +133,52 @@ their desktop (a notification, a PiP, Quiver's own toast) is costing them direct
 The clock / session timer / battery strip that SIGHT called the corner HUD is a fifth built-in
 layout (`clock`) using the same machinery; it has no performance metrics.
 
+**As built (2026-11-19), back toward the design canvas's mock-ups** (HudOverGame, HudPresets,
+HudEditor). Six presets, in the Ctrl+Shift+F3 cycle's order: FPS only, Compact, Standard, Full,
+Diagnostics, Clock.
+
+- **Hierarchy is the layout's.** A cell's `emphasis` is `hero` (the one big number; its row is
+  30 px instead of 20), `secondary` (beside the hero, larger, in the graph's base-series amber),
+  `strong`, `normal`, `quiet` (dimmer detail) or `tag` (a small uppercase word in the label
+  style). `suffix` puts a small label after the value ("118 FPS", "28 MS PC LATENCY"); `short`
+  and `label` stay prefixes ("GPU 87%"). Units of two or more letters become small labels too
+  ("8.5 MS", "6.1 GB"); `%`, `°`, `W`, `×` stay attached ("96W").
+- **Producers tint values.** quiverd puts each value's producer in the model (`style.source`:
+  `layer`, `mod` with its name, `system`, `tweaks`, `quiver`; a canonical metric takes its
+  source's). The renderer maps them to theme tokens: the layer neutral, a mod teal (`who-cli`
+  toward the text colour, a `who-cli` dot on its tags), the system a slightly grey text,
+  Tweaks the accent. A threshold level (warn, bad) wins. Absent producers leave no slot.
+- **The dual graph.** `series = ["frametime", "frametime.base"]`: presented frames in
+  `who-gui` blue, rendered (base) frames in `warn` amber while frame generation is on (quiverd
+  drops the base series otherwise), over a faint reference line at a frame-rate target (120,
+  60, 30 fps…) inside the range. In the game the layer draws both from its own presents: the
+  ones its Reflex counting says start an application frame are the base series
+  (`qv_hud_graph.muted` is its colour, `QV_GRAPH_SERIES_BASE` asks for it). On the desktop
+  quiverd sends `base_points` from the same flag in the layer's present records.
+  `frametime.base` is a canonical metric (1000 ÷ `fps.base`).
+- **The latency split** is a layout cell, `{ split = "latency", parts = [...] }`, drawn while
+  at least two parts have values: a thin stacked bar (sim, render, queue, present + scan-out),
+  or with `numbers = true` its numbers in a line ("■ SIM 6 · ■ RENDER 9 · …"). The parts are
+  canonical metrics `latency.split.{sim,render,queue,out}` over roles of the same names. They
+  aren't generic roles, so a mod with its own Reflex markers can fill them; nothing built in
+  does yet (the layer's opt-in `vkGetLatencyTimingsNV` reports are the obvious source).
+- **Per-mod strips.** A `[[row]] mods = true` (with `divider`, `max`) becomes one row per
+  connected mod under a rule: its name as a teal tag, then up to six gauges, states and texts
+  it declares (basic visibility), each with its `short` label, "·" between them.
+- **Standard** (284 wide): `118 FPS ····· 59 BASE` / the dual graph / `8.5 MS · 1% low 94 ···
+  FG 2.0×` / `28 MS PC LATENCY ··· REFLEX BOOST` / the split bar / `GPU 87% 72° 96W CPU 41%
+  78°`. Vanilla (no FG, no Reflex): `74 FPS` / one graph line / `13.5 MS · 1% low 60` / GPU
+  and CPU.
+- **Full** (320): Standard plus game-to-render latency, the split's numbers, VRAM and RAM,
+  `VRR on TEAR off 165 Hz CAP 120 fps`, DLSS (render → output, quality, model) and the mod
+  strips.
+- **Diagnostics** (340, new): what Full used to carry: clocks, VRAM of total, game RSS and
+  CPU, battery, the display mode and path (on its own row with what blocks scan-out, so it no
+  longer truncates), session time and time of day, DLSS's DLLs and override, Quiver Tweaks.
+- **Compact** (720): one line. **FPS only** (150): `118 FPS 59 BASE`, in a panel now like the
+  mock-up.
+- The card: radius 10, background 62% by default (the mock-ups' `rgba(8,10,14,0.62)`).
+
 ### 1.2 Placement, opacity, scale
 
 | Setting | Values | Default |
@@ -141,7 +187,7 @@ layout (`clock`) using the same machinery; it has no performance metrics.
 | `offset` | logical px from the anchor (x, y) | 12, 12 |
 | `scale` | 0.75–2.5 × the base size | 1.0 |
 | `base size` | text height = 1.6% of the swapchain height (≈ 17 px at 1080p, 26 px at 1600p) | |
-| `background` | opacity 0–100%, rounded panel or none | 45% `ink-0` |
+| `background` | opacity 0–100%, rounded panel or none | 62% `ink-0` (45% before 2026-11-19) |
 | `text` | opacity 50–100%; colour by threshold level on/off | 100%, on |
 | `orientation` | `row` (compact) / `block` | per preset |
 | `graph` | span 1–10 s, height in rows | 3 s, 2 rows |
@@ -358,11 +404,13 @@ cells = [
 around is harder to read than one with a gap). The size is in logical px at `scale` 1, so it
 follows the swapchain height and `scale` like the text does:
 
-- `width`: default 260 (block) or 640 (one line); 40–1200. Presets: FPS only 100, Compact
-  780, Standard 260, Full 320, Clock 220.
+- `width`: default 260 (block) or 640 (one line); 40–1200. Presets: FPS only 150, Compact
+  720, Standard 284, Full 320, Diagnostics 340, Clock 220 (before 2026-11-19: FPS only 100, Compact 780, Standard 260).
 - `height`: default from the layout's rows: a 20 px slot per text row, `rows` × 15 px per
   graph row (30 for the default 2), 4 px between rows, plus padding (6 + a 1 px border top
-  and bottom with a panel, none without); 16–1000. Standard: 188, Full: 308, Compact: 34.
+  and bottom with a panel, none without); 16–1000. A row with a `hero` cell is 30, a row of
+  split bars 8, a `divider` adds 5, a `mods` row keeps a line per strip. Standard: 162, Full:
+  335, Compact: 34.
 - Rows the model leaves out (nobody provides them, or everything in them is gated off) don't
   keep their place: the shown rows pack from the top and the space is left empty at the
   bottom.

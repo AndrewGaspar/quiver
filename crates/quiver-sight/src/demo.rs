@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
-use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, Level, Orientation, PerfValue, Presenter, hud_card};
+use quiver_api::perf::{Anchor, Captures, CellStyle, Emphasis, HudCell, HudModel, HudRow, Level, Orientation, PerfValue, Presenter, SourceKind, SplitPart, hud_card};
 
 use crate::Args;
 use crate::link::Msg;
@@ -15,8 +15,23 @@ fn v(text: &str, unit: &str, level: Level) -> PerfValue {
     PerfValue { value: text.parse().ok(), text: text.into(), unit: unit.into(), level, stale: false }
 }
 
-fn value(metric: &str, label: Option<&str>, pv: PerfValue) -> HudCell {
-    HudCell::Value { metric: metric.into(), label: label.map(String::from), value: pv }
+fn st(source: SourceKind, emphasis: Emphasis) -> CellStyle {
+    let source_name = (source == SourceKind::Mod).then(|| "pharos".to_owned());
+    CellStyle { emphasis, source, source_name, after: false }
+}
+
+/// A value cell as quiverd sends it.
+fn cell(metric: &str, label: Option<&str>, pv: PerfValue, style: CellStyle) -> HudCell {
+    HudCell::Value { metric: metric.into(), label: label.map(String::from), value: pv, style }
+}
+
+/// "118 FPS": a label after the value.
+fn after(metric: &str, label: &str, pv: PerfValue, style: CellStyle) -> HudCell {
+    cell(metric, Some(label), pv, CellStyle { after: true, ..style })
+}
+
+fn dim(text: &str) -> HudCell {
+    HudCell::text(text, Level::Dim)
 }
 
 /// Sample frame times (ms), oldest first, with a hitch.
@@ -28,102 +43,192 @@ pub fn frametimes(i: u32, n: usize) -> Vec<f32> {
     }).collect()
 }
 
-/// A model like quiverd's for `layout`, with values that move with `i`.
+/// The rendered frames under [`frametimes`] at 2× frame generation: one per two presents.
+pub fn base_frametimes(i: u32, n: usize) -> Vec<f32> {
+    frametimes(i, n).chunks(2).map(|c| c.iter().sum()).collect()
+}
+
+/// The presets the demo has models for, in the cycle's order.
+pub const LAYOUTS: [&str; 6] = ["fps", "compact", "standard", "full", "diagnostics", "clock"];
+
+/// A model like quiverd's for `layout` (its built-in presets), with values that move with
+/// `i`: frame generation on, a mod ("pharos") supplying PC latency, Reflex's mode and the
+/// latency split through the SDK, the base FPS from the Sight layer's Reflex counting. The
+/// `short` variant ([`vary`]) is the same game without the mod and FG ("Vanilla").
 pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[u32; 2]>) -> HudModel {
+    use Emphasis::*;
+    use SourceKind::{Layer, Mod, Quiver, System};
     let w = [0i32, 3, -2, 5, -4, 1, 2, -1][i as usize % 8];
     let fps = (158 + w).to_string();
     let base = ((158 + w) / 2).to_string();
-    let fg = |cells: &mut Vec<HudCell>| {
-        // FPS only has no label (quiverd's `fps_pair(None)`).
-        cells.push(value("fps.base", (layout != "fps").then_some("FPS"), v(&base, "", Level::Normal)));
-        cells.push(HudCell::Text { text: "→".into(), level: Level::Dim });
-        cells.push(value("fps", None, v(&fps, "", Level::Normal)));
+    let n = |x: &str| v(x, "", Level::Normal);
+    let desktop = presenter == Presenter::Desktop;
+    let graph = HudCell::Graph {
+        series: vec!["frametime".into(), "frametime.base".into()],
+        span_ms: 3000,
+        rows: 2,
+        min_ms: 0.0,
+        max_ms: 0.0,
+        warn_above_ms: 33.4,
+        bad_above_ms: 50.0,
+        points: if desktop { frametimes(i, 300) } else { Vec::new() },
+        base_points: if desktop { base_frametimes(i, 300) } else { Vec::new() },
     };
-    let points = if presenter == Presenter::Desktop { frametimes(i, 300) } else { Vec::new() };
-    let graph = HudCell::Graph { series: vec!["frametime".into()], span_ms: 3000, rows: 2, min_ms: 0.0, max_ms: 0.0, warn_above_ms: 33.4, bad_above_ms: 50.0, points };
-    let gpu = vec![
-        value("gpu.load", Some("GPU"), v(&(97 - w.abs()).to_string(), "%", Level::Warn)),
-        value("gpu.temp", None, v("71", "°", Level::Normal)),
-        value("gpu.power", None, v(&(92 + w).to_string(), "W", Level::Normal)),
-    ];
-    let cpu = vec![value("cpu.load", Some("CPU"), v(&(38 - w).to_string(), "%", Level::Normal)), value("cpu.temp", None, v("64", "°", Level::Normal))];
-    let (orientation, background, rows) = match layout {
-        "fps" => {
-            let mut r = Vec::new();
-            fg(&mut r);
-            (Orientation::Row, 0.0, vec![HudRow { cells: r }])
+    let gpu = |vram: bool| {
+        let mut r = vec![
+            cell("gpu.load", Some("GPU"), v(&(97 - w.abs()).to_string(), "%", Level::Warn), st(System, Normal)),
+            cell("gpu.temp", None, v("71", "°", Level::Normal), st(System, Quiet)),
+            cell("gpu.power", None, v(&(92 + w).to_string(), "W", Level::Normal), st(System, Quiet)),
+        ];
+        if vram {
+            r.push(cell("gpu.vram.used", None, v("6.1", "GB", Level::Normal), st(System, Quiet)));
         }
+        r
+    };
+    let cpu = || vec![cell("cpu.load", Some("CPU"), v(&(38 - w).to_string(), "%", Level::Normal), st(System, Normal)), cell("cpu.temp", None, v("64", "°", Level::Normal), st(System, Quiet))];
+    let fg_tag = || cell("fg.ratio", Some("FG"), v("2.0", "×", Level::Normal), st(Layer, Tag));
+    let split = |numbers: bool| HudCell::Split {
+        numbers,
+        label: None,
+        parts: [("latency.split.sim", "SIM", 6.0), ("latency.split.render", "RENDER", 9.0), ("latency.split.queue", "QUEUE", 4.0), ("latency.split.out", "OUT", 9.0)]
+            .iter()
+            .map(|(m, l, x)| SplitPart { metric: (*m).into(), label: (*l).into(), value: *x })
+            .collect(),
+        style: st(Mod, Normal),
+    };
+    let row = |cells: Vec<HudCell>| HudRow { cells, divider: false };
+    let (orientation, rows) = match layout {
+        "fps" => (Orientation::Row, vec![row(vec![after("fps", "FPS", n(&fps), st(Layer, Strong)), after("fps.base", "BASE", n(&base), st(Layer, Strong))])]),
         "compact" => {
-            let mut r = Vec::new();
-            fg(&mut r);
-            r.push(value("frametime", None, v("6.3", "ms", Level::Normal)));
-            r.push(value("fps.p1low", Some("1%↓"), v("128", "", Level::Normal)));
-            r.push(HudCell::Separator);
-            r.extend(gpu);
-            r.push(HudCell::Separator);
-            r.extend(cpu);
-            r.push(HudCell::Separator);
-            r.push(HudCell::Badge { metric: "upscaler".into(), label: None, value: v("DLSS K", "", Level::Accent) });
-            r.push(value("render.resolution", None, v("1280×800", "", Level::Dim)));
-            r.push(value("fg.ratio", Some("FG"), v("2.0", "×", Level::Normal)));
-            r.push(value("latency.render", Some("LAT"), v("21", "ms", Level::Normal)));
-            r.push(value("latency.pc", Some("PC"), v("16.8", "ms", Level::Normal)));
-            (Orientation::Row, 0.45, vec![HudRow { cells: r }])
-        }
-        _ => {
-            let mut first = Vec::new();
-            fg(&mut first);
-            first.push(value("fps.p1low", Some("1% low"), v("128", "", Level::Normal)));
-            let mut rows = vec![
-                HudRow { cells: first },
-                HudRow { cells: vec![value("frametime", Some("FT"), v("6.3", "ms", Level::Normal)), value("frametime.base", Some("base"), v("12.7", "ms", Level::Dim))] },
-                HudRow { cells: vec![graph] },
-                HudRow { cells: [gpu, vec![HudCell::Bar { metric: "gpu.vram.used".into(), label: None, value: v("6.1", "GB", Level::Normal), fraction: 0.76 }]].concat() },
-                HudRow { cells: [cpu, vec![value("mem.used", Some("RAM"), v("11.2", "GB", Level::Normal))]].concat() },
-                HudRow {
-                    cells: vec![
-                        HudCell::Badge { metric: "upscaler".into(), label: None, value: v("DLSS K", "", Level::Accent) },
-                        value("render.resolution", None, v("1280×800", "", Level::Normal)),
-                        HudCell::Text { text: "→".into(), level: Level::Dim },
-                        value("output.resolution", None, v("2560×1600", "", Level::Normal)),
-                    ],
-                },
-                HudRow { cells: vec![value("latency.render", Some("LAT"), v("21", "ms", Level::Good)), value("latency.pc", Some("PC"), v("16.8", "ms", Level::Normal))] },
+            let mut r = vec![
+                after("fps", "FPS", n(&fps), st(Layer, Strong)),
+                after("fps.base", "BASE", n(&base), st(Layer, Strong)),
+                cell("frametime", None, v("6.3", "ms", Level::Normal), st(Layer, Quiet)),
+                after("fps.p1low", "1% LOW", n("128"), st(Layer, Quiet)),
+                after("latency.pc", "LAT", v("28", "ms", Level::Normal), st(Mod, Normal)),
+                HudCell::Separator,
             ];
-            if layout == "full" {
-                // NVIDIA (SIGHT-HUD §3.17): Reflex and the FG multiplier the layer counts, then DLSS.
-                rows.push(HudRow {
-                    cells: vec![
-                        HudCell::Badge { metric: "nv.reflex.mode".into(), label: Some("RFX".into()), value: v("boost", "", Level::Good) },
-                        value("nv.reflex.cap", Some("CAP"), v("120", "fps", Level::Normal)),
-                        value("fg.ratio", Some("FG"), v("2.0", "×", Level::Normal)),
-                    ],
-                });
-                rows.push(HudRow {
-                    cells: vec![
-                        value("dlss.sr.quality", Some("SR"), v("Perf", "", Level::Normal)),
-                        value("dlss.sr.model", None, v("Transformer", "", Level::Normal)),
-                        value("dlss.version", Some("DLL"), v("310.9.16", "", Level::Normal)),
-                        value("dlss.sr.requested", Some("REQ"), v("K", "", Level::Dim)),
-                    ],
-                });
-                rows.push(HudRow {
-                    cells: vec![
-                        value("display.mode", Some("DISP"), v("2560×1600@165", "", Level::Normal)),
-                        value("display.vrr", Some("VRR"), v("on", "", Level::Normal)),
-                        value("display.tearing", Some("TEAR"), v("off", "", Level::Normal)),
-                        value("display.path", None, v("direct", "", Level::Normal)),
-                    ],
-                });
-                rows.push(HudRow { cells: vec![HudCell::Sparkline { metric: "cpu.load".into(), label: Some("CPU".into()), value: v("38", "%", Level::Normal), points: (0..30).map(|k| ((k * 13 + i) % 17) as f32 / 16.0).collect() }] });
-            }
-            (Orientation::Block, 0.45, rows)
+            r.extend(gpu(false));
+            r.push(HudCell::Separator);
+            r.extend(cpu());
+            r.push(HudCell::Separator);
+            r.push(HudCell::Badge { metric: "upscaler".into(), label: None, value: v("DLSS K", "", Level::Accent), style: st(Layer, Normal) });
+            r.push(fg_tag());
+            (Orientation::Row, vec![row(r)])
         }
+        "standard" | "full" => {
+            let full = layout == "full";
+            let mut lat = vec![after("latency.pc", if full { "PC LAT" } else { "PC LATENCY" }, v("28", "ms", Level::Normal), st(Mod, Normal))];
+            if full {
+                lat.push(after("latency.render", "RENDER", v("21", "ms", Level::Normal), st(Mod, Quiet)));
+            }
+            lat.extend([HudCell::Spacer, cell("nv.reflex.mode", Some("REFLEX"), v("boost", "", Level::Normal), st(Mod, Tag))]);
+            let mut rows = vec![
+                row(vec![after("fps", "FPS", n(&fps), st(Layer, Hero)), HudCell::Spacer, after("fps.base", "BASE", n(&base), st(Layer, Secondary))]),
+                row(vec![graph]),
+                row(vec![
+                    cell("frametime", None, v("6.3", "ms", Level::Normal), st(Layer, Quiet)),
+                    dim("·"),
+                    cell("fps.p1low", Some("1% low"), n("128"), st(Layer, Quiet)),
+                    HudCell::Spacer,
+                    fg_tag(),
+                ]),
+                row(lat),
+                row(vec![split(false)]),
+            ];
+            if full {
+                rows.push(row(vec![split(true)]));
+                rows.push(row(gpu(true)));
+                rows.push(row([cpu(), vec![cell("mem.used", Some("RAM"), v("11.2", "GB", Level::Normal), st(System, Quiet))]].concat()));
+                rows.push(row(vec![
+                    cell("display.vrr", Some("VRR"), n("on"), st(System, Normal)),
+                    cell("display.tearing", Some("TEAR"), v("off", "", Level::Dim), st(System, Normal)),
+                    cell("display.refresh", None, v("165", "Hz", Level::Normal), st(System, Quiet)),
+                    cell("nv.reflex.cap", Some("CAP"), v("120", "fps", Level::Normal), st(Layer, Normal)),
+                ]));
+                rows.push(row(vec![
+                    HudCell::Badge { metric: "upscaler".into(), label: None, value: v("DLSS K", "", Level::Accent), style: st(Layer, Normal) },
+                    cell("render.resolution", None, n("1280×800"), st(Layer, Quiet)),
+                    dim("→"),
+                    cell("output.resolution", None, n("2560×1600"), st(Layer, Quiet)),
+                ]));
+                rows.push(row(vec![cell("dlss.sr.quality", Some("SR"), n("Perf"), st(Layer, Normal)), cell("dlss.sr.model", None, n("Transformer"), st(Layer, Quiet))]));
+                // The mod's strip, from the metrics it declares.
+                let m = |id: &str, label: Option<&str>, text: &str| cell(id, label, n(text), st(Mod, Quiet));
+                rows.push(HudRow {
+                    cells: vec![
+                        HudCell::Text { text: "PHAROS".into(), level: Level::Normal, style: st(Mod, Tag) },
+                        m("pharos.render", None, "1280×800"),
+                        dim("·"),
+                        m("pharos.model", Some("model"), "M"),
+                        dim("·"),
+                        m("pharos.fg", Some("FG"), "on"),
+                        dim("·"),
+                        m("pharos.pacing", Some("pacing"), "on"),
+                    ],
+                    divider: true,
+                });
+            } else {
+                rows.push(row([gpu(false), cpu()].concat()));
+            }
+            (Orientation::Block, rows)
+        }
+        "diagnostics" => (
+            Orientation::Block,
+            vec![
+                row(vec![
+                    after("fps", "FPS", n(&fps), st(Layer, Strong)),
+                    cell("frametime", None, v("6.3", "ms", Level::Normal), st(Layer, Quiet)),
+                    HudCell::Spacer,
+                    cell("session.time", Some("TIME"), n("1:12:03"), st(Quiver, Normal)),
+                    cell("clock.time", None, n("14:52"), st(Quiver, Quiet)),
+                ]),
+                row(vec![cell("gpu.clock", Some("GPU"), v("1980", "MHz", Level::Normal), st(System, Normal)), cell("cpu.clock", Some("CPU"), v("4210", "MHz", Level::Normal), st(System, Normal))]),
+                row(vec![
+                    cell("gpu.vram.used", Some("VRAM"), v("6.1", "GB", Level::Normal), st(System, Normal)),
+                    cell("gpu.vram.total", Some("of"), v("8.0", "GB", Level::Normal), st(System, Quiet)),
+                    cell("mem.used", Some("RAM"), v("11.2", "GB", Level::Normal), st(System, Normal)),
+                ]),
+                row(vec![cell("proc.rss", Some("GAME"), v("4.3", "GB", Level::Normal), st(System, Normal)), cell("proc.cpu", None, v("212", "%", Level::Normal), st(System, Quiet))]),
+                row(vec![
+                    cell("bat.level", Some("BAT"), v("84", "%", Level::Normal), st(System, Normal)),
+                    cell("bat.power", None, v("41", "W", Level::Normal), st(System, Quiet)),
+                    HudCell::Badge { metric: "bat.status".into(), label: None, value: v("battery", "", Level::Warn), style: st(System, Normal) },
+                ]),
+                row(vec![
+                    cell("display.mode", Some("DISP"), n("2560×1600@165"), st(System, Normal)),
+                    cell("display.vrr", Some("VRR"), n("on"), st(System, Normal)),
+                    cell("display.tearing", Some("TEAR"), v("off", "", Level::Dim), st(System, Normal)),
+                ]),
+                row(vec![cell("display.path", Some("PATH"), n("composited"), st(System, Normal)), cell("display.blocked", Some("blocked by"), n("overlays"), st(System, Quiet))]),
+                row(vec![
+                    cell("dlss.version", Some("DLL"), n("310.9.16"), st(Layer, Normal)),
+                    cell("dlss.fg.version", Some("FG"), n("310.9.16"), st(Layer, Normal)),
+                    cell("dlss.sr.requested", Some("REQ"), v("K", "", Level::Dim), st(Layer, Normal)),
+                ]),
+                row(vec![cell("tweaks.summary", Some("TWK"), n("CAP 160 · DLSS K · LL on"), st(SourceKind::Tweaks, Normal))]),
+            ],
+        ),
+        _ => (
+            Orientation::Row,
+            vec![row(vec![
+                cell("clock.time", None, n("14:52"), st(Quiver, Normal)),
+                HudCell::Separator,
+                cell("session.time", None, n("1:12:03"), st(Quiver, Normal)),
+                HudCell::Separator,
+                cell("bat.level", Some("BAT"), v("84", "%", Level::Normal), st(System, Normal)),
+            ])],
+        ),
     };
+    let background = 0.62;
     let text_px = extent.map(|[_, h]| h as f32 * 0.016).unwrap_or(17.0);
-    // As quiverd sizes the presets: their width, and the height of every row.
+    // As quiverd sizes the presets: their width, and the height of every row (Full keeps
+    // room for a second mod strip).
     let width = hud_card::preset_width(layout).unwrap_or(hud_card::default_width(orientation));
-    let slots: Vec<f32> = rows.iter().map(|r| hud_card::row_slot(&r.cells)).collect();
+    let mut slots: Vec<f32> = rows.iter().map(hud_card::row_height).collect();
+    if layout == "full" {
+        slots.push(hud_card::LINE);
+    }
     let size = [width, hud_card::height(orientation, &slots, hud_card::panel(background))];
     HudModel {
         session: "s-demo".into(),
@@ -159,20 +264,16 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
 
 /// Demo content variants (`--variant`), for checking that the card keeps its size whatever
 /// it holds: `long` stretches every value (4-digit fps, long text values and badges), `short`
-/// is what quiverd sends with FG and the upscaler off and no latency provider (gated cells
-/// and whole rows gone).
+/// is what quiverd sends for the same game without the mod and frame generation ("Standard,
+/// Vanilla profile": no base FPS, no latency, no split, no strip; one graph line).
 pub const VARIANTS: [&str; 3] = ["base", "long", "short"];
 
 pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
-    let metric = |c: &HudCell| match c {
-        HudCell::Value { metric, .. } | HudCell::Badge { metric, .. } | HudCell::Bar { metric, .. } | HudCell::Sparkline { metric, .. } => Some(metric.clone()),
-        _ => None,
-    };
     match variant {
         "long" => {
             for r in &mut m.rows {
                 for c in &mut r.cells {
-                    let id = metric(c).unwrap_or_default();
+                    let id = c.metric().unwrap_or_default().to_owned();
                     let (HudCell::Value { value, .. } | HudCell::Badge { value, .. } | HudCell::Bar { value, .. } | HudCell::Sparkline { value, .. }) = c else { continue };
                     let text = match id.as_str() {
                         "fps" => "1234",
@@ -185,13 +286,16 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
                         "render.resolution" => "3840×2160",
                         "output.resolution" => "7680×4320",
                         "display.mode" => "7680×4320@240",
-                        "display.path" => "composited (blocked: overlays, a notification)",
+                        "display.path" => "composited",
+                        "display.blocked" => "overlays, a notification, the cursor",
                         "latency.render" => "1021",
                         "latency.pc" => "1002.5",
                         "dlss.sr.model" => "Transformer (DLSS 4.5)",
                         "dlss.version" => "310.10.123.4",
                         "dlss.sr.requested" => "latest · Ultra Perf",
                         "nv.reflex.cap" => "1000",
+                        "pharos.render" => "3840×2160 (DLAA off)",
+                        "tweaks.summary" => "CAP 160 · DLSS K · LL on · HDR on · FSYNC",
                         _ => continue,
                     };
                     value.text = text.into();
@@ -200,37 +304,37 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
             }
         }
         "short" => {
-            // No NVIDIA GPU, no DLSS, Reflex off: every NVIDIA cell goes with them.
-            let gone = [
-                "fps.base",
-                "frametime.base",
-                "render.resolution",
-                "output.resolution",
-                "upscaler",
-                "fg.ratio",
-                "latency.render",
-                "latency.pc",
-                "nv.reflex.mode",
-                "nv.reflex.cap",
-                "dlss.sr.quality",
-                "dlss.sr.model",
-                "dlss.version",
-                "dlss.sr.requested",
-            ];
+            // No mod and no frame generation: base FPS, the FG tag, the mod's latency and its
+            // split and strip go, and the graph has one series.
+            let gone = ["fps.base", "frametime.base", "fg.ratio", "upscaler", "render.resolution", "output.resolution", "dlss.sr.quality", "dlss.sr.model"];
+            let is_content = |c: &HudCell| !matches!(c, HudCell::Text { .. } | HudCell::Separator | HudCell::Spacer);
+            m.rows.retain(|r| !r.divider);
             for r in &mut m.rows {
-                r.cells.retain(|c| metric(c).is_none_or(|id| !gone.contains(&id.as_str())) && !matches!(c, HudCell::Text { .. }));
-                // The label of a dropped first cell moves to the next one (as quiverd does).
-                if let Some(HudCell::Value { metric, label, .. }) = r.cells.first_mut()
-                    && metric == "fps"
-                    && m.layout != "fps"
-                {
-                    *label = Some("FPS".into());
+                r.cells.retain(|c| {
+                    let gone_metric = c.metric().is_some_and(|id| gone.contains(&id));
+                    let modded = c.style().is_some_and(|s| s.source == SourceKind::Mod);
+                    !gone_metric && !modded && !matches!(c, HudCell::Split { .. })
+                });
+                for c in &mut r.cells {
+                    if let HudCell::Graph { series, base_points, .. } = c {
+                        series.retain(|s| s == "frametime");
+                        base_points.clear();
+                    }
                 }
-                while matches!(r.cells.last(), Some(HudCell::Separator)) {
+                // Tidy as quiverd does: no "·" without a value each side, nothing trailing.
+                let keep: Vec<bool> = (0..r.cells.len())
+                    .map(|i| {
+                        !matches!(&r.cells[i], HudCell::Text { text, .. } if text == "·" || text == "→")
+                            || (i > 0 && is_content(&r.cells[i - 1]) && r.cells.get(i + 1).is_some_and(is_content))
+                    })
+                    .collect();
+                let mut keep = keep.into_iter();
+                r.cells.retain(|_| keep.next().unwrap_or(true));
+                while matches!(r.cells.last(), Some(HudCell::Separator | HudCell::Spacer)) {
                     r.cells.pop();
                 }
             }
-            m.rows.retain(|r| r.cells.iter().any(|c| metric(c).is_some() || matches!(c, HudCell::Graph { .. })));
+            m.rows.retain(|r| r.cells.iter().any(is_content));
         }
         _ => {}
     }

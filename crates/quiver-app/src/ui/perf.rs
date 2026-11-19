@@ -624,7 +624,7 @@ impl Quiver {
     fn hud_layout_ids(&self) -> Vec<String> {
         match self.perf.layouts.ready() {
             Some(l) => l.iter().filter(|l| l.error.is_none()).map(|l| l.id.clone()).collect(),
-            None => ["fps", "compact", "standard", "full"].map(str::to_owned).to_vec(),
+            None => ["fps", "compact", "standard", "full", "diagnostics", "clock"].map(str::to_owned).to_vec(),
         }
     }
 
