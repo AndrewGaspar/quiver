@@ -414,6 +414,9 @@ impl ModRegistry {
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin,
     {
+        if origin.session.as_deref().is_some_and(quiver_api::lab::is_lab_session) {
+            anyhow::bail!("lab sessions have no mod channel");
+        }
         let first = match tokio::time::timeout(HELLO_TIMEOUT, read_line_capped(&mut reader, wire::MAX_LINE)).await {
             Ok(Ok(Some(l))) => l,
             Ok(Ok(None)) => return Ok(()),

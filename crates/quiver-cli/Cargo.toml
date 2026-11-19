@@ -29,6 +29,10 @@ hex.workspace = true
 quiver-api.workspace = true
 quiver-ipc.workspace = true
 serde.workspace = true
+libc.workspace = true
+base64.workspace = true
+image.workspace = true
+regex = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

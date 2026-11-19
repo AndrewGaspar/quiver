@@ -222,7 +222,7 @@ fn achievements_from_quiverd_and_earns() {
 /// The broker messages the bridge sends and reads for achievements.
 #[test]
 fn achievement_broker_messages() {
-    let req = quiver_ipc::BrokerRequest::AchievementEarned { uplay_id: 3539, account_id: Some("u".into()), achievement_id: 59 };
+    let req = quiver_ipc::BrokerRequest::AchievementEarned { uplay_id: 3539, account_id: Some("u".into()), achievement_id: 59, session: None };
     assert_eq!(
         serde_json::to_value(&req).unwrap(),
         serde_json::json!({ "achievement_earned": { "uplay_id": 3539, "account_id": "u", "achievement_id": 59 } })
@@ -236,4 +236,15 @@ fn achievement_broker_messages() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn lab_sessions_travel_with_play_sessions_and_earns() {
+    let req = quiver_ipc::BrokerRequest::PlaySession { uplay_id: 3539, account_id: None, session: Some("lab-t1-r2".into()) };
+    assert_eq!(serde_json::to_value(&req).unwrap()["play_session"]["session"], "lab-t1-r2");
+    let req = quiver_ipc::BrokerRequest::AchievementEarned { uplay_id: 3539, account_id: None, achievement_id: 1, session: Some("lab-t1-r2".into()) };
+    assert_eq!(serde_json::to_value(&req).unwrap()["achievement_earned"]["session"], "lab-t1-r2");
+    // Older brokers' and bridges' lines still parse.
+    let old: quiver_ipc::BrokerRequest = serde_json::from_str(r#"{"play_session":{"uplay_id":3539}}"#).unwrap();
+    assert!(matches!(old, quiver_ipc::BrokerRequest::PlaySession { session: None, .. }));
 }

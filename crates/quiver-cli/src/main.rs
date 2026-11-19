@@ -13,6 +13,7 @@ mod mods;
 mod perf;
 mod options;
 mod info;
+mod lab;
 mod savestores;
 mod setup;
 mod sight;
@@ -350,6 +351,16 @@ enum Cmd {
         #[command(subcommand)]
         action: epic::EpicAction,
     },
+    /// Lab instances: disposable headless copies of an installed game in a container, with
+    /// your real licence from quiverd, for agents developing mods (design/LAB.md):
+    /// `quiver lab create|up|launch|wait|shot|key|mouse|set|bench|brief|…`.
+    Lab {
+        /// Run the command in the background and print a job id (`quiver lab job wait <id>`).
+        #[arg(long, global = true)]
+        bg: bool,
+        #[command(subcommand)]
+        action: lab::LabAction,
+    },
     /// Run a Steam copy of a Ubisoft game against Quiver instead of Ubisoft Connect. Set it
     /// as the game's Steam launch options: `quiver steam-run --product <id> %command%`
     /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
@@ -674,13 +685,17 @@ async fn main() -> Result<()> {
     if let Cmd::SteamRun(args) = cli.cmd {
         return steamrun::run(&cli.source, args).await;
     }
+    // Mostly no daemon at all; connects on its own where it needs one (never starts it).
+    if let Cmd::Lab { action, bg } = cli.cmd {
+        return lab::run(&cli.source, action, bg).await;
+    }
     // Connects on its own (and only `hold` starts the daemon).
     if let Cmd::Daemon { action } = cli.cmd {
         return daemon::run(&cli.source, action).await;
     }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } => {
+        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } | Cmd::Lab { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,

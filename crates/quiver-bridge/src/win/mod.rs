@@ -60,6 +60,8 @@ pub async fn run() -> Result<()> {
     if let Some(path) = log_path {
         *crate::LOG.lock().unwrap() = Some(std::fs::OpenOptions::new().create(true).append(true).open(path)?);
     }
+    // Also what `quiver lab` looks for in this binary before using it in an instance.
+    log!("quiver-bridge {} ({})", env!("CARGO_PKG_VERSION"), quiver_ipc::LAB_PROTOCOL_MARKER);
     match &args {
         BridgeArgs::Serve { context } => CONTEXT.set(load_context(context.as_deref())?).ok(),
         BridgeArgs::Run { context, .. } => {
@@ -198,7 +200,7 @@ pub async fn load_achievements(language: Option<String>) -> Result<()> {
 /// Hand an earned achievement to quiverd (it deduplicates and reports it).
 pub async fn achievement_earned(achievement_id: u32) -> Result<()> {
     let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
-    let req = BrokerRequest::AchievementEarned { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()), achievement_id };
+    let req = BrokerRequest::AchievementEarned { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()), achievement_id, session: ctx.session.clone() };
     match broker(req).await? {
         BrokerResponse::Ok => Ok(()),
         BrokerResponse::Error { message } => Err(anyhow!("broker: {message}")),
@@ -212,7 +214,7 @@ pub async fn play_session_lease() -> Result<tokio::net::TcpStream> {
     let ctx = context().ok_or_else(|| anyhow!("no launch context"))?;
     let addr = ctx.broker.clone().ok_or_else(|| anyhow!("no broker in launch context"))?;
     let mut stream = tokio::net::TcpStream::connect(&addr).await?;
-    let mut line = serde_json::to_vec(&BrokerRequest::PlaySession { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()) })?;
+    let mut line = serde_json::to_vec(&BrokerRequest::PlaySession { uplay_id: ctx.uplay_id, account_id: Some(ctx.account_id.clone()), session: ctx.session.clone() })?;
     line.push(b'\n');
     stream.write_all(&line).await?;
     let mut rsp = String::new();

@@ -878,6 +878,10 @@ impl PerfHub {
     /// Mutate a session (producers use this).
     pub fn with_session<T>(&self, session: Option<&str>, product_id: u32, f: impl FnOnce(&mut Session) -> T) -> Option<T> {
         let mut st = self.lock();
+        // A lab instance's metrics never land in the person's running session.
+        if session.is_some_and(quiver_api::lab::is_lab_session) {
+            return None;
+        }
         let id = match session.filter(|s| st.sessions.contains_key(*s)) {
             Some(s) => s.to_owned(),
             None => st.sessions.values().rev().find(|s| s.game == GameRef::ubisoft(product_id))?.id.clone(),

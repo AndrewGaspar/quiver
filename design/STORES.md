@@ -940,3 +940,10 @@ syncs saves for, reports play time to and reads achievements from.
 - §3.8: Epic unlocks come from polling (`AchievementUnlocked.{game, key}`, `ReportState::ByGame`).
 - §3.9: Epic is `AfterSession`, under `report_playtime`, behind a one-time yes for the first
   report (and likewise the first save upload).
+
+**Lab launch material (2026-11-18; design/LAB.md).** `Request::LaunchMaterial { game, session, … }`
+is §3.6's `LaunchMaterial` for one store-agnostic caller, `quiver lab`: the Ubisoft bridge
+context or Epic's exchange-code arguments and ownership token, minted per launch from
+quiverd's session; `None` with a reason for Steam and others. Lab session ids
+(`lab-<instance>-r<run>`) are never reported as play time, achievements or metrics, by any
+store (LAB.md §5).

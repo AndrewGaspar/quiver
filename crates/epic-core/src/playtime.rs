@@ -131,6 +131,10 @@ pub struct Played {
 impl Epic {
     /// Queue a finished session (once per id). `report`: the `report_playtime` setting.
     pub async fn queue_session(&self, p: &Played, report: bool) -> Result<QueuedSession> {
+        // A lab instance's run (design/LAB.md) is never play time: not queued, held or sent.
+        if quiver_api::lab::is_lab_session(&p.id) {
+            anyhow::bail!("{} is a lab session: lab runs are never reported as play time", p.id);
+        }
         let game = crate::provider::game_ref(&p.app).context("not an Epic app name")?;
         let _q = self.p3.queue.lock().await;
         let mut q = Queue::load(&self.dir)?;

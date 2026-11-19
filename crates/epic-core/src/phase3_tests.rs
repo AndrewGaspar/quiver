@@ -378,6 +378,19 @@ async fn sessions_are_held_until_the_first_yes_then_reported_once() {
 }
 
 #[tokio::test]
+async fn lab_sessions_are_never_queued_or_sent() {
+    let r = rig().await;
+    let f = &r.cloud.fake;
+    r.epic.allow_writes(progress::WriteKind::Playtime).unwrap();
+    let e = r.epic.queue_session(&played("lab-t1-r3"), true).await.unwrap_err();
+    assert!(e.to_string().contains("lab session"), "{e}");
+    assert!(playtime::Queue::load(r.epic.epic_dir()).unwrap().sessions.is_empty());
+    f.reply("/library/api/public/playtime/account/", 204, "");
+    assert!(r.epic.send_queue(true, true).await.unwrap().is_empty());
+    assert!(!f.requests().iter().any(|q| q.label == "playtime report"));
+}
+
+#[tokio::test]
 async fn discarded_sessions_are_never_sent_even_after_the_first_yes() {
     let r = rig().await;
     let f = &r.cloud.fake;

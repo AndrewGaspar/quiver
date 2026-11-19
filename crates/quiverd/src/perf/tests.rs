@@ -547,3 +547,15 @@ fn panel_key_and_commands() {
     assert_eq!(e.hub.panel_status().panel.map(|p| p.open), Some(false), "the session ended");
     assert!(e.hub.panel_command(PanelAction::Toggle, None, None, "cli").is_err(), "no game running");
 }
+
+#[test]
+fn lab_metrics_never_land_in_the_persons_session() {
+    let e = env();
+    let id = quiver_core::modsdk::new_session_id();
+    e.hub.begin(&id, GameRef::ubisoft(3539), None, None, None, &BTreeMap::new(), &[], false).unwrap();
+    // The person's session for the game takes metrics with no session or an unknown one…
+    assert!(e.hub.with_session(None, 3539, |_| ()).is_some());
+    assert!(e.hub.with_session(Some("s-unknown"), 3539, |_| ()).is_some());
+    // …never a lab instance's.
+    assert!(e.hub.with_session(Some("lab-t1-r1"), 3539, |_| ()).is_none());
+}
