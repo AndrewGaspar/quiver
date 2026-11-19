@@ -138,7 +138,7 @@ pub mod vk {
 
 /// The probe's stdout, line by line.
 #[derive(Clone, Default)]
-pub struct Lines(Arc<Mutex<Vec<String>>>);
+pub struct Lines(pub Arc<Mutex<Vec<String>>>);
 
 impl Lines {
     pub fn len(&self) -> usize {
@@ -278,6 +278,14 @@ impl FakeSight {
     }
 }
 
+/// Which display server the probe runs on.
+pub enum Disp<'a> {
+    /// `DISPLAY`.
+    X11(&'a str),
+    /// Wine's Wayland driver (`PROTON_ENABLE_WAYLAND=1`) on a socket in a private runtime dir.
+    Wayland { runtime: &'a Path, socket: &'a str },
+}
+
 /// The probe running under Proton with the preload, its stdout collected.
 pub struct Probe {
     pub child: Option<Child>,
@@ -288,6 +296,10 @@ pub struct Probe {
 
 impl Probe {
     pub fn start(display: &str, sight: &FakeSight, seconds: u32, flags: u32, scratch: &Path, extra_env: &[(&str, &str)]) -> Probe {
+        Probe::start_on(Disp::X11(display), sight, seconds, flags, scratch, extra_env)
+    }
+
+    pub fn start_on(disp: Disp<'_>, sight: &FakeSight, seconds: u32, flags: u32, scratch: &Path, extra_env: &[(&str, &str)]) -> Probe {
         let proton = proton();
         let exe = build_probe(scratch);
         let keep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/quiver-sight-wine-input");
@@ -310,17 +322,25 @@ impl Probe {
             .env("XDG_DATA_HOME", scratch.join("home/.local/share"))
             .env("XDG_CONFIG_HOME", scratch.join("home/.config"))
             .env("XDG_CACHE_HOME", scratch.join("home/.cache"))
-            .env("DISPLAY", display)
             .env("WINEDEBUG", "-all")
             .env("WINEDLLOVERRIDES", "winemenubuilder.exe=d;mscoree,mshtml=")
             .env("LD_PRELOAD", preload_so())
             .env("QUIVER_PERF_DIR", sight.dir.path())
             .env("QUIVER_SIGHT_LOG", "1")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("PROTON_ENABLE_WAYLAND")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        match disp {
+            Disp::X11(d) => {
+                cmd.env("DISPLAY", d).env_remove("WAYLAND_DISPLAY").env_remove("PROTON_ENABLE_WAYLAND");
+            }
+            Disp::Wayland { runtime, socket } => {
+                cmd.env_remove("DISPLAY").env("XDG_RUNTIME_DIR", runtime).env("WAYLAND_DISPLAY", socket).env("PROTON_ENABLE_WAYLAND", "1");
+            }
+        }
+        if let Ok(d) = std::env::var("QUIVER_TEST_WINEDEBUG") {
+            cmd.env("WINEDEBUG", d);
+        }
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
