@@ -157,6 +157,7 @@ impl Telemetry {
         s.key_nexts = self.key_nexts.load(Ordering::Relaxed) as u16;
         let now = mono_raw_ns();
         crate::latency::fill_status(&mut s, now);
+        crate::hdr::fill_status(&mut s);
         s.key_panels = self.key_panels.load(Ordering::Relaxed) as u16;
         // The backdrop blur: readiness from the target swapchain (retarget), unless drawing
         // went off or a present found it can't.
@@ -237,6 +238,7 @@ impl Telemetry {
         self.refresh_hud();
         if let Some(dir) = self.hud_path.parent() {
             crate::panel::tick(dir, now);
+            crate::hdr::tick(dir);
         }
         crate::latency::poll_timings();
         self.write_status();

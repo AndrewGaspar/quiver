@@ -262,17 +262,22 @@ fn fresh(seen: u64, now_ns: i64, within: u64) -> bool {
 
 /// The capture decision (module docs): `Some(epoch)` while input belongs to the panel.
 pub fn capture(c: &Control, layer: &LayerInfo, now_ns: i64) -> Option<u64> {
+    capture_why(c, layer, now_ns).ok()
+}
+
+/// [`capture`], with why not (for logs).
+pub fn capture_why(c: &Control, layer: &LayerInfo, now_ns: i64) -> Result<u64, &'static str> {
     if !c.open() {
-        return None;
+        return Err("the panel closed");
     }
     let now = now_ns.max(0) as u64;
     if c.until <= now || c.until - now > PANEL_HOLD_MAX_NS {
-        return None;
+        return Err("failsafe: quiver-sight stopped renewing the panel's deadline");
     }
     let epoch = c.epoch();
     let drawn = layer.drawn_epoch == epoch && layer.drawn_ns != 0 && layer.drawn_ns <= now.saturating_add(1_000_000_000) && now.saturating_sub(layer.drawn_ns) < PANEL_DRAWN_FRESH_NS;
     let grace = c.opened_ns != 0 && c.opened_ns <= now && now - c.opened_ns < PANEL_OPEN_GRACE_NS;
-    (drawn || grace).then_some(epoch)
+    if drawn || grace { Ok(epoch) } else { Err("failsafe: the panel isn't in the game's frames (the layer stopped drawing it)") }
 }
 
 /// `panel.input` over a mapped region.

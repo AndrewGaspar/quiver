@@ -129,6 +129,8 @@ pub fn kill_all(inst: &Inst, m: &Manifest, container_id: &str) -> Result<Vec<Str
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    // The run's quiver-sight (Sight instances) goes with it.
+    notes.extend(super::sight::kill(container_id));
     // Epic ownership tokens are deleted once a run is over; a context left unread too.
     for dir in std::fs::read_dir(inst.runs()).into_iter().flatten().flatten() {
         for f in std::fs::read_dir(dir.path()).into_iter().flatten().flatten() {

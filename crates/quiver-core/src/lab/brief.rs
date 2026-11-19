@@ -39,6 +39,51 @@ fn list(items: &[String], none: &str) -> String {
 }
 
 /// The brief, as Markdown.
+/// How to test Sight in instance `i` (design/LAB.md §12).
+pub fn sight_section(i: &str) -> String {
+    format!(
+        "Off unless the instance has it: `quiver lab create … --sight`, or `quiver lab edit {i} sight=on` and then \
+         `quiver lab down {i} && quiver lab up {i}`. Launches then carry the Sight Vulkan layer, the input preload \
+         (`LD_PRELOAD`) and a lab `quiver-sight` in the container. It never talks to quiverd: panel actions that \
+         would change settings (options, Tweaks, HUD settings, quitting) are refused and logged, and nothing is \
+         reported.\n\n\
+         ```sh\n\
+         quiver lab launch {i} --wait frame\n\
+         quiver lab key {i} shift+F2          # the panel, drawn in the game's frames; the game keeps focus\n\
+         quiver lab sight {i} status          # drawn: in the game? capture on? the preload and the layer\n\
+         quiver lab shot {i}                  # the panel on the game's frame\n\
+         quiver lab key {i} Down Return       # drive it: the game gets none of these while it's open\n\
+         quiver lab click {i} 0.5 0.5         # the mouse too (the panel draws its own cursor)\n\
+         quiver lab key {i} Escape            # close; the game has its input again\n\
+         quiver lab key {i} shift+F3          # the HUD (frame rate, frame time, 1% low, the graph)\n\
+         quiver lab logs {i}                  # presenter chosen, captures, releases and why (failsafes)\n\
+         ```\n\n\
+         Logs: `runs/r<N>/sight.log` (quiver-sight), the `quiver-sight-input`/`quiver-sight-layer` lines in \
+         `game.log`, `runs/r<N>/sight.json` (its status). If quiver-sight dies or hangs, or the game stops \
+         presenting, the game gets its input back within a second or so: that's the failsafe, not a bug.\n\n"
+    )
+}
+
+pub fn hdr_section(i: &str) -> String {
+    format!(
+        "Off unless the instance has it: `quiver lab create … --hdr` (or `--display 1920x1080@60+hdr`), or \
+         `quiver lab edit {i} display.hdr=on` (it turns Sight on too) and then `quiver lab down {i} && quiver lab up {i}`. \
+         gamescope's headless output is then forced to HDR10 PQ (there's no real display), and launches get \
+         `ENABLE_GAMESCOPE_WSI=1` (gamescope's WSI layer, without which the game only sees SDR formats) and \
+         `PROTON_ENABLE_HDR=1`. Turn the game's own HDR setting on as you would on an HDR monitor.\n\n\
+         ```sh\n\
+         quiver lab hdr {i}                   # the swapchain (HDR10 PQ / scRGB?), the metadata the game set, gamescope's view\n\
+         quiver lab shot {i} --hdr            # the game's frame in its own format: .raw (exact), .png (16-bit PQ), .json\n\
+         ```\n\n\
+         The `.json` has the format, colour space, the game's HDR metadata (max CLL/FALL, mastering) and the \
+         frame's nits: max, average, p99, and the fraction above 203 (SDR reference white) and above 1000. \
+         Plain `quiver lab shot` is gamescope's 8-bit, tonemapped screenshot (1000 nits and up clip to white): \
+         fine for layout, useless for judging highlights. The Sight panel and HUD can't draw on an HDR \
+         swapchain yet; in an instance the panel then doesn't open (there's no desktop to fall back to) and \
+         the game keeps its input. One output only: gamescope headless can't add a second monitor.\n\n"
+    )
+}
+
 pub fn render(b: &BriefInput) -> String {
     let f = &b.facts;
     let i = &b.instance;
@@ -133,6 +178,12 @@ pub fn render(b: &BriefInput) -> String {
         s.push_str(&format!("- `{}` — {what}\n", cmd.replace("<i>", i)));
     }
     s.push('\n');
+
+    s.push_str("## Sight in the instance (the HUD and the in-game panel)\n\n");
+    s.push_str(&sight_section(i));
+
+    s.push_str("## HDR in the instance\n\n");
+    s.push_str(&hdr_section(i));
 
     s.push_str("## The lab channel (what your mod can tell the lab)\n\n");
     s.push_str(
@@ -251,7 +302,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "clock=virtual:62.5"] {
+        for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));

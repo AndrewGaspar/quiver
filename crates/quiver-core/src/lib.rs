@@ -34,6 +34,7 @@ pub mod secret;
 pub mod savestores;
 pub mod savesync;
 pub mod settings;
+pub mod sightenv;
 pub mod spaces;
 pub mod steamplan;
 pub mod steamlocal;

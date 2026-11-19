@@ -37,6 +37,7 @@ pub mod front;
 pub mod game;
 pub mod hud_view;
 pub mod hypr;
+pub mod lab;
 pub mod link;
 pub mod panel;
 pub mod place;
@@ -346,10 +347,12 @@ pub struct Args {
     layout: String,
     variant: String,
     headless: bool,
+    /// `--lab DIR`: a `quiver lab` instance's run (`lab`).
+    lab: Option<lab::LabArgs>,
 }
 
 fn args() -> anyhow::Result<Args> {
-    let mut a = Args { demo: None, section: None, namespace: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), variant: "base".into(), headless: false };
+    let mut a = Args { demo: None, section: None, namespace: None, seconds: 6.0, image: None, extent: (2560, 1600), layout: "standard".into(), variant: "base".into(), headless: false, lab: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
@@ -365,6 +368,10 @@ fn args() -> anyhow::Result<Args> {
             "--layout" => a.layout = val()?,
             "--variant" => a.variant = val()?,
             "--headless" => a.headless = true,
+            "--lab" => a.lab.get_or_insert_with(Default::default).dir = PathBuf::from(val()?),
+            "--lab-status" => a.lab.get_or_insert_with(Default::default).status = Some(PathBuf::from(val()?)),
+            "--title" => a.lab.get_or_insert_with(Default::default).title = val()?,
+            "--game" => a.lab.get_or_insert_with(Default::default).game = val()?,
             "--section" => a.section = Some(val()?),
             "--namespace" => a.namespace = Some(val()?),
             "-V" | "--version" => {
@@ -390,7 +397,7 @@ pub fn run() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = args()?;
-    let _lock = if args.demo.is_none() {
+    let _lock = if args.demo.is_none() && args.lab.is_none() {
         match single_instance()? {
             Some(l) => {
                 // A panel state file left by a quiver-sight that died.
@@ -416,8 +423,13 @@ pub fn run() -> anyhow::Result<()> {
     if let Some(ns) = &args.namespace {
         panel.namespace = ns.clone();
     }
-    match args.demo.clone() {
-        None => {
+    match (args.demo.clone(), args.lab.clone()) {
+        (_, Some(l)) => {
+            // A lab instance's run: no quiverd (design/LAB.md §12).
+            panel = panel::PanelCtl::new(layer_shell, Some(req_tx), Some(tx.clone()));
+            lab::start(l, tx.clone(), req_rx)?;
+        }
+        (None, None) => {
             panel = panel::PanelCtl::new(layer_shell, Some(req_tx), Some(tx.clone()));
             let tx = tx.clone();
             std::thread::Builder::new().name("quiver-sight-link".into()).spawn(move || {
@@ -425,10 +437,10 @@ pub fn run() -> anyhow::Result<()> {
                 rt.block_on(link::run(tx, req_rx));
             })?;
         }
-        Some(d) => demo::feed(&d, &args, tx.clone())?,
+        (Some(d), None) => demo::feed(&d, &args, tx.clone())?,
     }
     // The controller's long-press fallback has to listen from the start.
-    if panel.pad_chord() && args.demo.is_none() {
+    if panel.pad_chord() && args.demo.is_none() && args.lab.is_none() {
         panel.start_pad();
     }
     // The compositor's toplevels: what ties the panel and the desktop HUD to the game.

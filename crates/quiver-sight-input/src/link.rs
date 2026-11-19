@@ -74,15 +74,31 @@ fn panel() -> Option<&'static PanelInput<Mapping>> {
 pub fn capture_now() -> Option<u64> {
     let p = panel()?;
     let c = p.control();
-    let epoch = if c.open() && c.epoch() != DEAD_EPOCH.load(Ordering::Relaxed) { quiver_perf::panel::capture(&c, &p.layer(), mono_raw_ns()) } else { None };
-    let now = epoch.unwrap_or(0);
-    if CAPTURING.swap(now, Ordering::Relaxed) != now {
+    if !c.open() && CAPTURING.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    // One snapshot for the decision and its reason.
+    let decided = if c.open() && c.epoch() == DEAD_EPOCH.load(Ordering::Relaxed) {
+        Err("failsafe: quiver-sight is gone")
+    } else {
+        quiver_perf::panel::capture_why(&c, &p.layer(), mono_raw_ns())
+    };
+    let now = *decided.as_ref().unwrap_or(&0);
+    let prev = CAPTURING.swap(now, Ordering::Relaxed);
+    if prev != now {
         p.set_capturing(now);
         let f = FLAGS.load(Ordering::Relaxed);
         p.set_input(std::process::id(), if now != 0 { f | INPUT_CAPTURING } else { f }, mono_raw_ns());
-        log!("{}", if now != 0 { format!("capturing input for panel {now}") } else { "input back to the game".to_owned() });
+        if prev != 0 {
+            // Why, for `quiver lab logs` and the person reading game.log.
+            let why = if now != 0 { "the panel closed" } else { decided.err().unwrap_or("released") };
+            log!("input back to the game (panel {prev}): {why}");
+        }
+        if now != 0 {
+            log!("capturing input for panel {now}");
+        }
     }
-    epoch
+    decided.ok()
 }
 
 /// Forwards an event to the panel (lock-free).

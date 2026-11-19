@@ -237,7 +237,34 @@ pub struct LayerStatus {
     /// GPU time of the backdrop blur per present, ns (a running mean over the recent blurred
     /// presents, from timestamp queries); 0 when it hasn't blurred or can't time it.
     pub backdrop_gpu_ns: u32,
+    // ---- appended (HDR, design/LAB.md §13, 2026-11-19): zero from layers before (a shorter
+    // payload is zero-extended).
+    /// `HDR_*` flags.
+    pub hdr_flags: u32,
+    /// `vkSetHdrMetadataEXT` calls on the target swapchain.
+    pub hdr_metadata_calls: u32,
+    /// The last `VkHdrMetadataEXT` the app set on it, luminance and light levels in 1/10000
+    /// nit (cd/m²): max content light level, max frame-average light level, mastering
+    /// display max and min.
+    pub hdr_max_cll: u32,
+    pub hdr_max_fall: u32,
+    pub hdr_max_luminance: u32,
+    pub hdr_min_luminance: u32,
+    /// Its primaries and white point, CIE 1931 xy in 1/100000: red x, y, green x, y, blue x, y,
+    /// white x, y.
+    pub hdr_primaries: [u32; 8],
+    /// The last capture request (`capture.req` in the session dir) the layer wrote out
+    /// (`capture-<n>.raw` and `.json`); 0 none.
+    pub capture_done: u64,
 }
+
+/// `LayerStatus::hdr_flags`: the app set HDR metadata on the target swapchain.
+pub const HDR_METADATA_SET: u32 = 1 << 0;
+/// The target swapchain's images can be read back (`TRANSFER_SRC` usage was added): `quiver lab
+/// shot --hdr` and the layer's captures work.
+pub const HDR_CAPTURE_READY: u32 = 1 << 1;
+/// The target swapchain's colour space is an HDR one (HDR10 PQ, HLG, scRGB, …).
+pub const HDR_COLOR_SPACE: u32 = 1 << 2;
 
 /// `LayerStatus::reflex_flags`: the app called `vkSetLatencySleepModeNV` on the swapchain.
 pub const REFLEX_MODE_SET: u32 = 1 << 0;
@@ -481,7 +508,7 @@ const _: () = {
     assert!(size_of::<StatusBlock>() == RING_STATUS_BYTES);
     assert!(size_of::<Record>() == SLOT_BYTES);
     assert!(align_of::<Record>() == 8);
-    assert!(size_of::<LayerStatus>() == 336);
+    assert!(size_of::<LayerStatus>() == 400);
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
@@ -582,6 +609,10 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, key_panels),
     o!("qv_layer_status", LayerStatus, backdrop_error),
     o!("qv_layer_status", LayerStatus, backdrop_gpu_ns),
+    o!("qv_layer_status", LayerStatus, hdr_flags),
+    o!("qv_layer_status", LayerStatus, hdr_max_cll),
+    o!("qv_layer_status", LayerStatus, hdr_primaries),
+    o!("qv_layer_status", LayerStatus, capture_done),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),

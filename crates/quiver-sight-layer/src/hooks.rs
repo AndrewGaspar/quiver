@@ -255,16 +255,18 @@ pub unsafe extern "system" fn create_swapchain_khr(
         Some(plan_swapchain(&d, &orig))
     })
     .flatten();
-    let mut plan = plan.unwrap_or(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL) });
+    let mut plan = plan.unwrap_or(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL), capture: false });
+    // Captures (hdr.rs) need TRANSFER_SRC; added with whatever else is added, dropped with it.
+    let extra = if plan.capture { vk::ImageUsageFlags::TRANSFER_SRC } else { vk::ImageUsageFlags::empty() };
     let with = |usage: vk::ImageUsageFlags| {
         let mut p = orig;
-        p.image_usage |= usage;
+        p.image_usage |= usage | extra;
         p
     };
     let blur_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
     let patched = if plan.blur.is_ok() {
         with(blur_usage)
-    } else if plan.hud.is_ok() {
+    } else if plan.hud.is_ok() || plan.capture {
         with(vk::ImageUsageFlags::COLOR_ATTACHMENT)
     } else {
         orig
@@ -288,6 +290,7 @@ pub unsafe extern "system" fn create_swapchain_khr(
         r = unsafe { next(device, ci, alloc, out) };
         plan.hud = Err(DRAW_ERR_USAGE);
         plan.blur = Err(BACKDROP_ERR_USAGE);
+        plan.capture = false;
     }
     if r != vk::Result::SUCCESS {
         return r;
@@ -306,11 +309,14 @@ pub unsafe extern "system" fn create_swapchain_khr(
 struct Plan {
     hud: Result<Encoding, u32>,
     blur: Result<(), u32>,
+    /// `TRANSFER_SRC` usage for captures (`QUIVER_SIGHT_CAPTURE=1`, a known format, the
+    /// surface allows it).
+    capture: bool,
 }
 
 fn plan_swapchain(d: &DeviceData, ci: &vk::SwapchainCreateInfoKHR<'_>) -> Plan {
     if !draw_enabled() {
-        return Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_OFF) };
+        return Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_OFF), capture: false };
     }
     let features = format_features(d, ci.image_format);
     let blend = vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
@@ -330,7 +336,11 @@ fn plan_swapchain(d: &DeviceData, ci: &vk::SwapchainCreateInfoKHR<'_>) -> Plan {
             }
         })
     };
-    Plan { hud, blur }
+    let capture = crate::capture_enabled()
+        && crate::hdr::bytes_per_pixel(ci.image_format).is_some()
+        && formats::drawable(ci).is_ok()
+        && surface_usage(d, ci.surface).is_some_and(|u| u.contains(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT));
+    Plan { hud, blur, capture }
 }
 
 fn format_features(d: &DeviceData, format: vk::Format) -> vk::FormatFeatureFlags {
@@ -377,7 +387,7 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
     // can draw.
     let mut draw_error = plan.hud.err().unwrap_or(0);
     let mut blur_error = plan.blur.err().unwrap_or(0);
-    let comp = if plan.hud.is_err() && plan.blur.is_err() {
+    let comp = if plan.hud.is_err() && plan.blur.is_err() && !plan.capture {
         None
     } else if images.is_empty() {
         draw_error = DRAW_ERR_INTERNAL;
@@ -386,7 +396,10 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
     } else {
         // SAFETY: the swapchain's own images.
         match unsafe { Compositor::new(d, &images, ci.image_format, ci.image_extent, plan.hud, plan.blur) } {
-            Ok(c) => Some(c),
+            Ok(mut c) => {
+                c.set_capture(plan.capture, ci.image_color_space, id);
+                Some(c)
+            }
             Err(e) => {
                 log!("compositor setup failed: {e:?}");
                 draw_error = DRAW_ERR_INTERNAL;

@@ -26,52 +26,15 @@ use std::path::Path;
 
 use quiver_api::perf::{Captures, HudConfig, LaunchPerfPlan};
 
-pub const ENV_SIGHT: &str = "QUIVER_SIGHT";
-pub const SIGHT_LAYER: &str = "VK_LAYER_QUIVER_sight";
-pub const OBS_LAYER: &str = "VK_LAYER_OBS_vkcapture_64";
-/// Layers that must stay above Sight (closer to the application), the variables that turn each
-/// on (any), and the one that vetoes it. Frame generators belong here, or the HUD gets
-/// interpolated with the game.
-const ABOVE_SIGHT: [(&str, &[&str], Option<&str>); 4] = [
-    ("VK_LAYER_VKBASALT_post_processing", &["ENABLE_VKBASALT"], None),
-    // lsfg-vk v1.
-    ("VK_LAYER_LS_frame_generation", &["ENABLE_LSFG"], None),
-    // lsfg-vk v2: a config (or configless env mode) decides; DISABLE_LSFGVK vetoes.
-    ("VK_LAYER_LSFGVK_frame_generation", &["LSFGVK_CONFIG", "LSFGVK_ENV"], Some("DISABLE_LSFGVK")),
-    // NVIDIA Smooth Motion (the driver's implicit present layer).
-    ("VK_LAYER_NV_present", &["NVPRESENT_ENABLE_SMOOTH_MOTION"], Some("DISABLE_LAYER_NV_PRESENT_1")),
-];
+// The layer order and the preload's entry are shared with `quiver lab` (quiver_core::sightenv).
+pub use quiver_core::sightenv::{ENV_INPUT, ENV_SIGHT, input_preload_in, layer_order, truthy, uses_obs_capture};
 /// MangoHud's logging key moves here (§1.3).
 pub const MANGOHUD_LOGGING_KEY: &str = "Shift_L+F7";
-
-fn truthy(env: &BTreeMap<String, String>, k: &str) -> bool {
-    env.get(k).is_some_and(|v| !v.is_empty() && v != "0")
-}
 
 pub fn uses_mangohud(env: &BTreeMap<String, String>, wrappers: &[String]) -> bool {
     truthy(env, "MANGOHUD") || wrappers.iter().any(|w| Path::new(w).file_name().is_some_and(|n| n == "mangohud"))
 }
 
-pub fn uses_obs_capture(env: &BTreeMap<String, String>, wrappers: &[String]) -> bool {
-    truthy(env, "OBS_VKCAPTURE") || wrappers.iter().any(|w| Path::new(w).file_name().is_some_and(|n| n == "obs-gamecapture"))
-}
-
-/// The Vulkan layer order captures imply, application first.
-pub fn layer_order(captures: Captures, env: &BTreeMap<String, String>, obs: bool) -> Vec<String> {
-    let mut out: Vec<String> = env.get("VK_INSTANCE_LAYERS").map(|v| v.split(':').filter(|l| !l.is_empty() && *l != SIGHT_LAYER && *l != OBS_LAYER).map(str::to_owned).collect()).unwrap_or_default();
-    for (layer, vars, veto) in ABOVE_SIGHT {
-        let on = vars.iter().any(|v| truthy(env, v)) && !veto.is_some_and(|v| env.contains_key(v));
-        if on && !out.iter().any(|l| l == layer) {
-            out.push(layer.into());
-        }
-    }
-    match (captures, obs) {
-        (Captures::Hidden, true) => out.extend([OBS_LAYER.into(), SIGHT_LAYER.into()]),
-        (Captures::Shown, true) => out.extend([SIGHT_LAYER.into(), OBS_LAYER.into()]),
-        (_, false) => out.push(SIGHT_LAYER.into()),
-    }
-    out
-}
 
 /// MangoHud's config with the logging key moved: appended to the user's own
 /// `MANGOHUD_CONFIG` (unless it already sets `toggle_logging`), else `read_cfg` first so
@@ -157,18 +120,9 @@ pub fn add_input_preload(p: &mut LaunchPerfPlan, env: &BTreeMap<String, String>,
         p.notes.push("the Sight input preload isn't installed: the panel opens on the desktop".into());
         return;
     };
-    let joined = match env.get("LD_PRELOAD").map(|v| v.trim()).filter(|v| !v.is_empty()) {
-        Some(v) if v.split([' ', ':']).any(|x| x == so) => v.to_owned(),
-        Some(v) => format!("{v}:{so}"),
-        None => so.to_owned(),
-    };
-    p.env.insert("LD_PRELOAD".into(), joined);
+    p.env.insert("LD_PRELOAD".into(), quiver_core::sightenv::join_preload(env.get("LD_PRELOAD").map(String::as_str), so));
     p.notes.push("Sight input preload: the panel draws in the game and takes its keyboard and mouse while open".into());
 }
-
-/// `QUIVER_SIGHT_INPUT=0` in a launch's settings: no input preload (the preload honours it
-/// too, passing everything through).
-pub const ENV_INPUT: &str = "QUIVER_SIGHT_INPUT";
 
 /// The installed input preload, as an `LD_PRELOAD` entry: `<prefix>/lib/quiver/sight/$PLATFORM/
 /// libquiver_sight_input.so` when quiverd runs from `<prefix>/bin` and the 64-bit build is
@@ -176,18 +130,6 @@ pub const ENV_INPUT: &str = "QUIVER_SIGHT_INPUT";
 pub fn installed_input_preload() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     input_preload_in(exe.parent()?, |p| p.is_file())
-}
-
-pub fn input_preload_in(exe_dir: &Path, exists: impl Fn(&Path) -> bool) -> Option<String> {
-    const SO: &str = "libquiver_sight_input.so";
-    if let Some(prefix) = exe_dir.parent() {
-        let sight = prefix.join("lib/quiver/sight");
-        if exists(&sight.join("x86_64").join(SO)) {
-            return Some(format!("{}/$PLATFORM/{SO}", sight.display()));
-        }
-    }
-    let beside = exe_dir.join(SO);
-    exists(&beside).then(|| beside.display().to_string())
 }
 
 /// A Quiver-installed layer: `<data>/sight/layer/` with a manifest in it.
@@ -199,6 +141,7 @@ pub fn installed_layer_dir(data_dir: &Path) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quiver_core::sightenv::SIGHT_LAYER;
 
     fn env(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
         kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

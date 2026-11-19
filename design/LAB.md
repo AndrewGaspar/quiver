@@ -23,7 +23,7 @@ config files live, measure, kill, relaunch. Nothing an instance does reaches the
 accounts, saves, play time or achievements.
 
 ```
-quiver lab create <game> [--name N] [--display 2560x1600@165] [--proton P] [--mod DIR] [--graphics G]
+quiver lab create <game> [--name N] [--display 2560x1600@165[+hdr]] [--proton P] [--mod DIR] [--graphics G] [--sight] [--hdr]
 quiver lab up N | down N | rm N | list | show N | edit N key=value…
 quiver lab launch N [--mod DIR] [--clock virtual:HZ|real] [--wait frame]     quiver lab kill N
 quiver lab status N | wait N STATE [--stable]       quiver lab logs N [--tail 40]
@@ -33,6 +33,8 @@ quiver lab set N FILE:[section]key=value… [--wait] | profile N [NAME]
 quiver lab fixture save|install|list … | call N VERB … | where N | teleport N LOC
 quiver lab gpu [--for N] -- CMD… | bench N --variant A=… --variant B=… … | host
 quiver lab brief <game> | doctor | image build|status | job list|show|wait
+quiver lab sight N status [--json]                  (instances with sight = on, section 12)
+quiver lab hdr N [--json] | shot N --hdr [OUT]      (instances with display.hdr = on, section 13)
 quiver lab … --bg      (any command, as a background job)
 ```
 
@@ -308,6 +310,7 @@ Each is enforced in code, not by convention, and has a test.
 | One live login per account | launch material comes from quiverd; no store client runs in an instance; no credential file is read |
 | An EOS game reports nothing to Epic | every container resolves Epic's names to the instance's EOS proxy (3.1), which forwards only the allowlist and answers the rest 403; the CA is trusted only in the instance's cloned prefix; an EOS game's launch is refused unless a probe from inside the container reaches the proxy; a :443 connection to the real host's addresses outside the proxy kills the run (`lab::eos`, `lab::eosproxy`, `lab::wincert`; tests `tests/eos_proxy.rs`, `podman::tests::epic_names_go_to_the_eos_proxy`) |
 | **Nothing is reported** (section 5) | quiverd, by session kind |
+| Sight in an instance changes none of the person's settings | the lab `quiver-sight` never connects to quiverd; panel actions that would change settings are refused and logged (section 12; `quiver-sight/src/lab.rs`) |
 
 ## 5. Nothing is reported
 
@@ -671,3 +674,234 @@ misbehave.
    concern, not Quiver's. Quiver has no user-playing check: a launch never refuses, warns
    about or reports the user's games (`quiver lab host` lists GPU users as plain facts). The
    GPU lock (`quiver lab gpu`) only coordinates lab runs with each other.
+
+## 12. Sight in an instance (2026-11-19)
+
+An agent can test Sight (the HUD and the panel drawn in the game, design/SIGHT.md §14) in a
+real game without the person. Off by default, so existing instances don't change:
+`quiver lab create … --sight`, or `quiver lab edit N sight=on` then `quiver lab down N && quiver
+lab up N` (the container's mounts change). Code: `quiver_core::lab::sight`,
+`crates/quiver-cli/src/lab/sight.rs`, `quiver-sight --lab` (`crates/quiver-sight/src/lab.rs`).
+
+```sh
+quiver lab launch awr --wait frame
+quiver lab key awr shift+F2           # the panel, drawn in the game's frames; the game keeps focus
+quiver lab sight awr status           # drawn: in the game, capture on, the preload, the layer
+quiver lab shot awr                   # the panel on the game's frame
+quiver lab key awr Down Return        # drives the panel; the game gets none of it
+quiver lab key awr Escape             # closes it; the game has its input again
+quiver lab key awr shift+F3           # the HUD
+quiver lab logs awr                   # presenter chosen, captures, releases and why
+```
+
+**What a launch gets** (`sight = true`):
+
+- **The libraries**, mounted read-only at `up`: the installed Sight libraries
+  (`<prefix>/lib/quiver/sight/{x86_64,i686}`, next to the `quiver` that runs `up`) at
+  `/opt/quiver/sight`, `quiver-sight` at `/opt/quiver/bin/quiver-sight`, and
+  `libxkbcommon-x11.so.0` from the host at `/opt/quiver/lib` (image `quiver-lab:1` lacks it;
+  the Containerfile has it now for the next build). `QUIVER_LAB_SIGHT_DIR` and
+  `QUIVER_LAB_SIGHT_BIN` point at other builds (the tests).
+- **The environment**, the same as quiverd's launches (`quiver_core::sightenv`, shared with
+  `quiverd::perf::launch`): `QUIVER_PERF_DIR` (the run's session dir), `QUIVER_SIGHT=1`,
+  `VK_ADD_IMPLICIT_LAYER_PATH=/lab/sight/layer` (the layer's manifests, written at each launch,
+  pointing at the mounted libraries), `VK_INSTANCE_LAYERS` in quiverd's order, `LD_PRELOAD`
+  with `/opt/quiver/sight/$PLATFORM/libquiver_sight_input.so` after the manifest's own, and
+  `QUIVER_SIGHT_LOG=1` (the layer's and preload's lines go to `game.log`).
+  `env.QUIVER_SIGHT_INPUT=0` drops the preload.
+- **A `quiver-sight` for the run, inside the container** (`podman exec -d`, started just
+  before the game, killed with every Wine process at kill-all). Inside, it shares the game's
+  pid namespace and `/dev/shm`, so the preload's "the panel's owner still exists" failsafe works
+  as on the desktop. It renders off-screen with GPUI on the container's GPU (CDI).
+- **The session dir** is in a per-instance tmpfs folder on the host,
+  `/dev/shm/quiver-lab-<uid>/<instance>/quiver-<uid>/lab-<instance>-r<N>/`, bind-mounted at the
+  same path. The supervisor makes it and `hud.image` at each launch (removing the last run's),
+  and `quiver lab sight` reads `panel.input` and the layer's ring from the host. It goes at
+  `down` and `rm`. The container keeps its own `/dev/shm`, pid and network namespaces.
+
+**Nothing reaches the person's settings.** The lab `quiver-sight` (`--lab`) never connects to
+quiverd; none is reachable from the container anyway. Chosen over a read-only view of
+quiverd because then there's nothing to get wrong: no request reaches quiverd, so no
+setting, profile, Tweak or report can change, and the session stays `lab-<instance>-r<N>`
+(holder `lab`).
+
+- The HUD model comes from the layer's ring: frame rate, frame time and 1% low from its
+  present records, the graph the layer draws itself, and a `LAB r<N>` tag. It has no GPU or CPU
+  sensors (those are quiverd's) and no mod metrics.
+- The keys come from the layer's status block, as quiverd's ring thread reads them:
+  Shift+F2 (panel), Shift+F3 (HUD), Ctrl+Shift+F3 (preset).
+- The panel shows the instance's game and run. Mods, Tweaks and Achievements say they're
+  read-only (mod settings go through `quiver lab set`).
+- Every change the panel would send (an option, a Tweak, HUD settings, quitting the game) is
+  refused, logged in `sight.log` and `sight.json`, and shown as refused in the panel.
+  Showing or hiding the HUD only changes this run's `quiver-sight`.
+
+**Logs.** `runs/r<N>/sight.log` (quiver-sight), `runs/r<N>/sight.json` (its status: the
+panel's report, the HUD, frames per second, refused actions), and the `quiver-sight-input[…]`
+and `quiver-sight-layer:` lines in `game.log`. The preload now says why it gave input back
+(`input back to the game (panel N): the panel closed | failsafe: quiver-sight is gone |
+failsafe: quiver-sight stopped renewing the panel's deadline | failsafe: the panel isn't in the
+game's frames`). `quiver lab logs` summarises per panel across the prefix's processes: input
+hooked (X11 or Wayland), the presenter chosen and why, the layer drawing it, captures,
+releases by reason, failsafe releases, and refused actions. `quiver lab sight N status
+[--json]` shows the live state: quiver-sight alive, the HUD, the panel (open, drawn where,
+backdrop), capture, the preload's and layer's words, the cursor.
+
+**Doctor and brief.** `quiver lab doctor` checks that the Sight libraries and `quiver-sight`
+are installed next to `quiver` (and whether the i686 build and `libxkbcommon-x11` are there).
+`quiver lab brief` has a "Sight in the instance" section with the commands above.
+
+**Verified.** Unit tests:
+- the mounts only for `sight = true` instances, and no host pid, ipc or network namespace;
+- the environment (merged with the manifest's own `LD_PRELOAD`, layer path and
+  `VK_INSTANCE_LAYERS`; the opt-out);
+- the layer manifests (the same as the layer's own template);
+- the `quiver-sight` command line;
+- the log summary over interleaved lines from several processes;
+- the lab HUD's frame statistics and models, the read-only panel data.
+
+End to end, `crates/quiver-cli/tests/lab_sight.rs`. It runs the real `quiver lab up/launch/key/
+shot/sight/logs` on a hand-made DRM-free instance of the Sight layer's D3D12 test program
+(vkd3d-proton under GE-Proton11-12), in the real lab image with gamescope headless and the GPU:
+- keys reach the program;
+- Shift+F2 opens the panel drawn in the game (the screenshot's middle changes, mean difference
+  ~61/255);
+- keys don't reach the program while it's open; Escape closes it, and its Escape never reaches
+  the program;
+- Shift+F3 shows the HUD (top-left changes);
+- with the panel open, killing the run's `quiver-sight` gives the input back (~1 s, counting
+  the CLI's polling);
+- `quiver lab logs` reports the presenter and the failsafe.
+
+Not run: a real game in an instance (AWR, Origins), winewayland in an instance (gamescope
+headless has no Wayland input), a 32-bit game.
+
+**Limits.** A debug build of `quiver-sight` can't run in the container: rust-embed reads its
+fonts from the source tree in debug builds, so the installed (release) one is what's mounted.
+Test programs built as console programs get Wine's console window, which takes gamescope's
+focus (games are GUI programs). The lab HUD has no sensors.
+
+## 13. HDR in an instance (2026-11-19)
+
+`quiver lab create GAME --hdr` (or `--display 1920x1080@60+hdr`), or `quiver lab edit N
+display.hdr=on` and then down/up, makes an HDR instance. `display.hdr` turns `sight` on too,
+because measuring reads the swapchain through the Sight layer.
+
+```
+quiver lab create awr --hdr                  # or: quiver lab edit awr display.hdr=on; down; up
+quiver lab launch awr --wait frame           # then turn the game's own HDR setting on
+quiver lab hdr awr [--json]                  # swapchain format and colour space, the metadata, gamescope's view
+quiver lab shot awr --hdr [OUT.png]          # OUT.raw (exact), OUT.png (16-bit PQ), OUT.json (nits)
+```
+
+**The display.** gamescope's headless backend has no real output, so HDR is forced:
+`--hdr-enabled --hdr-debug-force-support --hdr-debug-force-output` (gamescope 3.17 in
+`quiver-lab:1`) make its one output HDR10 PQ. The boot script passes them through
+`QUIVER_LAB_GAMESCOPE_ARGS`. gamescope then sets `GAMESCOPE_HDR_OUTPUT_FEEDBACK=1` on the
+root window, though `GAMESCOPE_DISPLAY_SUPPORTS_HDR` stays 0 headless.
+
+**The game's environment.** `ENABLE_GAMESCOPE_WSI=1` and `PROTON_ENABLE_HDR=1` go before the
+manifest's env, so the manifest's env can override them. `podman exec` doesn't inherit
+gamescope's environment, so the exec prologue adds `GAMESCOPE_WAYLAND_DISPLAY` (written by the
+boot script to `/tmp/gamescope-wayland`) when the WSI layer is enabled. Measured in throwaway
+containers with the D3D12 test program:
+- **Without gamescope's WSI layer** the surface offers only `SRGB_NONLINEAR`, and
+  vkd3d-proton makes a `B8G8R8A8` SDR swapchain.
+- **With it** you get HDR10 (`A2B10G10R10` + `HDR10_ST2084`) and scRGB
+  (`R16G16B16A16_SFLOAT` + `EXTENDED_SRGB_LINEAR`), and gamescope sets
+  `GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK=1`.
+- **`DXVK_HDR`** wasn't needed with GE-Proton11-12: its DXGI detects HDR from gamescope's
+  feedback. `PROTON_ENABLE_HDR=1` (which sets `DXVK_HDR=1`) is there for builds that still
+  gate on it.
+- **winewayland** (`PROTON_ENABLE_WAYLAND=1`, `WAYLAND_DISPLAY=gamescope-0`) made no swapchain
+  in 45 s in the container: X11 plus the WSI layer is the HDR path.
+
+**Layer order.** gamescope's WSI layer turns the game's HDR swapchain into an sRGB one for the
+driver, and keeps `vkSetHdrMetadataEXT` to itself. A layer below it sees an SDR `MAILBOX`
+swapchain and no metadata. It's an implicit layer, and the loader puts implicit layers above
+every `VK_INSTANCE_LAYERS` layer unless they're named there too. So when the launch has
+`ENABLE_GAMESCOPE_WSI=1`, `sightenv::layer_order` names it below Sight
+(`VK_LAYER_QUIVER_sight:VK_LAYER_FROG_gamescope_wsi_x86_64:…_i686`). This applies to quiverd's
+launches too.
+
+**`quiver lab hdr`.** From the layer's status block, which gained appended fields (`hdr_*`,
+`capture_done`; older layers read as zero):
+- the target swapchain's format and colour space;
+- the last `VkHdrMetadataEXT` the game set: max CLL and FALL, mastering max and min, primaries
+  and white point, and the number of calls;
+- whether a capture is possible.
+
+From gamescope's root properties:
+- whether its output is HDR;
+- whether it sees the game as HDR;
+- the metadata's EOTF. Only the first byte of `GAMESCOPE_COLOR_APP_HDR_METADATA_FEEDBACK` is
+  read: gamescope writes a byte array as 32-bit items through Xlib's `long`s, so the rest is
+  unreliable.
+
+**`quiver lab shot --hdr`.** In lab launches only (`QUIVER_SIGHT_CAPTURE=1`), the Sight layer
+adds `TRANSFER_SRC` usage to swapchains when the surface allows it. A swapchain the HUD can't
+draw on still gets a compositor for captures. The capture works like this:
+1. The CLI writes `n` into the session dir's `capture.req`.
+2. The layer's heartbeat sees it.
+3. The next present on the target swapchain copies the presented image, before the
+   blur/HUD/panel, into a host buffer in the compositor's submit.
+4. A later present takes the bytes once that submit's fence is done.
+5. The heartbeat writes `capture-<n>.raw` and `.json` into the session dir, then
+   `capture_done = n` in the status block.
+
+The CLI then measures the capture, writes its files and removes the session-dir copies, since
+tmpfs isn't the place for full frames. It writes three files:
+- **`OUT.raw`:** the swapchain's bytes, exact.
+- **`OUT.png`:** 16-bit RGB. For HDR10 these are the PQ code values themselves (lossless). For
+  scRGB they're converted to BT.2020 PQ (derived).
+- **`OUT.json`:** the format, colour space, the game's metadata, and `stats`:
+  - max, average and p99 nits, and the brightest channel;
+  - the fraction of pixels above 203 nits (SDR reference white) and above 1000 nits.
+
+Luminance is computed per format:
+
+| Format | Luminance |
+|---|---|
+| PQ | BT.2020 weights |
+| scRGB | ×80 nits, BT.709 weights |
+| 8-bit sRGB | 1.0 = 203 nits |
+
+**gamescope's own screenshot** is an 8-bit PNG even in HDR: 203 nits came out at 169/255, and
+1000 nits clips to 255. A `.avif` path (`gamescopectl screenshot x.avif`) writes nothing
+headless. So plain `quiver lab shot` is for layout, and `--hdr` is for highlights.
+
+**Sight on an HDR swapchain** (recorded by the e2e test):
+- **Panel:** the layer can't draw the panel or the HUD on HDR yet (`DRAW_ERR_FORMAT`). On the
+  desktop the panel falls back to its layer-shell window. In an instance there's no
+  layer-shell, so Shift+F2 doesn't open it: the report says "can't draw it in the game (the
+  Sight layer can't draw on this swapchain …) and no layer-shell here". The game keeps its
+  input: the preload never captures for a panel the layer isn't drawing.
+- **HUD:** Shift+F3 sets the lab HUD on (`hud_on`), but nothing is drawn.
+
+**Monitors.** gamescope's headless backend has exactly one output (`--prefer-output` and
+`--virtual-connector-strategy` are for the DRM backend and Steam's virtual connectors). A
+second monitor would need a second gamescope, and a game sees only the one it was started on.
+Not built: one output per instance.
+
+**Verified.** Unit tests:
+- PQ both ways, and the test program's code values;
+- half floats;
+- HDR10, scRGB and SDR stats; the lossless 16-bit PNG;
+- gamescope's properties;
+- `+hdr` display parsing and edits (on turns Sight on; a new size keeps HDR);
+- the gamescope args in `run_args`, and the exec prologue;
+- the WSI layer below Sight;
+- the layer's sidecar JSON and status fields, the status block sizes in Rust and C, and an
+  older layer's shorter block.
+
+End to end, `crates/quiver-cli/tests/lab_hdr.rs` runs a hand-made DRM-free instance with
+`display.hdr` on, in the real image with gamescope headless and the GPU. The program draws 203,
+1000 and 4000 nits and sets max CLL 4000, max FALL 600, mastering 0.005–1000 and BT.2020
+primaries:
+- **HDR10** (`--arg 32`): `quiver lab hdr` shows `A2B10G10R10` HDR10 and the metadata exactly,
+  and gamescope reports output HDR and the game as HDR (EOTF PQ). `shot --hdr` measures max
+  3988 nits, avg 789, 52.8% above 203 and 5.6% above 1000 (the 4000-nit band).
+- **scRGB** (`--arg 64`): `R16G16B16A16_SFLOAT` scRGB, max 4000 nits, avg 790.
+- **Panel and HUD:** as above.
+
+Not run: a real game in HDR (AWR, Origins), D3D11 through DXVK in HDR, a 32-bit game.

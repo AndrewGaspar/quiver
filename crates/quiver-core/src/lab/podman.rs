@@ -39,8 +39,9 @@ echo "boot $(date -Is) ${QUIVER_LAB_W}x${QUIVER_LAB_H}@${QUIVER_LAB_HZ}" >> /lab
 # Displays :0-:9 are never ours. Xwayland skips a display whose lock file names a live
 # process; this shell's pid becomes gamescope's with the exec below.
 for d in 0 1 2 3 4 5 6 7 8 9; do printf "%10d\n" $$ > /tmp/.X$d-lock; done
-exec gamescope --backend headless -W "$QUIVER_LAB_W" -H "$QUIVER_LAB_H" -w "$QUIVER_LAB_W" -h "$QUIVER_LAB_H" -r "$QUIVER_LAB_HZ" -- \
-  bash -c 'case "$DISPLAY" in :[0-9]|:[0-9].*) echo "refusing display $DISPLAY" >> /lab/boot.log; exit 1;; esac; echo "$DISPLAY" > /tmp/display; exec sleep infinity' \
+# QUIVER_LAB_GAMESCOPE_ARGS: HDR forced on (lab/hdr.rs), word-split on purpose.
+exec gamescope --backend headless -W "$QUIVER_LAB_W" -H "$QUIVER_LAB_H" -w "$QUIVER_LAB_W" -h "$QUIVER_LAB_H" -r "$QUIVER_LAB_HZ" ${QUIVER_LAB_GAMESCOPE_ARGS:-} -- \
+  bash -c 'case "$DISPLAY" in :[0-9]|:[0-9].*) echo "refusing display $DISPLAY" >> /lab/boot.log; exit 1;; esac; echo "${GAMESCOPE_WAYLAND_DISPLAY:-}" > /tmp/gamescope-wayland; echo "$DISPLAY" > /tmp/display; exec sleep infinity' \
   >> /lab/gamescope.log 2>&1"#
 }
 
@@ -59,6 +60,9 @@ pub struct Host {
     /// Host files mounted read-only at the same path: 32-bit NVIDIA libraries, NVIDIA's Wine
     /// DLLs (DLSS), `/etc/machine-id`.
     pub ro_mounts: Vec<PathBuf>,
+    /// For a `sight = true` instance: the host's Sight pieces and the instance's shared-memory
+    /// root ([`super::sight`]).
+    pub sight: Option<(super::sight::HostSight, PathBuf)>,
 }
 
 /// 32-bit NVIDIA driver libraries and NVIDIA's Wine folder on this host.
@@ -124,7 +128,14 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
     for p in &host.ro_mounts {
         a.extend(["-v".into(), mount(p, p, "ro")]);
     }
-    let env: [(&str, String); 12] = [
+    if m.sight
+        && let Some((h, shm)) = &host.sight
+    {
+        for v in super::sight::mounts(h, shm) {
+            a.extend(["-v".into(), v]);
+        }
+    }
+    let env: [(&str, String); 13] = [
         ("HOME", "/tmp/home".into()),
         ("USER", "steamuser".into()),
         ("XDG_RUNTIME_DIR", "/tmp/xdg".into()),
@@ -136,6 +147,8 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
         ("QUIVER_LAB_H", m.display.height.to_string()),
         // Higher while the virtual clock runs uncapped (lab::vclock).
         ("QUIVER_LAB_HZ", super::vclock::boot_refresh(m).to_string()),
+        // HDR forced on (lab::hdr), with whatever refresh the clock asks for.
+        ("QUIVER_LAB_GAMESCOPE_ARGS", if m.display.hdr { super::hdr::GAMESCOPE_ARGS.into() } else { String::new() }),
         ("QUIVER_LAB_INSTANCE", inst.name.clone()),
         ("QUIVER_GAME", m.game.to_string()),
     ];
@@ -148,9 +161,9 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
 }
 
 /// The prologue every `podman exec` into an instance runs: the instance's own display (as
-/// gamescope reported it, never a default), then the command.
-const WITH_DISPLAY: &str =
-    r#"d=$(cat /tmp/display 2>/dev/null); [ -n "$d" ] || { echo "the instance's display isn't up" >&2; exit 3; }; export DISPLAY="$d"; exec "$@""#;
+/// gamescope reported it, never a default), gamescope's Wayland socket for a command that
+/// enables its WSI layer (HDR launches), then the command.
+const WITH_DISPLAY: &str = r#"d=$(cat /tmp/display 2>/dev/null); [ -n "$d" ] || { echo "the instance's display isn't up" >&2; exit 3; }; export DISPLAY="$d"; if [ "${ENABLE_GAMESCOPE_WSI:-}" = 1 ] && [ -z "${GAMESCOPE_WAYLAND_DISPLAY:-}" ]; then w=$(cat /tmp/gamescope-wayland 2>/dev/null); export GAMESCOPE_WAYLAND_DISPLAY="${w:-gamescope-0}"; fi; exec "$@""#;
 
 /// `podman exec …` (without `podman`) running `cmd` with the instance's display.
 pub fn exec_args(container: &str, detach: bool, workdir: Option<&Path>, env: &[(String, String)], cmd: &[String]) -> Vec<String> {
@@ -266,6 +279,42 @@ exe = "ACOrigins.exe"
         assert!(hosts.contains(&&"api-gamedev.ol.epicgames.net:127.0.0.1".to_owned()));
         let a = run_args(&inst, &m, &Host { eos_proxy_port: Some(40123), ..Default::default() });
         assert!(a.contains(&"--network=pasta:-T,443:40123".to_owned()), "{a:?}");
+    }
+
+    #[test]
+    fn sight_mounts_only_for_sight_instances() {
+        let (inst, mut m) = sample();
+        let h = super::super::sight::HostSight { lib_dir: "/h/sight".into(), binary: "/h/quiver-sight".into(), extra_libs: vec![], i686: false };
+        let host = Host { sight: Some((h, "/dev/shm/quiver-lab-1000/t1".into())), ..Default::default() };
+        let a = run_args(&inst, &m, &host);
+        assert!(!a.iter().any(|x| x.contains("/opt/quiver") || x.contains("quiver-lab-1000")), "sight off: nothing of it ({a:?})");
+        m.sight = true;
+        let a = run_args(&inst, &m, &host);
+        assert!(a.contains(&"/h/sight:/opt/quiver/sight:ro".to_owned()), "{a:?}");
+        assert!(a.contains(&"/h/quiver-sight:/opt/quiver/bin/quiver-sight:ro".to_owned()));
+        assert!(a.contains(&"/dev/shm/quiver-lab-1000/t1:/dev/shm/quiver-lab-1000/t1".to_owned()));
+        // Still its own namespaces: no host pid, ipc or network namespace for Sight.
+        assert!(!a.iter().any(|x| x.starts_with("--pid") || x.starts_with("--ipc") || x.contains("network=host")));
+    }
+
+    #[test]
+    fn hdr_forces_gamescopes_output() {
+        let (inst, mut m) = sample();
+        let gs = |a: &[String]| a.iter().find(|x| x.starts_with("QUIVER_LAB_GAMESCOPE_ARGS=")).cloned().unwrap();
+        assert_eq!(gs(&run_args(&inst, &m, &Host::default())), "QUIVER_LAB_GAMESCOPE_ARGS=");
+        m.display.hdr = true;
+        assert_eq!(gs(&run_args(&inst, &m, &Host::default())), "QUIVER_LAB_GAMESCOPE_ARGS=--hdr-enabled --hdr-debug-force-support --hdr-debug-force-output");
+        assert!(boot_script().contains("${QUIVER_LAB_GAMESCOPE_ARGS:-} --"));
+        assert!(boot_script().contains("/tmp/gamescope-wayland"));
+        // An exec that enables gamescope's WSI layer gets its Wayland socket.
+        assert!(WITH_DISPLAY.contains("ENABLE_GAMESCOPE_WSI") && WITH_DISPLAY.contains("GAMESCOPE_WAYLAND_DISPLAY"));
+        // With the virtual clock uncapped too: its refresh and HDR's flags, both.
+        m.clock = Some(super::super::vclock::VirtualClock::new(62.5));
+        let a = run_args(&inst, &m, &Host::default());
+        assert!(a.contains(&format!("QUIVER_LAB_HZ={}", super::super::vclock::boot_refresh(&m))) && super::super::vclock::boot_refresh(&m) > m.display.refresh, "{a:?}");
+        assert!(gs(&a).ends_with("--hdr-debug-force-output"));
+        let e: std::collections::BTreeMap<String, String> = super::super::hdr::launch_env().into_iter().collect();
+        assert_eq!((e["ENABLE_GAMESCOPE_WSI"].as_str(), e["PROTON_ENABLE_HDR"].as_str()), ("1", "1"));
     }
 
     #[test]

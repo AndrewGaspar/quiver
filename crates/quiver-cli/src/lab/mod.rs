@@ -4,8 +4,10 @@
 
 mod bench;
 mod create;
+mod hdr;
 mod jobs;
 mod ops;
+mod sight;
 mod sup;
 
 use std::path::{Path, PathBuf};
@@ -59,6 +61,15 @@ pub enum LabAction {
         /// Make the game's gold copy again from your current prefix and install.
         #[arg(long)]
         regold: bool,
+        /// Launches carry Sight: the HUD and the panel drawn in the game, the input preload,
+        /// and a lab quiver-sight (read-only: nothing reaches your settings). `quiver lab sight`.
+        #[arg(long)]
+        sight: bool,
+        /// HDR: gamescope's headless output forced to HDR10 PQ and the game's HDR environment
+        /// (also `--display WxH@HZ+hdr`). Turns Sight on too, which reads the swapchain:
+        /// `quiver lab hdr`, `quiver lab shot --hdr`.
+        #[arg(long)]
+        hdr: bool,
     },
     /// Instances, with their game, display and state.
     List {
@@ -73,7 +84,7 @@ pub enum LabAction {
     },
     /// Change an instance's manifest: display=WxH@HZ, proton=NAME, mod_dir=DIR, graphics=NAME,
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
-    /// log_file=PATH, args="…", notes="…" (key= clears); the fixed-step virtual clock:
+    /// log_file=PATH, args="…", notes="…", sight=on|off, display.hdr=on|off (key= clears); the fixed-step virtual clock:
     /// clock=virtual:HZ|real, clock.modules=A.dll,B.dll, clock.proxy=NAME|auto,
     /// clock.stuck_ms=N, clock.creep_after=N, clock.sleeps=present|all|none, clock.sleep_max_ms=N, clock.uncap=false.
     Edit {
@@ -143,6 +154,11 @@ pub enum LabAction {
         /// Also print metrics (blank, sharpness, mean level).
         #[arg(long)]
         metrics: bool,
+        /// The game's own frame in its swapchain format, from the Sight layer (sight = on):
+        /// `<file>.raw` exact, `<file>.png` 16-bit (PQ), `<file>.json` with the format, colour
+        /// space, HDR metadata and nits (max, average, above 203 and 1000).
+        #[arg(long)]
+        hdr: bool,
     },
     /// Press keys (xdotool names), each held for --hold ms.
     Key {
@@ -259,6 +275,27 @@ pub enum LabAction {
         /// Print the last N lines of game.log.
         #[arg(long)]
         tail: Option<usize>,
+    },
+    /// Sight in the instance (sight = on): the run's quiver-sight, the panel (drawn where, input
+    /// captured or not), the layer and the input preload.
+    Sight {
+        instance: String,
+        /// `status` (the only one; open the panel with `quiver lab key N shift+F2`).
+        #[arg(default_value = "status")]
+        what: String,
+        #[arg(long)]
+        run: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// HDR in the instance: the game's swapchain (format, colour space), the HDR metadata it
+    /// set (vkSetHdrMetadataEXT), and whether gamescope sees it as HDR. Needs sight = on.
+    Hdr {
+        instance: String,
+        #[arg(long)]
+        run: Option<u32>,
+        #[arg(long)]
+        json: bool,
     },
     /// A ready-to-paste brief for an agent starting to mod this game.
     Brief {
@@ -434,11 +471,15 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{} {}", lab::IMAGE, if ok { "present" } else { "missing (quiver lab image build)" });
             }
         },
-        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold } => {
+        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight, hdr } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
             let src = create::source(&client, &game, exe.as_deref(), true).await?;
             let name = name.unwrap_or_else(|| default_name(&src.title));
-            let o = create::CreateOpts { name, display: Display::parse(&display)?, proton, mod_dir, graphics, created_by: source.to_owned(), regold };
+            let mut display = Display::parse(&display)?;
+            display.hdr |= hdr;
+            // quiver lab hdr and shot --hdr read the swapchain through the Sight layer.
+            let sight = sight || display.hdr;
+            let o = create::CreateOpts { name, display, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight };
             println!("cloning {} (reflinks; a big game takes a minute)…", src.title);
             let (inst, notes) = create::create(&lab, &src, &o)?;
             for n in notes {
@@ -494,8 +535,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             m.save(&inst.manifest_path())?;
             println!("saved {}", inst.manifest_path().display());
-            if changes.iter().any(|c| c.starts_with("display=")) && ops::running_id(&inst.container()).is_some() {
-                println!("the display changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
+            if changes.iter().any(|c| c.starts_with("display=") || c.starts_with("sight=")) && ops::running_id(&inst.container()).is_some() {
+                println!("that changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
             }
             if changes.iter().any(|c| c.starts_with("clock")) && ops::running_id(&inst.container()).is_some() {
                 println!("the clock changes at the next launch; its display refresh (uncapped: 1000 Hz) at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
@@ -510,6 +551,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 c.write_all(b"{\"op\":\"quit\"}\n")
             });
             let _ = ops::podman_cmd(&["rm".into(), "-f".into(), "-t".into(), "5".into(), inst.container()]).output();
+            sight::down(&inst);
             println!("{} is down", inst.name);
         }
         LabAction::Rm { instance } => {
@@ -517,6 +559,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             if ops::running_id(&inst.container()).is_some() {
                 bail!("{0} is up; quiver lab down {0} first", inst.name);
             }
+            sight::down(&inst);
             std::fs::remove_dir_all(&inst.dir).with_context(|| format!("remove {}", inst.dir.display()))?;
             println!("removed {}", inst.name);
         }
@@ -590,12 +633,22 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             println!();
         }
-        LabAction::Shot { instance, file, settle, crop, metrics } => {
+        LabAction::Shot { instance, file, settle, crop, metrics, hdr } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             if settle > 0.0 {
                 std::thread::sleep(Duration::from_secs_f64(settle));
             }
             let run = read_state(&inst).run.map(|r| format!("-r{}", r.id)).unwrap_or_default();
+            if hdr {
+                if crop.is_some() || metrics {
+                    bail!("--hdr writes the whole frame and its own numbers (no --crop or --metrics)");
+                }
+                let out = file.unwrap_or_else(|| inst.shots().join(format!("hdr-{}{run}.png", chrono::Local::now().format("%H%M%S%.3f"))));
+                let run_dir = read_state(&inst).run.map(|r| inst.run_dir(r.id));
+                let s = hdr::shot(&inst, run_dir.as_deref(), &out)?;
+                hdr::print_shot(&s);
+                return Ok(());
+            }
             let out = file.unwrap_or_else(|| inst.shots().join(format!("shot-{}{run}.png", chrono::Local::now().format("%H%M%S%.3f"))));
             ops::shot(&inst, &out)?;
             if let Some(c) = &crop {
@@ -749,6 +802,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     println!("  {l}");
                 }
             }
+            // Sight (design/LAB.md §12): presenter, captures, releases and why.
+            sight::print_summary(&dir);
             // The virtual clock's report (design/LAB.md, "The virtual clock").
             if let Some(lines) = lab::vclock::report_lines(&dir, true) {
                 println!("virtual clock ({}):", lab::vclock::STATUS_FILE);
@@ -763,6 +818,21 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     println!("{l}");
                 }
             }
+        }
+        LabAction::Sight { instance, what, run, json } => {
+            let (inst, _) = inst_of(&lab, &instance)?;
+            if what != "status" {
+                bail!("quiver lab sight {instance} status (open and drive the panel with quiver lab key {instance} shift+F2, Down, Return, …)");
+            }
+            let run = run.or(read_state(&inst).run.map(|r| r.id));
+            let dir = run.map(|r| inst.run_dir(r));
+            sight::status(&inst, dir.as_deref(), json)?;
+        }
+        LabAction::Hdr { instance, run, json } => {
+            let (inst, _) = inst_of(&lab, &instance)?;
+            let run = run.or(read_state(&inst).run.map(|r| r.id));
+            let dir = run.map(|r| inst.run_dir(r));
+            hdr::status(&inst, dir.as_deref(), json)?;
         }
         LabAction::Brief { game, instance, display, out, exe } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
@@ -798,7 +868,23 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
         return Ok(());
     }
     match k {
-        "display" => m.display = Display::parse(v)?,
+        "display" => {
+            // The size and refresh; HDR stays as it was unless the value says +hdr.
+            let hdr = m.display.hdr;
+            m.display = Display::parse(v)?;
+            m.display.hdr |= hdr;
+        }
+        "display.hdr" => {
+            m.display.hdr = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" | "" => false,
+                _ => bail!("display.hdr=on or display.hdr=off"),
+            };
+            if m.display.hdr {
+                // quiver lab hdr and shot --hdr read the swapchain through the Sight layer.
+                m.sight = true;
+            }
+        }
         "proton" => {
             let p = quiver_core::launcher::resolve_proton(v)?;
             (m.runtime.dxvk, m.runtime.vkd3d, m.runtime.nvapi) = layer_versions(&p);
@@ -816,6 +902,13 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
         }
         "log_file" => m.log_file = opt(v),
         "notes" => m.notes = v.to_owned(),
+        "sight" => {
+            m.sight = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" | "" => false,
+                _ => bail!("sight=on or sight=off"),
+            }
+        }
         "args" => m.paths.args = v.split_whitespace().map(str::to_owned).collect(),
         "exe" if !v.is_empty() => m.paths.exe = v.to_owned(),
         _ => {
@@ -860,6 +953,7 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         broker_port,
         eos_proxy_port: Some(eos_port),
         ro_mounts: podman::host_ro_mounts(),
+        sight: sight::up(&inst, &m)?,
     };
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
@@ -1165,6 +1259,32 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
             ),
         },
     );
+    // Sight in instances (sight = on; design/LAB.md §12): the libraries, the binary, and that
+    // the binary's libraries resolve in the image.
+    match quiver_core::lab::sight::HostSight::discover() {
+        Ok(h) => check(
+            "Sight for instances (sight = on)",
+            true,
+            format!(
+                "{} and {}{}; {}",
+                h.lib_dir.display(),
+                h.binary.display(),
+                if h.i686 { "" } else { " (no i686 build: 32-bit games without the preload and layer)" },
+                if h.extra_libs.is_empty() { "libxkbcommon-x11 not on the host: quiver-sight may not start in the image".to_owned() } else { "libxkbcommon-x11 mounted from the host".to_owned() }
+            ),
+        ),
+        Err(e) => check("Sight for instances (sight = on)", false, e),
+    }
+    // HDR instances (display.hdr = on; design/LAB.md §13): gamescope's WSI layer in the image.
+    if image {
+        let wsi = "/usr/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.x86_64.json";
+        let ok = ops::podman_cmd(&["run".into(), "--rm".into(), "--network=none".into(), lab::IMAGE.into(), "test".into(), "-f".into(), wsi.into()]).status().is_ok_and(|s| s.success());
+        check(
+            "HDR for instances (display.hdr = on)",
+            ok,
+            if ok { "gamescope's WSI layer in the image; gamescope headless forced to HDR10 PQ".into() } else { format!("{wsi} missing in {}: HDR games will see only SDR formats", lab::IMAGE) },
+        );
+    }
     let missing: Vec<String> = ["x64", "x86"].iter().filter_map(|a| lab::vclock::unavailable(a)).collect();
     check("virtual clock DLL (clock=virtual:HZ)", missing.is_empty(), if missing.is_empty() { "x64 and x86, built in".into() } else { missing.join("; ") });
     if json {
@@ -1241,6 +1361,14 @@ mod tests {
         edit(&mut m, "env.DXVK_HUD=").unwrap();
         assert!(m.env.is_empty());
         assert!(edit(&mut m, "bogus=1").is_err() && edit(&mut m, "throttle+=nope").is_err() && edit(&mut m, "reload_pattern=(").is_err());
+        // HDR: on turns Sight on (it reads the swapchain); a new size keeps it; off clears it.
+        edit(&mut m, "display.hdr=on").unwrap();
+        assert!(m.display.hdr && m.sight);
+        edit(&mut m, "display=1920x1080@120").unwrap();
+        assert_eq!(m.display.to_string(), "1920x1080@120+hdr");
+        edit(&mut m, "display.hdr=off").unwrap();
+        assert!(!m.display.hdr && m.sight);
+        assert!(edit(&mut m, "display.hdr=maybe").is_err());
     }
 
     #[test]

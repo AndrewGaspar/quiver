@@ -56,6 +56,7 @@ pub mod blur;
 mod compositor;
 mod ffi;
 pub mod focus;
+pub mod hdr;
 pub mod formats;
 pub mod graph;
 mod hooks;
@@ -110,12 +111,17 @@ pub mod env {
     pub const KEYS: &str = "QUIVER_SIGHT_KEYS";
     /// `1`: read Reflex timing reports with `vkGetLatencyTimingsNV` ([`crate::latency`]).
     pub use crate::latency::ENV_TIMINGS as REFLEX_TIMINGS;
+    /// `1`: add `TRANSFER_SRC` usage to swapchains so the presented image can be captured in
+    /// its own format ([`crate::hdr`]; `quiver lab` instances set it, games of the person's
+    /// don't).
+    pub const CAPTURE: &str = "QUIVER_SIGHT_CAPTURE";
 }
 
 struct Config {
     draw: bool,
     blur: bool,
     log: bool,
+    capture: bool,
 }
 
 fn config() -> &'static Config {
@@ -126,8 +132,14 @@ fn config() -> &'static Config {
             draw: flag(env::DRAW).as_deref() != Some("0"),
             blur: flag(env::BLUR).as_deref() != Some("0"),
             log: flag(env::LOG).is_some_and(|v| !v.is_empty() && v != "0"),
+            capture: flag(env::CAPTURE).as_deref() == Some("1"),
         }
     })
+}
+
+/// Swapchains get `TRANSFER_SRC` for captures ([`hdr`]).
+pub(crate) fn capture_enabled() -> bool {
+    config().capture && draw_enabled()
 }
 
 /// The backdrop blur may be set up on new swapchains.
@@ -149,7 +161,9 @@ macro_rules! log {
         if $crate::log_enabled() {
             // Not eprintln!: a closed stderr would panic, inside the game.
             use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "quiver-sight-layer: {}", format_args!($($t)*));
+            // One write per line: other processes append to the same log.
+            let line = format!("quiver-sight-layer: {}\n", format_args!($($t)*));
+            let _ = std::io::stderr().write_all(line.as_bytes());
         }
     };
 }
@@ -243,6 +257,8 @@ fn device_hook(name: &CStr) -> vk::PFN_vkVoidFunction {
         b"vkSetLatencySleepModeNV" => hook!(latency::set_latency_sleep_mode_nv),
         b"vkLatencySleepNV" => hook!(latency::latency_sleep_nv),
         b"vkSetLatencyMarkerNV" => hook!(latency::set_latency_marker_nv),
+        // VK_EXT_hdr_metadata (hdr.rs): likewise.
+        b"vkSetHdrMetadataEXT" => hook!(hdr::set_hdr_metadata_ext),
         _ => None,
     }
 }
