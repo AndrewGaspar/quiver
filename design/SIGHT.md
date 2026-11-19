@@ -1574,8 +1574,12 @@ window, so the mode follows within that interval.
   preload it refuses the in-game presenter and says why.
 - The hyprpad rule, evaluated with Lua against state files (none, a live pid, a dead pid).
 
-Not verified: a real game (AWR, AC Origins), a real compositor under winewayland (only the
-fake one), Steam copies inside pressure-vessel (`$PLATFORM` in `LD_PRELOAD` there, and
+Verified live (2026-11-18): Alan Wake Remastered (vkd3d-proton, exclusive fullscreen, XWayland
+on Hyprland). The panel opened in the game, drove from keyboard, mouse and pad, and the game stayed
+fullscreen; the user confirmed it "works well".
+
+Not verified: AC Origins (DXVK with Pharos frame generation), a real compositor under
+winewayland (only the fake one), Steam copies inside pressure-vessel (`$PLATFORM` in `LD_PRELOAD` there, and
 `/dev/shm` shared), 32-bit games, mods that read input their own way (DirectInput, XInput pads
 are unaffected: the pad is hyprpad's), IME text input, multi-monitor, HDR swapchains (the
 panel isn't drawn on them; the desktop panel opens).
