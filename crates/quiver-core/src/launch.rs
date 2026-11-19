@@ -54,6 +54,7 @@ pub async fn build(auth: &Auth, session: &Session, lib: &mut Library, uplay_id: 
         mods_pipe: Some(quiver_proto::modsdk::pipe_name(Some(&session_id))),
         session: Some(session_id),
         profile: None,
+        ..Default::default()
     })
 }
 

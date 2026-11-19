@@ -52,6 +52,7 @@ async fn mod_to_registry_through_the_relay() {
                 profile: None,
                 conn: 7,
                 client_pid: Some(1234),
+                game: None,
             };
             modrelay::open_channel(s, &req).await
         };

@@ -36,8 +36,9 @@ pub struct Broker {
 /// The broker's answer to a lab instance's request that must not reach the person's
 /// records, or `None` to handle it as usual:
 /// - an earned achievement is answered `Ok` and neither recorded nor reported;
-/// - a mod channel is refused: Options, perf history and mod revisions are the person's (a
-///   lab mod is configured through its files, `quiver lab set`).
+/// - a mod channel is refused: Options, perf history and mod revisions are the person's. A
+///   lab instance serves its mods' channels itself (its bridge's `mods_relay`, design/LAB.md
+///   "Mod SDK"); one that reaches quiverd anyway (an older bridge) ends here.
 ///
 /// Play sessions are handled as usual but held as `playsession::LAB_HOLDER` (never
 /// reported, never in the play history); Denuvo tokens and the achievement list are reads.
@@ -112,9 +113,10 @@ impl Broker {
                 continue;
             }
             let rsp = match parsed {
-                Ok(BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid }) => {
-                    let Some(registry) = self.mods.get().cloned() else {
-                        let rsp = BrokerResponse::Error { message: "this quiverd takes no mod channels".into() };
+                Ok(BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid, game }) => {
+                    let game = crate::modsdk::channel_game(game.as_deref());
+                    let (Some(registry), Ok(game)) = (self.mods.get().cloned(), game) else {
+                        let rsp = BrokerResponse::Error { message: "this quiverd takes no mod channels (or the game ref is bad)".into() };
                         let mut out = serde_json::to_vec(&rsp)?;
                         out.push(b'\n');
                         w.write_all(&out).await?;
@@ -124,7 +126,8 @@ impl Broker {
                     out.push(b'\n');
                     w.write_all(&out).await?;
                     // From here on the connection is the mod's (one JSON message per line).
-                    let origin = crate::modsdk::ChannelOrigin { product_id: uplay_id, account: account_id, session, profile, bridge_conn: conn, client_pid };
+                    tracing::info!(game = %game.unwrap_or(quiver_api::GameRef::ubisoft(uplay_id)), session = session.as_deref().unwrap_or("-"), conn, "a mod's SDK channel through the bridge");
+                    let origin = crate::modsdk::ChannelOrigin { product_id: uplay_id, game, account: account_id, session, profile, bridge_conn: conn, client_pid };
                     return registry.serve(origin, lines.into_inner(), w).await;
                 }
                 Ok(BrokerRequest::PlaySession { uplay_id, account_id, session }) => {
@@ -267,7 +270,7 @@ mod lab_tests {
         let earn = |session: Option<&str>| BrokerRequest::AchievementEarned { uplay_id: 3539, account_id: None, achievement_id: 7, session: session.map(str::to_owned) };
         assert!(matches!(lab_answer(&earn(Some("lab-t1-r1"))), Some(BrokerResponse::Ok)));
         assert!(lab_answer(&earn(Some("s-4kq2"))).is_none() && lab_answer(&earn(None)).is_none());
-        let chan = BrokerRequest::ModChannel { uplay_id: 3539, account_id: None, session: Some("lab-t1-r1".into()), profile: None, conn: 1, client_pid: None };
+        let chan = BrokerRequest::ModChannel { uplay_id: 3539, account_id: None, session: Some("lab-t1-r1".into()), profile: None, conn: 1, client_pid: None, game: None };
         assert!(matches!(lab_answer(&chan), Some(BrokerResponse::Error { .. })));
         let play = BrokerRequest::PlaySession { uplay_id: 3539, account_id: None, session: Some("lab-t1-r1".into()) };
         assert!(lab_answer(&play).is_none(), "play sessions are held, as lab sessions");

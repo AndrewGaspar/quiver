@@ -8,6 +8,7 @@ mod create;
 mod hdr;
 mod jobs;
 mod ops;
+mod sdk;
 mod sight;
 mod sup;
 
@@ -1008,18 +1009,24 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
     // The EOS proxy's port on the host (design/LAB.md 3.1): the same as last time if it's free.
     let prev = std::fs::read_to_string(inst.dir.join(sup::EOS_PORT_FILE)).ok().and_then(|p| p.trim().parse().ok());
     let eos_port = eosproxy::listen(prev)?.local_addr()?.port();
+    // The instance's own mod SDK endpoint (design/LAB.md "Mod SDK"): the same port as last time
+    // if it's free.
+    let prev_mods = std::fs::read_to_string(inst.dir.join(sdk::PORT_FILE)).ok().and_then(|p| p.trim().parse().ok());
+    let mods_port = sdk::pick_port(prev_mods)?;
     let h = podman::Host {
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
         hostname: std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_owned(),
         broker_port,
         eos_proxy_port: Some(eos_port),
+        mods_port: Some(mods_port),
         ro_mounts: podman::host_ro_mounts(),
         sight: sight::up(&inst, &m)?,
     };
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
     std::fs::write(inst.dir.join(sup::EOS_PORT_FILE), eos_port.to_string())?;
+    std::fs::write(inst.dir.join(sdk::PORT_FILE), mods_port.to_string())?;
     ops::podman_ok(&podman::run_args(&inst, &m, &h))?;
     let deadline = Instant::now() + Duration::from_secs(15);
     let display = loop {

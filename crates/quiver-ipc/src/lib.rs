@@ -42,6 +42,40 @@ pub struct LaunchContext {
     /// The mod profile the launch runs (`QUIVER_PROFILE`), passed on with mod channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The bridge's **mods-only** role (another store's game: Epic): it serves only the mod
+    /// SDK pipe and its relay, no Connect pipes, no `UPLAY_ARGUMENTS`, no Ubisoft services. The
+    /// Ubisoft fields are then empty. See [`LaunchContext::mods_only`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mods_only: bool,
+    /// The game when it isn't the Ubisoft product `uplay_id` (`epic:<app>`, a
+    /// `quiver_api::GameRef`), passed on with mod channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+    /// Where mod channels go instead of `broker` (`host:port`): a `quiver lab` instance's own
+    /// read-only endpoint (design/LAB.md "Mod SDK"), so a lab mod never reaches quiverd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mods_relay: Option<String>,
+}
+
+impl LaunchContext {
+    /// A context for the bridge's mods-only role: the mod pipe named after `session`, mod
+    /// channels relayed to `relay` (quiverd's broker, or a lab instance's endpoint) for `game`.
+    pub fn mods_only(session: &str, relay: &str, game: &str, profile: Option<&str>) -> LaunchContext {
+        LaunchContext {
+            mods_only: true,
+            session: Some(session.to_owned()),
+            mods_pipe: Some(quiver_proto::modsdk::pipe_name(Some(session))),
+            broker: Some(relay.to_owned()),
+            game: Some(game.to_owned()),
+            profile: profile.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// Where this launch's mod channels go: the lab's endpoint if there is one, else the broker.
+    pub fn mods_relay_addr(&self) -> Option<&str> {
+        self.mods_relay.as_deref().or(self.broker.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +95,11 @@ pub struct CdKey {
 /// binary (it sends its context's session with `PlaySession` and `AchievementEarned`).
 /// `quiver lab` refuses to put a bridge without it into an instance.
 pub const LAB_PROTOCOL_MARKER: &str = "quiver-bridge-lab-protocol-1";
+
+/// What a bridge that knows the mods-only role ([`LaunchContext::mods_only`]) and
+/// [`LaunchContext::mods_relay`] carries in its binary. An older bridge would read a mods-only
+/// context as a Ubisoft one and serve Connect's pipes, so launchers check for it first.
+pub const MODS_ONLY_MARKER: &str = "quiver-bridge-mods-only-1";
 
 /// Requests from `quiver-bridge` to the native broker (in `quiverd`), one JSON object per line
 /// over TCP. The broker holds the Ubisoft session; the bridge never sees account credentials.
@@ -105,6 +144,10 @@ pub enum BrokerRequest {
         /// Windows pid of the process that opened the pipe, as Wine reports it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_pid: Option<u32>,
+        /// The game when it isn't the Ubisoft product `uplay_id` (`epic:<app>`; appended,
+        /// older bridges omit it). `uplay_id` is then 0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<String>,
     },
     // -- Achievements (appended; older brokers answer these with an error) ---------------
     /// The game's achievements with this account's unlock status, for the SDK's
@@ -208,5 +251,27 @@ mod tests {
         b.pop();
         assert_eq!(super::field_numbers(&b), None);
         assert_eq!(super::field_numbers(&[]), Some(vec![]));
+    }
+
+    /// A mods-only context: the pipe from the session, the relay, the game; a Ubisoft context
+    /// written without the new fields reads as before (not mods-only, relayed to the broker).
+    #[test]
+    fn mods_only_context() {
+        let c = super::LaunchContext::mods_only("s-0123456789", "127.0.0.1:47810", "epic:abc", None);
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["mods_only"], true);
+        assert_eq!(v["mods_pipe"], r"\\.\pipe\quiver-mods-s-0123456789");
+        assert_eq!(v["game"], "epic:abc");
+        assert!(v.get("mods_relay").is_none());
+        let back: super::LaunchContext = serde_json::from_value(v).unwrap();
+        assert_eq!(back.mods_relay_addr(), Some("127.0.0.1:47810"));
+        let old: super::LaunchContext = serde_json::from_str(
+            r#"{"uplay_id":3539,"account_id":"a","username":"u","name_on_platform":"u","upc_ticket":"t","owned_uplay_ids":[3539],"cd_keys":[],"savegame_path":null,"ubiservices_app_id":null,"language":null,"broker":"127.0.0.1:1"}"#,
+        )
+        .unwrap();
+        assert!(!old.mods_only && old.game.is_none());
+        assert_eq!(old.mods_relay_addr(), Some("127.0.0.1:1"));
+        let lab = super::LaunchContext { mods_relay: Some("127.0.0.1:2".into()), ..old };
+        assert_eq!(lab.mods_relay_addr(), Some("127.0.0.1:2"), "a lab's endpoint wins over the broker");
     }
 }

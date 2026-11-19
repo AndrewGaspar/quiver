@@ -207,9 +207,10 @@ pub fn render(b: &BriefInput) -> String {
     s.push_str("## Mod SDK and docs\n\n");
     s.push_str(&format!(
         "- `{docs}design/LAB.md`: this lab, its invariants and why each exists.\n\
-         - `{docs}sdk/quiver_mod.h`: Quiver's mod SDK (options and metrics over the bridge's pipe; Ubisoft games \
-         launched by Quiver). Lab sessions have no mod channel: in the lab, configure the mod through its files \
-         (`quiver lab set`).\n\
+         - `{docs}sdk/quiver_mod.h`: Quiver's mod SDK (options, metrics and the stereo layout over the bridge's \
+         pipe, in every Quiver launch). In the lab the channel is the instance's own and read-only (design/LAB.md \
+         section 14): the mod's stereo word reaches the lab's Sight, but it gets no option values and its changes \
+         aren't saved, so configure it through its files (`quiver lab set`).\n\
          - `{docs}design/MOD-CONFIG.md`: how a mod declares options (`quiver-options.toml`) for the app's Options page.\n\
          - `{docs}design/MODS-V2.md`: how mods are packaged and versioned (`quiver-mod.toml`) once it works.\n\
          - Worked example: Pharos (the AC Origins DLSS/Reflex/frame-generation mod) was built with the harness this \

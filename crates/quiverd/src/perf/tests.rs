@@ -597,3 +597,52 @@ fn stereo_from_the_setting_and_a_live_mod() {
     e.hub.disconnect(9);
     e.hub.end(&sid);
 }
+
+/// An Epic game's mod (Torchbearer in Alan Wake Remastered): its SDK channel names the game,
+/// not a Ubisoft product, and its stereo word reaches the session by its id: the HUD model and
+/// the in-game panel's keys both carry it, with no `sight.stereo` setting in the launch.
+#[test]
+fn an_epic_mods_stereo_reaches_the_hud_and_the_panel() {
+    let e = env();
+    let awr = GameRef::parse("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+    let sid = quiver_core::modsdk::new_session_id();
+    let b = e.hub.begin(&sid, awr, None, None, None, &BTreeMap::new(), &[], true).unwrap();
+    let dir = SessionDir::open(std::path::Path::new(&b.plan.env.get("QUIVER_PERF_DIR").cloned().unwrap_or_default()))
+        .ok()
+        .unwrap_or_else(|| e.hub.lock().sessions[&sid].dir.clone().unwrap());
+    // The layer: a 1920x1080 swapchain, no stereo setting (auto).
+    let w = fake_layer(&dir, 2);
+    let mut st = fake_status();
+    (st.extent_w, st.extent_h) = (1920, 1080);
+    w.set_layer_status(&st);
+    drain_once(&e.hub, &mut HashMap::new());
+    let (sight, mut rx) = conn(9);
+    let m = e.hub.attach(&sight, &sid).unwrap();
+    assert_eq!(m.stereo.as_ref().unwrap().layout, "mono");
+    perf_events(&mut rx);
+    let sink = mods::PerfModSink::new(&e.hub);
+    let c = ModSdkConnection {
+        conn: 3,
+        product_id: 0,
+        game: Some(awr),
+        surface: "torchbearer".into(),
+        sdk: "quiver_mod.h 3.0".into(),
+        proto: 3,
+        session: Some(sid.clone()),
+        stereo: Some("hsbs".into()),
+        ..Default::default()
+    };
+    sink.stereo(&c);
+    e.hub.publish(mono_raw_ns());
+    let models: Vec<_> = perf_events(&mut rx).into_iter().filter_map(|e| if let PerfEvent::HudModel(m) = e { Some(m) } else { None }).collect();
+    let s = models.last().and_then(|m| m.stereo.clone()).expect("a HUD model with the mod's layout");
+    assert_eq!((s.layout.as_str(), s.source.as_str(), s.detail.as_str(), s.setting.as_str()), ("hsbs", "mod", "torchbearer (SDK)", "auto"));
+    let keys = e.hub.panel_status().keys;
+    let k = keys.iter().find(|k| k.session == sid).expect("the session's panel keys");
+    assert_eq!(k.stereo.as_ref().map(|s| s.layout.as_str()), Some("hsbs"), "the in-game panel is laid out per eye too");
+    assert_eq!(e.hub.status(Some(&sid), None).unwrap().stereo.unwrap().line(), "hsbs (mod: torchbearer (SDK); setting auto)");
+    sink.disconnected(&c);
+    assert_eq!(e.hub.status(Some(&sid), None).unwrap().stereo.unwrap().layout, "mono");
+    e.hub.disconnect(9);
+    e.hub.end(&sid);
+}

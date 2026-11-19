@@ -104,15 +104,17 @@ async fn serve(n: u32, pipe: NamedPipeServer) {
 /// A broker connection turned into this mod's channel.
 async fn open(n: u32, client_pid: Option<u32>) -> std::io::Result<tokio::io::BufReader<tokio::net::TcpStream>> {
     let ctx = context().ok_or_else(|| std::io::Error::other("no launch context"))?;
-    let addr = ctx.broker.clone().ok_or_else(|| std::io::Error::other("no broker in the launch context"))?;
-    let stream = tokio::net::TcpStream::connect(&addr).await?;
+    // A lab instance's own endpoint when it has one (its mods never reach quiverd), else the broker.
+    let addr = ctx.mods_relay_addr().ok_or_else(|| std::io::Error::other("no broker in the launch context"))?;
+    let stream = tokio::net::TcpStream::connect(addr).await?;
     let req = BrokerRequest::ModChannel {
         uplay_id: ctx.uplay_id,
-        account_id: Some(ctx.account_id.clone()),
+        account_id: (!ctx.account_id.is_empty()).then(|| ctx.account_id.clone()),
         session: ctx.session.clone(),
         profile: ctx.profile.clone(),
         conn: n,
         client_pid,
+        game: ctx.game.clone(),
     };
     modrelay::open_channel(stream, &req).await
 }

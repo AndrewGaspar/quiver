@@ -1512,6 +1512,9 @@ pub enum ModSdkRequest {
     Status {
         #[serde(default)]
         product_id: Option<u32>,
+        /// One game of any store (`epic:<app>`; appended). Wins over `product_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game: Option<crate::GameRef>,
     },
 }
 
@@ -1520,7 +1523,11 @@ pub enum ModSdkRequest {
 pub struct ModSdkConnection {
     /// quiverd's id for this connection (unique while quiverd runs).
     pub conn: u64,
+    /// The Ubisoft product (0 for another store's game: see `game`).
     pub product_id: u32,
+    /// The game when it isn't a Ubisoft product (`epic:<app>`; appended, optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::GameRef>,
     /// The schema surface id it said `hello` with; also its metrics' namespace.
     pub surface: String,
     /// The SDK's version string, and the protocol agreed on.
@@ -1561,6 +1568,13 @@ pub struct ModSdkConnection {
     /// design/SIGHT.md §15): `sbs`, `hsbs`, `tab`, `htab`, `mono`. `None`: it hasn't said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stereo: Option<String>,
+}
+
+impl ModSdkConnection {
+    /// The game this connection belongs to: [`ModSdkConnection::game`], else the Ubisoft product.
+    pub fn game_ref(&self) -> crate::GameRef {
+        self.game.unwrap_or(crate::GameRef::ubisoft(self.product_id))
+    }
 }
 
 /// One metric a connected mod declared, with its latest value.
@@ -1621,9 +1635,9 @@ mod tests {
     #[test]
     fn mod_sdk_wire() {
         let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status","product_id":5}}"#).unwrap();
-        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: Some(5) })));
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: Some(5), game: None })));
         let r: crate::Request = serde_json::from_str(r#"{"method":"mod_sdk","params":{"op":"status"}}"#).unwrap();
-        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: None })));
+        assert!(matches!(r, crate::Request::ModSdk(ModSdkRequest::Status { product_id: None, .. })));
         let c: ModSdkConnection =
             serde_json::from_str(r#"{"conn":1,"product_id":5,"surface":"m","sdk":"s","proto":2,"caps":[],"connected":"2026-11-16T00:00:00Z"}"#).unwrap();
         assert!(c.metrics.is_empty() && c.options.is_empty());

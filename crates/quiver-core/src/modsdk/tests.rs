@@ -320,3 +320,59 @@ fn session_ids() {
     assert_ne!(a, b);
     assert!(a.starts_with("s-") && a.len() == 12 && wire::is_session_id(&a), "{a}");
 }
+
+fn connect_as(reg: &Arc<ModRegistry>, origin: ChannelOrigin) -> (Mod, tokio::task::JoinHandle<Result<()>>) {
+    let (to_q, q_in) = duplex(1 << 16);
+    let (q_out, from_q) = duplex(1 << 16);
+    let reg = reg.clone();
+    let task = tokio::spawn(async move { reg.serve(origin, BufReader::new(q_in), q_out).await });
+    (Mod { w: to_q, r: BufReader::new(from_q) }, task)
+}
+
+/// An Epic game's channel (the mods-only bridge sends `game`): listed under its game, never
+/// as Ubisoft product 0; its stereo word said right after hello (before the mod has read the
+/// welcome) still lands.
+#[tokio::test]
+async fn another_stores_channel_is_its_games() {
+    let (reg, rec) = setup();
+    let awr = quiver_api::GameRef::parse("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+    assert_eq!(channel_game(Some("epic:7315f614b0504081bcdceef138075c9c")).unwrap(), Some(awr));
+    assert_eq!(channel_game(Some("ubisoft:3539")).unwrap(), None, "a Ubisoft ref is the uplay id's");
+    assert!(channel_game(Some("not a ref")).is_err());
+    let origin = ChannelOrigin { product_id: 0, game: Some(awr), session: Some("s-epic".into()), bridge_conn: 1, ..Default::default() };
+    let (mut m, task) = connect_as(&reg, origin);
+    m.send(json!({"t":"hello","proto":3,"mod":"torchbearer","caps":["options"]})).await;
+    m.send(json!({"t":"stereo","layout":"hsbs"})).await;
+    assert_eq!(m.recv().await["t"], "welcome");
+    until(|| rec.take().into_iter().find(|l| l == "stereo Some(\"hsbs\")")).await;
+    let c = reg.connections_of(awr);
+    assert_eq!(c.len(), 1);
+    assert_eq!((c[0].game, c[0].product_id, c[0].stereo.as_deref()), (Some(awr), 0, Some("hsbs")));
+    assert!(reg.connections(Some(0)).is_empty(), "not Ubisoft product 0");
+    assert_eq!(reg.connections(None).len(), 1);
+    m.send(json!({"t":"bye"})).await;
+    task.await.unwrap().unwrap();
+}
+
+/// quiverd's registry refuses lab sessions; a lab instance's serves only them.
+#[tokio::test]
+async fn lab_sessions_only_in_a_lab_registry() {
+    let (reg, _) = setup();
+    let lab_origin = ChannelOrigin { session: Some("lab-awr-r3".into()), bridge_conn: 1, ..Default::default() };
+    let (_m, task) = connect_as(&reg, lab_origin.clone());
+    assert!(task.await.unwrap().unwrap_err().to_string().contains("lab sessions have no mod channel here"));
+
+    let rec = Arc::new(Rec::default());
+    let lab = ModRegistry::lab(|s| s.starts_with("lab-awr-"), rec.clone(), rec.clone());
+    let (_m, task) = connect_as(&lab, ChannelOrigin { session: Some("lab-other-r1".into()), ..Default::default() });
+    assert!(task.await.unwrap().unwrap_err().to_string().contains("isn't this lab instance's"));
+    let (_m, task) = connect_as(&lab, ChannelOrigin { session: Some("s-person".into()), ..Default::default() });
+    assert!(task.await.unwrap().unwrap_err().to_string().contains("lab sessions only"));
+    let (_m, task) = connect_as(&lab, ChannelOrigin { session: None, ..Default::default() });
+    assert!(task.await.unwrap().is_err(), "no session: not a lab one");
+    let (mut m, task) = connect_as(&lab, lab_origin);
+    m.send(json!({"t":"hello","proto":3,"mod":"torchbearer"})).await;
+    assert_eq!(m.recv().await["t"], "welcome");
+    m.send(json!({"t":"bye"})).await;
+    task.await.unwrap().unwrap();
+}

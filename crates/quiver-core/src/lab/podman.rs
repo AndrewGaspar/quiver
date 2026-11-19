@@ -57,6 +57,9 @@ pub struct Host {
     /// The instance's EOS proxy on the host's loopback ([`super::eosproxy`]): the container's
     /// port 443 is forwarded to it, and Epic's names resolve to the container's 127.0.0.1.
     pub eos_proxy_port: Option<u16>,
+    /// The instance's read-only mod SDK endpoint on the host's loopback (its supervisor,
+    /// design/LAB.md "Mod SDK"), forwarded into the container at the same port.
+    pub mods_port: Option<u16>,
     /// Host files mounted read-only at the same path: 32-bit NVIDIA libraries, NVIDIA's Wine
     /// DLLs (DLSS), `/etc/machine-id`.
     pub ro_mounts: Vec<PathBuf>,
@@ -110,8 +113,8 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
     a.extend(["--userns=keep-id".into(), "--user".into(), format!("{}:{}", host.uid, host.gid)]);
     a.extend(["--shm-size=2g".into(), "--security-opt".into(), "label=disable".into()]);
     // Never `--network host` (module docs). `-T` forwards the container's loopback ports to
-    // the host's: the broker's, and 443 to the EOS proxy.
-    let mut fwd: Vec<String> = host.broker_port.map(|p| format!("-T,{p}")).into_iter().collect();
+    // the host's: the broker's, the mod SDK endpoint's, and 443 to the EOS proxy.
+    let mut fwd: Vec<String> = host.broker_port.into_iter().chain(host.mods_port).map(|p| format!("-T,{p}")).collect();
     if let Some(p) = host.eos_proxy_port {
         fwd.push(format!("-T,443:{p}"));
         for name in super::eos::redirected_hosts() {
@@ -274,6 +277,9 @@ exe = "ACOrigins.exe"
         let (inst, m) = sample();
         let a = run_args(&inst, &m, &Host { uid: 1000, gid: 1000, broker_port: Some(47810), eos_proxy_port: Some(40123), ..Default::default() });
         assert!(a.contains(&"--network=pasta:-T,47810,-T,443:40123".to_owned()), "{a:?}");
+        // The instance's own mod SDK endpoint: the same port inside and out.
+        let a = run_args(&inst, &m, &Host { broker_port: Some(47810), eos_proxy_port: Some(40123), mods_port: Some(40200), ..Default::default() });
+        assert!(a.contains(&"--network=pasta:-T,47810,-T,40200,-T,443:40123".to_owned()), "{a:?}");
         let hosts: Vec<&String> = a.windows(2).filter(|w| w[0] == "--add-host").map(|w| &w[1]).collect();
         assert!(hosts.contains(&&"api.epicgames.dev:127.0.0.1".to_owned()), "{hosts:?}");
         assert!(hosts.contains(&&"api-gamedev.ol.epicgames.net:127.0.0.1".to_owned()));

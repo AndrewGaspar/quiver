@@ -373,7 +373,7 @@ mod tests {
             b.get_mut().write_all(b"\"ok\"\n").await.unwrap();
             b
         });
-        let req = BrokerRequest::ModChannel { uplay_id: 7, account_id: None, session: None, profile: None, conn: 3, client_pid: Some(9) };
+        let req = BrokerRequest::ModChannel { uplay_id: 7, account_id: None, session: None, profile: None, conn: 3, client_pid: Some(9), game: None };
         open_channel(a, &req).await.unwrap();
         server.await.unwrap();
         let (a, b) = duplex(1 << 16);

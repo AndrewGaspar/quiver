@@ -627,7 +627,10 @@ impl Daemon {
             Request::Mods(req) => self.handle_mods(source, req).await?,
             Request::Options(req) => self.handle_options(source, req).await?,
             Request::Tweaks(req) => self.handle_tweaks(source, req).await?,
-            Request::ModSdk(quiver_api::mods::ModSdkRequest::Status { product_id }) => json!(self.mod_sdk.connections(product_id)),
+            Request::ModSdk(quiver_api::mods::ModSdkRequest::Status { product_id, game }) => match game {
+                Some(g) => json!(self.mod_sdk.connections_of(g)),
+                None => json!(self.mod_sdk.connections(product_id)),
+            },
             // The connection loop passes connection-bound perf requests (subscriptions, HUD
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,

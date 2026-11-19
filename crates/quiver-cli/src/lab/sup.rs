@@ -74,6 +74,8 @@ struct Sup {
     eos: Option<EosProxy>,
     /// What the watch loop has already said about the current run's network.
     net_seen: Mutex<(u32, std::collections::BTreeSet<String>, eosproxy::Stats)>,
+    /// The instance's read-only mod SDK endpoint's port (`super::sdk`), when it runs.
+    mods_port: Mutex<Option<u16>>,
 }
 
 struct EosProxy {
@@ -260,9 +262,24 @@ pub fn supervise(lab: Lab, name: &str) -> Result<()> {
         Ok(None) => (None, "; no EOS proxy (a container from before it: quiver lab down/up)".into()),
         Err(e) => (None, format!("; the EOS proxy didn't start: {e:#}")),
     };
-    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()), eos, net_seen: Mutex::default() });
+    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()), eos, net_seen: Mutex::default(), mods_port: Mutex::new(None) });
     let _ = lab::write_atomic(&sup.inst.state_path(), &serde_json::to_vec_pretty(&*sup.state.lock().unwrap())?);
-    sup.update(|_| Some(format!("supervisor {} started{eos_note}", std::process::id())));
+    // The mod SDK endpoint: a lab mod's channel ends here, never in quiverd.
+    let weak = Arc::downgrade(&sup);
+    let note: super::sdk::Note = Arc::new(move |run, what| {
+        if let Some(s) = weak.upgrade() {
+            s.event(run, &what);
+        }
+    });
+    let mods_note = match super::sdk::start(&sup.inst, note, |inst, run_dir| super::sight::session_dir(inst, Some(run_dir))) {
+        Ok(Some((port, _reg))) => {
+            *sup.mods_port.lock().unwrap() = Some(port);
+            format!("; mod SDK endpoint on 127.0.0.1:{port} (read-only)")
+        }
+        Ok(None) => "; no mod SDK endpoint (a container from before it: quiver lab down/up)".into(),
+        Err(e) => format!("; the mod SDK endpoint didn't start: {e:#}"),
+    };
+    sup.update(|_| Some(format!("supervisor {} started{eos_note}{mods_note}", std::process::id())));
     {
         let sup = sup.clone();
         std::thread::spawn(move || watch(&sup));
@@ -462,7 +479,7 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     notes.push(format!("host: {}", hs.summary()));
     let _ = std::fs::remove_file(inst.lab().join("state"));
 
-    let mut bridge = None;
+    let bridge;
     let mut extra_args: Vec<String> = Vec::new();
     match m.licence {
         Licence::UbisoftBridge => {
@@ -486,6 +503,15 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
                 bail!("quiverd's broker is on port {want} but the container forwards {:?}; quiver lab down/up {} (QUIVER_LAB_BROKER_PORT={want})", fwd.trim(), inst.name);
             }
             context["savegame_path"] = quiver_core::steamrun::savegame_path(None, &account, product_id).into();
+            // The mods' channels go to the instance's endpoint, not quiverd's broker.
+            match *sup.mods_port.lock().unwrap() {
+                Some(p) if bridge_knows_mods_relay(&bridge_exe) => {
+                    context["mods_relay"] = format!("127.0.0.1:{p}").into();
+                    notes.push(format!("mod SDK: {} relayed to the instance's read-only endpoint", context["mods_pipe"].as_str().unwrap_or("the pipe")));
+                }
+                Some(_) => notes.push("mod SDK: none (the bridge predates the lab's endpoint; mod channels would be refused by quiverd)".into()),
+                None => notes.push("mod SDK: none (no endpoint in this container: quiver lab down/up)".into()),
+            }
             quiver_core::private::write_private(&run_dir.join("context.json"), &serde_json::to_vec(&context)?)?;
             quiver_core::launcher::install_prefix_bridge(&inst.prefix(), &bridge_exe)?;
             bridge = Some((r"C:\quiver\quiver-bridge.exe".to_owned(), format!(r"{run_win}\context.json"), format!(r"{run_win}\bridge.log")));
@@ -504,8 +530,12 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
             }
             notes.push(format!("licence: Epic exchange code ({})", shown.join(" ")));
             extra_args = args;
+            bridge = mods_bridge(sup, &m, &session, &run_dir, &run_win, &mut notes);
         }
-        Licence::None => notes.push("licence: none (DRM-free)".into()),
+        Licence::None => {
+            notes.push("licence: none (DRM-free)".into());
+            bridge = mods_bridge(sup, &m, &session, &run_dir, &run_win, &mut notes);
+        }
     }
     extra_args.extend(extra.iter().cloned());
 
@@ -579,6 +609,40 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     }
     let _ = container_id;
     Ok(json!({ "run": run, "session": session, "run_dir": run_dir, "notes": notes }))
+}
+
+/// Whether the bridge relays mod channels to `mods_relay` (it knows the mods-only role too).
+fn bridge_knows_mods_relay(bridge: &Path) -> bool {
+    quiver_core::launcher::bridge_knows_mods_only(bridge)
+}
+
+/// Another store's (or a DRM-free) launch: a mods-only bridge in launcher mode, the game's
+/// parent, serving the mod SDK pipe and relaying to the instance's endpoint. `None` (and a
+/// note) when there's no endpoint or no such bridge: the game starts without the SDK.
+fn mods_bridge(sup: &Sup, m: &Manifest, session: &str, run_dir: &Path, run_win: &str, notes: &mut Vec<String>) -> Option<(String, String, String)> {
+    let Some(port) = *sup.mods_port.lock().unwrap() else {
+        notes.push("mod SDK: none (no endpoint in this container: quiver lab down/up)".into());
+        return None;
+    };
+    let exe = match ops::lab_bridge() {
+        Ok(p) if bridge_knows_mods_relay(&p) => p,
+        Ok(p) => {
+            notes.push(format!("mod SDK: none ({} predates the mods-only role)", p.display()));
+            return None;
+        }
+        Err(e) => {
+            notes.push(format!("mod SDK: none ({e:#})"));
+            return None;
+        }
+    };
+    let ctx = quiver_ipc::LaunchContext::mods_only(session, &format!("127.0.0.1:{port}"), &m.game.to_string(), None);
+    let written = serde_json::to_vec(&ctx).map_err(anyhow::Error::from).and_then(|b| quiver_core::private::write_private(&run_dir.join("context.json"), &b));
+    if let Err(e) = written.and_then(|_| quiver_core::launcher::install_prefix_bridge(&sup.inst.prefix(), &exe).map(|_| ())) {
+        notes.push(format!("mod SDK: none ({e:#})"));
+        return None;
+    }
+    notes.push(format!("mod SDK: {} (mods-only bridge, relayed to the instance's read-only endpoint)", ctx.mods_pipe.unwrap_or_default()));
+    Some((r"C:\quiver\quiver-bridge.exe".to_owned(), format!(r"{run_win}\context.json"), format!(r"{run_win}\bridge.log")))
 }
 
 /// The watch loop: the readiness ladder, the mod's state, exits, Connect.
