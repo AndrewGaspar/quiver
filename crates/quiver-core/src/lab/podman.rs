@@ -33,6 +33,9 @@ pub fn boot_script() -> &'static str {
     r#"set -u
 mkdir -p /tmp/xdg /tmp/steam "$HOME"; chmod 700 /tmp/xdg
 echo "boot $(date -Is) ${QUIVER_LAB_W}x${QUIVER_LAB_H}@${QUIVER_LAB_HZ}" >> /lab/boot.log
+# No sound device in the container: ALSA's default is a null sink, or a game that opens
+# audio at start crashes (Alan Wake Remastered: a null read at Game_f_x64_EOS.exe+0x338489).
+[ -e "$HOME/.asoundrc" ] || printf 'pcm.!default { type null }\n' > "$HOME/.asoundrc"
 # Displays :0-:9 are never ours. Xwayland skips a display whose lock file names a live
 # process; this shell's pid becomes gamescope's with the exec below.
 for d in 0 1 2 3 4 5 6 7 8 9; do printf "%10d\n" $$ > /tmp/.X$d-lock; done
@@ -50,6 +53,9 @@ pub struct Host {
     pub hostname: String,
     /// The broker's TCP port on the host's loopback, forwarded into the container.
     pub broker_port: Option<u16>,
+    /// The instance's EOS proxy on the host's loopback ([`super::eosproxy`]): the container's
+    /// port 443 is forwarded to it, and Epic's names resolve to the container's 127.0.0.1.
+    pub eos_proxy_port: Option<u16>,
     /// Host files mounted read-only at the same path: 32-bit NVIDIA libraries, NVIDIA's Wine
     /// DLLs (DLSS), `/etc/machine-id`.
     pub ro_mounts: Vec<PathBuf>,
@@ -99,11 +105,16 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
     a.extend(["--device".into(), "nvidia.com/gpu=all".into()]);
     a.extend(["--userns=keep-id".into(), "--user".into(), format!("{}:{}", host.uid, host.gid)]);
     a.extend(["--shm-size=2g".into(), "--security-opt".into(), "label=disable".into()]);
-    // Never `--network host` (module docs).
-    a.push(match host.broker_port {
-        Some(p) => format!("--network=pasta:-T,{p}"),
-        None => "--network=pasta".into(),
-    });
+    // Never `--network host` (module docs). `-T` forwards the container's loopback ports to
+    // the host's: the broker's, and 443 to the EOS proxy.
+    let mut fwd: Vec<String> = host.broker_port.map(|p| format!("-T,{p}")).into_iter().collect();
+    if let Some(p) = host.eos_proxy_port {
+        fwd.push(format!("-T,443:{p}"));
+        for name in super::eos::redirected_hosts() {
+            a.extend(["--add-host".into(), format!("{name}:127.0.0.1")]);
+        }
+    }
+    a.push(if fwd.is_empty() { "--network=pasta".into() } else { format!("--network=pasta:{}", fwd.join(",")) });
     a.extend(["-v".into(), mount(&inst.prefix(), &m.paths.prefix, "")]);
     if !m.paths.install.starts_with(&m.paths.prefix) {
         a.extend(["-v".into(), mount(&inst.install(), &m.paths.install, "")]);
@@ -241,6 +252,19 @@ exe = "ACOrigins.exe"
         // The originals are never a mount source.
         assert!(!a.iter().any(|x| x.starts_with("/pf/origins:") || x.starts_with("/g/origins:")));
         assert!(a.contains(&"QUIVER_LAB_W=2560".to_owned()));
+        assert!(!a.iter().any(|x| x.contains("epicgames")));
+    }
+
+    #[test]
+    fn epic_names_go_to_the_eos_proxy() {
+        let (inst, m) = sample();
+        let a = run_args(&inst, &m, &Host { uid: 1000, gid: 1000, broker_port: Some(47810), eos_proxy_port: Some(40123), ..Default::default() });
+        assert!(a.contains(&"--network=pasta:-T,47810,-T,443:40123".to_owned()), "{a:?}");
+        let hosts: Vec<&String> = a.windows(2).filter(|w| w[0] == "--add-host").map(|w| &w[1]).collect();
+        assert!(hosts.contains(&&"api.epicgames.dev:127.0.0.1".to_owned()), "{hosts:?}");
+        assert!(hosts.contains(&&"api-gamedev.ol.epicgames.net:127.0.0.1".to_owned()));
+        let a = run_args(&inst, &m, &Host { eos_proxy_port: Some(40123), ..Default::default() });
+        assert!(a.contains(&"--network=pasta:-T,443:40123".to_owned()), "{a:?}");
     }
 
     #[test]
@@ -249,6 +273,7 @@ exe = "ACOrigins.exe"
         assert!(s.contains("for d in 0 1 2 3 4 5 6 7 8 9"));
         assert!(s.contains("--backend headless"));
         assert!(s.contains("refusing display"));
+        assert!(s.contains("pcm.!default { type null }"), "games without a sound device crash");
     }
 
     #[test]
