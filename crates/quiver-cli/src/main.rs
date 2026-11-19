@@ -89,6 +89,12 @@ enum Cmd {
         game: String,
         #[arg(long)]
         language: Option<String>,
+        /// When the install finishes, add it to Steam (staged while Steam runs).
+        #[arg(long)]
+        add_to_steam: bool,
+        /// When the install finishes, write a .desktop entry.
+        #[arg(long)]
+        desktop_entry: bool,
         #[arg(long)]
         detach: bool,
         /// Only show the download and install sizes, free space and languages.
@@ -872,10 +878,11 @@ async fn main() -> Result<()> {
         Cmd::Resume { game } => downloads::resume(&client, &game).await?,
         Cmd::Update { game, preview, detach, json } => downloads::update(&client, &game, preview, detach, json).await?,
         Cmd::Verify { game, repair, detach, json } => downloads::verify(&client, &game, repair, detach, json).await?,
-        Cmd::Install { game, language, detach, .. } => {
+        Cmd::Install { game, language, detach, add_to_steam, desktop_entry, .. } => {
             let e = resolve_installable(&client, &game).await?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Install { game: e.game.into(), language }).await?;
+            let after = (add_to_steam || desktop_entry).then_some(quiver_api::downloads::AfterInstall { steam: add_to_steam, desktop: desktop_entry });
+            let id: u64 = client.call(Request::Install { game: e.game.into(), language, after }).await?;
             eprintln!("installing {} (job {id})", e.name);
             if !detach {
                 follow(&client, events, id).await?;
@@ -1170,6 +1177,27 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_now_and_after_parse() {
+        use downloads::{OnOff, QueueAction};
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).map(|c| c.cmd);
+        assert!(matches!(parse(&["queue", "now", "origins"]), Ok(Cmd::Queue { action: Some(QueueAction::Now { game }), .. }) if game == "origins"));
+        assert!(matches!(
+            parse(&["queue", "move", "origins", "now"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::Move { to: quiver_api::downloads::QueueMove::Now, .. }), .. })
+        ));
+        assert!(parse(&["queue", "move", "origins", "sideways"]).is_err());
+        assert!(matches!(
+            parse(&["queue", "after", "origins", "--steam", "on"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::After { steam: Some(OnOff::On), desktop: None, .. }), .. })
+        ));
+        assert!(matches!(
+            parse(&["queue", "after", "origins", "--desktop", "off", "--steam", "off"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::After { steam: Some(OnOff::Off), desktop: Some(OnOff::Off), .. }), .. })
+        ));
+        assert!(matches!(parse(&["install", "origins", "--add-to-steam"]), Ok(Cmd::Install { add_to_steam: true, desktop_entry: false, .. })));
+    }
 
     fn entry(game: GameRef, name: &str) -> LibraryEntry {
         serde_json::from_value(serde_json::json!({

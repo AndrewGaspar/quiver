@@ -399,6 +399,10 @@ pub struct Progress {
     pub hash_total: AtomicU64,
     /// Set to stop the install; finished files stay recorded, so it can be resumed.
     pub cancel: std::sync::atomic::AtomicBool,
+    /// Set while the download is done and the install is being registered (manifest
+    /// written, the game recorded): `cancel` is no longer honoured, the install just
+    /// finishes. The queue waits for this rather than switching the download out.
+    pub finalizing: std::sync::atomic::AtomicBool,
     /// Bandwidth limit shared with other downloads.
     pub throttle: Option<Arc<Throttle>>,
     /// Slice retries so far, and slices waiting to retry right now.

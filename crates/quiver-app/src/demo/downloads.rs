@@ -16,7 +16,8 @@ use anyhow::{Result, anyhow, bail};
 use chrono::{Duration as Span, Utc};
 use serde_json::{Value, json};
 use quiver_api::downloads::{
-    CorruptFile, DownloadSettings, InstallPreview, LanguageSize, QueueEntry, QueueKind, QueueMove, QueueState, UpdatePreview, VerifyReport,
+    AfterInstall, CorruptFile, DownloadSettings, InstallPreview, LanguageSize, QueueEntry, QueueKind, QueueMove, QueueState, RunNow, UpdatePreview,
+    VerifyReport,
 };
 use quiver_api::mods::{ModPrefs, ModsRequest};
 use quiver_api::setup::{FirstRun, FoundInstall, InstallSource, MatchedBy, SetupState};
@@ -110,6 +111,7 @@ fn entry(st: &State, id: u32, kind: QueueKind, state: QueueState, job_id: u64, s
         total_bytes: 0,
         speed: 0,
         retries: 0,
+        after: AfterInstall::default(),
     }
 }
 
@@ -141,6 +143,7 @@ impl Dl {
             m.total_bytes = size_of(mirage);
             m.speed = 84_600_000;
             m.retries = 2;
+            m.after = AfterInstall { steam: true, desktop: true };
             let mut o = entry(st, odyssey, QueueKind::Update, QueueState::Queued, 43, "auto-update", 90);
             o.language = Some("en-US".into());
             let t = entry(st, trackmania, QueueKind::Install, QueueState::Queued, 42, "claude-code", 6);
@@ -248,8 +251,11 @@ impl Dl {
         j
     }
 
-    fn enqueue(&mut self, st: &mut State, product_id: u32, kind: QueueKind, language: Option<String>) -> Result<(u64, Vec<Event>)> {
-        if let Some(e) = self.queue.iter().find(|e| e.product_id == product_id) {
+    fn enqueue(&mut self, st: &mut State, product_id: u32, kind: QueueKind, language: Option<String>, after: Option<AfterInstall>) -> Result<(u64, Vec<Event>)> {
+        if let Some(e) = self.queue.iter_mut().find(|e| e.product_id == product_id) {
+            if let Some(a) = after {
+                e.after = a;
+            }
             let id = e.job_id.unwrap_or(0);
             if matches!(e.state, QueueState::Paused | QueueState::Failed) {
                 return self.resume(st, product_id);
@@ -259,6 +265,7 @@ impl Dl {
         let j = Self::new_job(st, JobKind::Install, product_id, "Queued");
         let mut e = entry(st, product_id, kind, QueueState::Queued, j.id, "gui", 0);
         e.language = language.or(Some("en-US".into()));
+        e.after = after.unwrap_or_default();
         self.queue.push(e);
         let what = match kind {
             QueueKind::Install => "install",
@@ -270,6 +277,49 @@ impl Dl {
         ev.extend(self.pump(st));
         ev.extend(self.queue.iter().filter_map(|e| st.jobs.iter().find(|j| Some(j.id) == e.job_id)).map(|j| Event::Job(j.clone())));
         Ok((j.id, ev))
+    }
+
+    /// "Download now", as quiverd does it: to the top; with the queue full, the lowest-placed
+    /// running download goes back to the queue right behind it (here at once: no slices in
+    /// flight to wait for). A repair verifying isn't switched out.
+    fn run_now(&mut self, st: &mut State, product_id: u32) -> Result<(RunNow, Vec<Event>)> {
+        let i = self.queue.iter().position(|e| e.product_id == product_id).ok_or_else(|| anyhow!("not in the queue"))?;
+        if self.queue[i].state.is_active() {
+            return Ok((RunNow::AlreadyRunning, vec![]));
+        }
+        let max = self.settings.max_active.max(1);
+        let running: Vec<usize> = (0..self.queue.len()).filter(|&j| self.queue[j].state.is_active()).collect();
+        let mut outcome = RunNow::Started;
+        let mut switched = None;
+        if running.len() >= max {
+            let Some(&j) = running.iter().rev().find(|&&j| self.queue[j].state == QueueState::Downloading) else {
+                bail!("{} is verifying its files and can't be switched out mid-check; pause it, or try again once it is downloading", self.queue[running[0]].name);
+            };
+            outcome = RunNow::Switching { from: self.queue[j].game_ref(), from_name: self.queue[j].name.clone() };
+            switched = Some(j);
+        }
+        let mut chosen = self.queue.remove(i);
+        if chosen.state == QueueState::Failed {
+            chosen.error = None;
+            chosen.job_id = Some(Self::new_job(st, JobKind::Install, product_id, "Queued").id);
+        }
+        chosen.state = QueueState::Queued;
+        let p = switched.map(|j| {
+            let mut p = self.queue.remove(if j > i { j - 1 } else { j });
+            p.state = QueueState::Queued;
+            p.speed = 0;
+            p
+        });
+        self.queue.insert(0, chosen);
+        if let Some(p) = p {
+            let at = self.queue.iter().rposition(|x| x.state.is_active()).map_or(1, |k| k + 1).max(1);
+            self.queue.insert(at, p);
+        }
+        let name = self.queue[0].name.clone();
+        st.activity.insert(0, ActivityEntry { at: Utc::now(), source: "gui".into(), action: format!("download now: {name}"), game: Some(quiver_api::GameRef::ubisoft(product_id)) });
+        let mut ev = self.pump(st);
+        ev.extend(self.queue.iter().filter_map(|e| st.jobs.iter().find(|j| Some(j.id) == e.job_id)).map(|j| Event::Job(j.clone())));
+        Ok((outcome, ev))
     }
 
     fn resume(&mut self, st: &mut State, product_id: u32) -> Result<(u64, Vec<Event>)> {
@@ -454,6 +504,27 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
     let mut events = vec![];
     let out = match req {
         Request::Queue => json!(d.queue),
+        Request::QueueRunNow { game } => {
+            let (r, ev) = d.run_now(st, game.as_ubisoft().unwrap_or(0))?;
+            events.extend(ev);
+            json!(r)
+        }
+        Request::QueueMove { game, to: QueueMove::Now } => {
+            let (_, ev) = d.run_now(st, game.as_ubisoft().unwrap_or(0))?;
+            events.extend(ev);
+            json!(d.queue)
+        }
+        Request::QueueSetAfter { game, steam, desktop } => {
+            let product_id = game.as_ubisoft().unwrap_or(0);
+            let e = d.queue.iter_mut().find(|e| e.product_id == product_id).ok_or_else(|| anyhow!("not in the queue"))?;
+            if let Some(s) = steam {
+                e.after.steam = s;
+            }
+            if let Some(dk) = desktop {
+                e.after.desktop = dk;
+            }
+            json!(e)
+        }
         Request::QueueMove { game, to } => {
             let product_id = game.as_ubisoft().unwrap_or(0);
             let q = &mut d.queue;
@@ -505,19 +576,19 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
             events.extend(d.pump(st));
             Value::Null
         }
-        Request::Install { game, language } => {
+        Request::Install { game, language, after } => {
             let product_id = game.as_ubisoft().unwrap_or(0);
             let kind = if st.entries.iter().any(|e| e.ubisoft_id() == Some(product_id) && e.installed.is_some()) { QueueKind::Update } else { QueueKind::Install };
             if kind == QueueKind::Install && flag("low-space") {
                 bail!("not enough space on ~/Games: needs {} plus a margin", crate::model::gb(size_of(product_id)));
             }
-            let (id, ev) = d.enqueue(st, product_id, kind, language)?;
+            let (id, ev) = d.enqueue(st, product_id, kind, language, after)?;
             events.extend(ev);
             json!(id)
         }
         Request::Update { game } => {
             let product_id = game.as_ubisoft().unwrap_or(0);
-            let (id, ev) = d.enqueue(st, product_id, QueueKind::Update, None)?;
+            let (id, ev) = d.enqueue(st, product_id, QueueKind::Update, None, None)?;
             events.extend(ev);
             json!(id)
         }
@@ -543,7 +614,7 @@ pub(super) fn handle(demo: &Demo, st: &mut State, req: Request) -> Result<std::r
         Request::UpdatePreview { game } => { let product_id = game.as_ubisoft().unwrap_or(0); json!(d.update_preview(st, product_id)?) }
         Request::Verify { game, repair: true } => {
             let product_id = game.as_ubisoft().unwrap_or(0);
-            let (id, ev) = d.enqueue(st, product_id, QueueKind::Repair, None)?;
+            let (id, ev) = d.enqueue(st, product_id, QueueKind::Repair, None, None)?;
             events.extend(ev);
             json!(id)
         }
@@ -775,6 +846,14 @@ mod tests {
         let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::Queue).unwrap()).unwrap();
         assert_eq!(q[0].state, QueueState::Paused);
         assert!(q[1].state.is_active(), "the next one starts");
+        // Download now: the running one goes back to the queue right behind.
+        let r: RunNow = serde_json::from_value(demo.handle(Request::QueueRunNow { game: 5059.into() }).unwrap()).unwrap();
+        assert!(matches!(r, RunNow::Switching { .. }), "{r:?}");
+        let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::Queue).unwrap()).unwrap();
+        assert_eq!((q[0].product_id, q[0].state.is_active()), (5059, true));
+        assert_eq!(q[1].state, QueueState::Queued);
+        let e: QueueEntry = serde_json::from_value(demo.handle(Request::QueueSetAfter { game: 5059.into(), steam: Some(true), desktop: None }).unwrap()).unwrap();
+        assert!(e.after.steam && !e.after.desktop);
         demo.handle(Request::QueueResume { game: 420.into()}).unwrap();
         demo.handle(Request::QueueRemove { game: 2688.into()}).unwrap();
         let q: Vec<QueueEntry> = serde_json::from_value(demo.handle(Request::Queue).unwrap()).unwrap();
