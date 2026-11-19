@@ -4845,6 +4845,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-vclock"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "serde",
+ "tempfile",
+ "x11rb",
+]
+
+[[package]]
 name = "quiver-webview"
 version = "0.1.0"
 dependencies = [

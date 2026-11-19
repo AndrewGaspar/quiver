@@ -1,0 +1,16 @@
+# dsound.dll exports: ordinal, then name ('-' for ordinal-only). From Wine's builtin dsound.dll
+# in GE-Proton11-12 (winedump -j export); its x86_64 and i386 builds export the same set.
+1 DirectSoundCreate
+2 DirectSoundEnumerateA
+3 DirectSoundEnumerateW
+4 DllCanUnloadNow
+5 DllGetClassObject
+6 DirectSoundCaptureCreate
+7 DirectSoundCaptureEnumerateA
+8 DirectSoundCaptureEnumerateW
+9 GetDeviceID
+10 DirectSoundFullDuplexCreate
+11 DirectSoundCreate8
+12 DirectSoundCaptureCreate8
+13 DllRegisterServer
+14 DllUnregisterServer

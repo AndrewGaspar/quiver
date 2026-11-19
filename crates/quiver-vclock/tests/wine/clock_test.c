@@ -1,0 +1,269 @@
+/* A stand-in game for tests/wine.rs: presents frames through Direct3D 11 or 9 (DXVK) and reads
+ * the clocks a game reads, through its own imports (so through the virtual clock when it's on).
+ * Real time comes from ntdll's NtQueryPerformanceCounter, which the clock never touches.
+ *
+ *   clock_test.exe <d3d11|d3d9> <frames> <slow_ms> <title>
+ *
+ * slow_ms > 0 makes every frame take at least that long in real time (NtDelayExecution, not
+ * Sleep, which the clock shortens): a presenter slower than the virtual rate.
+ *
+ * Phase A: <frames> frames, each starting with a read of QueryPerformanceCounter, timeGetTime,
+ * GetTickCount and GetTickCount64. Phase B: 30 frames, each waiting in a QPC busy-wait for two
+ * frame periods (it can only ever see one per Present: must terminate through the creep).
+ * Phase C: 30 frames waiting with `while (timeGetTime() - t0 < 2 periods) Sleep(1)`. Then, for
+ * every loaded module, how many of its clock imports point into the hook DLL. */
+#define COBJMACROS
+#define CINTERFACE
+#define PSAPI_VERSION 2
+#include <windows.h>
+#include <psapi.h>
+#include <d3d11.h>
+#include <d3d9.h>
+#include <mmsystem.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+typedef LONG(NTAPI *pfn_ntqpc)(LARGE_INTEGER *, LARGE_INTEGER *);
+typedef LONG(NTAPI *pfn_ntdelay)(BOOLEAN, LARGE_INTEGER *);
+static pfn_ntqpc nt_qpc;
+static pfn_ntdelay nt_delay;
+static LONGLONG real_freq;
+
+static double real_s(void) {
+    LARGE_INTEGER t, f;
+    nt_qpc(&t, &f);
+    return (double)t.QuadPart / (double)real_freq;
+}
+
+static void real_delay_ms(int ms) {
+    LARGE_INTEGER d;
+    d.QuadPart = -(LONGLONG)ms * 10000;
+    nt_delay(FALSE, &d);
+}
+
+/* Distinct values of a sequence of steps. */
+#define NB 16
+typedef struct { long long v[NB]; long c[NB]; int n; long other; } census;
+static void cadd(census *c, long long v) {
+    for (int i = 0; i < c->n; i++)
+        if (c->v[i] == v) { c->c[i]++; return; }
+    if (c->n < NB) { c->v[c->n] = v; c->c[c->n++] = 1; } else c->other++;
+}
+static void cprint(const char *tag, census *c) {
+    printf("%s", tag);
+    for (int i = 0; i < c->n; i++) printf(" %lld:%ld", c->v[i], c->c[i]);
+    if (c->other) printf(" other:%ld", c->other);
+    printf("\n");
+}
+
+static IDXGISwapChain *g_sc;
+static ID3D11DeviceContext *g_ctx;
+static ID3D11RenderTargetView *g_rtv;
+static IDirect3DDevice9 *g_d9;
+static int g_d3d9;
+
+static void frame(int i) {
+    float col[4] = {(float)(i % 64) / 64.0f, 0.2f, 0.4f, 1.0f};
+    if (g_d3d9) {
+        IDirect3DDevice9_Clear(g_d9, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(i & 255, 40, 90), 1.0f, 0);
+        IDirect3DDevice9_Present(g_d9, NULL, NULL, NULL, NULL);
+    } else {
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_rtv, col);
+        IDXGISwapChain_Present(g_sc, 1, 0); /* sync interval 1: the clock forces 0 */
+    }
+    MSG m;
+    while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&m);
+}
+
+static int hooked_slots(HMODULE mod, BYTE *lo, BYTE *hi) {
+    BYTE *base = (BYTE *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC) return 0;
+    IMAGE_DATA_DIRECTORY d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!d.VirtualAddress) return 0;
+    int n = 0;
+    for (IMAGE_IMPORT_DESCRIPTOR *imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + d.VirtualAddress); imp->Name; imp++) {
+        const char *dll = (const char *)(base + imp->Name);
+        /* Clock families only: a module importing version.dll legitimately points at the proxy. */
+        if (_strnicmp(dll, "kernel32", 8) && _strnicmp(dll, "kernelbase", 10) && _strnicmp(dll, "api-ms-win-core", 15) && _strnicmp(dll, "winmm", 5))
+            continue;
+        IMAGE_THUNK_DATA *s = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
+        for (int k = 0; s[k].u1.Function; k++) {
+            BYTE *p = (BYTE *)(uintptr_t)s[k].u1.Function;
+            if (p >= lo && p < hi) n++;
+        }
+    }
+    return n;
+}
+
+static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM a, LPARAM b) { return DefWindowProcA(w, m, a, b); }
+
+int main(int argc, char **argv) {
+    if (argc < 5) return 2;
+    g_d3d9 = !strcmp(argv[1], "d3d9");
+    int frames = atoi(argv[2]), slow = atoi(argv[3]);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    nt_qpc = (pfn_ntqpc)GetProcAddress(ntdll, "NtQueryPerformanceCounter");
+    nt_delay = (pfn_ntdelay)GetProcAddress(ntdll, "NtDelayExecution");
+    LARGE_INTEGER t0, rf;
+    nt_qpc(&t0, &rf);
+    real_freq = rf.QuadPart;
+
+    /* Import version.dll (the proxy) for real. */
+    DWORD h;
+    char self[MAX_PATH];
+    GetModuleFileNameA(NULL, self, MAX_PATH);
+    GetFileVersionInfoSizeA(self, &h);
+
+    LARGE_INTEGER qpf;
+    QueryPerformanceFrequency(&qpf);
+    printf("qpf %lld real_qpf %lld\n", (long long)qpf.QuadPart, (long long)real_freq);
+
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "quiver-vclock-test";
+    RegisterClassA(&wc);
+    HWND wnd = CreateWindowA(wc.lpszClassName, argv[4], WS_POPUP | WS_VISIBLE, 0, 0, 160, 120, NULL, NULL, wc.hInstance, NULL);
+    if (g_d3d9) {
+        IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
+        D3DPRESENT_PARAMETERS pp = {0};
+        pp.Windowed = TRUE;
+        pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+        pp.BackBufferWidth = 160;
+        pp.BackBufferHeight = 120;
+        pp.hDeviceWindow = wnd;
+        pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+        if (!d3d || FAILED(IDirect3D9_CreateDevice(d3d, 0, D3DDEVTYPE_HAL, wnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &g_d9))) {
+            printf("no d3d9 device\n");
+            return 3;
+        }
+    } else {
+        DXGI_SWAP_CHAIN_DESC sd = {0};
+        sd.BufferCount = 2;
+        sd.BufferDesc.Width = 160;
+        sd.BufferDesc.Height = 120;
+        sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.OutputWindow = wnd;
+        sd.SampleDesc.Count = 1;
+        sd.Windowed = TRUE;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        ID3D11Device *dev;
+        if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &g_sc, &dev, NULL, &g_ctx))) {
+            printf("no d3d11 device\n");
+            return 3;
+        }
+        ID3D11Texture2D *bb;
+        IDXGISwapChain_GetBuffer(g_sc, 0, &IID_ID3D11Texture2D, (void **)&bb);
+        ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)bb, NULL, &g_rtv);
+        ID3D11Texture2D_Release(bb);
+    }
+
+    /* Phase A. */
+    LONGLONG *q = calloc((size_t)frames, sizeof *q);
+    DWORD *mm = calloc((size_t)frames, sizeof *mm), *tc = calloc((size_t)frames, sizeof *tc);
+    ULONGLONG *tc64 = calloc((size_t)frames, sizeof *tc64);
+    double ra = 0, rb = 0;
+    int gpa_virtual = -1;
+    typedef BOOL(WINAPI * pfn_qpc)(LARGE_INTEGER *);
+    pfn_qpc gpa_qpc = (pfn_qpc)GetProcAddress(GetModuleHandleA("kernel32.dll"), "QueryPerformanceCounter");
+    for (int i = 0; i < frames; i++) {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        q[i] = t.QuadPart;
+        mm[i] = timeGetTime();
+        tc[i] = GetTickCount();
+        tc64[i] = GetTickCount64();
+        if (i == 1) ra = real_s();
+        if (i == frames / 2) {
+            /* Looked up at run time, inside one frame: the same virtual value. */
+            LARGE_INTEGER a;
+            gpa_qpc(&a);
+            gpa_virtual = a.QuadPart == t.QuadPart;
+        }
+        if (slow > 0) real_delay_ms(slow);
+        frame(i);
+    }
+    rb = real_s();
+    census cq = {0}, cm = {0}, ct = {0}, ct64 = {0};
+    unsigned long long hash = 1469598103934665603ull;
+    for (int i = 2; i < frames; i++) {
+        cadd(&cq, q[i] - q[i - 1]);
+        cadd(&cm, (long long)(mm[i] - mm[i - 1]));
+        cadd(&ct, (long long)(tc[i] - tc[i - 1]));
+        cadd(&ct64, (long long)(tc64[i] - tc64[i - 1]));
+    }
+    for (int i = 1; i < frames; i++) {
+        unsigned long long v = (unsigned long long)(q[i] - q[1]);
+        for (int b = 0; b < 8; b++) hash = (hash ^ ((v >> (8 * b)) & 255)) * 1099511628211ull;
+    }
+    cprint("A qpc_steps", &cq);
+    cprint("A ms_steps", &cm);
+    cprint("A tick_steps", &ct);
+    cprint("A tick64_steps", &ct64);
+    printf("A frames %d virtual_s %.6f real_s %.6f\n", frames - 1, (double)(q[frames - 1] - q[1]) / (double)qpf.QuadPart, rb - ra);
+    printf("A sequence_hash %016llx\n", hash);
+    printf("gpa_virtual %d\n", gpa_virtual);
+
+    /* Phase B: a QPC busy-wait for two frame periods. */
+    LONGLONG period = qpf.QuadPart / 60; /* any period: the wait is for 2 virtual frames */
+    {
+        LARGE_INTEGER a;
+        QueryPerformanceCounter(&a);
+        LONGLONG f1 = a.QuadPart;
+        frame(0);
+        QueryPerformanceCounter(&a);
+        period = a.QuadPart - f1; /* exactly one frame on the virtual clock */
+    }
+    double r0 = real_s();
+    LARGE_INTEGER last;
+    QueryPerformanceCounter(&last);
+    long long spins = 0;
+    for (int i = 0; i < 30; i++) {
+        LARGE_INTEGER now;
+        do {
+            QueryPerformanceCounter(&now);
+            spins++;
+        } while (now.QuadPart - last.QuadPart < 2 * period);
+        last = now;
+        frame(i);
+    }
+    printf("B frames 30 spins %lld real_s %.6f period %lld\n", spins, real_s() - r0, (long long)period);
+
+    /* Phase C: a Sleep(1) loop on timeGetTime for two frame periods. */
+    DWORD period_ms = (DWORD)(period * 1000 / qpf.QuadPart);
+    r0 = real_s();
+    DWORD tl = timeGetTime();
+    long long sleeps = 0;
+    for (int i = 0; i < 30; i++) {
+        DWORD now;
+        while ((now = timeGetTime()) - tl < 2 * period_ms) {
+            Sleep(1);
+            sleeps++;
+        }
+        tl = now;
+        frame(i);
+    }
+    printf("C frames 30 sleeps %lld real_s %.6f period_ms %lu\n", sleeps, real_s() - r0, (unsigned long)period_ms);
+
+    /* Which modules' clock imports point into the hook DLL. */
+    HMODULE proxy = GetModuleHandleA("version.dll");
+    MODULEINFO pi = {0};
+    K32GetModuleInformation(GetCurrentProcess(), proxy, &pi, sizeof pi);
+    BYTE *lo = (BYTE *)pi.lpBaseOfDll, *hi = lo + pi.SizeOfImage;
+    HMODULE mods[512];
+    DWORD need;
+    K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need);
+    for (DWORD i = 0; i < need / sizeof(HMODULE) && i < 512; i++) {
+        char name[MAX_PATH];
+        K32GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, sizeof name);
+        printf("iat %s %d%s\n", name, hooked_slots(mods[i], lo, hi), mods[i] == GetModuleHandleA(NULL) ? " exe" : "");
+    }
+    printf("done\n");
+    return 0;
+}
