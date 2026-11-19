@@ -18,7 +18,7 @@ use quiver_api::mods::VANILLA;
 use quiver_api::options::{OpOutcome, OptionsChange, OptionsRevision, Outcome};
 use quiver_api::tweaks::{DisplayCaps, Effect, Planned, Scope, ScopeKind, SessionTweaks, TweakEffect, TweakRevisions, TweaksPlan, TweaksRequest};
 use quiver_api::{Event, GameRef};
-use quiver_core::launcher::{self, Games};
+use quiver_core::launcher;
 use quiver_core::tweaks::{self as tw, At, Scopes};
 
 use crate::Daemon;
@@ -52,11 +52,12 @@ fn data() -> PathBuf {
     launcher::data_dir()
 }
 
-fn installed(product_id: u32) -> Option<launcher::Game> {
-    Games::load().ok()?.get(product_id).cloned()
+/// The game as mods see it, for any store with profiles (Ubisoft, Epic, Steam).
+fn installed(game: GameRef) -> Option<launcher::Game> {
+    crate::mods::installed(game).ok()
 }
 
-/// The profile id a request means for an installed Ubisoft game (`None`: its default).
+/// The profile id a request means for an installed game (`None`: its default).
 fn profile_id(game: &launcher::Game, profile: Option<&str>) -> Result<String> {
     let store = store_for(game);
     let (p, _) = launch_profile(&store, profile)?;
@@ -101,7 +102,7 @@ fn resolve_scope(scope: &Scope) -> Result<Resolved> {
     match scope {
         Scope::Global => Ok(Resolved { kind: ScopeKind::Global, game: None, installed: None, profile: None, scopes: Scopes::load(&data, None, None)? }),
         Scope::Game { game } => {
-            let installed = game.as_ubisoft().and_then(installed);
+            let installed = installed(*game);
             // The default profile is loaded too, so rows know when it overrides this scope.
             let profile = installed.as_ref().and_then(|g| profile_id(g, None).ok());
             let store = installed.as_ref().map(store_for);
@@ -109,8 +110,7 @@ fn resolve_scope(scope: &Scope) -> Result<Resolved> {
             Ok(Resolved { kind: ScopeKind::Game, game: Some(*game), installed, profile, scopes })
         }
         Scope::Profile { game, profile } => {
-            let product = game.as_ubisoft().with_context(|| format!("{game} has no mod profiles: set its tweaks for the game (--game) or globally"))?;
-            let g = installed(product).context("not installed (profile tweaks need an installed game)")?;
+            let g = crate::mods::installed(*game).with_context(|| format!("{game}: profile tweaks need an installed game with profiles; set its tweaks for the game (--game) or globally"))?;
             let pid = profile_id(&g, profile.as_deref())?;
             let store = store_for(&g);
             let scopes = Scopes::load(&data, Some(game), Some((&store, &pid)))?;
@@ -196,7 +196,7 @@ impl Daemon {
                 let this = self.clone();
                 json!(
                     with_store_lock(move || {
-                        let g = game.as_ubisoft().and_then(installed);
+                        let g = installed(game);
                         let pid = match &g {
                             Some(g) => Some(profile_id(g, profile.as_deref())?),
                             None => None,
@@ -207,7 +207,7 @@ impl Daemon {
                 )
             }
             TweaksRequest::Capabilities { game } => {
-                let (env, proton) = match game.and_then(|g| g.as_ubisoft()).and_then(installed) {
+                let (env, proton) = match game.and_then(installed) {
                     Some(g) => preview_env(&cfg, Some(&g), None),
                     None => (BTreeMap::new(), None),
                 };
@@ -225,7 +225,8 @@ impl Daemon {
     /// get no tweaks yet; the plan says so.
     fn preview(&self, cfg: &launcher::Config, game: &GameRef, g: Option<&launcher::Game>, profile: Option<&str>) -> Result<TweaksPlan> {
         let (env, proton) = preview_env(cfg, g, profile);
-        let route = if g.is_some() { "quiver" } else { "steam" };
+        // Steam games start from Steam (through steam-run when hooked), even with profiles.
+        let route = if g.is_some() && game.as_steam().is_none() { "quiver" } else { "steam" };
         let build = (route == "quiver").then(|| build_dir(cfg, proton.as_deref()));
         if tw::display().is_none() {
             refresh_display();
@@ -236,7 +237,7 @@ impl Daemon {
             None => None,
         };
         let mut c = tw::plan_for(&data(), game, ctx.as_ref(), caps, &env, None)?;
-        if g.is_none() {
+        if route == "steam" {
             c.plan.notes.push(route_note(game, crate::steamhook::hooked(*game)));
         }
         Ok(c.plan)
@@ -250,7 +251,7 @@ impl Daemon {
     /// The platform surface at a profile's scope, for the Options view's surface list.
     pub(crate) fn tweaks_profile_state(&self, game: GameRef, ctx: &quiver_core::options::Ctx, level: Option<quiver_api::options::Level>) -> Result<quiver_api::options::SurfaceState> {
         let scopes = Scopes::load(&data(), Some(&game), Some((&ctx.store, &ctx.profile_id)))?;
-        let plan = game.as_ubisoft().and_then(installed).and_then(|g| self.preview(&self.cfg, &game, Some(&g), Some(&ctx.profile_id)).ok());
+        let plan = installed(game).and_then(|g| self.preview(&self.cfg, &game, Some(&g), Some(&ctx.profile_id)).ok());
         let last = tw::last_session(&data(), &game);
         Ok(tw::state(tw::schema(), &scopes, ScopeKind::Profile, level, plan.as_ref(), last.as_ref()))
     }
@@ -326,7 +327,7 @@ impl Daemon {
         if std::env::var("QUIVER_TWEAKS").is_ok_and(|v| v == "0") {
             return (Vec::new(), None);
         }
-        let gref = GameRef::ubisoft(game.product_id);
+        let gref = game.game_ref();
         let d = data();
         let dir = tw::session_dir(&d, &gref, session);
         let mut user: BTreeMap<String, String> = self.cfg.env.iter().cloned().collect();
@@ -561,7 +562,7 @@ pub(crate) fn steam_plan(cfg: &launcher::Config, plan: &mut quiver_api::steamlib
     refresh_display();
     let d = data();
     let caps = tw::capabilities(&d, None, "steam");
-    let ctx = game.as_ubisoft().and_then(installed).and_then(|g| quiver_core::options::context(&store_for(&g), None).ok());
+    let ctx = installed(game).and_then(|g| quiver_core::options::context(&store_for(&g), None).ok());
     match locked(|| tw::plan_for(&d, &game, ctx.as_ref(), caps, &user, None)) {
         Ok(c) => {
             plan.tweaks = Some(c.plan.revisions);
