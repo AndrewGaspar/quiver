@@ -3999,10 +3999,16 @@ impl Window {
                 ScaledPixels((f32::from(self.viewport_size.width) * self.scale_factor).round()),
                 ScaledPixels((f32::from(self.viewport_size.height) * self.scale_factor).round()),
             );
+            let started = Instant::now();
             let packed = self
                 .rendered_frame
                 .scene
                 .pack_side_by_side(eye, &*packing.shift);
+            log::debug!(
+                "stereo: packed {} paint operations in {:?}",
+                self.rendered_frame.scene.len(),
+                started.elapsed()
+            );
             self.platform_window.draw(&packed);
         } else {
             self.platform_window.draw(&self.rendered_frame.scene);
