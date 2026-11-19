@@ -24,7 +24,18 @@ pub struct Xvfb {
 }
 
 impl Drop for Xvfb {
+    /// SIGTERM first, so Xvfb removes its socket and lock file (a SIGKILL leaves both behind
+    /// in /tmp, and they hold display numbers until someone clears them); SIGKILL after 2 s.
     fn drop(&mut self) {
+        // SAFETY: our own child's pid.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
