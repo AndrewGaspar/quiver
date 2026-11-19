@@ -5,7 +5,18 @@
 //! default), the rest wait their turn. Pausing stops a download at a slice boundary
 //! (through the installer's cancel flag) and resuming continues from what is on disk. The
 //! queue is saved to `<data>/queue.json` on every change; after a restart, items that
-//! were running start again, queued ones wait their turn and paused ones stay paused.
+//! were running start again first (whatever their place), queued ones wait their turn and
+//! paused ones stay paused.
+//!
+//! "Download now" ([`Downloads::run_now`]) moves an item to the top and, when the queue is
+//! full, switches the lowest-placed running download out: it stops at a slice boundary
+//! like a pause, but goes back to the queue (right behind the new one) instead of pausing.
+//! A download that is verifying files is never switched out, and one registering its
+//! install (`Progress::finalizing`) is left to finish; the new one starts after it.
+//!
+//! Each item carries "when it finishes" choices ([`AfterInstall`]): quiverd writes the
+//! .desktop entry and the Steam shortcut itself once the install completes
+//! ([`Host::after_install`]), whether or not a front end is open.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -18,7 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use quiver_api::downloads::{DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, SampleState, Throughput, VerifyReport};
+use quiver_api::downloads::{AfterInstall, DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, RunNow, SampleState, Throughput, VerifyReport};
 use quiver_api::{Event, GameRef, Job, JobKind, Request, StoreId};
 use quiver_core::builds::{self, Latest, RepairPhase};
 use quiver_core::install::{Progress, Throttle, human_bytes, is_cancelled};
@@ -66,6 +77,10 @@ pub(crate) trait Host: Send + Sync + 'static {
     fn discard(&self, game: GameRef, name: &str) -> bool;
     /// Do the work of an item.
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>>;
+    /// An item's install finished: do what its [`QueueEntry::after`] asks (Steam shortcut,
+    /// .desktop entry). Returns lines for its job ([`quiver_api::downloads::is_after_note`]);
+    /// a failure is one of them, never the install's.
+    fn after_install(self: Arc<Self>, item: QueueEntry) -> BoxFut<Vec<String>>;
     /// Whether new items may start (not while quiverd restarts onto a new build).
     fn accepting(&self) -> bool {
         true
@@ -88,6 +103,8 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 enum Stop {
     Pause,
     Remove { discard: bool },
+    /// Switched out for another item ("Download now"): back to `Queued`, not `Paused`.
+    Preempt,
 }
 
 struct Item {
@@ -105,6 +122,11 @@ struct Item {
 struct Saved {
     #[serde(default)]
     items: Vec<QueueEntry>,
+    /// The items that were running (not stopping), in queue order: after a restart they
+    /// start again first, up to `max_active`. Absent in files from before: then the items
+    /// saved as downloading or verifying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    running: Option<Vec<GameRef>>,
 }
 
 pub(crate) struct Downloads {
@@ -116,6 +138,8 @@ pub(crate) struct Downloads {
     dismissed: Mutex<HashSet<GameRef>>,
     /// Verify-only jobs running: product -> (job id, progress).
     verifying: Mutex<Vec<(GameRef, u64, Arc<Progress>)>>,
+    /// What was running when quiverd last stopped: the first pump starts these first.
+    resume_first: Mutex<Vec<GameRef>>,
 }
 
 fn status_line(e: &QueueEntry, waiting: bool) -> Option<String> {
@@ -130,13 +154,18 @@ fn status_line(e: &QueueEntry, waiting: bool) -> Option<String> {
 }
 
 impl Downloads {
-    /// Load the saved queue. Items that were running are queued again (and start first,
-    /// in their place); paused and failed ones stay as they were.
+    /// Load the saved queue. Items that were running are queued again and start first,
+    /// before the queue's top (see [`Downloads::pump`]); paused and failed ones stay as
+    /// they were.
     pub(crate) fn load(path: PathBuf, settings: DownloadSettings) -> Arc<Self> {
         let saved: Saved = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).map_err(|e| tracing::warn!("ignoring corrupt {}: {e}", path.display())).ok())
             .unwrap_or_default();
+        let resume_first = saved
+            .running
+            .clone()
+            .unwrap_or_else(|| saved.items.iter().filter(|e| e.state.is_active()).map(QueueEntry::game_ref).collect());
         let items = saved
             .items
             .into_iter()
@@ -159,6 +188,7 @@ impl Downloads {
             throttle,
             dismissed: Mutex::default(),
             verifying: Mutex::default(),
+            resume_first: Mutex::new(resume_first),
         });
         d.renumber();
         d
@@ -259,7 +289,22 @@ impl Downloads {
     }
 
     fn save(&self) {
-        let saved = Saved { items: self.list() };
+        let saved = {
+            let items = self.items.lock().unwrap();
+            let entries = items
+                .iter()
+                .map(|i| {
+                    let mut e = i.entry.clone();
+                    // Stopping to pause: paused, should quiverd stop before it has.
+                    if matches!(i.stop, Some(Stop::Pause)) {
+                        e.state = QueueState::Paused;
+                    }
+                    e
+                })
+                .collect();
+            let running = items.iter().filter(|i| i.progress.is_some() && i.stop.is_none()).map(|i| i.entry.game_ref()).collect();
+            Saved { items: entries, running: Some(running) }
+        };
         let tmp = self.path.with_extension("json.tmp");
         let r = (|| -> Result<()> {
             if let Some(dir) = self.path.parent() {
@@ -312,6 +357,7 @@ impl Downloads {
         kind: QueueKind,
         language: Option<String>,
         account: Option<String>,
+        after: Option<AfterInstall>,
     ) -> Result<u64> {
         let game: GameRef = game.into();
         if self.verifying.lock().unwrap().iter().any(|(p, ..)| *p == game) {
@@ -323,6 +369,9 @@ impl Downloads {
         if let Some(e) = self.get(game) {
             if e.kind != kind && !matches!((e.kind, kind), (QueueKind::Install | QueueKind::Update, QueueKind::Install | QueueKind::Update)) {
                 bail!("{name} is already in the queue ({:?}); remove it first", e.kind);
+            }
+            if let Some(a) = after {
+                self.set_after(host, source, game, Some(a.steam), Some(a.desktop))?;
             }
             if matches!(e.state, QueueState::Paused | QueueState::Failed) {
                 return self.resume(host, source, game);
@@ -347,6 +396,7 @@ impl Downloads {
             total_bytes: 0,
             speed: 0,
             retries: 0,
+            after: after.unwrap_or_default(),
         };
         self.items.lock().unwrap().push(Item { entry, progress: None, stop: None, status: None, history: None });
         let what = match kind {
@@ -372,11 +422,138 @@ impl Downloads {
                     let it = items.remove(i);
                     items.insert(0, it);
                 }
+                QueueMove::Now => bail!("moving to `now` switches downloads: use run_now"),
                 _ => {}
             }
         }
         self.changed(host);
         Ok(())
+    }
+
+    /// "Download now": move a game's item to the top and start it. When `max_active`
+    /// downloads run already, the lowest-placed one is switched out: it stops at a slice
+    /// boundary (what it finished stays on disk) and goes back to `Queued` right behind the
+    /// running ones, so it is next. A paused or failed item is resumed.
+    ///
+    /// Safe points: a download verifying files is never switched out (refused when that's
+    /// the only one to switch); one registering its install ([`Progress::finalizing`]), or
+    /// already stopping, is left to finish, and this one starts when it has.
+    pub(crate) fn run_now<H: Host>(self: &Arc<Self>, host: &Arc<H>, source: &str, game: impl Into<GameRef>) -> Result<RunNow> {
+        let game: GameRef = game.into();
+        let max = self.settings.lock().unwrap().max_active.max(1);
+        let (name, outcome) = {
+            let mut items = self.items.lock().unwrap();
+            let i = items.iter().position(|i| i.entry.game_ref() == game).context("not in the queue")?;
+            let name = items[i].entry.name.clone();
+            if items[i].progress.is_some() {
+                match items[i].stop {
+                    None => return Ok(RunNow::AlreadyRunning),
+                    Some(Stop::Remove { .. }) => bail!("{name} is being removed from the queue"),
+                    // Stopping to pause or to make way: keep going instead.
+                    Some(Stop::Pause | Stop::Preempt) => {
+                        let it = &mut items[i];
+                        it.stop = None;
+                        it.status = None;
+                        if let Some(p) = &it.progress {
+                            p.cancel.store(false, Ordering::Relaxed);
+                        }
+                        let it = items.remove(i);
+                        items.insert(0, it);
+                        drop(items);
+                        host.log(source, format!("download now: {name} (kept going)"), Some(game));
+                        self.changed(host);
+                        return Ok(RunNow::Started);
+                    }
+                }
+            }
+            if items[i].entry.state == QueueState::Done {
+                bail!("{name} is done");
+            }
+            if host.playing(game) {
+                bail!("{name} is being played: its download waits until the game exits");
+            }
+            if !host.accepting() {
+                bail!("quiverd is restarting onto a new build; try again in a moment");
+            }
+            let running: Vec<usize> = (0..items.len()).filter(|&j| j != i && items[j].progress.is_some()).collect();
+            let finishing = running.iter().copied().find(|&j| {
+                items[j].stop.is_some() || items[j].progress.as_ref().is_some_and(|p| p.finalizing.load(Ordering::Relaxed))
+            });
+            let mut preempt = None;
+            let outcome = if running.len() < max {
+                RunNow::Started
+            } else if let Some(j) = finishing {
+                RunNow::Waiting { for_name: items[j].entry.name.clone() }
+            } else {
+                // The lowest-placed download that is downloading (not verifying).
+                let Some(j) = running.iter().rev().copied().find(|&j| items[j].entry.state == QueueState::Downloading) else {
+                    let v = running.first().map(|&j| items[j].entry.name.clone()).unwrap_or_default();
+                    bail!("{v} is verifying its files and can't be switched out mid-check; pause it, or try again once it is downloading");
+                };
+                preempt = Some(j);
+                RunNow::Switching { from: items[j].entry.game_ref(), from_name: items[j].entry.name.clone() }
+            };
+            // Resume a paused or failed item.
+            {
+                let it = &mut items[i];
+                if it.entry.state == QueueState::Failed {
+                    it.entry.job_id = Some(host.new_job(JobKind::Install, game, it.entry.name.clone()));
+                    it.entry.error = None;
+                }
+                it.entry.state = QueueState::Queued;
+            }
+            let chosen = items.remove(i);
+            let switched = preempt.map(|j| {
+                let mut p = items.remove(if j > i { j - 1 } else { j });
+                p.stop = Some(Stop::Preempt);
+                p.status = Some(format!("Switching to {name}…"));
+                if let Some(pr) = &p.progress {
+                    pr.cancel.store(true, Ordering::Relaxed);
+                }
+                p
+            });
+            items.insert(0, chosen);
+            if let Some(p) = switched {
+                // Right behind the downloads that keep running: next in line.
+                let at = items.iter().rposition(|x| x.progress.is_some()).map_or(1, |k| k + 1).max(1);
+                items.insert(at, p);
+            }
+            (name, outcome)
+        };
+        let how = match &outcome {
+            RunNow::Switching { from_name, .. } => format!(" (switched out {from_name}, which goes back to the queue)"),
+            RunNow::Waiting { for_name } => format!(" (starts once {for_name} finishes)"),
+            _ => String::new(),
+        };
+        host.log(source, format!("download now: {name}{how}"), Some(game));
+        self.changed(host);
+        self.pump(host);
+        Ok(outcome)
+    }
+
+    /// Change what is done when a game's install finishes ([`QueueEntry::after`]); `None`
+    /// keeps a choice as it is.
+    pub(crate) fn set_after<H: Host>(&self, host: &Arc<H>, source: &str, game: impl Into<GameRef>, steam: Option<bool>, desktop: Option<bool>) -> Result<QueueEntry> {
+        let game: GameRef = game.into();
+        let (entry, before) = {
+            let mut items = self.items.lock().unwrap();
+            let it = items.iter_mut().find(|i| i.entry.game_ref() == game).context("not in the queue")?;
+            let before = it.entry.after;
+            if let Some(s) = steam {
+                it.entry.after.steam = s;
+            }
+            if let Some(d) = desktop {
+                it.entry.after.desktop = d;
+            }
+            (it.entry.clone(), before)
+        };
+        if entry.after != before {
+            let what: Vec<&str> = [(entry.after.steam, "add to Steam"), (entry.after.desktop, "create a .desktop entry")].into_iter().filter(|x| x.0).map(|x| x.1).collect();
+            let what = if what.is_empty() { "nothing".to_owned() } else { what.join(" and ") };
+            host.log(source, format!("when {} finishes: {what}", entry.name), Some(game));
+            self.save();
+        }
+        Ok(entry)
     }
 
     pub(crate) fn pause<H: Host>(&self, host: &Arc<H>, source: &str, game: impl Into<GameRef>) -> Result<()> {
@@ -516,7 +693,13 @@ impl Downloads {
         {
             let mut items = self.items.lock().unwrap();
             let mut active = items.iter().filter(|i| i.progress.is_some()).count();
-            for it in items.iter_mut() {
+            // What ran before quiverd stopped goes first (once), then the queue in order.
+            let first = std::mem::take(&mut *self.resume_first.lock().unwrap());
+            let mut order: Vec<usize> = first.iter().filter_map(|g| items.iter().position(|i| i.entry.game_ref() == *g)).collect();
+            let rest: Vec<usize> = (0..items.len()).filter(|i| !order.contains(i)).collect();
+            order.extend(rest);
+            for i in order {
+                let it = &mut items[i];
                 if active >= max {
                     break;
                 }
@@ -624,7 +807,15 @@ impl Downloads {
         }
         let (this, host) = (self.clone(), host.clone());
         tokio::spawn(async move {
-            let result = host.clone().run(entry, progress.clone(), phase).await;
+            let mut result = host.clone().run(entry, progress.clone(), phase).await;
+            // Installed: what it should do when it finishes, as chosen now (it can change
+            // while it runs).
+            if let Ok(o) = &mut result {
+                let now = this.items.lock().unwrap().iter().find(|i| i.progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, &progress))).map(|i| i.entry.clone());
+                if let Some(e) = now.filter(|e| !e.after.is_empty() && e.kind != QueueKind::Repair) {
+                    o.detail.extend(host.clone().after_install(e).await);
+                }
+            }
             this.finish(&host, game, &progress, result);
         });
     }
@@ -649,8 +840,9 @@ impl Downloads {
                     items.remove(i);
                     (job, Some(("Removed from queue (install again to resume)".to_owned(), None, Vec::new())), true, discard, name)
                 }
-                (Err(_), None) if cancelled => {
-                    // Resumed while it was stopping: start it again.
+                (Err(_), None | Some(Stop::Preempt)) if cancelled => {
+                    // Switched out for another item, or resumed while it was stopping:
+                    // queued again, with what it finished on disk.
                     it.entry.state = QueueState::Queued;
                     (job, None, false, false, name)
                 }
@@ -702,7 +894,7 @@ impl Downloads {
             if self.get(game).is_some() || self.dismissed.lock().unwrap().contains(&game) || host.playing(game) {
                 continue;
             }
-            match self.enqueue(host, "auto-update", game, p.name.clone(), QueueKind::Update, p.language.clone(), None) {
+            match self.enqueue(host, "auto-update", game, p.name.clone(), QueueKind::Update, p.language.clone(), None, None) {
                 Ok(_) => queued.push(game),
                 Err(err) => tracing::warn!(game = %game, "auto-update: {err:#}"),
             }
@@ -831,6 +1023,10 @@ impl Host for Daemon {
         dir.starts_with(&self.cfg.library) && std::fs::remove_dir_all(&dir).is_ok()
     }
 
+    fn after_install(self: Arc<Self>, item: QueueEntry) -> BoxFut<Vec<String>> {
+        Box::pin(async move { crate::exports::after_install(&self, &item).await })
+    }
+
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>> {
         Box::pin(async move {
             if !item.game_ref().is_ubisoft() {
@@ -922,14 +1118,14 @@ async fn product_name(daemon: &Arc<Daemon>, product_id: u32) -> String {
 }
 
 /// `Request::Install`: queue an install, or an update if the game is installed.
-pub(crate) async fn install(daemon: &Arc<Daemon>, source: &str, product_id: u32, language: Option<String>) -> Result<u64> {
+pub(crate) async fn install(daemon: &Arc<Daemon>, source: &str, product_id: u32, language: Option<String>, after: Option<AfterInstall>) -> Result<u64> {
     let name = product_name(daemon, product_id).await;
     // Resolve the account now, so a missing sign-in fails here rather than in the queue.
     daemon.account_for(product_id, None).await?;
     let installed = Games::load()?.get(product_id).is_some();
     let kind = if installed { QueueKind::Update } else { QueueKind::Install };
     let language = language.or_else(|| Some(language_for(product_id)));
-    daemon.downloads.enqueue(daemon, source, GameRef::ubisoft(product_id), name, kind, language, None)
+    daemon.downloads.enqueue(daemon, source, GameRef::ubisoft(product_id), name, kind, language, None, after)
 }
 
 /// `Request::Cancel` for a queue (`Install`) or verify job: removes the queue item.
@@ -1068,10 +1264,16 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
     Ok(match req {
         Request::Queue => json!(d.list()),
         Request::DownloadThroughput { last } => json!(d.throughput(last)),
+        Request::QueueMove { game, to: QueueMove::Now } => {
+            d.run_now(daemon, source, game.0)?;
+            json!(d.list())
+        }
         Request::QueueMove { game, to } => {
             d.move_item(daemon, game.0, to)?;
             json!(d.list())
         }
+        Request::QueueRunNow { game } => json!(d.run_now(daemon, source, game.0)?),
+        Request::QueueSetAfter { game, steam, desktop } => json!(d.set_after(daemon, source, game.0, steam, desktop)?),
         Request::QueuePause { game } => {
             d.pause(daemon, source, game.0)?;
             Value::Null
@@ -1089,7 +1291,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
         Request::Update { game } if game.store != StoreId::Ubisoft && game.store != StoreId::Epic => json!(daemon.update_in_client(source, game.0).await?),
         Request::InstallPreview { game, .. } if !game.is_ubisoft() => json!(crate::epic::install_preview(daemon, game.0).await?),
         Request::UpdatePreview { game } if !game.is_ubisoft() => json!(crate::epic::update_preview(daemon, game.0).await?),
-        Request::Update { game } if !game.is_ubisoft() => json!(crate::epic::install(daemon, source, game.0).await?),
+        Request::Update { game } if !game.is_ubisoft() => json!(crate::epic::install(daemon, source, game.0, None).await?),
         Request::Verify { game, repair } if !game.is_ubisoft() => json!(crate::epic::verify(daemon, source, game.0, repair).await?),
         Request::VerifyResult { game } if !game.is_ubisoft() => {
             let r: Option<VerifyReport> = std::fs::read_to_string(report_path(game.0)).ok().and_then(|t| serde_json::from_str(&t).ok());
@@ -1114,14 +1316,14 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             Games::load()?.get(product_id).context("not installed")?;
             daemon.account_for(product_id, None).await?;
             let name = product_name(daemon, product_id).await;
-            json!(d.enqueue(daemon, source, game.0, name, QueueKind::Update, Some(language_for(product_id)), None)?)
+            json!(d.enqueue(daemon, source, game.0, name, QueueKind::Update, Some(language_for(product_id)), None, None)?)
         }
         Request::Verify { game, repair: false } => json!(verify_now(daemon, source, ubisoft(game.0)?)?),
         Request::Verify { game, repair: true } => {
             let product_id = ubisoft(game.0)?;
             let g = Games::load()?.get(product_id).cloned().context("not installed")?;
             daemon.account_for(product_id, None).await?;
-            json!(d.enqueue(daemon, source, game.0, g.name, QueueKind::Repair, Some(language_for(product_id)), None)?)
+            json!(d.enqueue(daemon, source, game.0, g.name, QueueKind::Repair, Some(language_for(product_id)), None, None)?)
         }
         Request::VerifyResult { game } => {
             let r: Option<VerifyReport> = std::fs::read_to_string(report_path(game.0)).ok().and_then(|t| serde_json::from_str(&t).ok());
