@@ -4,6 +4,8 @@
 //! - [`ring`]: per-frame / per-event rings, one writer process, lock-free readers.
 //! - [`record`]: ring records (layer presents, mod frames, series, events).
 //! - [`hud`]: `hud.image`, the double-buffered, seqlocked HUD image.
+//! - [`panel`]: `panel.input`, the Sight panel drawn in the game: who captures input, the
+//!   forwarded events, the layer's word (with `panel.image`, the panel's pixels).
 //! - [`session`]: the session dir (`/dev/shm/quiver-<uid>/<session>/`, `QUIVER_PERF_DIR`).
 //! - [`clock`]: CLOCK_MONOTONIC_RAW, Wine QPC conversion, offset checks and fits.
 //! - [`descriptor`], [`control`]: metric descriptors and the JSON control-plane payloads.
@@ -20,6 +22,7 @@ pub mod clock;
 mod error;
 pub mod hud;
 pub mod layout;
+pub mod panel;
 pub mod record;
 pub mod ring;
 pub mod shm;

@@ -292,7 +292,9 @@ typedef struct qv_hud_buffer {      /* at header_bytes + i * buffer_bytes */
     qv_hud_graph graph[QV_HUD_MAX_GRAPHS];
     uint32_t _pad0;
     uint64_t model_rev;             /* the HUD model revision this image shows */
-    uint8_t  _reserved[72];
+    uint32_t dirty_y0, dirty_y1;    /* panel.image: rows changed since publish dirty_base */
+    uint64_t dirty_base;            /* 0: none promised (hud.image writers leave these 0) */
+    uint8_t  _reserved[56];
     /* pixels at QV_HUD_PIXELS_OFFSET */
 } qv_hud_buffer;
 
@@ -423,6 +425,8 @@ QV_ASSERT_OFFSET(qv_hud_buffer, opacity, 44);
 QV_ASSERT_OFFSET(qv_hud_buffer, ngraphs, 48);
 QV_ASSERT_OFFSET(qv_hud_buffer, graph, 52);
 QV_ASSERT_OFFSET(qv_hud_buffer, model_rev, 176);
+QV_ASSERT_OFFSET(qv_hud_buffer, dirty_y0, 184);
+QV_ASSERT_OFFSET(qv_hud_buffer, dirty_base, 192);
 
 /* ---- Ring writer ------------------------------------------------------------------- *
  * For a ring this process writes (a mod's ring the bridge created; map it with

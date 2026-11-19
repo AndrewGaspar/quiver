@@ -1,0 +1,20 @@
+[package]
+name = "quiver-sight-input"
+description = "libquiver_sight_input.so: the Sight panel's input in the game, an LD_PRELOAD library interposing Wine's X11 and Wayland input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# libquiver_sight_input.so, put in LD_PRELOAD by quiverd for launches with the Sight layer.
+name = "quiver_sight_input"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+quiver-perf = { path = "../quiver-perf", default-features = false, features = ["std"] }
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb", "xtest"] }

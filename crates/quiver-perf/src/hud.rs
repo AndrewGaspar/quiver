@@ -30,6 +30,19 @@ const DESC_WORDS: usize = HUD_PIXELS_OFFSET / 8;
 /// The layer stops drawing an image whose writer heartbeat is older than this (§2.8).
 pub const HUD_STALE_NS: i64 = 3_000_000_000;
 
+/// Size limits of an image file: `hud.image` ([`HUD_LIMITS`]) or the Sight panel's
+/// `panel.image` ([`PANEL_LIMITS`]), the same format with room for a full-screen image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageLimits {
+    /// Most pixels a side.
+    pub max_dim: u32,
+    /// Most bytes per buffer (descriptor included).
+    pub max_buffer_bytes: u32,
+}
+
+pub const HUD_LIMITS: ImageLimits = ImageLimits { max_dim: HUD_MAX_DIM, max_buffer_bytes: HUD_MAX_BUFFER_BYTES };
+pub const PANEL_LIMITS: ImageLimits = ImageLimits { max_dim: PANEL_MAX_DIM, max_buffer_bytes: PANEL_MAX_BUFFER_BYTES };
+
 /// Bytes of a `hud.image` file with buffers of `buffer_bytes`.
 pub const fn hud_file_bytes(buffer_bytes: u32) -> usize {
     HUD_HEADER_BYTES + 2 * buffer_bytes as usize
@@ -38,9 +51,14 @@ pub const fn hud_file_bytes(buffer_bytes: u32) -> usize {
 /// The smallest valid buffer size (a multiple of 4096) for a `width × height` image with
 /// tightly packed rows; `None` above the 4 MiB cap.
 pub fn buffer_bytes_for(width: u32, height: u32) -> Option<u32> {
+    buffer_bytes_within(width, height, &HUD_LIMITS)
+}
+
+/// [`buffer_bytes_for`] under other limits (`panel.image`).
+pub fn buffer_bytes_within(width: u32, height: u32, limits: &ImageLimits) -> Option<u32> {
     let need = HUD_PIXELS_OFFSET as u64 + width as u64 * 4 * height as u64;
     let rounded = need.div_ceil(4096) * 4096;
-    (rounded <= HUD_MAX_BUFFER_BYTES as u64).then_some(rounded as u32)
+    (rounded <= limits.max_buffer_bytes as u64).then_some(rounded as u32)
 }
 
 /// Packs a premultiplied colour for `qv_hud_graph` (bytes R, G, B, A in memory).
@@ -82,7 +100,10 @@ impl HudBufferHeader {
         graph: [HudGraph::ZERO; HUD_MAX_GRAPHS],
         _pad0: 0,
         model_rev: 0,
-        _reserved: [0; HUD_PIXELS_OFFSET - 184],
+        dirty_y0: 0,
+        dirty_y1: 0,
+        dirty_base: 0,
+        _reserved: [0; HUD_PIXELS_OFFSET - 200],
     };
 
     /// The graphs in use (`ngraphs` clamped to 2).
@@ -108,11 +129,16 @@ impl HudBufferHeader {
     /// The §3.16 checks, against the buffer capacity and (for the layer) the swapchain extent
     /// it is about to draw on. A descriptor that fails isn't drawn.
     pub fn validate(&self, buffer_bytes: u32, swapchain_extent: Option<(u32, u32)>) -> Result<(), Error> {
+        self.validate_within(&HUD_LIMITS, buffer_bytes, swapchain_extent)
+    }
+
+    /// [`HudBufferHeader::validate`] under other limits (`panel.image`).
+    pub fn validate_within(&self, limits: &ImageLimits, buffer_bytes: u32, swapchain_extent: Option<(u32, u32)>) -> Result<(), Error> {
         let inv = Error::Invalid;
         if self.format != HUD_FORMAT_RGBA8_PREMUL_SRGB {
             return Err(inv("format"));
         }
-        if self.width == 0 || self.height == 0 || self.width > HUD_MAX_DIM || self.height > HUD_MAX_DIM {
+        if self.width == 0 || self.height == 0 || self.width > limits.max_dim || self.height > limits.max_dim {
             return Err(inv("width/height"));
         }
         if !self.stride.is_multiple_of(4) || (self.stride as u64) < self.width as u64 * 4 {
@@ -156,6 +182,13 @@ impl HudBufferHeader {
             }
         }
         Ok(())
+    }
+
+    /// The rows that changed since publish `have` (the image a reader's texture holds), when
+    /// the descriptor promises it ([`HudBufferHeader::dirty_base`]) and the rows are in the
+    /// image; `None`: take the whole image.
+    pub fn dirty_rows(&self, have: u64) -> Option<(u32, u32)> {
+        (have != 0 && self.dirty_base == have && self.dirty_y0 < self.dirty_y1 && self.dirty_y1 <= self.height).then_some((self.dirty_y0, self.dirty_y1))
     }
 }
 
@@ -260,14 +293,20 @@ pub fn read_backdrop<R: ShmRegion>(region: &R, now_ns: i64) -> BackdropRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HudInfo {
     pub buffer_bytes: u32,
+    pub limits: ImageLimits,
 }
 
 /// Initializes `region` as an empty `hud.image` (quiverd, at session start); magic last.
 pub fn init_hud<R: ShmRegion>(region: &R, buffer_bytes: u32) -> Result<HudInfo, Error> {
+    init_image(region, buffer_bytes, &HUD_LIMITS)
+}
+
+/// [`init_hud`] under other limits (`panel.image`).
+pub fn init_image<R: ShmRegion>(region: &R, buffer_bytes: u32, limits: &ImageLimits) -> Result<HudInfo, Error> {
     if !region.writable() {
         return Err(Error::ReadOnly);
     }
-    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > HUD_MAX_BUFFER_BYTES {
+    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > limits.max_buffer_bytes {
         return Err(Error::Layout("buffer_bytes"));
     }
     let need = hud_file_bytes(buffer_bytes);
@@ -290,11 +329,16 @@ pub fn init_hud<R: ShmRegion>(region: &R, buffer_bytes: u32) -> Result<HudInfo, 
     region.u16_at(OFF_HEADER_BYTES).store(HUD_HEADER_BYTES as u16, Ordering::Relaxed);
     region.u32_at(OFF_BUFFER_BYTES).store(buffer_bytes, Ordering::Relaxed);
     region.u64_at(OFF_MAGIC).store(HUD_MAGIC, Ordering::Release);
-    Ok(HudInfo { buffer_bytes })
+    Ok(HudInfo { buffer_bytes, limits: *limits })
 }
 
 /// Validates a `hud.image` header in (untrusted) memory.
 pub fn read_hud_header<R: ShmRegion>(region: &R) -> Result<HudInfo, Error> {
+    read_image_header(region, &HUD_LIMITS)
+}
+
+/// [`read_hud_header`] under other limits (`panel.image`).
+pub fn read_image_header<R: ShmRegion>(region: &R, limits: &ImageLimits) -> Result<HudInfo, Error> {
     if region.len() < HUD_HEADER_BYTES {
         return Err(Error::TooSmall { need: HUD_HEADER_BYTES, have: region.len() });
     }
@@ -313,14 +357,14 @@ pub fn read_hud_header<R: ShmRegion>(region: &R) -> Result<HudInfo, Error> {
         return Err(Error::Layout("header_bytes"));
     }
     let buffer_bytes = region.u32_at(OFF_BUFFER_BYTES).load(Ordering::Relaxed);
-    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > HUD_MAX_BUFFER_BYTES {
+    if buffer_bytes < 4096 || !buffer_bytes.is_multiple_of(4096) || buffer_bytes > limits.max_buffer_bytes {
         return Err(Error::Layout("buffer_bytes"));
     }
     let need = hud_file_bytes(buffer_bytes);
     if region.len() < need {
         return Err(Error::TooSmall { need, have: region.len() });
     }
-    Ok(HudInfo { buffer_bytes })
+    Ok(HudInfo { buffer_bytes, limits: *limits })
 }
 
 fn buffer_off(info: &HudInfo, b: u64) -> usize {
@@ -336,10 +380,15 @@ pub struct HudWriter<R: ShmRegion> {
 impl<R: ShmRegion> HudWriter<R> {
     /// Attaches to a `hud.image` quiverd created; continues from its publish counter.
     pub fn new(region: R) -> Result<Self, Error> {
+        Self::with_limits(region, &HUD_LIMITS)
+    }
+
+    /// Attaches to an image file of other limits (`panel.image`).
+    pub fn with_limits(region: R, limits: &ImageLimits) -> Result<Self, Error> {
         if !region.writable() {
             return Err(Error::ReadOnly);
         }
-        let info = read_hud_header(&region)?;
+        let info = read_image_header(&region, limits)?;
         Ok(HudWriter { region, info })
     }
 
@@ -372,7 +421,7 @@ impl<R: ShmRegion> HudWriter<R> {
     /// Writes `desc` (its `seq` is ignored) and `pixels` (premultiplied RGBA8, `stride ×
     /// height` bytes) into the back buffer and publishes it. Returns the new publish count.
     pub fn publish(&mut self, desc: &HudBufferHeader, pixels: &[u8]) -> Result<u64, Error> {
-        desc.validate(self.info.buffer_bytes, None)?;
+        desc.validate_within(&self.info.limits, self.info.buffer_bytes, None)?;
         let len = desc.pixel_bytes();
         if pixels.len() < len {
             return Err(Error::Invalid("fewer pixels than stride × height"));
@@ -447,7 +496,12 @@ pub struct HudReader<R: ShmRegion> {
 
 impl<R: ShmRegion> HudReader<R> {
     pub fn new(region: R) -> Result<Self, Error> {
-        let info = read_hud_header(&region)?;
+        Self::with_limits(region, &HUD_LIMITS)
+    }
+
+    /// Reads an image file of other limits (`panel.image`).
+    pub fn with_limits(region: R, limits: &ImageLimits) -> Result<Self, Error> {
+        let info = read_image_header(&region, limits)?;
         Ok(HudReader { region, info, last: 0 })
     }
 
@@ -491,15 +545,23 @@ impl<R: ShmRegion> HudReader<R> {
     /// `stride × height` bytes; size it to the buffer capacity to be safe) and validates it
     /// against the swapchain extent the layer will draw on.
     pub fn poll(&mut self, swapchain_extent: (u32, u32), dst: &mut [u8]) -> HudPoll {
+        self.poll_since(swapchain_extent, dst, 0).0
+    }
+
+    /// [`HudReader::poll`] for a reader whose texture holds publish `have` (0: nothing): when
+    /// the new image says only some rows changed since then ([`HudBufferHeader::dirty_rows`]),
+    /// only those rows are copied into `dst` (at their place in the image's layout; the rest
+    /// of `dst` is left alone) and returned.
+    pub fn poll_since(&mut self, swapchain_extent: (u32, u32), dst: &mut [u8], have: u64) -> (HudPoll, Option<(u32, u32)>) {
         let p = self.published();
         if p == self.last {
-            return HudPoll::Unchanged;
+            return (HudPoll::Unchanged, None);
         }
         let base = buffer_off(&self.info, p);
         let seq = self.region.u64_at(base);
         let s1 = seq.load(Ordering::Acquire);
         if s1 & 1 == 1 {
-            return HudPoll::Busy;
+            return (HudPoll::Busy, None);
         }
         let mut w = [0u64; DESC_WORDS];
         for (k, word) in w.iter_mut().enumerate().skip(1) {
@@ -509,32 +571,37 @@ impl<R: ShmRegion> HudReader<R> {
         // Check that the descriptor is one writer's before trusting its sizes.
         fence(Ordering::Acquire);
         if seq.load(Ordering::Relaxed) != s1 {
-            return HudPoll::Torn;
+            return (HudPoll::Torn, None);
         }
-        if let Err(e) = desc.validate(self.info.buffer_bytes, Some(swapchain_extent)) {
+        if let Err(e) = desc.validate_within(&self.info.limits, self.info.buffer_bytes, Some(swapchain_extent)) {
             self.last = p;
-            return HudPoll::Invalid(e);
+            return (HudPoll::Invalid(e), None);
         }
         let len = desc.pixel_bytes();
         if dst.len() < len {
             self.last = p;
-            return HudPoll::Invalid(Error::TooSmall { need: len, have: dst.len() });
+            return (HudPoll::Invalid(Error::TooSmall { need: len, have: dst.len() }), None);
         }
         let px = base + HUD_PIXELS_OFFSET;
-        let (whole, rest) = dst[..len].split_at_mut(len / 8 * 8);
-        for (k, c) in whole.chunks_exact_mut(8).enumerate() {
-            c.copy_from_slice(&self.region.u64_at(px + 8 * k).load(Ordering::Relaxed).to_le_bytes());
-        }
-        if !rest.is_empty() {
-            let wd = self.region.u64_at(px + len / 8 * 8).load(Ordering::Relaxed).to_le_bytes();
-            rest.copy_from_slice(&wd[..rest.len()]);
+        let rows = desc.dirty_rows(have);
+        // Byte ranges of whole rows; the first and last word may hold a neighbouring row's
+        // bytes too (copied as well: the same image).
+        let (from, to) = match rows {
+            Some((y0, y1)) => (y0 as usize * desc.stride as usize, y1 as usize * desc.stride as usize),
+            None => (0, len),
+        };
+        for k in from / 8..to.div_ceil(8) {
+            let b = self.region.u64_at(px + 8 * k).load(Ordering::Relaxed).to_le_bytes();
+            let at = 8 * k;
+            let n = (len - at).min(8);
+            dst[at..at + n].copy_from_slice(&b[..n]);
         }
         fence(Ordering::Acquire);
         if seq.load(Ordering::Relaxed) != s1 {
-            return HudPoll::Torn;
+            return (HudPoll::Torn, None);
         }
         self.last = p;
-        HudPoll::Image { published: p, desc }
+        (HudPoll::Image { published: p, desc }, rows)
     }
 
     /// Forget the last image taken, so the next poll takes the current one again (after a
@@ -671,7 +738,7 @@ mod tests {
         w.publish(&desc(64, 64, 2), &pixels(&desc(64, 64, 2))).unwrap();
         assert!(matches!(r.poll((2560, 1600), &mut dst), HudPoll::Image { published: 2, .. }));
         // A front buffer left odd reads as busy.
-        let seq = mem.u64_at(buffer_off(&HudInfo { buffer_bytes: bb }, 3));
+        let seq = mem.u64_at(buffer_off(&HudInfo { buffer_bytes: bb, limits: HUD_LIMITS }, 3));
         w.publish(&desc(64, 64, 3), &pixels(&desc(64, 64, 3))).unwrap();
         seq.fetch_add(1, Ordering::Relaxed);
         assert_eq!(r.poll((2560, 1600), &mut dst), HudPoll::Busy);
