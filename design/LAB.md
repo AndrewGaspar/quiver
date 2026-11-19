@@ -725,7 +725,9 @@ ticks, with 4847 reads by Unity's other threads while held; `step 12` -> frame 9
 pixel-identical to gamescope's shot of it; a click while held did nothing until the steps,
 then the title screen reacted; `step 500 --no-wait` then `pause` stopped at 9698; `step 5
 --auto-resume 2` held at 9703 and ran free 2 s later; every frame's QPC step in the census was
-160000 ticks; leaked 0.
+160000 ticks; leaked 0. A second run, `launch` then `clock pause` at once: held at frame 1
+(2.3 s after the launch), `step 300` -> frame 301, +4.800000 s, its SDR and `--hdr` shots
+pixel-identical, no escape in the run (the free-running first run had one, in its loading).
 
 ## 9. First live run (for the main session)
 
