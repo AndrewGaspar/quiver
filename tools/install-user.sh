@@ -5,6 +5,10 @@
 #                                             quiver-webview: the Epic sign-in window, needs webkit2gtk-4.1 at run time)
 #   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
+#   ~/.local/lib/quiver/skills/quiver/SKILL.md, linked as `quiver` into each agent skills
+#                                             directory that exists (~/.claude/skills,
+#                                             ~/.agents/skills, ~/.codex/skills); a `quiver`
+#                                             entry there that isn't our link is left alone
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg
@@ -222,11 +226,38 @@ else:
 PY
 }
 
+# The agent skill: a `quiver` link in each agent skills directory that exists, pointing at the
+# installed copy (so it always matches the installed CLI). Never replaces someone else's entry.
+skill_dirs=("$HOME/.claude/skills" "$HOME/.agents/skills" "$HOME/.codex/skills")
+link_skill() {
+    local target=$libdir/skills/quiver d
+    [[ -f $target/SKILL.md ]] || return 0
+    for d in "${skill_dirs[@]}"; do
+        [[ -d $d ]] || continue
+        if [[ -L $d/quiver ]]; then
+            [[ $(readlink "$d/quiver") == "$target" ]] && continue
+            echo "Note: $d/quiver links elsewhere ($(readlink "$d/quiver")); left alone."
+        elif [[ -e $d/quiver ]]; then
+            echo "Note: $d/quiver isn't Quiver's link; left alone."
+        else
+            ln -s "$target" "$d/quiver" && echo "  linked agent skill $d/quiver"
+        fi
+    done
+}
+unlink_skill() {
+    local d
+    for d in "${skill_dirs[@]}"; do
+        [[ -L $d/quiver && $(readlink "$d/quiver") == "$libdir/skills/quiver" ]] && rm -f "$d/quiver"
+    done
+    return 0
+}
+
 # Directories that are ours alone, removed once empty.
 owned_roots="$libdir:$docdir:$HOME/.local/state/quiver"
 
 if ((uninstall)); then
     manage uninstall "$manifest" "$owned_roots"
+    unlink_skill
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$datadir/applications" >/dev/null 2>&1 || true
     fi
@@ -280,6 +311,7 @@ SIGHT_LAYER_I686=$sight_i686 \
 BINDIR=$bindir LIBDIR=$libdir DATADIR=$datadir UNITDIR=$unitdir LICENSEDIR=$docdir \
     EXEC_START='%h/.local/bin/quiverd' "$repo/packaging/layout.sh" "$CARGO_TARGET_DIR" "$stage"
 QUIVER_CHANGED_OUT=$changed_out manage install "$stage" "$manifest" "$bindir" "$owned_roots" "$version" "$commit" "$repo"
+link_skill
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$datadir/applications" >/dev/null 2>&1 || true

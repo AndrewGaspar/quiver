@@ -9,6 +9,7 @@
 #   BINDIR      quiver, quiverd, quiver-app, quiver-sight, quiver-webview, ubi (the CLI's old name)  (/usr/bin)
 #   LIBDIR      quiver-bridge.exe, ubi-bridge.exe (a link to it, the old name),
 #               sight/<arch>/libquiver_sight_layer.so         (/usr/lib/quiver)
+#               skills/quiver/SKILL.md (the agent skill: how agents use Quiver)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer (built for i686-unknown-linux-gnu)
@@ -68,6 +69,10 @@ sed -e "s|^Exec=.*|Exec=$BINDIR/quiver-app|" -e "s|^Icon=.*|Icon=quiver|" \
     "$src/contrib/quiver.desktop" >"$root$DATADIR/applications/quiver.desktop"
 chmod 644 "$root$DATADIR/applications/quiver.desktop"
 install -Dm644 "$src/contrib/quiver.svg" "$root$DATADIR/icons/hicolor/scalable/apps/quiver.svg"
+
+# The agent skill (Claude Code / Codex / ~/.agents): matches this build's CLI. A package can
+# link $LIBDIR/skills/quiver into a skills directory; tools/install-user.sh does it per user.
+install -Dm644 "$src/contrib/skills/quiver/SKILL.md" "$root$LIBDIR/skills/quiver/SKILL.md"
 
 install -d "$root$UNITDIR"
 sed -e "s|^ExecStart=.*|ExecStart=$EXEC_START|" \
