@@ -1,6 +1,7 @@
 //! The screens before the library: connecting, "can't reach quiverd", and sign-in (email and
 //! password, then the two-step code), which also adds another account to a running app.
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, Focusable, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
 use super::global::{CancelSignin, NextField, SubmitSignin};
@@ -328,6 +329,8 @@ impl Quiver {
             .px(px(card_px))
             .py(px(28.))
             .rounded(px(14.))
+            // Stereo: the form is the page, raised two steps over the art behind it.
+            .depth_raised()
             .bg(th.ink2.opacity(0.96))
             .border_1()
             .border_color(th.line1)
@@ -358,6 +361,7 @@ impl Quiver {
                         .items_center()
                         .gap(px(10.))
                         .w(px(card_w))
+                        .depth_surface()
                         .px(px(14.))
                         .py(px(10.))
                         .rounded(px(10.))
@@ -377,6 +381,7 @@ impl Quiver {
                         .items_center()
                         .gap(px(10.))
                         .w(px(card_w))
+                        .depth_surface()
                         .px(px(14.))
                         .py(px(10.))
                         .rounded(px(10.))

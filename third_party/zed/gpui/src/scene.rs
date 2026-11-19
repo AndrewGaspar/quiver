@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Path,
     PathTiles, Pixels, Point, Radians, ScaledPixels, Size, TimedTransformation,
-    bounds_tree::BoundsTree,
+    bounds_tree::BoundsTree, clamp_eye_shift,
 };
 use smallvec::SmallVec;
 use std::{
@@ -61,11 +61,63 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     animations: Vec<SpriteAnimation>,
-    /// Quiver: each paint operation's stereo depth ([`Scene::set_stereo_depth`]), index-aligned
-    /// with `paint_operations`. Unread unless the window packs a stereo frame.
-    paint_depths: Vec<f32>,
-    /// Quiver: the depth primitives inserted now are tagged with.
-    current_depth: f32,
+    /// Quiver: each paint operation's stereo scope (an index into `stereo_scopes`),
+    /// index-aligned with `paint_operations`. Unread unless the window packs a stereo frame.
+    paint_scopes: Vec<u32>,
+    /// Quiver: each primitive's stereo scope, index-aligned with its kind's vector.
+    primitive_scopes: PrimitiveScopes,
+    /// Quiver: this frame's depth scopes ([`Scene::push_stereo_scope`]); 0 is the plane.
+    stereo_scopes: Vec<StereoScope>,
+    /// Quiver: the scope primitives inserted now belong to.
+    current_scope: u32,
+    /// Quiver: how far (device px) primitives may move sideways when packed. Draw orders are
+    /// worked out as if each primitive were that much wider on both sides, so two that only
+    /// overlap once moved still draw in paint order.
+    order_slack: f32,
+    /// Quiver: in a packed scene, each source scope's shifts ([`Scene::packed_scope_shifts`]).
+    packed_shifts: Vec<[f32; 2]>,
+}
+
+/// Quiver: a run of paint operations at one stereo depth: an element and what it paints,
+/// up to its children that have depths of their own ([`Scene::push_stereo_scope`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StereoScope {
+    /// HypXRland's unitless rung, 0 = the window's plane.
+    pub depth: f32,
+    /// The element's bounds (device pixels), for keeping its shift inside the eye's edges;
+    /// `None` isn't clamped.
+    pub bounds: Option<Bounds<ScaledPixels>>,
+}
+
+const ROOT_SCOPE: StereoScope = StereoScope {
+    depth: 0.0,
+    bounds: None,
+};
+
+/// Quiver: the stereo scope of every primitive, by kind.
+#[derive(Default)]
+struct PrimitiveScopes {
+    shadows: Vec<u32>,
+    quads: Vec<u32>,
+    paths: Vec<u32>,
+    underlines: Vec<u32>,
+    monochrome_sprites: Vec<u32>,
+    subpixel_sprites: Vec<u32>,
+    polychrome_sprites: Vec<u32>,
+    surfaces: Vec<u32>,
+}
+
+impl PrimitiveScopes {
+    fn clear(&mut self) {
+        self.shadows.clear();
+        self.quads.clear();
+        self.paths.clear();
+        self.underlines.clear();
+        self.monochrome_sprites.clear();
+        self.subpixel_sprites.clear();
+        self.polychrome_sprites.clear();
+        self.surfaces.clear();
+    }
 }
 
 #[expect(missing_docs)]
@@ -84,20 +136,66 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.animations.clear();
-        self.paint_depths.clear();
-        self.current_depth = 0.0;
+        self.paint_scopes.clear();
+        self.primitive_scopes.clear();
+        self.stereo_scopes.clear();
+        self.current_scope = 0;
     }
 
-    /// Quiver: tags the primitives inserted from now on with a stereo `depth` (HypXRland's
-    /// unitless rung, 0 = the window's plane) and returns the previous one. Only
+    fn stereo_scope(&self, index: u32) -> StereoScope {
+        self.stereo_scopes
+            .get(index as usize)
+            .copied()
+            .unwrap_or(ROOT_SCOPE)
+    }
+
+    /// Quiver: the primitives inserted from now on are at a stereo `depth` (HypXRland's
+    /// unitless rung, 0 = the window's plane), kept inside the eye's edges as `bounds` (device
+    /// pixels) is. Returns the previous scope, for [`Scene::pop_stereo_scope`]. Only
     /// [`Scene::pack_side_by_side`] reads it.
+    pub fn push_stereo_scope(
+        &mut self,
+        depth: f32,
+        bounds: Option<Bounds<ScaledPixels>>,
+    ) -> u32 {
+        if self.stereo_scopes.is_empty() {
+            self.stereo_scopes.push(ROOT_SCOPE);
+        }
+        let index = self.stereo_scopes.len() as u32;
+        self.stereo_scopes.push(StereoScope { depth, bounds });
+        std::mem::replace(&mut self.current_scope, index)
+    }
+
+    /// Quiver: back to the scope [`Scene::push_stereo_scope`] returned.
+    pub fn pop_stereo_scope(&mut self, previous: u32) {
+        self.current_scope = previous;
+    }
+
+    /// Quiver: primitives from now on are at `depth`, unclamped; returns the previous depth.
     pub fn set_stereo_depth(&mut self, depth: f32) -> f32 {
-        std::mem::replace(&mut self.current_depth, depth)
+        let previous = self.stereo_depth();
+        self.push_stereo_scope(depth, None);
+        previous
     }
 
     /// Quiver: the stereo depth primitives are being tagged with.
     pub fn stereo_depth(&self) -> f32 {
-        self.current_depth
+        self.stereo_scope(self.current_scope).depth
+    }
+
+    /// Quiver: the number of depth scopes so far this frame.
+    pub fn stereo_scope_count(&self) -> usize {
+        self.stereo_scopes.len()
+    }
+
+    /// Quiver: this frame's depth scopes, by index (0 is the window's plane).
+    pub fn stereo_scopes(&self) -> &[StereoScope] {
+        &self.stereo_scopes
+    }
+
+    /// Quiver: see `order_slack`. Zero (the default) leaves draw orders as upstream has them.
+    pub fn set_stereo_order_slack(&mut self, device_px: f32) {
+        self.order_slack = device_px.max(0.0);
     }
 
     /// Inserts a sprite that [`Self::advance_animations`] keeps moving. The
@@ -155,7 +253,7 @@ impl Scene {
             max_shared_kind: PrimitiveKind::Surface,
         });
         self.paint_operations.push(PaintOperation::StartLayer);
-        self.paint_depths.push(self.current_depth);
+        self.paint_scopes.push(self.current_scope);
     }
 
     pub fn pop_layer(&mut self) {
@@ -166,7 +264,7 @@ impl Scene {
             }
         }
         self.paint_operations.push(PaintOperation::EndLayer);
-        self.paint_depths.push(self.current_depth);
+        self.paint_scopes.push(self.current_scope);
     }
 
     fn insert_layer(&mut self, layer: Layer) {
@@ -179,7 +277,8 @@ impl Scene {
         for index in layer.primitives.into_iter().flatten() {
             if let PaintOperation::Primitive(primitive) = &self.paint_operations[index] {
                 let primitive = primitive.clone();
-                self.push_primitive(primitive, order);
+                let scope = self.paint_scopes.get(index).copied().unwrap_or(0);
+                self.push_primitive(primitive, order, scope);
             }
         }
     }
@@ -196,6 +295,21 @@ impl Scene {
         }
 
         let kind = primitive.kind();
+        // Quiver: while packing, as wide as the primitive may move (see `order_slack`).
+        let clipped_bounds = if self.order_slack > 0.0 {
+            Bounds {
+                origin: Point {
+                    x: ScaledPixels(clipped_bounds.origin.x.0 - self.order_slack),
+                    y: clipped_bounds.origin.y,
+                },
+                size: Size {
+                    width: ScaledPixels(clipped_bounds.size.width.0 + 2.0 * self.order_slack),
+                    height: clipped_bounds.size.height,
+                },
+            }
+        } else {
+            clipped_bounds
+        };
         if let Some(&layer) = self.layer_stack.last()
             && let Some(layer) = self.layers.get_mut(layer)
         {
@@ -211,49 +325,77 @@ impl Scene {
             let order = self
                 .primitive_bounds
                 .insert(clipped_bounds, kind, kind.max_shared_kind());
-            self.push_primitive(primitive.clone(), order);
+            self.push_primitive(primitive.clone(), order, self.current_scope);
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
-        self.paint_depths.push(self.current_depth);
+        self.paint_scopes.push(self.current_scope);
         true
     }
 
-    fn push_primitive(&mut self, primitive: Primitive, order: DrawOrder) {
+    fn push_primitive(&mut self, primitive: Primitive, order: DrawOrder, scope: u32) {
+        let scopes = &mut self.primitive_scopes;
         match primitive {
-            Primitive::Shadow(shadow) => self.shadows.push(Shadow { order, ..shadow }),
-            Primitive::Quad(quad) => self.quads.push(Quad { order, ..quad }),
+            Primitive::Shadow(shadow) => {
+                self.shadows.push(Shadow { order, ..shadow });
+                scopes.shadows.push(scope);
+            }
+            Primitive::Quad(quad) => {
+                self.quads.push(Quad { order, ..quad });
+                scopes.quads.push(scope);
+            }
             Primitive::Path(mut path) => {
                 path.order = order;
                 self.paths.push(path);
+                scopes.paths.push(scope);
             }
             Primitive::Underline(underline) => {
-                self.underlines.push(Underline { order, ..underline })
+                self.underlines.push(Underline { order, ..underline });
+                scopes.underlines.push(scope);
             }
-            Primitive::MonochromeSprite(sprite) => self
-                .monochrome_sprites
-                .push(MonochromeSprite { order, ..sprite }),
-            Primitive::SubpixelSprite(sprite) => self
-                .subpixel_sprites
-                .push(SubpixelSprite { order, ..sprite }),
-            Primitive::PolychromeSprite(sprite) => self
-                .polychrome_sprites
-                .push(PolychromeSprite { order, ..sprite }),
+            Primitive::MonochromeSprite(sprite) => {
+                self.monochrome_sprites
+                    .push(MonochromeSprite { order, ..sprite });
+                scopes.monochrome_sprites.push(scope);
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                self.subpixel_sprites
+                    .push(SubpixelSprite { order, ..sprite });
+                scopes.subpixel_sprites.push(scope);
+            }
+            Primitive::PolychromeSprite(sprite) => {
+                self.polychrome_sprites
+                    .push(PolychromeSprite { order, ..sprite });
+                scopes.polychrome_sprites.push(scope);
+            }
             Primitive::Surface(mut surface) => {
                 surface.order = order;
                 self.surfaces.push(surface);
+                scopes.surfaces.push(scope);
             }
         }
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
-        let outer_depth = self.current_depth;
-        for (operation, &depth) in prev_scene.paint_operations[range.clone()]
+        let outer_scope = self.current_scope;
+        // Quiver: a cached view keeps the depths it was painted at: its scopes are copied
+        // into this scene once each.
+        let mut copied: SmallVec<[(u32, u32); 16]> = SmallVec::new();
+        for (operation, &scope) in prev_scene.paint_operations[range.clone()]
             .iter()
-            .zip(&prev_scene.paint_depths[range])
+            .zip(&prev_scene.paint_scopes[range])
         {
-            // A cached view keeps the depths it was painted at.
-            self.current_depth = depth;
+            self.current_scope = if scope == 0 {
+                outer_scope
+            } else if let Some((_, new)) = copied.iter().find(|(old, _)| *old == scope) {
+                *new
+            } else {
+                let s = prev_scene.stereo_scope(scope);
+                self.push_stereo_scope(s.depth, s.bounds);
+                let new = self.current_scope;
+                copied.push((scope, new));
+                new
+            };
             match operation {
                 PaintOperation::Primitive(primitive) => {
                     // Animation ids index the scene they were inserted into.
@@ -270,91 +412,246 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
-        self.current_depth = outer_depth;
+        self.current_scope = outer_scope;
     }
 
     /// Quiver: this (finished) scene drawn twice, side by side, into a frame two eyes wide:
     /// HypXRland's `stereo:sbs` packing (the left eye is the left half). `eye` is one eye's
     /// size in device pixels; `shift(depth)` gives each eye's horizontal offset for primitives
     /// at `depth`, in device pixels (`[left, right]`; crossed disparity, in front of the
-    /// screen, is the left eye's content moving right and the right eye's moving left). Each
-    /// primitive's content mask moves with it and is clipped to its eye, so nothing crosses
-    /// the seam. Animated sprites are drawn at their current pose.
+    /// screen, is the left eye's content moving right and the right eye's moving left).
+    ///
+    /// The frame's edges (HypXRland's `depth_edge_slack` rule): each depth scope's shift is
+    /// limited by the margin between what the scope paints and the eye's edge it moves toward
+    /// ([`clamp_eye_shift`], with `edge_slack` device px of slack), so nothing slides off one
+    /// eye only. A primitive spanning the eye's whole width (a scrim, a bar's background)
+    /// can't move without uncovering a strip at one edge, so it stays put, and doesn't hold
+    /// the rest of its scope back either. Each primitive's content mask moves with it and is
+    /// clipped to its eye, so nothing crosses the seam.
+    ///
+    /// Both eyes' copies keep the primitive's draw order (they never overlap), so the packed
+    /// scene is built straight from the sorted primitives, without working out orders again;
+    /// the window widens primitives by the largest shift while ordering them
+    /// ([`Scene::set_stereo_order_slack`]) so moved neighbours still draw in paint order.
+    /// Animated sprites keep animating ([`Scene::advance_animations`]) in both eyes.
     pub fn pack_side_by_side(
         &self,
         eye: Size<ScaledPixels>,
         shift: &dyn Fn(f32) -> [f32; 2],
+        edge_slack: f32,
     ) -> Scene {
-        let mut out = Scene::default();
-        let mut shifts: SmallVec<[(f32, [f32; 2]); 8]> = SmallVec::new();
-        for index in 0..2 {
-            let eye_rect = Bounds {
-                origin: Point {
-                    x: ScaledPixels(eye.width.0 * index as f32),
-                    y: ScaledPixels(0.0),
-                },
-                size: eye,
+        let scope_count = self.stereo_scopes.len().max(1);
+        let scopes = &self.primitive_scopes;
+        // A primitive covering the eye from edge to edge stays put.
+        let spans = |b: &Bounds<ScaledPixels>| {
+            b.origin.x.0 <= 0.5 && b.origin.x.0 + b.size.width.0 >= eye.width.0 - 0.5
+        };
+        // What each scope paints, horizontally: [left, right] in device px.
+        let mut extent: Vec<[f32; 2]> = vec![[f32::MAX, f32::MIN]; scope_count];
+        let mut grow = |scope: u32, b: Bounds<ScaledPixels>| {
+            if b.size.width.0 <= 0.0 || b.size.height.0 <= 0.0 || spans(&b) {
+                return;
+            }
+            if let Some(e) = extent.get_mut(scope as usize) {
+                e[0] = e[0].min(b.origin.x.0);
+                e[1] = e[1].max(b.origin.x.0 + b.size.width.0);
+            }
+        };
+        macro_rules! extents {
+            ($kind:ident, $clipped:expr) => {
+                for (index, primitive) in self.$kind.iter().enumerate() {
+                    grow(
+                        scopes.$kind.get(index).copied().unwrap_or(0),
+                        $clipped(primitive),
+                    );
+                }
             };
-            for (operation, &depth) in self.paint_operations.iter().zip(&self.paint_depths) {
-                match operation {
-                    PaintOperation::StartLayer => out.push_layer(),
-                    PaintOperation::EndLayer => out.pop_layer(),
-                    PaintOperation::Primitive(primitive) => {
-                        let per_eye = match shifts.iter().find(|(d, _)| *d == depth) {
-                            Some((_, s)) => *s,
-                            None => {
-                                let s = shift(depth);
-                                shifts.push((depth, s));
-                                s
-                            }
-                        };
-                        let dx = eye_rect.origin.x.0 + per_eye[index];
-                        let primitive = match primitive {
-                            Primitive::MonochromeSprite(sprite)
-                                if sprite.animation != SpriteAnimationId::NONE =>
-                            {
-                                let mut current = *sprite;
-                                if let Some(now) = self
-                                    .animations
-                                    .get(sprite.animation.0 as usize)
-                                    .and_then(|a| self.monochrome_sprites.get(a.sprite_index))
-                                {
-                                    current.transformation = now.transformation;
-                                    current.color = now.color;
-                                }
-                                current.animation = SpriteAnimationId::NONE;
-                                Primitive::MonochromeSprite(current)
-                            }
-                            other => other.clone(),
-                        };
-                        out.current_depth = depth;
-                        out.insert_primitive(primitive.translated(dx, &eye_rect));
+        }
+        extents!(shadows, |p: &Shadow| p.bounds.intersect(&p.content_mask.bounds));
+        extents!(quads, |p: &Quad| p.bounds.intersect(&p.content_mask.bounds));
+        extents!(paths, |p: &PaintedPath| p
+            .bounds
+            .intersect(&p.paint.content_mask.bounds));
+        extents!(underlines, |p: &Underline| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+        extents!(monochrome_sprites, |p: &MonochromeSprite| p
+            .transformation
+            .transform_bounds(p.bounds)
+            .intersect(&p.content_mask.bounds));
+        extents!(subpixel_sprites, |p: &SubpixelSprite| p
+            .transformation
+            .transform_bounds(p.bounds)
+            .intersect(&p.content_mask.bounds));
+        extents!(polychrome_sprites, |p: &PolychromeSprite| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+        extents!(surfaces, |p: &PaintSurface| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+
+        // Each scope's two shifts, held inside the eye's edges.
+        let mut memo: SmallVec<[(f32, [f32; 2]); 8]> = SmallVec::new();
+        let mut shifts: Vec<[f32; 2]> = Vec::with_capacity(scope_count);
+        for (index, e) in extent.iter().enumerate() {
+            let scope = self.stereo_scope(index as u32);
+            if scope.depth <= 0.0 || e[0] > e[1] {
+                shifts.push([0.0, 0.0]);
+                continue;
+            }
+            let s = match memo.iter().find(|(d, _)| *d == scope.depth) {
+                Some((_, s)) => *s,
+                None => {
+                    let s = shift(scope.depth);
+                    memo.push((scope.depth, s));
+                    s
+                }
+            };
+            let (left, right) = (e[0], eye.width.0 - e[1]);
+            shifts.push([
+                clamp_eye_shift(s[0], left, right, edge_slack),
+                clamp_eye_shift(s[1], left, right, edge_slack),
+            ]);
+        }
+        let eyes = [0.0f32, 1.0].map(|i| Bounds {
+            origin: Point {
+                x: ScaledPixels(eye.width.0 * i),
+                y: ScaledPixels(0.0),
+            },
+            size: eye,
+        });
+        let dx = |scope: u32, e: usize, pinned: bool| {
+            let own = if pinned {
+                0.0
+            } else {
+                shifts.get(scope as usize).map_or(0.0, |s| s[e])
+            };
+            eyes[e].origin.x.0 + own
+        };
+
+        let mut out = Scene::default();
+        macro_rules! pack {
+            ($kind:ident, $clipped:expr) => {
+                out.$kind.reserve(self.$kind.len() * 2);
+                for (index, primitive) in self.$kind.iter().enumerate() {
+                    let scope = scopes.$kind.get(index).copied().unwrap_or(0);
+                    let pinned = spans(&$clipped(primitive));
+                    for e in 0..2 {
+                        out.$kind
+                            .push(primitive.translated(dx(scope, e, pinned), &eyes[e]));
                     }
                 }
+            };
+        }
+        pack!(shadows, |p: &Shadow| p.bounds.intersect(&p.content_mask.bounds));
+        pack!(quads, |p: &Quad| p.bounds.intersect(&p.content_mask.bounds));
+        pack!(paths, |p: &PaintedPath| p
+            .bounds
+            .intersect(&p.paint.content_mask.bounds));
+        pack!(underlines, |p: &Underline| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+        pack!(subpixel_sprites, |p: &SubpixelSprite| p
+            .transformation
+            .transform_bounds(p.bounds)
+            .intersect(&p.content_mask.bounds));
+        pack!(polychrome_sprites, |p: &PolychromeSprite| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+        pack!(surfaces, |p: &PaintSurface| p
+            .bounds
+            .intersect(&p.content_mask.bounds));
+        out.monochrome_sprites
+            .reserve(self.monochrome_sprites.len() * 2);
+        for (index, sprite) in self.monochrome_sprites.iter().enumerate() {
+            let scope = scopes.monochrome_sprites.get(index).copied().unwrap_or(0);
+            let pinned = spans(
+                &sprite
+                    .transformation
+                    .transform_bounds(sprite.bounds)
+                    .intersect(&sprite.content_mask.bounds),
+            );
+            for e in 0..2 {
+                let dx = dx(scope, e, pinned);
+                let mut copy = sprite.translated(dx, &eyes[e]);
+                if let Some(animation) = self.animations.get(sprite.animation.0 as usize) {
+                    // The eye's copy animates about its own, moved, centre.
+                    let mut animation = *animation;
+                    animation.sprite_index = out.monochrome_sprites.len();
+                    animation.center.x += Pixels(dx / animation.scale_factor.max(f32::EPSILON));
+                    copy.animation = SpriteAnimationId(out.animations.len() as u32);
+                    out.animations.push(animation);
+                } else {
+                    copy.animation = SpriteAnimationId::NONE;
+                }
+                out.monochrome_sprites.push(copy);
             }
         }
-        out.current_depth = 0.0;
-        out.finish();
+        out.packed_shifts = shifts;
         out
+    }
+
+    /// Quiver: in a packed scene, each depth scope's `[left, right]` shift as packed (after
+    /// the edge clamp), by scope index of the scene it was packed from.
+    pub fn packed_scope_shifts(&self) -> &[[f32; 2]] {
+        &self.packed_shifts
+    }
+
+    /// Quiver: how many primitives the scene has, of every kind.
+    pub fn primitive_count(&self) -> usize {
+        self.shadows.len()
+            + self.quads.len()
+            + self.paths.len()
+            + self.underlines.len()
+            + self.monochrome_sprites.len()
+            + self.subpixel_sprites.len()
+            + self.polychrome_sprites.len()
+            + self.surfaces.len()
+    }
+
+    /// Quiver: the stereo depth of each quad, in [`Scene::quads`]' order (tests, evidence).
+    pub fn quad_stereo_depths(&self) -> Vec<f32> {
+        self.primitive_scopes
+            .quads
+            .iter()
+            .map(|&s| self.stereo_scope(s).depth)
+            .collect()
     }
 
     pub fn finish(&mut self) {
         debug_assert!(self.layer_stack.is_empty(), "unbalanced scene layers");
         let keys = &mut Vec::new();
-        sort_in_place(&mut self.shadows, keys, |shadow| (shadow.order, 0));
-        sort_in_place(&mut self.quads, keys, |quad| (quad.order, 0));
-        self.paths.sort_by_key(|path| path.order);
-        sort_in_place(&mut self.underlines, keys, |underline| (underline.order, 0));
-        sort_in_place(&mut self.monochrome_sprites, keys, |sprite| {
-            (sprite.order, sprite.tile.texture_id.index)
+        // Quiver: each kind's stereo scopes move with its primitives.
+        let scopes = &mut self.primitive_scopes;
+        sort_in_place(&mut self.shadows, &mut scopes.shadows, keys, |shadow| {
+            (shadow.order, 0)
         });
-        sort_in_place(&mut self.subpixel_sprites, keys, |sprite| {
-            (sprite.order, sprite.tile.texture_id.index)
+        sort_in_place(&mut self.quads, &mut scopes.quads, keys, |quad| (quad.order, 0));
+        sort_by_order(&mut self.paths, &mut scopes.paths, |path| path.order);
+        sort_in_place(&mut self.underlines, &mut scopes.underlines, keys, |underline| {
+            (underline.order, 0)
         });
-        sort_in_place(&mut self.polychrome_sprites, keys, |sprite| {
-            (sprite.order, sprite.tile.texture_id.index)
+        sort_in_place(
+            &mut self.monochrome_sprites,
+            &mut scopes.monochrome_sprites,
+            keys,
+            |sprite| (sprite.order, sprite.tile.texture_id.index),
+        );
+        sort_in_place(
+            &mut self.subpixel_sprites,
+            &mut scopes.subpixel_sprites,
+            keys,
+            |sprite| (sprite.order, sprite.tile.texture_id.index),
+        );
+        sort_in_place(
+            &mut self.polychrome_sprites,
+            &mut scopes.polychrome_sprites,
+            keys,
+            |sprite| (sprite.order, sprite.tile.texture_id.index),
+        );
+        sort_by_order(&mut self.surfaces, &mut scopes.surfaces, |surface| {
+            surface.order
         });
-        self.surfaces.sort_by_key(|surface| surface.order);
 
         // Sorting moved the sprites, so animations learn where theirs ended up.
         if !self.animations.is_empty() {
@@ -401,12 +698,16 @@ impl Scene {
 /// does, because the index is part of what is sorted.
 fn sort_in_place<T: Copy>(
     primitives: &mut [T],
+    // Quiver: the primitives' stereo scopes, moved with them.
+    scopes: &mut [u32],
     keys: &mut Vec<(u64, u32)>,
     key: impl Fn(&T) -> (u32, u32),
 ) {
+    debug_assert_eq!(primitives.len(), scopes.len());
     if primitives.is_sorted_by_key(&key) {
         return;
     }
+    let with_scopes = scopes.len() == primitives.len();
     keys.clear();
     keys.extend(primitives.iter().enumerate().map(|(index, primitive)| {
         let (major, minor) = key(primitive);
@@ -421,16 +722,44 @@ fn sort_in_place<T: Copy>(
             continue;
         }
         let displaced = primitives[start];
+        let displaced_scope = if with_scopes { scopes[start] } else { 0 };
         let mut target = start;
         loop {
             let source = keys[target].1 as usize;
             keys[target].1 = target as u32;
             if source == start {
                 primitives[target] = displaced;
+                if with_scopes {
+                    scopes[target] = displaced_scope;
+                }
                 break;
             }
             primitives[target] = primitives[source];
+            if with_scopes {
+                scopes[target] = scopes[source];
+            }
             target = source;
+        }
+    }
+}
+
+/// Quiver: a stable sort of non-`Copy` primitives (paths, surfaces) by draw order, their
+/// stereo scopes moved with them.
+fn sort_by_order<T>(primitives: &mut Vec<T>, scopes: &mut Vec<u32>, order: impl Fn(&T) -> u32) {
+    if primitives.is_sorted_by_key(&order) {
+        return;
+    }
+    let mut indices: Vec<usize> = (0..primitives.len()).collect();
+    indices.sort_by_key(|&i| order(&primitives[i]));
+    let mut taken: Vec<Option<T>> = primitives.drain(..).map(Some).collect();
+    let with_scopes = scopes.len() == taken.len();
+    let old_scopes = std::mem::take(scopes);
+    for i in indices {
+        if let Some(p) = taken[i].take() {
+            primitives.push(p);
+        }
+        if with_scopes {
+            scopes.push(old_scopes[i]);
         }
     }
 }
@@ -527,77 +856,6 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
-        }
-    }
-
-    /// Quiver: moved right by `dx` device pixels, its content mask moved with it and clipped
-    /// to `clip` (one eye of a packed stereo frame).
-    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Primitive {
-        fn mv(b: Bounds<ScaledPixels>, dx: f32) -> Bounds<ScaledPixels> {
-            Bounds {
-                origin: Point {
-                    x: ScaledPixels(b.origin.x.0 + dx),
-                    y: b.origin.y,
-                },
-                size: b.size,
-            }
-        }
-        let mask = |m: &ContentMask<ScaledPixels>| ContentMask {
-            bounds: mv(m.bounds, dx).intersect(clip),
-        };
-        // p' = R(p - s) + t + s: the same transform about the moved origin (row-major R, as
-        // `transform_bounds` reads it).
-        let tf = |t: TransformationMatrix| {
-            let r = t.rotation_scale;
-            TransformationMatrix {
-                rotation_scale: r,
-                translation: [
-                    t.translation[0] + dx - r[0][0] * dx,
-                    t.translation[1] - r[1][0] * dx,
-                ],
-            }
-        };
-        match self {
-            Primitive::Shadow(p) => Primitive::Shadow(Shadow {
-                bounds: mv(p.bounds, dx),
-                shape_bounds: mv(p.shape_bounds, dx),
-                content_mask: mask(&p.content_mask),
-                ..*p
-            }),
-            Primitive::Quad(p) => Primitive::Quad(Quad {
-                bounds: mv(p.bounds, dx),
-                content_mask: mask(&p.content_mask),
-                ..*p
-            }),
-            Primitive::Path(p) => Primitive::Path(p.translated(dx, clip)),
-            Primitive::Underline(p) => Primitive::Underline(Underline {
-                bounds: mv(p.bounds, dx),
-                content_mask: mask(&p.content_mask),
-                ..*p
-            }),
-            Primitive::MonochromeSprite(p) => Primitive::MonochromeSprite(MonochromeSprite {
-                bounds: mv(p.bounds, dx),
-                content_mask: mask(&p.content_mask),
-                transformation: tf(p.transformation),
-                ..*p
-            }),
-            Primitive::SubpixelSprite(p) => Primitive::SubpixelSprite(SubpixelSprite {
-                bounds: mv(p.bounds, dx),
-                content_mask: mask(&p.content_mask),
-                transformation: tf(p.transformation),
-                ..*p
-            }),
-            Primitive::PolychromeSprite(p) => Primitive::PolychromeSprite(PolychromeSprite {
-                bounds: mv(p.bounds, dx),
-                content_mask: mask(&p.content_mask),
-                ..*p
-            }),
-            Primitive::Surface(p) => {
-                let mut p = p.clone();
-                p.bounds = mv(p.bounds, dx);
-                p.content_mask = mask(&p.content_mask);
-                Primitive::Surface(p)
-            }
         }
     }
 
@@ -1453,5 +1711,114 @@ mod tests {
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         assert_eq!(batch_labels(&mut scene), ["underlines (1)", "quads (1)"]);
+    }
+}
+
+// Quiver: one eye's copy of each kind of primitive for a packed stereo frame
+// ([`Scene::pack_side_by_side`]): moved right by `dx` device pixels, its content mask moved
+// with it and clipped to `clip` (the eye).
+
+fn moved(b: Bounds<ScaledPixels>, dx: f32) -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: Point {
+            x: ScaledPixels(b.origin.x.0 + dx),
+            y: b.origin.y,
+        },
+        size: b.size,
+    }
+}
+
+fn moved_mask(
+    m: &ContentMask<ScaledPixels>,
+    dx: f32,
+    clip: &Bounds<ScaledPixels>,
+) -> ContentMask<ScaledPixels> {
+    ContentMask {
+        bounds: moved(m.bounds, dx).intersect(clip),
+    }
+}
+
+/// p' = R(p - s) + t + s: the same transform about the moved origin (row-major R, as
+/// `transform_bounds` reads it).
+fn moved_transform(t: TransformationMatrix, dx: f32) -> TransformationMatrix {
+    let r = t.rotation_scale;
+    TransformationMatrix {
+        rotation_scale: r,
+        translation: [
+            t.translation[0] + dx - r[0][0] * dx,
+            t.translation[1] - r[1][0] * dx,
+        ],
+    }
+}
+
+impl Shadow {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        Shadow {
+            bounds: moved(self.bounds, dx),
+            shape_bounds: moved(self.shape_bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            ..*self
+        }
+    }
+}
+
+impl Quad {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        Quad {
+            bounds: moved(self.bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            ..*self
+        }
+    }
+}
+
+impl Underline {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        Underline {
+            bounds: moved(self.bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            ..*self
+        }
+    }
+}
+
+impl MonochromeSprite {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        MonochromeSprite {
+            bounds: moved(self.bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            transformation: moved_transform(self.transformation, dx),
+            ..*self
+        }
+    }
+}
+
+impl SubpixelSprite {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        SubpixelSprite {
+            bounds: moved(self.bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            transformation: moved_transform(self.transformation, dx),
+            ..*self
+        }
+    }
+}
+
+impl PolychromeSprite {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        PolychromeSprite {
+            bounds: moved(self.bounds, dx),
+            content_mask: moved_mask(&self.content_mask, dx, clip),
+            ..*self
+        }
+    }
+}
+
+impl PaintSurface {
+    fn translated(&self, dx: f32, clip: &Bounds<ScaledPixels>) -> Self {
+        let mut p = self.clone();
+        p.bounds = moved(p.bounds, dx);
+        p.content_mask = moved_mask(&p.content_mask, dx, clip);
+        p
     }
 }

@@ -6,6 +6,7 @@
 //! Steam only reads launch options when it starts, so while it runs a change waits. Quiver
 //! never restarts Steam without asking: [`Quiver::ask_restart_steam`] opens the confirmation.
 
+use quiver_ui::depth::DepthExt;
 use std::collections::HashSet;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
@@ -185,6 +186,7 @@ impl Quiver {
         Some(
             div()
                 .id("steam-offer")
+                .depth_overlay()
                 .absolute()
                 .right(px(if self.bp().narrow() { 16. } else { 20. }))
                 .bottom(px(if above { 150. } else { 20. }))

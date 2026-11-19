@@ -2,6 +2,7 @@
 //! did it. Filters by source (LT / RT) and game (Y on an entry). Kept fresh by events and,
 //! while the page is open, a poll (there is no "activity appended" event yet).
 
+use quiver_ui::depth::DepthExt;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Local, Utc};
@@ -226,8 +227,9 @@ impl Quiver {
                     ))),
             );
 
-        // The list.
+        // The list: one card (a surface) of day headers and rows; the rows pop from it.
         let mut children: Vec<AnyElement> = vec![header.into_any_element()];
+        let mut list: Vec<AnyElement> = Vec::new();
         let list_items = items(&row_refs);
         let n_items = list_items.len();
         for (k, it) in list_items.into_iter().enumerate() {
@@ -246,7 +248,10 @@ impl Quiver {
                     .into_any_element(),
                 Item::Row(i) => self.render_activity_row(th, rows[i].clone(), i, last, cx),
             };
-            children.push(el);
+            list.push(el);
+        }
+        if !list.is_empty() {
+            children.push(div().depth_surface().children(list).into_any_element());
         }
         if rows.is_empty() {
             children.push(
@@ -413,6 +418,7 @@ impl Quiver {
             .gap(px(18.))
             .px(px(20.))
             .pt(px(24.))
+            .depth_surface()
             .bg(th.ink0)
             .border_color(th.line1)
             .child(
@@ -555,6 +561,7 @@ impl Quiver {
             .child(
                 div()
                     .id("gf-menu")
+                    .depth_overlay()
                     .absolute()
                     .top(px(if self.bp().narrow() { 150. } else { 108. }))
                     .left(px((28f32 + 436.).min(self.viewport.0 - 316.).max(16.)))

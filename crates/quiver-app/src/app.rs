@@ -200,7 +200,7 @@ pub struct Quiver {
     pub perf: crate::ui::perf::PerfUi,
     /// Quiver Tweaks: Settings → Tweaks and the game page's Tweaks tab.
     pub tw: crate::ui::game::tweaks::TweaksUi,
-    /// The stereo UI prototype (`stereo_ui.rs`, `QUIVER_STEREO_UI`).
+    /// The stereo UI (`stereo_ui.rs`): Settings → Display, and the window's packing.
     pub stereo: crate::stereo_ui::StereoUi,
 }
 
@@ -1073,7 +1073,7 @@ impl Quiver {
         self.toast_for(crate::err_text(e).into(), true, 7000, cx);
     }
 
-    fn toast_for(&mut self, text: SharedString, bad: bool, ms: u64, cx: &mut Context<Self>) {
+    pub(crate) fn toast_for(&mut self, text: SharedString, bad: bool, ms: u64, cx: &mut Context<Self>) {
         self.toast = Some(text);
         self.toast_bad = bad;
         self.toast_gen += 1;
@@ -1391,12 +1391,6 @@ impl Focusable for Quiver {
     }
 }
 
-/// Stereo UI (`stereo_ui.rs`): an overlay at the dialogs' depth. The wrapper covers the window
-/// like the overlays' own scrims do, so their layout is unchanged.
-fn dialog_depth(o: impl IntoElement) -> gpui::Div {
-    div().absolute().inset_0().stereo_depth(crate::stereo_ui::depth::DIALOG).child(o)
-}
-
 impl Render for Quiver {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th: Theme = theme(cx).clone();
@@ -1474,12 +1468,12 @@ impl Render for Quiver {
                 .when_some(self.render_link_banner(&th, cx), |d, b| d.child(b))
                 .child(self.render_page(&th, window, cx))
                 .when(self.mode == InputMode::Pad, |d| d.child(self.render_hintbar(&th)))
-                .when_some(self.render_overlay(&th, cx), |d, o| d.child(dialog_depth(o)))
-                .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(dialog_depth(o)))
-                .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(dialog_depth(o)))
-                .when_some(self.toast.clone(), |d, t| {
-                    d.child(dialog_depth(crate::ui::overlay::toast(&th, t, self.toast_bad)))
-                }),
+                // Overlays: each panel sits at the overlay depth (`quiver_ui::depth::OVERLAY`), its
+                // scrim on the page's plane (`stereo_ui.rs`).
+                .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
+                .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
+                .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(o))
+                .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t, self.toast_bad))),
         };
         // The top bar shows the daemon link; other screens get a notice instead.
         let notice = match self.link {

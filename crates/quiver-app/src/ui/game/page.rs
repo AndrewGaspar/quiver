@@ -2,6 +2,7 @@
 //! exports, the launch-options form, dialogs and dropdowns. Rendering lives next to this
 //! file, one module per tab.
 
+use quiver_ui::depth::DepthExt;
 use crate::model::Gid;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -2100,7 +2101,7 @@ impl Quiver {
                             this.dialog_press(0, cx);
                             cx.notify();
                         }))
-                        .child(panel),
+                        .child(panel.depth_overlay()),
                 ),
             )
             .with_priority(2)
