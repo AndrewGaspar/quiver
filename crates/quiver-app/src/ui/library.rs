@@ -2,6 +2,7 @@
 //! library is every store's games; Ubisoft is one store among them, and while no Ubisoft
 //! account is signed in the library offers its sign-in as a card.
 
+use crate::stereo_ui::depth as stereo_depth;
 use gpui::{AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, prelude::*, px, relative};
 
 use super::{
@@ -380,7 +381,7 @@ impl Quiver {
         let side_panel = !attention.is_empty() && !stacked;
         let content_w = (w - 2. * gutter - if side_panel { ATTENTION_W + 32. + 24. } else { 0. }).clamp(200., 540.);
         let art_h = if stacked { HERO_HEIGHT + 120. + 70. * attention.len() as f32 } else { HERO_HEIGHT };
-        let mut hero = div().id("hero").relative().w_full().overflow_hidden().bg(th.ink0);
+        let mut hero = div().id("hero").relative().w_full().overflow_hidden().bg(th.ink0).stereo_depth(stereo_depth::HERO);
         hero = if stacked { hero.flex().flex_col().min_h(px(HERO_HEIGHT)) } else { hero.h(px(HERO_HEIGHT)) };
         let art_layer = div().absolute().inset_0().overflow_hidden();
         hero = match &art {
@@ -723,8 +724,13 @@ impl Quiver {
             );
         }
         let meta = g.tile_meta();
+        // Stereo UI (`stereo_ui.rs`): tiles float above the hero; the focused or hovered one
+        // pops forward. Nothing changes on a mono window.
+        let tile_depth = if focused { stereo_depth::FOCUSED } else { stereo_depth::TILE };
         div()
             .id(("tile", id.ix()))
+            .stereo_depth(tile_depth)
+            .hover(|s| s.stereo_depth(stereo_depth::FOCUSED))
             .group(group)
             .flex()
             .flex_col()

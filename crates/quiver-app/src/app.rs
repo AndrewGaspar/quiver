@@ -200,6 +200,8 @@ pub struct Quiver {
     pub perf: crate::ui::perf::PerfUi,
     /// Quiver Tweaks: Settings → Tweaks and the game page's Tweaks tab.
     pub tw: crate::ui::game::tweaks::TweaksUi,
+    /// The stereo UI prototype (`stereo_ui.rs`, `QUIVER_STEREO_UI`).
+    pub stereo: crate::stereo_ui::StereoUi,
 }
 
 impl Quiver {
@@ -243,12 +245,14 @@ impl Quiver {
             wc: Default::default(),
             perf: Default::default(),
             tw: Default::default(),
+            stereo: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
         this.start_gamepad(window, cx);
         this.start_global(window, cx);
         this.start_downloads(window, cx);
+        this.start_stereo_ui(window, cx);
         if demo {
             this.start_demo_script(window, cx);
             this.start_options_demo(window, cx);
@@ -1360,7 +1364,7 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Key actions
 
-    fn key(&mut self, i: Input, cx: &mut Context<Self>) {
+    pub(crate) fn key(&mut self, i: Input, cx: &mut Context<Self>) {
         self.input(i, InputMode::Keyboard, cx);
     }
 }
@@ -1385,6 +1389,12 @@ impl Focusable for Quiver {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// Stereo UI (`stereo_ui.rs`): an overlay at the dialogs' depth. The wrapper covers the window
+/// like the overlays' own scrims do, so their layout is unchanged.
+fn dialog_depth(o: impl IntoElement) -> gpui::Div {
+    div().absolute().inset_0().stereo_depth(crate::stereo_ui::depth::DIALOG).child(o)
 }
 
 impl Render for Quiver {
@@ -1464,10 +1474,12 @@ impl Render for Quiver {
                 .when_some(self.render_link_banner(&th, cx), |d, b| d.child(b))
                 .child(self.render_page(&th, window, cx))
                 .when(self.mode == InputMode::Pad, |d| d.child(self.render_hintbar(&th)))
-                .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
-                .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
-                .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(o))
-                .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t, self.toast_bad))),
+                .when_some(self.render_overlay(&th, cx), |d, o| d.child(dialog_depth(o)))
+                .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(dialog_depth(o)))
+                .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(dialog_depth(o)))
+                .when_some(self.toast.clone(), |d, t| {
+                    d.child(dialog_depth(crate::ui::overlay::toast(&th, t, self.toast_bad)))
+                }),
         };
         // The top bar shows the daemon link; other screens get a notice instead.
         let notice = match self.link {

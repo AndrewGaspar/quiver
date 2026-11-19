@@ -399,7 +399,7 @@ pub fn register(p: &Placement, dir: &Path) -> Result<String, String> {
 }
 
 /// Run `hyprctl`, with a time limit; its stdout.
-fn hyprctl(args: &[&str]) -> Result<String, String> {
+pub(crate) fn hyprctl(args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("hyprctl")
         .args(args)
         .stdin(Stdio::null())

@@ -42,7 +42,7 @@ use crate::theme::{Theme, rgba};
 use crate::ui::game::LaunchDraft;
 use crate::ui::{Icon, Kind, MEDIUM, button, icon, soft_shadow};
 
-mod hypr;
+pub(crate) mod hypr;
 pub use hypr::forget_tokens as forget_hyprland_tokens;
 
 pub const ENV_RESUME: &str = "QUIVER_RESUME";

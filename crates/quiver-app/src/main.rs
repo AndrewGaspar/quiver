@@ -28,6 +28,7 @@ mod model;
 mod nav;
 mod selfupdate;
 mod source;
+mod stereo_ui;
 mod ui;
 
 // The design system lives in `quiver-ui`; these keep the `crate::theme::…` paths the screens use.
@@ -72,6 +73,10 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,quiver_app=info".into()),
         )
         .init();
+    if let Some(dir) = std::env::var_os("QUIVER_STEREO_SHOT") {
+        stereo_ui::shot::run(dir.into());
+        return;
+    }
     let resume = selfupdate::take_resume();
     let demo = source::demo_requested();
     if demo {
