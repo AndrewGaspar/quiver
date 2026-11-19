@@ -6,6 +6,7 @@ use crate::Inspector;
 use crate::profiler;
 use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
+use crate::{StereoPolicy, StereoScope, StereoStats};
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
@@ -1045,6 +1046,9 @@ pub(crate) struct DeferredDraw {
     /// The entities the deferred element accessed while it was last drawn, in
     /// any phase, restored when its prepaint is reused.
     accessed_entities: FxHashSet<EntityId>,
+    /// Quiver: the stereo depth where the deferred element sits in the tree, captured when
+    /// that place is painted, so the element is drawn at it (not at the window's plane).
+    stereo_depth: Option<f32>,
 }
 
 pub(crate) struct Frame {
@@ -1255,6 +1259,16 @@ pub struct Window {
     pub(crate) element_opacity: f32,
     /// Quiver: set while frames are presented packed for two eyes.
     stereo_packing: Option<StereoPacking>,
+    /// Quiver: how elements' styles become depths.
+    stereo_policy: StereoPolicy,
+    /// Quiver: the last packed frame, reused while the scene is unchanged.
+    stereo_frame: Option<StereoFrame>,
+    /// Quiver: bumped by every draw, so a packed frame knows which scene it came from.
+    scene_generation: u64,
+    stereo_stats: StereoStats,
+    /// Quiver: painting inside a pointer control without focus of its own
+    /// ([`crate::StereoState::in_control`]).
+    stereo_in_control: bool,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2418,6 +2432,11 @@ impl Window {
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             stereo_packing: None,
+            stereo_policy: StereoPolicy::default(),
+            stereo_frame: None,
+            scene_generation: 0,
+            stereo_stats: StereoStats::default(),
+            stereo_in_control: false,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -2512,8 +2531,35 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
 #[derive(Clone)]
 pub struct StereoPacking {
     /// Each eye's horizontal offset, in device pixels, for content at a depth:
-    /// `[left eye, right eye]`. Integer offsets keep text and images pixel-exact.
+    /// `[left eye, right eye]`. Integer offsets keep text and images pixel-exact. It should
+    /// grow with depth (the window takes the shift at depth 1 as the largest).
     pub shift: Rc<dyn Fn(f32) -> [f32; 2]>,
+    /// Device pixels an element against the eye's edge may still move toward it
+    /// ([`clamp_eye_shift`]); HypXRland's `depth_edge_slack` is 2.
+    pub edge_slack: f32,
+}
+
+impl StereoPacking {
+    /// A packing with HypXRland's 2 px of edge slack.
+    pub fn new(shift: impl Fn(f32) -> [f32; 2] + 'static) -> Self {
+        Self {
+            shift: Rc::new(shift),
+            edge_slack: 2.0,
+        }
+    }
+
+    /// The farthest any primitive moves in either eye (device px).
+    fn max_shift(&self) -> f32 {
+        let [l, r] = (self.shift)(1.0);
+        l.abs().max(r.abs()).ceil()
+    }
+}
+
+/// Quiver: a packed frame and what it was packed from.
+struct StereoFrame {
+    scene: Scene,
+    generation: u64,
+    eye: Size<ScaledPixels>,
 }
 
 impl ContentMask<Pixels> {
@@ -3070,6 +3116,10 @@ impl Window {
     pub(crate) fn advance_scene_animations(&mut self, cx: &App) {
         let elapsed = cx.background_executor().now() - cx.synced_animation_epoch;
         self.rendered_frame.scene.advance_animations(elapsed);
+        // Quiver: a reused packed frame animates its own copies.
+        if let Some(frame) = &mut self.stereo_frame {
+            frame.scene.advance_animations(elapsed);
+        }
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
@@ -3846,6 +3896,12 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        // Quiver: while packing, draw orders allow for the primitives' sideways moves.
+        let order_slack = self
+            .stereo_packing
+            .as_ref()
+            .map_or(0.0, StereoPacking::max_shift);
+        self.next_frame.scene.set_stereo_order_slack(order_slack);
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
             #[cfg(feature = "profiler")]
@@ -3899,6 +3955,7 @@ impl Window {
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
+        self.scene_generation += 1;
         self.scene_animation_interval
             .set(self.rendered_frame.scene.animation_frame_interval());
         self.next_frame.clear();
@@ -3999,17 +4056,43 @@ impl Window {
                 ScaledPixels((f32::from(self.viewport_size.width) * self.scale_factor).round()),
                 ScaledPixels((f32::from(self.viewport_size.height) * self.scale_factor).round()),
             );
-            let started = Instant::now();
-            let packed = self
-                .rendered_frame
-                .scene
-                .pack_side_by_side(eye, &*packing.shift);
-            log::debug!(
-                "stereo: packed {} paint operations in {:?}",
-                self.rendered_frame.scene.len(),
-                started.elapsed()
-            );
-            self.platform_window.draw(&packed);
+            // A present without a new draw (animations only, input bursts, the compositor
+            // asking again) shows the frame already packed.
+            let fresh = self
+                .stereo_frame
+                .as_ref()
+                .is_some_and(|f| f.generation == self.scene_generation && f.eye == eye);
+            if fresh {
+                self.stereo_stats.reused += 1;
+            } else {
+                let started = Instant::now();
+                let scene = self.rendered_frame.scene.pack_side_by_side(
+                    eye,
+                    &*packing.shift,
+                    packing.edge_slack,
+                );
+                let took = started.elapsed();
+                let stats = &mut self.stereo_stats;
+                stats.packed += 1;
+                stats.last_pack = took;
+                stats.total_pack += took;
+                stats.primitives = scene.primitive_count();
+                stats.scopes = self.rendered_frame.scene.stereo_scope_count();
+                log::debug!(
+                    "stereo: packed {} primitives ({} depth scopes) in {:?}",
+                    stats.primitives,
+                    stats.scopes,
+                    took
+                );
+                self.stereo_frame = Some(StereoFrame {
+                    scene,
+                    generation: self.scene_generation,
+                    eye,
+                });
+            }
+            if let Some(frame) = &self.stereo_frame {
+                self.platform_window.draw(&frame.scene);
+            }
         } else {
             self.platform_window.draw(&self.rendered_frame.scene);
         }
@@ -4161,7 +4244,13 @@ impl Window {
         } else if let Some(mut drag_element) = active_drag_element {
             drag_element.paint(self, cx);
         } else if let Some(mut tooltip_element) = tooltip_element {
-            tooltip_element.paint(self, cx);
+            // Quiver: tooltips float at the policy's tooltip depth.
+            let depth = self
+                .is_stereo_packed()
+                .then_some(self.stereo_policy.tooltip)
+                .filter(|d| *d > 0.0);
+            let bounds = self.tooltip_bounds.as_ref().map(|t| t.bounds);
+            self.with_stereo_scope(depth, bounds, |window| tooltip_element.paint(window, cx));
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -4373,12 +4462,15 @@ impl Window {
 
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
+            let stereo_depth = deferred_draw.stereo_depth;
             if let Some(element) = deferred_draw.element.as_mut() {
                 let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
                     self.with_rendered_view(deferred_draw.current_view, |window| {
                         window.with_content_mask(content_mask, |window| {
                             window.with_rem_size(Some(deferred_draw.rem_size), |window| {
-                                element.paint(window, cx);
+                                window.with_stereo_depth(stereo_depth, |window| {
+                                    element.paint(window, cx);
+                                });
                             });
                         })
                     })
@@ -4460,6 +4552,7 @@ impl Window {
                     prepaint_range: deferred_draw.prepaint_range.clone(),
                     paint_range: deferred_draw.paint_range.clone(),
                     accessed_entities: deferred_draw.accessed_entities.clone(),
+                    stereo_depth: deferred_draw.stereo_depth,
                 }),
         );
     }
@@ -4632,27 +4725,100 @@ impl Window {
     /// Quiver: paints `f` at a stereo `depth` (HypXRland's unitless rung, 0..1, 0 = the
     /// window's plane): while the window packs stereo frames
     /// ([`Window::set_stereo_packing`]) what `f` paints is offset per eye by that depth's
-    /// disparity. Depths don't add up: an inner depth replaces the outer one. `None` paints
-    /// at the depth already in effect. Without packing this changes nothing.
+    /// disparity. This depth replaces the outer one (for one relative to it, see
+    /// [`Window::stereo_depth`]). `None` paints at the depth already in effect. Not clamped at
+    /// the eye's edges. Without packing this changes nothing.
     pub fn with_stereo_depth<R>(&mut self, depth: Option<f32>, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_stereo_scope(depth, None, f)
+    }
+
+    /// Quiver: like [`Window::with_stereo_depth`], for an element with `bounds` (window
+    /// coordinates): its shift is kept inside the eye's edges as those bounds are.
+    pub fn with_stereo_scope<R>(
+        &mut self,
+        depth: Option<f32>,
+        bounds: Option<Bounds<Pixels>>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let Some(depth) = depth else {
             return f(self);
         };
-        let previous = self.next_frame.scene.set_stereo_depth(depth);
+        let scale = self.scale_factor();
+        let previous = self
+            .next_frame
+            .scene
+            .push_stereo_scope(depth, bounds.map(|b| b.scale(scale)));
         let result = f(self);
-        self.next_frame.scene.set_stereo_depth(previous);
+        self.next_frame.scene.pop_stereo_scope(previous);
         result
+    }
+
+    /// Quiver: see [`crate::StereoState::in_control`].
+    pub(crate) fn stereo_in_control(&self) -> bool {
+        self.stereo_in_control
+    }
+
+    /// Quiver: paints `f` (an element's children) knowing whether that element is a pointer
+    /// control without focus of its own; `None` leaves it as it is.
+    pub(crate) fn with_stereo_control<R>(
+        &mut self,
+        bare: Option<bool>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let Some(bare) = bare else {
+            return f(self);
+        };
+        let previous = std::mem::replace(&mut self.stereo_in_control, bare);
+        let result = f(self);
+        self.stereo_in_control = previous;
+        result
+    }
+
+    /// Quiver: the stereo depth what is painted now is at (0 without packing).
+    pub fn stereo_depth(&self) -> f32 {
+        self.next_frame.scene.stereo_depth()
+    }
+
+    /// Quiver: how elements' styles become depths ([`resolve_stereo_depth`]). Takes effect
+    /// from the next frame.
+    pub fn set_stereo_policy(&mut self, policy: StereoPolicy) {
+        if self.stereo_policy != policy {
+            self.stereo_policy = policy;
+            self.refresh();
+        }
+    }
+
+    /// Quiver: see [`Window::set_stereo_policy`].
+    pub fn stereo_policy(&self) -> StereoPolicy {
+        self.stereo_policy
+    }
+
+    /// Quiver: what packing has cost so far.
+    pub fn stereo_stats(&self) -> StereoStats {
+        self.stereo_stats
+    }
+
+    /// Quiver: the depth scopes of the frame last drawn (evidence and tests).
+    pub fn stereo_scopes(&self) -> Vec<StereoScope> {
+        self.rendered_frame.scene.stereo_scopes().to_vec()
+    }
+
+    /// Quiver: each depth scope's `[left, right]` shift (device px) in the frame last packed,
+    /// after the edge clamp, by the index [`Window::stereo_scopes`] has.
+    pub fn stereo_scope_shifts(&self) -> Vec<[f32; 2]> {
+        self.stereo_frame.as_ref().map(|f| f.scene.packed_scope_shifts().to_vec()).unwrap_or_default()
     }
 
     /// Quiver: presents this window's frames packed side by side for two eyes
     /// (HypXRland's `stereo:sbs`), or stops (`None`). Each element is drawn into both eyes,
-    /// offset by `packing.shift` for its [`Window::with_stereo_depth`]. The window keeps its
-    /// logical size, layout and input coordinates; only the drawable doubles. Returns
+    /// offset by `packing.shift` for its depth ([`resolve_stereo_depth`]). The window keeps
+    /// its logical size, layout and input coordinates; only the drawable doubles. Returns
     /// whether the platform window can (Wayland and off-screen windows can).
     pub fn set_stereo_packing(&mut self, packing: Option<StereoPacking>) -> bool {
         let on = packing.is_some();
         let supported = self.platform_window.set_stereo_side_by_side(on);
         self.stereo_packing = if supported { packing } else { None };
+        self.stereo_frame = None;
         self.refresh();
         supported
     }
@@ -4976,7 +5142,22 @@ impl Window {
             prepaint_range: PrepaintStateIndex::default()..PrepaintStateIndex::default(),
             paint_range: PaintIndex::default()..PaintIndex::default(),
             accessed_entities: FxHashSet::default(),
+            stereo_depth: None,
         });
+    }
+
+    /// Quiver: the deferred draw `index` ([`Window::deferred_draw_index`] at its
+    /// `defer_draw`) is painted at the stereo depth in effect now.
+    pub(crate) fn capture_deferred_stereo_depth(&mut self, index: usize) {
+        let depth = self.next_frame.scene.stereo_depth();
+        if let Some(draw) = self.next_frame.deferred_draws.get_mut(index) {
+            draw.stereo_depth = Some(depth).filter(|d| *d > 0.0);
+        }
+    }
+
+    /// Quiver: the index the next [`Window::defer_draw`] gets.
+    pub(crate) fn deferred_draw_index(&self) -> usize {
+        self.next_frame.deferred_draws.len()
     }
 
     /// Creates a new painting layer. A "layer" is a batch of geometry that are

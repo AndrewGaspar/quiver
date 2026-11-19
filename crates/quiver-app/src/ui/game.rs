@@ -18,6 +18,7 @@ mod storepage;
 mod stores;
 pub(crate) mod tweaks;
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
 pub use page::{ExportAction, GamePage, LaunchDraft, Load, PlayAfter, checkbox, kv, settings_from_reply, toggle};
@@ -75,6 +76,8 @@ impl Quiver {
                             .top_0()
                             .bottom_0()
                             .flex()
+                            // Stereo: the drawer slides over the page as an overlay.
+                            .depth_overlay()
                             .shadow(vec![soft_shadow(rgba(0x000000, 0.6), 0., 40.)])
                             .child(self.render_side(th, id, w, cx)),
                     )
@@ -141,6 +144,8 @@ impl Quiver {
         }
         div()
             .id("side-rail")
+            // Stereo: the game list is a surface beside the page.
+            .depth_surface()
             .flex()
             .flex_col()
             .flex_none()
@@ -199,6 +204,8 @@ impl Quiver {
             .flex_none()
             .w(px(width))
             .min_h_0()
+            // Stereo: the game list is a surface beside the page.
+            .depth_surface()
             .bg(th.ink0)
             .border_r_1()
             .border_color(th.line1)
@@ -562,6 +569,7 @@ impl Quiver {
                 gpui::anchored().anchor(gpui::Anchor::TopRight).offset(gpui::point(px(0.), px(36.))).snap_to_window_with_margin(px(8.)).child(
                     div()
                         .id("art-menu")
+                        .depth_overlay()
                         .occlude()
                         .w(px(300.))
                         .p(px(4.))

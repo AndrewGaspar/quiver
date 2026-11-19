@@ -2,7 +2,7 @@
 //! library is every store's games; Ubisoft is one store among them, and while no Ubisoft
 //! account is signed in the library offers its sign-in as a card.
 
-use crate::stereo_ui::depth as stereo_depth;
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, prelude::*, px, relative};
 
 use super::{
@@ -129,7 +129,9 @@ pub fn play_button(
         })
         .when(!pad_glyph, |d| d.child(icon(i, is, th.acc_ink)))
         .child(label.to_owned())
-        .focus_glow(main_focus, th, 10.);
+        .focus_glow(main_focus, th, 10.)
+        // Stereo: the two halves move together with their wrapper (the control).
+        .stereo_control(false);
     let more = div()
         .flex()
         .items_center()
@@ -141,7 +143,8 @@ pub fn play_button(
         .border_l_1()
         .border_color(th.acc_ink.opacity(0.25))
         .child(icon(Icon::ChevronDown, if large { 16. } else { 14. }, th.acc_ink))
-        .focus_glow(more_focus, th, 10.);
+        .focus_glow(more_focus, th, 10.)
+        .stereo_control(false);
     (main, more)
 }
 
@@ -177,6 +180,7 @@ impl Quiver {
             rows.push(
                 div()
                     .id(("grid-row", r))
+                    .depth_surface()
                     .flex()
                     .gap(px(Self::GRID_GAP))
                     .px(px(self.gutter()))
@@ -207,8 +211,11 @@ impl Quiver {
             .overflow_y_scroll()
             .track_scroll(&self.lib_scroll)
             .child(hero)
-            .child(header)
-            .children(signin)
+            // Stereo: the hero's art is the plane; the library (its header, the sign-in card's
+            // row and the grid's rows) floats a step above it, its chips and tiles another step
+            // above that. Each child takes the depth itself: `scroll_to_item` counts them.
+            .child(div().depth_surface().child(header))
+            .children(signin.map(|s| div().depth_surface().child(s)))
             .children(rows)
             .child(div().h(px(48.)))
     }
@@ -381,7 +388,7 @@ impl Quiver {
         let side_panel = !attention.is_empty() && !stacked;
         let content_w = (w - 2. * gutter - if side_panel { ATTENTION_W + 32. + 24. } else { 0. }).clamp(200., 540.);
         let art_h = if stacked { HERO_HEIGHT + 120. + 70. * attention.len() as f32 } else { HERO_HEIGHT };
-        let mut hero = div().id("hero").relative().w_full().overflow_hidden().bg(th.ink0).stereo_depth(stereo_depth::HERO);
+        let mut hero = div().id("hero").relative().w_full().overflow_hidden().bg(th.ink0).depth_plane();
         hero = if stacked { hero.flex().flex_col().min_h(px(HERO_HEIGHT)) } else { hero.h(px(HERO_HEIGHT)) };
         let art_layer = div().absolute().inset_0().overflow_hidden();
         hero = match &art {
@@ -455,6 +462,8 @@ impl Quiver {
             .rounded(px(10.))
             .shadow(vec![soft_shadow(th.acc.opacity(0.28), 8., 30.)])
             .cursor_pointer()
+            // Stereo: the split button rises as one control, and with its focus.
+            .stereo_focused(focus_play)
             .child(main.id("hero-play-main").on_click(cx.listener(|this, _, _, cx| this.click(Target::Hero(0), cx))))
             .child(more.id("hero-play-more").on_click(cx.listener(move |this, _, _, cx| {
                 this.nav.open_menu(id);
@@ -509,6 +518,7 @@ impl Quiver {
             .px(px(16.))
             .pb(px(6.))
             .rounded(px(14.))
+            .depth_surface()
             .bg(on_art::glass())
             .border_1()
             .border_color(rgba(0xffffff, 0.09))
@@ -643,7 +653,9 @@ impl Quiver {
             .when(!focused, |d| d.group_hover(group.clone(), move |s| s.shadow(deep.clone())).child(hover_ring))
             .child(art_fill(th, &art, &label, 10., false))
             .child(tl)
-            .focus_glow(focused, th, 10.);
+            .focus_glow(focused, th, 10.)
+            // Stereo: the art and its caption rise together, as the tile (the control).
+            .stereo_control(false);
         if custom || !badges.is_empty() {
             boxart = boxart.child(
                 div()
@@ -724,13 +736,10 @@ impl Quiver {
             );
         }
         let meta = g.tile_meta();
-        // Stereo UI (`stereo_ui.rs`): tiles float above the hero; the focused or hovered one
-        // pops forward. Nothing changes on a mono window.
-        let tile_depth = if focused { stereo_depth::FOCUSED } else { stereo_depth::TILE };
         div()
             .id(("tile", id.ix()))
-            .stereo_depth(tile_depth)
-            .hover(|s| s.stereo_depth(stereo_depth::FOCUSED))
+            // Stereo: a control on the grid's surface; it pops further when focused or hovered.
+            .stereo_focused(focused)
             .group(group)
             .flex()
             .flex_col()

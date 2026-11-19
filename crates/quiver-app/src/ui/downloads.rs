@@ -10,6 +10,7 @@
 //! button within the row ([`DlState::col`]). On a queued item LT/RT move it up or down and
 //! X pauses or resumes it.
 
+use quiver_ui::depth::DepthExt;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -237,8 +238,10 @@ pub fn who(th: &Theme, source: &str) -> Div {
 const DL_SIDE_W: f32 = 340.;
 
 fn seg(th: &Theme, first: bool, last: bool) -> Div {
+    // Stereo: each piece of the card is the card's surface; its controls pop from it.
     div()
         .flex()
+        .depth_surface()
         .bg(th.ink2)
         .border_l_1()
         .border_r_1()
@@ -2057,6 +2060,7 @@ impl Quiver {
             .child(
                 div()
                     .id("dl-dialog")
+                    .depth_overlay()
                     .absolute()
                     .top(px((self.viewport.1 * 0.12).max(60.)))
                     .left(px(left))

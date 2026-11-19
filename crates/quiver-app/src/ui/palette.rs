@@ -2,6 +2,7 @@
 //! one daemon call or a place in the app, and shows the `quiver …` command that does the
 //! same from a terminal.
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
 use super::downloads::DlCmd;
@@ -188,6 +189,7 @@ impl Quiver {
                 SettingsSection::Tweaks => (Icon::SlidersHorizontal, Some("quiver tweaks"), "tweaks dlss frame rate cap vsync latency reflex anisotropic frame generation nvidia override"),
                 SettingsSection::Steam => (Icon::Gamepad, Some("quiver export list"), "shortcuts desktop entries exports restart steam user"),
                 SettingsSection::Appearance => (Icon::Palette, None, "theme omarchy colors controller gamepad hyprpad hints"),
+                SettingsSection::Display => (Icon::Monitor, None, "3d stereo depth xreal glasses headset side by side sbs"),
                 SettingsSection::Automation => (Icon::Bot, Some("quiver status"), "cli agents permissions policy socket daemon quiverd"),
                 SettingsSection::About => (Icon::Info, Some("quiver status"), "version license credits ubisoft links"),
             };
@@ -459,6 +461,7 @@ impl Quiver {
             .child(
                 div()
                     .id("palette")
+                    .depth_overlay()
                     .absolute()
                     .top(px(92.))
                     .left(px(left))

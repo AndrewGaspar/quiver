@@ -1,6 +1,7 @@
 //! Overlays: the command palette (Ctrl K / Start), the game menu (Y), the controller hint
 //! bar, and toasts.
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 
 use super::{Icon, MEDIUM, PillKind, SEMIBOLD, caption, glyph, icon, kbd, mono, pill, soft_shadow};
@@ -87,6 +88,7 @@ impl Quiver {
 
         let panel = div()
             .id(title)
+            .depth_overlay()
             .absolute()
             .top(px(if palette { 92. } else { 132. }))
             .left(px(left))
@@ -234,6 +236,7 @@ impl Quiver {
             }
         }
         div()
+            .depth_chrome()
             .flex()
             .flex_none()
             .items_center()
@@ -257,6 +260,7 @@ pub fn toast(th: &Theme, text: SharedString, bad: bool) -> impl IntoElement + us
     let (bg, border, ic, ic_color) = if bad { (th.bad.opacity(0.22).blend(th.ink3), th.bad.opacity(0.7), Icon::CircleX, th.bad) } else { (th.ink3, th.line2, Icon::Info, th.acc_hi) };
     div().absolute().left_0().right_0().bottom(px(64.)).flex().justify_center().px(px(16.)).child(
         div()
+            .depth_overlay()
             .flex()
             .min_w_0()
             .items_center()
