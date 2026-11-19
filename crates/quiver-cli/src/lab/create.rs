@@ -200,6 +200,7 @@ pub fn create(lab: &Lab, src: &Source, o: &CreateOpts) -> Result<(Inst, Vec<Stri
         reload_pattern: None,
         log_file: None,
         notes: String::new(),
+        clock: None,
     };
     m.save(&inst.manifest_path())?;
     Ok((inst, notes))

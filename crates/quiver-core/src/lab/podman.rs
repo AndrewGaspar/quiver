@@ -134,7 +134,8 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
         ("STEAM_COMPAT_APP_ID", "0".into()),
         ("QUIVER_LAB_W", m.display.width.to_string()),
         ("QUIVER_LAB_H", m.display.height.to_string()),
-        ("QUIVER_LAB_HZ", m.display.refresh.to_string()),
+        // Higher while the virtual clock runs uncapped (lab::vclock).
+        ("QUIVER_LAB_HZ", super::vclock::boot_refresh(m).to_string()),
         ("QUIVER_LAB_INSTANCE", inst.name.clone()),
         ("QUIVER_GAME", m.game.to_string()),
     ];

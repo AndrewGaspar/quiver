@@ -42,6 +42,8 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "x509-parser"] }
 time = "0.3"
+# The lab's fixed-step virtual clock (lab::vclock): the hook DLL it drops into an instance.
+quiver-vclock = { path = "../quiver-vclock" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -182,6 +182,9 @@ pub struct Manifest {
     pub log_file: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// The fixed-step virtual clock (`[clock]`, [`super::vclock`]); absent: real time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<super::vclock::VirtualClock>,
 }
 
 impl Manifest {
@@ -272,6 +275,7 @@ pub(crate) mod tests {
             reload_pattern: Some("reloaded".into()),
             log_file: None,
             notes: String::new(),
+            clock: None,
         }
     }
 

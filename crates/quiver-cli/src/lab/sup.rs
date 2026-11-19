@@ -44,6 +44,9 @@ pub enum SupRequest {
         no_mod: bool,
         #[serde(default)]
         args: Vec<String>,
+        /// The clock for this launch (`real`, `virtual:<Hz>`), instead of the manifest's.
+        #[serde(default)]
+        clock: Option<String>,
     },
     Kill {
         source: String,
@@ -297,7 +300,7 @@ fn serve(sup: &Sup, conn: UnixStream) -> bool {
     let result = match req {
         SupRequest::Ping => Ok(json!({ "pid": std::process::id() })),
         SupRequest::Quit => Ok(Value::Null),
-        SupRequest::Launch { source, mod_dir, no_mod, args } => launch(sup, &source, mod_dir, no_mod, &args),
+        SupRequest::Launch { source, mod_dir, no_mod, args, clock } => launch(sup, &source, mod_dir, no_mod, &args, clock.as_deref()),
         SupRequest::Kill { source } => kill(sup, &source, "killed"),
     };
     reply(&conn, result);
@@ -394,10 +397,10 @@ pub fn apply_mod(inst: &Inst, m: &Manifest, mod_dir: Option<&Path>) -> Result<Ve
     Ok(copied)
 }
 
-fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra: &[String]) -> Result<Value> {
+fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra: &[String], clock: Option<&str>) -> Result<Value> {
     let _busy = sup.busy.lock().unwrap();
     let inst = &sup.inst;
-    let m = inst.load()?;
+    let mut m = inst.load()?;
     let container_id = ops::running_id(&inst.container()).with_context(|| format!("instance '{}' isn't up (quiver lab up {})", inst.name, inst.name))?;
     let client = block_on(quiver_api::Client::connect_running(&format!("lab:{}", inst.name))).ok();
     if m.licence != Licence::None && client.is_none() {
@@ -408,6 +411,8 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let mut notes = kill_locked(sup, source, "killed")?["notes"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>();
     notes.extend(guard::enforce(&inst.prefix())?);
     let mod_dir = if no_mod { None } else { mod_dir.or(m.mod_dir.clone()) };
+    // The virtual clock (lab::vclock): its DLL in the clone, its environment in `m` for this launch.
+    notes.extend(lab::vclock::prepare(inst, &mut m, clock, mod_dir.as_deref())?);
     let copied = apply_mod(inst, &m, mod_dir.as_deref())?;
     if let Some(d) = &mod_dir {
         notes.push(format!("mod: {} file(s) from {}", copied.len(), d.display()));

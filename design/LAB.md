@@ -25,7 +25,7 @@ accounts, saves, play time or achievements.
 ```
 quiver lab create <game> [--name N] [--display 2560x1600@165] [--proton P] [--mod DIR] [--graphics G]
 quiver lab up N | down N | rm N | list | show N | edit N key=value…
-quiver lab launch N [--mod DIR] [--wait frame]     quiver lab kill N
+quiver lab launch N [--mod DIR] [--clock virtual:HZ|real] [--wait frame]     quiver lab kill N
 quiver lab status N | wait N STATE [--stable]       quiver lab logs N [--tail 40]
 quiver lab shot N [--settle S] [--crop C] [--metrics]
 quiver lab key N KEY… | type N TEXT | mouse N DX DY | click N FX FY [--expect-change]
@@ -415,6 +415,173 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 Long runs go in the background: `quiver lab … --bg` prints a job id; `quiver lab job wait ID`
 returns with the job's output and exit code.
 
+### 8.1 The virtual clock (fixed step: faster, and repeatable)
+
+```sh
+quiver lab edit N clock=virtual:62.5        # every launch; clock=real turns it off
+quiver lab launch N --clock virtual:62.5    # one launch (--clock real: one launch without)
+quiver lab edit N clock.modules=Engine.dll clock.stuck_ms=2000 clock.proxy=winmm clock.uncap=false
+```
+
+With the clock on, the game is told that **every frame took exactly 1/N s**, however long it
+really took. Two benefits follow:
+
+- **Faster than real time** when frames are cheap. Presentation is uncapped, so a small or
+  old game that renders 800 fps at a 62.5 Hz virtual rate runs its simulation ~13x as fast
+  (the Wine test below measured 13-17x with a trivial D3D11 presenter). Agents get through
+  repros, menus and waits in a fraction of the time.
+- **Repeatable** when the machine is busy. If real frames take longer than 1/N s, the game
+  runs slower than real time but behaves exactly as at N Hz: frame k is at k/N s in every
+  run. A speed-up below 1.0x is normal and isn't flagged. The test runs the same program
+  with a fast presenter, again, and held to 40 fps: the three virtual-time sequences are
+  identical, busy-waits included.
+
+Off by default. It changes time only, never licence, ownership or DRM code.
+
+**Credit.** The approach is Ishimura's: the virtual clock of the user's Dead Space project
+(`~/code/ds-decomp`, its RIG shim; `docs/17-virtual-clock.md` and `docs/22-frame-delta.md`
+there), built so that its physics A/B runs stopped measuring the machine. Its lessons,
+corrections included:
+
+- hook the **game's import address tables**, not the kernel32/winmm exports, so Wine's,
+  DXVK's and the hook's own clocks stay real (DXVK paces presentation with them);
+- advance by exactly one frame per Present, with a reported QPF that makes a frame a whole
+  number of ticks;
+- design for the deadlock: creep, a real-time escape, never backwards, and a Sleep never
+  advances time, each counted;
+- speed-up = real fps / virtual rate is an identity, a consistency check rather than evidence
+  that the simulation advanced, so the report also carries a **census** of the steps the game
+  actually read.
+
+**How** (`crates/quiver-vclock`; the lab side is `quiver_core::lab::vclock`):
+
+- **The DLL** (`win/hook.c`; the arithmetic in `win/vclock.c`, which the crate's unit tests
+  run on the host) is built with mingw for x86_64 and i686 by `build.rs` and embedded in
+  `quiver`, once per proxy name. Each export of the proxied DLL is a `jmp` through a table
+  filled from the real DLL in the system folder, so with no `QUIVER_VCLOCK` it is a plain
+  pass-through.
+- **Injection: a proxy DLL in the clone.** At each launch the supervisor removes any copy an
+  earlier launch left (every build carries a marker), then picks the first of `version`,
+  `winmm`, `dinput8` and `dsound` that the executable imports, or a DLL next to it does (a
+  Unity `UnityPlayer.dll`), and that neither the game nor the mod ships. It writes the
+  hook under that name next to the executable in the **instance's install clone** (refused if
+  the folder resolves outside the instance) and sets it `n,b` for that launch only.
+  `clock.proxy=` forces one.
+- **What becomes virtual.** QueryPerformanceCounter/Frequency, GetTickCount(64), timeGetTime,
+  GetSystemTimeAsFileTime (and Precise), Sleep and SleepEx, from kernel32, kernelbase, the
+  `api-ms-win-core-*` sets and winmm, matched by name in the import tables (and delay-load
+  tables) of the executable and of the modules in `clock.modules` (`UnityPlayer.dll` is added
+  by itself when it's there); GetProcAddress in the same modules answers those names with the
+  hooks too. Nothing else is patched: the Wine test checks that the executable is the only
+  module whose clock imports point into the DLL.
+- **The frame boundary is the game's own Present, hooked in process.** The DLL hooks the
+  creation functions in the imports of the game's modules and of the other modules in its
+  folder (minus graphics layers such as an app-local DXVK or a mod's `dxgi.dll`): Direct3D 8
+  and 9 (`CreateDevice`, then the device's and swap chain's `Present`/`PresentEx`), DXGI
+  factories and D3D10/11 device-and-swap-chain (then `CreateSwapChain*`, then the swap chain's
+  `Present`/`Present1`; a device made without a factory has its adapter's factory hooked),
+  OpenGL `SwapBuffers`/`wglSwapBuffers`, and Vulkan `vkQueuePresentKHR` through its
+  proc-address lookups. Vtable slots are patched per class, with a registry of originals.
+  Nested presents on one thread count once; when two paths present, a D3D Present outranks
+  OpenGL, which outranks Vulkan.
+  **Why not the Sight layer's present count:** under DXVK and vkd3d-proton,
+  `vkQueuePresentKHR` runs on the translation layer's submission thread, a frame or more after
+  the game's Present returned. A clock driven by it would hand the game 0 or 2 frames on some
+  frames, which is exactly the jitter this exists to remove. The in-process hook advances the
+  clock on the game's thread when its Present returns. It also needs no layer in the instance
+  and covers OpenGL.
+- **Uncapped presentation** (unless `clock.uncap=false`): `DXVK_CONFIG` gets
+  `dxgi.syncInterval = 0; d3d9.presentInterval = 0` and no frame-rate caps (after the
+  manifest's own `DXVK_CONFIG`); `DXVK_FRAME_RATE=0`, `VKD3D_FRAME_RATE=0`,
+  `__GL_SYNC_TO_VBLANK=0`, `vblank_mode=0`. The DXGI Present hook passes sync interval 0 (for
+  vkd3d-proton's swap chains too) and D3D9 devices are created with
+  `D3DPRESENT_INTERVAL_IMMEDIATE`. The container's gamescope boots at 1000 Hz
+  (`lab::vclock::boot_refresh`; a launch says so when the instance was booted lower). A
+  mod's own limiter, such as Pharos's `fps_limit`, is the user's to turn off.
+
+**The clock.** At 10 MHz (Wine's QPC), `ticks_per_frame = round(QPF / N)` and the reported
+QPF is `ticks_per_frame * N`: 62.5 Hz is 160000 ticks at 10000000, and 60 Hz is 166667 ticks
+at 10000020, a few ppm off. Pick a rate whose period is a whole number of milliseconds (125,
+100, 62.5, 50, 40 Hz): games that time frames with timeGetTime or GetTickCount then see the
+same step every frame; a launch notes it otherwise. Until the first Present the clock passes
+real time through, so start-up is unchanged. The first Present moves it on to the next whole
+virtual second, so every run has the same phase from then on (a millisecond clock floors, and
+start-up takes a different real time each run).
+
+**The safety valves**, each counted in the report:
+
+- **Creep.** After `clock.creep_after` (4096) clock reads in one frame, the frame can only be
+  spinning on the clock: each further read moves time on by 1/1024 of a frame, so a frame
+  limiter that waits for more time than a Present can give terminates. The test's QPC
+  busy-wait for two frames and its `Sleep(1)` loop on timeGetTime both end this way. Creep
+  depends on how often the game reads, not on the machine, so it is still repeatable, but
+  those frames aren't exactly 1/N.
+- **The real-time escape.** If a frame takes `clock.stuck_ms` (1000) of **real** time, time
+  follows real time from there until the next Present. This catches waits that read the clock
+  rarely, and loading screens that never present. **When it fires, that frame's timing tracked
+  the machine, not the frame count, and isn't reproducible.** The report counts escapes, and
+  `quiver lab logs` marks the run `NOT FULLY DETERMINISTIC`. Ishimura used 250 ms; the lab
+  uses 1000 ms so that a loaded machine's slow frames stay on the virtual clock. Raise it with
+  `clock.stuck_ms` if loading screens trip it.
+- **Never backwards.** A Present sets time to max(grid, now); a frame where creep or the
+  escape had already passed the grid is an **overrun**.
+- **Sleep** never advances virtual time; it only gets shorter in real time (at most
+  `clock.sleep_max_ms`, default 0: a yield), so a sleep-based limiter spins on the clock and
+  creeps.
+
+**The report.** The DLL writes `runs/r<N>/vclock.log` (each patched import slot and vtable
+hook, the present path, engagement, a line every 10 s) and `vclock.status` (key=value,
+rewritten every half second and at exit). `quiver lab status` shows engaged or not, frames,
+virtual and real seconds, the speed-up, and the counters; `--json` adds the parsed report as
+`clock`. `quiver lab logs` adds the **census**, the distinct steps between successive values
+the game read from the performance counter and from the millisecond clocks. "160000 ticks
+x1199 (100%)" means exactly 1/62.5 s every frame; creep shows as small steps, an escape as odd
+ones. A long gap where the game didn't read a clock shows as one large step. The census is
+followed by whether every step was a frame, and the determinism verdict.
+
+**Limits** (in the brief too):
+
+- **Audio drifts.** The mixer runs on a clock this can't reach (Ishimura: "Audio drifts"), so
+  sound desyncs or stutters away from 1.0x. This is a testing tool.
+- **Other clocks keep real time.** Games that pace on audio, waitable timers, `timeSetEvent`,
+  `WaitForSingleObject` timeouts, `GetSystemTime`/`GetLocalTime`, `rdtsc`, or that read the
+  clock from a module not listed in `clock.modules`, see real time there.
+- **Multiplayer and DRM timing checks** see a clock that disagrees with the world. Denuvo and
+  other DRM may react badly to time hooks: use it on DRM-free, offline, small games first.
+- **Two present paths, or two swap chains presenting per frame,** can still count a frame twice
+  (the latching handles a translation layer's own present; a second window doesn't).
+- **The engine's own accumulator.** Ishimura found Dead Space's frame timer quantised the
+  exact delta it was given into whole milliseconds, on another thread than Present. A game
+  that does that still varies inside; the census shows what it was handed, not what it made of
+  it.
+- **Not yet:** DirectDraw-only games (no present hook), a present source for games that
+  present from a process the proxy isn't loaded in.
+
+**Tests:**
+
+- `cargo test -p quiver-vclock`: the clock's arithmetic in the host build of `vclock.c`. Whole
+  ticks per frame and the reported QPF, exactly one period per frame whatever the real frame
+  took, a busy-wait that terminates by creeping (with the overrun after it), the escape (once
+  per frame, then back on the grid), never backwards under random interleavings, sleeps,
+  FILETIME and ms scaling, the report's parsing and verdicts, and the embedded DLLs.
+- `cargo test -p quiver-core vclock`: `clock=` edits and the manifest, proxy choice (an
+  import, a DLL beside the exe, a shipped DLL skipped, a mod's refused when forced, no way in),
+  the DLL placed in the clone and removed at the next launch, never outside the instance, the
+  environment (DXVK_CONFIG merged), the report lines and the brief.
+- Opt-in, in Wine: `QUIVER_TEST_PROTON=… cargo test -p quiver-vclock --test wine -- --ignored
+  --nocapture --test-threads 1`. `tests/wine/clock_test.c` presents through DXVK on a private
+  Xvfb (display ≥ :400) with the hook as `version.dll`, for D3D11 x64 fast, again, and held to
+  40 fps, then D3D9 x64 and D3D11 x86. Measured 2026-11-18 on GE-Proton11-12:
+  - every one of 1198 steps on QPC is 160000 ticks, and on timeGetTime, GetTickCount and
+    GetTickCount64 every step is 16 ms;
+  - 19.168 s of game time took 1.1-1.4 s of real time with a fast presenter (13-17x) and
+    30.1 s with the 40 fps one (0.64x);
+  - the three sequence hashes are identical, as are the DLL's census, creep and sleep counts;
+  - the busy-wait and the Sleep loop both terminated (60 creeping frames, no escapes);
+  - `GetProcAddress("QueryPerformanceCounter")` gives the virtual value;
+  - only the executable's 7 clock imports point into the DLL; none of the other 28 modules'
+    (Wine's builtins, DXVK's d3d11, dxgi and d3d9) do.
+
 ## 9. First live run (for the main session)
 
 Needs the merged build installed (`tools/install-user.sh`: the lab refuses a bridge without
@@ -442,6 +609,25 @@ checks allowed, and what was blocked; if the game stops at sign-in, the blocked 
 which path it needed (section 3.1 says how to extend the allowlist). If it doesn't trust the
 CA, it shows `tls failed … rejected the lab's certificate`: EOS was offline, fail closed. No
 `!!! BYPASS` or `!!! OUTSIDE` line may appear.
+
+**The virtual clock (8.1)**, on a small DRM-free game `G` (instance `g`), not run live yet:
+
+```sh
+quiver lab doctor                                  # "virtual clock DLL: x64 and x86, built in"
+quiver lab edit g clock=virtual:62.5
+quiver lab down g && quiver lab up g               # gamescope at 1000 Hz (tail lab/boot.log: "@1000")
+quiver lab launch g --wait frame                   # notes: "virtual clock: 62.5 Hz … through <proxy>.dll"
+quiver lab status g                                # "clock: virtual clock engaged … = N.NNx"
+quiver lab logs g                                  # census, exact?, deterministic?
+quiver lab launch g --clock real --wait frame      # the same game on real time: the DLL is gone
+quiver lab edit g clock=real && quiver lab down g && quiver lab up g
+```
+
+What to check: the clock engaged (a present path was hooked), the speed-up is above 1 for a
+cheap game, and the performance-counter census is dominated by 160000-tick steps. If it never
+engages, `vclock.log` lists what was hooked. Check also that gamescope doesn't pace at 1000 Hz
+(the real fps in the report is frames / real seconds), and whether the game's audio or menus
+misbehave.
 
 ## 10. Not built yet
 
