@@ -607,9 +607,15 @@ impl Quiver {
     }
 
     fn load_settings(&mut self, id: Gid, cx: &mut Context<Self>) {
-        // A Steam copy's settings apply when Steam starts it through Quiver; other stores'
-        // games have no Quiver settings (their client launches them).
-        if !id.is_ubisoft() || !self.game(id).is_some_and(|g| g.installed() || g.steam_only()) {
+        // A Steam copy's settings apply when Steam starts it through Quiver; an Epic game's
+        // when Quiver launches it (its default profile, Proton, env). A Steam game's are its
+        // mods state's (`steam_profile`), and other stores' games have none.
+        let has = match id.0.store {
+            quiver_api::StoreId::Ubisoft => self.game(id).is_some_and(|g| g.installed() || g.steam_only()),
+            quiver_api::StoreId::Epic => self.game(id).is_some_and(|g| g.installed()),
+            _ => false,
+        };
+        if !has {
             return;
         }
         // The daemon replies `{revision, settings}`.
