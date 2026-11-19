@@ -434,8 +434,10 @@ the preload are in the game.
   the section inside the card.
 
 **Not verified.**
-- A real game in the lab. The root disk was full during this work, so no instance could be made
-  (see the report).
+- A real game in the lab. The root disk was full for most of this work. Once there was room, a
+  fresh AWR instance (Torchbearer 0.4.9, `output = hsbs`; its SDK call reached the lab's
+  quiver-sight as `hsbs`) stopped at AWR's "DX12 feature level 12_0" dialog on every launch. It
+  did the same with the installed Sight layer, so the cause is the host, not this change.
 - How it looks in the glasses: whether the ladder reads as intended and the steps are
   comfortable over an evening. The numbers are HypXRland's provisional ones.
 - Depth changes snap. HypXRland eases its own over about 80–200 ms; Sight's focus moves are 2 px
