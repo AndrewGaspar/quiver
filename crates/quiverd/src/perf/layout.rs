@@ -289,6 +289,42 @@ impl Layout {
     }
 }
 
+/// A layout from the API's form (`HudLayout`: cells as JSON, row options beside them), as the
+/// Sight panel's editor sends it to be saved. Validated like a file.
+pub fn from_api(l: &HudLayout) -> Result<Layout, String> {
+    let mut rows = Vec::with_capacity(l.rows.len());
+    for (i, cells) in l.rows.iter().enumerate() {
+        let mut row: Row = match l.row_options.get(i) {
+            Some(o) if !o.is_null() => serde_json::from_value(o.clone()).map_err(|e| format!("row {}: {e}", i + 1))?,
+            _ => Row::default(),
+        };
+        row.cells = cells.iter().enumerate().map(|(j, c)| serde_json::from_value(c.clone()).map_err(|e| format!("row {} cell {}: {e}", i + 1, j + 1))).collect::<Result<_, _>>()?;
+        rows.push(row);
+    }
+    let width = (l.size[0] > 0.0).then_some(l.size[0]);
+    let out = Layout { format: LAYOUT_FORMAT, name: l.name.clone(), anchor: l.anchor, background: l.background, orientation: Some(l.orientation), width, height: None, rows, id: l.id.clone(), builtin: false };
+    out.validate()?;
+    Ok(out)
+}
+
+/// Writes `l` as the user layout `<id>.toml` (replacing one of that id), atomically. A
+/// preset's id, or one that isn't a file name, is refused.
+pub fn save(hud_dir: &Path, l: &HudLayout) -> Result<HudLayoutInfo, String> {
+    let layout = from_api(l)?;
+    let path = layouts_dir(hud_dir).join(format!("{}.toml", l.id));
+    if file_id(&path).as_deref() != Some(l.id.as_str()) {
+        return Err(format!("{:?} can't be a layout's id (lowercase letters, digits, - and _; not a preset's)", l.id));
+    }
+    let text = toml::to_string(&layout).map_err(|e| e.to_string())?;
+    let text = format!("# A HUD layout saved by Quiver (the Sight panel's layout editor).\n{text}");
+    std::fs::create_dir_all(layouts_dir(hud_dir)).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Read back as `load` will.
+    let back = load(hud_dir, &l.id)?;
+    Ok(HudLayoutInfo { id: back.id, name: back.name, builtin: false, path: Some(path), error: None })
+}
+
 fn valid_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'))
 }
@@ -739,6 +775,43 @@ cells = [
             let e = parse("x", &format!("{text}\n[[row]]\ncells = [{{ metric = \"fps\" }}]")).unwrap_err();
             assert!(e.contains(want), "{text}: {e}");
         }
+    }
+
+    #[test]
+    fn an_edited_preset_saves_as_a_user_layout() {
+        let t = tempfile::tempdir().unwrap();
+        // The editor's round trip: the API form of Standard, rows moved and a row added.
+        let mut api = builtin("standard").unwrap().to_api();
+        api.rows.swap(2, 3);
+        api.rows.push(vec![serde_json::json!({ "metric": "gpu.vram.used", "short": "VRAM" })]);
+        api.id = "standard-edited".into();
+        api.name = "Standard (edited)".into();
+        let info = save(t.path(), &api).unwrap();
+        assert_eq!((info.id.as_str(), info.name.as_str(), info.builtin), ("standard-edited", "Standard (edited)", false));
+        let back = load(t.path(), "standard-edited").unwrap();
+        assert_eq!(back.rows.len(), api.rows.len());
+        assert_eq!(back.rows[2].cells[0].metric.as_deref(), Some("latency.pc"), "the moved row");
+        assert_eq!(back.rows.last().unwrap().cells[0].short.as_deref(), Some("VRAM"));
+        assert_eq!(back.width, Some(284.0), "the preset's width");
+        assert!(list(t.path()).iter().any(|i| i.id == "standard-edited" && i.error.is_none()));
+        // Full's row options (the mods strip, its rule) survive.
+        let mut full = builtin("full").unwrap().to_api();
+        full.id = "mine".into();
+        save(t.path(), &full).unwrap();
+        let f = load(t.path(), "mine").unwrap();
+        assert!(f.rows.last().unwrap().mods && f.rows.last().unwrap().divider);
+        // Saved again: replaced.
+        full.name = "Mine".into();
+        assert_eq!(save(t.path(), &full).unwrap().name, "Mine");
+        // A preset's id, a path, a bad cell: refused, nothing written.
+        for id in ["standard", "../x", "Bad"] {
+            let mut bad = api.clone();
+            bad.id = id.into();
+            assert!(save(t.path(), &bad).is_err(), "{id}");
+        }
+        let mut bad = api.clone();
+        bad.rows[0].push(serde_json::json!({ "metric": "fps", "colour": "pink" }));
+        assert!(save(t.path(), &bad).unwrap_err().contains("unknown field"));
     }
 
     #[test]

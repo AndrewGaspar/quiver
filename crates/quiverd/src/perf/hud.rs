@@ -339,6 +339,29 @@ fn is_content(c: &HudCell) -> bool {
 
 /// Builds the model (rev 0: the caller numbers it).
 pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
+    model_with(inp, store, now, false).0
+}
+
+/// The model of a layout being edited (the Sight panel's preview): every layout row has a
+/// model row, a dim placeholder naming what it shows when nothing in it has a value now, so
+/// the person can still move it. Returns each layout row's first model row too.
+pub fn build_preview(inp: &ModelInput, store: &Store, now: i64) -> (HudModel, Vec<usize>) {
+    model_with(inp, store, now, true)
+}
+
+/// What a row that shows nothing now would show ("fps.base · latency.pc"), for the preview.
+fn placeholder(r: &super::layout::Row) -> HudRow {
+    let what: Vec<String> = if r.mods {
+        vec!["a strip per connected mod".into()]
+    } else {
+        r.cells.iter().filter_map(|c| c.metric.clone().or_else(|| c.graph.as_ref().map(|g| format!("{g} graph"))).or_else(|| c.split.as_ref().map(|s| format!("{s} split")))).collect()
+    };
+    let text = if what.is_empty() { "(empty row)".to_owned() } else { format!("{} · nothing now", what.join(" · ")) };
+    HudRow { cells: vec![HudCell::Text { text, level: Level::Dim, style: CellStyle::default() }], divider: r.divider }
+}
+
+fn model_with(inp: &ModelInput, store: &Store, now: i64, preview: bool) -> (HudModel, Vec<usize>) {
+    let mut starts = Vec::with_capacity(inp.layout.rows.len());
     let status = store.layer_status.filter(|s| s.extent_w > 0 && s.extent_h > 0);
     let extent = status.map(|s| [s.extent_w, s.extent_h]);
     // 1.6% of one eye's height on a stereo frame (design/SIGHT.md §15).
@@ -348,8 +371,13 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
     let mut rows = Vec::new();
     let fg = store.fg_active(now);
     for r in &inp.layout.rows {
+        starts.push(rows.len());
         if r.mods {
-            rows.extend(mod_strips(store, r, now));
+            let strips = mod_strips(store, r, now);
+            if strips.is_empty() && preview {
+                rows.push(placeholder(r));
+            }
+            rows.extend(strips);
             continue;
         }
         let mut cells: Vec<HudCell> = Vec::new();
@@ -440,10 +468,12 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         // A separator followed only by text (a gated group's leftovers) goes too.
         if tidy.iter().any(is_content) {
             rows.push(HudRow { cells: tidy, divider: r.divider });
+        } else if preview {
+            rows.push(placeholder(r));
         }
     }
     let background = inp.layout.background.unwrap_or(inp.cfg.background);
-    HudModel {
+    let model = HudModel {
         session: inp.session.to_owned(),
         product_id: inp.product_id,
         rev: 0,
@@ -472,7 +502,8 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         backdrop: inp.backdrop.clone().map(Box::new),
         game_focus: inp.game_focus,
         stereo: inp.stereo.clone(),
-    }
+    };
+    (model, starts)
 }
 
 /// The card's size for the rows a model shows (SIGHT-HUD §1.4, as built 2026-11-19): the
@@ -792,6 +823,26 @@ mod tests {
         let want = m.size;
         hold.apply(&s, &mut m);
         assert_eq!(m.size, want);
+    }
+
+    #[test]
+    fn the_preview_keeps_every_row_in_place() {
+        let (plain, now) = session(false);
+        let cfg = HudConfig::default();
+        let l = builtin("full").unwrap();
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Desktop, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
+        let (m, starts) = build_preview(&inp, &plain, now);
+        assert_eq!(starts.len(), l.rows.len());
+        assert_eq!(m.rows.len(), l.rows.len(), "one model row per layout row (no mod connected)");
+        assert!(starts.windows(2).all(|w| w[0] < w[1]));
+        // What has values shows as in the HUD; the rest is a dim placeholder naming it.
+        assert_eq!(text_of(&HudModel { rows: vec![m.rows[0].clone()], ..m.clone() }), "160 FPS");
+        let lat = &m.rows[starts[3]];
+        assert!(matches!(&lat.cells[..], [HudCell::Text { text, level: Level::Dim, .. }] if text.starts_with("latency.pc")), "{lat:?}");
+        let strip = m.rows.last().unwrap();
+        assert!(strip.divider && matches!(&strip.cells[0], HudCell::Text { text, .. } if text.contains("mod")));
+        // The HUD itself drops those rows.
+        assert!(build_model(&inp, &plain, now).rows.len() < m.rows.len());
     }
 
     #[test]

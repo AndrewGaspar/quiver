@@ -274,6 +274,11 @@ pub fn system() -> Vec<MetricDescriptor> {
     let mut name = d("gpu.name", MetricKind::Text, Unit::None, "GPU", None, "The GPU the metrics are from.", );
     name.group = Some("GPU".into());
     v.push(name);
+    // Where the GPU numbers come from, for the Sight panel's tiles ("GPU · nvml").
+    let mut source = d("gpu.source", MetricKind::Text, Unit::None, "GPU sensors", None, "Where the GPU metrics are read: nvml (NVIDIA's library) or sysfs (the kernel driver's files).", );
+    source.group = Some("GPU".into());
+    source.visibility = Some(quiver_perf::descriptor::Visibility::Advanced);
+    v.push(source);
     let mut bat = d("bat.status", MetricKind::State, Unit::None, "Power source", None, "Battery or AC.", );
     bat.group = Some("Power".into());
     bat.values = vec![

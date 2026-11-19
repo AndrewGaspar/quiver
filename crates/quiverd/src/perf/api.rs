@@ -72,6 +72,18 @@ impl Daemon {
                 json!(plan)
             }
             PerfRequest::Summaries { game, limit } => json!(summaries(&game, limit)),
+            PerfRequest::FrameTimes { session, game, span_ms, buckets } => json!(hub.frame_times(session.as_deref(), game, span_ms, buckets)?),
+            PerfRequest::SaveLog { session, game, seconds } => {
+                let (saved, g) = hub.save_log(session.as_deref(), game, seconds)?;
+                self.log_activity_game(source, format!("performance log ({} frames): {}", saved.frames, saved.path.display()), Some(g));
+                json!(saved)
+            }
+            PerfRequest::HudPreview { session, layout } => json!(hub.preview(&session, &layout)?),
+            PerfRequest::HudLayoutSave { layout } => {
+                let info = super::layout::save(hub.hud.dir(), &layout).map_err(|e| anyhow::anyhow!(e))?;
+                self.log_activity_game(source, format!("HUD layout {} saved ({})", info.id, info.name), None);
+                json!(info)
+            }
             PerfRequest::DevSession { product_id, stop, sight } => {
                 if !matches!(source, "cli" | "dev" | "test") {
                     bail!("dev sessions are for the CLI and tests");
