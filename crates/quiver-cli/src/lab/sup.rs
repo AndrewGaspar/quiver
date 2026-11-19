@@ -26,7 +26,7 @@ use quiver_api::lab::LaunchMaterial;
 use quiver_api::{Request, StoreId};
 use quiver_core::lab::manifest::Licence;
 use quiver_core::lab::ready::{Exit, Phase, Run, State};
-use quiver_core::lab::{self, Inst, Lab, Manifest, configset, guard, host, podman, procs};
+use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eosfilter, guard, host, podman, procs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -276,11 +276,32 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
             Err(e) => notes.push(format!("graphics profile {p} not applied: {e:#}")),
         }
     }
+    // The EOS filter (lab::eosfilter): after the mod's files, so a mod's own secur32.dll is
+    // refused rather than left in front of it. A game with the EOS SDK doesn't launch without it.
+    let eos = eosfilter::plan(&m.install_in(inst), &m.paths.exe, m.licence == Licence::EpicExchangeCode);
+    let mut eos_on = false;
+    if let Some(plan) = &eos {
+        match eosfilter::find_build().and_then(|b| eosfilter::install(&inst.dir, &m.install_in(inst), plan, &b)) {
+            Ok(dlls) => {
+                eos_on = true;
+                let dirs: Vec<String> = plan.dirs.iter().map(|(d, a)| format!("{} ({})", if d.as_os_str().is_empty() { ".".into() } else { d.display().to_string() }, a.dir())).collect();
+                notes.push(format!("EOS filter: {} secur32.dll in {} (saves, achievements, stats and telemetry to Epic blocked)", dlls.len(), dirs.join(", ")));
+            }
+            Err(e) if plan.required => bail!(
+                "refusing to launch: the game ships the EOS SDK ({}), which would sync cloud saves and report achievements and stats to the person's Epic account, and the EOS filter that blocks that couldn't be installed in the instance: {e:#}",
+                plan.sdks.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
+            Err(e) => notes.push(format!("EOS filter not installed (no EOS SDK found in the game, so nothing needs it): {e:#}")),
+        }
+    }
     let run = next_run(inst);
     let run_dir = inst.run_dir(run);
     std::fs::create_dir_all(&run_dir)?;
     let session = quiver_api::lab::session_id(&inst.name, run);
     let run_win = format!(r"{}\runs\r{run}", lab::LAB_WIN);
+    if eos_on {
+        notes.push(format!("EOS filter decisions: runs/r{run}/{}", eosfilter::LOG_FILE));
+    }
     let run_mount = format!("{}/runs/r{run}", lab::LAB_MOUNT);
     let hs = host::snapshot(&procs::scan(), &ops::containers());
     std::fs::write(run_dir.join("host.json"), serde_json::to_vec_pretty(&hs)?)?;
@@ -357,9 +378,15 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let overrides: Vec<String> = m.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let base = env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES").map(|(_, v)| v.clone()).into_iter().chain((!overrides.is_empty()).then(|| overrides.join(";")));
     let base: Vec<String> = base.collect();
-    env.retain(|(k, _)| k != "WINEDLLOVERRIDES");
+    let mut base = (!base.is_empty()).then(|| base.join(";"));
+    env.retain(|(k, _)| k != "WINEDLLOVERRIDES" && k != eosfilter::LOG_ENV);
+    if eos_on {
+        // The filter wins over any secur32 setting the manifest has.
+        base = Some(eosfilter::with_override(base.as_deref()));
+        env.push((eosfilter::LOG_ENV.into(), format!(r"{run_win}\{}", eosfilter::LOG_FILE)));
+    }
     // Connect's executables are disabled for every launch (the guard's third layer).
-    env.push(("WINEDLLOVERRIDES".into(), quiver_core::steamrun::dll_overrides_without_connect((!base.is_empty()).then(|| base.join(";")).as_deref())));
+    env.push(("WINEDLLOVERRIDES".into(), quiver_core::steamrun::dll_overrides_without_connect(base.as_deref())));
     std::fs::create_dir_all(inst.lab().join("cache/nv"))?;
     std::fs::create_dir_all(inst.lab().join("req"))?;
     std::fs::create_dir_all(inst.lab().join("rsp"))?;

@@ -73,6 +73,10 @@ pub fn render(b: &BriefInput) -> String {
     let hints = |h: &[super::facts::Hint]| if h.is_empty() { "none found".to_owned() } else { h.iter().map(|h| format!("{} (`{}`)", h.name, h.evidence)).collect::<Vec<_>>().join("; ") };
     s.push_str(&format!("- Engine hints: {}\n", hints(&f.engines)));
     s.push_str(&format!("- SDKs and middleware: {}\n", hints(&f.sdks)));
+    let eos_sdk = f.sdks.iter().any(|h| h.name == "Epic Online Services");
+    if eos_sdk || b.licence == Some(Licence::EpicExchangeCode) {
+        s.push_str(&eos_note(eos_sdk, i));
+    }
     s.push_str(&format!("- Anti-cheat: {}\n", f.anticheat.as_deref().unwrap_or("no marker found")));
     if f.anticheat.is_some() {
         s.push_str("  - **Stop and ask the user** before touching anything online: mods are for offline single-player only, and anti-cheat is never bypassed.\n");
@@ -162,12 +166,33 @@ pub fn render(b: &BriefInput) -> String {
     s
 }
 
+/// What the EOS filter does to an Epic or EOS game in the lab (design/LAB.md section 3.1).
+fn eos_note(sdk: bool, i: &str) -> String {
+    let hosts = super::eosfilter::filtered_hosts().join(", ");
+    let mut s = format!(
+        "- **Epic Online Services:** the game's own requests to `{hosts}` go through the lab's EOS filter (a `secur32.dll` \
+         Quiver puts in the instance's clone, never in the user's install). Allowed: sign-in, the SDK's config, EOS Connect, \
+         ownership and entitlement reads. Blocked before a byte is sent: cloud saves (Player Data Storage), achievements, \
+         stats, leaderboards, presence, telemetry and anything else, so the game may say those are offline or failed; \
+         that is expected. Every decision is logged in `runs/r<N>/eos-filter.log` (`quiver lab logs {i}` sums it up). \
+         If sign-in or ownership needs a blocked path, add it to `contrib/lab/eos-filter/allowlist.h` (design/LAB.md 3.1); \
+         never add anything that writes to the account or reports.{}\n",
+        if sdk { " Launches refuse to start if the filter can't be installed." } else { "" }
+    );
+    s.push_str("  - The allowlist:");
+    for (m, p, _) in super::eosfilter::allowlist() {
+        s.push_str(&format!(" `{m} {p}`"));
+    }
+    s.push('\n');
+    s
+}
+
 /// The rules every brief carries.
 pub const RULES: &[&str] = &[
     "Never sign in to any store, and never run a store's client (Ubisoft Connect, the Epic launcher, Steam) in an instance. The lab gets the licence from quiverd per launch; Connect is disabled in every instance and a Connect process kills the run.",
     "Never read credential or token files (Connect's `ConnectSecureStorage.dat`, keyrings, `~/.config/*/credentials`).",
     "Never touch the user's real prefix or install (`quiver lab` never mounts them). Copy saves in as fixtures (`quiver lab fixture`), never link them.",
-    "Nothing from an instance is reported: no play time, achievements or cloud saves reach the user's accounts. Don't enable a game's own cloud sync in an instance.",
+    "Nothing from an instance is reported: no play time, achievements, stats or cloud saves reach the user's accounts (for EOS games the EOS filter blocks them; its log is in the run folder). Don't enable a game's own cloud sync in an instance, and never route around the filter.",
     "Use `quiver lab launch`, `kill` and `wait`; never assemble pkill/sleep sequences. Never `pkill -f` or `pgrep -f` (it matches your own shell); the lab identifies processes by container and prefix.",
     "Poll a real signal, never a fixed sleep: `quiver lab wait` (process, window, frame, or your mod's state), `--wait` on `set`.",
     "Prefer keys and relative mouse motion. Clicks are fractions of the window (`quiver lab click <i> 0.5 0.62`) and must be checked: use `--expect-change` or a screenshot.",
@@ -224,7 +249,14 @@ mod tests {
         for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
-        let refused = render(&BriefInput { licence: None, refused: Some("Steamworks needs the Steam client".into()), ..b });
+        assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));
+        let refused = render(&BriefInput { licence: None, refused: Some("Steamworks needs the Steam client".into()), ..b.clone() });
         assert!(refused.contains("Lab launches are refused"));
+        // An Epic game with the EOS SDK: the filter, its log and the allowlist.
+        let sdk = super::super::facts::Hint { name: "Epic Online Services".into(), evidence: "EOSSDK-Win64-Shipping.dll".into() };
+        let epic = render(&BriefInput { game: "epic:awr".into(), licence: Some(Licence::EpicExchangeCode), instance: "awr".into(), facts: Facts { sdks: vec![sdk], ..b.facts.clone() }, ..b });
+        for want in ["**Epic Online Services:**", "api.epicgames.dev", "cloud saves (Player Data Storage)", "eos-filter.log", "quiver lab logs awr", "allowlist.h", "refuse to start", "`POST /epic/oauth/{v}/token`"] {
+            assert!(epic.contains(want), "missing {want:?} in\n{epic}");
+        }
     }
 }

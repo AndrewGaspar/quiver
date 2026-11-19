@@ -16,7 +16,7 @@ use clap::Subcommand;
 use quiver_api::Client;
 use quiver_core::lab::manifest::{Display, layer_versions};
 use quiver_core::lab::ready::{State, Want};
-use quiver_core::lab::{self, Inst, Lab, Manifest, configset, facts, host, podman, procs};
+use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eosfilter, facts, host, podman, procs};
 
 use sup::SupRequest;
 
@@ -710,6 +710,14 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
                 println!("  {} ({} bytes)", e.file_name().to_string_lossy(), e.metadata().map(|m| m.len()).unwrap_or(0));
             }
+            // What the EOS filter let through and what it blocked (design/LAB.md section 3.1).
+            if let Ok(text) = std::fs::read_to_string(dir.join(eosfilter::LOG_FILE)) {
+                let s = eosfilter::summarize(&text);
+                println!("EOS filter: loaded in {} process(es), {} request(s) allowed, {} blocked ({})", s.loaded, s.allowed, s.blocked, eosfilter::LOG_FILE);
+                for (what, n) in &s.blocked_requests {
+                    println!("  blocked {what}{}", if *n > 1 { format!(" (x{n})") } else { String::new() });
+                }
+            }
             if let Some(n) = tail {
                 let text = std::fs::read_to_string(dir.join("game.log")).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
@@ -1088,6 +1096,16 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
     check("quiverd", quiverd, if quiverd { "running".into() } else { "not running (quiver status)".into() });
     let bridge = ops::lab_bridge();
     check("lab-aware bridge", bridge.is_ok(), match bridge { Ok(p) => p.display().to_string(), Err(e) => format!("{e:#}") });
+    // Games with the EOS SDK don't launch without it (design/LAB.md section 3.1).
+    let eos = eosfilter::find_build();
+    check(
+        "EOS filter (Epic/EOS games: cloud saves, achievements, stats blocked)",
+        eos.is_ok(),
+        match eos {
+            Ok(p) => format!("{} ({} allowlist entries, for {})", p.display(), eosfilter::allowlist().len(), eosfilter::filtered_hosts().join(", ")),
+            Err(e) => format!("{e:#}"),
+        },
+    );
     if json {
         return print_json(&checks.iter().map(|(n, ok, d)| serde_json::json!({ "check": n, "ok": ok, "detail": d })).collect::<Vec<_>>());
     }

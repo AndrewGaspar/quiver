@@ -73,6 +73,8 @@ build() {
   # C build script (ring, zstd-sys, …) when it changes, which defeats a cached target dir.
   env -u SOURCE_DATE_EPOCH cargo build --frozen --release
   env -u SOURCE_DATE_EPOCH cargo build --frozen --release -p quiver-bridge --target "$_bridge_target"
+  # The lab's EOS filter, both architectures (mingw-w64-gcc).
+  contrib/lab/eos-filter/build.sh "$CARGO_TARGET_DIR/eos-filter"
 }
 
 package() {

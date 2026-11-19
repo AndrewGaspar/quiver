@@ -5,6 +5,8 @@
 #                                             quiver-webview: the Epic sign-in window, needs webkit2gtk-4.1 at run time)
 #   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
+#   ~/.local/lib/quiver/lab/eos-filter/{x86_64,i686}/secur32.dll  (the lab's EOS filter; needs
+#                                             mingw-w64-gcc for both architectures)
 #   ~/.local/lib/quiver/skills/quiver/SKILL.md, linked as `quiver` into each agent skills
 #                                             directory that exists (~/.claude/skills,
 #                                             ~/.agents/skills, ~/.codex/skills); a `quiver`
@@ -291,6 +293,8 @@ mkdir -p "$build"
 echo "Building Quiver $version (target dir $CARGO_TARGET_DIR)"
 cargo build --release --locked
 cargo build --release --locked -p quiver-bridge --target x86_64-pc-windows-gnu
+# The lab's EOS filter (design/LAB.md section 3.1): lab instances of EOS games don't launch without it.
+"$repo/contrib/lab/eos-filter/build.sh" "$CARGO_TARGET_DIR/eos-filter"
 # The Sight layer for 32-bit games, when Rust's i686 target is there (rustup target add
 # i686-unknown-linux-gnu; also needs 32-bit glibc, lib32-glibc on Arch).
 sight_i686=0
