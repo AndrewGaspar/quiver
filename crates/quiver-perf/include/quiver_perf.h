@@ -165,6 +165,12 @@ extern "C" {
 #define QV_STEREO_SETTING_SET     0x100
 #define QV_STEREO_SETTING_INVALID 0x200
 #define QV_STEREO_DRAWN_VALID     0x100
+/* Depth on a packed stereo frame (qv_hud_buffer.depth, qv_hud_lift.depth: 1/1000 of a rung). */
+#define QV_DEPTH_ONE              1000
+#define QV_DEPTH_SETTING_SET      0x10000
+#define QV_DEPTH_SETTING_INVALID  0x20000
+#define QV_DEPTH_DRAWN_VALID      0x10000
+#define QV_HUD_MAX_LIFTS          4
 
 #define QV_GRAPH_SERIES_PRESENTED      1
 #define QV_GRAPH_SERIES_BASE           2
@@ -266,6 +272,9 @@ typedef struct qv_layer_status {
     /* appended (stereo): zero from layers before */
     uint32_t stereo_setting;    /* QUIVER_SIGHT_STEREO: 0 auto/unset, QV_STEREO_SETTING_SET | QV_STEREO_*, or _INVALID */
     uint32_t stereo_drawn;      /* QV_STEREO_DRAWN_VALID | the layout of the last frame drawn on */
+    /* appended (depth): zero from layers before */
+    uint32_t depth_setting;     /* QUIVER_SIGHT_DEPTH: 0 unset (100%), QV_DEPTH_SETTING_SET | percent, or _INVALID */
+    uint32_t depth_drawn;       /* QV_DEPTH_DRAWN_VALID | the largest total disparity drawn last (px) */
 } qv_layer_status;
 
 #define QV_HDR_METADATA_SET   (1u << 0)
@@ -307,6 +316,13 @@ typedef struct qv_hud_graph {       /* a rectangle the layer fills with the live
     uint32_t series;                /* QV_GRAPH_SERIES_* */
 } qv_hud_graph;
 
+/* A part of a HUD/panel image at its own depth, back to front, in image pixels. */
+typedef struct qv_hud_lift {
+    uint16_t x, y, w, h;
+    uint16_t depth;                 /* 1/1000 of a rung, <= QV_DEPTH_ONE (absolute) */
+    uint16_t _pad;
+} qv_hud_lift;
+
 typedef struct qv_hud_buffer {      /* at header_bytes + i * buffer_bytes */
     uint64_t seq;                   /* odd while quiver-sight writes this buffer */
     uint32_t width, height, stride; /* pixels, pixels, bytes per row (multiple of 4) */
@@ -321,7 +337,10 @@ typedef struct qv_hud_buffer {      /* at header_bytes + i * buffer_bytes */
     uint64_t model_rev;             /* the HUD model revision this image shows */
     uint32_t dirty_y0, dirty_y1;    /* panel.image: rows changed since publish dirty_base */
     uint64_t dirty_base;            /* 0: none promised (hud.image writers leave these 0) */
-    uint8_t  _reserved[56];
+    uint16_t depth;                 /* stereo: in front of the game, 1/1000 of a rung (0: its plane) */
+    uint16_t nlifts;                /* <= QV_HUD_MAX_LIFTS */
+    qv_hud_lift lifts[QV_HUD_MAX_LIFTS];
+    uint8_t  _reserved[4];
     /* pixels at QV_HUD_PIXELS_OFFSET */
 } qv_hud_buffer;
 
@@ -370,7 +389,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 408);
+QV_ASSERT_SIZE(qv_layer_status, 416);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -415,6 +434,8 @@ QV_ASSERT_OFFSET(qv_layer_status, hdr_primaries, 360);
 QV_ASSERT_OFFSET(qv_layer_status, capture_done, 392);
 QV_ASSERT_OFFSET(qv_layer_status, stereo_setting, 400);
 QV_ASSERT_OFFSET(qv_layer_status, stereo_drawn, 404);
+QV_ASSERT_OFFSET(qv_layer_status, depth_setting, 408);
+QV_ASSERT_OFFSET(qv_layer_status, depth_drawn, 412);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);
@@ -462,6 +483,15 @@ QV_ASSERT_OFFSET(qv_hud_buffer, stereo, 172);
 QV_ASSERT_OFFSET(qv_hud_buffer, model_rev, 176);
 QV_ASSERT_OFFSET(qv_hud_buffer, dirty_y0, 184);
 QV_ASSERT_OFFSET(qv_hud_buffer, dirty_base, 192);
+QV_ASSERT_OFFSET(qv_hud_buffer, depth, 200);
+QV_ASSERT_OFFSET(qv_hud_buffer, nlifts, 202);
+QV_ASSERT_OFFSET(qv_hud_buffer, lifts, 204);
+QV_ASSERT_SIZE(qv_hud_lift, 12);
+QV_ASSERT_OFFSET(qv_hud_lift, x, 0);
+QV_ASSERT_OFFSET(qv_hud_lift, y, 2);
+QV_ASSERT_OFFSET(qv_hud_lift, w, 4);
+QV_ASSERT_OFFSET(qv_hud_lift, h, 6);
+QV_ASSERT_OFFSET(qv_hud_lift, depth, 8);
 
 /* ---- Ring writer ------------------------------------------------------------------- *
  * For a ring this process writes (a mod's ring the bridge created; map it with

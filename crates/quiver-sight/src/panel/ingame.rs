@@ -41,6 +41,7 @@ use gpui::{
     PlatformInput, ScrollDelta, ScrollEvent, TouchPhase, WindowHandle, point, px, size,
 };
 use quiver_perf::HudBufferHeader;
+use quiver_perf::layout::{HUD_MAX_LIFTS, HudLift};
 use quiver_perf::clock::mono_raw_ns;
 use quiver_perf::hud::{HudWriter, PANEL_LIMITS, buffer_bytes_within};
 use quiver_perf::layout::HUD_FORMAT_RGBA8_PREMUL_SRGB;
@@ -51,7 +52,7 @@ use quiver_perf::panel::{
 use quiver_perf::shm::Mapping;
 use quiver_perf::stereo::Stereo;
 
-use super::view::PanelView;
+use super::view::{DepthMarks, PanelView};
 use crate::link::Msg;
 
 /// The layer must have composited the panel within this of opening, or the desktop panel
@@ -99,6 +100,10 @@ struct Publish {
     /// The swapchain's, and how it packs its eyes.
     swapchain: (u32, u32),
     stereo: Stereo,
+    /// Where the view's parts at their own depth are ([`DepthMarks`]), and the lifts last
+    /// published from them.
+    marks: Rc<RefCell<DepthMarks>>,
+    prev_lifts: Vec<HudLift>,
     prev: Vec<u8>,
     prev_dims: (u32, u32, u32),
     last: u64,
@@ -115,6 +120,8 @@ impl Publish {
         let len = (fr.stride as usize * (h as usize - 1) + w as usize * 4).min(fr.data.len());
         let data = &fr.data[..len];
         let dims = (w, h, fr.stride);
+        let lifts = if self.stereo.is_stereo() { lifts(&self.marks.borrow(), scale, (w, h)) } else { Vec::new() };
+        let same_lifts = lifts == self.prev_lifts;
         // The rows that differ from the last image (whole rows of `w` pixels).
         let dirty = if self.last != 0 && self.prev_dims == dims && self.prev.len() == data.len() {
             let row = |y: u32| {
@@ -123,7 +130,8 @@ impl Publish {
             };
             let first = (0..h).find(|&y| data[row(y)] != self.prev[row(y)]);
             match first {
-                None => return, // nothing changed
+                None if same_lifts => return, // nothing changed
+                None => None,                 // only the depths: the whole image again
                 Some(y0) => {
                     let y1 = (y0..h).rev().find(|&y| data[row(y)] != self.prev[row(y)]).unwrap_or(y0) + 1;
                     Some((y0, y1))
@@ -135,6 +143,10 @@ impl Publish {
         let mut d = HudBufferHeader::ZERO;
         (d.width, d.height, d.stride, d.format, d.scale) = (w, h, fr.stride, HUD_FORMAT_RGBA8_PREMUL_SRGB, scale);
         (d.extent_w, d.extent_h, d.opacity, d.stereo) = (self.swapchain.0, self.swapchain.1, 1.0, self.stereo.code());
+        // The scrim and the blur stay at the game's plane (depth 0); the card, the focused row
+        // and a dialog float at their rungs (design/STEREO-UI.md).
+        d.nlifts = lifts.len() as u16;
+        d.lifts[..lifts.len()].copy_from_slice(&lifts);
         if let Some((y0, y1)) = dirty {
             (d.dirty_y0, d.dirty_y1, d.dirty_base) = (y0, y1, self.last);
         }
@@ -155,10 +167,27 @@ impl Publish {
                 self.prev.clear();
                 self.prev.extend_from_slice(data);
                 self.prev_dims = dims;
+                self.prev_lifts = lifts;
             }
             Err(e) => tracing::warn!("panel.image: {e}"),
         }
     }
+}
+
+/// The image's lifts from the view's marks: logical px × `scale` image px, rounded out and
+/// kept inside the image (`size`), back to front, at most [`HUD_MAX_LIFTS`].
+pub fn lifts(marks: &DepthMarks, scale: f32, size: (u32, u32)) -> Vec<HudLift> {
+    marks
+        .parts()
+        .filter_map(|(b, depth)| {
+            let x0 = (f32::from(b.origin.x) * scale).floor().max(0.0) as u32;
+            let y0 = (f32::from(b.origin.y) * scale).floor().max(0.0) as u32;
+            let x1 = ((f32::from(b.origin.x + b.size.width) * scale).ceil().max(0.0) as u32).min(size.0).min(u16::MAX as u32);
+            let y1 = ((f32::from(b.origin.y + b.size.height) * scale).ceil().max(0.0) as u32).min(size.1).min(u16::MAX as u32);
+            (x1 > x0 && y1 > y0).then(|| HudLift { x: x0 as u16, y: y0 as u16, w: (x1 - x0) as u16, h: (y1 - y0) as u16, depth, _pad: 0 })
+        })
+        .take(HUD_MAX_LIFTS)
+        .collect()
 }
 
 /// Held keys and buttons, and the modifiers they make.
@@ -436,7 +465,8 @@ impl InGame {
         let writer = create_panel_image(&dir.join(PANEL_IMAGE_FILE), bb).context("creating panel.image")?;
         writer.set_writer_pid(std::process::id());
         writer.heartbeat(mono_raw_ns());
-        let publish = Rc::new(RefCell::new(Publish { writer, extent, swapchain, stereo, prev: Vec::new(), prev_dims: (0, 0, 0), last: 0, frames: 0, rows: 0 }));
+        let marks = view.read(cx).marks.clone();
+        let publish = Rc::new(RefCell::new(Publish { writer, extent, swapchain, stereo, marks, prev_lifts: Vec::new(), prev: Vec::new(), prev_dims: (0, 0, 0), last: 0, frames: 0, rows: 0 }));
         let sink = publish.clone();
         let logical = (extent.0 as f32 / factor, extent.1 as f32 / factor);
         let root = view.clone();

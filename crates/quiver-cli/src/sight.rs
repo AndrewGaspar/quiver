@@ -187,6 +187,10 @@ fn print_status(s: &SightStatus) {
         println!("keys:     {} — {} (Shift+F2 presses: {})", k.session, if k.keys.is_empty() { "unknown" } else { &k.keys }, k.presses);
         if let Some(st) = &k.stereo {
             println!("stereo:   {} — {}", k.session, st.line());
+            let d = st.depth_line();
+            if !d.is_empty() {
+                println!("          {d}");
+            }
         }
     }
 }

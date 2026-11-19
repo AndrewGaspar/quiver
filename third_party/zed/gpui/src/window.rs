@@ -1253,6 +1253,8 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// Quiver: set while frames are presented packed for two eyes.
+    stereo_packing: Option<StereoPacking>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2415,6 +2417,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            stereo_packing: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -2503,6 +2506,14 @@ pub struct DispatchEventResult {
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// The bounds
     pub bounds: Bounds<P>,
+}
+
+/// Quiver: how a window packs a stereo frame ([`Window::set_stereo_packing`]).
+#[derive(Clone)]
+pub struct StereoPacking {
+    /// Each eye's horizontal offset, in device pixels, for content at a depth:
+    /// `[left eye, right eye]`. Integer offsets keep text and images pixel-exact.
+    pub shift: Rc<dyn Fn(f32) -> [f32; 2]>,
 }
 
 impl ContentMask<Pixels> {
@@ -3983,7 +3994,25 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        if let Some(packing) = &self.stereo_packing {
+            let eye = size(
+                ScaledPixels((f32::from(self.viewport_size.width) * self.scale_factor).round()),
+                ScaledPixels((f32::from(self.viewport_size.height) * self.scale_factor).round()),
+            );
+            let started = Instant::now();
+            let packed = self
+                .rendered_frame
+                .scene
+                .pack_side_by_side(eye, &*packing.shift);
+            log::debug!(
+                "stereo: packed {} paint operations in {:?}",
+                self.rendered_frame.scene.len(),
+                started.elapsed()
+            );
+            self.platform_window.draw(&packed);
+        } else {
+            self.platform_window.draw(&self.rendered_frame.scene);
+        }
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -4598,6 +4627,39 @@ impl Window {
         let result = f(self);
         self.element_offset_stack.pop();
         result
+    }
+
+    /// Quiver: paints `f` at a stereo `depth` (HypXRland's unitless rung, 0..1, 0 = the
+    /// window's plane): while the window packs stereo frames
+    /// ([`Window::set_stereo_packing`]) what `f` paints is offset per eye by that depth's
+    /// disparity. Depths don't add up: an inner depth replaces the outer one. `None` paints
+    /// at the depth already in effect. Without packing this changes nothing.
+    pub fn with_stereo_depth<R>(&mut self, depth: Option<f32>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let Some(depth) = depth else {
+            return f(self);
+        };
+        let previous = self.next_frame.scene.set_stereo_depth(depth);
+        let result = f(self);
+        self.next_frame.scene.set_stereo_depth(previous);
+        result
+    }
+
+    /// Quiver: presents this window's frames packed side by side for two eyes
+    /// (HypXRland's `stereo:sbs`), or stops (`None`). Each element is drawn into both eyes,
+    /// offset by `packing.shift` for its [`Window::with_stereo_depth`]. The window keeps its
+    /// logical size, layout and input coordinates; only the drawable doubles. Returns
+    /// whether the platform window can (Wayland and off-screen windows can).
+    pub fn set_stereo_packing(&mut self, packing: Option<StereoPacking>) -> bool {
+        let on = packing.is_some();
+        let supported = self.platform_window.set_stereo_side_by_side(on);
+        self.stereo_packing = if supported { packing } else { None };
+        self.refresh();
+        supported
+    }
+
+    /// Quiver: whether frames are presented packed for two eyes.
+    pub fn is_stereo_packed(&self) -> bool {
+        self.stereo_packing.is_some()
     }
 
     pub(crate) fn with_element_opacity<R>(

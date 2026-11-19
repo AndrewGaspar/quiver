@@ -120,10 +120,15 @@ pub mod env {
     /// reports it (status block); quiver-sight lays the HUD and panel out for the layout
     /// quiverd resolves and tells the layer per image.
     pub use quiver_perf::stereo::ENV_STEREO as STEREO;
+    /// The `sight.depth` setting (design/STEREO-UI.md): on a stereo frame, how far in front of
+    /// the game the HUD and the panel float, percent of the ladder (`off` or `0`: at the
+    /// game's plane; unset: 100). The layer applies it to the depths each image carries.
+    pub use quiver_perf::stereo::ENV_DEPTH as DEPTH;
 }
 
 struct Config {
     stereo: quiver_perf::stereo::Setting,
+    depth: quiver_perf::stereo::DepthSetting,
     draw: bool,
     blur: bool,
     log: bool,
@@ -136,6 +141,7 @@ fn config() -> &'static Config {
         let flag = |k: &str| std::env::var(k).ok();
         Config {
             stereo: quiver_perf::stereo::Setting::parse(flag(env::STEREO).as_deref()),
+            depth: quiver_perf::stereo::DepthSetting::parse(flag(env::DEPTH).as_deref()),
             draw: flag(env::DRAW).as_deref() != Some("0"),
             blur: flag(env::BLUR).as_deref() != Some("0"),
             log: flag(env::LOG).is_some_and(|v| !v.is_empty() && v != "0"),
@@ -147,6 +153,12 @@ fn config() -> &'static Config {
 /// The launch's `sight.stereo` setting, for the status block.
 pub(crate) fn stereo_setting() -> quiver_perf::stereo::Setting {
     config().stereo
+}
+
+/// The launch's `sight.depth` setting: the status block reports it, the compositor applies
+/// its percent.
+pub(crate) fn depth_setting() -> quiver_perf::stereo::DepthSetting {
+    config().depth
 }
 
 /// Swapchains get `TRANSFER_SRC` for captures ([`hdr`]).

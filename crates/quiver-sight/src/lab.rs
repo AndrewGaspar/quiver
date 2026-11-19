@@ -430,7 +430,7 @@ mod tests {
         }
         let m = model("lab-a-r1", 1, true, "standard", None, image, None, None, "r1", None);
         // A stereo setting: the text is sized for one eye (tab on 1920x2160: 1080 tall).
-        let st = StereoInfo::resolve(None, &LayerStereo { setting: quiver_perf::stereo::Setting::Fixed(quiver_perf::stereo::Stereo::Tab).code(), drawn: None });
+        let st = StereoInfo::resolve(None, &LayerStereo { setting: quiver_perf::stereo::Setting::Fixed(quiver_perf::stereo::Stereo::Tab).code(), drawn: None, ..Default::default() });
         assert_eq!((st.layout.as_str(), st.source.as_str()), ("tab", "setting"));
         let m2 = model("lab-a-r1", 1, true, "standard", Some([1920, 2160]), image, None, None, "r1", Some(st));
         assert!((m2.text_px - 1080.0 * 0.016).abs() < 1e-3);

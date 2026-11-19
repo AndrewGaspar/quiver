@@ -276,6 +276,9 @@ impl GameHud {
         let pl = place(m.anchor, [m.offset[0] * f, m.offset[1] * f], m.safe_area, st.logical_extent((extent[0], extent[1])), (cw, ch));
         let mut d = HudBufferHeader::ZERO;
         d.stereo = st.code();
+        // Just in front of the game (whose own HUD is at its plane) on a stereo frame; the
+        // layer turns the rung into each eye's shift (design/STEREO-UI.md).
+        d.depth = quiver_perf::stereo::rung::HUD;
         d.width = pl.w;
         d.height = pl.h;
         d.stride = fr.stride;

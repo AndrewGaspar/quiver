@@ -14,7 +14,7 @@ const QUAD_FRAG: &[u8] = include_bytes!("../shaders/quad.frag.spv");
 const GRAPH_VERT: &[u8] = include_bytes!("../shaders/graph.vert.spv");
 const GRAPH_FRAG: &[u8] = include_bytes!("../shaders/graph.frag.spv");
 
-/// `shaders/common.glsl`'s push constants.
+/// `shaders/common.glsl`'s push constants: 128 bytes, Vulkan's guaranteed minimum.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Push {
@@ -23,7 +23,17 @@ pub struct Push {
     pub size: [f32; 2],
     pub opacity: f32,
     pub flags: u32,
+    /// This eye's shift for the whole draw on a stereo frame (design/STEREO-UI.md), px.
+    pub shift: [f32; 2],
+    /// The quad's lifts: in use, rectangles (x0, y0, x1, y1) in image texels back to front,
+    /// and each one's shift beyond `shift`.
+    pub nlifts: u32,
+    pub _pad: u32,
+    pub lift: [[f32; 4]; 4],
+    pub lift_dx: [f32; 4],
 }
+
+const _: () = assert!(size_of::<Push>() == 128);
 
 pub const PUSH_SRGB_DECODE: u32 = 1;
 /// Into a stereo eye squeezed 2:1 along x (`hsbs`) or y (`htab`): the quad averages texel pairs.
@@ -41,7 +51,7 @@ pub fn squeeze_flags(s: quiver_perf::stereo::Stereo) -> u32 {
 
 impl Push {
     pub fn bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), 32 bytes of f32/u32, no padding.
+        // SAFETY: repr(C), 128 bytes of f32/u32, no padding.
         unsafe { std::slice::from_raw_parts((self as *const Push).cast::<u8>(), size_of::<Push>()) }
     }
 }

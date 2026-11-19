@@ -68,6 +68,38 @@ pub(crate) struct PathTiles {
 }
 
 impl PathTiles {
+    /// Quiver: the same tiles moved right by `dx` device pixels (a stereo eye's copy).
+    pub(crate) fn translated(&self, dx: f32) -> Self {
+        let mut bounds = self.bounds;
+        bounds.origin.x = ScaledPixels(bounds.origin.x.0 + dx);
+        let tiles = self
+            .tiles
+            .iter()
+            .map(|t| PathTile {
+                top_left: point(t.top_left.x + dx, t.top_left.y),
+                bottom_right: point(t.bottom_right.x + dx, t.bottom_right.y),
+                reference: point(t.reference.x + dx, t.reference.y),
+                curves_top_left: point(t.curves_top_left.x + dx, t.curves_top_left.y),
+                curves_bottom_right: point(t.curves_bottom_right.x + dx, t.curves_bottom_right.y),
+                ..*t
+            })
+            .collect();
+        let curves = self
+            .curves
+            .iter()
+            .map(|c| PathCurve {
+                p0: point(c.p0.x + dx, c.p0.y),
+                p1: point(c.p1.x + dx, c.p1.y),
+                ..*c
+            })
+            .collect();
+        Self {
+            bounds,
+            tiles,
+            curves,
+        }
+    }
+
     pub(crate) fn bounds(&self) -> Bounds<ScaledPixels> {
         self.bounds
     }

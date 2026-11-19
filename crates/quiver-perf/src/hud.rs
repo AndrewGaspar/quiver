@@ -104,12 +104,20 @@ impl HudBufferHeader {
         dirty_y0: 0,
         dirty_y1: 0,
         dirty_base: 0,
-        _reserved: [0; HUD_PIXELS_OFFSET - 200],
+        depth: 0,
+        nlifts: 0,
+        lifts: [HudLift::ZERO; HUD_MAX_LIFTS],
+        _reserved: [0; HUD_PIXELS_OFFSET - 252],
     };
 
     /// The graphs in use (`ngraphs` clamped to 2).
     pub fn graphs(&self) -> &[HudGraph] {
         &self.graph[..(self.ngraphs as usize).min(HUD_MAX_GRAPHS)]
+    }
+
+    /// The lifts in use (`nlifts` clamped to [`HUD_MAX_LIFTS`]).
+    pub fn lifts(&self) -> &[HudLift] {
+        &self.lifts[..(self.nlifts as usize).min(HUD_MAX_LIFTS)]
     }
 
     /// Bytes of pixel data: `stride × height`.
@@ -176,6 +184,20 @@ impl HudBufferHeader {
         }
         if self.ngraphs as usize > HUD_MAX_GRAPHS {
             return Err(inv("ngraphs"));
+        }
+        if self.depth > crate::stereo::DEPTH_ONE {
+            return Err(inv("depth"));
+        }
+        if self.nlifts as usize > HUD_MAX_LIFTS {
+            return Err(inv("nlifts"));
+        }
+        for l in self.lifts() {
+            if l.w == 0 || l.h == 0 || !inside(l.x as i32, l.y as i32, l.w as i64, l.h as i64, self.width, self.height) {
+                return Err(inv("lift outside the image"));
+            }
+            if l.depth > crate::stereo::DEPTH_ONE {
+                return Err(inv("lift depth"));
+            }
         }
         for g in self.graphs() {
             if g.w <= 0 || g.h <= 0 || !inside(g.x, g.y, g.w as i64, g.h as i64, self.width, self.height) {
@@ -731,6 +753,41 @@ mod tests {
         assert_eq!(d.validate(bb, Some((1920, 1080))), Err(Error::Invalid("stereo layout")));
         (d.stereo, d.extent_w, d.x) = (Stereo::Sbs.code(), 3, 0);
         assert!(d.validate(bb, Some((3, 1080))).is_err());
+    }
+
+    #[test]
+    fn depth_and_lifts() {
+        let bb = buffer_bytes_for(200, 100).unwrap();
+        let mut d = desc(200, 100, 1);
+        (d.extent_w, d.extent_h, d.stereo) = (3840, 1080, crate::stereo::STEREO_SBS);
+        assert_eq!((d.depth, d.lifts()), (0, &[][..]), "zero from writers before depth");
+        d.depth = 450;
+        d.nlifts = 2;
+        d.lifts[0] = HudLift { x: 10, y: 10, w: 180, h: 80, depth: 450, _pad: 0 };
+        d.lifts[1] = HudLift { x: 20, y: 20, w: 100, h: 30, depth: 750, _pad: 0 };
+        assert!(d.validate(bb, Some((3840, 1080))).is_ok());
+        assert_eq!(d.lifts().len(), 2);
+        assert!(d.lifts[1].contains(20.0, 49.5) && !d.lifts[1].contains(120.0, 30.0));
+        // It travels through the buffer.
+        let mem = Arc::new(HeapRegion::new(hud_file_bytes(bb)));
+        init_hud(&mem, bb).unwrap();
+        let mut w = HudWriter::new(mem.clone()).unwrap();
+        let mut r = HudReader::new(mem.clone()).unwrap();
+        w.publish(&d, &pixels(&d)).unwrap();
+        let mut dst = vec![0u8; d.pixel_bytes()];
+        let HudPoll::Image { desc: got, .. } = r.poll((3840, 1080), &mut dst) else { panic!("no image") };
+        assert_eq!((got.depth, got.lifts()), (450, d.lifts()));
+        // Bounds.
+        let bad = |f: &dyn Fn(&mut HudBufferHeader)| {
+            let mut e = d;
+            f(&mut e);
+            e.validate(bb, Some((3840, 1080)))
+        };
+        assert_eq!(bad(&|e| e.depth = 1001), Err(Error::Invalid("depth")));
+        assert_eq!(bad(&|e| e.nlifts = 5), Err(Error::Invalid("nlifts")));
+        assert_eq!(bad(&|e| e.lifts[1].w = 190), Err(Error::Invalid("lift outside the image")));
+        assert_eq!(bad(&|e| e.lifts[0].h = 0), Err(Error::Invalid("lift outside the image")));
+        assert_eq!(bad(&|e| e.lifts[1].depth = 2000), Err(Error::Invalid("lift depth")));
     }
 
     #[test]

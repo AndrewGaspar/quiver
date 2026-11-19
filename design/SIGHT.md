@@ -1659,8 +1659,9 @@ the setting, and the compositor's window rule. The left eye is the left (or top)
   - the scissor is the image's pixels within that eye, so nothing crosses the seam.
 - The panel's cursor is in the image's (logical) pixels and is drawn in both eyes, squeezed
   with the rest.
-- **Disparity** is zero. A per-image offset (± px per eye) would be a small change in `Eyes`;
-  it isn't built.
+- **Disparity**: built since (design/STEREO-UI.md §12). Each image and each lifted part of it
+  (the panel's card, focused row, dialog) gets a per-eye shift from its depth rung, at the
+  `sight.depth` strength; `off` is the zero disparity described here.
 
 **The backdrop blur stays in each eye.** The request in `hud.image`'s header carries the
 layout (`qv_hud_header.stereo`, written with the request). Every blur pass clamps its taps

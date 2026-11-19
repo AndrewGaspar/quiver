@@ -4,6 +4,7 @@
 //! hint bar. Everything it changes goes to quiverd through the link ([`LinkReq`]); values show
 //! what was asked at once and what came of it when quiverd answers, never optimism.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -11,8 +12,8 @@ use std::time::Duration;
 use chrono::Utc;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    AnyElement, Context, Div, FocusHandle, Hsla, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle, SharedString, Styled, Window, div,
-    prelude::*, px,
+    AnyElement, Bounds, Context, Div, FocusHandle, Hsla, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, ScrollHandle, SharedString, Styled, Window, canvas,
+    div, prelude::*, px,
 };
 use quiver_api::options::{OptionOp, OptionState, OptionsChange};
 use quiver_api::perf::{HudScope, PerfValue, Stat};
@@ -54,6 +55,72 @@ pub struct Footer {
     pub pad_shared: bool,
 }
 
+/// Where the panel's parts that float at their own depth are, for a stereo frame
+/// (design/STEREO-UI.md): window logical px, padded by the background around each, clipped to
+/// what's visible. Marker canvases fill them while the frame is laid out; the in-game publisher
+/// turns them into the image's lifts. Back to front.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DepthMarks {
+    /// The card (the panel's depth).
+    pub card: Option<Bounds<Pixels>>,
+    /// The focused row or section.
+    pub focus: Option<Bounds<Pixels>>,
+    /// A dialog's box, and its focused button.
+    pub dialog: Option<Bounds<Pixels>>,
+    pub dialog_focus: Option<Bounds<Pixels>>,
+}
+
+#[derive(Clone, Copy)]
+enum Mark {
+    Card,
+    Focus,
+    Dialog,
+    DialogFocus,
+}
+
+impl DepthMarks {
+    /// Each part with its rung (thousandths, `quiver_perf::stereo::rung`), back to front.
+    pub fn parts(&self) -> impl Iterator<Item = (Bounds<Pixels>, u16)> + '_ {
+        use quiver_perf::stereo::rung;
+        [(self.card, rung::PANEL), (self.focus, rung::FOCUS), (self.dialog, rung::DIALOG), (self.dialog_focus, rung::DIALOG_FOCUS)]
+            .into_iter()
+            .filter_map(|(b, d)| b.map(|b| (b, d)))
+    }
+
+    fn slot(&mut self, m: Mark) -> &mut Option<Bounds<Pixels>> {
+        match m {
+            Mark::Card => &mut self.card,
+            Mark::Focus => &mut self.focus,
+            Mark::Dialog => &mut self.dialog,
+            Mark::DialogFocus => &mut self.dialog_focus,
+        }
+    }
+}
+
+/// Background around a marked part, logical px: covers a focus ring (5 px outside the
+/// element) and a pixel of what's behind it, which a lift's moved-off strip is filled from.
+const MARK_PAD: f32 = 6.0;
+
+/// An invisible child covering its (relative) parent that records the parent's bounds, padded
+/// and clipped to the content mask, as part `m`.
+fn mark(marks: &Rc<RefCell<DepthMarks>>, m: Mark, pad: f32) -> impl IntoElement {
+    let marks = marks.clone();
+    canvas(
+        move |bounds, window, _| {
+            let padded = bounds.dilate(px(pad));
+            let b = padded.intersect(&window.content_mask().bounds);
+            if b.size.width > px(0.) && b.size.height > px(0.) {
+                *marks.borrow_mut().slot(m) = Some(b);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
 pub struct PanelView {
     pub session: String,
     pub data: PanelData,
@@ -73,6 +140,8 @@ pub struct PanelView {
     pub focus: FocusHandle,
     scroll: ScrollHandle,
     side_scroll: ScrollHandle,
+    /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
+    pub marks: Rc<RefCell<DepthMarks>>,
 }
 
 fn tone_color(th: &Theme, t: Tone) -> Hsla {
@@ -127,6 +196,7 @@ impl PanelView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
+            marks: Rc::default(),
         }
     }
 
@@ -483,6 +553,7 @@ impl PanelView {
                     .child(icon(ic, 17., if on { th.acc_hi } else { th.tx3 }))
                     .child(s.label())
                     .focus_ring(on && focused, th, 10.)
+                    .when(on && focused, |d| d.child(mark(&self.marks, Mark::Focus, MARK_PAD)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.nav.select_section(s);
                         this.nav.zone = Zone::Side;
@@ -561,6 +632,7 @@ impl PanelView {
             .border_color(if focused { th.line2 } else { th.line1 })
             .cursor_pointer()
             .focus_ring(focused, th, 12.)
+            .when(focused, |d| d.child(mark(&self.marks, Mark::Focus, MARK_PAD)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let rows = this.rows();
                 this.nav.focus_row(&rows, i);
@@ -725,6 +797,7 @@ impl PanelView {
                     .border_color(th.line1)
                     .cursor_pointer()
                     .focus_ring(focused, th, 12.)
+                    .when(focused, |d| d.child(mark(&self.marks, Mark::Focus, MARK_PAD)))
                     .child(icon(ic, 18., col))
                     .child(div().flex().flex_col().gap(px(2.)).child(div().text_size(px(15.)).font_weight(MEDIUM).text_color(col).child(label)).child(div().text_size(px(12.)).text_color(th.tx3).child(help)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -749,6 +822,7 @@ impl PanelView {
                     .rounded(px(12.))
                     .bg(if focused { th.ink3 } else { th.ink2 })
                     .focus_ring(focused, th, 12.)
+                    .when(focused, |d| d.child(mark(&self.marks, Mark::Focus, MARK_PAD)))
                     .child(div().flex_none().size(px(34.)).rounded(px(9.)).bg(if a.unlocked { th.acc_soft } else { th.ink4 }).flex().items_center().justify_center().child(icon(
                         if masked { Icon::Lock } else { Icon::Trophy },
                         17.,
@@ -830,6 +904,7 @@ impl PanelView {
                 .text_color(if on && danger { th.ink0 } else { th.tx1 })
                 .cursor_pointer()
                 .focus_ring(on, th, 10.)
+                .when(on, |d| d.child(mark(&self.marks, Mark::DialogFocus, MARK_PAD)))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(c) = &mut this.nav.confirm {
@@ -848,10 +923,12 @@ impl PanelView {
                 .bg(th.scrim.opacity(0.5))
                 .child(
                     div()
+                        .relative()
                         .w(px(520.))
                         .flex()
                         .flex_col()
                         .gap(px(14.))
+                        .child(mark(&self.marks, Mark::Dialog, 4.))
                         .p(px(24.))
                         .rounded(px(16.))
                         .bg(th.ink2)
@@ -876,6 +953,8 @@ pub fn backdrop_colors(th: &Theme, b: Backdrop) -> (Hsla, Hsla) {
 impl Render for PanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cx.global::<Theme>().clone();
+        // Filled again as this frame is laid out.
+        *self.marks.borrow_mut() = DepthMarks::default();
         let vp = window.viewport_size();
         let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
         let (scrim, card) = backdrop_colors(&th, self.backdrop);
@@ -910,6 +989,7 @@ impl Render for PanelView {
                     .border_1()
                     .border_color(th.line2)
                     .overflow_hidden()
+                    .child(mark(&self.marks, Mark::Card, 0.))
                     .child(self.header(&th))
                     .child(
                         div()

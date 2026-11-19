@@ -286,6 +286,8 @@ impl LayerStatus {
         capture_done: 0,
         stereo_setting: 0,
         stereo_drawn: 0,
+        depth_setting: 0,
+        depth_drawn: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -299,7 +301,7 @@ impl LayerStatus {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 408).
+        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 416).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }
     }
 
@@ -402,7 +404,13 @@ mod tests {
         s.extent_w = 2560;
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
-        assert_eq!(b.len(), 408);
+        assert_eq!(b.len(), 416);
+        // A layer from before depth wrote 408 bytes: the depth fields read as zero.
+        let mut dp = s;
+        (dp.depth_setting, dp.depth_drawn) = (0x1_0096, 0x1_0005);
+        let old = LayerStatus::from_bytes(&dp.as_bytes()[..408]);
+        assert_eq!((old.depth_setting, old.depth_drawn, old.extent_w), (0, 0, 2560));
+        assert_eq!(LayerStatus::from_bytes(dp.as_bytes()).depth_drawn, 0x1_0005);
         // A layer from before stereo wrote 400 bytes: the stereo fields read as zero.
         let mut st = s;
         (st.stereo_setting, st.stereo_drawn) = (0x101, 0x102);
