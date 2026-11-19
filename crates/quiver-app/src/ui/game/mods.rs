@@ -166,12 +166,14 @@ impl Quiver {
                 }))
                 .into_any_element()
         };
-        // Which save store each uses (cloud icon: the store that syncs). Steam games: every
-        // profile uses the real saves.
+        // Which save store each uses (cloud icon: the store that syncs). Epic and Steam
+        // games: every profile uses the real saves.
+        let sync = self.save_sync(m);
+        let no_cloud = sync.is_some_and(|s| !s.syncs());
         let store_label = |s: Option<&quiver_api::mods::SavesPlan>| match s {
-            _ if steam => (Icon::Cloud, "Real saves".to_owned()),
-            Some(s) => (if s.cloud { Icon::Cloud } else { Icon::HardDrive }, s.store_name.clone().unwrap_or_else(|| "Own saves".into())),
-            None => (Icon::Cloud, "Default".to_owned()),
+            _ if !m.has_save_stores() => (if no_cloud || sync.is_none() { Icon::HardDrive } else { Icon::Cloud }, "Real saves".to_owned()),
+            Some(s) => (if s.cloud && !no_cloud { Icon::Cloud } else { Icon::HardDrive }, s.store_name.clone().unwrap_or_else(|| "Own saves".into())),
+            None => (if no_cloud { Icon::HardDrive } else { Icon::Cloud }, "Default".to_owned()),
         };
         cards.push(entry(0, None, "Vanilla".into(), "Base game only, never mounted".into(), store_label(m.vanilla_saves.as_ref()), Icon::ShieldCheck, false, self, cx));
         for (i, p) in m.profiles.iter().enumerate() {
@@ -864,15 +866,22 @@ impl Quiver {
     fn render_vanilla_card(&mut self, th: &Theme, g: &GameRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = g.id();
         let steam = g.steam_game();
-        let cloud = self.gp.info.ready().map(|i| i.features.cloud_saves).unwrap_or(true);
         let is_default = self.default_profile(id).is_none();
-        let store = self.gp.mods.ready().and_then(|m| m.vanilla_saves.clone());
-        let saves = match (&store, cloud) {
-            _ if steam => "The game's real saves (Steam Cloud syncs them)".to_owned(),
-            (_, false) => "The game's own (no cloud saves)".to_owned(),
-            (Some(s), _) if s.cloud => format!("{} store, synced with the cloud", s.store_name.as_deref().unwrap_or("Default")),
+        let m = self.gp.mods.ready().cloned();
+        let sync = m.as_ref().and_then(|m| self.save_sync(m));
+        let store = m.as_ref().and_then(|m| m.vanilla_saves.clone());
+        let cloud = quiver_api::savestores::cloud_name(id.0.store);
+        let saves = match (&store, sync) {
+            _ if !id.0.is_ubisoft() => {
+                format!("The game's real saves; {}", quiver_api::savestores::real_saves_sync(id.0.store, sync))
+            }
+            (Some(s), Some(quiver_api::savestores::SaveSync::UbisoftNone)) => {
+                format!("{} store, on this PC only (Ubisoft Connect doesn't sync this game's saves)", s.store_name.as_deref().unwrap_or("Default"))
+            }
+            (None, Some(quiver_api::savestores::SaveSync::UbisoftNone)) => "The game's own, on this PC only (Ubisoft Connect doesn't sync this game's saves)".to_owned(),
+            (Some(s), _) if s.cloud => format!("{} store, synced with {cloud}", s.store_name.as_deref().unwrap_or("Default")),
             (Some(s), _) => format!("{} store, on this PC only", s.store_name.as_deref().unwrap_or("Default")),
-            (None, _) => "The game's own, synced with the cloud".to_owned(),
+            (None, _) => format!("The game's own, synced with {cloud}"),
         };
         card(th)
             .p(px(16.))

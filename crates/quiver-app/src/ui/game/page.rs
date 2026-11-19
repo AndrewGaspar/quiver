@@ -2035,6 +2035,7 @@ impl Quiver {
                     .into_any_element()],
             ),
             Dialog::NewProfile { name, layers, saves, .. } => {
+                let sync = self.gp.mods.ready().and_then(|m| self.save_sync(m));
                 let rows: Vec<AnyElement> = layers
                     .iter()
                     .enumerate()
@@ -2076,7 +2077,7 @@ impl Quiver {
                             .when(rows.is_empty(), |d| d.child(div().text_color(th.tx3).text_size(px(12.)).child("No layers yet: add one from a folder first, or create an empty profile.")))
                             .children(rows)
                             .into_any_element(),
-                        super::stores::new_profile_saves(th, self.gp.mods.ready(), layers, saves.as_deref(), cx),
+                        super::stores::new_profile_saves(th, self.gp.mods.ready(), sync, layers, saves.as_deref(), cx),
                     ],
                 )
             }

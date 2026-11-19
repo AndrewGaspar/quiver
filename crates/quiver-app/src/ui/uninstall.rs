@@ -55,9 +55,9 @@ pub fn prefix_loss(store: StoreId, cloud: Option<bool>) -> String {
     let base = "It holds the game's Windows settings and everything the game wrote to its Documents and AppData folders, which is often where its saves are.";
     let saves = match (store, cloud) {
         (StoreId::Ubisoft, Some(true)) => {
-            "Ubisoft's cloud keeps this game's Default saves; saves of other save stores (profiles with saves of their own) exist only here and are lost."
+            "Ubisoft Connect's cloud keeps this game's Default saves; saves of other save stores (profiles with saves of their own) exist only here and are lost."
         }
-        (StoreId::Ubisoft, Some(false)) => "This game doesn't sync saves with Ubisoft's cloud: its saves exist only here and are lost.",
+        (StoreId::Ubisoft, Some(false)) => "This game doesn't sync saves with Ubisoft Connect's cloud: its saves exist only here and are lost.",
         (StoreId::Epic, Some(true)) => {
             "Quiver syncs this game's saves with Epic's cloud around each session; anything not synced yet, and anything the game keeps outside Epic's save folders, is lost."
         }

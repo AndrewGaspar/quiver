@@ -20,8 +20,8 @@
 //! claims it, so the play session records the profile, mod versions and options revision it
 //! ran, and its options session ends with it.
 //!
-//! **Saves.** Steam Cloud syncs the game's real save folder, so every profile of a Steam game
-//! uses it (`savestores::REAL_SAVES`): forking saves per profile isn't built for Steam games.
+//! **Saves.** Every profile of a Steam game uses its real save folder, which Steam Cloud syncs
+//! when the app has a cloud quota (`mods::save_sync`): forking saves per profile isn't built yet.
 //! Nothing here ever touches Steam's own files (`localconfig.vdf`, manifests, the client).
 
 use std::collections::HashMap;

@@ -128,6 +128,8 @@ pub struct ModStore {
     game: Option<Game>,
     /// The app-level `fixes_on_vanilla` setting.
     fixes_on_vanilla: Option<bool>,
+    /// Who syncs the game's saves (`None`: the store's usual, see [`ModStore::save_sync`]).
+    save_sync: Option<quiver_api::savestores::SaveSync>,
 }
 
 /// A fresh random id: `prefix` and 6 base-36 characters.
@@ -496,7 +498,7 @@ fn short_hash(s: &str) -> String {
 impl ModStore {
     /// The store of `game` (a Ubisoft product id, or any [`quiver_api::GameRef`]).
     pub fn new(data: &Path, game: impl Into<quiver_api::GameRef>) -> Self {
-        Self { data: data.to_owned(), key: game.into(), game: None, fixes_on_vanilla: None }
+        Self { data: data.to_owned(), key: game.into(), game: None, fixes_on_vanilla: None, save_sync: None }
     }
 
     /// The store under Quiver's data directory.
@@ -511,6 +513,19 @@ impl ModStore {
         self.game = Some(game.clone());
         self.fixes_on_vanilla = fixes_on_vanilla;
         self
+    }
+
+    /// With who syncs the game's saves, as the daemon found out (an Epic game's catalog
+    /// entry, a Steam app's appinfo).
+    pub fn with_save_sync(mut self, sync: Option<quiver_api::savestores::SaveSync>) -> Self {
+        self.save_sync = sync;
+        self
+    }
+
+    /// Who syncs the game's saves: what [`ModStore::with_save_sync`] gave, else Ubisoft
+    /// Connect's cloud for a Ubisoft game, else not known.
+    pub fn save_sync(&self) -> Option<quiver_api::savestores::SaveSync> {
+        self.save_sync.or_else(|| self.key.is_ubisoft().then_some(quiver_api::savestores::SaveSync::Ubisoft))
     }
 
     fn record_path(&self) -> PathBuf {
@@ -1500,7 +1515,7 @@ impl ModStore {
         if !self.has_save_stores() {
             // Steam and Epic games: the real saves, whatever the mods (and say so).
             advice.share_default = true;
-            advice.reason = crate::savestores::real_saves(self.game_ref()).0.into();
+            advice.reason = self.real_saves().0;
         }
         let wanted = saves.unwrap_or(if advice.share_default { crate::savestores::DEFAULT_STORE } else { crate::savestores::NEW_STORE });
         let store = self.resolve_store(wanted, name, source)?;
@@ -1603,6 +1618,7 @@ impl ModStore {
             save_stores: if self.has_save_stores() { self.save_stores().current()?.stores } else { Vec::new() },
             vanilla_saves: Some(self.saves_plan(None, &[])),
             mods: self.mods()?,
+            save_sync: self.save_sync(),
         })
     }
 
@@ -2844,5 +2860,36 @@ mod tests {
         assert_eq!(ubi.profile_dir("p"), data.join("mods/3539/profiles/p"));
         assert_eq!(ubi.layer_history_path("l"), data.join("games/3539/layers/l.jsonl"));
         assert!(ubi.has_save_stores());
+    }
+
+    /// Who syncs the saves decides the words: an Epic game whose catalog names no save
+    /// folder (Alan Wake Remastered) claims no cloud, and nothing says Ubisoft.
+    #[test]
+    fn saves_wording_follows_the_store() {
+        use quiver_api::savestores::SaveSync;
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let awr = quiver_api::GameRef::parse("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+        let store = ModStore::new(&data, awr).with_save_sync(Some(SaveSync::EpicInGame));
+        let (_, advice) = store.create_profile_with("HDR on", &[], None, "cli", None).unwrap();
+        assert!(advice.share_default && advice.reason.contains("Epic's launcher doesn't sync"), "{}", advice.reason);
+        let state = store.state().unwrap();
+        assert_eq!(state.save_sync, Some(SaveSync::EpicInGame));
+        let plan = state.vanilla_saves.unwrap();
+        assert!(!plan.cloud, "{plan:?}");
+        let note = plan.cloud_note.unwrap();
+        assert!(note.contains("stay on this PC") && !note.contains("Ubisoft"), "{note}");
+        let synced = ModStore::new(&data, awr).with_save_sync(Some(SaveSync::EpicLauncher)).state().unwrap();
+        assert!(synced.vanilla_saves.unwrap().cloud);
+        // A Ubisoft game says Ubisoft Connect's cloud, and a store that isn't the cloud one says which is.
+        let ubi = ModStore::new(&data, 3539);
+        assert_eq!(ubi.save_sync(), Some(SaveSync::Ubisoft));
+        let (_, rev) = ubi.save_stores().create("Run", None, "cli", None).unwrap();
+        let s = ubi.save_stores();
+        let run = rev.stores.iter().find(|x| x.name == "Run").unwrap().clone();
+        ubi.edit_stores(&crate::savestores::SaveStoreOp::Vanilla { store: run.id.clone() }, "cli", None).unwrap();
+        let v = ubi.state().unwrap().vanilla_saves.unwrap();
+        assert!(v.cloud_note.unwrap().contains("Ubisoft Connect's cloud keeps one set of saves per game"));
+        assert_eq!(s.current().unwrap().cloud_store().unwrap().id, crate::savestores::DEFAULT_STORE);
     }
 }

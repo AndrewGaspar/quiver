@@ -358,13 +358,16 @@ pub(crate) async fn resolve_installed(client: &Client, game: &str) -> Result<Gam
 }
 
 /// For a Steam game, what decides whether its mods reach the game: the hook, and the saves.
-pub(crate) async fn steam_note(client: &Client, game: GameRef) -> Option<String> {
+pub(crate) async fn steam_note(client: &Client, game: GameRef, state: &ModsState) -> Option<String> {
     let app = game.as_steam()?;
     let hooked = client
         .call::<quiver_api::exports::SteamHook>(Request::SteamHookStatus { app_id: app, steam_user: None })
         .await
         .is_ok_and(|h| h.hooked());
-    let saves = "every profile uses the game's real saves, which Steam Cloud syncs (profiles with saves of their own aren't built for Steam games yet)";
+    let saves = format!(
+        "every profile uses the game's real saves; {} (profiles with saves of their own aren't built for Steam games yet)",
+        quiver_api::savestores::real_saves_sync(game.store, state.saves_sync())
+    );
     Some(if hooked {
         format!("it starts through quiver steam-run, so Steam's Play runs this profile; {saves}")
     } else {
@@ -767,7 +770,7 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
                 println!("{}", serde_json::to_string_pretty(&state)?);
             } else {
                 print_state(&g.name, &state);
-                if let Some(n) = steam_note(client, product_id.0).await {
+                if let Some(n) = steam_note(client, product_id.0, &state).await {
                     println!("note: {n}");
                 }
             }
@@ -782,7 +785,7 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
             if product_id.0.as_steam().is_some() {
                 // Its `steam_profile` setting: what Play in Steam runs through quiver steam-run.
                 println!("{}: Play in Steam runs {}", g.name, default_label(&state));
-                if let Some(n) = steam_note(client, product_id.0).await {
+                if let Some(n) = steam_note(client, product_id.0, &state).await {
                     println!("note: {n}");
                 }
             } else {
@@ -945,7 +948,10 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
             let state: ModsState = client.call(Request::Mods(ModsRequest::List { game: product_id.into() })).await?;
             let names: Vec<String> = p.layers.iter().map(|e| entry_label(&state, e)).collect();
             let store = p.saves.as_deref().map(|id| {
-                state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced" } else { ", this PC only" }))
+                if !state.has_save_stores() {
+                    return format!("the game's real saves; {}", quiver_api::savestores::real_saves_sync(state.game_ref().store, state.saves_sync()));
+                }
+                state.save_stores.iter().find(|s| s.id == id).map_or(id.to_owned(), |s| format!("{}{}", s.name, if s.cloud { ", synced with Ubisoft Connect's cloud" } else { ", this PC only" }))
             });
             println!(
                 "{}: profile {} '{}' revision {} (mods: {}; saves: {}{}{})",

@@ -746,12 +746,27 @@ pub struct ModsState {
     /// Another store's game (`steam:620`; `product_id` is then 0). Appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<crate::GameRef>,
+    /// Who syncs the game's saves with a cloud (`None`: not known, or an older daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_sync: Option<crate::savestores::SaveSync>,
 }
 
 impl ModsState {
     /// The game the state is for.
     pub fn game_ref(&self) -> crate::GameRef {
         self.game.unwrap_or(crate::GameRef::ubisoft(self.product_id))
+    }
+
+    /// Who syncs the game's saves: [`ModsState::save_sync`], else Ubisoft Connect's cloud
+    /// for a Ubisoft game (older daemons), else not known.
+    pub fn saves_sync(&self) -> Option<crate::savestores::SaveSync> {
+        self.save_sync.or_else(|| self.game_ref().is_ubisoft().then_some(crate::savestores::SaveSync::Ubisoft))
+    }
+
+    /// Whether the game's profiles pick a save store (Ubisoft games); other stores' games
+    /// use their real saves for every profile.
+    pub fn has_save_stores(&self) -> bool {
+        self.game_ref().is_ubisoft()
     }
 
     /// Every mod, one-version mods included (also for a state without `mods`).

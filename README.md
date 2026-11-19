@@ -522,9 +522,13 @@ new store named after it otherwise, saying why ("Skip intros (unknown save compa
 could change saves"); `profile create --saves STORE` overrides that. Changing a profile's mods
 later only warns when the stack could change saves while it shares vanilla's store or Default.
 
-Ubisoft's cloud keeps one set of slots per game and account, so **one store per game syncs
-with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
-launches with any other store keep their saves on this PC and say so. `quiver saves <game>`
+Ubisoft Connect's cloud keeps one set of slots per game and account, so **one store per game
+syncs with the cloud** (Default unless `quiver saves <game> store cloud STORE|none` moves it);
+launches with any other store keep their saves on this PC and say so. Save stores are for
+Ubisoft games: every profile of an Epic or Steam game uses the game's real saves, which Epic's
+cloud syncs only when the game's catalog entry names a save folder (others sync in game through
+Epic Online Services, if at all) and Steam Cloud only for apps that use it; the app and `quiver
+mods <game> list` say which. `quiver saves <game>`
 shows the cloud store's slots against the cloud, and `restore` brings a backup back into it.
 Its backup list includes folders named by hand (`save-backups/<product>-<name>`), dated by the
 folder's modification time.

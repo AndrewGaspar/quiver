@@ -1463,15 +1463,12 @@ impl Mods {
         let cloud = stores.iter().find(|s| s.cloud && !s.retired);
         SavesPlan {
             separate: !s.is_default(),
-            reason: format!("uses the '{}' store; {}", s.name, if s.cloud { "synced with the cloud" } else { "kept on this PC (not the cloud store)" }),
+            reason: format!("uses the '{}' store; {}", s.name, if s.cloud { "synced with Ubisoft Connect's cloud" } else { "kept on this PC (not the cloud store)" }),
             folder: format!("savegames/<user>/{}", s.folder),
             cloud: s.cloud,
             store: Some(s.id.clone()),
             store_name: Some(s.name.clone()),
-            cloud_note: (!s.cloud).then(|| match cloud {
-                Some(c) => format!("'{}' stays on this PC: Ubisoft's cloud keeps one set of saves per game, and '{}' is the store that syncs with it", s.name, c.name),
-                None => format!("'{}' stays on this PC: no save store syncs with Ubisoft's cloud", s.name),
-            }),
+            cloud_note: (!s.cloud).then(|| quiver_api::savestores::store_sync_note(Some(&s), cloud, Some(quiver_api::savestores::SaveSync::Ubisoft))),
         }
     }
 

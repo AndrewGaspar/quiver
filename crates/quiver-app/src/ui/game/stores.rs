@@ -6,7 +6,7 @@ use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled
 use quiver_api::Request;
 use quiver_api::SettingOp;
 use quiver_api::mods::{ModsState, ProfileInfo};
-use quiver_api::savestores::{DEFAULT_STORE, NEW_STORE, SaveStore, SaveStoresReport, SavesAdvice, saves_advice};
+use quiver_api::savestores::{DEFAULT_STORE, NEW_STORE, SaveStore, SaveStoresReport, SaveSync, SavesAdvice, cloud_name, real_saves_note, saves_advice, store_sync_note};
 
 use super::page::{Dialog, Load, load_note};
 use crate::app::Quiver;
@@ -14,13 +14,26 @@ use crate::model::{Gid, GameRow, ago};
 use crate::theme::Theme;
 use crate::ui::{Icon, PillKind, SEMIBOLD, card, card_header, caption, chip, icon, mono, pill};
 
-/// A Steam game's saves, for every profile: save stores don't apply to it.
-pub const STEAM_SAVES: &str = "Uses the game's real saves (Steam Cloud syncs them); profiles with saves of their own aren't available for Steam games yet.";
+/// Who syncs the game's saves, as far as the app knows: the daemon's answer, made
+/// [`SaveSync::UbisoftNone`] for a Ubisoft game whose page says it has no cloud saves.
+pub fn sync_of(m: &ModsState, ubisoft_cloud_saves: Option<bool>) -> Option<SaveSync> {
+    match m.saves_sync() {
+        Some(SaveSync::Ubisoft) if ubisoft_cloud_saves == Some(false) => Some(SaveSync::UbisoftNone),
+        s => s,
+    }
+}
 
-/// The saves section of a Steam game's profile editor and new-profile dialog: no store
-/// picker, just what its profiles use.
-fn steam_saves(th: &Theme) -> AnyElement {
-    div().flex().flex_col().gap(px(6.)).child(caption("Saves", th.tx3)).child(line(Icon::Cloud, th.tx3, STEAM_SAVES)).into_any_element()
+/// The saves of a game without save stores (Epic, Steam), for every profile: the real
+/// saves and who syncs them, with no store picker.
+pub fn real_saves_text(m: &ModsState, sync: Option<SaveSync>) -> String {
+    let label = m.game_ref().store.label();
+    format!("{}. Profiles with saves of their own aren't available for {label} games yet.", real_saves_note(m.game_ref().store, sync))
+}
+
+/// The saves section of such a game's profile editor and new-profile dialog.
+fn real_saves(th: &Theme, m: &ModsState, sync: Option<SaveSync>) -> AnyElement {
+    let ic = if sync.is_some_and(SaveSync::syncs) { Icon::Cloud } else { Icon::HardDrive };
+    div().flex().flex_col().gap(px(6.)).child(caption("Saves", th.tx3)).child(line(ic, th.tx3, real_saves_text(m, sync))).into_any_element()
 }
 
 /// The advice for a stack (entries: mods tracking their current version, or pinned ones;
@@ -29,10 +42,15 @@ pub fn advice_for(m: &ModsState, layers: &[String]) -> SavesAdvice {
     saves_advice(&m.stack_layers(layers))
 }
 
-fn live(m: &ModsState) -> Vec<SaveStore> {
+/// The live stores of a Ubisoft game, Default first; none syncs when the game has no
+/// cloud saves (`sync` [`SaveSync::UbisoftNone`]).
+fn live(m: &ModsState, sync: Option<SaveSync>) -> Vec<SaveStore> {
     let mut v: Vec<SaveStore> = m.save_stores.iter().filter(|s| !s.retired).cloned().collect();
     if v.is_empty() {
         v.push(SaveStore { id: DEFAULT_STORE.into(), name: "Default".into(), cloud: true, ..Default::default() });
+    }
+    if sync == Some(SaveSync::UbisoftNone) {
+        v.iter_mut().for_each(|s| s.cloud = false);
     }
     v
 }
@@ -79,17 +97,24 @@ fn store_chips(
 }
 
 /// The new-profile dialog's saves section: the advice for the ticked layers and a choice
-/// (`choice` `None`: follow the advice).
-pub fn new_profile_saves(th: &Theme, m: Option<&ModsState>, layers: &[(String, String, bool)], choice: Option<&str>, cx: &mut Context<Quiver>) -> AnyElement {
+/// (`choice` `None`: follow the advice). `sync`: [`sync_of`].
+pub fn new_profile_saves(
+    th: &Theme,
+    m: Option<&ModsState>,
+    sync: Option<SaveSync>,
+    layers: &[(String, String, bool)],
+    choice: Option<&str>,
+    cx: &mut Context<Quiver>,
+) -> AnyElement {
     let Some(m) = m else { return div().into_any_element() };
-    if m.game_ref().as_steam().is_some() {
-        return steam_saves(th);
+    if !m.has_save_stores() {
+        return real_saves(th, m, sync);
     }
     let ticked: Vec<String> = layers.iter().filter(|l| l.2).map(|l| l.0.clone()).collect();
     let advice = advice_for(m, &ticked);
     let recommended = if advice.share_default { DEFAULT_STORE } else { NEW_STORE };
     let chosen = choice.unwrap_or(recommended);
-    let stores = live(m);
+    let stores = live(m, sync);
     let chips = store_chips(th, "np-store", &stores, chosen, recommended, |this, id, _| {
         if let Some(Dialog::NewProfile { saves, .. }) = &mut this.gp.dialog {
             *saves = Some(id);
@@ -97,6 +122,8 @@ pub fn new_profile_saves(th: &Theme, m: Option<&ModsState>, layers: &[(String, S
     }, cx);
     let risky_shared = !advice.share_default && chosen != NEW_STORE;
     let chosen_store = stores.iter().find(|s| s.id == chosen);
+    let cloud_store = stores.iter().find(|s| s.cloud && !s.retired);
+    let synced = chosen_store.is_some_and(|s| s.cloud);
     div()
         .flex()
         .flex_col()
@@ -107,14 +134,7 @@ pub fn new_profile_saves(th: &Theme, m: Option<&ModsState>, layers: &[(String, S
             if risky_shared { th.warn } else { th.tx3 },
             format!("Recommended: {}. {}", if advice.share_default { "Default" } else { "a new store" }, capitalize(&advice.reason)),
         ))
-        .child(line(if chosen_store.is_some_and(|s| s.cloud) { Icon::Cloud } else { Icon::HardDrive },
-            th.tx3,
-            match chosen_store {
-                Some(s) if s.cloud => format!("'{}' syncs with Ubisoft's cloud.", s.name),
-                Some(s) => format!("'{}' stays on this PC: only one store per game syncs with the cloud.", s.name),
-                None => "A new store named after the profile; it stays on this PC (only one store per game syncs with the cloud).".into(),
-            },
-        ))
+        .child(line(if synced { Icon::Cloud } else { Icon::HardDrive }, th.tx3, store_sync_note(chosen_store, cloud_store, sync) + "."))
         .into_any_element()
 }
 
@@ -124,6 +144,11 @@ fn capitalize(s: &str) -> String {
 }
 
 impl Quiver {
+    /// [`sync_of`] with what the game page knows.
+    pub fn save_sync(&self, m: &ModsState) -> Option<SaveSync> {
+        sync_of(m, self.gp.info.ready().map(|i| i.features.cloud_saves))
+    }
+
     pub fn load_stores(&mut self, id: Gid, cx: &mut Context<Self>) {
         if self.gp.stores.ready().is_none() {
             self.gp.stores = Load::Loading;
@@ -142,11 +167,12 @@ impl Quiver {
     /// stack, and where its saves sync.
     pub(super) fn render_store_picker(&mut self, th: &Theme, g: &GameRow, m: &ModsState, p: &ProfileInfo, cx: &mut Context<Self>) -> AnyElement {
         let id = g.id();
-        if g.steam_game() {
-            return steam_saves(th);
+        let sync = self.save_sync(m);
+        if !m.has_save_stores() {
+            return real_saves(th, m, sync);
         }
         let pid = p.profile.id.clone();
-        let stores = live(m);
+        let stores = live(m, sync);
         let current = p.profile.saves.clone().unwrap_or_default();
         let advice = advice_for(m, &p.profile.layers);
         let recommended = if advice.share_default { DEFAULT_STORE } else { NEW_STORE };
@@ -174,7 +200,7 @@ impl Quiver {
                     .text_size(px(12.5))
                     .child(div().text_color(th.tx2).child("Save store"))
                     .child(div().flex_1())
-                    .child(if saves.cloud {
+                    .child(if saves.cloud && sync != Some(SaveSync::UbisoftNone) {
                         pill(th, PillKind::Ok, Some(Icon::Cloud), "Synced")
                     } else {
                         pill(th, PillKind::Muted, Some(Icon::HardDrive), "This PC only")
@@ -185,7 +211,15 @@ impl Quiver {
                 th.tx3,
                 if users.is_empty() { "No other profile uses this store.".to_owned() } else { format!("Shared with {}.", users.join(", ")) },
             ))
-            .when_some(saves.cloud_note.clone(), |d, n| d.child(line(Icon::HardDrive, th.tx3, capitalize(&n) + ".")))
+            .child(match (sync, saves.cloud_note.clone()) {
+                // The daemon can't tell a Ubisoft game without cloud saves; the page can.
+                (Some(SaveSync::UbisoftNone), _) => {
+                    let s = stores.iter().find(|s| s.id == current);
+                    line(Icon::HardDrive, th.tx3, store_sync_note(s, None, sync) + ".")
+                }
+                (_, Some(n)) => line(Icon::HardDrive, th.tx3, capitalize(&n) + "."),
+                (_, None) => line(Icon::Cloud, th.tx3, format!("Syncs with {}.", cloud_name(quiver_api::StoreId::Ubisoft))),
+            })
             .child(match shared_warning {
                 Some(w) => line(Icon::TriangleAlert, th.warn, capitalize(&w.replace("give it a store of its own with saves=new", "pick New store to give it its own")) + "."),
                 None => line(Icon::Info,
@@ -205,7 +239,8 @@ impl Quiver {
         let Some(r) = self.gp.stores.ready().filter(|_| self.gp.id == id).cloned() else {
             return card(th).child(card_header(th, "Save stores")).children(load_note(th, &self.gp.stores, "save stores")).into_any_element();
         };
-        let cloud_name = r.cloud.as_ref().and_then(|c| r.stores.iter().find(|s| &s.store.id == c)).map(|s| s.store.name.clone());
+        let cloud_store_name = r.cloud.as_ref().and_then(|c| r.stores.iter().find(|s| &s.store.id == c)).map(|s| s.store.name.clone());
+        let no_cloud = self.gp.info.ready().is_some_and(|i| !i.features.cloud_saves);
         let rows: Vec<AnyElement> = r
             .stores
             .iter()
@@ -219,7 +254,7 @@ impl Quiver {
                     .px(px(16.))
                     .py(px(10.))
                     .when(i > 0, |d| d.border_t_1().border_color(th.line1))
-                    .child(icon(if s.store.cloud { Icon::Cloud } else { Icon::HardDrive }, 15., if s.store.cloud { th.ok } else { th.tx3 }))
+                    .child(icon(if s.store.cloud && !no_cloud { Icon::Cloud } else { Icon::HardDrive }, 15., if s.store.cloud && !no_cloud { th.ok } else { th.tx3 }))
                     .child(
                         div()
                             .flex_1()
@@ -233,8 +268,8 @@ impl Quiver {
                                     .items_center()
                                     .gap(px(8.))
                                     .child(div().font_weight(SEMIBOLD).truncate().child(s.store.name.clone()))
-                                    .when(s.store.cloud, |d| d.child(pill(th, PillKind::Ok, None, "Cloud")))
-                                    .when(!s.store.cloud, |d| d.child(pill(th, PillKind::Muted, None, "This PC only"))),
+                                    .when(s.store.cloud && !no_cloud, |d| d.child(pill(th, PillKind::Ok, None, "Cloud")))
+                                    .when(!s.store.cloud || no_cloud, |d| d.child(pill(th, PillKind::Muted, None, "This PC only"))),
                             )
                             .child(div().text_size(px(11.5)).text_color(th.tx3).truncate().child(if users.is_empty() {
                                 "Not used by any profile".to_owned()
@@ -261,9 +296,10 @@ impl Quiver {
                 card_header(th, "Save stores")
                     .child(div().text_size(px(12.)).text_color(th.tx3).child(format!(
                         "{} · each profile picks one on the Mods tab",
-                        match &cloud_name {
-                            Some(n) => format!("only {n} syncs with Ubisoft's cloud"),
-                            None => "none syncs with Ubisoft's cloud".into(),
+                        match (&cloud_store_name, no_cloud) {
+                            (_, true) => "this game has no cloud saves: every store stays on this PC".to_owned(),
+                            (Some(n), _) => format!("only {n} syncs with {}", cloud_name(quiver_api::StoreId::Ubisoft)),
+                            (None, _) => format!("none syncs with {}", cloud_name(quiver_api::StoreId::Ubisoft)),
                         }
                     )))
                     .child(div().flex_1()),

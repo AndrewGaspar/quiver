@@ -29,18 +29,16 @@ pub use quiver_api::savestores::{
 use crate::mods::ModStore;
 use crate::settings::{append_jsonl, read_jsonl};
 
-/// Why another store's game has no save stores (design/STEAM-COPIES.md §4, "Saves"): its
-/// client syncs the real save folder, which Quiver doesn't fork yet.
-pub const REAL_SAVES: &str = "Steam games use their real saves, which Steam Cloud syncs: every profile shares them (profiles with saves of their own aren't built for Steam games yet)";
-/// [`REAL_SAVES`] for an Epic game.
-pub const REAL_SAVES_EPIC: &str = "Epic games use their real saves, which Quiver syncs with Epic's cloud around each session (or the game syncs itself): every profile shares them (profiles with saves of their own aren't built for Epic games yet)";
-
-/// Why a game of this store has no save stores, and who syncs its real saves.
-pub fn real_saves(game: quiver_api::GameRef) -> (&'static str, &'static str) {
-    match game.store {
-        quiver_api::StoreId::Epic => (REAL_SAVES_EPIC, "Quiver syncs Epic cloud saves before and after each session (games that sync in game do it themselves)"),
-        _ => (REAL_SAVES, "Steam Cloud syncs the game's real saves; Quiver doesn't sync them"),
-    }
+/// Why another store's game has no save stores (design/STEAM-COPIES.md §4, "Saves"), and
+/// who syncs its real saves (`sync`: [`ModStore::save_sync`]): (reason, note). Forking the
+/// real save folder per profile isn't built for those games yet.
+pub fn real_saves(game: quiver_api::GameRef, sync: Option<quiver_api::savestores::SaveSync>) -> (String, String) {
+    let label = game.store.label();
+    let how = quiver_api::savestores::real_saves_sync(game.store, sync);
+    (
+        format!("{label} games use their real saves, which every profile shares ({how}; profiles with saves of their own aren't built for {label} games yet)"),
+        how,
+    )
 }
 
 /// One game's save stores under a data directory.
@@ -431,6 +429,11 @@ pub(crate) fn legacy_separate(p: &Profile, mods: &[Layer], has_folder: bool) -> 
 }
 
 impl ModStore {
+    /// [`real_saves`] for this store's game.
+    pub fn real_saves(&self) -> (String, String) {
+        real_saves(self.game_ref(), self.save_sync())
+    }
+
     pub fn save_stores(&self) -> SaveStores {
         SaveStores::new(self.data_dir(), self.product_id())
     }
@@ -446,14 +449,16 @@ impl ModStore {
     /// See [`ModStore::saves_plan`].
     pub(crate) fn store_saves_plan(&self, profile: Option<&Profile>, mods: &[Layer]) -> SavesPlan {
         if !self.has_save_stores() {
+            // Default is the game's real save folder: every profile uses it.
+            let (reason, note) = self.real_saves();
             return SavesPlan {
                 separate: false,
-                reason: real_saves(self.game_ref()).0.into(),
+                reason,
                 folder: "the game's own save folder".into(),
-                cloud: false,
+                cloud: self.save_sync().is_some_and(|s| s.syncs()),
                 store: Some(DEFAULT_STORE.into()),
                 store_name: Some("the game's saves".into()),
-                cloud_note: Some(real_saves(self.game_ref()).1.into()),
+                cloud_note: Some(note),
             };
         }
         let cur = self.current_stores();
@@ -483,18 +488,23 @@ impl ModStore {
                 None => (default, "not given a save store yet: shares Default".to_owned()),
             },
         };
-        let cloud_note = (!store.cloud).then(|| match cur.cloud_store() {
-            Some(c) => format!(
-                "'{}' stays on this PC: Ubisoft's cloud keeps one set of saves per game, and '{}' is the store that syncs with it",
-                store.name, c.name
-            ),
-            None => format!("'{}' stays on this PC: no save store syncs with Ubisoft's cloud", store.name),
-        });
+        let sync = self.save_sync();
+        let synced = store.cloud && sync != Some(quiver_api::savestores::SaveSync::UbisoftNone);
+        let cloud_note = (!synced).then(|| quiver_api::savestores::store_sync_note(Some(&store), cur.cloud_store(), sync));
         SavesPlan {
             separate: store.folder != self.product_id().to_string(),
-            reason: format!("{why}; {}", if store.cloud { "synced with the cloud" } else { "kept on this PC (not the cloud store)" }),
+            reason: format!(
+                "{why}; {}",
+                if synced {
+                    "synced with Ubisoft Connect's cloud"
+                } else if store.cloud {
+                    "kept on this PC (the game has no cloud saves)"
+                } else {
+                    "kept on this PC (not the cloud store)"
+                }
+            ),
             folder: format!("savegames/<user>/{}", store.folder),
-            cloud: store.cloud,
+            cloud: synced,
             store: Some(store.id.clone()),
             store_name: Some(store.name.clone()),
             cloud_note,
@@ -506,8 +516,9 @@ impl ModStore {
         if !self.has_save_stores() {
             let risky: Vec<String> = mods.iter().filter(|m| !m.save_compatible()).map(|m| m.name.clone()).collect();
             if !risky.is_empty() {
+                let how = self.real_saves().1;
                 warnings.push(format!(
-                    "{} may change saves, and this profile uses the game's real saves (Steam Cloud syncs them): back them up before playing it",
+                    "{} may change saves, and this profile uses the game's real saves ({how}): back them up before playing it",
                     risky.join(", ")
                 ));
             }
@@ -579,7 +590,7 @@ impl ModStore {
                 if p.cloud_saves {
                     let cloud = cur.cloud_store().map_or("no store".to_owned(), |c| format!("'{}'", c.name));
                     report.notes.push(format!(
-                        "profile '{}' had cloud_saves=on, so its saves and vanilla's took turns in Ubisoft's one set of cloud saves; now only {cloud} syncs and '{name}' stays on this PC. \
+                        "profile '{}' had cloud_saves=on, so its saves and vanilla's took turns in Ubisoft Connect's one set of cloud saves; now only {cloud} syncs and '{name}' stays on this PC. \
                          To share one set again: quiver saves {pid} merge '{name}' into default, then quiver mods {pid} profile set {} saves=default",
                         p.name, p.id
                     ));
@@ -651,7 +662,7 @@ impl ModStore {
             if same_name(query, DEFAULT_STORE) {
                 return Ok(DEFAULT_STORE.into());
             }
-            bail!("{} (saves={query} isn't possible; use saves=default)", real_saves(self.game_ref()).0);
+            bail!("{} (saves={query} isn't possible; use saves=default)", self.real_saves().0);
         }
         if same_name(query, NEW_STORE) {
             let cur = self.save_stores().current()?;

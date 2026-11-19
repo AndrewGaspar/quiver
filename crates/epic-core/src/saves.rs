@@ -364,6 +364,15 @@ impl Spec {
     }
 }
 
+/// How an installed game's saves sync, from the catalog cache alone (no network, no
+/// account): [`SaveMode::Launcher`] when its catalog entry names a `CloudSaveFolder`, else
+/// [`SaveMode::InGame`]. `None`: not installed under `epic_dir`, or its entry isn't cached.
+pub fn cached_save_mode(epic_dir: &Path, app: &str) -> Option<SaveMode> {
+    let i = crate::installs::Installs::new(epic_dir).get(app)?;
+    let item = crate::library::Cache::new(epic_dir).catalog().remove(&crate::library::catalog_key(&i.namespace, &i.catalog_item_id))?.item;
+    Some(if Spec::of(Some(&item)).template.is_some() { SaveMode::Launcher } else { SaveMode::InGame })
+}
+
 fn backup_id(t: DateTime<Utc>) -> String {
     t.format("%Y%m%d-%H%M%S").to_string()
 }

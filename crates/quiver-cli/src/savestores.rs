@@ -9,12 +9,20 @@ use quiver_api::{Client, Request};
 
 use crate::print_json;
 
-/// A game with save stores: Ubisoft games only. A Steam game's saves are its real ones, which
-/// Steam Cloud syncs (design/STORE-STEAM.md §10).
+/// A game with save stores: Ubisoft games only. Epic and Steam games' saves are their real
+/// ones, which every profile shares (design/STORE-STEAM.md §10); who syncs them depends on
+/// the game (`ModsState::save_sync`).
 async fn resolve(client: &Client, game: &str) -> Result<quiver_api::mods::GameProfiles> {
     let g = crate::mods::resolve_installed(client, game).await?;
     if !g.game_ref().is_ubisoft() {
-        bail!("{}: Steam games use their real saves, which Steam Cloud syncs; every profile shares them (save stores are for Ubisoft games)", g.name);
+        let state: Option<quiver_api::mods::ModsState> =
+            client.call(Request::Mods(quiver_api::ModsRequest::List { game: g.game_ref().into() })).await.ok();
+        let how = quiver_api::savestores::real_saves_sync(g.game_ref().store, state.and_then(|s| s.saves_sync()));
+        bail!(
+            "{}: {} games use their real saves, which every profile shares ({how}); save stores are for Ubisoft games",
+            g.name,
+            g.game_ref().store.label()
+        );
     }
     Ok(g)
 }
@@ -27,7 +35,7 @@ pub enum StoreAction {
     /// Hide a store no profile uses; its files stay (unretire brings it back).
     Retire { store: String },
     Unretire { store: String },
-    /// The one store that syncs with Ubisoft's cloud (`none`: no store does).
+    /// The one store that syncs with Ubisoft Connect's cloud (`none`: no store does).
     Cloud { store: String },
     /// The store vanilla launches use (normally Default).
     Vanilla { store: String },
@@ -74,9 +82,9 @@ pub async fn stores(client: &Client, game: &str, json: bool) -> Result<()> {
     match &r.cloud {
         Some(id) => {
             let name = r.stores.iter().find(|s| &s.store.id == id).map_or(id.as_str(), |s| s.store.name.as_str());
-            println!("  only '{name}' syncs with Ubisoft's cloud (one set of saves per game and account); the others stay on this PC");
+            println!("  only '{name}' syncs with Ubisoft Connect's cloud (one set of saves per game and account); the others stay on this PC");
         }
-        None => println!("  no store syncs with Ubisoft's cloud (quiver saves {} store cloud default)", e.product_id),
+        None => println!("  no store syncs with Ubisoft Connect's cloud (quiver saves {} store cloud default)", e.product_id),
     }
     for s in &r.stores {
         print_store(s, &r.vanilla);
@@ -119,7 +127,7 @@ pub async fn store(client: &Client, game: &str, action: StoreAction) -> Result<(
         StoreAction::History => {
             let revs: Vec<SaveStoresRevision> = client.call(Request::SaveStoreHistory { product_id }).await?;
             if revs.is_empty() {
-                println!("{}: nothing recorded yet (Default only, synced with the cloud)", e.name);
+                println!("{}: nothing recorded yet (Default only, synced with Ubisoft Connect's cloud)", e.name);
             }
             revs.iter().for_each(print_revision);
             return Ok(());
@@ -182,7 +190,7 @@ pub async fn merge(client: &Client, game: &str, from: String, into: Vec<String>)
         println!("  saves in '{}' before the merge: backup {} (quiver saves {} restore {})", r.into.name, b.id, e.product_id, b.id);
     }
     if r.marked_for_upload && r.slots.iter().any(|s| matches!(s.outcome, MergeOutcome::Copied | MergeOutcome::Replaced)) {
-        println!("  '{}' syncs with the cloud: the slots taken from '{}' upload after the next session", r.into.name, r.from.name);
+        println!("  '{}' syncs with Ubisoft Connect's cloud: the slots taken from '{}' upload after the next session", r.into.name, r.from.name);
     }
     println!("  '{}' is unchanged. Point profiles at '{}' (quiver mods {} profile set PROFILE saves={}), then retire it if you like (files kept): quiver saves {} store retire {}", r.from.name, r.into.name, e.product_id, r.into.id, e.product_id, r.from.id);
     Ok(())
