@@ -711,7 +711,35 @@ impl Epic {
         };
         if spec.template.is_none() {
             r.state = SyncState::Unknown;
-            r.next = Some("Saves sync in game: Epic's catalog names no save folder for the launcher, so cloud saves, if the game has them, go through Epic Online Services inside the game.".into());
+            // The launcher's cloud can still hold files for the app (from an older catalog that
+            // named a folder): say so rather than leave "none" ambiguous.
+            let mut found = None;
+            if with_cloud {
+                let l = Location {
+                    app: app.to_owned(),
+                    account_id: account_id.clone(),
+                    account_name: String::new(),
+                    template: String::new(),
+                    dir: PathBuf::new(),
+                    filter: spec.filter.clone(),
+                    max_mb: spec.max_mb,
+                    custom: spec.custom.clone(),
+                };
+                match self.read_cloud(&l).await {
+                    Ok(c) => {
+                        r.cloud = c.versions.first().cloned();
+                        r.cloud_versions = c.versions.len();
+                        found = Some(c.versions.len());
+                    }
+                    Err(e) => r.cloud_error = Some(format!("{e:#}")),
+                }
+            }
+            let launcher = match found {
+                Some(0) => " Epic's launcher cloud has no saves for it on this account.",
+                Some(_) => " Epic's launcher cloud does hold saves for it on this account (from when its catalog named a folder); Quiver can't place them without a folder.",
+                None => "",
+            };
+            r.next = Some(format!("Saves sync in game: Epic's catalog names no save folder for the launcher, so cloud saves, if the game has them, go through Epic Online Services inside the game.{launcher}"));
             return Ok(r);
         }
         let base = self.game_state(app)?.base.get(&account_id).cloned();
