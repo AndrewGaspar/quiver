@@ -37,6 +37,8 @@ pub struct Local {
     /// The mods launch quiverd prepared (`SteamLaunchPlan { mods: true }`): its profile, mod
     /// versions and options, and the options session that ends with this one.
     pub mods: Option<(String, crate::steammods::Prepared)>,
+    /// The profile a launch Quiver made itself runs (Epic), when `mods` doesn't say.
+    pub profile: Option<String>,
 }
 
 impl Local {
@@ -53,7 +55,7 @@ impl Local {
             session: self.perf_session.clone().or_else(|| self.mods.as_ref().map(|(id, _)| id.clone())),
             pids: vec![self.pid],
             game: Some(self.game),
-            profile: prepared.and_then(|p| p.profile.clone()),
+            profile: prepared.and_then(|p| p.profile.clone()).or_else(|| self.profile.clone()),
             options_revision: prepared.and_then(|p| p.options_revision),
             ..Default::default()
         }
@@ -177,7 +179,7 @@ impl crate::Daemon {
             },
             None => String::new(),
         };
-        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks, mods };
+        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks, mods, profile: None };
         let active = l.active();
         let id = self.local.insert(l);
         let name = self.game_name(game).await;
@@ -226,7 +228,7 @@ mod tests {
         let s = LocalSessions::default();
         assert!(s.list().is_empty());
         let control = GameRef::steam(870780);
-        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None, mods: None });
+        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None, mods: None, profile: None });
         let a = &s.list()[0];
         assert_eq!((a.product_id, a.game, a.game_ref(), a.steam_app_id), (0, Some(control), control, Some(870780)));
         assert_eq!((a.holders.as_slice(), a.session.as_deref(), a.pids.as_slice()), (&["steam".to_owned()][..], Some("s-x"), &[4242][..]));

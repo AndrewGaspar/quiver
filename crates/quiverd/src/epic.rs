@@ -460,6 +460,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
         // Steam launch's: a local session from "Running" to exit.
         let local_id: Arc<Mutex<Option<u64>>> = Arc::default();
         let local = local_id.clone();
+        let local_profile = profile_id.clone();
         let (cfg, ev, sid, g2) = (this.cfg.clone(), this.clone(), session_id.clone(), g.clone());
         let result = match prefix_ready {
             Err(e) => Err(e),
@@ -470,7 +471,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                 LaunchEvent::Running => {
                     let now = chrono::Utc::now();
                     *started.lock().unwrap() = Some(now);
-                    let l = crate::localsessions::Local { game, pid: 0, started: now, perf_session: Some(sid.clone()), settings_revision: rev, tweaks: tweak_revisions, mods: None };
+                    let l = crate::localsessions::Local { game, pid: 0, started: now, perf_session: Some(sid.clone()), settings_revision: rev, tweaks: tweak_revisions, mods: None, profile: local_profile.clone() };
                     *local.lock().unwrap() = Some(ev.local.insert(l));
                     ev.update_job(id, |j| j.status = "Running".into());
                     ev.emit(Event::LibraryChanged);

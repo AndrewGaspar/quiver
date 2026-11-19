@@ -34,12 +34,12 @@ pub async fn session(client: &Client, id: &str) -> Result<SessionView> {
     let perf: Vec<PerfSessionInfo> = client.call(Request::Perf(PerfRequest::Sessions)).await.unwrap_or_default();
     let a = active.into_iter().find(|s| s.session.as_deref() == Some(id));
     let p = perf.into_iter().find(|s| s.session == id);
-    let (game, profile, started, pids, reported, steam) = match (&a, &p) {
-        (Some(a), _) => (a.game_ref(), a.profile.clone(), Some(a.started), a.pids.clone(), a.game.is_none().then_some(a.reported), a.steam_app_id.is_some() || !a.game_ref().is_ubisoft()),
-        (None, Some(p)) => (p.game_ref(), p.profile.clone(), Some(p.started), Vec::new(), None, !p.game_ref().is_ubisoft()),
+    let (game, profile, started, pids, reported, steam_app) = match (&a, &p) {
+        (Some(a), _) => (a.game_ref(), a.profile.clone(), Some(a.started), a.pids.clone(), a.game.is_none().then_some(a.reported), a.steam_app_id),
+        (None, Some(p)) => (p.game_ref(), p.profile.clone(), Some(p.started), Vec::new(), None, None),
         (None, None) => anyhow::bail!("session {id} isn't running"),
     };
-    let mut v = SessionView { session: id.into(), game, profile_id: profile, started, pids, reported, copy: if steam { "Steam copy".into() } else { "Quiver install".into() }, ..Default::default() };
+    let mut v = SessionView { session: id.into(), game, profile_id: profile, started, pids, reported, copy: copy_label(game, steam_app), ..Default::default() };
     match client.call::<quiver_api::stores::GameDetail>(Request::GameDetail { game, refresh: false }).await {
         Ok(d) => {
             v.name = d.name;
@@ -66,6 +66,18 @@ pub async fn session(client: &Client, id: &str) -> Result<SessionView> {
         }
     }
     Ok(v)
+}
+
+/// Which copy of the game runs, for the header: a Ubisoft game Quiver installed or its Steam
+/// copy, a Steam game (Steam's install), or another store's game Quiver installed.
+pub fn copy_label(game: GameRef, steam_app: Option<u32>) -> String {
+    if game.is_ubisoft() {
+        return if steam_app.is_some() { "Steam copy".into() } else { "Quiver install".into() };
+    }
+    if game.as_steam().is_some() {
+        return "Steam".into();
+    }
+    format!("{} · Quiver install", game.store.label())
 }
 
 /// A profile's game settings in words, for the Session section.
@@ -96,7 +108,7 @@ pub async fn options(client: &Client, s: &SessionView) -> Load<Vec<SurfaceState>
 /// there always reaches this game), else the game.
 pub fn tweak_scope(s: &SessionView) -> (Scope, String) {
     match s.profile() {
-        Some(p) if s.game.is_ubisoft() => (Scope::Profile { game: s.game, profile: Some(p.to_owned()) }, format!("the {} profile", s.profile_name.as_deref().unwrap_or(p))),
+        Some(p) => (Scope::Profile { game: s.game, profile: Some(p.to_owned()) }, format!("the {} profile", s.profile_name.as_deref().unwrap_or(p))),
         _ => (Scope::Game { game: s.game }, "this game".into()),
     }
 }
