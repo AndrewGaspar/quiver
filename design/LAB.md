@@ -204,6 +204,7 @@ with `%`, `\`, empty, `.` or `..` segments never match.
 | `POST`/`GET /epic/oauth/{v}/tokenInfo` | checks that token | SDK; Auth web API |
 | `POST /epic/oauth/{v}/revoke` | the SDK ending its own token at logout (only this launch's session, never quiverd's) | SDK; Auth web API |
 | `GET /epic/oauth/{v}/.well-known/jwks.json` | Epic's public keys, to verify ID tokens | Auth web API |
+| `GET /epic/id/{v}/accounts` | the signed-in account's display name, read only. AWR's SDK revokes its token and stays signed out when this is refused | seen live (lab run awr r4, 2026-11-19) |
 | `POST /auth/v1/oauth/token` | EOS Connect sign-in and the SDK's client credentials | SDK; Connect web API |
 | `GET /epic/ecom/{v}/platforms/{}/identities/{}/ownership` | does the account own the game | SDK (`/v1/platforms/{platform}/identities/{identityId}/ownership`); Ecom web API (v3) |
 | `POST /epic/ecom/{v}/platforms/{}/identities/{}/ownershipToken` | a signed statement of that | SDK; Ecom web API (v3) |
@@ -214,8 +215,7 @@ with `%`, `\`, empty, `.` or `..` segments never match.
 **Blocked on purpose.** Some paths are close to sign-in but write to the account:
 `/auth/v1/users` (creates a product user), `/auth/v1/accounts*` (links accounts, makes device
 ids), `…/entitlements/redeem` (marks entitlements used), offers and purchases. Others aren't
-needed for sign-in: `/epic/oauth/{v}/deviceAuthorization` and user info (`/epic/id/…`,
-`/user/…`).
+needed for sign-in: `/epic/oauth/{v}/deviceAuthorization` and other user info (`/user/…`).
 
 **Blocked as reporting.** Player Data Storage and Title Storage,
 `/v1/{deployment}/achievements/{puid}/unlock` and the achievement definitions, stats,

@@ -52,6 +52,7 @@ const SDK: &str = "route strings in AWR's EOSSDK-Win64-Shipping.dll 1.7.1";
 const AUTH: &str = "dev.epicgames.com/docs/web-api-ref/authentication";
 const CONN: &str = "dev.epicgames.com/docs/web-api-ref/connect-web-api";
 const ECOM: &str = "dev.epicgames.com/docs/web-api-ref/ecom-web-apis";
+const LIVE: &str = "seen live: AWR's SDK (1.7.1) signs out again when this is refused (lab run awr r4, 2026-11-19)";
 const MIRROR: &str = "the EOS OpenAPI mirror at apis.io (epic-games-ecom-api), the same resources without /epic";
 
 /// **The EOS allowlist**: the only requests a lab instance may send to `api.epicgames.dev`.
@@ -81,6 +82,10 @@ pub const ALLOWLIST: &[Allow] = &[
     Allow { method: "POST", pattern: "/epic/oauth/{v}/revoke", why: "Epic account sign-out (the lab's own token)", source: AUTH },
     // GET /epic/oauth/v2/.well-known/jwks.json: Epic's public keys, to verify ID tokens.
     Allow { method: "GET", pattern: "/epic/oauth/{v}/.well-known/jwks.json", why: "Epic account public keys", source: AUTH },
+    // GET /epic/id/v1/accounts?accountId=…: the signed-in account's display name, read only.
+    // AWR's SDK revokes its fresh token and stays signed out when this is refused, so without
+    // it the game never gets far enough to try (and be refused) its saves.
+    Allow { method: "GET", pattern: "/epic/id/{v}/accounts", why: "Epic account lookup (read)", source: LIVE },
     // --- EOS Connect sign-in ---
     // "/auth/v1/oauth/token" (SDK), POST /auth/v1/oauth/token (docs): the Connect login for the
     // existing product user, and the SDK's client credentials. Not "/auth/v1/users" (creates a
@@ -375,7 +380,7 @@ mod tests {
             ("POST", "/auth/v1/users"),
             ("POST", "/auth/v1/accounts/deviceid"),
             ("POST", "/epic/oauth/v1/deviceAuthorization"),
-            ("GET", "/epic/id/v1/accounts"),
+            ("POST", "/epic/id/v1/accounts"),
             ("PUT", "/presence/v1/ns/acc/presence/conn"),
             ("GET", "/epic/oauth/v1/token"),
             ("DELETE", "/epic/ecom/v1/identities/abc/entitlements"),
