@@ -64,6 +64,13 @@ static int64_t advance(vc_clock *c, int64_t want) {
 }
 
 int64_t vc_now(vc_clock *c, vc_thread *t) {
+    if (LOAD(&c->held) > 0) {
+        /* Held at a Present (pause or step): time is frozen. The reads count for nothing: a
+         * thread polling the clock while the game is held isn't spinning on a frame, and the
+         * held real time isn't a stuck frame. */
+        ADD(&c->held_reads, 1);
+        return LOAD(&c->vnow);
+    }
     if (!LOAD(&c->engaged)) {
         /* Pass-through until the first Present, monotonic all the same. */
         return advance(c, passthrough(c, c->real_now(c->ctx)));
@@ -135,6 +142,138 @@ void vc_present(vc_clock *c) {
     STORE(&c->real_frame_start, real);
     ADD(&c->gen, 1);
     ADD(&c->frames, 1);
+    if (LOAD(&c->hold)) ADD(&c->stepped, 1);
+}
+
+uint64_t vc_hold_cmd(vc_clock *c, int cmd, uint64_t arg, uint32_t timeout_ms) {
+    uint64_t frames = LOAD(&c->frames);
+    int on = LOAD(&c->hold);
+    if (timeout_ms && (cmd == VC_CMD_PAUSE || cmd == VC_CMD_STEP)) STORE(&c->hold_timeout_real, scale(timeout_ms, c->real_freq, 1000));
+    else if (cmd == VC_CMD_PAUSE || cmd == VC_CMD_STEP) STORE(&c->hold_timeout_real, 0);
+    switch (cmd) {
+    case VC_CMD_PAUSE:
+        /* As soon as possible: the end of the Present in flight (or now, if one is held). */
+        if (!on) {
+            STORE(&c->hold_at, frames + 1);
+            ADD(&c->pauses, 1);
+            STORE(&c->hold, 1);
+        } else if (LOAD(&c->hold_at) > frames + 1) {
+            STORE(&c->hold_at, frames + 1); /* a step in progress stops early */
+        }
+        return LOAD(&c->hold_at);
+    case VC_CMD_STEP: {
+        if (arg < 1) arg = 1;
+        ADD(&c->steps, arg);
+        if (!on) {
+            /* From running: the frame in flight is the first of the K. */
+            STORE(&c->hold_at, frames + arg);
+            ADD(&c->pauses, 1);
+            STORE(&c->hold, 1);
+            return frames + arg;
+        }
+        uint64_t from = LOAD(&c->hold_at);
+        if (from < frames) from = frames;
+        STORE(&c->hold_at, from + arg);
+        return from + arg;
+    }
+    case VC_CMD_RESUME:
+        STORE(&c->hold, 0);
+        STORE(&c->hold_at, 0);
+        return 0;
+    default:
+        return on ? LOAD(&c->hold_at) : 0;
+    }
+}
+
+int vc_must_hold(vc_clock *c) {
+    return LOAD(&c->hold) && LOAD(&c->frames) >= LOAD(&c->hold_at);
+}
+
+void vc_hold_begin(vc_clock *c) {
+    int64_t real = c->real_now(c->ctx);
+    if (ADD(&c->held, 1) == 1) {
+        STORE(&c->held_since, real);
+        STORE(&c->held_v, LOAD(&c->vnow));
+        ADD(&c->holds, 1);
+    }
+}
+
+void vc_hold_end(vc_clock *c) {
+    int64_t real = c->real_now(c->ctx);
+    if (ADD(&c->held, -1) == 0) {
+        ADD(&c->leaked, LOAD(&c->vnow) - LOAD(&c->held_v));
+        ADD(&c->held_real, real - LOAD(&c->held_since));
+    }
+    /* The frame's real time starts now: the escape measures the frame, not the hold. */
+    STORE(&c->real_frame_start, real);
+}
+
+int vc_hold_expired(vc_clock *c) {
+    int64_t t = LOAD(&c->hold_timeout_real);
+    if (!t || LOAD(&c->held) <= 0 || !LOAD(&c->hold)) return 0;
+    if (c->real_now(c->ctx) - LOAD(&c->held_since) < t) return 0;
+    STORE(&c->hold, 0);
+    STORE(&c->hold_at, 0);
+    ADD(&c->auto_resumes, 1);
+    return 1;
+}
+
+void vc_ctl_attach(vc_ctl *k, vc_clock *c, uint64_t pid) {
+    STORE(&k->magic, VC_CTL_MAGIC);
+    STORE(&k->version, (uint64_t)VC_CTL_VERSION);
+    STORE(&k->pid, pid);
+    /* Commands written before this process claimed the page were for another one. */
+    STORE(&k->ack_seq, LOAD(&k->cmd_seq));
+    vc_ctl_publish(k, c);
+}
+
+int vc_ctl_poll(vc_ctl *k, vc_clock *c, uint64_t *cmd_out, uint64_t *arg_out) {
+    uint64_t seq = LOAD(&k->cmd_seq);
+    if (seq == LOAD(&k->ack_seq)) return 0;
+    uint64_t cmd = LOAD(&k->cmd), arg = LOAD(&k->cmd_arg), to = LOAD(&k->cmd_timeout_ms);
+    uint64_t frames = LOAD(&c->frames);
+    uint64_t at = vc_hold_cmd(c, (int)cmd, arg, to > 0xffffffffu ? 0xffffffffu : (uint32_t)to);
+    STORE(&k->ack_frames, frames);
+    STORE(&k->ack_hold_at, at);
+    STORE(&k->ack_cmd, cmd);
+    vc_ctl_publish(k, c);
+    STORE(&k->ack_seq, seq);
+    if (cmd_out) *cmd_out = cmd;
+    if (arg_out) *arg_out = arg;
+    return 1;
+}
+
+void vc_ctl_publish(vc_ctl *k, vc_clock *c) {
+    while (XCHG(&c->pub_lock, 1)) {
+    }
+    uint64_t u = LOAD(&k->update);
+    STORE(&k->update, u | 1); /* odd: writing */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    int held = LOAD(&c->held) > 0, on = LOAD(&c->hold);
+    int engaged = LOAD(&c->engaged);
+    STORE(&k->state, (uint64_t)(held ? VC_STATE_HELD : on ? VC_STATE_HOLDING : VC_STATE_RUNNING));
+    STORE(&k->engaged, (uint64_t)engaged);
+    STORE(&k->frames, LOAD(&c->frames));
+    STORE(&k->vticks, engaged ? LOAD(&c->vnow) - LOAD(&c->engaged_v) : 0);
+    STORE(&k->hold_at, on ? LOAD(&c->hold_at) : 0);
+    STORE(&k->ticks_per_frame, (uint64_t)c->ticks_per_frame);
+    STORE(&k->qpf, (uint64_t)c->vfreq);
+    STORE(&k->pauses, LOAD(&c->pauses));
+    STORE(&k->steps, LOAD(&c->steps));
+    STORE(&k->stepped, LOAD(&c->stepped));
+    STORE(&k->holds, LOAD(&c->holds));
+    int64_t hr = LOAD(&c->held_real);
+    if (held) hr += c->real_now(c->ctx) - LOAD(&c->held_since);
+    STORE(&k->held_us, (uint64_t)scale(hr, 1000000, c->real_freq));
+    STORE(&k->held_reads, LOAD(&c->held_reads));
+    STORE(&k->leaked, LOAD(&c->leaked));
+    STORE(&k->auto_resumes, LOAD(&c->auto_resumes));
+    STORE(&k->creep_frames, LOAD(&c->creep_frames));
+    STORE(&k->escapes, LOAD(&c->escapes));
+    STORE(&k->overruns, LOAD(&c->overruns));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    STORE(&k->update, (u | 1) + 1); /* even: done */
+    STORE(&c->pub_lock, 0);
 }
 
 uint32_t vc_sleep(vc_clock *c, uint32_t requested, uint32_t max_ms, int shorten) {

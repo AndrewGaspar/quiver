@@ -45,6 +45,8 @@ use quiver_vclock::Report;
 
 const RATE: &str = "62.5";
 const TPF: i64 = 160_000;
+/// The Right arrow's keycode in Xvfb's default (evdev) keymap.
+const RIGHT: u8 = 114;
 
 fn proton() -> PathBuf {
     PathBuf::from(std::env::var_os("QUIVER_TEST_PROTON").expect("set QUIVER_TEST_PROTON to a Proton build directory"))
@@ -121,15 +123,22 @@ struct Case<'a> {
     helper: bool,
     /// QUIVER_VCLOCK_SLEEPS.
     sleeps: Option<&'a str>,
+    /// QUIVER_TEST_KEYS: report the Right arrow per frame.
+    keys: bool,
 }
 
 impl Default for Case<'_> {
     fn default() -> Self {
-        Case { arch: "x64", api: "d3d11", frames: 1200, slow_ms: 0, tag: "", helper: false, sleeps: None }
+        Case { arch: "x64", api: "d3d11", frames: 1200, slow_ms: 0, tag: "", helper: false, sleeps: None, keys: false }
     }
 }
 
 fn run(display: &str, c: &Case) -> Out {
+    run_with(display, c, None)
+}
+
+/// `run`, with a controller acting on the report folder while the game runs (pause and step).
+fn run_with(display: &str, c: &Case, controller: Option<&dyn Fn(&Path)>) -> Out {
     let Case { arch, api, frames, slow_ms, tag, .. } = *c;
     let scratch = tempfile::tempdir().unwrap();
     let t = scratch.path();
@@ -141,12 +150,14 @@ fn run(display: &str, c: &Case) -> Out {
         std::fs::create_dir_all(t.join(d)).unwrap();
     }
     let title = format!("quiver-vclock-{tag}-{}", std::process::id());
-    let out = Command::new("python3")
+    let mut cmd = Command::new("python3");
+    cmd
         .arg(proton().join("proton"))
         .args(["runinprefix", &win(&exe), api, &frames.to_string(), &slow_ms.to_string(), &title])
         .args(c.helper.then(|| win(&t.join("helper.exe"))))
         .env("QUIVER_VCLOCK_EXE", "clock_test.exe")
         .env("QUIVER_VCLOCK_SLEEPS", c.sleeps.unwrap_or("present"))
+        .env(if c.keys { "QUIVER_TEST_KEYS" } else { "QUIVER_TEST_NO_KEYS" }, "1")
         .current_dir(t)
         .env("STEAM_COMPAT_DATA_PATH", &compat)
         .env("WINEPREFIX", compat.join("pfx"))
@@ -166,9 +177,20 @@ fn run(display: &str, c: &Case) -> Out {
         .env("QUIVER_VCLOCK", RATE)
         .env("QUIVER_VCLOCK_DIR", win(&t.join("out")))
         .env_remove("WAYLAND_DISPLAY")
-        .env_remove("PROTON_ENABLE_WAYLAND")
-        .output()
-        .unwrap();
+        .env_remove("PROTON_ENABLE_WAYLAND");
+    let out = match controller {
+        None => cmd.output().unwrap(),
+        Some(f) => {
+            let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&t.join("out")))) {
+                // A held game waits for ever by design: don't leave it behind.
+                let _ = Command::new(proton().join("files/bin/wineserver")).arg("-k").env("WINEPREFIX", compat.join("pfx")).status();
+                let _ = child.kill();
+                std::panic::resume_unwind(e);
+            }
+            child.wait_with_output().unwrap()
+        }
+    };
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let log = std::fs::read_to_string(t.join("out").join(quiver_vclock::LOG_FILE)).unwrap_or_default();
     // The helper process's lines would only say it isn't the game.
@@ -187,12 +209,89 @@ fn run(display: &str, c: &Case) -> Out {
         let mut w = l.splitn(3, ' ');
         let (a, b, rest) = (w.next().unwrap_or(""), w.next().unwrap_or(""), w.next().unwrap_or(""));
         match a {
-            "A" | "B" | "C" | "D" => lines.insert(format!("{a} {b}"), rest.to_owned()),
+            "A" | "B" | "C" | "D" | "keys" => lines.insert(format!("{a} {b}"), rest.to_owned()),
             "iat" => lines.insert(format!("iat {b}"), rest.to_owned()),
             _ => lines.insert(a.to_owned(), format!("{b} {rest}").trim().to_owned()),
         };
     }
     Out { lines, report, stdout, log }
+}
+
+/// The controller of the stepped case, as `quiver lab clock` drives it: pause as soon as the
+/// game's process maps the page, hold 3 s, step, resume. Returns (frame, virtual s) after each.
+/// Gives the X input focus to the test window titled `title` (there is no window manager in
+/// the Xvfb to do it), so the keys pressed go to the game.
+fn focus(display: &str, title: &str) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, InputFocus};
+    use x11rb::wrapper::ConnectionExt as _;
+    let (conn, screen) = x11rb::xcb_ffi::XCBConnection::connect(Some(&std::ffi::CString::new(display).unwrap())).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let mut todo = vec![root];
+    while let Some(w) = todo.pop() {
+        let name = conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 256).unwrap().reply().map(|r| r.value).unwrap_or_default();
+        if name == title.as_bytes() {
+            conn.set_input_focus(InputFocus::PARENT, w, x11rb::CURRENT_TIME).unwrap();
+            conn.sync().unwrap();
+            return;
+        }
+        if let Ok(t) = conn.query_tree(w).unwrap().reply() {
+            todo.extend(t.children);
+        }
+    }
+    panic!("no window titled {title} on {display}");
+}
+
+fn control(dir: &Path, kb: Option<(&xvfb::Keyboard, &str, &str)>) -> Vec<(u64, f64)> {
+    use quiver_vclock::control::{Cmd, Control, Snapshot};
+    use std::time::{Duration, Instant};
+    let end = Instant::now() + Duration::from_secs(120);
+    let ctl = loop {
+        if let Ok(c) = Control::open(dir) {
+            break c;
+        }
+        assert!(Instant::now() < end, "no control page in {}", dir.display());
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let wait = |seq: u64, ok: &dyn Fn(&Snapshot) -> bool| {
+        let end = Instant::now() + Duration::from_secs(60);
+        loop {
+            let s = ctl.snapshot();
+            if s.ack_seq >= seq && ok(&s) {
+                return s;
+            }
+            assert!(Instant::now() < end, "timed out: {s:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let mut out = Vec::new();
+    let s = wait(ctl.send(Cmd::Pause, 0, 0), &|s| s.held());
+    out.push((s.frames, s.virtual_s));
+    std::thread::sleep(Duration::from_secs(3));
+    let s2 = ctl.snapshot();
+    assert_eq!((s2.frames, s2.vticks), (s.frames, s.vticks), "time moved while paused");
+    assert!(s2.held_s >= 2.5, "held time is published every 250 ms: {s2:?}");
+    let mut at = s.frames;
+    for (n, k) in [1u64, 12, 1, 100].into_iter().enumerate() {
+        // The Right arrow pressed while held, across the first two steps (13 frames), released
+        // while held, before the third.
+        if let Some((kb, display, title)) = kb
+            && (n == 0 || n == 2)
+        {
+            if n == 0 {
+                focus(display, title);
+            }
+            kb.key(RIGHT, n == 0);
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let s = wait(ctl.send(Cmd::Step, k, 0), &|s| s.held() && s.frames >= s.ack_hold_at);
+        assert_eq!(s.frames, at + k, "step {k}");
+        assert_eq!(s.vticks, s.frames as i64 * TPF, "step {k}: exactly 1/62.5 s per frame");
+        at = s.frames;
+        out.push((s.frames, s.virtual_s));
+    }
+    wait(ctl.send(Cmd::Resume, 0, 0), &|s| s.running());
+    out
 }
 
 /// What every case checks.
@@ -246,6 +345,28 @@ fn the_game_sees_exactly_one_frame_per_present() {
     eprintln!("fast: {v:.3} s virtual in {r:.3} s real = {:.2}x", v / r);
     assert!(v > r, "the fast presenter wasn't faster than real time ({v} virtual, {r} real)");
     hashes.push(fast.get("A sequence_hash").to_owned());
+
+    // Paused from the start through the control page, held for real seconds with the pollers
+    // reading, stepped 1, 12, 1 and 100 frames, resumed: the game sees the same time as the
+    // fast run, frame for frame.
+    let log = std::cell::RefCell::new(Vec::new());
+    let kb = x.keyboard();
+    let title = format!("quiver-vclock-stepped-{}", std::process::id());
+    let ctrl = |dir: &Path| log.borrow_mut().extend(control(dir, Some((&kb, &x.display, &title))));
+    let stepped = run_with(&x.display, &Case { tag: "stepped", keys: true, ..Default::default() }, Some(&ctrl));
+    check(&stepped, 1200, "d3d11");
+    assert_eq!(stepped.get("A sequence_hash"), hashes[0], "stepping changed the virtual-time sequence");
+    let r = &stepped.report;
+    eprintln!("stepped: {:?}\n  {}", log.borrow(), r.hold_line().unwrap_or_default());
+    assert!(r.control && r.pauses == 1 && r.steps == 114 && r.holds == 5 && r.leaked_ticks == 0 && r.hold_state == "running", "{r:?}");
+    assert!(r.held_s >= 2.9 && r.held_reads > 0, "the pollers read while held: {r:?}");
+    hashes.push(stepped.get("A sequence_hash").to_owned());
+    // Input sent while held is read when the game next steps, by every API: held at frame 1,
+    // pressed, stepped 1 + 12, released, stepped: frames 2 to 14 saw it down.
+    for api in ["keys messages", "keys raw", "keys async"] {
+        let l = stepped.get(api);
+        assert!(l.starts_with("13 first 2 last 14"), "{api}: {l}");
+    }
 
     // The same again: the same virtual-time sequence.
     let again = run(&x.display, &Case { tag: "again", ..Default::default() });

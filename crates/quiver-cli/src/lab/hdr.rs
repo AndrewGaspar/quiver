@@ -138,7 +138,7 @@ pub fn shot(inst: &Inst, run_dir: Option<&Path>, out: &Path) -> Result<HdrShot> 
             break;
         }
         if Instant::now() > end {
-            bail!("no capture within 10 s (is the game presenting? quiver lab logs {})", inst.name);
+            bail!("no capture within 10 s (is the game presenting? A game held by quiver lab clock is captured from the frame the layer kept, which needs the current Sight layer; quiver lab logs {})", inst.name);
         }
         std::thread::sleep(Duration::from_millis(50));
     }

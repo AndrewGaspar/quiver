@@ -265,6 +265,10 @@ pub const HDR_METADATA_SET: u32 = 1 << 0;
 pub const HDR_CAPTURE_READY: u32 = 1 << 1;
 /// The target swapchain's colour space is an HDR one (HDR10 PQ, HLG, scRGB, …).
 pub const HDR_COLOR_SPACE: u32 = 1 << 2;
+/// Holding (`capture.hold` in the session dir, set by `quiver lab clock` while the game is
+/// paused or stepped): the layer keeps a copy of the last frame it presented, and serves
+/// captures from it, since nothing presents while the game is held.
+pub const HDR_CAPTURE_HELD: u32 = 1 << 3;
 
 /// `LayerStatus::reflex_flags`: the app called `vkSetLatencySleepModeNV` on the swapchain.
 pub const REFLEX_MODE_SET: u32 = 1 << 0;

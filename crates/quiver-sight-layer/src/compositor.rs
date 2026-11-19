@@ -725,7 +725,8 @@ impl Compositor {
         self.capture_ok
     }
 
-    /// A finished capture's bytes to [`crate::hdr::CAPTURED`], once its submit is done.
+    /// A finished capture's bytes to [`crate::hdr::CAPTURED`] (id 0: a frame kept while
+    /// holding, to [`crate::hdr::RETAINED`]), once its submit is done.
     unsafe fn reap_capture(&mut self, dev: &ash::Device) -> Result<(), u32> {
         let Some((_, _, slot)) = &self.capture else { return Ok(()) };
         // SAFETY: our fence.
@@ -739,7 +740,7 @@ impl Compositor {
         let data = unsafe { std::slice::from_raw_parts(buf.ptr.as_ptr(), len.min(buf.size)) }.to_vec();
         // SAFETY: not in use any more.
         unsafe { destroy_buffer(dev, &buf) };
-        *crate::hdr::CAPTURED.lock().unwrap_or_else(|p| p.into_inner()) = Some(crate::hdr::Captured {
+        let c = crate::hdr::Captured {
             id,
             format: self.format,
             color_space: self.color_space,
@@ -748,7 +749,12 @@ impl Compositor {
             bytes_per_pixel: bpp,
             swapchain: self.swapchain_id,
             data,
-        });
+        };
+        if id == 0 {
+            *crate::hdr::RETAINED.lock().unwrap_or_else(|p| p.into_inner()) = Some((c, std::time::Instant::now()));
+        } else {
+            *crate::hdr::CAPTURED.lock().unwrap_or_else(|p| p.into_inner()) = Some(c);
+        }
         Ok(())
     }
 
@@ -921,7 +927,10 @@ impl Compositor {
             }));
             // A capture asked for (crate::hdr) and none in flight.
             let want = crate::hdr::REQUEST.load(std::sync::atomic::Ordering::Relaxed);
-            let capture = self.capture_ok && self.capture.is_none() && want > crate::hdr::TAKEN.load(std::sync::atomic::Ordering::Relaxed);
+            // Holding (the game's clock is paused or stepped): every frame is kept, since the
+            // last one before the hold is what a capture must show (crate::hdr).
+            let hold = crate::hdr::HOLD.load(std::sync::atomic::Ordering::Relaxed);
+            let capture = self.capture_ok && self.capture.is_none() && (hold || want > crate::hdr::TAKEN.load(std::sync::atomic::Ordering::Relaxed));
             if visible.is_none() && copy.is_none() && !blur && panel_shown.is_none() && panel_copy.is_none() && !capture {
                 return Ok(Drawn::Done { semaphore: None, hud, blurred: false });
             }
@@ -932,7 +941,7 @@ impl Compositor {
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(fail)?;
             // First, so it holds the game's pixels without the blur, HUD or panel.
             let captured = if capture { self.record_capture(d, cmd, image) } else { None };
-            if capture {
+            if capture && !hold {
                 // Taken even when the buffer couldn't be made: no retry on every present.
                 crate::hdr::TAKEN.store(want, std::sync::atomic::Ordering::Relaxed);
             }
@@ -974,7 +983,16 @@ impl Compositor {
                     self.slots[slot].submitted = true;
                     self.slots[slot].timed = timed;
                     if let Some(b) = captured {
-                        self.capture = Some((b, want, slot));
+                        if hold {
+                            // Kept now, not at a later present: a held game may not present
+                            // again. Waiting here costs a frame's copy, only while holding.
+                            self.capture = Some((b, 0, slot));
+                            if dev.wait_for_fences(&[fence], true, 2_000_000_000).is_ok() {
+                                self.reap_capture(dev)?;
+                            }
+                        } else {
+                            self.capture = Some((b, want, slot));
+                        }
                     }
                     if let Some((o, _)) = panel_shown {
                         sight_panel::mark_drawn(o.epoch, now);

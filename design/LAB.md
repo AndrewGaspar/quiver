@@ -403,7 +403,7 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 | Pharos tool | Lab |
 |---|---|
 | `aco shot` | `quiver lab shot` (gamescope's own screenshot of what the game presents; `--settle` for TAA/upscaler convergence; `--crop`, `--metrics`) |
-| `aco keys` (xdotool) | `quiver lab key` (keydown, hold, keyup), `type` |
+| `aco keys` (xdotool) | `quiver lab key` (keydown, hold, keyup; `--down`/`--up` leave keys down across `quiver lab clock` steps, §8.2), `type` |
 | `inject_mouse.py` | `quiver lab mouse DX DY` (XTEST relative motion via `xdotool mousemove_relative`); `--repeat --gap --log` runs the timed injector in the container, logging CLOCK_MONOTONIC_RAW send times (Wine's QPC base) for latency work |
 | clicks at 2560×1600 pixels | `quiver lab click FX FY`: fractions of the manifest's display; `--expect-change` fails when the screen didn't change (clicks missed silently before) |
 | `ini-set` | `quiver lab set FILE:[section]key=value` (INI and XML through `confpatch`, byte for byte except the value; Unreal section names with dots work; `{width}`/`{height}`/`{refresh}`), `--wait` for the reload line |
@@ -604,6 +604,128 @@ followed by whether every step was a frame, and the determinism verdict.
   - `GetProcAddress("QueryPerformanceCounter")` gives the virtual value;
   - only the executable's 7 clock imports point into the DLL; none of the other 28 modules'
     (Wine's builtins, DXVK's d3d11, dxgi and d3d9) do.
+
+### 8.2 Pause and frame stepping (2026-11-19)
+
+```sh
+quiver lab clock N pause              # hold at the end of the frame in flight; prints frame and virtual time
+quiver lab clock N step 12            # exactly 12 more frames (each 1/HZ s), then hold again
+quiver lab clock N step               # one frame
+quiver lab clock N resume             # run free
+quiver lab clock N status [--json]    # running/holding/held, frame, virtual time, steps taken
+quiver lab clock N step 12 && quiver lab shot N     # the 12th frame, on screen
+quiver lab key N --down Right; quiver lab clock N step 12; quiver lab key N --up Right; quiver lab clock N step 1; quiver lab shot N
+```
+
+Needs the virtual clock on for the run (`clock=virtual:HZ`, or `launch --clock virtual:HZ`). `pause`
+and `step` wait until the game is held there (`--no-wait` returns once the game has the
+command; `--timeout S`, default 300, gives up waiting, never the hold). A step from running is a
+pause that lets K frames through, counting the one in flight; a step while a step is under way
+extends it; a pause during a step stops it at the end of the frame in flight. Right after
+`quiver lab launch`, `pause` and `step` wait for the game's process to map the page, and a
+pause that arrives before the first Present holds at frame 1: `quiver lab launch N && quiver
+lab clock N pause` starts the game held at its first frame.
+
+**Where it holds.** In the DLL's Present hook, after the real Present returned and the clock
+moved on its one frame: what the game just presented stays on screen (under DXVK the
+translation layer's own present runs on its thread a moment later, and gets there too), and
+the game's next frame starts when it's released. Frame `k` (the `k`th Present since engagement)
+was rendered at virtual time `(k - 1)/HZ`; the status shows `k` and `k/HZ`, the time the next
+frame will see. A second thread presenting while one is held is held before its frame counts,
+so time can't move under a hold that way either.
+
+**Time doesn't move while held**, however long: every clock read returns the frozen value. The
+valves stand down for it: reads while held don't count towards the creep (a thread polling
+the clock while the game is held isn't a spin), and the real-time escape measures a frame from
+its release, not across the hold (without that, the first frame after a pause longer than
+`clock.stuck_ms` would escape to real time). Other threads' sleeps were never virtual and stay
+real. What still moved is counted: `leaked` is the virtual ticks between a hold's start and its
+end (0 by construction; non-zero would be a race between a read and the hold) and is in the
+report and the verdict; the reads while held (`held_reads`) are counted too. Clocks the DLL
+doesn't reach (audio, timers, rdtsc: §8.1 limits) keep running while held, as they always did.
+
+**Determinism.** A Present advances exactly as it does free-running, and a hold adds nothing,
+so stepping K at a time gives the same virtual-time sequence as running free: the host test
+runs a stand-in game (frames of varying real length, busy-waits that creep, a background
+reader) free and then paused and stepped 1, 12, 1, 7, 64, 3, 100, 1, 1, 2, 250 with 2.5 s real
+holds (longer than the escape) and 10 000 reads per hold, and requires identical sequences
+and identical creep, overrun and escape counts; the Wine test does the same with the real DLL
+(the sequence hash equals the free-running one).
+
+**The control channel: a shared page.** The game's process (the one named by
+`QUIVER_VCLOCK_EXE`, never a helper) creates `runs/r<N>/vclock.ctl` (4 KiB) and maps it
+(`CreateFileMapping`: under Wine a shared mmap of the file, so the host's `mmap` of it sees the
+same bytes); `quiver lab clock` maps it on the host. Layout `vc_ctl` in `win/vclock.h`,
+mirrored by `quiver_vclock::control`: the controller writes `cmd`, `cmd_arg`,
+`cmd_timeout_ms`, then `cmd_seq + 1` (under `flock`, so two controllers serialise); the DLL
+applies each command once, publishes its state (a seqlock: frames, virtual ticks, hold target,
+the counters, the valves) and then `ack_seq`. Commands are read at every counted Present (one
+atomic load), by the DLL's status thread every 50 ms (so a game in a loading screen still
+acknowledges), and every millisecond by the held thread, which polls with real 1 ms sleeps (the
+DLL's own `Sleep` import). Robustness:
+
+- **No controller, no hold.** Only a command holds; a new process claiming the page ignores
+  commands written before it (`ack_seq = cmd_seq` at attach), so nothing from an earlier
+  process or run applies.
+- **A deliberate pause never times out by default**: the agent controlling it decides. Holding
+  costs nothing (a 1 ms poll), and Wine doesn't mind a thread blocked in Present.
+  `--auto-resume SECS` on `pause` or `step` is a safety net for a controller that may not come
+  back (counted as `auto_resumes`).
+- **The game dying** leaves a page that just stops changing: `quiver lab clock` checks the run's
+  state while it waits and stops with the exit. `quiver lab kill`, `launch` and `down` work on
+  a held game as on any other (a new launch is a new run folder and page).
+
+**Shots while held.** `quiver lab shot` asks gamescope, which keeps compositing the last frame
+the game presented: two shots 2 s apart while held are byte-identical. `shot --hdr` comes from
+the Sight layer, which captures in the present path, and a held game presents nothing; so while
+`quiver lab clock` holds a Sight instance it writes `capture.hold` into the session dir, and
+the layer (seeing it within 250 ms) copies every frame it presents into a host buffer and
+waits for the copy (only while holding), keeping the latest (`HDR_CAPTURE_HELD` in the status
+block). A capture request is then served from that copy once no newer frame has come for 100
+ms. `pause` waits (up to 1.5 s) for the layer to say it's keeping frames before it holds, so
+the frame the pause stops on is kept; `resume` removes the file. An auto-resume leaves it until
+the next `resume` (the copies then cost a frame's readback each).
+
+**Input while held.** `quiver lab key N --down K` presses and leaves keys down, `--up` lets
+them go (`quiver lab click N FX FY --down/--up` for buttons). Input sent while the game is held
+is processed when it next steps: Wine turns X events into Windows input when the game's window
+thread pumps messages, and that thread is blocked in Present. So a key down before `step 12`
+is seen in all 12 frames and the frame after, and a plain `quiver lab key` (press and release)
+while held lands both in the same frame, which a game that polls key state can miss; the
+commands say so. The Wine test checks the three ways games read the keyboard: window messages
+(WM_KEYDOWN/UP), raw input (WM_INPUT) and polled state (GetAsyncKeyState) all saw the Right
+arrow in exactly the frames from the step after the press to the step after the release.
+DirectInput keyboards are built on the same input under Wine. XInput (gamepads) isn't fed by
+the lab. A game that reads input on a thread that isn't held, or pumps messages on another
+thread than the one presenting (Unity's main thread, while its render thread presents), can
+see input before the next step, but its simulation still only gets time one frame per step.
+
+**Records.** The DLL logs every command, hold and release to `vclock.log` (`control: step 12 at
+frame 9618 …: holds at frame 9630`, `held at frame 9630 (virtual 154.179666 s)`, `released …`),
+and `vclock.status` carries the state and counters. `quiver lab logs` prints the last 20 of
+those lines and the `pause/step:` line (holds, step frames asked, presents while holding, time
+held, reads while held, leaked); `quiver lab status` prints the same line and the live state
+from the page. The speed-up leaves time held out.
+
+**Tests.** `cargo test -p quiver-vclock`: the hold state machine in `vclock.c` (a pause holds at
+the end of the frame in flight, steps count presents and add up, a pause shortens a step, a
+step from running, before the first Present, 10 s held with 200 000 reads frozen with no creep
+or escape, the timeout only when asked), the stepped-vs-free sequence above, the control page
+(stale commands ignored, applied once, acknowledged with the target, the state block's layout
+read back field by field) and the same loop on real threads with a reader hammering the clock.
+The Wine test's `stepped` case runs the D3D11 presenter paused from its first frame through the
+page, held 3 s (frozen, the pollers reading), stepped 1, 12, 1, 100 (each exactly `k * 160000`
+ticks) with the Right arrow held across the first 13 frames, resumed; its phase A sequence
+equals the free-running one, the 70 busy-wait frames creep as before, nothing escapes or leaks.
+
+**Live** (2026-11-19, Rabbids Coding in a Sight instance at 62.5 Hz, 3.9x when running free):
+paused at frame 9618 (virtual 153.987666 s); 10 s of real time later still frame 9618, the same
+ticks, with 4847 reads by Unity's other threads while held; `step 12` -> frame 9630, +0.192000 s;
+`step 1` -> 9631, +0.016 s; two SDR shots while held identical; `shot --hdr` of frame 9632
+pixel-identical to gamescope's shot of it; a click while held did nothing until the steps,
+then the title screen reacted; `step 500 --no-wait` then `pause` stopped at 9698; `step 5
+--auto-resume 2` held at 9703 and ran free 2 s later; every frame's QPC step in the census was
+160000 ticks; leaked 0.
 
 ## 9. First live run (for the main session)
 

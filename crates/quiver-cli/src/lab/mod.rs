@@ -3,6 +3,7 @@
 //! this is the command line, the supervisor (`sup`) and the tools.
 
 mod bench;
+mod clock;
 mod create;
 mod hdr;
 mod jobs;
@@ -124,6 +125,11 @@ pub enum LabAction {
     },
     /// Stop the game and every Wine process in the instance.
     Kill { instance: String },
+    /// Pause and frame stepping on the virtual clock (clock=virtual:HZ): `pause` holds the game
+    /// at the end of the frame in flight (it stays on screen, virtual time stops), `step [K]`
+    /// lets exactly K more frames through (each exactly 1/HZ s) and holds again, `resume` runs
+    /// free, `status`. Waits for the hold: `quiver lab clock N step 12 && quiver lab shot N`.
+    Clock(clock::ClockArgs),
     /// Readiness, the run, the mod's state, host load.
     Status {
         instance: String,
@@ -160,13 +166,21 @@ pub enum LabAction {
         #[arg(long)]
         hdr: bool,
     },
-    /// Press keys (xdotool names), each held for --hold ms.
+    /// Press keys (xdotool names), each held for --hold ms. `--down` presses and leaves them
+    /// down, `--up` lets them go: a key held across `quiver lab clock N step K` (a paused game
+    /// reads input when it next steps).
     Key {
         instance: String,
         #[arg(required = true)]
         keys: Vec<String>,
         #[arg(long, default_value_t = 120)]
         hold: u64,
+        /// Press and leave down (until `--up`).
+        #[arg(long, conflicts_with = "up")]
+        down: bool,
+        /// Release keys left down.
+        #[arg(long)]
+        up: bool,
     },
     /// Type text.
     Type { instance: String, text: String },
@@ -188,7 +202,8 @@ pub enum LabAction {
         #[arg(long)]
         log: Option<String>,
     },
-    /// Click at a fraction of the window (0-1), e.g. `0.5 0.62`.
+    /// Click at a fraction of the window (0-1), e.g. `0.5 0.62`. `--down`/`--up`: press and
+    /// leave the button down there, or let it go (a drag, or a button held across steps).
     Click {
         instance: String,
         fx: f64,
@@ -198,6 +213,10 @@ pub enum LabAction {
         /// Fail unless the screen changed afterwards (clicks can miss silently).
         #[arg(long)]
         expect_change: bool,
+        #[arg(long, conflicts_with_all = ["up", "expect_change"])]
+        down: bool,
+        #[arg(long, conflicts_with = "expect_change")]
+        up: bool,
     },
     /// Run a command in the instance's container, with its display set.
     Exec {
@@ -581,6 +600,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{w} after {:.1}s", (chrono::Utc::now() - r.started).num_milliseconds() as f64 / 1000.0);
             }
         }
+        LabAction::Clock(a) => clock::run(&lab, a)?,
         LabAction::Kill { instance } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             let r = sup::request(&lab, &inst, &SupRequest::Kill { source: source.into() })?;
@@ -595,7 +615,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let hs = host::snapshot(&procs::scan(), &ops::containers());
             if json {
                 let clock = st.run.as_ref().and_then(|r| lab::vclock::Report::read(&inst.run_dir(r.id)));
-                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock }));
+                let control = clock::snapshot(&inst);
+                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock, "clock_control": control }));
             }
             println!("{} ({}, {}): container {}", inst.name, m.game, m.display, if st.container_up { "up" } else { "down" });
             match &st.run {
@@ -613,6 +634,10 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     }
                     for (i, l) in lab::vclock::report_lines(&inst.run_dir(r.id), false).into_iter().flatten().enumerate() {
                         println!("  {}{l}", if i == 0 { "clock: " } else { "    " });
+                    }
+                    // Live, from the control page (the report is up to half a second old).
+                    if let Some(s) = clock::snapshot(&inst).filter(|s| s.pauses > 0 || !s.running()) {
+                        println!("    now: {} (quiver lab clock {} status)", clock::describe(&s), inst.name);
                     }
                 }
             }
@@ -664,14 +689,19 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{}x{} mean {mean:.1} sd {sd:.1} sharpness {:.2} blank {}", g.width(), g.height(), quiver_core::lab::image::sharpness(&g), quiver_core::lab::image::is_blank(&g));
             }
         }
-        LabAction::Key { instance, keys, hold } => {
+        LabAction::Key { instance, keys, hold, down, up } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             let hold = format!("{:.3}", hold as f64 / 1000.0);
             let mut a = Vec::new();
             for k in &keys {
-                a.extend(["keydown".into(), k.clone(), "sleep".into(), hold.clone(), "keyup".into(), k.clone(), "sleep".into(), "0.05".into()]);
+                match (down, up) {
+                    (true, _) => a.extend(["keydown".into(), k.clone()]),
+                    (_, true) => a.extend(["keyup".into(), k.clone()]),
+                    _ => a.extend(["keydown".into(), k.clone(), "sleep".into(), hold.clone(), "keyup".into(), k.clone(), "sleep".into(), "0.05".into()]),
+                }
             }
             ops::xdotool(&inst, &a)?;
+            held_note(&inst, down.then_some(true).or(up.then_some(false)));
         }
         LabAction::Type { instance, text } => {
             let (inst, _) = inst_of(&lab, &instance)?;
@@ -681,14 +711,22 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let (inst, _) = inst_of(&lab, &instance)?;
             mouse(&inst, dx, dy, steps, repeat, &gap, log.as_deref())?;
         }
-        LabAction::Click { instance, fx, fy, button, expect_change } => {
+        LabAction::Click { instance, fx, fy, button, expect_change, down, up } => {
             let (inst, m) = inst_of(&lab, &instance)?;
             let (x, y) = m.display.at(fx, fy);
+            if down || up {
+                let (verb, what) = if down { ("mousedown", "pressed") } else { ("mouseup", "released") };
+                ops::xdotool(&inst, &["mousemove".into(), x.to_string(), y.to_string(), "sleep".into(), "0.05".into(), verb.into(), button.to_string()])?;
+                println!("button {button} {what} at ({x}, {y}) on {}", m.display);
+                held_note(&inst, Some(down));
+                return Ok(());
+            }
             let tmp = inst.dir.join(".click.png");
             let before = if expect_change { Some(ops::shot_gray(&inst, &tmp)?) } else { None };
             let b = button.to_string();
             ops::xdotool(&inst, &["mousemove".into(), x.to_string(), y.to_string(), "sleep".into(), "0.2".into(), "mousedown".into(), b.clone(), "sleep".into(), "0.12".into(), "mouseup".into(), b])?;
             println!("clicked ({x}, {y}) on {}", m.display);
+            held_note(&inst, None);
             if let Some(before) = before {
                 std::thread::sleep(Duration::from_millis(700));
                 let after = ops::shot_gray(&inst, &tmp)?;
@@ -811,6 +849,14 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     println!("  {l}");
                 }
             }
+            // Pauses and steps, as the DLL logged them (quiver lab clock).
+            let control = lab::vclock::control_lines(&dir);
+            if !control.is_empty() {
+                println!("pause/step ({}, {} line(s); the last 20):", lab::vclock::LOG_FILE, control.len());
+                for l in &control[control.len().saturating_sub(20)..] {
+                    println!("  {l}");
+                }
+            }
             if let Some(n) = tail {
                 let text = std::fs::read_to_string(dir.join("game.log")).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
@@ -847,6 +893,22 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Input sent while the game is held by `quiver lab clock` waits for its next frame. `down`:
+/// Some(true) a press left down, Some(false) a release, None a press and release.
+fn held_note(inst: &Inst, down: Option<bool>) {
+    if let Some(s) = clock::snapshot(inst).filter(|s| !s.running()) {
+        println!(
+            "note: the game is held at frame {} (quiver lab clock): it reads this input when it next steps{}",
+            s.frames,
+            match down {
+                Some(true) => "; it stays down across steps until --up",
+                Some(false) => "",
+                None => ", so the press and the release can land in the same frame (a game polling key state may miss it): use --down, step, --up",
+            }
+        );
+    }
 }
 
 fn default_name(title: &str) -> String {

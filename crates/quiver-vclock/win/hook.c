@@ -34,6 +34,14 @@
  * hooked, engagement, a report every 10 s) and vclock.status (key=value, rewritten every
  * half second; `quiver lab status` reads it).
  *
+ * Pause and step (`quiver lab clock N pause|step K|resume|status`): the game's process maps
+ * vclock.ctl in the same folder (vclock.h's vc_ctl: a page the lab maps too). Commands are
+ * read at every counted Present, by the status thread every 50 ms and, while held, by the
+ * held thread every millisecond. A hold blocks the presenting thread here, after the real
+ * Present returned and the clock moved on (so the frame stays on screen), polling with real
+ * 1 ms sleeps; it never times out unless the command said so. Without a controller nothing
+ * ever holds: commands are the only way in, and a new process ignores the ones before it.
+ *
  * This changes time only. It never touches licence, ownership or DRM code.
  *
  * Prior art: the virtual clock of the ds-decomp project's RIG shim (docs/17-virtual-clock.md). */
@@ -103,6 +111,8 @@ static vc_thread g_thr_fallback;             /* if a thread's couldn't be alloca
 static volatile DWORD g_present_tid;         /* the thread that last presented */
 static int g_main = 1;                       /* this process is the game (QUIVER_VCLOCK_EXE) */
 static volatile LONG g_quit;
+static vc_ctl *g_ctl;                        /* the control page (vclock.ctl), or NULL */
+static CRITICAL_SECTION g_ctl_cs;            /* applying commands */
 
 enum { PATH_NONE, PATH_VK, PATH_GL, PATH_D3D8, PATH_D3D9, PATH_DXGI };
 static const char *const PATH_NAMES[] = {"none", "vulkan", "opengl", "d3d8", "d3d9", "dxgi"};
@@ -213,6 +223,19 @@ static void write_status(const char *why) {
     char cq[512], cm[512];
     census_text(&g_cqpc, cq, sizeof cq);
     census_text(&g_cms, cm, sizeof cm);
+    /* Time held (paused or between steps) isn't the game running: the speed-up leaves it out. */
+    int held = __atomic_load_n(&c->held, __ATOMIC_ACQUIRE) > 0, holding = __atomic_load_n(&c->hold, __ATOMIC_ACQUIRE);
+    int64_t hr = vc_load_i64(&c->held_real);
+    if (held) hr += real_now(NULL) - vc_load_i64(&c->held_since);
+    double held_s = (double)hr / (double)c->real_freq, run_s = rs - held_s;
+    char hold[768];
+    snprintf(hold, sizeof hold,
+             "control=%d\nhold_state=%s\nhold_at=%llu\npauses=%llu\nsteps=%llu\nstepped=%llu\nholds=%llu\nheld_s=%.6f\nheld_reads=%llu\n"
+             "leaked_ticks=%lld\nauto_resumes=%llu\n",
+             g_ctl != NULL, held ? "held" : holding ? "holding" : "running", holding ? (unsigned long long)vc_load_u64(&c->hold_at) : 0ull,
+             (unsigned long long)vc_load_u64(&c->pauses), (unsigned long long)vc_load_u64(&c->steps), (unsigned long long)vc_load_u64(&c->stepped),
+             (unsigned long long)vc_load_u64(&c->holds), held_s, (unsigned long long)vc_load_u64(&c->held_reads), (long long)vc_load_i64(&c->leaked),
+             (unsigned long long)vc_load_u64(&c->auto_resumes));
     char buf[6144];
     EnterCriticalSection(&g_cs);
     int n = snprintf(buf, sizeof buf,
@@ -222,12 +245,12 @@ static void write_status(const char *why) {
         "creep_after=%llu\ncreep_frames=%llu\nstuck_ms=%u\nescapes=%llu\noverruns=%llu\n"
         "sleeps=%llu\nsleep_ms_requested=%llu\nsleep_ms_slept=%llu\nsleep_max_ms=%u\nsync0=%d\nsince_install_s=%.3f\n"
         "census_qpc=%s\ncensus_qpc_other=%llu\ncensus_ms=%s\ncensus_ms_other=%llu\n"
-        "sleeps_real=%llu\nsleep_mode=%s\npresent_thread=%lu\ngame_process=%d\n",
+        "sleeps_real=%llu\nsleep_mode=%s\npresent_thread=%lu\ngame_process=%d\n%s",
         why, (unsigned long)GetCurrentProcessId(), ss_proxy, sizeof(void *) == 8 ? "x64" : "x86", c->rate,
         (long long)c->ticks_per_frame, (long long)c->vfreq, (long long)c->real_freq, (int)__atomic_load_n(&c->engaged, __ATOMIC_ACQUIRE),
         PATH_NAMES[g_path], (long)g_ignored_presents, g_hooked[0] ? g_hooked : "-", (long)g_patched_slots, (long)g_vtable_hooks,
         g_cfg.modules[0] ? g_cfg.modules : "-",
-        (unsigned long long)vc_load_u64(&c->frames), vs, rs, rs > 0.0 ? vs / rs : 0.0,
+        (unsigned long long)vc_load_u64(&c->frames), vs, rs, run_s > 0.0 ? vs / run_s : 0.0,
         (unsigned long long)vc_load_u64(&c->queries_total), (unsigned long long)vc_load_u64(&c->queries_max),
         (unsigned long long)c->creep_after, (unsigned long long)vc_load_u64(&c->creep_frames), c->stuck_ms,
         (unsigned long long)vc_load_u64(&c->escapes), (unsigned long long)vc_load_u64(&c->overruns),
@@ -235,7 +258,7 @@ static void write_status(const char *why) {
         (unsigned long long)vc_load_u64(&c->sleep_ms_slept), g_cfg.sleep_max_ms, g_cfg.sync0, real_since_install(),
         cq, (unsigned long long)g_cqpc.other, cm, (unsigned long long)g_cms.other,
         (unsigned long long)vc_load_u64(&c->sleeps_real), g_cfg.sleeps == 2 ? "all" : g_cfg.sleeps == 1 ? "present" : "none",
-        (unsigned long)g_present_tid, g_main);
+        (unsigned long)g_present_tid, g_main, hold);
     LeaveCriticalSection(&g_cs);
     if (n <= 0) return;
     if (n > (int)sizeof buf) n = (int)sizeof buf;
@@ -261,6 +284,107 @@ static void report(const char *tag) {
            (unsigned long long)vc_load_u64(&c->escapes), (unsigned long long)vc_load_u64(&c->overruns),
            (unsigned long long)vc_load_u64(&c->sleeps), (unsigned long long)vc_load_u64(&c->sleep_ms_requested),
            (unsigned long long)vc_load_u64(&c->sleep_ms_slept), (unsigned long long)vc_load_u64(&c->sleeps_real));
+    if (vc_load_u64(&c->holds) || vc_load_u64(&c->pauses))
+        ss_log("%s: pause/step: %llu hold(s) started, %llu step frame(s) asked, %llu present(s) while holding, held %.3f s, %llu read(s) while held, "
+               "leaked %lld ticks, auto-resumes %llu", tag, (unsigned long long)vc_load_u64(&c->pauses), (unsigned long long)vc_load_u64(&c->steps),
+               (unsigned long long)vc_load_u64(&c->stepped), (double)vc_load_i64(&c->held_real) / (double)c->real_freq,
+               (unsigned long long)vc_load_u64(&c->held_reads), (long long)vc_load_i64(&c->leaked), (unsigned long long)vc_load_u64(&c->auto_resumes));
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Pause and step (vclock.ctl) */
+
+static const char *cmd_name(uint64_t c) {
+    return c == VC_CMD_PAUSE ? "pause" : c == VC_CMD_STEP ? "step" : c == VC_CMD_RESUME ? "resume" : "unknown";
+}
+
+static double vsec(void) {
+    return __atomic_load_n(&g_clock.engaged, __ATOMIC_ACQUIRE) ? (double)(vc_load_i64(&g_clock.vnow) - g_clock.engaged_v) / (double)g_clock.vfreq : 0.0;
+}
+
+/* Apply a pending command, if there is one (any thread). */
+static void ctl_poll(void) {
+    vc_ctl *k = g_ctl;
+    if (!k || __atomic_load_n(&k->cmd_seq, __ATOMIC_ACQUIRE) == __atomic_load_n(&k->ack_seq, __ATOMIC_ACQUIRE)) return;
+    EnterCriticalSection(&g_ctl_cs);
+    uint64_t cmd = 0, arg = 0;
+    int got = vc_ctl_poll(k, &g_clock, &cmd, &arg);
+    LeaveCriticalSection(&g_ctl_cs);
+    if (!got) return;
+    uint64_t at = __atomic_load_n(&k->ack_hold_at, __ATOMIC_ACQUIRE), fr = __atomic_load_n(&k->ack_frames, __ATOMIC_ACQUIRE);
+    uint64_t to = __atomic_load_n(&k->cmd_timeout_ms, __ATOMIC_ACQUIRE);
+    char tmo[80] = "";
+    if (to && cmd != VC_CMD_RESUME) snprintf(tmo, sizeof tmo, "; resumes by itself after %llu ms held", (unsigned long long)to);
+    if (cmd == VC_CMD_RESUME) ss_log("control: resume at frame %llu (virtual %.6f s): running free", (unsigned long long)fr, vsec());
+    else if (cmd == VC_CMD_STEP)
+        ss_log("control: step %llu at frame %llu (virtual %.6f s): holds at frame %llu%s", (unsigned long long)arg, (unsigned long long)fr, vsec(), (unsigned long long)at, tmo);
+    else if (cmd == VC_CMD_PAUSE)
+        ss_log("control: pause at frame %llu (virtual %.6f s): holds at frame %llu%s", (unsigned long long)fr, vsec(), (unsigned long long)at, tmo);
+    else
+        ss_log("control: unknown command %llu ignored", (unsigned long long)cmd);
+    write_status(cmd_name(cmd));
+}
+
+static void ctl_publish(void) {
+    if (g_ctl) vc_ctl_publish(g_ctl, &g_clock);
+}
+
+/* Blocks the presenting thread while the clock holds: polls the control page every
+ * millisecond of real time (this DLL's own Sleep import is the real one). */
+static void hold_wait(int before_advance) {
+    vc_clock *c = &g_clock;
+    vc_hold_begin(c);
+    ctl_publish();
+    ss_log("control: held at frame %llu (virtual %.6f s)%s", (unsigned long long)vc_load_u64(&c->frames), vsec(),
+           before_advance ? ": a second presenting thread, held before its frame counts" : "");
+    write_status("held");
+    while (vc_must_hold(c) && !g_quit) {
+        Sleep(1);
+        ctl_poll();
+        if (vc_hold_expired(c)) ss_log("control: the hold's timeout passed: running free (auto-resume)");
+    }
+    int64_t before = vc_load_i64(&c->leaked);
+    vc_hold_end(c);
+    ctl_publish();
+    int64_t leak = vc_load_i64(&c->leaked) - before;
+    if (leak) ss_log("control: WARNING: virtual time moved %lld ticks while held", (long long)leak);
+    ss_log("control: released at frame %llu (virtual %.6f s; held %.3f s in all)", (unsigned long long)vc_load_u64(&c->frames), vsec(),
+           (double)vc_load_i64(&c->held_real) / (double)c->real_freq);
+}
+
+/* The control page: vclock.ctl in the report folder, mapped shared (the lab maps it too). The
+ * game's process only: a helper process never takes it over. */
+static void ctl_open(void) {
+    if (!g_main || !g_cfg.dir[0]) return;
+    char path[MAX_PATH + 32];
+    snprintf(path, sizeof path, "%s\\vclock.ctl", g_cfg.dir);
+    HANDLE f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        ss_log("no control page (%s: error %lu): pause and step aren't available in this run", path, (unsigned long)GetLastError());
+        return;
+    }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(f, &size) || size.QuadPart < VC_CTL_SIZE) {
+        static const char zero[VC_CTL_SIZE];
+        DWORD w;
+        SetFilePointer(f, 0, NULL, FILE_BEGIN);
+        WriteFile(f, zero, VC_CTL_SIZE, &w, NULL);
+    }
+    HANDLE m = CreateFileMappingA(f, NULL, PAGE_READWRITE, 0, VC_CTL_SIZE, NULL);
+    CloseHandle(f);
+    if (!m) {
+        ss_log("no control page (mapping: error %lu): pause and step aren't available in this run", (unsigned long)GetLastError());
+        return;
+    }
+    vc_ctl *k = (vc_ctl *)MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, VC_CTL_SIZE);
+    CloseHandle(m);
+    if (!k) {
+        ss_log("no control page (view: error %lu): pause and step aren't available in this run", (unsigned long)GetLastError());
+        return;
+    }
+    vc_ctl_attach(k, &g_clock, GetCurrentProcessId());
+    g_ctl = k;
+    ss_log("control page %s: quiver lab clock pause|step|resume reach this process", path);
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -285,6 +409,10 @@ static void on_present(int path) {
         if (cur) ss_log("presents are now counted from %s (was %s: a higher-level present path showed up)", PATH_NAMES[path], PATH_NAMES[cur]);
         else ss_log("presents are counted from %s", PATH_NAMES[path]);
     }
+    ctl_poll();
+    /* Another thread presenting while one is held: held before its frame counts, so the
+     * hold's time doesn't move. */
+    if (vc_must_hold(&g_clock)) hold_wait(1);
     int was = __atomic_load_n(&g_clock.engaged, __ATOMIC_ACQUIRE);
     vc_present(&g_clock);
     g_present_tid = GetCurrentThreadId();
@@ -294,6 +422,10 @@ static void on_present(int path) {
                (long long)g_clock.vfreq, (double)g_clock.ticks_per_frame / (double)g_clock.vfreq);
         write_status("engaged");
     }
+    ctl_publish();
+    /* Pause and step: hold here, after the real Present and the clock's frame, so what the
+     * game just presented stays on screen and the next frame starts when released. */
+    if (vc_must_hold(&g_clock)) hold_wait(0);
 }
 
 /* Nested presents on one thread (a device Present calling its swap chain's) count once. */
@@ -1118,10 +1250,15 @@ static void scan_modules(void) {
 
 static DWORD WINAPI status_thread(void *arg) {
     (void)arg;
-    int tick = 0;
+    int tick = 0, sub = 0;
     while (!g_quit) {
-        Sleep(250); /* this DLL's own import: real time */
+        Sleep(50); /* this DLL's own import: real time */
         if (g_quit) break;
+        /* Commands get applied (and acknowledged) even while the game doesn't present. */
+        ctl_poll();
+        if (++sub < 5) continue;
+        sub = 0;
+        ctl_publish();
         scan_modules();
         if (tick % 2 == 0) write_status("periodic");
         if (tick % 40 == 39) report("report");
@@ -1253,6 +1390,7 @@ static void start(void) {
         if (!ss_real[i]) ss_log("WARNING: the real %s.dll has no export %s (ordinal %u): calling it would crash", ss_proxy,
                                 ss_names[i] ? ss_names[i] : "-", (unsigned)ss_ords[i]);
     ss_log("audio, and anything else on a clock this can't reach, drifts: a testing tool, never for play");
+    ctl_open();
     scan_modules();
     write_status("installed");
     HANDLE t = CreateThread(NULL, 0, status_thread, NULL, 0, NULL);
@@ -1266,6 +1404,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
         InitializeCriticalSection(&g_cs);
         InitializeCriticalSection(&g_census_cs);
+        InitializeCriticalSection(&g_ctl_cs);
         g_tls = TlsAlloc();
         g_tls_thr = TlsAlloc();
         load_real();

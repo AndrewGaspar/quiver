@@ -23,6 +23,16 @@
  * limiter that sleeps terminates fast while background threads that sleep-poll keep their
  * real sleeps and don't turn into clock-read storms.
  *
+ * Pause and step (`quiver lab clock N pause|step K|resume`): a hold stops the game at its
+ * Present, after the real Present returned and the clock moved on a frame, so the frame it just
+ * presented stays on screen. While a thread is held there, virtual time doesn't move: reads
+ * return the frozen value without counting towards the creep, and the real-time escape stands
+ * down (a frame's real time starts again when it is released). A step lets K more Presents
+ * through, each the usual exactly-one-frame advance, then holds again, so a stepped run sees the
+ * same virtual-time sequence as a free-running one. Whatever still moved while held is counted
+ * (`leaked`; 0 by construction unless a race slipped through). The controller talks to the
+ * clock through `vc_ctl`, a page both sides map (vclock.ctl in the report folder).
+ *
  * Prior art: the virtual clock of the user's Ishimura project (ds-decomp's RIG shim,
  * docs/17-virtual-clock.md). */
 #ifndef QUIVER_VCLOCK_H
@@ -78,7 +88,65 @@ typedef struct vc_clock {
     uint64_t sleep_ms_requested;
     uint64_t sleep_ms_slept;
     uint64_t sleeps_real;      /* sleeps left as asked (not the presenting thread's) */
+
+    /* Pause and step (live, atomics). */
+    int32_t hold;              /* 1: presents stop once `frames` reaches `hold_at` */
+    int32_t held;              /* threads blocked at the gate now */
+    uint64_t hold_at;          /* the present count to stop at */
+    int64_t hold_timeout_real; /* resume by itself after this long held (real ticks); 0 never */
+    int64_t held_since;        /* real counter when the first thread blocked */
+    int64_t held_v;            /* vnow then */
+    int32_t pub_lock;          /* vc_ctl_publish's spinlock */
+    int32_t pad0;
+
+    /* Pause and step counters. */
+    uint64_t pauses;           /* holds started (a pause, or a step from running) */
+    uint64_t steps;            /* frames asked for by step commands */
+    uint64_t stepped;          /* presents while a hold was on (steps let through) */
+    uint64_t holds;            /* times the gate blocked */
+    int64_t held_real;         /* real ticks spent held, in all */
+    uint64_t held_reads;       /* clock reads while held: frozen, no creep, no escape */
+    int64_t leaked;            /* virtual ticks time moved while held (0 by design) */
+    uint64_t auto_resumes;     /* holds ended by their timeout, not by the controller */
 } vc_clock;
+
+/* Commands (vc_hold_cmd, vc_ctl.cmd). */
+enum { VC_CMD_NONE = 0, VC_CMD_PAUSE = 1, VC_CMD_STEP = 2, VC_CMD_RESUME = 3 };
+/* vc_ctl.state. */
+enum { VC_STATE_RUNNING = 0, VC_STATE_HOLDING = 1, VC_STATE_HELD = 2 };
+
+/* The control page (vclock.ctl, VC_CTL_SIZE bytes, mapped shared by the DLL and the lab).
+ * Every field is 64 bits and naturally aligned. The controller writes cmd, cmd_arg and
+ * cmd_timeout_ms, then cmd_seq + 1 (release); the clock applies a command once
+ * (vc_ctl_poll), publishes its state, then sets ack_seq. The state block is a seqlock:
+ * `update` is odd while the clock writes it. src/lib.rs mirrors this layout. */
+#define VC_CTL_MAGIC 0x314c544356515551ull /* "QUQVCTL1" */
+#define VC_CTL_VERSION 1
+#define VC_CTL_SIZE 4096
+typedef struct vc_ctl {
+    uint64_t magic, version, pid;
+    /* The controller's. */
+    uint64_t cmd_seq, cmd, cmd_arg, cmd_timeout_ms;
+    /* The clock's. */
+    uint64_t ack_seq;
+    uint64_t update;
+    uint64_t state;            /* VC_STATE_* */
+    uint64_t engaged;
+    uint64_t frames;           /* presents counted since engagement */
+    int64_t vticks;            /* virtual ticks since engagement */
+    uint64_t hold_at;
+    uint64_t ticks_per_frame;
+    uint64_t qpf;
+    uint64_t pauses, steps, stepped, holds;
+    uint64_t held_us;          /* real time held, in all */
+    uint64_t held_reads;
+    int64_t leaked;
+    uint64_t auto_resumes;
+    uint64_t ack_frames;       /* frames when the last command was applied */
+    uint64_t ack_hold_at;      /* hold_at it set (a step's target; 0 after resume) */
+    uint64_t ack_cmd;          /* the last command applied */
+    uint64_t creep_frames, escapes, overruns; /* the valves, for the controller's report */
+} vc_ctl;
 
 /* Whole ticks per frame for `rate` on a counter of `real_freq`, and the frequency to report
  * (`ticks_per_frame * rate`, rounded): a few ppm from the real one, and exactly 1/rate per
@@ -99,6 +167,25 @@ void vc_present(vc_clock *c);
 /* How long a Sleep(requested) really sleeps: as asked before engagement or when `shorten` is
  * 0, else at most `max_ms`. Virtual time never moves for a Sleep. */
 uint32_t vc_sleep(vc_clock *c, uint32_t requested, uint32_t max_ms, int shorten);
+
+/* Pause and step. A pause holds at the end of the next Present (the frame in flight finishes);
+ * a step of K holds K Presents after the current one (from running, it is a pause that lets K
+ * more through first); a resume releases. Returns the present count the clock will hold at
+ * (0 after a resume). `timeout_ms` (pause and step): resume by itself after that long held. */
+uint64_t vc_hold_cmd(vc_clock *c, int cmd, uint64_t arg, uint32_t timeout_ms);
+/* Must the presenting thread block now (a hold is on and `frames` reached `hold_at`)? */
+int vc_must_hold(vc_clock *c);
+/* A thread blocks at the gate / is released (its frame's real time starts again). */
+void vc_hold_begin(vc_clock *c);
+void vc_hold_end(vc_clock *c);
+/* The hold's timeout passed: the hold is lifted (counted). Returns 1 then. */
+int vc_hold_expired(vc_clock *c);
+
+/* The control page: claim it for this process (stale commands ignored), apply a pending
+ * command (returns 1 and the command, else 0), publish the clock's state. */
+void vc_ctl_attach(vc_ctl *k, vc_clock *c, uint64_t pid);
+int vc_ctl_poll(vc_ctl *k, vc_clock *c, uint64_t *cmd, uint64_t *arg);
+void vc_ctl_publish(vc_ctl *k, vc_clock *c);
 
 /* Virtual ticks as milliseconds and as 100 ns units (FILETIME), without overflow. */
 uint64_t vc_ticks_ms(const vc_clock *c, int64_t ticks);
