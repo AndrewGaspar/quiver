@@ -16,7 +16,7 @@ use clap::Subcommand;
 use quiver_api::Client;
 use quiver_core::lab::manifest::{Display, layer_versions};
 use quiver_core::lab::ready::{State, Want};
-use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eosfilter, facts, host, podman, procs};
+use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, facts, host, podman, procs};
 
 use sup::SupRequest;
 
@@ -710,12 +710,26 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
                 println!("  {} ({} bytes)", e.file_name().to_string_lossy(), e.metadata().map(|m| m.len()).unwrap_or(0));
             }
-            // What the EOS filter let through and what it blocked (design/LAB.md section 3.1).
-            if let Ok(text) = std::fs::read_to_string(dir.join(eosfilter::LOG_FILE)) {
-                let s = eosfilter::summarize(&text);
-                println!("EOS filter: loaded in {} process(es), {} request(s) allowed, {} blocked ({})", s.loaded, s.allowed, s.blocked, eosfilter::LOG_FILE);
+            // What the EOS proxy saw, let through and blocked (design/LAB.md section 3.1).
+            if let Ok(text) = std::fs::read_to_string(dir.join(eos::LOG_FILE)) {
+                let s = eos::summarize(&text);
+                println!("EOS proxy ({}): {}", eos::LOG_FILE, s.verdict());
+                println!(
+                    "  probe {}, TLS accepted {}, TLS failed {} (rejected our certificate: {}), other names refused {}, requests allowed {}, blocked {}, upstream errors {}",
+                    if s.probes > 0 { "ok" } else { "none" },
+                    s.tls_ok,
+                    s.tls_failed,
+                    s.untrusted,
+                    s.refused,
+                    s.allowed,
+                    s.blocked,
+                    s.upstream_errors
+                );
                 for (what, n) in &s.blocked_requests {
                     println!("  blocked {what}{}", if *n > 1 { format!(" (x{n})") } else { String::new() });
+                }
+                for l in s.bypass_lines.iter().chain(&s.outside_lines) {
+                    println!("  {l}");
                 }
             }
             if let Some(n) = tail {
@@ -805,15 +819,24 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
     let broker_port = (m.licence == quiver_core::lab::manifest::Licence::UbisoftBridge).then(|| {
         std::env::var("QUIVER_LAB_BROKER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(47810u16)
     });
+    // A supervisor left from the last container owns the old EOS proxy port: it goes first.
+    if sup::alive(&inst) {
+        let _ = sup::quit(&inst);
+    }
+    // The EOS proxy's port on the host (design/LAB.md 3.1): the same as last time if it's free.
+    let prev = std::fs::read_to_string(inst.dir.join(sup::EOS_PORT_FILE)).ok().and_then(|p| p.trim().parse().ok());
+    let eos_port = eosproxy::listen(prev)?.local_addr()?.port();
     let h = podman::Host {
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
         hostname: std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_owned(),
         broker_port,
+        eos_proxy_port: Some(eos_port),
         ro_mounts: podman::host_ro_mounts(),
     };
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
+    std::fs::write(inst.dir.join(sup::EOS_PORT_FILE), eos_port.to_string())?;
     ops::podman_ok(&podman::run_args(&inst, &m, &h))?;
     let deadline = Instant::now() + Duration::from_secs(15);
     let display = loop {
@@ -1096,14 +1119,23 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
     check("quiverd", quiverd, if quiverd { "running".into() } else { "not running (quiver status)".into() });
     let bridge = ops::lab_bridge();
     check("lab-aware bridge", bridge.is_ok(), match bridge { Ok(p) => p.display().to_string(), Err(e) => format!("{e:#}") });
-    // Games with the EOS SDK don't launch without it (design/LAB.md section 3.1).
-    let eos = eosfilter::find_build();
+    // Games with the EOS SDK don't launch without it (design/LAB.md section 3.1). DNS only:
+    // nothing is sent to Epic.
+    let epic = tokio::net::lookup_host((eos::FORWARDED_HOST, 443)).await.map(|a| a.map(|a| a.ip()).collect::<Vec<_>>());
+    let ca = eosproxy::Ca::generate("doctor").and_then(|ca| eosproxy::Config::new(&ca, None, eosproxy::Upstream::Dns).map(|_| ()));
+    let ok = ca.is_ok() && epic.as_ref().is_ok_and(|a| !a.is_empty() && a.iter().all(|ip| !ip.is_loopback()));
     check(
-        "EOS filter (Epic/EOS games: cloud saves, achievements, stats blocked)",
-        eos.is_ok(),
-        match eos {
-            Ok(p) => format!("{} ({} allowlist entries, for {})", p.display(), eosfilter::allowlist().len(), eosfilter::filtered_hosts().join(", ")),
-            Err(e) => format!("{e:#}"),
+        "EOS proxy (EOS games: only sign-in and ownership reach Epic)",
+        ok,
+        match (&ca, &epic) {
+            (Err(e), _) => format!("can't make a CA: {e:#}"),
+            (_, Err(e)) => format!("{} doesn't resolve on the host: {e}", eos::FORWARDED_HOST),
+            (_, Ok(a)) => format!(
+                "{} allowlist entries; {} resolves to {} on the host; instances made before the proxy need quiver lab down/up",
+                eos::ALLOWLIST.len(),
+                eos::FORWARDED_HOST,
+                a.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ")
+            ),
         },
     );
     if json {

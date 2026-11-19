@@ -12,10 +12,10 @@
 //!   gold prefix and checked again before every launch, its credentials are deleted, its
 //!   DLLs are disabled in `WINEDLLOVERRIDES`, and a Connect process seen in an instance
 //!   kills the run ([`guard`]).
-//! - Nothing an EOS game sends to Epic from an instance reports anything: requests to
-//!   `api.epicgames.dev` pass an allowlist (sign-in, ownership) in a `secur32.dll` installed
-//!   in the instance's clone, and a game with the EOS SDK doesn't launch without it
-//!   ([`eosfilter`]).
+//! - An EOS game's requests to Epic pass an allowlist (sign-in, ownership): every instance's
+//!   container resolves Epic's names to the instance's EOS proxy, which trusts nothing but
+//!   the allowlist and answers the rest 403; a game with the EOS SDK doesn't launch unless
+//!   the proxy answers from inside the container ([`eos`], [`eosproxy`], [`wincert`]).
 //! - Displays `:0`–`:9` are reserved inside every container ([`podman::boot_script`]), and
 //!   the container has a network namespace of its own (the broker port is forwarded), so it
 //!   can't reach the host's X servers by their abstract sockets.
@@ -23,7 +23,8 @@
 pub mod bench;
 pub mod brief;
 pub mod configset;
-pub mod eosfilter;
+pub mod eos;
+pub mod eosproxy;
 pub mod facts;
 pub mod guard;
 pub mod host;
@@ -32,6 +33,7 @@ pub mod manifest;
 pub mod podman;
 pub mod procs;
 pub mod ready;
+pub mod wincert;
 
 use std::path::{Path, PathBuf};
 

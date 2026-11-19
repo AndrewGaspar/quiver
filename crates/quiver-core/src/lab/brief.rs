@@ -166,22 +166,24 @@ pub fn render(b: &BriefInput) -> String {
     s
 }
 
-/// What the EOS filter does to an Epic or EOS game in the lab (design/LAB.md section 3.1).
+/// What the EOS proxy does to an Epic or EOS game in the lab (design/LAB.md section 3.1).
 fn eos_note(sdk: bool, i: &str) -> String {
-    let hosts = super::eosfilter::filtered_hosts().join(", ");
     let mut s = format!(
-        "- **Epic Online Services:** the game's own requests to `{hosts}` go through the lab's EOS filter (a `secur32.dll` \
-         Quiver puts in the instance's clone, never in the user's install). Allowed: sign-in, the SDK's config, EOS Connect, \
-         ownership and entitlement reads. Blocked before a byte is sent: cloud saves (Player Data Storage), achievements, \
-         stats, leaderboards, presence, telemetry and anything else, so the game may say those are offline or failed; \
-         that is expected. Every decision is logged in `runs/r<N>/eos-filter.log` (`quiver lab logs {i}` sums it up). \
-         If sign-in or ownership needs a blocked path, add it to `contrib/lab/eos-filter/allowlist.h` (design/LAB.md 3.1); \
-         never add anything that writes to the account or reports.{}\n",
-        if sdk { " Launches refuse to start if the filter can't be installed." } else { "" }
+        "- **Epic Online Services:** in the instance, `{host}` (and Epic's other names) resolve to the lab's EOS proxy, \
+         which terminates TLS with a certificate from the instance's own CA (trusted only in the instance's cloned prefix) \
+         and forwards only sign-in, the SDK's config, EOS Connect and ownership/entitlement reads to Epic. Everything else, \
+         cloud saves (Player Data Storage), achievements, stats, leaderboards, presence and telemetry included, gets a 403 \
+         and never reaches Epic, so the game may say those are offline or failed; that is expected. If the game doesn't \
+         trust the lab's CA, EOS is simply offline for the run (fail closed). Every handshake and decision is in \
+         `runs/r<N>/eos-filter.log`; `quiver lab logs {i}` gives the verdict (did the proxy see the game's TLS and \
+         requests, and did anything bypass it). If sign-in or ownership needs a blocked path, add it to `ALLOWLIST` in \
+         `crates/quiver-core/src/lab/eos.rs` (design/LAB.md 3.1); never anything that writes to the account or reports.{}\n",
+        if sdk { " Launches refuse to start unless the proxy answers from inside the container." } else { "" },
+        host = super::eos::FORWARDED_HOST,
     );
     s.push_str("  - The allowlist:");
-    for (m, p, _) in super::eosfilter::allowlist() {
-        s.push_str(&format!(" `{m} {p}`"));
+    for a in super::eos::ALLOWLIST {
+        s.push_str(&format!(" `{} {}`", a.method, a.pattern));
     }
     s.push('\n');
     s
@@ -192,7 +194,7 @@ pub const RULES: &[&str] = &[
     "Never sign in to any store, and never run a store's client (Ubisoft Connect, the Epic launcher, Steam) in an instance. The lab gets the licence from quiverd per launch; Connect is disabled in every instance and a Connect process kills the run.",
     "Never read credential or token files (Connect's `ConnectSecureStorage.dat`, keyrings, `~/.config/*/credentials`).",
     "Never touch the user's real prefix or install (`quiver lab` never mounts them). Copy saves in as fixtures (`quiver lab fixture`), never link them.",
-    "Nothing from an instance is reported: no play time, achievements, stats or cloud saves reach the user's accounts (for EOS games the EOS filter blocks them; its log is in the run folder). Don't enable a game's own cloud sync in an instance, and never route around the filter.",
+    "Nothing from an instance is reported: no play time, achievements, stats or cloud saves reach the user's accounts (for EOS games the lab's EOS proxy blocks them; its log is in the run folder). Don't enable a game's own cloud sync in an instance, and never route around the proxy (no hard-coded Epic addresses, no other DNS).",
     "Use `quiver lab launch`, `kill` and `wait`; never assemble pkill/sleep sequences. Never `pkill -f` or `pgrep -f` (it matches your own shell); the lab identifies processes by container and prefix.",
     "Poll a real signal, never a fixed sleep: `quiver lab wait` (process, window, frame, or your mod's state), `--wait` on `set`.",
     "Prefer keys and relative mouse motion. Clicks are fractions of the window (`quiver lab click <i> 0.5 0.62`) and must be checked: use `--expect-change` or a screenshot.",
@@ -255,7 +257,7 @@ mod tests {
         // An Epic game with the EOS SDK: the filter, its log and the allowlist.
         let sdk = super::super::facts::Hint { name: "Epic Online Services".into(), evidence: "EOSSDK-Win64-Shipping.dll".into() };
         let epic = render(&BriefInput { game: "epic:awr".into(), licence: Some(Licence::EpicExchangeCode), instance: "awr".into(), facts: Facts { sdks: vec![sdk], ..b.facts.clone() }, ..b });
-        for want in ["**Epic Online Services:**", "api.epicgames.dev", "cloud saves (Player Data Storage)", "eos-filter.log", "quiver lab logs awr", "allowlist.h", "refuse to start", "`POST /epic/oauth/{v}/token`"] {
+        for want in ["**Epic Online Services:**", "api.epicgames.dev", "cloud saves (Player Data Storage)", "eos-filter.log", "quiver lab logs awr", "lab/eos.rs", "unless the proxy answers", "fail closed", "`POST /epic/oauth/{v}/token`"] {
             assert!(epic.contains(want), "missing {want:?} in\n{epic}");
         }
     }

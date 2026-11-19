@@ -26,7 +26,7 @@ use quiver_api::lab::LaunchMaterial;
 use quiver_api::{Request, StoreId};
 use quiver_core::lab::manifest::Licence;
 use quiver_core::lab::ready::{Exit, Phase, Run, State};
-use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eosfilter, guard, host, podman, procs};
+use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, guard, host, podman, procs, wincert};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -67,6 +67,143 @@ struct Sup {
     state: Mutex<State>,
     /// Serialises launches and kills.
     busy: Mutex<()>,
+    /// The instance's EOS proxy (lab::eosproxy), when its container forwards port 443 to it.
+    eos: Option<EosProxy>,
+    /// What the watch loop has already said about the current run's network.
+    net_seen: Mutex<(u32, std::collections::BTreeSet<String>, eosproxy::Stats)>,
+}
+
+struct EosProxy {
+    shared: Arc<eosproxy::Shared>,
+    port: u16,
+    ca: eosproxy::Ca,
+}
+
+/// The file `up` records the EOS proxy's port in (the container forwards 443 to it).
+pub const EOS_PORT_FILE: &str = "eos-proxy-port";
+
+/// Start the instance's EOS proxy on the port its container forwards to.
+fn start_eos_proxy(inst: &Inst) -> Result<Option<EosProxy>> {
+    let Some(port) = std::fs::read_to_string(inst.dir.join(EOS_PORT_FILE)).ok().and_then(|p| p.trim().parse::<u16>().ok()) else {
+        return Ok(None);
+    };
+    let ca = eosproxy::Ca::load_or_create(&inst.dir.join("eos-proxy"), &inst.name)?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("the EOS proxy's port {port} is taken"))?;
+    let shared = eosproxy::Shared::new(inst.dir.join("eos-proxy").join("proxy.log"));
+    eosproxy::spawn(listener, eosproxy::Config::new(&ca, None, eosproxy::Upstream::Dns)?, shared.clone())?;
+    Ok(Some(EosProxy { shared, port, ca }))
+}
+
+/// Before an EOS game's launch: the proxy listens on the port the container forwards to, the
+/// instance's cloned prefix trusts its CA, and a probe from inside the container reaches it
+/// through `api.epicgames.dev:443`. The run's proxy log starts here.
+fn eos_ready(sup: &Sup, run_dir: &Path, run: u32) -> Result<Vec<String>> {
+    let inst = &sup.inst;
+    let i = &inst.name;
+    let p = sup.eos.as_ref().with_context(|| {
+        format!(
+            "this instance's container has no EOS proxy (it was made before the proxy existed, or the proxy didn't start: see {}); quiver lab down {i} && quiver lab up {i}",
+            inst.supervisor_log().display()
+        )
+    })?;
+    let fwd = std::fs::read_to_string(inst.dir.join(EOS_PORT_FILE)).unwrap_or_default();
+    if fwd.trim() != p.port.to_string() {
+        bail!("the container forwards port 443 to {:?} but the EOS proxy listens on {}; quiver lab down {i} && quiver lab up {i}", fwd.trim(), p.port);
+    }
+    let host = eos::FORWARDED_HOST;
+    let addrs: Vec<String> = p.shared.epic_addrs().iter().map(|a| a.to_string()).collect();
+    p.shared.start_run(
+        run_dir.join(eos::LOG_FILE),
+        &format!(
+            "--- EOS proxy for run r{run}: the container's {host} and {} resolve to 127.0.0.1, whose port 443 is this proxy (host 127.0.0.1:{}); allowed requests go to the real {host} ({}); lab CA {}",
+            eos::SINKHOLED_HOSTS.join(", "),
+            p.port,
+            if addrs.is_empty() { "resolved at first use".to_owned() } else { addrs.join(", ") },
+            wincert::thumbprint(&p.ca.der)
+        ),
+    );
+    let mut notes: Vec<String> = wincert::install(&inst.prefix(), &p.ca.der)?.into_iter().map(|d| format!("EOS proxy: {d}")).collect();
+    if !wincert::installed(&inst.prefix(), &p.ca.der) {
+        bail!("the lab CA isn't in the instance prefix's ROOT store after installing it");
+    }
+    let nonce = format!("{:x}-{:x}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    let script = format!(r#"getent hosts {host} | head -n1; exec 3<>/dev/tcp/{host}/443 || exit 7; printf '{} {nonce}\n' >&3; head -n1 <&3"#, eosproxy::PROBE);
+    let out = ops::podman_ok(&["exec".into(), inst.container(), "bash".into(), "-c".into(), script]).context("probe the EOS proxy from inside the container")?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let resolved = text.lines().next().unwrap_or_default().trim().to_owned();
+    if !resolved.starts_with("127.0.0.1") {
+        bail!("inside the container {host} resolves to {resolved:?}, not the EOS proxy (the container was made before it); quiver lab down {i} && quiver lab up {i}");
+    }
+    if !text.contains(eosproxy::PROBE_REPLY) || !p.shared.probed(&nonce) {
+        bail!("a probe from inside the container didn't reach the EOS proxy ({:?})", text.trim());
+    }
+    *sup.net_seen.lock().unwrap() = (run, Default::default(), Default::default());
+    notes.push(format!(
+        "EOS proxy: a probe from inside the container reached it ({host}:443 -> host 127.0.0.1:{}); the game's handshakes and requests go to runs/r{run}/{}, and `quiver lab logs {i}` says whether it saw any",
+        p.port,
+        eos::LOG_FILE
+    ));
+    Ok(notes)
+}
+
+/// During a run: say when the proxy first sees the game's TLS (or its rejection), and look
+/// for :443 connections that didn't go through it. One to an address of the real
+/// `api.epicgames.dev` kills the run (as a Connect process does). True: killed.
+fn eos_watch(sup: &Sup, p: &EosProxy, all: &[procs::Proc], cid: &str) -> bool {
+    let Some(run) = sup.state.lock().unwrap().run.as_ref().filter(|r| r.phase != Phase::Exited).map(|r| r.id) else { return false };
+    let Some(pid) = procs::instance_wine(all, cid).first().map(|p| p.pid) else { return false };
+    let read = |f: &str| std::fs::read_to_string(format!("/proc/{pid}/net/{f}")).unwrap_or_default();
+    let conns = eos::outside_443(&read("tcp"), &read("tcp6"));
+    let stats = p.shared.stats();
+    let epic = p.shared.epic_addrs();
+    let (old, fresh) = {
+        let mut seen = sup.net_seen.lock().unwrap();
+        if seen.0 != run {
+            *seen = (run, Default::default(), Default::default());
+        }
+        let old = std::mem::replace(&mut seen.2, stats);
+        let fresh: Vec<eos::TcpConn> = conns.into_iter().filter(|c| seen.1.insert(format!("{}:{}", c.remote, c.port))).collect();
+        (old, fresh)
+    };
+    let mut say = Vec::new();
+    if old.tls_ok == 0 && stats.tls_ok > 0 {
+        say.push("EOS proxy: the game's TLS to api.epicgames.dev was accepted (it trusts the lab CA); its requests are in eos-filter.log".to_owned());
+    }
+    if old.untrusted == 0 && stats.untrusted > 0 {
+        say.push("EOS proxy: the game rejected the lab's certificate, so EOS is offline for this run (fail closed; nothing reached Epic)".to_owned());
+    } else if old.tls_failed == 0 && stats.tls_failed > 0 && stats.untrusted == 0 {
+        say.push("EOS proxy: a TLS handshake with the game failed (see eos-filter.log)".to_owned());
+    }
+    if old.allowed + old.blocked == 0 && stats.allowed + stats.blocked > 0 {
+        say.push(format!("EOS proxy: the game's requests arrive ({} allowed, {} blocked so far)", stats.allowed, stats.blocked));
+    }
+    let mut killed = false;
+    for c in fresh {
+        let to = format!("{}:{} ({})", c.remote, c.port, c.state);
+        if epic.contains(&c.remote) {
+            let msg = format!("!!! BYPASS {to} is one of api.epicgames.dev's addresses and didn't go through the EOS proxy (a hard-coded address?); run killed");
+            p.shared.log(&msg);
+            sup.update(|st| {
+                st.violations.push(format!("{} {msg}", Utc::now().to_rfc3339()));
+                Some(msg.clone())
+            });
+            killed = true;
+        } else {
+            let msg = format!("!!! OUTSIDE {to}: a :443 connection that didn't go through the EOS proxy (not one of the addresses api.epicgames.dev has on this host; check what it is)");
+            p.shared.log(&msg);
+            say.push(msg);
+        }
+    }
+    for n in say {
+        sup.update(|st| {
+            st.run.as_mut()?.notes.push(n.clone());
+            Some(n)
+        });
+    }
+    if killed {
+        let _ = kill(sup, "supervisor", "violation");
+    }
+    killed
 }
 
 impl Sup {
@@ -112,9 +249,17 @@ pub fn supervise(lab: Lab, name: &str) -> Result<()> {
     st.supervisor_pid = Some(std::process::id());
     st.container_up = ops::running_id(&inst.container()).is_some();
     st.display = ops::display(&inst);
-    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()) });
+    let (eos, eos_note) = match start_eos_proxy(&inst) {
+        Ok(Some(p)) => {
+            let note = format!("; EOS proxy on 127.0.0.1:{} (the container's api.epicgames.dev:443)", p.port);
+            (Some(p), note)
+        }
+        Ok(None) => (None, "; no EOS proxy (a container from before it: quiver lab down/up)".into()),
+        Err(e) => (None, format!("; the EOS proxy didn't start: {e:#}")),
+    };
+    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()), eos, net_seen: Mutex::default() });
     let _ = lab::write_atomic(&sup.inst.state_path(), &serde_json::to_vec_pretty(&*sup.state.lock().unwrap())?);
-    sup.update(|_| Some(format!("supervisor {} started", std::process::id())));
+    sup.update(|_| Some(format!("supervisor {} started{eos_note}", std::process::id())));
     {
         let sup = sup.clone();
         std::thread::spawn(move || watch(&sup));
@@ -276,31 +421,30 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
             Err(e) => notes.push(format!("graphics profile {p} not applied: {e:#}")),
         }
     }
-    // The EOS filter (lab::eosfilter): after the mod's files, so a mod's own secur32.dll is
-    // refused rather than left in front of it. A game with the EOS SDK doesn't launch without it.
-    let eos = eosfilter::plan(&m.install_in(inst), &m.paths.exe, m.licence == Licence::EpicExchangeCode);
-    let mut eos_on = false;
-    if let Some(plan) = &eos {
-        match eosfilter::find_build().and_then(|b| eosfilter::install(&inst.dir, &m.install_in(inst), plan, &b)) {
-            Ok(dlls) => {
-                eos_on = true;
-                let dirs: Vec<String> = plan.dirs.iter().map(|(d, a)| format!("{} ({})", if d.as_os_str().is_empty() { ".".into() } else { d.display().to_string() }, a.dir())).collect();
-                notes.push(format!("EOS filter: {} secur32.dll in {} (saves, achievements, stats and telemetry to Epic blocked)", dlls.len(), dirs.join(", ")));
-            }
-            Err(e) if plan.required => bail!(
-                "refusing to launch: the game ships the EOS SDK ({}), which would sync cloud saves and report achievements and stats to the person's Epic account, and the EOS filter that blocks that couldn't be installed in the instance: {e:#}",
-                plan.sdks.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-            ),
-            Err(e) => notes.push(format!("EOS filter not installed (no EOS SDK found in the game, so nothing needs it): {e:#}")),
-        }
+    // The EOS proxy (lab::eos): an EOS game's Epic traffic goes through it or the game doesn't
+    // launch. The old secur32 filter (it never saw the SDK's TLS) is taken out of the clone.
+    for p in eos::remove_old_filter(&m.install_in(inst)) {
+        notes.push(format!("removed the old secur32.dll EOS filter {}", p.display()));
     }
+    let eos_plan = eos::plan(&m.install_in(inst), m.licence == Licence::EpicExchangeCode);
     let run = next_run(inst);
     let run_dir = inst.run_dir(run);
     std::fs::create_dir_all(&run_dir)?;
     let session = quiver_api::lab::session_id(&inst.name, run);
     let run_win = format!(r"{}\runs\r{run}", lab::LAB_WIN);
-    if eos_on {
-        notes.push(format!("EOS filter decisions: runs/r{run}/{}", eosfilter::LOG_FILE));
+    if let Some(plan) = &eos_plan {
+        let ready = eos_ready(sup, &run_dir, run);
+        if let (Err(e), Some(p)) = (&ready, &sup.eos) {
+            p.shared.log(&format!("--- not ready: {e:#}"));
+        }
+        match ready {
+            Ok(did) => notes.extend(did),
+            Err(e) if plan.required => bail!(
+                "refusing to launch: the game ships the EOS SDK ({}), which would sync cloud saves and report achievements and stats to the person's Epic account, and the lab's EOS proxy isn't in its path: {e:#}",
+                plan.sdks.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
+            Err(e) => notes.push(format!("EOS proxy not checked (no EOS SDK found in the game): {e:#}")),
+        }
     }
     let run_mount = format!("{}/runs/r{run}", lab::LAB_MOUNT);
     let hs = host::snapshot(&procs::scan(), &ops::containers());
@@ -378,15 +522,9 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let overrides: Vec<String> = m.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let base = env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES").map(|(_, v)| v.clone()).into_iter().chain((!overrides.is_empty()).then(|| overrides.join(";")));
     let base: Vec<String> = base.collect();
-    let mut base = (!base.is_empty()).then(|| base.join(";"));
-    env.retain(|(k, _)| k != "WINEDLLOVERRIDES" && k != eosfilter::LOG_ENV);
-    if eos_on {
-        // The filter wins over any secur32 setting the manifest has.
-        base = Some(eosfilter::with_override(base.as_deref()));
-        env.push((eosfilter::LOG_ENV.into(), format!(r"{run_win}\{}", eosfilter::LOG_FILE)));
-    }
+    env.retain(|(k, _)| k != "WINEDLLOVERRIDES");
     // Connect's executables are disabled for every launch (the guard's third layer).
-    env.push(("WINEDLLOVERRIDES".into(), quiver_core::steamrun::dll_overrides_without_connect(base.as_deref())));
+    env.push(("WINEDLLOVERRIDES".into(), quiver_core::steamrun::dll_overrides_without_connect((!base.is_empty()).then(|| base.join(";")).as_deref())));
     std::fs::create_dir_all(inst.lab().join("cache/nv"))?;
     std::fs::create_dir_all(inst.lab().join("req"))?;
     std::fs::create_dir_all(inst.lab().join("rsp"))?;
@@ -477,6 +615,11 @@ fn watch(sup: &Sup) {
             let _ = kill(sup, "supervisor", "violation");
             continue;
         }
+        if let Some(p) = &sup.eos
+            && eos_watch(sup, p, &all, &cid)
+        {
+            continue;
+        }
         let game = procs::instance_game(&all, &cid, &exe);
         let pids: Vec<u32> = game.iter().map(|p| p.pid).collect();
         if !pids.is_empty() {
@@ -546,6 +689,25 @@ fn watch(sup: &Sup) {
             }
         }
     }
+}
+
+/// Ask a supervisor to stop, and wait (a few seconds at most) until it has.
+pub fn quit(inst: &Inst) -> Result<()> {
+    if let Ok(conn) = UnixStream::connect(inst.socket()) {
+        let mut line = serde_json::to_vec(&SupRequest::Quit)?;
+        line.push(b'\n');
+        let _ = (&conn).write_all(&line);
+        let mut rsp = String::new();
+        let _ = BufReader::new(&conn).read_line(&mut rsp);
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while alive(inst) {
+        if Instant::now() > deadline {
+            bail!("the instance's old supervisor didn't stop (see {})", inst.supervisor_log().display());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 /// Talk to an instance's supervisor, starting it if the container is up and it isn't.

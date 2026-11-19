@@ -89,6 +89,8 @@ the GPU lock, and the mod's `reload_pattern` and `log_file`. Change it with `qui
 | `--userns=keep-id`, the host's hostname and `/etc/machine-id` | files keep the user's ownership; the machine looks the same to Ubisoft and Denuvo |
 | `/usr/lib/nvidia/wine` mounted | NVIDIA's NGX DLLs (DLSS) |
 | per-instance NVIDIA shader cache (`lab/cache/nv`) | relaunches don't recompile |
+| ALSA's default is a null sink (`$HOME/.asoundrc`) | there is no sound device; AWR crashed at startup without one (3.2) |
+| Epic's names resolve to the instance's EOS proxy, port 443 forwarded to it | EOS saves, achievements and stats never reach Epic (3.1) |
 
 ## 3. Licensing, per store
 
@@ -111,51 +113,89 @@ sees a refresh token, a password or a store login.
   exchange code from quiverd (`epic_core::Epic::launch_material`), and the ownership token when
   the game wants one, written 0600 into the run folder (`-epicovt=Z:\lab\runs\rN\<ns><item>.ovt`)
   and deleted at the next kill. The refresh token stays in quiverd's keyring. EOS then talks to
-  Epic itself over the container's network, through the **EOS filter** (3.1): sign-in and
-  ownership reach Epic; EOS cloud saves (Player Data Storage), achievements, stats,
-  leaderboards, presence and telemetry are blocked before a byte of them is sent. A game with
-  the EOS SDK doesn't launch in the lab without the filter.
+  Epic itself, and the container sends `api.epicgames.dev` to the instance's **EOS proxy**
+  (3.1): sign-in, the SDK's config and ownership reach Epic; EOS cloud saves (Player Data
+  Storage), achievements, stats, leaderboards, presence and telemetry get a 403 from the proxy
+  and never reach Epic. If the game doesn't trust the lab's CA, EOS is offline for the run
+  (fail closed). A game with the EOS SDK doesn't launch unless the proxy answers from inside
+  its container.
 - **DRM-free** (`licence = "none"`): nothing to mint. Today that is Steam games without
   Steamworks or SteamStub (below). GOG has no provider in Quiver yet (not built).
 - **Steam**: see section 7.
 
-### 3.1 The EOS filter
+### 3.1 The EOS proxy
 
 A game built on the Epic Online Services SDK talks to Epic itself, with the person's real
 licence: it syncs cloud saves, unlocks achievements, sends stats, leaderboard scores and
-telemetry. A lab run with test or modded saves would overwrite the person's real cloud saves
+telemetry. A lab run with test or modded saves could overwrite the person's real cloud saves
 and earn achievements. Blocking the host isn't possible: AWR's `EOSSDK-Win64-Shipping.dll`
 (EOS SDK 1.7.1) names one host, `api.epicgames.dev`, for everything, sign-in included; the
-services differ only by URL path. So the lab filters by path, in plaintext, before TLS.
+services differ only by URL path. So the lab filters by path.
 
-**How.** The SDK is libcurl over Windows schannel: it imports `Secur32.dll` and `CRYPT32`
-and bundles no certificates, so there is no fake CA or MITM. `contrib/lab/eos-filter` is a
-`secur32.dll` (`shim.c`, built for x86_64 and i686 by `build.sh`, installed as
-`<libdir>/lab/eos-filter/<arch>/secur32.dll`) whose exports jump to Wine's own secur32,
-except:
+**Why a proxy (the first live run).** The first filter was a `secur32.dll` that read each
+request's plaintext in schannel's `EncryptMessage`. In AWR it loaded but saw nothing while the
+game held five TLS connections to Epic (Cloudflare, 104.18.124.108 and 104.18.125.108): the
+SDK statically links **OpenSSL 1.1.1c** under libcurl 7.55.1 ("AES-256 GCM using openssl",
+`ossl_static.pdb`, libwebsockets' `tls/openssl/ssl.c`), and imports from Secur32 only
+`AcquireCredentialsHandleA`, `InitializeSecurityContextA`, `CompleteAuthToken`,
+`DeleteSecurityContext` and `FreeCredentialsHandle` (proxy and NTLM auth). It was removed.
+What does work: the SDK carries Unreal's `FSslCertificateManager`, which loads the Windows ROOT
+store into OpenSSL (`bUsePlatformProvidedCertificates`, "Unable to open ROOT certificate store",
+`CertOpenSystemStoreW`/`CertEnumCertificatesInStore`) next to its bundled roots; pinning is
+configuration (`PinnedPublicKeys`, "no pinned key digests found for domain").
 
-- `InitializeSecurityContextA/W` remember each new TLS context's server name (SNI);
-- `EncryptMessage` (and `SealMessage`): on a connection to a filtered host, the write's
-  plaintext goes through `filter.c` first, a streaming HTTP/1.x parser per connection
-  (request line, `Host`, `Content-Length`, chunked bodies, keep-alive and pipelined requests,
-  heads and bodies split over many writes). Each request is decided from its request line
-  before any byte of it is encrypted. A blocked write is zeroed and fails with
-  `SEC_E_ENCRYPT_FAILURE`, so nothing of it reaches the socket and the SDK sees a send error;
-  the connection stays blocked. A request whose request line is split across writes, a
-  request line that isn't HTTP/1.x (HTTP/2's preface), malformed or conflicting framing, and
-  any path with `%`, `\`, `.` or `..` segments are blocked: the filter fails safe;
-- `InitSecurityInterfaceA/W` return the same table with those three replaced, except to the
-  real secur32's own calls (through Wine's `schannel.dll`, which forwards to `secur32`, i.e.
-  the filter): those get the real table, or secur32 would load the filter as a provider and
-  recurse until the stack overflows (the lesson of `tools/recon/tls-tap`).
+**How.** Every instance's container, from `quiver lab up` on:
 
-Connections to every other host are not parsed and pass untouched. A context whose server
-name the filter never saw is judged by its requests' `Host` headers (an unlisted request to
-the filtered host, or one with no `Host` in its first write, is blocked).
+- resolves `api.epicgames.dev`, and Epic's other names in the SDK (`api-gamedev.ol.epicgames.net`,
+  `geo-nat.ol.epicgames.com`, `stun-1-nat.ol.epicgames.com`, `stun-2-nat.ol.epicgames.com`),
+  to `127.0.0.1` (`podman --add-host`);
+- forwards its loopback port 443 to the instance's **EOS proxy** on the host's loopback
+  (`--network=pasta:…,-T,443:<port>`; the port is in `<instance>/eos-proxy-port`). Verified
+  rootless: pasta binds the namespace's port 443 itself, no sysctl needed, and two `-T`
+  forwards (the broker's and this one) work in one option.
 
-**The allowlist** (`contrib/lab/eos-filter/allowlist.h`, the one place to change it; each
-entry has a comment and its source). Everything else on `api.epicgames.dev` is blocked.
-`{}` is one path segment, `{v}` a version (`v1`…`v99`); the query string is ignored.
+The proxy (`quiver_core::lab::eosproxy`) runs in the instance's supervisor, so it lives exactly
+as long as the instance is up, and needs nothing in the image:
+
+- **TLS** for `api.epicgames.dev` only, with a fresh certificate from the instance's own CA.
+  The CA (`<instance>/eos-proxy/ca.pem`, key `ca.key` 0600, outside the mounted `lab/` folder so
+  nothing in the container can read the key) may sign only `api.epicgames.dev` (a name
+  constraint). Any other name (the sinkholed ones) is refused at the handshake and logged.
+  ALPN offers `http/1.1` only (an `h2` offer gets http/1.1; an h2-only client gets no
+  connection).
+- **HTTP/1.1** (hyper: keep-alive, pipelining, chunked bodies). Each request is checked against
+  the allowlist. An allowed request is forwarded to the real `api.epicgames.dev` over one
+  upstream connection per game connection, verified against the web PKI. The host is resolved
+  on the host and never to a local address, so it can't loop back to itself; hop-by-hop
+  headers are dropped. Everything else, protocol upgrades (websockets) and unknown paths
+  included, is answered `403` with an Epic-shaped error body
+  (`errors.com.quiver.lab.eos_blocked`) and never leaves the proxy.
+- **Trust** lives in the instance's *cloned* prefix only (`quiver_core::lab::wincert`, at each
+  launch, with no wineserver running). The CA is written to `system.reg` as
+  `HKLM\Software\Microsoft\SystemCertificates\Root\Certificates\<SHA-1>`, value `Blob` (Wine's
+  serialized properties: `CERT_HASH_PROP_ID` then `CERT_CERT_PROP_ID`). That is where Wine's
+  ROOT store lives and what `CertOpenSystemStoreW(0, "ROOT")` returns.
+  - **The root sync.** Wine's crypt32 deletes, on its first use per session, the roots listed
+    under `HKLM\Software\Wine\HostImportedCertificates` that the host no longer has. When that
+    key is missing, it first lists every cached root there, ours included
+    (`dlls/crypt32/rootstore.c`). 32-bit processes see `Software\Wow6432Node\Wine\…`.
+  - **Seen in a Proton 11 prefix:** a 32-bit client deleted a CA the 64-bit one had kept, until
+    the Wow6432Node key existed. So both import keys are created if missing, without our hash.
+  - **Key usage.** Wine's chain engine reads only the *last* byte of the KeyUsage bit string
+    (`CRYPT_KeyUsageValid`), and rcgen writes two bytes. So the CA's KeyUsage is written as a
+    one-byte bit string, or Wine rejects the chain with `CERT_E_WRONG_USAGE`.
+  - Older lab CAs (from a CA made again) are removed.
+
+**Fail closed.** If the game doesn't trust the lab CA (bundled roots only, or a pinned key),
+its TLS to `api.epicgames.dev` fails and EOS is offline for the run. That is acceptable, and
+the log says so (`tls failed … the game rejected the lab's certificate (alert UnknownCA) …
+fail closed`, or `closed … after the handshake without a request` for a pin checked after the
+handshake). Unknown paths always stay blocked.
+
+**The allowlist** (`ALLOWLIST` in `crates/quiver-core/src/lab/eos.rs`, the one place to change
+it; each entry has a comment and its source). Everything else on `api.epicgames.dev` gets a 403.
+`{}` is one path segment, `{v}` a version (`v1`…`v99`); the query string is ignored; paths
+with `%`, `\`, empty, `.` or `..` segments never match.
 
 | Method and path | What | Source |
 |---|---|---|
@@ -171,53 +211,89 @@ entry has a comment and its source). Everything else on `api.epicgames.dev` is b
 | `POST /epic/ecom/{v}/platforms/{}/identities/{}/entitlementToken` | a signed statement of those (newer SDKs) | Ecom web API (v4) |
 | the three ecom reads under `/ecom/{v}/…` | the same resources without `/epic` | the EOS OpenAPI mirror on apis.io |
 
-Blocked on purpose, though sign-in-adjacent: `/auth/v1/users` (creates a product user),
-`/auth/v1/accounts*` (links accounts, makes device ids), `…/entitlements/redeem` (marks
-entitlements used), offers and purchases, `/epic/oauth/{v}/deviceAuthorization`, user info
-(`/epic/id/…`, `/user/…`). Blocked as reporting: Player Data Storage and Title Storage,
-`/v1/{deployment}/achievements/{puid}/unlock` and definitions, stats, leaderboards, presence,
-friends, sessions, lobbies, and the SDK's telemetry (`[SDKAnalytics]
-BaseUrl=https://api.epicgames.dev/telemetry/data/`, `datarouter/api/v1/public/data`). Sources:
-the SDK's own route strings in AWR's `EOSSDK-Win64-Shipping.dll`, and Epic's web API reference
-(dev.epicgames.com/docs/web-api-ref: authentication, connect-web-api, ecom-web-apis). The
-filter only removes reporting: it never answers for Epic, fakes a response or touches what
-the ownership checks return.
+**Blocked on purpose.** Some paths are close to sign-in but write to the account:
+`/auth/v1/users` (creates a product user), `/auth/v1/accounts*` (links accounts, makes device
+ids), `…/entitlements/redeem` (marks entitlements used), offers and purchases. Others aren't
+needed for sign-in: `/epic/oauth/{v}/deviceAuthorization` and user info (`/epic/id/…`,
+`/user/…`).
 
-**The log.** Each decision goes to `runs/r<N>/eos-filter.log` (`QUIVER_EOS_FILTER_LOG`, set
-by the launch): time, `allow`/`block`, the method, the path and the query's keys (values
-replaced by `…`: they can be ids or codes), and the allowlist entry or the reason. Never
-headers or bodies (they carry tokens). A `--- EOS filter (<arch>) loaded in pid …` line shows
-which processes loaded it. `quiver lab logs <i>` sums it up (allowed, blocked, each blocked
-request). An agent that finds sign-in or ownership needs a blocked path adds an entry to
-`allowlist.h` with its source, rebuilds (`tools/install-user.sh`) and documents it here;
-never an entry that writes to the account or reports.
+**Blocked as reporting.** Player Data Storage and Title Storage,
+`/v1/{deployment}/achievements/{puid}/unlock` and the achievement definitions, stats,
+leaderboards, presence, friends, sessions, lobbies, and the SDK's telemetry (`[SDKAnalytics]
+BaseUrl=https://api.epicgames.dev/telemetry/data/`, `datarouter/api/v1/public/data`).
 
-**Where it goes.** At each launch (`lab::eosfilter`, the supervisor), after the mod's files:
-the game executable's folder (Windows looks there first) and every folder of the install
-holding an `EOSSDK-Win64/Win32-Shipping.dll`, each with the matching architecture, in the
-instance's clone only. A folder that resolves outside the instance (a symlink back to the
-person's files) is refused; a `secur32.dll` there that isn't a filter build (the game's or a
-mod's) is refused, not replaced. The launch's `WINEDLLOVERRIDES` gets `secur32=n,b`, over
-any `secur32` setting in the manifest. Every Epic instance gets it; a game of any store
-that ships the EOS SDK must: **the launch refuses** with the reason if the filter can't be
-installed (not built, a foreign `secur32.dll`, the folder outside the instance). There is no
-opt-out. `quiver lab doctor` checks the build, `quiver lab brief` explains it.
+**Sources.** The SDK's own route strings in AWR's `EOSSDK-Win64-Shipping.dll`, and Epic's web
+API reference (dev.epicgames.com/docs/web-api-ref: authentication, connect-web-api,
+ecom-web-apis). The proxy only removes reporting: it never answers for Epic on an allowed
+path, fakes ownership, or touches what Epic returns.
 
-**Tests.** `crates/quiver-core/tests/eos_filter.rs`: `test_filter.c` (the parser and
-allowlist: split writes, keep-alive and pipelining, chunked bodies, other hosts, unknown
-paths, path tricks, unknown servers; ASan and UBSan); both DLLs build with the marker and all
-80 of Wine's secur32 exports; and, opt-in (`QUIVER_TEST_PROTON=… cargo test -p quiver-core
---test eos_filter -- --ignored`), a schannel client under Wine against a local TLS server for
-both architectures, through the function table (as libcurl) and the exports: allowed
-requests and another host's arrive, blocked ones never do (not a byte), the log says each;
-the same run without the filter shows the server would have seen them. Nothing in the tests
-talks to Epic.
+**The log and the verdict.** Every connection and decision goes to `runs/r<N>/eos-filter.log`:
 
-**Not covered.** HTTP/2 to `api.epicgames.dev` (its preface is blocked, so such a game
-would get no EOS at all; the log would show `PRI *`); a game whose EOS traffic doesn't go
-through schannel (its own TLS library) or goes to another Epic host (the filter names only
-`api.epicgames.dev`, the one AWR's SDK uses); sharing a folder with a game's own
-`secur32.dll` (refused).
+- `probe ok`: the launch's own probe, from inside the container through `api.epicgames.dev:443`;
+- `tls ok` or `tls failed …` (with the reason), and `refused <name>`;
+- `allow METHOD path -- rule -> status` and `block METHOD path -- reason (403)`. The path is
+  shown with the query's keys only (values replaced by `…`); headers and bodies are never logged;
+- `closed conn#N after K request(s)`.
+
+`quiver lab logs <i>` gives the verdict: did the proxy see the game's TLS and requests, did the
+game reject our certificate (EOS offline, fail closed), did TLS succeed with no request after
+it (a pinned key). Then the counts and each blocked request. "Loaded" proves nothing: the probe
+and the `tls ok` lines are the evidence.
+
+**Bypasses.** During a run the supervisor reads the container's TCP table
+(`/proc/<pid>/net/tcp{,6}` of an instance process) for `:443` connections that aren't to the
+container's loopback.
+
+- One to an address the real `api.epicgames.dev` has (as the proxy resolved it) is logged as
+  `!!! BYPASS` and kills the run as a violation, the way a Connect process does.
+- Any other is logged as `!!! OUTSIDE`, and added to the run's notes and events.
+
+**At each launch** (`lab::eos`, the supervisor), for an Epic game or any game shipping
+`EOSSDK-Win64/Win32-Shipping.dll`, after the kill-all:
+
+1. The proxy's run log starts.
+2. The CA is trusted in the clone's registry.
+3. A probe from inside the container must reach the proxy through `api.epicgames.dev:443`.
+
+If any of that fails and the game ships the EOS SDK, **the launch refuses** with the reason,
+for example an instance made before the proxy: `quiver lab down <i> && quiver lab up <i>`.
+There is no opt-out. The old `secur32.dll` filter is deleted from the clone if it's there.
+`quiver lab doctor` checks that a CA can be made and that `api.epicgames.dev` resolves on the
+host (DNS only); `quiver lab brief` explains all this to the agent.
+
+**Tests** (`crates/quiver-core/tests/eos_proxy.rs`, a local stand-in upstream with its own CA;
+nothing talks to Epic):
+
+- allowed requests forwarded intact (chunked bodies too), blocked ones never reach the upstream;
+- keep-alive, pipelining in one write (200, 403, 200 in order), ALPN, sinkholed names,
+  websocket upgrades;
+- a client that doesn't trust the CA fails closed, and the probe works;
+- OpenSSL (`openssl s_client -verify_hostname`) accepts the chain;
+- `eos::tests`, `wincert::tests`, `podman::tests::epic_names_go_to_the_eos_proxy`;
+- opt-in, `QUIVER_TEST_PROTON=… cargo test -p quiver-core --test eos_proxy -- --ignored`: a
+  Windows client (`tests/eos_proxy/client.c`, x86_64 and i686) finds the lab CA in
+  `CertOpenSystemStoreW(0, "ROOT")` from the scratch prefix's registry, verifies the proxy's
+  chain for `api.epicgames.dev` with `CertGetCertificateChain` and the SSL policy, and gets 200s
+  and 403s. Wine's root sync keeps the CA in both architectures; without it the client gets
+  `CERT_E_UNTRUSTEDROOT`.
+
+**Not covered.**
+- A game that trusts only its bundled roots or pins Epic's key: EOS is offline (fail closed).
+- A game with hard-coded Epic addresses: a bypass, so the run is killed; if the address isn't
+  one the host resolves, it is only flagged as OUTSIDE.
+- Name lookups that skip `/etc/hosts`: the redirect is the container's `/etc/hosts`, which
+  `getaddrinfo` reads (AWR's SDK imports Winsock's `getaddrinfo`; no c-ares in it). A lookup
+  through `DnsQuery` (the SDK has the string) would go to DNS and show up as a bypass.
+- UDP: STUN and P2P go to sinkholed names, and nothing answers.
+- HTTP/2-only clients: no connection.
+
+### 3.2 No sound device
+
+The container has no sound device. AWR crashed at startup in r1 and r2 of the first live run,
+an access violation (a null read at `Game_f_x64_EOS.exe+0x338489`), before any EOS traffic.
+With `pcm.!default { type null }` in `$HOME/.asoundrc` it reached a frame in 4.1 s. The boot
+script (`podman::boot_script`) now writes that file in every container (`HOME` is
+`/tmp/home`), so ALSA's default device is a null sink.
 
 ## 4. Safety invariants
 
@@ -230,7 +306,7 @@ Each is enforced in code, not by convention, and has a test.
 | Instance processes are identified by container, never by name alone | `procs`: the libpod cgroup of each process, then `WINEPREFIX`; kill-all is `wineserver -k`, then SIGKILL of what is left in the container's cgroup. No `pkill -f` anywhere. |
 | Kill everything before every launch | the supervisor's launch starts with kill-all (a stale wineserver or bridge hangs the next game before its SDK answers) |
 | One live login per account | launch material comes from quiverd; no store client runs in an instance; no credential file is read |
-| An EOS game reports nothing to Epic | the EOS filter (3.1) in the instance's clone, `secur32=n,b` in every such launch, the launch refused without it (`lab::eosfilter`; tests `eosfilter::tests`, `tests/eos_filter.rs`) |
+| An EOS game reports nothing to Epic | every container resolves Epic's names to the instance's EOS proxy (3.1), which forwards only the allowlist and answers the rest 403; the CA is trusted only in the instance's cloned prefix; an EOS game's launch is refused unless a probe from inside the container reaches the proxy; a :443 connection to the real host's addresses outside the proxy kills the run (`lab::eos`, `lab::eosproxy`, `lab::wincert`; tests `tests/eos_proxy.rs`, `podman::tests::epic_names_go_to_the_eos_proxy`) |
 | **Nothing is reported** (section 5) | quiverd, by session kind |
 
 ## 5. Nothing is reported
@@ -247,7 +323,7 @@ quiverd decides by that id, never by what a script remembers to pass:
 | Ubisoft cloud saves | pulled before, pushed after | never: the bridge never uploads, Connect's `syncsavegames` is forced off, and quiverd's save sync is only around its own launches |
 | Epic play time | queued after the session, reported | `Epic::queue_session` refuses a lab session id (never queued, held or sent); lab launches never go through quiverd's Epic session (`epicgame::begin/end`: no save sync, no achievement polling) |
 | Epic cloud saves (EGS savesync) | around quiverd's launches | never: lab launches don't go through quiverd's Epic session |
-| EOS cloud saves, achievements, stats, leaderboards, presence, telemetry (the game's own EOS SDK) | the game's | blocked by the EOS filter (3.1): only sign-in, the SDK's config, Connect and ownership/entitlement reads reach `api.epicgames.dev`; a game with the SDK doesn't launch without the filter |
+| EOS cloud saves, achievements, stats, leaderboards, presence, telemetry (the game's own EOS SDK) | the game's | 403 from the EOS proxy (3.1), never sent to Epic: only sign-in, the SDK's config, Connect and ownership/entitlement reads reach `api.epicgames.dev`; if the game rejects the lab's CA, nothing reaches Epic at all (EOS offline). Not yet confirmed against AWR live (section 9) |
 | Steam play time, achievements, cloud | Steam's | a lab never talks to Steam (section 7), so nothing reaches it |
 | `quiver sessions` | the game, holders `launcher`/`bridge`/`steam` | shown with the holder `lab`, so lab runs are visibly not the user's |
 
@@ -359,10 +435,13 @@ Check afterwards: `quiver activity` shows "issued lab launch material … sessio
 quiverd's log has "bridge reports game running holder=lab" and no "play session started";
 no new entry in Origins' play history. Then the same for Epic: `quiver lab create "Alan Wake
 Remastered" --name awr && quiver lab up awr && quiver lab launch awr --wait frame`. The
-launch notes say where the EOS filter went; `quiver lab logs awr` then shows the filter
-loaded in the game's process, sign-in (`/epic/oauth/v1/token`), the SDK config and the
-ownership checks allowed, and what was blocked. If the game stops at sign-in, the blocked
-lines say which path it needed (section 3.1 says how to extend the allowlist).
+launch notes say the EOS proxy's probe from inside the container worked and that the CA is
+trusted in the clone. `quiver lab logs awr` then gives the verdict. If AWR trusts the lab CA,
+it shows `tls ok` lines, sign-in (`/epic/oauth/v1/token`), the SDK config and the ownership
+checks allowed, and what was blocked; if the game stops at sign-in, the blocked lines say
+which path it needed (section 3.1 says how to extend the allowlist). If it doesn't trust the
+CA, it shows `tls failed … rejected the lab's certificate`: EOS was offline, fail closed. No
+`!!! BYPASS` or `!!! OUTSIDE` line may appear.
 
 ## 10. Not built yet
 
