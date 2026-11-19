@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, UpdatePreview, VerifyReport};
-use quiver_api::{Client, Request, StoreId};
+use quiver_api::{Client, Event, Request, StoreId};
 use quiver_core::install::human_bytes;
 
 use crate::{follow, game_label, print_json, resolve_any, resolve_installable};
@@ -139,6 +139,99 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
         }
     }
     Ok(())
+}
+
+/// The lines `quiver queue --watch` prints: each one only when it differs from the last.
+struct WatchLines {
+    last: String,
+    at: Option<std::time::Instant>,
+}
+
+impl WatchLines {
+    fn emit(&mut self, v: serde_json::Value) -> Result<()> {
+        use std::io::Write;
+        self.at = Some(std::time::Instant::now());
+        let line = v.to_string();
+        if line == self.last {
+            return Ok(());
+        }
+        // A reader that went away (the bar reloaded) ends the watch.
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{line}")?;
+        out.flush()?;
+        self.last = line;
+        Ok(())
+    }
+
+    fn down(&mut self, why: &str) -> Result<()> {
+        self.emit(serde_json::json!({ "connected": false, "error": why }))
+    }
+
+    /// The queue and download settings now, or the daemon down if it can't answer.
+    async fn snapshot(&mut self, client: &Client) -> Result<()> {
+        let q: Result<Vec<QueueEntry>> = client.call(Request::Queue).await;
+        let s: Result<DownloadSettings> =
+            client.call(Request::DownloadSettings { max_active: None, bandwidth_limit: None, auto_update: None }).await;
+        match (q, s) {
+            (Ok(queue), Ok(settings)) => self.emit(serde_json::json!({ "connected": true, "queue": queue, "settings": settings })),
+            (Err(e), _) | (_, Err(e)) => self.down(&format!("{e:#}")),
+        }
+    }
+}
+
+/// `quiver queue --watch`: the queue as a JSON line on every change, for status bars.
+/// Connects to a running quiverd only, and while there is none says so and looks again
+/// every few seconds, all in this one process. Job events tick twice a second per active
+/// download; they are coalesced to at most one line a second, and a line identical to
+/// the last is not printed again.
+pub async fn watch(source: &str) -> Result<()> {
+    use std::time::Duration;
+    const MIN_GAP: Duration = Duration::from_secs(1);
+    const RETRY: Duration = Duration::from_secs(5);
+    let mut out = WatchLines { last: String::new(), at: None };
+    loop {
+        let connected = match Client::connect_running(source).await {
+            Ok(client) => client.subscribe().await.map(|events| (client, events)),
+            Err(e) => Err(e),
+        };
+        let (client, mut events) = match connected {
+            Ok(c) => c,
+            Err(e) => {
+                out.down(&format!("{e:#}"))?;
+                tokio::time::sleep(RETRY).await;
+                continue;
+            }
+        };
+        out.snapshot(&client).await?;
+        // The client reconnects by itself (never starting quiverd) and says so.
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Disconnected => {
+                    out.down("quiverd went away")?;
+                    continue;
+                }
+                Event::Job(_) | Event::Reconnected | Event::LibraryChanged => {}
+                _ => continue,
+            }
+            if let Some(at) = out.at {
+                tokio::time::sleep(MIN_GAP.saturating_sub(at.elapsed())).await;
+            }
+            let mut down = false;
+            while let Ok(e) = events.try_recv() {
+                match e {
+                    Event::Disconnected => down = true,
+                    Event::Reconnected => down = false,
+                    _ => {}
+                }
+            }
+            if down {
+                out.down("quiverd went away")?;
+            } else {
+                out.snapshot(&client).await?;
+            }
+        }
+        tokio::time::sleep(RETRY).await;
+    }
 }
 
 pub async fn pause(client: &Client, game: &str) -> Result<()> {

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "quiver.downloads",
+  "name": "Quiver downloads",
+  "version": "1.0.0",
+  "author": "Quiver",
+  "license": "MIT",
+  "description": "Quiver's download queue in the bar: a progress ring with the percentage while a game downloads, distinct marks for paused, failed and stalled downloads, and a panel with what is downloading and what is next, pause and resume, and a way into Quiver. Follows `quiver queue --watch`; never starts quiverd.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Quiver downloads",
+    "description": "Download progress for Quiver's queue; hidden while nothing is queued. Click for the queue, middle-click to open Quiver.",
+    "category": "Status",
+    "aliases": [
+      "quiver",
+      "downloads",
+      "games",
+      "queue"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "label": "percent",
+      "showWhenIdle": false,
+      "notify": true,
+      "quiverPath": ""
+    },
+    "schema": [
+      {
+        "key": "label",
+        "type": "enum",
+        "label": "Beside the ring while downloading",
+        "options": ["percent", "speed", "both", "none"],
+        "defaultValue": "percent"
+      },
+      {
+        "key": "showWhenIdle",
+        "type": "boolean",
+        "label": "Keep the ring in the bar when nothing is queued",
+        "defaultValue": false
+      },
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "Notify when a download finishes or fails",
+        "defaultValue": true
+      },
+      {
+        "key": "quiverPath",
+        "type": "string",
+        "label": "Path to the quiver CLI (blank: quiver on PATH)",
+        "defaultValue": ""
+      }
+    ]
+  }
+}

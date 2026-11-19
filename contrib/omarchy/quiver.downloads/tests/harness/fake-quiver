@@ -1,0 +1,19 @@
+#!/bin/bash
+# Stand-in for `quiver` in the render harness. `queue --watch` just stays up (the
+# harness feeds lines to the service itself); anything else is logged, one
+# argv per line with arguments separated by a tab, to $FAKE_QUIVER_LOG. A ref of
+# 99999 fails, to exercise the error path.
+if [[ $1 == queue && $2 == --watch ]]; then
+    exec sleep 3600
+fi
+printf '%s' "$1" >>"$FAKE_QUIVER_LOG"
+shift
+for a in "$@"; do printf '\t%s' "$a" >>"$FAKE_QUIVER_LOG"; done
+printf '\n' >>"$FAKE_QUIVER_LOG"
+for a in "$@"; do
+    if [[ $a == 99999 ]]; then
+        echo "Error: not in the queue" >&2
+        exit 1
+    fi
+done
+exit 0

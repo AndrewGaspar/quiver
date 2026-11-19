@@ -103,6 +103,12 @@ enum Cmd {
         action: Option<downloads::QueueAction>,
         #[arg(long)]
         json: bool,
+        /// Keep running and print the queue as one JSON object per line whenever it changes
+        /// (`{"connected":true,"queue":[…],"settings":{…}}`, at most one a second), or
+        /// `{"connected":false,…}` while quiverd is down. Never starts quiverd. For status
+        /// bars (contrib/omarchy).
+        #[arg(long)]
+        watch: bool,
     },
     /// Pause a game's download (resumable; it keeps its place in the queue).
     Pause { game: String },
@@ -705,6 +711,13 @@ async fn main() -> Result<()> {
     if let Cmd::Daemon { action } = cli.cmd {
         return daemon::run(&cli.source, action).await;
     }
+    // Never starts the daemon (a status bar must not bring back a quiverd someone stopped).
+    if let Cmd::Queue { action, watch: true, .. } = &cli.cmd {
+        if action.is_some() {
+            bail!("--watch follows the queue itself; leave out the subcommand");
+        }
+        return downloads::watch(&cli.source).await;
+    }
     let client = Client::connect(&cli.source).await?;
     match cli.cmd {
         Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } | Cmd::Lab { .. } => {
@@ -860,7 +873,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,
-        Cmd::Queue { action, json } => downloads::queue(&client, action, json).await?,
+        Cmd::Queue { action, json, .. } => downloads::queue(&client, action, json).await?,
         Cmd::Setup { show, json } => {
             if show || json {
                 setup::show(&client, json).await?
