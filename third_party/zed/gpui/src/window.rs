@@ -1269,6 +1269,9 @@ pub struct Window {
     /// Quiver: painting inside a pointer control without focus of its own
     /// ([`crate::StereoState::in_control`]).
     stereo_in_control: bool,
+    /// Quiver: depths captured for deferred draws while those are being painted (a deferred
+    /// element inside another one), by deferred draw index.
+    stereo_late_deferred: Vec<(usize, f32)>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2437,6 +2440,7 @@ impl Window {
             scene_generation: 0,
             stereo_stats: StereoStats::default(),
             stereo_in_control: false,
+            stereo_late_deferred: Vec::new(),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -4242,7 +4246,12 @@ impl Window {
         if let Some(mut prompt_element) = prompt_element {
             prompt_element.paint(self, cx);
         } else if let Some(mut drag_element) = active_drag_element {
-            drag_element.paint(self, cx);
+            // Quiver: what's being dragged is lifted off the page, like a tooltip.
+            let depth = self
+                .is_stereo_packed()
+                .then_some(self.stereo_policy.tooltip)
+                .filter(|d| *d > 0.0);
+            self.with_stereo_scope(depth, None, |window| drag_element.paint(window, cx));
         } else if let Some(mut tooltip_element) = tooltip_element {
             // Quiver: tooltips float at the policy's tooltip depth.
             let depth = self
@@ -4462,6 +4471,15 @@ impl Window {
 
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
+            // Quiver: a deferred element inside another deferred one learnt its depth while
+            // its parent painted (`capture_deferred_stereo_depth`).
+            if let Some(&(_, depth)) = self
+                .stereo_late_deferred
+                .iter()
+                .find(|(ix, _)| *ix == deferred_draw_ix)
+            {
+                deferred_draw.stereo_depth = Some(depth).filter(|d| *d > 0.0);
+            }
             let stereo_depth = deferred_draw.stereo_depth;
             if let Some(element) = deferred_draw.element.as_mut() {
                 let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
@@ -4483,6 +4501,7 @@ impl Window {
             deferred_draw.paint_range = paint_start..paint_end;
         }
         self.next_frame.deferred_draws = deferred_draws;
+        self.stereo_late_deferred.clear();
         self.element_id_stack.clear();
     }
 
@@ -5152,6 +5171,9 @@ impl Window {
         let depth = self.next_frame.scene.stereo_depth();
         if let Some(draw) = self.next_frame.deferred_draws.get_mut(index) {
             draw.stereo_depth = Some(depth).filter(|d| *d > 0.0);
+        } else {
+            // The deferred draws are out being painted: this one is inside another.
+            self.stereo_late_deferred.push((index, depth));
         }
     }
 

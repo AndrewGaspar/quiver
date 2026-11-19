@@ -201,6 +201,9 @@ struct HyprClient {
     monitor: i64,
     #[serde(default, rename = "focusHistoryID")]
     focus_history: Option<i64>,
+    /// Logical size, `[w, h]`.
+    #[serde(default)]
+    size: Option<[f64; 2]>,
 }
 
 fn yes() -> bool {
@@ -234,13 +237,19 @@ pub fn any_stereo(monitors: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Our window (by pid) and its monitor, from `hyprctl -j clients` and `-j monitors`.
-pub fn our_output(clients: &str, monitors: &str, pid: u32) -> Option<(String, Output)> {
+/// Our window and its monitor, from `hyprctl -j clients` and `-j monitors`: the client with
+/// our pid; with several (more than one window), the one whose logical size is nearest
+/// `size` (the window's own), then the most recently focused.
+pub fn our_output(clients: &str, monitors: &str, pid: u32, size: Option<(f32, f32)>) -> Option<(String, Output)> {
     let clients: Vec<HyprClient> = serde_json::from_str(clients).ok()?;
+    let off = |c: &HyprClient| match (size, c.size) {
+        (Some((w, h)), Some([cw, ch])) => ((cw as f32 - w).abs() + (ch as f32 - h).abs()).round() as i64,
+        _ => 0,
+    };
     let me = clients
         .into_iter()
         .filter(|c| c.pid == pid as i64 && c.mapped && !c.address.is_empty())
-        .min_by_key(|c| c.focus_history.unwrap_or(i64::MAX))?;
+        .min_by_key(|c| (off(c), c.focus_history.unwrap_or(i64::MAX)))?;
     let monitors: Vec<HyprMonitor> = serde_json::from_str(monitors).ok()?;
     let m = monitors.into_iter().find(|m| m.id == me.monitor)?;
     let stereo = m.stereo.as_deref().is_some_and(|s| s == "sbs");
@@ -311,13 +320,13 @@ pub enum Probe {
     Ours(String, Output),
 }
 
-fn probe(pid: u32) -> Probe {
+fn probe(pid: u32, size: Option<(f32, f32)>) -> Probe {
     let Ok(monitors) = hypr_query("monitors") else { return Probe::Unknown };
     if !any_stereo(&monitors) {
         return Probe::NoStereo;
     }
     let Ok(clients) = hypr_query("clients") else { return Probe::Unknown };
-    match our_output(&clients, &monitors, pid) {
+    match our_output(&clients, &monitors, pid, size) {
         Some((addr, out)) => Probe::Ours(addr, out),
         None => Probe::Unknown,
     }
@@ -427,6 +436,11 @@ impl Quiver {
         }
         let _ = tx.unbounded_send(());
         self.stereo.wake = Some(tx);
+        // The window entering another output (`wl_surface.enter`), or changing size (fullscreen,
+        // maximise; the size also tells this window from another of ours): look again now
+        // rather than at the next Hyprland event or tick.
+        cx.observe_window_display(window, |q, _, _| q.stereo.wake()).detach();
+        cx.observe_window_bounds(window, |q, _, _| q.stereo.wake()).detach();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 // Coalesce a burst of events, and look again now and then anyway (a `stereo`
@@ -438,13 +452,18 @@ impl Quiver {
                 }
                 cx.background_executor().timer(Duration::from_millis(120)).await;
                 while rx.try_recv().is_ok() {}
-                let Ok(mode) = this.update(cx, |q, _| q.stereo.mode()) else { break };
+                let Ok((mode, size)) = this.update_in(cx, |q, window, _| {
+                    let s = window.viewport_size();
+                    (q.stereo.mode(), Some((f32::from(s.width), f32::from(s.height))))
+                }) else {
+                    break;
+                };
                 // Off: nothing to ask Hyprland. Not Hyprland: nothing to ask either.
                 let found = if mode == Mode::Off || !hyprland {
                     Probe::Unknown
                 } else {
                     let pid = std::process::id();
-                    cx.background_executor().spawn(async move { probe(pid) }).await
+                    cx.background_executor().spawn(async move { probe(pid, size) }).await
                 };
                 if this.update_in(cx, |q, window, cx| q.apply_stereo(found, window, cx)).is_err() {
                     break;
@@ -804,25 +823,40 @@ mod tests {
 
     #[test]
     fn finds_the_stereo_monitor() {
-        let (addr, out) = our_output(CLIENTS, MONITORS, 42).unwrap();
+        let (addr, out) = our_output(CLIENTS, MONITORS, 42, None).unwrap();
         assert_eq!(addr, "0xb");
         assert!(out.packs());
         assert_eq!(out.pane_px(), 1920.0);
-        let (_, out) = our_output(CLIENTS, MONITORS, 10).unwrap();
+        let (_, out) = our_output(CLIENTS, MONITORS, 10, None).unwrap();
         assert!(!out.stereo);
-        assert!(our_output(CLIENTS, MONITORS, 7).is_none());
+        assert!(our_output(CLIENTS, MONITORS, 7, None).is_none());
         assert!(any_stereo(MONITORS));
         assert!(!any_stereo(r#"[{"id": 0, "name": "eDP-2", "width": 2560}]"#));
         // Rotated: HypXRland turns depth off there, so does the app.
         let rotated = MONITORS.replace(r#""transform": 0, "stereo""#, r#""transform": 1, "stereo""#);
-        let (_, out) = our_output(CLIENTS, &rotated, 42).unwrap();
+        let (_, out) = our_output(CLIENTS, &rotated, 42, None).unwrap();
         assert!(out.stereo && !out.packs());
+    }
+
+    /// Two windows of one process on different monitors: each finds its own by its size.
+    #[test]
+    fn several_windows() {
+        let clients = r#"[
+            {"address": "0xc", "pid": 42, "mapped": true, "monitor": 0, "focusHistoryID": 0, "size": [800, 600]},
+            {"address": "0xb", "pid": 42, "mapped": true, "monitor": 1, "focusHistoryID": 3, "size": [1920, 1080]}
+        ]"#;
+        let (addr, out) = our_output(clients, MONITORS, 42, Some((1920.0, 1080.0))).unwrap();
+        assert_eq!((addr.as_str(), out.stereo), ("0xb", true));
+        let (addr, out) = our_output(clients, MONITORS, 42, Some((800.0, 600.0))).unwrap();
+        assert_eq!((addr.as_str(), out.stereo), ("0xc", false));
+        // Without a size: the most recently focused.
+        assert_eq!(our_output(clients, MONITORS, 42, None).unwrap().0, "0xc");
     }
 
     #[test]
     fn what_to_pack() {
-        let (addr, stereo) = our_output(CLIENTS, MONITORS, 42).unwrap();
-        let (_, flat) = our_output(CLIENTS, MONITORS, 10).unwrap();
+        let (addr, stereo) = our_output(CLIENTS, MONITORS, 42, None).unwrap();
+        let (_, flat) = our_output(CLIENTS, MONITORS, 10, None).unwrap();
         let on = Probe::Ours(addr.clone(), stereo.clone());
         let off = Probe::Ours(addr.clone(), flat);
         assert_eq!(wanted_pane(Mode::Auto, &on, 1.0), Some(1920.0));

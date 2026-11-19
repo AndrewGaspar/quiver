@@ -478,7 +478,10 @@ impl Quiver {
         } else {
             TitleBox { max_w: 380f32.min(content_w), max_h: 96., max_scale: 1.4, text: 40., text_w: content_w }
         };
+        // Stereo: the art is the plane; what's written over it is content, a step up, and
+        // its buttons pop from that (the attention panel is a surface of its own).
         let content = div()
+            .depth_surface()
             .when(!stacked, |d| d.absolute().left(px(gutter)).bottom(px(44.)))
             .when(stacked, |d| d.relative().mx(px(gutter)).mt_auto().pt(px(28.)).pb(px(36.)))
             .w(px(content_w))

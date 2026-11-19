@@ -140,6 +140,8 @@ impl Quiver {
             .rounded(px(8.))
             .when(on, |d| d.bg(th.acc_soft))
             .hover(|s| s.bg(th.ink3))
+            // Stereo: the selected entry is the menu's focus.
+            .stereo_focused(on)
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 let t = if matches!(this.nav.overlay, Some(Overlay::Palette { .. })) {

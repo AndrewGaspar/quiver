@@ -495,7 +495,7 @@ impl Scene {
         let mut shifts: Vec<[f32; 2]> = Vec::with_capacity(scope_count);
         for (index, e) in extent.iter().enumerate() {
             let scope = self.stereo_scope(index as u32);
-            if scope.depth <= 0.0 || e[0] > e[1] {
+            if scope.depth <= 0.0 {
                 shifts.push([0.0, 0.0]);
                 continue;
             }
@@ -507,6 +507,12 @@ impl Scene {
                     s
                 }
             };
+            if e[0] > e[1] {
+                // Paints nothing of its own (only children with depths of their own): nothing
+                // to clamp, reported as asked (`packed_scope_shifts`).
+                shifts.push(s);
+                continue;
+            }
             let (left, right) = (e[0], eye.width.0 - e[1]);
             shifts.push([
                 clamp_eye_shift(s[0], left, right, edge_slack),
