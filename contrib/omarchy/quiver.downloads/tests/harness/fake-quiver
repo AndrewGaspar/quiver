@@ -1,0 +1,20 @@
+#!/bin/bash
+# Stand-in for `quiver` in the render harness. `queue --json --no-start` prints
+# tests/fixtures/live-queue.json; anything else is logged, one argv per line
+# with arguments separated by a tab, to $FAKE_QUIVER_LOG. A ref of 99999
+# fails, to exercise the error path.
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [[ $1 == queue && $2 == --json ]]; then
+    exec cat "$here/../fixtures/live-queue.json"
+fi
+printf '%s' "$1" >>"$FAKE_QUIVER_LOG"
+shift
+for a in "$@"; do printf '\t%s' "$a" >>"$FAKE_QUIVER_LOG"; done
+printf '\n' >>"$FAKE_QUIVER_LOG"
+for a in "$@"; do
+    if [[ $a == 99999 ]]; then
+        echo "Error: not in the queue" >&2
+        exit 1
+    fi
+done
+exit 0

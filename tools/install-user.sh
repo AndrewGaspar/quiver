@@ -11,6 +11,8 @@
 #                                             directory that exists (~/.claude/skills,
 #                                             ~/.agents/skills, ~/.codex/skills); a `quiver`
 #                                             entry there that isn't our link is left alone
+#   ~/.local/lib/quiver/omarchy/quiver.downloads/  (the Omarchy bar widget; never put in the bar
+#                                             from here: `quiver omarchy install-plugin` does that)
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg
@@ -321,6 +323,15 @@ fi
 if command -v systemctl >/dev/null 2>&1 && grep -qxF "$unitdir/quiverd.service" "$changed_out" \
     && systemctl --user is-enabled quiverd.service >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
+fi
+
+# The Omarchy bar widget: installed as files only (quiver omarchy install-plugin puts it in the
+# bar). When it is linked in and changed, the shell reloads its plugins to pick it up: its
+# file watcher doesn't look through the link.
+omarchy_link=$HOME/.config/omarchy/plugins/quiver.downloads
+if [[ -L $omarchy_link && $(readlink "$omarchy_link") == "$libdir/omarchy/quiver.downloads" ]] \
+    && grep -qF "$libdir/omarchy/" "$changed_out" && command -v omarchy-shell >/dev/null 2>&1; then
+    omarchy-shell -q shell rescanPlugins && echo "  reloaded the Omarchy shell's plugins (the downloads widget changed)"
 fi
 
 case ":$PATH:" in
