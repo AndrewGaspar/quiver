@@ -1575,8 +1575,8 @@ window, so the mode follows within that interval.
 - The hyprpad rule, evaluated with Lua against state files (none, a live pid, a dead pid).
 
 Verified live (2026-11-18): Alan Wake Remastered (vkd3d-proton, exclusive fullscreen, XWayland
-on Hyprland). The panel opened in the game, drove from keyboard, mouse and pad, and the game stayed
-fullscreen; the user confirmed it "works well".
+on Hyprland). The panel opened in the game for about 15 s and closed again; the user reported it "works
+well". Which inputs were used wasn't recorded.
 
 Not verified: AC Origins (DXVK with Pharos frame generation), a real compositor under
 winewayland (only the fake one), Steam copies inside pressure-vessel (`$PLATFORM` in `LD_PRELOAD` there, and
