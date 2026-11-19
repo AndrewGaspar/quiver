@@ -492,7 +492,7 @@ impl Quiver {
                         this.show_toast(format!("{} is now the default account", a.name), cx);
                         this.refresh_status(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             GlobalCmd::RemoveExport(i) => {
@@ -535,7 +535,7 @@ impl Quiver {
                             let n = v.get("applied").and_then(|n| n.as_u64()).unwrap_or(0);
                             this.show_toast(format!("Wrote {n} staged shortcut change{}", if n == 1 { "" } else { "s" }), cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_global_exports(cx);
                 });
@@ -548,7 +548,7 @@ impl Quiver {
                 let name = self.game_name(id);
                 self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, move |this, r, cx| match r {
                     Ok(()) => this.show_toast(format!("Stopping {name}"), cx),
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             GlobalCmd::ActivityFrom(f) => {
@@ -572,7 +572,7 @@ impl Quiver {
                             cx,
                         ),
                         Ok(_) => this.show_toast(format!("Added {name} to Steam"), cx),
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_global_exports(cx);
                 });
@@ -591,7 +591,7 @@ impl Quiver {
                 self.call::<serde_json::Value, _>(req, cx, move |this, r, cx| {
                     match r {
                         Ok(_) => this.show_toast(format!("Added {name} to the app launcher"), cx),
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_global_exports(cx);
                 });
@@ -628,7 +628,7 @@ impl Quiver {
                         this.show_toast(format!("Signed out {name}"), cx);
                         this.refresh_status(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             ConfirmAction::RestartSteam => self.restart_steam(cx),
@@ -643,7 +643,7 @@ impl Quiver {
                             this.show_toast("Removal staged: Steam shows it after its next restart", cx)
                         }
                         Ok(_) => this.show_toast("Removed", cx),
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_global_exports(cx);
                 });

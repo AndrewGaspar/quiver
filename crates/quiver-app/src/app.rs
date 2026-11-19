@@ -172,6 +172,8 @@ pub struct Quiver {
     pub side_scroll: ScrollHandle,
     pub body_scroll: ScrollHandle,
     pub toast: Option<SharedString>,
+    /// The toast is an error (red, and it stays longer).
+    pub toast_bad: bool,
     toast_gen: u64,
     pub link: Link,
     link_gen: u64,
@@ -224,6 +226,7 @@ impl Quiver {
             side_scroll: ScrollHandle::new(),
             body_scroll: ScrollHandle::new(),
             toast: None,
+            toast_bad: false,
             toast_gen: 0,
             link: Link::Up,
             link_gen: 0,
@@ -610,12 +613,12 @@ impl Quiver {
             return;
         }
         // The daemon replies `{revision, settings}`.
-        self.call::<serde_json::Value, _>(Request::SettingsGet { game: id.pid().into() }, cx, move |this, r, _| {
+        self.call::<serde_json::Value, _>(Request::SettingsGet { game: id.0.into() }, cx, move |this, r, _| {
             if let (Ok(v), Some(g)) = (r, this.game_mut(id)) {
                 g.settings = Some(crate::ui::game::settings_from_reply(v).0);
             }
         });
-        self.call::<Vec<Revision>, _>(Request::SettingsHistory { game: id.pid().into() }, cx, move |this, r, _| {
+        self.call::<Vec<Revision>, _>(Request::SettingsHistory { game: id.0.into() }, cx, move |this, r, _| {
             if let (Ok(h), Some(g)) = (r, this.game_mut(id)) {
                 g.history = Some(h);
             }
@@ -988,7 +991,7 @@ impl Quiver {
         } else if g.running() {
             self.call::<(), _>(Request::Stop { game: id.0.into() }, cx, |this, r, cx| {
                 if let Err(e) = r {
-                    this.show_toast(err_text(&e), cx);
+                    this.show_error(&e, cx);
                 }
             });
         } else if let Some(f) = g.installing() {
@@ -999,7 +1002,7 @@ impl Quiver {
             // Another store's game: its client starts it.
             self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Asked {label} to start {name}"), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             });
         } else if g.steam_only() {
             // Steam starts it (through Quiver, once it's switched).
@@ -1014,14 +1017,14 @@ impl Quiver {
             self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) if via_quiver => this.show_toast(format!("Asked Steam to start {name}"), cx),
                 Ok(_) => this.show_toast(format!("Asked Steam to start {name}; it opens Ubisoft Connect first"), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             });
         } else if !id.is_ubisoft() && !g.entry.on_disk() && !g.entry.installable {
             // Another store's game that isn't installed: its provider says why it can't
             // play yet (an Epic game before Epic installs; a Ubisoft game bought on Epic).
             self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, |this, r, cx| {
                 if let Err(e) = r {
-                    this.show_toast(err_text(&e), cx);
+                    this.show_error(&e, cx);
                 }
             });
         } else if !g.installed() {
@@ -1036,7 +1039,7 @@ impl Quiver {
             let with = self.default_profile(id).and_then(|p| self.gp.profiles().into_iter().find(|x| x.id == p)).map(|p| format!(" · {}", p.name));
             self.call::<u64, _>(Request::Play { game: id.0.into(), profile: None }, cx, move |this, r, cx| match r {
                 Ok(_) => this.show_toast(format!("Starting {name}{}…", with.unwrap_or_default()), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             });
         }
     }
@@ -1047,16 +1050,26 @@ impl Quiver {
         let label = id.0.store.label();
         self.call::<u64, _>(Request::Update { game: id.0.into() }, cx, move |this, r, cx| match r {
             Ok(_) => this.show_toast(format!("Opened {label}'s downloads: {label} updates it"), cx),
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
     pub fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.toast = Some(text.into());
+        self.toast_for(text.into(), false, 3200, cx);
+    }
+
+    /// A failed request, as a red toast that stays long enough to read.
+    pub fn show_error(&mut self, e: &anyhow::Error, cx: &mut Context<Self>) {
+        self.toast_for(crate::err_text(e).into(), true, 7000, cx);
+    }
+
+    fn toast_for(&mut self, text: SharedString, bad: bool, ms: u64, cx: &mut Context<Self>) {
+        self.toast = Some(text);
+        self.toast_bad = bad;
         self.toast_gen += 1;
         let generation = self.toast_gen;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(3200)).await;
+            cx.background_executor().timer(Duration::from_millis(ms)).await;
             this.update(cx, |this, cx| {
                 if this.toast_gen == generation {
                     this.toast = None;
@@ -1448,7 +1461,7 @@ impl Render for Quiver {
                 .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(o))
-                .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t))),
+                .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t, self.toast_bad))),
         };
         // The top bar shows the daemon link; other screens get a notice instead.
         let notice = match self.link {
@@ -1461,7 +1474,7 @@ impl Render for Quiver {
         let offer = if ready { self.render_steam_offer(&th, update.is_some(), cx) } else { None };
         screen
             .when_some(offer, |d, n| d.child(n))
-            .when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into())))
+            .when_some(notice, |d, n| d.child(crate::ui::overlay::toast(&th, n.into(), false)))
             .when_some(update, |d, n| d.child(n))
     }
 }

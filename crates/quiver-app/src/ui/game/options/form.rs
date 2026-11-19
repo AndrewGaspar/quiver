@@ -131,6 +131,12 @@ pub(in crate::ui) fn sec(th: &Theme, label: impl Into<String>) -> gpui::Div {
 /// A banner across the form (running game, a change from elsewhere, a crash).
 pub(in crate::ui) fn banner(th: &Theme, tone: Tone, ic: Icon, text: impl Into<SharedString>) -> gpui::Div {
     let (_, fg) = tone_colors(th, tone);
+    // Errors and warnings stand out more than notes (the user found "Not saved" too faint).
+    let (bg, border) = match tone {
+        Tone::Bad => (0.16, 0.65),
+        Tone::Warn => (0.12, 0.5),
+        _ => (0.08, 0.3),
+    };
     div()
         .flex()
         .items_center()
@@ -138,9 +144,9 @@ pub(in crate::ui) fn banner(th: &Theme, tone: Tone, ic: Icon, text: impl Into<Sh
         .px(px(12.))
         .py(px(9.))
         .rounded(px(8.))
-        .bg(fg.opacity(0.08))
+        .bg(fg.opacity(bg))
         .border_1()
-        .border_color(fg.opacity(0.3))
+        .border_color(fg.opacity(border))
         .text_size(px(12.5))
         .text_color(th.tx1)
         .child(icon(ic, 14., fg))

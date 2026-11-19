@@ -281,7 +281,7 @@ impl Quiver {
                     this.options_reload(cx);
                     this.options_jump(&info.key, None);
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             },
         );
     }

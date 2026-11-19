@@ -129,7 +129,7 @@ pub enum PlayAfter {
 }
 
 pub enum Dialog {
-    RestoreSettings { game: u32, revision: u32 },
+    RestoreSettings { game: Gid, revision: u32 },
     RestoreSaves { game: Gid, backup: SaveBackup },
     DeleteProfile { game: Gid, profile: Profile },
     RestoreProfile { game: Gid, id: String, name: String, revision: u32 },
@@ -717,7 +717,7 @@ impl Quiver {
         let profile = Some(chosen.map(|p| p.id).unwrap_or_else(|| VANILLA.into()));
         self.call::<u64, _>(Request::Play { game: id.0.into(), profile }, cx, move |this, r, cx| match r {
             Ok(_) => this.show_toast(format!("Starting {name} · {label}…"), cx),
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -739,12 +739,12 @@ impl Quiver {
         }
         let ops = vec![SettingOp::Set { key: "profile".into(), value: value.unwrap_or_else(|| VANILLA.into()) }];
         let message = Some(format!("Default for Play: {label}"));
-        self.call::<Revision, _>(Request::SettingsSet { game: id.pid().into(), ops, message }, cx, move |this, r, cx| match r {
+        self.call::<Revision, _>(Request::SettingsSet { game: id.0.into(), ops, message }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Play now uses {label} (launch options r{})", rev.revision), cx);
                 this.load_details(id, cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -764,7 +764,7 @@ impl Quiver {
                 this.show_toast(format!("Play in Steam now runs {label} (settings r{}){then}", rev.revision), cx);
                 this.load_mods(id, cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -974,7 +974,7 @@ impl Quiver {
                         this.open_dialog(Dialog::SteamUser { game: id, users: u.users });
                     }
                     Ok(_) => this.export_steam(id, None, cx),
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             ExportAction::SteamRemove => {
@@ -982,7 +982,7 @@ impl Quiver {
                     match r {
                         Ok(r) if r.staged => this.show_toast(format!("{name} leaves Steam when Steam next restarts"), cx),
                         Ok(_) => this.show_toast(format!("Removed {name} from Steam"), cx),
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_exports(cx);
                 });
@@ -1004,7 +1004,7 @@ impl Quiver {
                             let path = v.get("path").and_then(|p| p.as_str()).map(|p| crate::model::tilde(Path::new(p))).unwrap_or_default();
                             this.show_toast(if remove { format!("Removed {path}") } else { format!("Created {path}") }, cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     this.load_exports(cx);
                 });
@@ -1025,7 +1025,7 @@ impl Quiver {
                     this.show_toast(format!("Added {name} to Steam"), cx);
                     this.load_exports(cx);
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
         });
     }
@@ -1206,7 +1206,7 @@ impl Quiver {
         }
         let message = self.launch_message(id, cx);
         self.gp.busy = true;
-        self.call::<Revision, _>(Request::SettingsSet { game: id.pid().into(), ops, message }, cx, move |this, r, cx| {
+        self.call::<Revision, _>(Request::SettingsSet { game: id.0.into(), ops, message }, cx, move |this, r, cx| {
             this.gp.busy = false;
             match r {
                 Ok(rev) => {
@@ -1219,20 +1219,20 @@ impl Quiver {
                     }
                 }
                 // Not saved: don't start the game without them either.
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
         });
     }
 
-    pub fn restore_settings(&mut self, id: u32, revision: u32, cx: &mut Context<Self>) {
-        self.call::<Revision, _>(Request::SettingsRestore { game: id.into(), revision }, cx, move |this, r, cx| match r {
+    pub fn restore_settings(&mut self, id: Gid, revision: u32, cx: &mut Context<Self>) {
+        self.call::<Revision, _>(Request::SettingsRestore { game: id.0.into(), revision }, cx, move |this, r, cx| match r {
             Ok(rev) => {
                 this.show_toast(format!("Restored r{revision} as r{}", rev.revision), cx);
-                this.launch_discard(Gid::from(id));
+                this.launch_discard(id);
                 this.gp.rev_sel = Some(rev.revision);
-                this.load_details(Gid::from(id), cx);
+                this.load_details(id, cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -1267,7 +1267,7 @@ impl Quiver {
                     this.load_profile_history(id, &p, cx);
                     let _ = rev;
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             },
         );
     }
@@ -1294,7 +1294,7 @@ impl Quiver {
                 pi.update(cx, |t, cx| t.set_text("", cx));
                 this.load_mods(id, cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -1354,7 +1354,7 @@ impl Quiver {
                             let prev = r.previous.map(|p| format!("; the saves that were there are in backup {}", p.id)).unwrap_or_default();
                             this.show_toast(format!("Restored slot(s) {:?}{prev}", r.restored), cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     }
                     let cloud = this.gp.saves_cloud;
                     this.load_saves(game, cloud, cx);
@@ -1377,7 +1377,7 @@ impl Quiver {
                             this.gp.prof_sel = None;
                             this.load_mods(game, cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     },
                 );
             }
@@ -1392,7 +1392,7 @@ impl Quiver {
                             this.load_mods(game, cx);
                             this.load_profile_history(game, &id, cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     },
                 );
             }
@@ -1406,7 +1406,7 @@ impl Quiver {
                             this.show_toast(format!("Removed layer {name}"), cx);
                             this.load_mods(game, cx);
                         }
-                        Err(e) => this.show_toast(err_text(&e), cx),
+                        Err(e) => this.show_error(&e, cx),
                     },
                 );
             }
@@ -1565,7 +1565,7 @@ impl Quiver {
                 if let Some(r) = revs.get(i).copied() {
                     let current = revs.first().copied();
                     if self.gp.rev_sel == Some(r) && Some(r) != current {
-                        self.open_dialog(Dialog::RestoreSettings { game: id.pid(), revision: r });
+                        self.open_dialog(Dialog::RestoreSettings { game: id, revision: r });
                     } else {
                         self.gp.rev_sel = Some(r);
                     }
@@ -1928,7 +1928,7 @@ impl Quiver {
                     .into_any_element()],
             ),
             Dialog::RestoreSettings { revision, game } => {
-                let g = self.game(Gid::from(*game));
+                let g = self.game(*game);
                 let cur = g.and_then(|g| g.history.as_ref()).and_then(|h| h.iter().max_by_key(|r| r.revision)).map(|r| r.revision).unwrap_or(0);
                 (
                     Icon::RotateCcw,

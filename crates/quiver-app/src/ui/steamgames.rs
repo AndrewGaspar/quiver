@@ -98,7 +98,7 @@ impl Quiver {
                 ),
                 Ok(r) if undo => this.show_toast(format!("{} starts through Ubisoft Connect again", r.name), cx),
                 Ok(r) => this.show_toast(format!("{} now starts through Quiver from Steam", r.name), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_steam_games(cx);
             this.load_global_exports(cx);
@@ -120,7 +120,7 @@ impl Quiver {
         }
         self.call::<serde_json::Value, _>(Request::SteamDismissOffer { app_id }, cx, |this, r, cx| {
             if let Err(e) = r {
-                this.show_toast(err_text(&e), cx);
+                this.show_error(&e, cx);
             }
             this.load_steam_games(cx);
         });
@@ -141,7 +141,7 @@ impl Quiver {
             match r {
                 Ok(_) if on => this.show_toast("Quiver offers this when a Ubisoft game is installed through Steam", cx),
                 Ok(_) => this.show_toast("No more offers for new Steam installs", cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_steam_games(cx);
         });

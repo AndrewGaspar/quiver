@@ -586,7 +586,7 @@ impl Quiver {
                 this.show_toast(c.warnings.first().cloned().unwrap_or(msg), cx);
                 this.load_mods(id, cx);
             }
-            Err(e) => this.show_toast(crate::err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 

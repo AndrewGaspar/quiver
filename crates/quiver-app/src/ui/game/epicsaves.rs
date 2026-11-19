@@ -80,7 +80,7 @@ impl Quiver {
             this.gp.busy = false;
             match r {
                 Ok(r) => this.show_toast(format!("Saves: {}", r.summary()), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_epic_saves(id, cx);
             this.load_store_detail(id, true, cx);
@@ -94,7 +94,7 @@ impl Quiver {
             match r {
                 Ok(_) if on => this.show_toast("Epic cloud saves are kept fresh between sessions", cx),
                 Ok(_) => this.show_toast("Epic cloud saves sync only around launches and on Sync now", cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_epic_saves(id, cx);
         });
@@ -105,7 +105,7 @@ impl Quiver {
         self.call::<serde_json::Value, _>(game_req(EpicGameRequest::SavesRestore { game: id.0, backup }), cx, move |this, r, cx| {
             match r {
                 Ok(_) => this.show_toast("Backup restored: it uploads with the next sync", cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_epic_saves(id, cx);
         });
@@ -116,7 +116,7 @@ impl Quiver {
         self.call::<EpicPlaytime, _>(game_req(EpicGameRequest::PlaytimeSend { confirmed: true }), cx, move |this, r, cx| {
             match r {
                 Ok(p) => this.show_toast(format!("{} play session(s) sent to Epic", p.queue.len()), cx),
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_epic_saves(id, cx);
             this.load_store_detail(id, true, cx);

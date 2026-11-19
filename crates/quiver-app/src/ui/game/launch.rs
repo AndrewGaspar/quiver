@@ -719,7 +719,7 @@ impl Quiver {
                             .when(!is_cur, |d| {
                                 d.child(button(("rev-restore", i), th, Kind::Primary, Size::Small, Some(Icon::RotateCcw), format!("Restore r{rev}")).on_click(cx.listener(
                                     move |this, _, _, cx| {
-                                        this.open_dialog(Dialog::RestoreSettings { game: id.pid(), revision: rev });
+                                        this.open_dialog(Dialog::RestoreSettings { game: id, revision: rev });
                                         cx.notify();
                                     },
                                 )))

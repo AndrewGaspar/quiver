@@ -97,7 +97,7 @@ impl Quiver {
                 self.ui.epic.note = None;
                 self.call::<LoginStart, _>(Request::Epic(EpicRequest::LoginBegin), cx, |this, r, cx| match r {
                     Ok(s) => this.epic_window(s.url, cx),
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             EpicAction::PasteInstead | EpicAction::Reopen => {
@@ -105,7 +105,7 @@ impl Quiver {
                 self.ui.epic.note = None;
                 self.call::<LoginStart, _>(Request::Epic(EpicRequest::LoginBegin), cx, move |this, r, cx| match r {
                     Ok(s) => this.epic_paste(s.url, reopen, cx),
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             EpicAction::Submit => {
@@ -125,7 +125,7 @@ impl Quiver {
                         this.show_toast(format!("{} is now the default Epic account", a.display_name), cx);
                         this.load_epic_accounts(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             EpicAction::SignOut(i) => {
@@ -141,7 +141,7 @@ impl Quiver {
                         this.load_epic_accounts(cx);
                         this.load_library(false, cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
         }

@@ -564,7 +564,7 @@ impl Quiver {
                 this.show_toast(summary, cx);
                 this.options_reload(cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -581,7 +581,7 @@ impl Quiver {
                 this.show_toast(summary, cx);
                 this.options_reload(cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 

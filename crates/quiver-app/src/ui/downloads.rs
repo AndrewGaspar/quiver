@@ -398,7 +398,7 @@ impl Quiver {
                 }
                 this.dl.settings = Some(s);
             }
-            Err(e) if change => this.show_toast(err_text(&e), cx),
+            Err(e) if change => this.show_error(&e, cx),
             Err(_) => {}
         });
     }
@@ -435,7 +435,7 @@ impl Quiver {
                         this.show_toast(m, cx);
                     }
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
             this.load_queue(cx);
         });
@@ -483,7 +483,7 @@ impl Quiver {
                 }
                 self.call::<Vec<QueueEntry>, _>(Request::QueueMove { game: id.0.into(), to }, cx, |this, r, cx| match r {
                     Ok(q) => this.dl.queue = q,
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             Btn::Open(id) => self.open_game(id, cx),
@@ -1755,7 +1755,7 @@ impl Quiver {
                         this.show_toast(if busy { format!("Queued {name}: it starts when the download ahead of it finishes") } else { format!("Installing {name}") }, cx);
                         this.load_queue(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             Do::Update(id) => {
@@ -1766,7 +1766,7 @@ impl Quiver {
                         this.show_toast(format!("Updating {name}"), cx);
                         this.load_queue(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             Do::OpenVerify(id) => self.open_verify_dialog(id, cx),
@@ -1780,7 +1780,7 @@ impl Quiver {
                             this.dl.dsel = 0;
                         }
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             Do::Repair(id) => {
@@ -1792,7 +1792,7 @@ impl Quiver {
                         this.nav.open_section(Section::Downloads);
                         this.load_queue(cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
         }

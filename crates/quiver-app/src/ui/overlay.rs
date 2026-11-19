@@ -252,7 +252,9 @@ impl Quiver {
     }
 }
 
-pub fn toast(th: &Theme, text: SharedString) -> impl IntoElement + use<> {
+/// A short note at the bottom; `bad`: an error, tinted red with a red icon and border.
+pub fn toast(th: &Theme, text: SharedString, bad: bool) -> impl IntoElement + use<> {
+    let (bg, border, ic, ic_color) = if bad { (th.bad.opacity(0.22).blend(th.ink3), th.bad.opacity(0.7), Icon::CircleX, th.bad) } else { (th.ink3, th.line2, Icon::Info, th.acc_hi) };
     div().absolute().left_0().right_0().bottom(px(64.)).flex().justify_center().px(px(16.)).child(
         div()
             .flex()
@@ -262,12 +264,13 @@ pub fn toast(th: &Theme, text: SharedString) -> impl IntoElement + use<> {
             .px(px(14.))
             .py(px(9.))
             .rounded(px(10.))
-            .bg(th.ink3)
+            .bg(bg)
             .border_1()
-            .border_color(th.line2)
+            .border_color(border)
             .shadow(vec![soft_shadow(rgba(0x000000, 0.5), 14., 40.)])
             .text_size(px(12.5))
-            .child(icon(Icon::Info, 14., th.acc_hi))
+            .when(bad, |d| d.text_color(th.tx1))
+            .child(icon(ic, 14., ic_color))
             .child(div().min_w_0().child(text)),
     )
 }

@@ -274,7 +274,7 @@ impl Quiver {
                                 let req = Request::Epic(quiver_api::epic::EpicRequest::ExtraInstall { game: id.0, extra: extra.clone() });
                                 this.call::<u64, _>(req, cx, move |this, r, cx| match r {
                                     Ok(_) => this.show_toast("Downloading the extra next to the game's folder (see Downloads)", cx),
-                                    Err(e) => this.show_toast(err_text(&e), cx),
+                                    Err(e) => this.show_error(&e, cx),
                                 });
                             }))
                             .into_any_element(),

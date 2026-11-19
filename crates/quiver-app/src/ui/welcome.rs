@@ -333,7 +333,7 @@ impl Quiver {
                         cx,
                     );
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
         });
         self.close_welcome(cx);
@@ -360,7 +360,7 @@ impl Quiver {
                     s.fixes_on_vanilla = p.fixes_on_vanilla;
                 }
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -537,7 +537,7 @@ impl Quiver {
                         this.dl.setup = Some(s);
                         this.show_toast("Saved. quiverd restarts to use the new folders", cx);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             WCtl::Rescan => {
@@ -552,7 +552,7 @@ impl Quiver {
                     Ok(job) => {
                         this.wc.imports.insert(path, job);
                     }
-                    Err(e) => this.show_toast(err_text(&e), cx),
+                    Err(e) => this.show_error(&e, cx),
                 });
             }
             WCtl::SteamOnInstall => self.wc.steam_on_install = Some(!self.wc.steam_on_install.unwrap_or(true)),
@@ -627,7 +627,7 @@ impl Quiver {
             self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: false, steam_user: user }, cx, move |this, r, cx| {
                 this.wc.steam_busy.remove(&id.pid());
                 if let Err(e) = r {
-                    this.show_toast(err_text(&e), cx);
+                    this.show_error(&e, cx);
                 }
                 this.load_global_exports(cx);
             });

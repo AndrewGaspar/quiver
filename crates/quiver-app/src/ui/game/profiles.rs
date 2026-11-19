@@ -10,7 +10,6 @@ use quiver_api::Request;
 use super::options::ModsView;
 use super::page::{Dialog, checkbox, small};
 use crate::app::Quiver;
-use crate::err_text;
 use crate::model::{Gid, GameRow};
 use crate::nav::Tab;
 use crate::theme::Theme;
@@ -133,7 +132,7 @@ impl Quiver {
                     this.load_mods(game, cx);
                     this.select_profile(game, Some(rev.profile.id), cx);
                 }
-                Err(e) => this.show_toast(err_text(&e), cx),
+                Err(e) => this.show_error(&e, cx),
             }
         });
     }
@@ -296,7 +295,7 @@ impl Quiver {
                 this.load_mods(id, cx);
                 this.load_profile_history(id, &p, cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 

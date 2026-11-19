@@ -397,7 +397,7 @@ impl Quiver {
                 this.show_toast(if c.revision > 0 { format!("r{}: {what}", c.revision) } else { what }, cx);
                 this.tweaks_reload(cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
@@ -411,7 +411,7 @@ impl Quiver {
                 this.show_toast(summary, cx);
                 this.tweaks_reload(cx);
             }
-            Err(e) => this.show_toast(err_text(&e), cx),
+            Err(e) => this.show_error(&e, cx),
         });
     }
 
