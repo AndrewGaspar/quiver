@@ -181,6 +181,7 @@ impl Sight {
             Msg::Ended(s) => {
                 self.panel.ended(&s, cx);
                 self.panel.layer_backdrop(&s, None, cx);
+                self.panel.set_stereo(&s, None, cx);
                 self.front.ended(&s);
                 self.hinted.remove(&s);
                 if let Some(mut h) = self.huds.remove(&s) {
@@ -284,9 +285,10 @@ impl Sight {
         if h.model.as_ref().is_none_or(|old| old.presenter != m.presenter) {
             tracing::info!(session = %m.session, presenter = ?m.presenter, reason = %m.presenter_reason, "HUD presenter");
         }
-        let (session, backdrop) = (m.session.clone(), m.backdrop.as_deref().cloned());
+        let (session, backdrop, stereo) = (m.session.clone(), m.backdrop.as_deref().cloned(), m.stereo.as_ref().map(|s| s.stereo()));
         h.model = Some(m);
         self.panel.layer_backdrop(&session, backdrop, cx);
+        self.panel.set_stereo(&session, stereo, cx);
         self.apply_front(cx);
         self.place_toasts();
     }

@@ -153,6 +153,7 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
         rows,
         backdrop: None,
         game_focus: None,
+        stereo: None,
     }
 }
 

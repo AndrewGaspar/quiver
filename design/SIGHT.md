@@ -1,6 +1,6 @@
 # Sight: Quiver's in-game overlay (design notes)
 
-Status: designed 2026-11-16; the HUD (SIGHT-HUD.md) and the panel MVP are built, see
+Status: designed 2026-11-16; the HUD (SIGHT-HUD.md) and the panel MVP are built (stereo frames: [§15](#15-stereo-the-hud-and-the-panel-in-each-eye-2026-11-19)), see
 [§14 As built](#14-as-built-the-panel-mvp-2026-11-17). *Decided 2026-11-18:* the panel is
 drawn **in the game** by the Sight layer and takes the game's keyboard and mouse **inside the
 game's process** (an LD_PRELOAD library, as Steam's overlay does), so the game keeps focus; the
@@ -1614,3 +1614,166 @@ A game that keeps its own cursor visible and confines the pointer shows it under
 (they coincide on X11; on Wayland the panel follows deltas). Wine's client-side key repeat on
 Wayland repeats a key the game held when the panel opened until it's released. hyprpad's mode
 follows within its rescan interval.
+
+
+---
+
+## 15. Stereo: the HUD and the panel in each eye (2026-11-19)
+
+**Why.** Stereo mods present a *packed* frame. Torchbearer (Alan Wake Remastered) does this with
+`[stereo] mode = sbs` and `output = full` (a 3840x1080 window, each half a 1:1 eye) or
+`output = hsbs` (a window at the desktop size, each half an eye squeezed 2:1). Ishimura (Dead
+Space) does it too. The viewer is an XReal Air 2 Ultra under HypXRland, which crops a stereo
+window half per eye. Under Wine the Vulkan swapchain is the window's client size and
+vkd3d-proton/DXVK blit the game's already-packed buffer into it, so the layer sees the packed
+image. Drawn once over the whole swapchain, Sight's HUD landed in one eye, and the panel
+straddled the seam with its pointer mapping wrong.
+
+**Layouts** (`quiver_perf::stereo`). The spellings are HypXRland's `stereo:<layout>` (its
+docs/openxr/05-configuration.md §8.6), so one string names a layout everywhere: the SDK call,
+the setting, and the compositor's window rule. The left eye is the left (or top) half.
+
+| Layout | Frame | Each eye | Overlay laid out at (logical) |
+|---|---|---|---|
+| `mono` (also `off`) | one view | the frame | the frame |
+| `sbs` | 2× wide | a half, 1:1 | half the width × the height |
+| `hsbs` | window width | a half, squeezed 2:1 horizontally | the width × the height |
+| `tab` | 2× tall | a half, 1:1 | the width × half the height |
+| `htab` | window height | a half, squeezed 2:1 vertically | the width × the height |
+
+**Drawing: once per eye, at zero disparity.**
+- quiver-sight lays the HUD and the in-game panel out for one eye's *logical* size:
+  - the HUD's anchor and offset are resolved in that space;
+  - its text size is 1.6% of the eye's height (quiverd's `text_px`);
+  - the panel's off-screen window is that size, at the monitor factor of that size.
+- The image's descriptor says so: `qv_hud_buffer.stereo` (was padding, so 0 = mono from
+  older writers). `x`, `y` and the size are then in eye-logical pixels, and quiver-perf
+  validates them against that space. `extent_w/h` stay the swapchain's.
+- The layer draws each image once per eye (`compositor::Eyes`):
+  - the viewport is the eye's half of the swapchain, and the push constants' extent is the
+    eye's logical size, so the same quad, graph vertices and cursor land in both eyes at the
+    same place (zero disparity, like the game's own HUD);
+  - into a squeezed eye, the quad averages the two texels each fragment covers (a 2:1 box
+    filter: `FLAG_SQUEEZE_X/Y`). It used to fetch by `gl_FragCoord`; it now uses an
+    interpolated texel coordinate, so it works under any viewport;
+  - the scissor is the image's pixels within that eye, so nothing crosses the seam.
+- The panel's cursor is in the image's (logical) pixels and is drawn in both eyes, squeezed
+  with the rest.
+- **Disparity** is zero. A per-image offset (± px per eye) would be a small change in `Eyes`;
+  it isn't built.
+
+**The backdrop blur stays in each eye.** The request in `hud.image`'s header carries the
+layout (`qv_hud_header.stereo`, written with the request). Every blur pass clamps its taps
+to the half of the source that the fragment is in, half a texel inside. Level sizes are
+rounded up to even, so the seam (uv 0.5) is a texel edge at every level, and no tap mixes
+the two eyes.
+
+**Pointer: in the eye it's over** (`panel/ingame.rs` `Translate`). The input preload is
+unchanged. It forwards X11 positions in the game's window, which is the swapchain's size.
+quiver-sight maps each position into the eye it's over (`Stereo::to_logical`):
+- `sbs`: `x mod` the eye's width;
+- `hsbs`: that, ×2;
+- `tab` / `htab`: the same, vertically.
+
+A click lands where the panel is in that eye. Relative motion and Wayland deltas stay 1:1 in
+logical pixels.
+
+**Captures** stay whole packed frames: the capture is taken before the overlay and isn't
+split. A one-eye capture isn't built.
+
+**How the layout is decided** (`stereo::resolve`):
+1. **A live mod's word.** `quiver_set_stereo_layout(m, "sbs")` in `quiver_mod.h` (protocol 3)
+   sends `{"t":"stereo","layout":"sbs"}`. quiverd keeps it per session, newest connection
+   first (`Session::sdk_stereo`), and drops it when that connection goes (bye or pipe
+   closed) or the mod withdraws it (`NULL` or `"auto"`). It reaches quiver-sight in the next
+   `HudModel` (`HudModel::stereo`: layout, source, detail), so Torchbearer can switch at
+   runtime. A change while the panel is open in that game reopens the panel, laid out anew.
+2. **Else the `sight.stereo` Tweak** (`auto` | `mono` | `sbs` | `hsbs` | `tab` | `htab`, on
+   the Display page; global, game or profile scope like every Tweak; applies at the next
+   launch). Its mechanism is the game's environment, `QUIVER_SIGHT_STEREO=<layout>`. The
+   layer reads that and reports it in its status block (`qv_layer_status.stereo_setting`), so
+   quiverd and a lab's quiver-sight read it the same way. In a lab, set it with
+   `quiver lab edit N env.QUIVER_SIGHT_STEREO=sbs`.
+3. **Else mono.**
+
+**Precedence: the mod wins while it's live.** This is the opposite of HypXRland's rule for
+the window tag, where an explicit rule beats the client's tag. Content metadata there is
+untrusted, and the last human instruction must win. Here the declaration comes from code the
+person installed. It knows its packing frame by frame: Torchbearer switches it at runtime,
+and with stereo off but packed output on it still says `sbs`/`hsbs`. The setting is the
+fallback for mods without the SDK (Ishimura today). A setting that should override a
+misbehaving mod would be a new value (e.g. `force:<layout>`); it isn't built.
+
+**Status.**
+- `quiver hud status`: `stereo: sbs (mod: torchbearer (SDK); setting auto)`.
+- `quiver sight status`: a `stereo:` line per session.
+- `quiver lab sight N status`: the layout, the size the overlay is laid out at, and how to
+  set it.
+- The layer's status block also has `stereo_drawn`, the layout of the last image it drew.
+  `quiver hud status` says when that differs from the resolved layout (a quiver-sight still
+  on the old layout).
+- The panel's `drawn:` line says "in each eye (sbs, laid out at 1920x1080)".
+
+**Wire and layouts** (all compatible: zero means mono or unset):
+- `qv_hud_buffer.stereo` at offset 172 (was `_pad0`);
+- `qv_hud_header.stereo` at 144;
+- `qv_layer_status.stereo_setting` and `stereo_drawn`, appended (the struct is 408 bytes);
+- `QV_STEREO_*` in `quiver_perf.h`;
+- the SDK's `quiver_mod.h 3.0` with `QUIVER_MOD_PROTOCOL 3`, and `quiver-proto`'s `PROTOCOL = 3`;
+- `ModSdkConnection::stereo`, `HudModel::stereo`, `HudStatus::stereo` and
+  `PanelKeys::stereo`, appended and optional.
+
+An older quiverd ignores the `stereo` message. An older layer draws a stereo image once,
+across the frame. That is transient skew until the game restarts.
+
+**Verification.**
+- Unit tests:
+  - the layouts' geometry, pointer mapping both ways, scissors, settings and precedence
+    (`quiver_perf::stereo`);
+  - descriptor validation in eye space and the request's layout (`hud::tests`);
+  - the status block's zero-extension;
+  - the layer's `Eyes` per layout;
+  - the blur's even levels and splits;
+  - the panel's pointer per layout (`ingame::tests::stereo_pointer`);
+  - the lab model's text size;
+  - the SDK message parse and the registry (`stereo_layout_from_the_sdk`: set, the same
+    layout again, a refusal, a withdrawal);
+  - quiverd's resolution (`stereo_from_the_setting_and_a_live_mod`: the setting, the mod
+    winning live, another connection's withdrawal, a disconnect back to the setting);
+  - the Tweak's plan (`QUIVER_SIGHT_STEREO`, nothing for auto).
+- GPU, opt-in: `tests/vulkan_stereo.rs` (headless RADV) reads back a panel drawn through the
+  real layer:
+  - sbs: the block and cursor in both eyes at the same place;
+  - hsbs: squeezed into both 320-px eyes, one-pixel stripes averaged to grey, the cursor in
+    both;
+  - the status block's setting and `stereo_drawn`.
+- The SDK compiles with MinGW as C99 (32 and 64-bit) and C++. `modsdk_wine.rs` checks the
+  call through the real bridge.
+- **Live, in the lab** (Alan Wake Remastered with Torchbearer 0.4.1, built from 66e0c66's tree:
+  `[stereo] mode = sbs`, `[game] display_mode = borderless`, `[dev] start_level = 15`,
+  `skip_videos = 1`, `env.QUIVER_SIGHT_STEREO` set in the instance). In both runs below:
+  - Shift+F3 put the HUD in both eyes at the same place;
+  - Shift+F2 put the panel in both eyes, over a blur that stops at the seam;
+  - `Down` moved the selection in both eyes;
+  - a click on "Performance" in the left eye and on "Achievements" in the right eye each
+    selected that section, the cursor showing in both eyes;
+  - Escape gave the input back.
+
+  The two runs:
+  - `output = full` on a 3840x1080 instance: eyes 1920x1080, the overlay laid out at
+    1920x1080.
+  - `output = hsbs` on a 1920x1080 instance: eyes 960x1080 squeezed, the overlay laid out at
+    1920x1080 and squeezed with the game.
+
+  The lab has no mod channel, so these runs used the setting, not the SDK call.
+
+**Not verified.**
+- The SDK path with a real mod, live: Torchbearer doesn't call `quiver_set_stereo_layout`
+  yet, and lab sessions refuse mod channels. The C side ran through the real bridge under
+  Wine (`modsdk_wine`), and the quiverd side ran in unit tests.
+- On the glasses under HypXRland: whether a stereo window's per-eye crop shows the overlay
+  fused.
+- `tab` / `htab` with a real producer (GPU and unit tests only).
+- Winewayland (pointer deltas only, as before).
+- The panel re-laying itself out when the layout changes while it's open.
+- 32-bit games.

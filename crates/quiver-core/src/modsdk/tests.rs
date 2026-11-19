@@ -47,6 +47,9 @@ impl ModMetricsSink for Rec {
     fn mark(&self, _m: &ModSdkConnection, metric: &DeclaredMetric, at: i64, dur: Option<i64>, label: Option<&str>) {
         self.push(format!("mark {} at={at} dur={dur:?} label={label:?}", metric.id));
     }
+    fn stereo(&self, m: &ModSdkConnection) {
+        self.push(format!("stereo {:?}", m.stereo));
+    }
     fn disconnected(&self, m: &ModSdkConnection) {
         self.push(format!("metrics gone {}", m.surface));
     }
@@ -98,6 +101,30 @@ async fn until<T>(mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 #[tokio::test]
+async fn stereo_layout_from_the_sdk() {
+    let (reg, rec) = setup();
+    let (mut m, task) = connect(&reg, 0);
+    m.send(json!({"t":"hello","proto":3,"mod":"torchbearer","caps":["options"]})).await;
+    assert_eq!(m.recv().await["proto"], 3);
+    m.send(json!({"t":"stereo","layout":"sbs"})).await;
+    until(|| rec.take().into_iter().find(|l| l.starts_with("stereo")).filter(|l| l == "stereo Some(\"sbs\")")).await;
+    assert_eq!(reg.connections(None)[0].stereo.as_deref(), Some("sbs"));
+    // The same again: no news. HypXRland's tag spelling and `off` are the same layouts.
+    m.send(json!({"t":"stereo","layout":"stereo:sbs"})).await;
+    m.send(json!({"t":"stereo","layout":"off"})).await;
+    until(|| rec.take().into_iter().find(|l| l == "stereo Some(\"mono\")")).await;
+    // Not a layout: refused, unchanged.
+    m.send(json!({"t":"stereo","layout":"3d"})).await;
+    until(|| (reg.connections(None)[0].refused == 1).then_some(())).await;
+    assert_eq!(reg.connections(None)[0].stereo.as_deref(), Some("mono"));
+    // Withdrawn: the setting applies again.
+    m.send(json!({"t":"stereo"})).await;
+    until(|| rec.take().into_iter().find(|l| l == "stereo None")).await;
+    m.send(json!({"t":"bye"})).await;
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn handshake_metrics_and_status() {
     let (reg, rec) = setup();
     let (mut m, task) = connect(&reg, 3539);
@@ -106,7 +133,7 @@ async fn handshake_metrics_and_status() {
         .await;
     let w = m.recv().await;
     assert_eq!(w["t"], "welcome");
-    assert_eq!(w["proto"], 2, "min(theirs, ours)");
+    assert_eq!(w["proto"], 3, "min(theirs, ours)");
     assert_eq!(w["caps"], json!(["options", "metrics"]), "only what both know");
     assert_eq!(w["session"], "s-test");
     assert_eq!(w["profile"], "p1");

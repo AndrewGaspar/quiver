@@ -110,6 +110,8 @@ pub trait ModMetricsSink: Send + Sync {
     fn samples(&self, _m: &ModSdkConnection, _at: i64, _samples: &[Sample]) {}
     /// A mark on an `event` metric.
     fn mark(&self, _m: &ModSdkConnection, _metric: &DeclaredMetric, _at: i64, _dur: Option<i64>, _label: Option<&str>) {}
+    /// The mod said how its frames pack their eyes (`m.stereo`, validated; `None`: withdrawn).
+    fn stereo(&self, _m: &ModSdkConnection) {}
     fn disconnected(&self, _m: &ModSdkConnection) {}
 }
 
@@ -221,6 +223,7 @@ struct Session {
     marks: Window,
     logs: Window,
     declares: Window,
+    stereo: Window,
     refused: u64,
 }
 
@@ -482,6 +485,7 @@ impl ModRegistry {
             marks: Window::new(pl::MAX_MARKS_PER_SEC),
             logs: Window::new(10),
             declares: Window::new(4),
+            stereo: Window::new(10),
             refused: 0,
         };
         let result: Result<()> = async {
@@ -661,6 +665,29 @@ impl ModRegistry {
                     1 => tracing::warn!(target: "quiver::mod", surface = %s.surface, "{text}"),
                     2 => tracing::info!(target: "quiver::mod", surface = %s.surface, "{text}"),
                     _ => tracing::debug!(target: "quiver::mod", surface = %s.surface, "{text}"),
+                }
+            }
+            FromMod::Stereo { layout } => {
+                if !s.stereo.take() {
+                    self.refuse(s, "stereo over the rate");
+                    return None;
+                }
+                let layout = match layout.as_deref() {
+                    None | Some("auto") => None,
+                    Some(l) => match quiver_perf::stereo::Stereo::parse(l) {
+                        Some(st) => Some(st.as_str().to_owned()),
+                        None => {
+                            self.refuse(s, "stereo: not a layout (sbs, hsbs, tab, htab, mono)");
+                            return None;
+                        }
+                    },
+                };
+                let before = self.info(s.id).and_then(|i| i.stereo);
+                if let Some(info) = self.with_info(s.id, |i| i.stereo = layout.clone())
+                    && before != layout
+                {
+                    tracing::info!(product_id = info.product_id, surface = %info.surface, stereo = ?layout, "mod set its stereo layout");
+                    self.metrics_sink().stereo(&info);
                 }
             }
             FromMod::Bye | FromMod::Unknown => {}

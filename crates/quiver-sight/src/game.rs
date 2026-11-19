@@ -124,6 +124,12 @@ fn premul(c: Hsla) -> u32 {
     rgba_premul(b(c.r), b(c.g), b(c.b), b(c.a))
 }
 
+/// How the model's frames pack their eyes, if that layout fits `extent` (else mono).
+pub fn stereo(m: &HudModel, extent: [u32; 2]) -> quiver_perf::stereo::Stereo {
+    let s = m.stereo.as_ref().map(|s| s.stereo()).unwrap_or_default();
+    if s.fits((extent[0], extent[1])) { s } else { quiver_perf::stereo::Stereo::Mono }
+}
+
 /// Device px per logical px for a model: its text size (1.6% of the swapchain height) times
 /// its scale, over the view's base text size.
 pub fn factor(m: &HudModel) -> f32 {
@@ -264,8 +270,12 @@ impl GameHud {
             }
             ch = max_rows.max(1);
         }
-        let pl = place(m.anchor, [m.offset[0] * f, m.offset[1] * f], m.safe_area, (extent[0], extent[1]), (cw, ch));
+        // A stereo frame: placed in one eye's logical space; the layer draws it in each eye
+        // (design/SIGHT.md §15).
+        let st = stereo(m, extent);
+        let pl = place(m.anchor, [m.offset[0] * f, m.offset[1] * f], m.safe_area, st.logical_extent((extent[0], extent[1])), (cw, ch));
         let mut d = HudBufferHeader::ZERO;
+        d.stereo = st.code();
         d.width = pl.w;
         d.height = pl.h;
         d.stride = fr.stride;

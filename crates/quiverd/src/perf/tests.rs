@@ -559,3 +559,41 @@ fn lab_metrics_never_land_in_the_persons_session() {
     // …never a lab instance's.
     assert!(e.hub.with_session(Some("lab-t1-r1"), 3539, |_| ()).is_none());
 }
+
+#[test]
+fn stereo_from_the_setting_and_a_live_mod() {
+    use quiver_perf::stereo::{Setting, Stereo};
+    let e = env();
+    let (sid, dir) = dev_session(&e.hub, 7);
+    // The launch's sight.stereo = hsbs, as the layer reports it from its environment.
+    let w = fake_layer(&dir, 2);
+    let mut st = fake_status();
+    (st.extent_w, st.extent_h, st.stereo_setting) = (1920, 1080, Setting::Fixed(Stereo::Hsbs).code());
+    w.set_layer_status(&st);
+    drain_once(&e.hub, &mut HashMap::new());
+    let (sight, mut rx) = conn(9);
+    let m = e.hub.attach(&sight, &sid).unwrap();
+    let s = m.stereo.clone().unwrap();
+    assert_eq!((s.layout.as_str(), s.source.as_str(), s.detail.as_str()), ("hsbs", "setting", "QUIVER_SIGHT_STEREO=hsbs"));
+    assert!((m.text_px - 1080.0 * 0.016).abs() < 1e-3, "hsbs: one eye is laid out 1080 tall");
+    perf_events(&mut rx);
+    // Torchbearer says sbs through the SDK: it wins while its channel is up, at once.
+    let sink = mods::PerfModSink::new(&e.hub);
+    let mut c = ModSdkConnection { conn: 7, product_id: 7, surface: "torchbearer".into(), sdk: "test".into(), proto: 3, session: Some(sid.clone()), ..Default::default() };
+    c.stereo = Some("sbs".into());
+    sink.stereo(&c);
+    e.hub.publish(mono_raw_ns());
+    let models: Vec<_> = perf_events(&mut rx).into_iter().filter_map(|e| if let PerfEvent::HudModel(m) = e { Some(m) } else { None }).collect();
+    let s = models.last().and_then(|m| m.stereo.clone()).unwrap();
+    assert_eq!((s.layout.as_str(), s.source.as_str(), s.detail.as_str(), s.setting.as_str()), ("sbs", "mod", "torchbearer (SDK)", "hsbs"));
+    assert_eq!(e.hub.status(Some(&sid), None).unwrap().stereo.unwrap().layout, "sbs");
+    // Another connection's withdrawal doesn't touch it; its own disconnect does.
+    sink.stereo(&ModSdkConnection { conn: 8, stereo: None, ..c.clone() });
+    assert_eq!(e.hub.status(Some(&sid), None).unwrap().stereo.unwrap().source, "mod");
+    sink.disconnected(&c);
+    let s = e.hub.status(Some(&sid), None).unwrap().stereo.unwrap();
+    assert_eq!((s.layout.as_str(), s.source.as_str()), ("hsbs", "setting"));
+    assert_eq!(s.line(), "hsbs (setting: QUIVER_SIGHT_STEREO=hsbs)");
+    e.hub.disconnect(9);
+    e.hub.end(&sid);
+}

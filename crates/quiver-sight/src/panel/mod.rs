@@ -53,6 +53,7 @@ use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions}
 use gpui::{App, AppContext, Bounds, Entity, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px, size};
 use quiver_api::perf::LayerBackdrop;
 use quiver_api::sight::{Backdrop, PanelAction, PanelCommand, PanelReport, PanelSection};
+use quiver_perf::stereo::Stereo;
 use quiver_perf::hud::{BackdropRequest, HudWriter};
 use quiver_perf::panel::{PANEL_INPUT_FILE, PanelEvent, PanelInput, create_panel_input};
 use quiver_perf::shm::Mapping;
@@ -168,12 +169,14 @@ struct GameBlur {
     writer: HudWriter<Mapping>,
     since: Instant,
     confirmed: bool,
+    /// The frames' stereo layout: the layer keeps each eye's blur inside it.
+    stereo: Stereo,
 }
 
 impl GameBlur {
-    fn start(session: &str, image: &std::path::Path) -> Result<GameBlur> {
+    fn start(session: &str, image: &std::path::Path, stereo: Stereo) -> Result<GameBlur> {
         let writer = quiver_perf::session::open_hud_writer(image).with_context(|| format!("opening {}", image.display()))?;
-        let g = GameBlur { session: session.to_owned(), writer, since: Instant::now(), confirmed: false };
+        let g = GameBlur { session: session.to_owned(), writer, since: Instant::now(), confirmed: false, stereo };
         g.renew();
         Ok(g)
     }
@@ -181,7 +184,7 @@ impl GameBlur {
     fn renew(&self) {
         let until = quiver_perf::clock::mono_raw_ns() + GAME_BLUR_HOLD.as_nanos() as i64;
         // No dim from the layer: the panel draws its own (theme-aware) tint over the blur.
-        self.writer.set_backdrop(&BackdropRequest::blur(0, 0, until));
+        self.writer.set_backdrop(&BackdropRequest::blur(0, 0, until).with_stereo(self.stereo));
     }
 }
 
@@ -214,6 +217,8 @@ pub struct PanelCtl {
     inputs: HashMap<String, Arc<PanelInput<Mapping>>>,
     /// The layer blurring the game behind the open panel.
     game_blur: Option<GameBlur>,
+    /// Each session's stereo layout, from its HUD model (design/SIGHT.md §15).
+    stereo: HashMap<String, Stereo>,
 }
 
 impl PanelCtl {
@@ -236,6 +241,7 @@ impl PanelCtl {
             layers: HashMap::new(),
             inputs: HashMap::new(),
             game_blur: None,
+            stereo: HashMap::new(),
         }
     }
 
@@ -263,6 +269,34 @@ impl PanelCtl {
             }
         }
         self.check_game_blur(cx);
+    }
+
+    /// A session's HUD model said how its frames pack their eyes (`None`: mono, or the session
+    /// ended). A change while the panel is drawn in that game opens it again, laid out anew.
+    pub fn set_stereo(&mut self, session: &str, s: Option<Stereo>, cx: &mut App) {
+        let s = s.unwrap_or_default();
+        let old = self.stereo.insert(session.to_owned(), s).unwrap_or_default();
+        if old == s {
+            return;
+        }
+        tracing::info!(session, from = old.as_str(), to = s.as_str(), "stereo layout");
+        if let Some(g) = self.game_blur.as_mut().filter(|g| g.session == session) {
+            g.stereo = s;
+            g.renew();
+        }
+        let Some(o) = self.open.as_mut() else { return };
+        if o.session != session || o.game.is_none() {
+            return;
+        }
+        let g = o.game.take().unwrap();
+        let input = g.input_handle();
+        let extent = g.extent;
+        g.close(cx);
+        if let Err(e) = self.open_in_game(session, input, extent, cx) {
+            tracing::warn!(session, "panel in the game, laid out for {}: {e:#}", s.as_str());
+            self.report.presenter_detail = format!("drawing it in the game failed: {e:#}");
+            self.report_now();
+        }
     }
 
     /// Every half second: renews the open panel's blur request, and gives up on it if the
@@ -488,7 +522,7 @@ impl PanelCtl {
     fn pick_backdrop(&mut self, session: &str) -> (Backdrop, String) {
         self.game_blur = None;
         match self.layers.get(session) {
-            Some(l) if l.ready => match GameBlur::start(session, &l.image) {
+            Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
                 Ok(g) => {
                     self.game_blur = Some(g);
                     (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
@@ -620,11 +654,14 @@ impl PanelCtl {
         };
         let Some(ui) = self.ui.clone() else { anyhow::bail!("no UI channel") };
         let Some(o) = &self.open else { anyhow::bail!("not open") };
-        let factor = ingame::factor(extent, o.monitor.is_some().then_some(o.logical));
+        // A packed stereo frame: the panel is laid out for one eye and drawn in each
+        // (design/SIGHT.md §15).
+        let stereo = self.stereo.get(session).copied().filter(|s| s.fits(extent)).unwrap_or_default();
+        let factor = ingame::factor(stereo.logical_extent(extent), o.monitor.is_some().then_some(o.logical));
         let view = o.view.clone();
         self.game_blur = None;
         let (backdrop, detail) = match self.layers.get(session) {
-            Some(l) if l.ready => match GameBlur::start(session, &l.image) {
+            Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
                 Ok(g) => {
                     self.game_blur = Some(g);
                     (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
@@ -637,11 +674,17 @@ impl PanelCtl {
             v.backdrop = backdrop;
             cx.notify();
         });
-        let g = ingame::InGame::open(session, input, &dir, extent, factor, view, ui, cx)?;
+        let g = ingame::InGame::open(session, input, &dir, extent, stereo, factor, view, ui, cx)?;
         let Some(o) = &mut self.open else { anyhow::bail!("not open") };
         o.game = Some(g);
         self.report.presenter = "game".into();
-        self.report.presenter_detail = format!("the Sight layer draws it in the game's {}x{} frames at {factor:.2}×; the game keeps the keyboard", extent.0, extent.1);
+        let eyes = if stereo.is_stereo() {
+            let (lw, lh) = stereo.logical_extent(extent);
+            format!(" in each eye ({}, laid out at {lw}x{lh})", stereo.as_str())
+        } else {
+            String::new()
+        };
+        self.report.presenter_detail = format!("the Sight layer draws it in the game's {}x{} frames{eyes} at {factor:.2}×; the game keeps the keyboard", extent.0, extent.1);
         self.report.backdrop = backdrop;
         self.report.backdrop_detail = detail;
         self.report.hidden = None;

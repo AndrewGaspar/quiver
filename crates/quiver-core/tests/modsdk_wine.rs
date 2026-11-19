@@ -120,7 +120,10 @@ async fn exercise(reg: &Arc<ModRegistry>, rec: &Rec, product_id: u32) -> ModSdkC
     })
     .await;
     assert_eq!(c.surface, "quiver-test");
-    assert_eq!(c.proto, 2);
+    assert_eq!(c.proto, 3);
+    // quiver_set_stereo_layout("stereo:sbs") before connecting, sent after the welcome.
+    let c = until(30, || reg.connections(Some(product_id)).into_iter().find(|c| c.stereo.is_some())).await;
+    assert_eq!(c.stereo.as_deref(), Some("sbs"));
     assert_eq!(c.caps, ["options", "metrics", "actions", "log"]);
     assert_eq!(c.version.as_deref(), Some("test-1"));
     assert_eq!(c.module.as_deref(), Some("quiver_mod_test.exe"));

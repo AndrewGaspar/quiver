@@ -17,6 +17,12 @@
 //!   the layer's own key reader toggles the panel), the pointer a cursor the layer draws
 //!   (absolute X11 positions as they are, Wayland and relative motion as deltas), clicks and
 //!   wheels GPUI mouse events at the cursor.
+//! - **Stereo** (design/SIGHT.md §15): on a packed frame the view is laid out for one eye's
+//!   logical size (`sbs`: half the width; `hsbs`: the whole width, squeezed by the layer), the
+//!   image says so, and the layer draws it in each eye. X11 pointer positions map into the eye
+//!   they're over (`x mod` the eye's width, ×2 within the half for `hsbs`; the same vertically
+//!   for `tab`/`htab`), so a click lands where the panel is in that eye; the cursor is in the
+//!   image's (logical) pixels and drawn in both eyes.
 //! - **Keeping input**: [`InGame::renew`] every tick (250 ms) renews the capture deadline and
 //!   the image's heartbeat; a quiver-sight that hangs or dies gives the game its input back
 //!   within a second (quiver-perf `panel::capture`).
@@ -43,6 +49,7 @@ use quiver_perf::panel::{
     create_panel_image,
 };
 use quiver_perf::shm::Mapping;
+use quiver_perf::stereo::Stereo;
 
 use super::view::PanelView;
 use crate::link::Msg;
@@ -87,7 +94,11 @@ pub fn factor(extent: (u32, u32), monitor_logical: Option<(f32, f32)>) -> f32 {
 /// The frame publisher (the off-screen window's frame callback).
 struct Publish {
     writer: HudWriter<Mapping>,
+    /// The image's size (one eye's logical size for a stereo frame).
     extent: (u32, u32),
+    /// The swapchain's, and how it packs its eyes.
+    swapchain: (u32, u32),
+    stereo: Stereo,
     prev: Vec<u8>,
     prev_dims: (u32, u32, u32),
     last: u64,
@@ -123,7 +134,7 @@ impl Publish {
         };
         let mut d = HudBufferHeader::ZERO;
         (d.width, d.height, d.stride, d.format, d.scale) = (w, h, fr.stride, HUD_FORMAT_RGBA8_PREMUL_SRGB, scale);
-        (d.extent_w, d.extent_h, d.opacity) = (self.extent.0, self.extent.1, 1.0);
+        (d.extent_w, d.extent_h, d.opacity, d.stereo) = (self.swapchain.0, self.swapchain.1, 1.0, self.stereo.code());
         if let Some((y0, y1)) = dirty {
             (d.dirty_y0, d.dirty_y1, d.dirty_base) = (y0, y1, self.last);
         }
@@ -273,8 +284,12 @@ fn mouse_button(code: u32) -> Option<MouseButton> {
 
 /// The cursor and key state, separate from GPUI so the translation is testable.
 pub struct Translate {
+    /// In the image's pixels (one eye's logical pixels on a stereo frame).
     pub cursor: (f64, f64),
     pub extent: (u32, u32),
+    /// The swapchain (= the game's window, which X11 positions are in) and its packing.
+    pub swapchain: (u32, u32),
+    pub stereo: Stereo,
     pub factor: f32,
     /// The cursor is drawn (the mouse was used since the last key).
     pub cursor_shown: bool,
@@ -285,7 +300,13 @@ pub struct Translate {
 
 impl Translate {
     pub fn new(extent: (u32, u32), factor: f32) -> Translate {
-        Translate { cursor: (extent.0 as f64 / 2.0, extent.1 as f64 / 2.0), extent, factor, cursor_shown: false, keys: Keys::default(), wl_last: None, clicks: (None, 0) }
+        Self::stereo(extent, Stereo::Mono, factor)
+    }
+
+    /// For a swapchain of `swapchain` packed as `stereo`: the image is one eye's logical size.
+    pub fn stereo(swapchain: (u32, u32), stereo: Stereo, factor: f32) -> Translate {
+        let extent = stereo.logical_extent(swapchain);
+        Translate { cursor: (extent.0 as f64 / 2.0, extent.1 as f64 / 2.0), extent, swapchain, stereo, factor, cursor_shown: false, keys: Keys::default(), wl_last: None, clicks: (None, 0) }
     }
 
     fn position(&self) -> gpui::Point<gpui::Pixels> {
@@ -361,8 +382,12 @@ impl Translate {
                 let (dx, dy) = last.map_or((0.0, 0.0), |l| (p.0 - l.0, p.1 - l.1));
                 Some(self.move_to(self.cursor.0 + dx, self.cursor.1 + dy))
             }
-            // X11: the pointer's position in the game's window, which is the swapchain's size.
-            EV_POINTER => Some(self.move_to(e.a as f64, e.b as f64)),
+            // X11: the pointer's position in the game's window, which is the swapchain's size;
+            // on a stereo frame, in the eye it's over.
+            EV_POINTER => {
+                let (_, (x, y)) = self.stereo.to_logical(self.swapchain, (e.a as f64, e.b as f64));
+                Some(self.move_to(x, y))
+            }
             EV_SCROLL => {
                 let (dx, dy) = e.xy();
                 self.cursor_shown = true;
@@ -389,7 +414,9 @@ pub struct InGame {
     input: Arc<PanelInput<Mapping>>,
     window: WindowHandle<PanelView>,
     publish: Rc<RefCell<Publish>>,
+    /// The swapchain's extent (the image is `tr.extent`).
     pub extent: (u32, u32),
+    pub stereo: Stereo,
     pub factor: f32,
     pub epoch: u64,
     stop: Arc<AtomicBool>,
@@ -403,12 +430,13 @@ impl InGame {
     /// Opens it: `panel.image` at the swapchain's size, the off-screen window around `view`,
     /// the panel open in `panel.input`, and the thread that drains the input ring.
     #[allow(clippy::too_many_arguments)]
-    pub fn open(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, extent: (u32, u32), factor: f32, view: Entity<PanelView>, ui: UnboundedSender<Msg>, cx: &mut App) -> Result<InGame> {
+    pub fn open(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, swapchain: (u32, u32), stereo: Stereo, factor: f32, view: Entity<PanelView>, ui: UnboundedSender<Msg>, cx: &mut App) -> Result<InGame> {
+        let extent = stereo.logical_extent(swapchain);
         let bb = buffer_bytes_within(extent.0, extent.1, &PANEL_LIMITS).with_context(|| format!("a {}x{} panel is larger than panel.image allows", extent.0, extent.1))?;
         let writer = create_panel_image(&dir.join(PANEL_IMAGE_FILE), bb).context("creating panel.image")?;
         writer.set_writer_pid(std::process::id());
         writer.heartbeat(mono_raw_ns());
-        let publish = Rc::new(RefCell::new(Publish { writer, extent, prev: Vec::new(), prev_dims: (0, 0, 0), last: 0, frames: 0, rows: 0 }));
+        let publish = Rc::new(RefCell::new(Publish { writer, extent, swapchain, stereo, prev: Vec::new(), prev_dims: (0, 0, 0), last: 0, frames: 0, rows: 0 }));
         let sink = publish.clone();
         let logical = (extent.0 as f32 / factor, extent.1 as f32 / factor);
         let root = view.clone();
@@ -436,7 +464,7 @@ impl InGame {
         let epoch = (mono_raw_ns() as u64 / 1_000_000).max(input.control().epoch() + 1);
         let now = mono_raw_ns();
         input.set_sight_pid(std::process::id());
-        let tr = Translate::new(extent, factor);
+        let tr = Translate::stereo(swapchain, stereo, factor);
         input.set_cursor(tr.cursor.0 as i32, tr.cursor.1 as i32, extent);
         let mut reader = EventReader::at_end(&input);
         input.open(epoch, now, now + PANEL_HOLD_NS as i64, false);
@@ -452,8 +480,13 @@ impl InGame {
                 std::thread::sleep(Duration::from_millis(4));
             }
         })?;
-        tracing::info!(session, extent = ?extent, factor, epoch, "panel opened in the game");
-        Ok(InGame { session: session.to_owned(), input, window, publish, extent, factor, epoch, stop, opened: Instant::now(), confirmed: false, tr })
+        tracing::info!(session, swapchain = ?swapchain, stereo = stereo.as_str(), extent = ?extent, factor, epoch, "panel opened in the game");
+        Ok(InGame { session: session.to_owned(), input, window, publish, extent: swapchain, stereo, factor, epoch, stop, opened: Instant::now(), confirmed: false, tr })
+    }
+
+    /// The session's `panel.input` (to open it again).
+    pub fn input_handle(&self) -> Arc<PanelInput<Mapping>> {
+        self.input.clone()
     }
 
     /// Renews the capture deadline and the image's heartbeat (every tick); returns whether the
@@ -485,7 +518,7 @@ impl InGame {
                 }
             });
         }
-        self.input.set_cursor(self.tr.cursor.0.round() as i32, self.tr.cursor.1.round() as i32, self.extent);
+        self.input.set_cursor(self.tr.cursor.0.round() as i32, self.tr.cursor.1.round() as i32, self.tr.extent);
         self.input.set_cursor_shown(self.tr.cursor_shown);
     }
 
@@ -493,8 +526,9 @@ impl InGame {
     pub fn describe(&self) -> String {
         let p = self.publish.borrow();
         let i = self.input.input();
+        let eyes = if self.stereo.is_stereo() { format!(", {} {}x{} per eye", self.stereo.as_str(), self.tr.extent.0, self.tr.extent.1) } else { String::new() };
         format!(
-            "in the game ({}x{} at {:.2}×): {} images ({} rows), input {} forwarded, {} lost, {} held keys released to the game",
+            "in the game ({}x{}{eyes} at {:.2}×): {} images ({} rows), input {} forwarded, {} lost, {} held keys released to the game",
             self.extent.0, self.extent.1, self.factor, p.frames, p.rows, i.forwarded, i.lost, i.releases
         )
     }
@@ -564,6 +598,37 @@ mod tests {
         // A key hides the cursor until the mouse moves again.
         t.event(&key(103, true));
         assert!(!t.cursor_shown);
+    }
+
+    #[test]
+    fn stereo_pointer() {
+        let x11 = |x: i32, y: i32| PanelEvent { kind: EV_POINTER, a: x, b: y, ..Default::default() };
+        // sbs, a 3840x1080 window: the panel is 1920x1080 and a click in either half lands at
+        // the same place in it.
+        let mut t = Translate::stereo((3840, 1080), Stereo::Sbs, 1.0);
+        assert_eq!(t.extent, (1920, 1080));
+        t.event(&x11(400, 300));
+        assert_eq!(t.cursor, (400.0, 300.0));
+        t.event(&x11(1920 + 400, 300));
+        assert_eq!(t.cursor, (400.0, 300.0));
+        // hsbs, a 1920x1080 window: each half is 960 wide, ×2 into the 1920 layout.
+        let mut t = Translate::stereo((1920, 1080), Stereo::Hsbs, 1.0);
+        assert_eq!(t.extent, (1920, 1080));
+        let Some(PlatformInput::MouseMove(m)) = t.event(&x11(200, 100)) else { panic!() };
+        assert_eq!((f32::from(m.position.x), f32::from(m.position.y)), (400.0, 100.0));
+        t.event(&x11(960 + 200, 100));
+        assert_eq!(t.cursor, (400.0, 100.0));
+        // tab / htab: the same vertically.
+        let mut t = Translate::stereo((1920, 2160), Stereo::Tab, 1.0);
+        t.event(&x11(50, 1080 + 70));
+        assert_eq!((t.extent, t.cursor), ((1920, 1080), (50.0, 70.0)));
+        let mut t = Translate::stereo((1920, 1080), Stereo::Htab, 2.0);
+        let Some(PlatformInput::MouseMove(m)) = t.event(&x11(50, 540 + 70)) else { panic!() };
+        assert_eq!((t.cursor, f32::from(m.position.y)), ((50.0, 140.0), 70.0));
+        // Relative motion stays 1:1 in the layout's pixels, clamped to it.
+        let mut t = Translate::stereo((3840, 1080), Stereo::Sbs, 1.0);
+        t.event(&PanelEvent::motion(0, 5000.0, 0.0));
+        assert_eq!(t.cursor.0, 1919.0);
     }
 
     #[test]

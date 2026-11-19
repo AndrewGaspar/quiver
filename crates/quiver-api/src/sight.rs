@@ -195,6 +195,9 @@ pub struct PanelKeys {
     /// `quiver hud status` shows it.
     pub keys: String,
     pub presses: u32,
+    /// How the session's frames pack their eyes (appended; design/SIGHT.md §15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stereo: Option<crate::perf::StereoInfo>,
 }
 
 // `Report` carries a whole `PanelReport`; a request is sent on a panel change, not per frame.

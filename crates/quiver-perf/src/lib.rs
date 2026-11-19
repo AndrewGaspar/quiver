@@ -6,6 +6,7 @@
 //! - [`hud`]: `hud.image`, the double-buffered, seqlocked HUD image.
 //! - [`panel`]: `panel.input`, the Sight panel drawn in the game: who captures input, the
 //!   forwarded events, the layer's word (with `panel.image`, the panel's pixels).
+//! - [`stereo`]: packed stereo frames (sbs/hsbs/tab/htab): eyes, logical sizes, the pointer.
 //! - [`session`]: the session dir (`/dev/shm/quiver-<uid>/<session>/`, `QUIVER_PERF_DIR`).
 //! - [`clock`]: CLOCK_MONOTONIC_RAW, Wine QPC conversion, offset checks and fits.
 //! - [`descriptor`], [`control`]: metric descriptors and the JSON control-plane payloads.
@@ -26,6 +27,7 @@ pub mod panel;
 pub mod record;
 pub mod ring;
 pub mod shm;
+pub mod stereo;
 
 #[cfg(feature = "std")]
 pub mod session;

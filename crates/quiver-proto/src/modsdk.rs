@@ -7,9 +7,10 @@
 //! per line, on a broker connection that began with `BrokerRequest::ModChannel`.
 //!
 //! Unknown `t` values and unknown fields are ignored both ways. `proto` only grows; each side
-//! speaks `min(theirs, mine)`. This is protocol [`PROTOCOL`] = 2: the options messages here
-//! (`hello`/`welcome`, `options`, `set`/`ack`, `changed`, `readout`, `action`, `log`, `bye`)
-//! plus the perf messages, which are `quiver_perf::control::PerfMessage` (`metrics`,
+//! speaks `min(theirs, mine)`. This is protocol [`PROTOCOL`] = 3: the options messages here
+//! (`hello`/`welcome`, `options`, `set`/`ack`, `changed`, `readout`, `action`, `log`, `bye`),
+//! protocol 3's `stereo` (how the mod's presented frames pack their eyes, design/SIGHT.md §15;
+//! a quiverd speaking 2 ignores it as an unknown `t`), plus the perf messages, which are `quiver_perf::control::PerfMessage` (`metrics`,
 //! `metrics_ok`, `m`, `mark`; the ring ones are SIGHT-HUD phase 2). [`is_perf_message`] tells
 //! which enum a message belongs to.
 //!
@@ -30,7 +31,9 @@ pub fn is_perf_message(t: &str) -> bool {
 }
 
 /// The protocol this side speaks.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
+/// The first protocol with [`FromMod::Stereo`].
+pub const PROTOCOL_STEREO: u32 = 3;
 /// Largest frame a mod may send (the bridge closes the pipe on a larger one). A schema too
 /// big for this ships as `quiver-options.toml` instead of inline in `hello`.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -167,6 +170,15 @@ pub enum FromMod {
         #[serde(default = "info_level")]
         level: i32,
         text: String,
+    },
+    /// Protocol 3: the frames the game presents pack two eyes this way (`quiver_set_stereo_layout`,
+    /// design/SIGHT.md §15): `sbs`, `hsbs`, `tab`, `htab` or `mono` (HypXRland's `stereo:<layout>`
+    /// spellings, without the prefix). `None`/absent: the mod withdraws its word and the
+    /// `sight.stereo` setting applies. It holds while the connection is up and is sent again
+    /// after a reconnect.
+    Stereo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<String>,
     },
     Bye,
     /// A message from a newer SDK: ignored.
@@ -345,6 +357,8 @@ mod tests {
         let w = serde_json::to_value(ToMod::Set { seq: 3, values: Values::new() }).unwrap();
         assert_eq!(w, json!({"t":"set","seq":3,"values":{}}));
         assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"bye"})).unwrap(), FromMod::Bye);
+        assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"stereo","layout":"hsbs"})).unwrap(), FromMod::Stereo { layout: Some("hsbs".into()) });
+        assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"stereo"})).unwrap(), FromMod::Stereo { layout: None });
     }
 
     #[test]

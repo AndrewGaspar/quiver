@@ -145,6 +145,8 @@ pub struct ModelInput<'a> {
     pub backdrop: Option<LayerBackdrop>,
     /// The game's window in front, as its layer sees it ([`game_focus`]).
     pub game_focus: Option<bool>,
+    /// How its frames pack their eyes ([`super::Session::stereo`]).
+    pub stereo: Option<quiver_api::perf::StereoInfo>,
 }
 
 /// Whether the game's window is in front as its layer reports it (design/SIGHT.md §14):
@@ -262,7 +264,9 @@ fn is_content(c: &HudCell) -> bool {
 pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
     let status = store.layer_status.filter(|s| s.extent_w > 0 && s.extent_h > 0);
     let extent = status.map(|s| [s.extent_w, s.extent_h]);
-    let text_px = extent.map(|[_, h]| h as f32 * TEXT_FRACTION).unwrap_or(17.0);
+    // 1.6% of one eye's height on a stereo frame (design/SIGHT.md §15).
+    let stereo = inp.stereo.as_ref().map(|s| s.stereo()).unwrap_or_default();
+    let text_px = extent.map(|[w, h]| stereo.logical_extent((w, h)).1 as f32 * TEXT_FRACTION).unwrap_or(17.0);
     let has_frames = store.frames.frames > 0 || store.producers.get(super::catalog::PRODUCER_LAYER).is_some_and(|p| p.info.connected);
     let mut rows = Vec::new();
     for r in &inp.layout.rows {
@@ -361,6 +365,7 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         rows,
         backdrop: inp.backdrop.clone().map(Box::new),
         game_focus: inp.game_focus,
+        stereo: inp.stereo.clone(),
     }
 }
 
@@ -465,7 +470,7 @@ mod tests {
     fn model(store: &Store, layout: &str, now: i64) -> HudModel {
         let cfg = HudConfig::default();
         let l = builtin(layout).unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
         build_model(&inp, store, now)
     }
 
@@ -536,7 +541,7 @@ mod tests {
         // Without a panel the padding goes, the slots stay.
         let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
         let l = builtin("standard").unwrap();
-        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None };
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
         assert_eq!(build_model(&inp, &modded, now2).size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0]);
     }
 

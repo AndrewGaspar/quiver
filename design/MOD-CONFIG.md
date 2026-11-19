@@ -642,7 +642,11 @@ session's profile. Mods never see account data, a token or a TCP port (steer 10)
 
 **Wire format.** 4-byte little-endian length, then a UTF-8 JSON object with a `t` field.
 Unknown `t` values and unknown fields are ignored both ways. `proto` is an integer that only
-grows; each side speaks `min(theirs, mine)`. The current protocol is **2**: it adds the metrics
+grows; each side speaks `min(theirs, mine)`. *2026-11-19:* the current protocol is **3**, which adds
+one message, mod → quiverd `stereo` `{layout}` (`quiver_set_stereo_layout`: how the game's
+presented frames pack two eyes, so Sight draws its HUD and panel per eye; design/SIGHT.md §15).
+A quiverd speaking 2 ignores it as an unknown `t`, and the SDK sends it only once the welcome
+says 3. Protocol **2** added the metrics
 messages (`metrics`, `metrics_ok`, `m`, `mark`, `ring_req`, `ring`, `perf_ctl`, and `caps` /
 `perf` fields on `hello` / `welcome`), specified in [SIGHT-HUD.md](SIGHT-HUD.md) §3.6. The
 table below is the options part.

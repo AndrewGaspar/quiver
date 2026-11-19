@@ -23,6 +23,13 @@
 //! after the HUD in a second render pass, with the panel's cursor on top; a present that drew
 //! it tells the input preload ([`crate::panel::mark_drawn`]).
 //!
+//! **Stereo** (design/SIGHT.md §15): an image whose descriptor says the frame is packed
+//! (`sbs`, `hsbs`, `tab`, `htab`) is laid out for one eye's logical size and drawn once per
+//! eye: the viewport is that eye's half of the swapchain and the push constants' extent the
+//! eye's logical size, so the same quad, graph and cursor land in both eyes at the same
+//! position (zero disparity), squeezed 2:1 for the half layouts, and the scissor keeps each
+//! draw inside its eye. The blur keeps its taps inside each eye ([`crate::blur`]).
+//!
 //! Everything is allocated when the swapchain is created, except the staging buffers and the
 //! textures (on the first image, and a texture again only when an image outgrows it) and the
 //! blur's images (the first time a panel asks).
@@ -40,7 +47,8 @@ use crate::formats::Encoding;
 use crate::graph::{self, History, VERTS_PER_GRAPH, Vertex};
 use crate::log;
 use crate::panel::{self as sight_panel, CURSOR_VERTS};
-use crate::pipelines::{PUSH_SRGB_DECODE, Pipelines, Push};
+use crate::pipelines::{PUSH_SRGB_DECODE, Pipelines, Push, squeeze_flags};
+use quiver_perf::stereo::Stereo;
 use crate::state::DeviceData;
 use crate::telemetry::{self, HUD};
 
@@ -673,14 +681,11 @@ impl Compositor {
         self.panel.have = self.panel.pending_published;
     }
 
-    /// The panel's image and its cursor, in a render pass of their own after the HUD's.
+    /// The panel's image and its cursor, in a render pass of their own after the HUD's; once
+    /// per eye of a stereo frame (module docs).
     unsafe fn record_panel_draw(&self, dev: &ash::Device, cmd: vk::CommandBuffer, image: usize, slot: usize, c: &HudBufferHeader, cursor: Option<(i32, i32)>) {
-        let (ew, eh) = (self.extent.width, self.extent.height);
         let full = vk::Rect2D { offset: vk::Offset2D::default(), extent: self.extent };
-        let scissor = vk::Rect2D { offset: vk::Offset2D { x: c.x.max(0), y: c.y.max(0) }, extent: vk::Extent2D { width: c.width.min(ew), height: c.height.min(eh) } };
-        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: ew as f32, height: eh as f32, min_depth: 0.0, max_depth: 1.0 };
         let srgb = if self.enc == Some(Encoding::Srgb) { PUSH_SRGB_DECODE } else { 0 };
-        let push = Push { extent: [ew as f32, eh as f32], origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: srgb };
         let pc = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let base = slot * VB_SLOT_BYTES + VB_CURSOR_OFFSET;
         if let Some(tip) = cursor {
@@ -696,19 +701,24 @@ impl Compositor {
                 &vk::RenderPassBeginInfo::default().render_pass(self.pipes.render_pass).framebuffer(self.framebuffers[image]).render_area(full),
                 vk::SubpassContents::INLINE,
             );
-            dev.cmd_set_viewport(cmd, 0, &[viewport]);
-            dev.cmd_set_scissor(cmd, 0, &[scissor]);
-            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
-            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.panel.sets[self.panel.cur_set]], &[]);
-            dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
-            dev.cmd_draw(cmd, 4, 1, 0, 0);
-            if cursor.is_some() {
-                let cpush = Push { opacity: 1.0, ..push };
-                dev.cmd_set_scissor(cmd, 0, &[full]);
-                dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
-                dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, cpush.bytes());
-                dev.cmd_bind_vertex_buffers(cmd, 0, &[self.vertices.buf], &[base as u64]);
-                dev.cmd_draw(cmd, CURSOR_VERTS as u32, 1, 0, 0);
+            for eye in Eyes::of(c, self.extent) {
+                let push = Push { extent: eye.extent, origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: srgb | eye.squeeze };
+                dev.cmd_set_viewport(cmd, 0, &[eye.viewport]);
+                if let Some(scissor) = eye.scissor {
+                    dev.cmd_set_scissor(cmd, 0, &[scissor]);
+                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
+                    dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.panel.sets[self.panel.cur_set]], &[]);
+                    dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
+                    dev.cmd_draw(cmd, 4, 1, 0, 0);
+                }
+                if cursor.is_some() {
+                    let cpush = Push { opacity: 1.0, ..push };
+                    dev.cmd_set_scissor(cmd, 0, &[eye.clip]);
+                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
+                    dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, cpush.bytes());
+                    dev.cmd_bind_vertex_buffers(cmd, 0, &[self.vertices.buf], &[base as u64]);
+                    dev.cmd_draw(cmd, CURSOR_VERTS as u32, 1, 0, 0);
+                }
             }
             dev.cmd_end_render_pass(cmd);
         }
@@ -956,7 +966,8 @@ impl Compositor {
             let mut timed = false;
             if blur && let Some((pipes, chain)) = &self.blur {
                 let plan = blur::plan((self.extent.width, self.extent.height), self.backdrop.radius_fraction());
-                chain.record(dev, pipes, cmd, image, self.images[image], self.framebuffers[image], slot, &plan, alpha, self.backdrop.dim_fraction());
+                let split = blur::split_for(self.backdrop.stereo());
+                chain.record(dev, pipes, cmd, image, self.images[image], self.framebuffers[image], slot, &plan, alpha, self.backdrop.dim_fraction(), split);
                 timed = chain.queries.is_some();
             }
             if let Some(c) = visible {
@@ -996,6 +1007,9 @@ impl Compositor {
                     }
                     if let Some((o, _)) = panel_shown {
                         sight_panel::mark_drawn(o.epoch, now);
+                    }
+                    if let Some(c) = panel_shown.map(|(_, c)| c).or(visible) {
+                        telemetry::note_stereo_drawn(c.stereo);
                     }
                 }
                 Err(vk::Result::ERROR_DEVICE_LOST) => return Err(DRAW_ERR_DEVICE_LOST),
@@ -1085,22 +1099,9 @@ impl Compositor {
     }
 
     unsafe fn record_draw(&self, dev: &ash::Device, cmd: vk::CommandBuffer, image: usize, slot: usize, c: &HudBufferHeader, history: &History) {
-        let (ew, eh) = (self.extent.width, self.extent.height);
-        // Inside the swapchain: validated against this extent by quiver-perf.
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: c.x.max(0), y: c.y.max(0) },
-            extent: vk::Extent2D { width: c.width.min(ew), height: c.height.min(eh) },
-        };
-        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: ew as f32, height: eh as f32, min_depth: 0.0, max_depth: 1.0 };
-        let push = Push {
-            extent: [ew as f32, eh as f32],
-            origin: [c.x as f32, c.y as f32],
-            size: [c.width as f32, c.height as f32],
-            opacity: c.opacity,
-            flags: if self.enc == Some(Encoding::Srgb) { PUSH_SRGB_DECODE } else { 0 },
-        };
+        let flags = if self.enc == Some(Encoding::Srgb) { PUSH_SRGB_DECODE } else { 0 };
         // Graph vertices into this slot's part of the vertex buffer (not in use: its fence
-        // is signalled).
+        // is signalled), in the image's own pixels: one set, drawn in every eye.
         let base = slot * VB_SLOT_BYTES;
         // SAFETY: the vertex buffer is mapped and sized slots × VB_SLOT_BYTES, Vertex-aligned.
         let out = unsafe { std::slice::from_raw_parts_mut(self.vertices.ptr.as_ptr().add(base).cast::<Vertex>(), 2 * VERTS_PER_GRAPH) };
@@ -1119,17 +1120,22 @@ impl Compositor {
                     .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: self.extent }),
                 vk::SubpassContents::INLINE,
             );
-            dev.cmd_set_viewport(cmd, 0, &[viewport]);
-            dev.cmd_set_scissor(cmd, 0, &[scissor]);
-            dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
-            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.desc_sets[self.cur_set]], &[]);
-            dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
-            dev.cmd_draw(cmd, 4, 1, 0, 0);
-            if n > 0 {
-                dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
+            for eye in Eyes::of(c, self.extent) {
+                // Inside the frame (and the eye): validated against this extent by quiver-perf.
+                let Some(scissor) = eye.scissor else { continue };
+                let push = Push { extent: eye.extent, origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: flags | eye.squeeze };
+                dev.cmd_set_viewport(cmd, 0, &[eye.viewport]);
+                dev.cmd_set_scissor(cmd, 0, &[scissor]);
+                dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
+                dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.layout, 0, &[self.desc_sets[self.cur_set]], &[]);
                 dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
-                dev.cmd_bind_vertex_buffers(cmd, 0, &[self.vertices.buf], &[base as u64]);
-                dev.cmd_draw(cmd, n as u32, 1, 0, 0);
+                dev.cmd_draw(cmd, 4, 1, 0, 0);
+                if n > 0 {
+                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
+                    dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
+                    dev.cmd_bind_vertex_buffers(cmd, 0, &[self.vertices.buf], &[base as u64]);
+                    dev.cmd_draw(cmd, n as u32, 1, 0, 0);
+                }
             }
             dev.cmd_end_render_pass(cmd);
         }
@@ -1194,6 +1200,82 @@ impl Compositor {
                 destroy_buffer(dev, &b);
             }
         }
+    }
+}
+
+/// Where one eye of an image goes ([`Eyes::of`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Eye {
+    /// The eye's part of the swapchain, as a viewport: logical px (`extent`) map onto it.
+    pub viewport: vk::Viewport,
+    /// The push constants' extent: the eye's logical size (the swapchain's, for mono).
+    pub extent: [f32; 2],
+    /// `PUSH_SQUEEZE_*` for the quad.
+    pub squeeze: u32,
+    /// The image's swapchain pixels within this eye; `None` when it covers none of them.
+    pub scissor: Option<vk::Rect2D>,
+    /// The whole eye (the cursor's scissor).
+    pub clip: vk::Rect2D,
+}
+
+/// The eyes an image is drawn into: one for mono, two for a packed stereo frame
+/// (`HudBufferHeader::stereo`, validated by quiver-perf).
+pub struct Eyes;
+
+impl Eyes {
+    pub fn of(c: &HudBufferHeader, extent: vk::Extent2D) -> impl Iterator<Item = Eye> + use<> {
+        let stereo = Stereo::from_code(c.stereo).unwrap_or_default();
+        let ext = (extent.width, extent.height);
+        let (lw, lh) = stereo.logical_extent(ext);
+        let (x, y, w, h) = (c.x, c.y, c.width, c.height);
+        (0..stereo.eyes()).map(move |e| {
+            let r = stereo.eye_rect(ext, e);
+            let s = stereo.eye_scissor(ext, e, x, y, w, h);
+            let rect = |x: u32, y: u32, w: u32, h: u32| vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w, height: h } };
+            Eye {
+                viewport: vk::Viewport { x: r.x as f32, y: r.y as f32, width: r.w as f32, height: r.h as f32, min_depth: 0.0, max_depth: 1.0 },
+                extent: [lw as f32, lh as f32],
+                squeeze: squeeze_flags(stereo),
+                scissor: (s.w > 0 && s.h > 0).then(|| rect(s.x, s.y, s.w, s.h)),
+                clip: rect(r.x, r.y, r.w, r.h),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod eye_tests {
+    use super::*;
+
+    fn desc(stereo: Stereo, x: i32, y: i32, w: u32, h: u32) -> HudBufferHeader {
+        let mut d = HudBufferHeader::ZERO;
+        (d.x, d.y, d.width, d.height, d.stereo) = (x, y, w, h, stereo.code());
+        d
+    }
+
+    #[test]
+    fn eyes_of_an_image() {
+        let ext = vk::Extent2D { width: 3840, height: 1080 };
+        // Mono: the whole swapchain, as before stereo.
+        let m: Vec<Eye> = Eyes::of(&desc(Stereo::Mono, 12, 12, 260, 188), ext).collect();
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].viewport.width, m[0].extent), (3840.0, [3840.0, 1080.0]));
+        assert_eq!(m[0].scissor.unwrap().offset, vk::Offset2D { x: 12, y: 12 });
+        // sbs: two 1920-wide eyes at 1:1, the same logical position in each.
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Sbs, 12, 12, 260, 188), ext).collect();
+        assert_eq!(e.len(), 2);
+        assert_eq!((e[1].viewport.x, e[1].viewport.width, e[1].extent, e[1].squeeze), (1920.0, 1920.0, [1920.0, 1080.0], 0));
+        assert_eq!(e[1].scissor.unwrap(), vk::Rect2D { offset: vk::Offset2D { x: 1932, y: 12 }, extent: vk::Extent2D { width: 260, height: 188 } });
+        // hsbs on 1920x1080: 960-wide eyes, laid out at 1920 and squeezed.
+        let ext = vk::Extent2D { width: 1920, height: 1080 };
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Hsbs, 0, 0, 1920, 1080), ext).collect();
+        assert_eq!((e[0].viewport.width, e[0].extent, e[0].squeeze), (960.0, [1920.0, 1080.0], crate::pipelines::PUSH_SQUEEZE_X));
+        assert_eq!(e[0].scissor.unwrap().extent.width, 960);
+        assert_eq!(e[1].scissor.unwrap().offset.x, 960);
+        // htab: squeezed vertically, the bottom eye below 540.
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Htab, 0, 1000, 100, 80), ext).collect();
+        assert_eq!((e[1].viewport.y, e[1].viewport.height, e[1].squeeze), (540.0, 540.0, crate::pipelines::PUSH_SQUEEZE_Y));
+        assert_eq!(e[1].scissor.unwrap(), vk::Rect2D { offset: vk::Offset2D { x: 0, y: 1040 }, extent: vk::Extent2D { width: 100, height: 40 } });
     }
 }
 

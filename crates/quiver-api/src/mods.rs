@@ -1557,6 +1557,10 @@ pub struct ModSdkConnection {
     /// Messages quiverd refused (malformed, over a rate limit, not its namespace).
     #[serde(default)]
     pub refused: u64,
+    /// How it says the game's frames pack their eyes (`quiver_set_stereo_layout`, protocol 3;
+    /// design/SIGHT.md §15): `sbs`, `hsbs`, `tab`, `htab`, `mono`. `None`: it hasn't said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stereo: Option<String>,
 }
 
 /// One metric a connected mod declared, with its latest value.

@@ -12,6 +12,9 @@
 //!   layer's key counters in its status block, as quiverd's ring thread reads them.
 //! - **The panel's data**: the instance's game and run; Mods, Tweaks and Achievements say
 //!   they're read-only in a lab (mod settings go through `quiver lab set`).
+//! - **Stereo** (design/SIGHT.md §15): a lab has no mod channel, so the layout is the
+//!   launch's `sight.stereo` setting, which the layer reports from `QUIVER_SIGHT_STEREO` in
+//!   the game's environment (`quiver lab edit N env.QUIVER_SIGHT_STEREO=sbs`).
 //! - **Actions**: every change the panel would send to quiverd (an option, a Tweak, HUD
 //!   settings, quitting the game) is refused, logged, and shown as refused in the panel; showing
 //!   or hiding the HUD only changes this process's HUD.
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use quiver_api::GameRef;
-use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, LayerBackdrop, Level, Orientation, PerfValue, Presenter, hud_card};
+use quiver_api::perf::{Anchor, Captures, HudCell, HudModel, HudRow, LayerBackdrop, LayerStereo, Level, Orientation, PerfValue, Presenter, StereoInfo, hud_card};
 use quiver_api::sight::{PanelAction, PanelCommand, PanelReport};
 use quiver_perf::layout::{LAYER_BLUR_READY, LAYER_BLURRING};
 use quiver_perf::record::LayerPresent;
@@ -58,6 +61,7 @@ struct Shared {
     refused: Vec<String>,
     fps: Option<f64>,
     extent: Option<[u32; 2]>,
+    stereo: Option<StereoInfo>,
 }
 
 struct Lab {
@@ -108,7 +112,7 @@ fn value(metric: &str, label: Option<&str>, pv: PerfValue) -> HudCell {
 
 /// The lab HUD's model: what the layer's ring says, in the preset's shape.
 #[allow(clippy::too_many_arguments)]
-pub fn model(session: &str, rev: u64, on: bool, layout: &str, extent: Option<[u32; 2]>, image: &Path, backdrop: Option<LayerBackdrop>, s: Option<Stats>, run: &str) -> HudModel {
+pub fn model(session: &str, rev: u64, on: bool, layout: &str, extent: Option<[u32; 2]>, image: &Path, backdrop: Option<LayerBackdrop>, s: Option<Stats>, run: &str, stereo: Option<StereoInfo>) -> HudModel {
     let num = |x: Option<f64>, prec: usize| x.map_or_else(|| "—".to_owned(), |x| format!("{x:.prec$}"));
     let fps = value("fps", (layout != "fps").then_some("FPS"), v(num(s.map(|s| s.fps), 0), "", Level::Normal));
     let low = value("fps.p1low", Some("1% low"), v(num(s.map(|s| s.p1low), 0), "", Level::Normal));
@@ -137,7 +141,8 @@ pub fn model(session: &str, rev: u64, on: bool, layout: &str, extent: Option<[u3
         anchor: Anchor::TopLeft,
         offset: [12.0, 12.0],
         scale: 1.0,
-        text_px: extent.map(|[_, h]| h as f32 * 0.016).unwrap_or(17.0),
+        // 1.6% of one eye's height.
+        text_px: extent.map(|[w, h]| stereo.as_ref().map_or(quiver_perf::stereo::Stereo::Mono, |s| s.stereo()).logical_extent((w, h)).1 as f32 * 0.016).unwrap_or(17.0),
         background,
         text_opacity: 1.0,
         level_colors: true,
@@ -153,6 +158,7 @@ pub fn model(session: &str, rev: u64, on: bool, layout: &str, extent: Option<[u3
         rows,
         backdrop: backdrop.map(Box::new),
         game_focus: None,
+        stereo,
     }
 }
 
@@ -218,6 +224,7 @@ fn quiver_core_status(l: &Lab, sh: &Shared) -> serde_json::Value {
         "hud_on": l.hud_on.load(Ordering::Relaxed),
         "hud_layout": LAYOUTS[l.layout.load(Ordering::Relaxed) % LAYOUTS.len()],
         "extent": sh.extent,
+        "stereo": sh.stereo,
         "fps": sh.fps,
         "panel": sh.report,
         "refused": sh.refused,
@@ -277,8 +284,9 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
     Ok(())
 }
 
-/// What a HUD model depends on besides the numbers: shown, preset, extent, blur ready, blurring.
-type Shape = (bool, usize, Option<[u32; 2]>, bool, bool);
+/// What a HUD model depends on besides the numbers: shown, preset, extent, blur ready, blurring,
+/// stereo.
+type Shape = (bool, usize, Option<[u32; 2]>, bool, bool, Option<StereoInfo>);
 
 /// The layer's ring → keys, HUD models, the status file.
 fn feed(l: &Lab, dir: &SessionDir) {
@@ -345,13 +353,14 @@ fn feed(l: &Lab, dir: &SessionDir) {
         let on = l.hud_on.load(Ordering::Relaxed);
         let layout = l.layout.load(Ordering::Relaxed) % LAYOUTS.len();
         let (ready, blurring) = (st.flags & LAYER_BLUR_READY != 0, st.flags & LAYER_BLURRING != 0);
-        let shape = (on, layout, extent, ready, blurring);
+        let stereo = Some(StereoInfo::resolve(None, &LayerStereo::from_status(&st)));
+        let shape = (on, layout, extent, ready, blurring, stereo.clone());
         let hud_gen = l.hud_gen.load(Ordering::Relaxed);
         // A new model: on any change of shape, and twice a second while shown (the values).
-        if last_shape != Some(shape) || hud_gen != sent_gen || (on && last_model.elapsed() >= Duration::from_millis(500)) {
+        if last_shape.as_ref() != Some(&shape) || hud_gen != sent_gen || (on && last_model.elapsed() >= Duration::from_millis(500)) {
             rev += 1;
             let backdrop = LayerBackdrop { image: image.clone(), ready, blurring, reason: if ready { String::new() } else { format!("backdrop error {}", st.backdrop_error) } };
-            let m = model(&l.session, rev, on, LAYOUTS[layout], extent, &image, Some(backdrop), s, &run);
+            let m = model(&l.session, rev, on, LAYOUTS[layout], extent, &image, Some(backdrop), s, &run, stereo.clone());
             let _ = l.tx.unbounded_send(Msg::Model(Box::new(m)));
             last_model = Instant::now();
             last_shape = Some(shape);
@@ -362,6 +371,7 @@ fn feed(l: &Lab, dir: &SessionDir) {
                 let mut sh = l.shared.lock().unwrap_or_else(|p| p.into_inner());
                 sh.fps = s.map(|s| s.fps);
                 sh.extent = extent;
+                sh.stereo = stereo;
             }
             l.write_status();
             last_status = Instant::now();
@@ -397,7 +407,7 @@ mod tests {
         let image = Path::new("/s/hud.image");
         let s = Some(Stats { fps: 144.0, frametime_ms: 6.9, p1low: 120.0 });
         for layout in LAYOUTS {
-            let m = model("lab-a-r1", 1, true, layout, Some([2560, 1600]), image, None, s, "r1");
+            let m = model("lab-a-r1", 1, true, layout, Some([2560, 1600]), image, None, s, "r1", None);
             assert_eq!(m.presenter, Presenter::Game);
             assert_eq!(m.image.as_deref(), Some(image));
             assert!(m.size[0] > 0.0 && m.size[1] > 0.0);
@@ -407,7 +417,12 @@ mod tests {
             });
             assert_eq!(fps.as_deref(), Some("144"));
         }
-        let m = model("lab-a-r1", 1, true, "standard", None, image, None, None, "r1");
+        let m = model("lab-a-r1", 1, true, "standard", None, image, None, None, "r1", None);
+        // A stereo setting: the text is sized for one eye (tab on 1920x2160: 1080 tall).
+        let st = StereoInfo::resolve(None, &LayerStereo { setting: quiver_perf::stereo::Setting::Fixed(quiver_perf::stereo::Stereo::Tab).code(), drawn: None });
+        assert_eq!((st.layout.as_str(), st.source.as_str()), ("tab", "setting"));
+        let m2 = model("lab-a-r1", 1, true, "standard", Some([1920, 2160]), image, None, None, "r1", Some(st));
+        assert!((m2.text_px - 1080.0 * 0.016).abs() < 1e-3);
         assert!(m.rows.iter().flat_map(|r| &r.cells).any(|c| matches!(c, HudCell::Value { value, .. } if value.text == "—")));
     }
 

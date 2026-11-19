@@ -49,6 +49,25 @@ pub const MODE_PREFILTER: u32 = 0;
 pub const MODE_DOWN: u32 = 1;
 pub const MODE_UP: u32 = 2;
 pub const MODE_COMPOSITE: u32 = 3;
+/// `BlurPush::mode`'s second byte: a packed stereo frame's seam the taps don't cross
+/// (design/SIGHT.md §15).
+pub const SPLIT_NONE: u32 = 0;
+pub const SPLIT_X: u32 = 1;
+pub const SPLIT_Y: u32 = 2;
+
+/// The split for frames packed as `s`.
+pub fn split_for(s: quiver_perf::stereo::Stereo) -> u32 {
+    match s {
+        quiver_perf::stereo::Stereo::Mono => SPLIT_NONE,
+        s if s.side_by_side() => SPLIT_X,
+        _ => SPLIT_Y,
+    }
+}
+
+/// Sizes round up to even (beyond 1), so a stereo seam at uv 0.5 is a texel edge at every level.
+fn even(v: u32) -> u32 {
+    if v > 1 { v + (v & 1) } else { v }
+}
 
 /// `shaders/blur.frag`'s push constants.
 #[repr(C)]
@@ -82,12 +101,12 @@ pub struct Plan {
 /// The size of level `i` for an L0 of `l0`.
 pub fn level_size(l0: (u32, u32), i: usize) -> (u32, u32) {
     let d = 1u32 << i;
-    (l0.0.div_ceil(d).max(1), l0.1.div_ceil(d).max(1))
+    (even(l0.0.div_ceil(d).max(1)), even(l0.1.div_ceil(d).max(1)))
 }
 
 /// L0's size for a swapchain extent.
 pub fn l0_size(extent: (u32, u32)) -> (u32, u32) {
-    (extent.0.div_ceil(PREFILTER).max(1), extent.1.div_ceil(PREFILTER).max(1))
+    (even(extent.0.div_ceil(PREFILTER).max(1)), even(extent.1.div_ceil(PREFILTER).max(1)))
 }
 
 /// Levels a chain for `extent` can have (the smallest side stays ≥ 4 texels).
@@ -437,14 +456,16 @@ impl Chain {
 
     /// Records the blur of swapchain image `index` (`image`, drawn through `framebuffer`) into
     /// `cmd`: it ends in `PRESENT_SRC_KHR`, ready for the HUD's render pass. `slot`'s two
-    /// timestamps bracket it when there's a query pool.
+    /// timestamps bracket it when there's a query pool. `split` (`SPLIT_*`): a stereo frame's
+    /// eyes are blurred apart.
     ///
     /// # Safety
     /// Recording `cmd` on the compositor's queue; the image is in `PRESENT_SRC_KHR` and its
     /// contents are visible (the submit waits on the app's semaphores).
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn record(&self, dev: &ash::Device, pipes: &BlurPipes, cmd: vk::CommandBuffer, index: usize, image: vk::Image, framebuffer: vk::Framebuffer, slot: usize, p: &Plan, alpha: f32, dim: f32) {
+    pub unsafe fn record(&self, dev: &ash::Device, pipes: &BlurPipes, cmd: vk::CommandBuffer, index: usize, image: vk::Image, framebuffer: vk::Framebuffer, slot: usize, p: &Plan, alpha: f32, dim: f32, split: u32) {
         let Some(&image_set) = self.image_sets.get(index) else { return };
+        let mode = |m: u32| m | (split & 0xff) << 8;
         let levels = p.levels.min(self.levels.len().saturating_sub(1));
         let texel = |s: (u32, u32)| [1.0 / s.0 as f32, 1.0 / s.1 as f32];
         let pass = |rp: vk::RenderPass, fb: vk::Framebuffer, size: (u32, u32), pipe: vk::Pipeline, set: vk::DescriptorSet, push: BlurPush| {
@@ -481,14 +502,14 @@ impl Chain {
                 .subresource_range(crate::compositor::color_range());
             dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[to_read]);
             let l0 = &self.levels[0];
-            pass(pipes.inter_pass, l0.fb, l0.size, pipes.inter, image_set, BlurPush { texel: texel(self.extent), offset: 1.0, mode: MODE_PREFILTER, ..Default::default() });
+            pass(pipes.inter_pass, l0.fb, l0.size, pipes.inter, image_set, BlurPush { texel: texel(self.extent), offset: 1.0, mode: mode(MODE_PREFILTER), ..Default::default() });
             for i in 1..=levels {
                 let (src, dst) = (&self.levels[i - 1], &self.levels[i]);
-                pass(pipes.inter_pass, dst.fb, dst.size, pipes.inter, src.set, BlurPush { texel: texel(src.size), offset: p.offset, mode: MODE_DOWN, ..Default::default() });
+                pass(pipes.inter_pass, dst.fb, dst.size, pipes.inter, src.set, BlurPush { texel: texel(src.size), offset: p.offset, mode: mode(MODE_DOWN), ..Default::default() });
             }
             for i in (0..levels).rev() {
                 let (src, dst) = (&self.levels[i + 1], &self.levels[i]);
-                pass(pipes.inter_pass, dst.fb, dst.size, pipes.inter, src.set, BlurPush { texel: texel(src.size), offset: p.offset, mode: MODE_UP, ..Default::default() });
+                pass(pipes.inter_pass, dst.fb, dst.size, pipes.inter, src.set, BlurPush { texel: texel(src.size), offset: p.offset, mode: mode(MODE_UP), ..Default::default() });
             }
             // The prefilter's read of the swapchain image before the composite writes it.
             let to_write = vk::ImageMemoryBarrier::default()
@@ -507,7 +528,7 @@ impl Chain {
                 self.extent,
                 if alpha >= 1.0 { pipes.composite_opaque } else { pipes.composite },
                 l0.set,
-                BlurPush { texel: texel(l0.size), offset: 1.0, alpha: alpha.clamp(0.0, 1.0), dim: dim.clamp(0.0, 1.0), mode: MODE_COMPOSITE },
+                BlurPush { texel: texel(l0.size), offset: 1.0, alpha: alpha.clamp(0.0, 1.0), dim: dim.clamp(0.0, 1.0), mode: mode(MODE_COMPOSITE) },
             );
             if let Some(q) = self.queries {
                 dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::BOTTOM_OF_PIPE, q, 2 * slot as u32 + 1);
@@ -617,6 +638,17 @@ mod tests {
         assert_eq!(max_levels((8, 8)), 0);
         assert_eq!(plan((8, 8), 0.025).levels, 0);
         assert_eq!(level_size((960, 540), 3), (120, 68));
+        // Even at every level, so a stereo seam (uv 0.5) is a texel edge: hsbs on 1920x1080
+        // goes 480 → 240 → 120 → 60 → 30 → 16 rather than an odd 15.
+        assert_eq!(level_size(l0_size((1920, 1080)), 5), (16, 10));
+        assert_eq!(l0_size((1918, 1080)), (480, 270));
+        for i in 0..=MAX_LEVELS {
+            let (w, h) = level_size(l0_size((3840, 1080)), i);
+            assert!(w % 2 == 0 && h % 2 == 0, "level {i}: {w}x{h}");
+        }
+        assert_eq!(split_for(quiver_perf::stereo::Stereo::Hsbs), SPLIT_X);
+        assert_eq!(split_for(quiver_perf::stereo::Stereo::Htab), SPLIT_Y);
+        assert_eq!(split_for(quiver_perf::stereo::Stereo::Mono), SPLIT_NONE);
         assert_eq!(l0_size((1, 1)), (1, 1));
         assert_eq!(max_levels((u32::MAX, u32::MAX)), MAX_LEVELS);
     }

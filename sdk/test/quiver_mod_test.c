@@ -49,6 +49,8 @@ int main(int argc, char **argv) {
     quiver_on_action_cb(Q, on_action, NULL);
     quiver_handle_option(Q, "test.mode");
     quiver_handle_option(Q, "test.level");
+    /* Protocol 3: the frames are full side-by-side; a bad layout is refused. */
+    printf("stereo sbs=%d bad=%d\n", quiver_set_stereo_layout(Q, "stereo:sbs"), quiver_set_stereo_layout(Q, "3d"));
     fps = quiver_metric_declare(Q, "fps.base", QUIVER_GAUGE, "{\"unit\":\"fps\",\"label\":\"Base FPS\"}");
     frames = quiver_metric_declare(Q, "frames.real", QUIVER_COUNTER, NULL);
     fg = quiver_metric_declare(Q, "fg.state", QUIVER_STATE,

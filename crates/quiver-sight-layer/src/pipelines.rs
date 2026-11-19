@@ -26,6 +26,18 @@ pub struct Push {
 }
 
 pub const PUSH_SRGB_DECODE: u32 = 1;
+/// Into a stereo eye squeezed 2:1 along x (`hsbs`) or y (`htab`): the quad averages texel pairs.
+pub const PUSH_SQUEEZE_X: u32 = 2;
+pub const PUSH_SQUEEZE_Y: u32 = 4;
+
+/// The quad's squeeze flags for frames packed as `s`.
+pub fn squeeze_flags(s: quiver_perf::stereo::Stereo) -> u32 {
+    match s {
+        quiver_perf::stereo::Stereo::Hsbs => PUSH_SQUEEZE_X,
+        quiver_perf::stereo::Stereo::Htab => PUSH_SQUEEZE_Y,
+        _ => 0,
+    }
+}
 
 impl Push {
     pub fn bytes(&self) -> &[u8] {

@@ -45,7 +45,7 @@ options = ["tex.anisotropy", "tex.lod_bias"]
 [[page]]
 id = "display"
 title = "Display"
-options = ["hdr"]
+options = ["hdr", "sight.stereo"]
 
 # ---------------------------------------------------------------------------- frame rate
 
@@ -413,6 +413,27 @@ via = [
     confirm = { log = "dxvk", line = "Color space:", key = "HDR10_ST2084", says = "DXVK created an HDR10 swapchain" } },
   { mech = "env", map = { app = "@unset", on = { DXVK_HDR = "1" }, off = { DXVK_NO_HDR = "1" } },
     confirm = { log = "dxvk", line = "Color space:", key = "HDR10_ST2084", says = "DXVK created an HDR10 swapchain" } },
+]
+
+[option."sight.stereo"]
+type = "enum"
+label = "Stereo 3D frames"
+help = "How this game's frames pack two eyes, so Quiver's HUD and Sight panel are drawn once in each eye (for 3D glasses such as an XReal in side-by-side mode). Auto: a mod that tells Quiver decides (it wins while it runs), otherwise none. Set it for a stereo mod that can't say."
+values = [
+  { value = "auto", label = "Auto (the mod says, else none)" },
+  { value = "mono", label = "Not stereo" },
+  { value = "sbs", label = "Side by side, full (2× wide)" },
+  { value = "hsbs", label = "Side by side, half (squeezed)" },
+  { value = "tab", label = "Over-under, full (2× tall)" },
+  { value = "htab", label = "Over-under, half (squeezed)" },
+]
+default = "auto"
+level = "advanced"
+apply = "launch"
+# The Sight layer reports it to quiverd, which resolves it with a live mod's
+# quiver_set_stereo_layout (design/SIGHT.md §15). The spellings are HypXRland's stereo:<layout>.
+via = [
+  { mech = "env", label = "Sight", map = { auto = "@unset" }, set = { QUIVER_SIGHT_STEREO = "{v}" } },
 ]
 
 # ----------------------------------------------------------------------- built-in conflicts

@@ -85,7 +85,7 @@ impl PerfHub {
                 .filter_map(|s| {
                     let l = s.key_layer()?;
                     let (keys, _) = l.status.as_ref().map_or(("", ""), super::keybinds::layer_keys);
-                    Some(PanelKeys { session: s.id.clone(), keys: keys.into(), presses: p.presses.get(&s.id).copied().unwrap_or(0) })
+                    Some(PanelKeys { session: s.id.clone(), keys: keys.into(), presses: p.presses.get(&s.id).copied().unwrap_or(0), stereo: Some(s.stereo()) })
                 })
                 .collect()
         };

@@ -129,6 +129,10 @@ pub struct Session {
     noted: Option<Presenter>,
     /// The layer's Reflex counters at the last drain (`nvidia::apply_layer`).
     nv_last: nvidia::Last,
+    /// A live mod's stereo layout (`quiver_set_stereo_layout`): the layout, its surface, its
+    /// connection (design/SIGHT.md §15). The newest declaration wins; it goes with its
+    /// connection.
+    pub sdk_stereo: Option<(quiver_perf::stereo::Stereo, String, u64)>,
 }
 
 impl Session {
@@ -184,6 +188,13 @@ impl Session {
         })
     }
 
+    /// How the game's frames pack their eyes (design/SIGHT.md §15): a live mod's word, else
+    /// the launch's `sight.stereo` setting as its layer reports it, else mono.
+    pub fn stereo(&self) -> quiver_api::perf::StereoInfo {
+        let st = self.key_layer().or(self.live_layer()).and_then(|l| l.status).or(self.store.layer_status).unwrap_or(quiver_perf::layout::LayerStatus::ZERO);
+        quiver_api::perf::StereoInfo::resolve(self.sdk_stereo.as_ref().map(|(s, surface, _)| (*s, surface.as_str())), &quiver_api::perf::LayerStereo::from_status(&st))
+    }
+
     fn info(&self) -> PerfSessionInfo {
         PerfSessionInfo {
             session: self.id.clone(),
@@ -222,6 +233,7 @@ impl Session {
             last_error: self.last_error.clone(),
             captures: self.cfg.captures,
             layer_off: self.layer_off.clone(),
+            stereo: Some(self.stereo()),
         }
     }
 
@@ -465,6 +477,7 @@ impl PerfHub {
             monitor: None,
             noted: None,
             nv_last: nvidia::Last::default(),
+            sdk_stereo: None,
         };
         {
             let mut st = self.lock();
@@ -831,6 +844,7 @@ impl PerfHub {
                 monitor: s.monitor.as_deref(),
                 backdrop,
                 game_focus,
+                stereo: Some(s.stereo()),
             };
             let mut m = hud::build_model(&inp, &s.store, now);
             if s.model.as_ref().is_some_and(|old| hud::same(old, &m)) {

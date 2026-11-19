@@ -810,6 +810,89 @@ pub struct HudModel {
     /// toplevel protocol, to tie the panel and the desktop HUD to the game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_focus: Option<bool>,
+    /// How the game's frames pack their eyes (design/SIGHT.md §15): `quiver-sight` lays the HUD
+    /// and the in-game panel out for one eye and the layer draws them in each. `None` (a
+    /// quiverd from before, or no layer yet): mono.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stereo: Option<StereoInfo>,
+}
+
+/// The stereo layout of a session's frames and who decided it (design/SIGHT.md §15).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StereoInfo {
+    /// `mono`, `sbs`, `hsbs`, `tab`, `htab` (HypXRland's `stereo:<layout>` spellings).
+    pub layout: String,
+    /// `mod` (a live mod's `quiver_set_stereo_layout`), `setting` (the `sight.stereo` Tweak,
+    /// `QUIVER_SIGHT_STEREO`), or `default`.
+    pub source: String,
+    /// Who or what, for status lines: `torchbearer (SDK)`, `QUIVER_SIGHT_STEREO=hsbs`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// The setting as the game's environment has it (`auto` when unset), whatever won.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub setting: String,
+    /// What the layer last drew with (`None`: it hasn't drawn an image yet, or is older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawn: Option<String>,
+}
+
+impl StereoInfo {
+    /// The layout (mono for anything unknown).
+    pub fn stereo(&self) -> quiver_perf::stereo::Stereo {
+        quiver_perf::stereo::Stereo::parse(&self.layout).unwrap_or_default()
+    }
+
+    /// What it is, resolved: the layout, the source, and a mod's or the setting's word.
+    pub fn resolve(sdk: Option<(quiver_perf::stereo::Stereo, &str)>, status: &crate::perf::LayerStereo) -> StereoInfo {
+        use quiver_perf::stereo::{Setting, Source, resolve};
+        let setting = Setting::from_code(status.setting);
+        let (layout, source) = resolve(sdk.map(|s| s.0), setting);
+        let detail = match source {
+            Source::Mod => format!("{} (SDK)", sdk.map_or("a mod", |s| s.1)),
+            Source::Setting => format!("{}={}", quiver_perf::stereo::ENV_STEREO, layout.as_str()),
+            Source::Default => String::new(),
+        };
+        StereoInfo {
+            layout: layout.as_str().into(),
+            source: source.as_str().into(),
+            detail,
+            setting: setting_name(setting).into(),
+            drawn: status.drawn.and_then(quiver_perf::stereo::Stereo::from_code).map(|s| s.as_str().into()),
+        }
+    }
+
+    /// One line: `sbs (mod: torchbearer (SDK))`, `mono (default; setting auto)`.
+    pub fn line(&self) -> String {
+        let why = if self.detail.is_empty() { self.source.clone() } else { format!("{}: {}", self.source, self.detail) };
+        let setting = if self.source != "setting" && !self.setting.is_empty() { format!("; setting {}", self.setting) } else { String::new() };
+        let drawn = match &self.drawn {
+            Some(d) if *d != self.layout => format!("; the layer last drew {d}"),
+            _ => String::new(),
+        };
+        format!("{} ({why}{setting}{drawn})", self.layout)
+    }
+}
+
+/// The `sight.stereo` setting's name.
+pub fn setting_name(s: quiver_perf::stereo::Setting) -> &'static str {
+    match s {
+        quiver_perf::stereo::Setting::Auto => "auto",
+        quiver_perf::stereo::Setting::Fixed(l) => l.as_str(),
+        quiver_perf::stereo::Setting::Invalid => "invalid",
+    }
+}
+
+/// The layer's stereo fields (`qv_layer_status.stereo_setting`, `stereo_drawn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LayerStereo {
+    pub setting: u32,
+    pub drawn: Option<u32>,
+}
+
+impl LayerStereo {
+    pub fn from_status(s: &quiver_perf::LayerStatus) -> LayerStereo {
+        LayerStereo { setting: s.stereo_setting, drawn: (s.stereo_drawn & quiver_perf::layout::STEREO_DRAWN_VALID != 0).then_some(s.stereo_drawn & 0xff) }
+    }
 }
 
 /// The Sight layer's backdrop blur for one session, from its status block (SIGHT §14).
@@ -1055,6 +1138,9 @@ pub struct HudStatus {
     /// Why the launch has no Sight layer (appended; `enabled` is false then).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_off: Option<String>,
+    /// How the game's frames pack their eyes and who said so (appended; design/SIGHT.md §15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stereo: Option<StereoInfo>,
 }
 
 impl HudStatus {
