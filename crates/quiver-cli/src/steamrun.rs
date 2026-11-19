@@ -99,8 +99,10 @@ fn processes() -> Vec<(Vec<u8>, Vec<u8>)> {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
-        .filter_map(|e| Some((std::fs::read(e.path().join("cmdline")).ok()?, std::fs::read(e.path().join("environ")).ok()?)))
+        .filter_map(|e| Some((e.file_name().to_string_lossy().parse::<u32>().ok()?, e)))
+        // Lab instances mount their prefix clones at the real path: not the person's processes.
+        .filter(|(pid, _)| !launcher::in_container(*pid))
+        .filter_map(|(_, e)| Some((std::fs::read(e.path().join("cmdline")).ok()?, std::fs::read(e.path().join("environ")).ok()?)))
         .collect()
 }
 

@@ -1130,8 +1130,15 @@ pub async fn stop(cfg: &Config, game: &Game) -> Result<()> {
     Ok(())
 }
 
+/// Whether a process runs in a podman container (a `quiver lab` instance, say). Lab instances
+/// mount their clone of a prefix at the real prefix's path, so their game processes carry the
+/// same `WINEPREFIX` as the person's: they are never the person's game.
+pub fn in_container(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|c| crate::lab::procs::libpod_id(&c).is_some())
+}
+
 /// Game processes in the prefix: Windows executables other than the bridge, Wine's own
-/// services and Proton's wrappers.
+/// services and Proton's wrappers, outside containers.
 fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
     let prefix = format!("WINEPREFIX={}", proton.prefix.display());
     std::fs::read_dir("/proc")
@@ -1140,6 +1147,9 @@ fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+            if in_container(pid) {
+                return None;
+            }
             let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
             let in_prefix = env.split(|&b| b == 0).any(|kv| kv.starts_with(prefix.as_bytes()));
             let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
