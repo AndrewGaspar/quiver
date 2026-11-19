@@ -257,10 +257,12 @@ pub fn session_dir(inst: &Inst, run_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// The newest layer ring's status block in a session dir.
-/// The run's stereo layout: a lab has no mod channel, so the launch's setting as the layer
-/// reports it (`QUIVER_SIGHT_STEREO` in the instance's env), as the lab quiver-sight uses it.
-pub fn lab_stereo(s: &quiver_perf::LayerStatus) -> quiver_api::perf::StereoInfo {
-    quiver_api::perf::StereoInfo::resolve(None, &quiver_api::perf::LayerStereo::from_status(s))
+/// The run's stereo layout as the lab quiver-sight resolves it: a live mod's word through the
+/// instance's mod SDK endpoint (in the session dir), else the launch's setting as the layer
+/// reports it (`QUIVER_SIGHT_STEREO` in the instance's env).
+pub fn lab_stereo(s: &quiver_perf::LayerStatus, session_dir: &Path) -> quiver_api::perf::StereoInfo {
+    let word = quiver_api::lab::SdkStereo::read(session_dir);
+    quiver_api::perf::StereoInfo::resolve(word.as_ref().and_then(|w| w.word()), &quiver_api::perf::LayerStereo::from_status(s))
 }
 
 pub fn layer_status(dir: &Path) -> Option<quiver_perf::LayerStatus> {
@@ -280,8 +282,9 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
     let alive = st.as_ref().is_some_and(|s| s.at.is_some_and(|t| (chrono::Utc::now() - t).num_seconds() < 5));
     if json {
         let p = panel.as_ref().map(|p| serde_json::json!({ "control": format!("{:?}", p.control()), "capturing": p.capture(now), "input": format!("{:?}", p.input()), "layer": format!("{:?}", p.layer()), "cursor": p.cursor() }));
-        let stereo = layer_status.as_ref().map(lab_stereo);
-        return super::print_json(&serde_json::json!({ "sight": m.sight, "mounted": up.is_some(), "session_dir": dir, "quiver_sight": st, "quiver_sight_alive": alive, "panel_input": p, "stereo": stereo, "layer": layer_status.map(|s| serde_json::json!({ "extent": [s.extent_w, s.extent_h], "presents": s.presents, "flags": s.flags, "keys": s.keys, "key_panels": s.key_panels, "key_toggles": s.key_toggles, "stereo_setting": s.stereo_setting, "stereo_drawn": s.stereo_drawn })) }));
+        let stereo = layer_status.as_ref().zip(dir.as_deref()).map(|(s, d)| lab_stereo(s, d));
+        let sdk = run_dir.and_then(super::sdk::read_status);
+        return super::print_json(&serde_json::json!({ "sight": m.sight, "mounted": up.is_some(), "session_dir": dir, "quiver_sight": st, "quiver_sight_alive": alive, "panel_input": p, "stereo": stereo, "mod_sdk": sdk, "layer": layer_status.map(|s| serde_json::json!({ "extent": [s.extent_w, s.extent_h], "presents": s.presents, "flags": s.flags, "keys": s.keys, "key_panels": s.key_panels, "key_toggles": s.key_toggles, "stereo_setting": s.stereo_setting, "stereo_drawn": s.stereo_drawn })) }));
     }
     if !m.sight {
         println!("sight: off (quiver lab edit {0} sight=on, then quiver lab down {0} && quiver lab up {0})", inst.name);
@@ -318,7 +321,7 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
                 println!("refused (read-only): {r}");
             }
             if let Some(ls) = &layer_status {
-                let st = lab_stereo(ls);
+                let st = lab_stereo(ls, &dir);
                 let eyes = match st.stereo() {
                     quiver_perf::stereo::Stereo::Mono => String::new(),
                     s => {
@@ -327,8 +330,12 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
                     }
                 };
                 println!("stereo: {}{eyes}", st.line());
-                if st.source != "setting" {
-                    println!("  (a lab has no mod channel: set it with quiver lab edit {} env.{}=sbs|hsbs|tab|htab, then relaunch)", inst.name, quiver_perf::stereo::ENV_STEREO);
+                if st.source == "default" {
+                    println!(
+                        "  (no mod said a layout through the mod SDK; or set it with quiver lab edit {} env.{}=sbs|hsbs|tab|htab, then relaunch)",
+                        inst.name,
+                        quiver_perf::stereo::ENV_STEREO
+                    );
                 }
             }
         }
@@ -364,6 +371,21 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
     }
     if let Some(s) = layer_status {
         println!("layer status: {} presents, swapchain {}x{}, keys {:#x} (Shift+F2 {}, Shift+F3 {})", s.presents, s.extent_w, s.extent_h, s.keys, s.key_panels, s.key_toggles);
+    }
+    match run_dir.and_then(super::sdk::read_status) {
+        Some(conns) if !conns.is_empty() => {
+            for c in conns {
+                println!(
+                    "mod SDK: {} connected (protocol {}, {}{}), stereo {} — the instance's read-only endpoint",
+                    c.surface,
+                    c.proto,
+                    if c.sdk.is_empty() { "SDK" } else { &c.sdk },
+                    c.module.as_deref().map(|m| format!(", {m}")).unwrap_or_default(),
+                    c.stereo.as_deref().unwrap_or("not said")
+                );
+            }
+        }
+        _ => println!("mod SDK: no mod connected in this run"),
     }
     Ok(())
 }

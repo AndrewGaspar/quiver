@@ -424,7 +424,8 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
         }
         None => None,
     };
-    let store = StoreLaunch { args: material.args, env: Vec::new(), setup };
+    // The mod SDK channel goes through quiverd's broker, as a Ubisoft launch's does.
+    let store = StoreLaunch { args: material.args, env: Vec::new(), setup, broker: Some(d.broker.clone()) };
     let this = d.clone();
     tokio::spawn(async move {
         let started_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>> = Arc::default();

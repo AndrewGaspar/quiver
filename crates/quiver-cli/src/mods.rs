@@ -1048,7 +1048,7 @@ pub async fn run(client: &Client, game: &str, action: ModsAction) -> Result<()> 
             print_patches(&undone, &|id| id.clone());
         }
         ModsAction::Sdk { action: SdkAction::Status { json } } => {
-            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: product_id.0.as_ubisoft() })).await?;
+            let conns: Vec<ModSdkConnection> = client.call(Request::ModSdk(ModSdkRequest::Status { product_id: product_id.0.as_ubisoft(), game: (!product_id.0.is_ubisoft()).then_some(product_id.0) })).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&conns)?);
             } else {
@@ -1095,6 +1095,9 @@ fn print_sdk(game: &str, conns: &[ModSdkConnection]) {
         }
         if !c.options.is_empty() {
             println!("    applies live: {}", c.options.join(", "));
+        }
+        if let Some(s) = &c.stereo {
+            println!("    stereo layout: {s} (quiver_set_stereo_layout; Sight draws the HUD and panel per eye)");
         }
         for m in &c.metrics {
             let value = match &m.value {

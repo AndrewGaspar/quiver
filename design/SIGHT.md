@@ -1765,7 +1765,9 @@ across the frame. That is transient skew until the game restarts.
   - `output = hsbs` on a 1920x1080 instance: eyes 960x1080 squeezed, the overlay laid out at
     1920x1080 and squeezed with the game.
 
-  The lab has no mod channel, so these runs used the setting, not the SDK call.
+  The lab had no mod channel then, so these runs used the setting, not the SDK call. It has
+  one now (design/LAB.md §14): a lab mod's word reaches the lab's quiver-sight through the
+  instance's own read-only endpoint.
 
 **Not verified.**
 - The SDK path with a real mod, live: Torchbearer doesn't call `quiver_set_stereo_layout`

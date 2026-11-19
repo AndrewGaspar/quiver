@@ -950,6 +950,95 @@ pub struct StoreLaunch {
     pub env: Vec<(String, String)>,
     /// Run in the prefix before the game, each to the end (a failure is reported, not fatal).
     pub setup: Vec<SetupRun>,
+    /// quiverd's broker (`host:port`): the game's mods reach Quiver through a mods-only
+    /// `quiver-bridge` ([`start_mods_bridge`]) relaying to it. `None`: no mod SDK channel.
+    pub broker: Option<String>,
+}
+
+/// A mods-only `quiver-bridge` serving a launch's mod SDK pipe (`QUIVER_MODS_PIPE`): the
+/// game's sibling, as in Ubisoft launches, so the game learns the pipe from us.
+pub struct ModsBridge {
+    child: Child,
+    pub pipe: String,
+    pub log: PathBuf,
+}
+
+/// Whether the bridge at `path` knows the mods-only role ([`quiver_ipc::MODS_ONLY_MARKER`]):
+/// an older one would serve Connect's pipes for a mods-only context.
+pub fn bridge_knows_mods_only(path: &Path) -> bool {
+    let marker = quiver_ipc::MODS_ONLY_MARKER.as_bytes();
+    std::fs::read(path).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker))
+}
+
+/// Start a mods-only bridge for another store's game (Epic): the mod SDK pipe named after
+/// the plan's session, its channels relayed to `relay` for the plan's game. No Connect pipes,
+/// no Ubisoft services. Inside the launch's namespace when it has one (first in, like the
+/// Ubisoft path's bridge: the wineserver starts with it). Waits until the pipe is up.
+async fn start_mods_bridge(cfg: &Config, proton: &Proton<'_>, game: &Game, plan: &crate::mods::Plan, relay: &str, ns: Option<&crate::overlay::Namespace>) -> Result<ModsBridge> {
+    let session = plan.session.as_deref().filter(|s| quiver_proto::modsdk::is_session_id(s)).context("the launch has no session id")?;
+    let game_ref = plan.game.unwrap_or_else(|| game.game_ref());
+    let bridge_exe = cfg.bridge_exe()?;
+    if !bridge_knows_mods_only(&bridge_exe) {
+        bail!("{} is a bridge from before the mods-only role (install a current Quiver)", bridge_exe.display());
+    }
+    install_prefix_bridge(&game.prefix, &bridge_exe)?;
+    let run_dir = run_dir(&game.prefix);
+    let ctx = quiver_ipc::LaunchContext::mods_only(session, relay, &game_ref.to_string(), plan.api.profile.as_ref().map(|p| p.id.as_str()));
+    let ctx_path = run_dir.join("mods-context.json");
+    crate::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
+    let log = run_dir.join("bridge.log");
+    let _ = std::fs::remove_file(&log);
+    let mut cmd = proton.command(&[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    if let Some(ns) = ns {
+        ns.enter(cmd.as_std_mut(), None)?;
+    }
+    // The prefix's first Wine process, so the wineserver and Wine's services start with its
+    // environment: the game's settings, as in Ubisoft launches.
+    for (k, v) in &plan.api.settings.env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .env("QUIVER_SESSION", session)
+        .env(ENV_GAME, game_ref.to_string())
+        .env("QUIVER_BRIDGE_LOG", win_path(&log))
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(run_dir.join("bridge-proton.log"))?)
+        .kill_on_drop(true)
+        .spawn()?;
+    // The prefix's first Wine process starts the wineserver: give it time.
+    for _ in 0..150 {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("(mods)") {
+            return Ok(ModsBridge { child, pipe: ctx.mods_pipe.unwrap_or_default(), log });
+        }
+        if text.contains("mods can't reach Quiver") {
+            let _ = child.start_kill();
+            bail!("the bridge couldn't make the mod pipe; see {}", log.display());
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("quiver-bridge exited early ({status}); see {}", log.display());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _ = child.start_kill();
+    stop_bridge_processes(proton);
+    bail!("quiver-bridge didn't make the mod pipe in time; see {}", log.display())
+}
+
+/// Stop the mods-only bridge: its Wine process (the `proton run` wrapping it waits for it),
+/// then the wrapper.
+async fn stop_mods_bridge(proton: &Proton<'_>, b: &mut ModsBridge) {
+    stop_bridge_processes(proton);
+    let _ = b.child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(5), b.child.wait()).await;
+}
+
+/// SIGKILL the bridge's Wine processes in the prefix (outside containers).
+fn stop_bridge_processes(proton: &Proton<'_>) {
+    for pid in prefix_processes(proton, |cmd| cmd.contains("quiver-bridge.exe")) {
+        // SAFETY: plain kill(2) on a pid we just read from /proc.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
 }
 
 /// An installer run once in a prefix.
@@ -1038,6 +1127,23 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     };
 
     events(LaunchEvent::Status("Starting…".into()));
+    // The mod SDK channel (design/MOD-CONFIG.md): a mods-only bridge serves the game's pipe.
+    // Never in the way of the launch: without it the game starts without the SDK.
+    let mut mods_bridge = match &store.broker {
+        None => None,
+        Some(relay) => match start_mods_bridge(cfg, &proton, game, plan, relay, ns.as_ref()).await {
+            Ok(b) => {
+                tracing::info!(game = %plan.game.unwrap_or_else(|| game.game_ref()), pipe = %b.pipe, log = %b.log.display(), "mod SDK pipe up (mods-only bridge)");
+                events(LaunchEvent::Detail(vec![format!("mod SDK: {} (mods-only bridge)", b.pipe)]));
+                Some(b)
+            }
+            Err(e) => {
+                tracing::warn!(game = %plan.game.unwrap_or_else(|| game.game_ref()), "no mod SDK channel this launch: {e:#}");
+                events(LaunchEvent::Detail(vec![format!("mod SDK: none this launch ({e:#})")]));
+                None
+            }
+        },
+    };
     let exe = game.install_dir.join(&game.exe);
     let exe_win = win_path(&exe);
     let mut args = vec![exe_win.as_str()];
@@ -1066,11 +1172,18 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     if let Some(g) = &plan.game {
         cmd.env(ENV_GAME, g.to_string());
     }
+    // The bridge is the game's sibling, so the game learns its mod pipe from us.
+    if let Some(b) = &mods_bridge {
+        cmd.env("QUIVER_MODS_PIPE", &b.pipe);
+    }
     cmd.current_dir(workdir).stdout(Stdio::null()).stderr(std::fs::File::create(run_dir.join("game.log"))?).kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let started = wait_for_game_start(&proton, &mut child).await;
     if !started {
         let _ = child.start_kill();
+        if let Some(b) = mods_bridge.as_mut() {
+            stop_mods_bridge(&proton, b).await;
+        }
         let _ = proton.wineserver().arg("-k").status().await;
         bail!("the game didn't start; see {}", run_dir.join("game.log").display());
     }
@@ -1085,7 +1198,15 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
         }
         pids = now;
     }
-    let status = child.try_wait().ok().flatten();
+    let status = match mods_bridge.as_mut() {
+        None => child.try_wait().ok().flatten(),
+        Some(b) => {
+            // `proton run` waits for every process in the prefix, the bridge included: stop
+            // it, then take the game's exit status as `proton run` reports it.
+            stop_mods_bridge(&proton, b).await;
+            tokio::time::timeout(Duration::from_secs(10), child.wait()).await.ok().and_then(|s| s.ok())
+        }
+    };
     let _ = child.start_kill();
     let _ = proton.wineserver().arg("-k").status().await;
     let _ = child.wait().await;
@@ -1140,6 +1261,14 @@ pub fn in_container(pid: u32) -> bool {
 /// Game processes in the prefix: Windows executables other than the bridge, Wine's own
 /// services and Proton's wrappers, outside containers.
 fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
+    prefix_processes(proton, |cmd| {
+        cmd.contains(".exe") && !cmd.contains("quiver-bridge") && !cmd.contains("ubi-bridge") && !cmd.contains("\\windows\\") && !cmd.contains("proton")
+    })
+}
+
+/// Processes in the prefix (by `WINEPREFIX`, outside containers) whose lowercased command
+/// line `wanted` accepts.
+fn prefix_processes(proton: &Proton<'_>, wanted: impl Fn(&str) -> bool) -> Vec<u32> {
     let prefix = format!("WINEPREFIX={}", proton.prefix.display());
     std::fs::read_dir("/proc")
         .into_iter()
@@ -1154,12 +1283,7 @@ fn game_processes(proton: &Proton<'_>) -> Vec<u32> {
             let in_prefix = env.split(|&b| b == 0).any(|kv| kv.starts_with(prefix.as_bytes()));
             let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
             let cmd = String::from_utf8_lossy(&cmd).to_lowercase();
-            let is_game = cmd.contains(".exe")
-                && !cmd.contains("quiver-bridge")
-                && !cmd.contains("ubi-bridge")
-                && !cmd.contains("\\windows\\")
-                && !cmd.contains("proton");
-            (in_prefix && is_game).then_some(pid)
+            (in_prefix && wanted(&cmd)).then_some(pid)
         })
         .collect()
 }

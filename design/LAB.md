@@ -322,7 +322,7 @@ quiverd decides by that id, never by what a script remembers to pass:
 | Ubisoft play time (UbiServices `playsession` POST/PUT/DELETE) | the broker's `PlaySession` lease reports it | the bridge passes its context's session with `PlaySession`; the broker holds it as the `lab` holder; `PlaySessions` never starts, beats or ends a session only lab holders hold (`playsession::reportable`). If the user later joins the same game, their share is reported from then. |
 | Quiver's play history (`games/<id>/sessions`, `on_finished`) | recorded | not recorded while only lab holders held it (`playsession::finished`) |
 | Ubisoft achievements (`AchievementEarned`: local earned set, report journal, UbiServices) | recorded and reported | the bridge passes its session; the broker answers `Ok` and records nothing (`broker::lab_answer`) |
-| Mod channel (Options, perf metrics, mod revisions) | served | refused for lab sessions (`broker::lab_answer`, and `ModRegistry::serve` again); the perf hub never files a lab session's metrics under the user's session (`PerfHub::with_session`). A lab mod is configured through its files (`quiver lab set`). |
+| Mod channel (Options, perf metrics, mod revisions) | served by quiverd | served **inside the instance**, read-only (section 14): its bridge relays to the supervisor's own endpoint, never quiverd's broker. quiverd still refuses lab sessions (`broker::lab_answer`, and `ModRegistry::serve` again); the perf hub never files a lab session's metrics under the user's session (`PerfHub::with_session`). A lab mod is configured through its files (`quiver lab set`). |
 | Ubisoft cloud saves | pulled before, pushed after | never: the bridge never uploads, Connect's `syncsavegames` is forced off, and quiverd's save sync is only around its own launches |
 | Epic play time | queued after the session, reported | `Epic::queue_session` refuses a lab session id (never queued, held or sent); lab launches never go through quiverd's Epic session (`epicgame::begin/end`: no save sync, no achievement polling) |
 | Epic cloud saves (EGS savesync) | around quiverd's launches | never: lab launches don't go through quiverd's Epic session |
@@ -782,8 +782,8 @@ misbehave.
 - Steamworks titles (section 7).
 - A Quiver mod profile (Mods v2 stack) as an instance's mod: today a mod is a folder copied
   over the install; the profile route (overlays, config patches) is the next step.
-- The mod SDK channel for lab sessions (refused on purpose; would need a lab-scoped Options
-  store so a lab mod's options never reach the user's).
+- Live Options for a lab mod (`set` from a lab Options page): the lab's mod channel is
+  read-only (section 14).
 - The app: instances aren't shown in Quiver's app.
 - Analysis tools that read a specific mod's captures (frame dumps, per-frame draw counts).
 
@@ -1029,3 +1029,44 @@ primaries:
 - **Panel and HUD:** as above.
 
 Not run: a real game in HDR (AWR, Origins), D3D11 through DXVK in HDR, a 32-bit game.
+
+## 14. The mod SDK in an instance (2026-11-19)
+
+A mod in an instance connects through the mod SDK (`quiver_mod.h`) as it does at home, so
+what it says reaches Sight in the instance: Torchbearer's `quiver_set_stereo_layout("hsbs")`
+puts the HUD and the panel in both eyes with no `sight.stereo` setting. It used to be
+refused: quiverd's registry feeds the person's Options, perf history and mod revisions, and a
+lab mod must reach none of them. Now the channel ends **in the instance**, read-only.
+
+- **The endpoint**: the supervisor runs a `ModRegistry::lab` (`crates/quiver-cli/src/lab/sdk.rs`)
+  on the host's loopback, at a port `up` picks (`mods-port`, the same as last time if free)
+  and forwards into the container at the same port (`podman::Host::mods_port`, pasta `-T`). It
+  takes only this instance's lab sessions (`lab-<instance>-r<N>`), validated as quiverd
+  validates every channel. quiverd's registry still refuses lab sessions, so a channel that
+  reaches it anyway (an older bridge) ends there as before.
+- **The bridge**: an Epic (or DRM-free) launch runs the bridge in launcher mode with a
+  mods-only context (`--run context.json -- game.exe …`: the pipe, the relay to the endpoint,
+  the game; no Connect pipes, no `UPLAY_ARGUMENTS`, the licence arguments not logged). A Ubisoft
+  launch's context gets `mods_relay` (the endpoint), so its mods' channels go there while
+  Denuvo still goes to quiverd's broker. No endpoint (a container from before it: `down`/`up`)
+  or a bridge without `quiver_ipc::MODS_ONLY_MARKER`: no SDK this run, and a `mod SDK:` note
+  says why. The launch never fails over it.
+- **Read-only**: the welcome carries no values (the mod reads its files; `quiver lab set`
+  changes them), a mod's own `changed` is logged in `events.jsonl` as "kept in the instance,
+  not saved", and nothing sets options or runs actions on it. Its metrics stay in its
+  connection's status.
+- **What it writes**: `runs/r<N>/sdk.json` (the run's connections: surface, protocol, module,
+  caps, metrics, stereo) and, for a Sight instance, `sdk-stereo.json` in the run's session dir
+  (`quiver_api::lab::SDK_STEREO_FILE`: layout, surface, connection), removed when the mod
+  withdraws its word or its connection goes. The run's lab `quiver-sight` reads it five times
+  a second and resolves the layout as quiverd does (the mod's word, else the launch's
+  setting, else mono).
+- **Status**: `quiver lab sight N status` prints `stereo: hsbs (mod: torchbearer (SDK); setting
+  auto) — the HUD and panel are laid out at 1920x1080 and drawn in each eye` and a `mod SDK:`
+  line per connection; `--json` has `mod_sdk`. The supervisor's events say `mod SDK: torchbearer
+  connected (protocol 3, …)` and `mod SDK: torchbearer says its frames are hsbs`.
+
+Tests: `lab::sdk::tests::lab_channel_is_read_only_and_carries_stereo` (welcome without values,
+the word in the session dir and gone with its connection, a change kept in the instance,
+other instances' and the person's sessions refused), `modsdk::tests::lab_sessions_only_in_a_lab_registry`,
+`podman::tests::epic_names_go_to_the_eos_proxy` (the forward).

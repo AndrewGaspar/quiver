@@ -77,6 +77,23 @@ pub async fn run() -> Result<()> {
     // game may start, and its mods connect early.
     let mods_pipe = mods::pipe_name();
     mods::start(&mods_pipe);
+    // The mods-only role (another store's game): the SDK pipe and its relay, nothing of
+    // Connect. The marker is what launchers check for before giving a bridge this role.
+    if context().is_some_and(|c| c.mods_only) {
+        log!("mods-only ({}): no Connect pipes, no Ubisoft services", quiver_ipc::MODS_ONLY_MARKER);
+        if let BridgeArgs::Run { exe, args, .. } = args {
+            let code = match run_game(&exe, &args, &mods_pipe).await {
+                Ok(c) => c,
+                Err(e) => {
+                    log!("{e:#}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+        // Serving for a game quiverd starts itself (a sibling): until it's stopped.
+        std::future::pending::<()>().await;
+    }
     // Own every pipe before anything can look for Connect.
     let mut tasks = Vec::new();
     for (name, kind) in PIPES {
@@ -121,12 +138,18 @@ pub async fn run() -> Result<()> {
 /// Launcher mode: start the game as Connect would, wait for it, then for any process it
 /// handed the SDK connection to (a relaunch), and return its exit code.
 async fn run_game(exe: &str, args: &[String], mods_pipe: &str) -> Result<i32> {
-    let uplay_id = context().map(|c| c.uplay_id).ok_or_else(|| anyhow!("--run needs a launch context"))?;
+    let ctx = context().ok_or_else(|| anyhow!("--run needs a launch context"))?;
     let workdir = quiver_ipc::run::win_parent(exe);
-    let uplay_args = quiver_ipc::run::uplay_arguments(uplay_id, exe, workdir);
-    log!("starting {exe} {args:?} in {workdir} (UPLAY_ARGUMENTS for {uplay_id})");
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.args(args).current_dir(workdir).env("UPLAY_ARGUMENTS", &uplay_args);
+    cmd.args(args).current_dir(workdir);
+    if ctx.mods_only {
+        // Another store's arguments may carry its licence (Epic's exchange code): not logged.
+        log!("starting {exe} with {} argument(s) in {workdir} (mods only)", args.len());
+    } else {
+        let uplay_args = quiver_ipc::run::uplay_arguments(ctx.uplay_id, exe, workdir);
+        log!("starting {exe} {args:?} in {workdir} (UPLAY_ARGUMENTS for {})", ctx.uplay_id);
+        cmd.env("UPLAY_ARGUMENTS", &uplay_args);
+    }
     // Here the bridge is the game's parent: it tells the game (and its mods) where to
     // connect itself.
     cmd.env("QUIVER_MODS_PIPE", mods_pipe);

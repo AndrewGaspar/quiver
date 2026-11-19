@@ -640,6 +640,22 @@ bridge relays each mod connection to quiverd as a stream (a new `BrokerRequest::
 that turns the connection into a duplex message stream), and quiverd scopes it to the
 session's profile. Mods never see account data, a token or a TCP port (steer 10).
 
+*2026-11-19, other stores.* An Epic launch (`launcher::play_store_game`) has no Connect to stand
+in for, so it used to start no bridge and set no `QUIVER_MODS_PIPE`: `quiver_open` returned the
+no-op handle, and everything said through it (Torchbearer's `quiver_set_stereo_layout("hsbs")`)
+was lost. It now starts the bridge in a **mods-only role** (`LaunchContext::mods_only`): the mod
+pipe and its relay to the broker, nothing else (no Connect pipes, no `UPLAY_ARGUMENTS`, no
+Ubisoft services; the licence arguments are never logged). As in Ubisoft launches the bridge
+is the game's sibling, started first (into the mods' namespace, with the game's settings env)
+and stopped once the game's processes are gone, so `proton run` returns with the game's exit
+code. It never blocks the launch: no bridge, an older bridge (no `MODS_ONLY_MARKER`), or a pipe
+not up within 30 s, and the game starts without the SDK (logged, and a line in the job
+detail). The channel carries the game (`ModChannel.game`, `epic:<app>`; `uplay_id` 0), and
+`ModSdkConnection.game` says it, so `quiver mods <epic game> sdk status` lists it. quiverd logs
+`mod connected through the SDK` (game, surface, module, protocol, session) and `mod set its
+stereo layout` at info. Steam's `quiver steam-run` hook for non-Ubisoft games still has no
+channel (it runs Steam's own command unchanged; see design/STORE-STEAM.md §9).
+
 **Wire format.** 4-byte little-endian length, then a UTF-8 JSON object with a `t` field.
 Unknown `t` values and unknown fields are ignored both ways. `proto` is an integer that only
 grows; each side speaks `min(theirs, mine)`. *2026-11-19:* the current protocol is **3**, which adds

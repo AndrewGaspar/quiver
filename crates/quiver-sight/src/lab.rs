@@ -12,9 +12,11 @@
 //!   layer's key counters in its status block, as quiverd's ring thread reads them.
 //! - **The panel's data**: the instance's game and run; Mods, Tweaks and Achievements say
 //!   they're read-only in a lab (mod settings go through `quiver lab set`).
-//! - **Stereo** (design/SIGHT.md §15): a lab has no mod channel, so the layout is the
-//!   launch's `sight.stereo` setting, which the layer reports from `QUIVER_SIGHT_STEREO` in
-//!   the game's environment (`quiver lab edit N env.QUIVER_SIGHT_STEREO=sbs`).
+//! - **Stereo** (design/SIGHT.md §15): a live mod's word (`quiver_set_stereo_layout`) through
+//!   the instance's own read-only mod SDK endpoint, which its supervisor writes into the session
+//!   dir (`quiver_api::lab::SDK_STEREO_FILE`); else the launch's `sight.stereo` setting, which
+//!   the layer reports from `QUIVER_SIGHT_STEREO` in the game's environment
+//!   (`quiver lab edit N env.QUIVER_SIGHT_STEREO=sbs`).
 //! - **Actions**: every change the panel would send to quiverd (an option, a Tweak, HUD
 //!   settings, quitting the game) is refused, logged, and shown as refused in the panel; showing
 //!   or hiding the HUD only changes this process's HUD.
@@ -300,6 +302,7 @@ fn feed(l: &Lab, dir: &SessionDir) {
     let mut sent_gen = u64::MAX;
     let mut tick = 0u64;
     let mut last_shape: Option<Shape> = None;
+    let mut sdk_stereo: Option<quiver_api::lab::SdkStereo> = None;
     loop {
         std::thread::sleep(Duration::from_millis(50));
         tick += 1;
@@ -314,6 +317,14 @@ fn feed(l: &Lab, dir: &SessionDir) {
                 ring = Some((p, r));
                 times.clear();
                 keys = None;
+            }
+        }
+        // A live mod's stereo word (the instance's mod SDK endpoint writes it), 5 times a second.
+        if tick.is_multiple_of(4) {
+            let now = quiver_api::lab::SdkStereo::read(dir.path());
+            if now != sdk_stereo {
+                tracing::info!(stereo = ?now.as_ref().map(|w| (&w.layout, &w.surface)), "lab: the mod SDK's stereo word");
+                sdk_stereo = now;
             }
         }
         let Some((_, r)) = ring.as_mut() else { continue };
@@ -353,7 +364,7 @@ fn feed(l: &Lab, dir: &SessionDir) {
         let on = l.hud_on.load(Ordering::Relaxed);
         let layout = l.layout.load(Ordering::Relaxed) % LAYOUTS.len();
         let (ready, blurring) = (st.flags & LAYER_BLUR_READY != 0, st.flags & LAYER_BLURRING != 0);
-        let stereo = Some(StereoInfo::resolve(None, &LayerStereo::from_status(&st)));
+        let stereo = Some(StereoInfo::resolve(sdk_stereo.as_ref().and_then(|w| w.word()), &LayerStereo::from_status(&st)));
         let shape = (on, layout, extent, ready, blurring, stereo.clone());
         let hud_gen = l.hud_gen.load(Ordering::Relaxed);
         // A new model: on any change of shape, and twice a second while shown (the values).

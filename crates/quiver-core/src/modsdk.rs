@@ -49,10 +49,22 @@ pub fn new_session_id() -> String {
     s
 }
 
+/// The game a `ModChannel` request names (`game`, appended): `None` for a Ubisoft product
+/// (the request's `uplay_id`) or when not given.
+pub fn channel_game(game: Option<&str>) -> Result<Option<quiver_api::GameRef>> {
+    match game {
+        None => Ok(None),
+        Some(g) => Ok(Some(quiver_api::GameRef::parse(g).map_err(|e| anyhow::anyhow!("{e}"))?).filter(|g| !g.is_ubisoft())),
+    }
+}
+
 /// Who a channel belongs to, from the bridge's `ModChannel` request.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelOrigin {
     pub product_id: u32,
+    /// The game when it isn't the Ubisoft product `product_id` (an Epic game; `product_id`
+    /// is then 0).
+    pub game: Option<quiver_api::GameRef>,
     pub account: Option<String>,
     pub session: Option<String>,
     pub profile: Option<String>,
@@ -183,7 +195,13 @@ struct Conn {
     pending: HashMap<u64, Pending>,
 }
 
+/// The lab sessions a lab registry takes ([`ModRegistry::lab`]).
+type LabSessions = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct ModRegistry {
+    /// A `quiver lab` instance's own registry ([`ModRegistry::lab`]): the lab sessions it
+    /// serves (its instance's). quiverd's (`None`) serves everything but lab sessions.
+    lab: Option<LabSessions>,
     options: RwLock<Arc<dyn ModOptionsSink>>,
     metrics: RwLock<Arc<dyn ModMetricsSink>>,
     conns: Mutex<BTreeMap<u64, Conn>>,
@@ -241,7 +259,21 @@ fn def_at(defs: &[DeclaredMetric], index: u16) -> Option<&DeclaredMetric> {
 
 impl ModRegistry {
     pub fn new(options: Arc<dyn ModOptionsSink>, metrics: Arc<dyn ModMetricsSink>) -> Arc<Self> {
+        Self::make(None, options, metrics)
+    }
+
+    /// A lab instance's registry (design/LAB.md "Mod SDK"): it takes channels of lab
+    /// sessions (`lab-<instance>-r<run>`) that `accept` takes (its instance's), never anyone
+    /// else's. Its sinks keep what mods say inside the instance: the person's Options, perf
+    /// history and mod revisions never see a lab mod (quiverd's registry still refuses lab
+    /// sessions).
+    pub fn lab(accept: impl Fn(&str) -> bool + Send + Sync + 'static, options: Arc<dyn ModOptionsSink>, metrics: Arc<dyn ModMetricsSink>) -> Arc<Self> {
+        Self::make(Some(Box::new(accept)), options, metrics)
+    }
+
+    fn make(lab: Option<LabSessions>, options: Arc<dyn ModOptionsSink>, metrics: Arc<dyn ModMetricsSink>) -> Arc<Self> {
         Arc::new(Self {
+            lab,
             options: RwLock::new(options),
             metrics: RwLock::new(metrics),
             conns: Mutex::new(BTreeMap::new()),
@@ -278,10 +310,16 @@ impl ModRegistry {
         self.events.subscribe()
     }
 
-    /// Connected mods, for one game or all, oldest first.
+    /// Connected mods, for one Ubisoft product or all, oldest first.
     pub fn connections(&self, product_id: Option<u32>) -> Vec<ModSdkConnection> {
         let conns = self.conns.lock().unwrap();
-        conns.values().filter(|c| product_id.is_none_or(|p| c.info.product_id == p)).map(|c| c.info.clone()).collect()
+        conns.values().filter(|c| product_id.is_none_or(|p| c.info.game.is_none() && c.info.product_id == p)).map(|c| c.info.clone()).collect()
+    }
+
+    /// Connected mods of one game, any store's, oldest first.
+    pub fn connections_of(&self, game: quiver_api::GameRef) -> Vec<ModSdkConnection> {
+        let conns = self.conns.lock().unwrap();
+        conns.values().filter(|c| c.info.game_ref() == game).map(|c| c.info.clone()).collect()
     }
 
     /// The options some connection of `surface` applies live.
@@ -395,14 +433,18 @@ impl ModRegistry {
                     Ok(Some(l)) => l,
                     _ => return,
                 };
-                let Ok(quiver_ipc::BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid }) = serde_json::from_slice(&first)
+                let Ok(quiver_ipc::BrokerRequest::ModChannel { uplay_id, account_id, session, profile, conn, client_pid, game }) = serde_json::from_slice(&first)
                 else {
+                    return;
+                };
+                let Ok(game) = channel_game(game.as_deref()) else {
+                    let _ = w.write_all(b"{\"error\":{\"message\":\"bad game ref\"}}\n").await;
                     return;
                 };
                 if w.write_all(b"\"ok\"\n").await.is_err() {
                     return;
                 }
-                let origin = ChannelOrigin { product_id: uplay_id, account: account_id, session, profile, bridge_conn: conn, client_pid };
+                let origin = ChannelOrigin { product_id: uplay_id, game, account: account_id, session, profile, bridge_conn: conn, client_pid };
                 if let Err(e) = this.serve(origin, r, w).await {
                     tracing::info!("mod channel ended: {e:#}");
                 }
@@ -417,8 +459,12 @@ impl ModRegistry {
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin,
     {
-        if origin.session.as_deref().is_some_and(quiver_api::lab::is_lab_session) {
-            anyhow::bail!("lab sessions have no mod channel");
+        let lab_session = origin.session.as_deref().filter(|s| quiver_api::lab::is_lab_session(s));
+        match (&self.lab, lab_session) {
+            (None, Some(_)) => anyhow::bail!("lab sessions have no mod channel here (a lab instance serves its own)"),
+            (Some(_), None) => anyhow::bail!("a lab instance's registry serves lab sessions only"),
+            (Some(accept), Some(s)) if !accept(s) => anyhow::bail!("session {s} isn't this lab instance's"),
+            _ => {}
         }
         let first = match tokio::time::timeout(HELLO_TIMEOUT, read_line_capped(&mut reader, wire::MAX_LINE)).await {
             Ok(Ok(Some(l))) => l,
@@ -463,12 +509,14 @@ impl ModRegistry {
         });
         self.conns.lock().unwrap().insert(id, Conn { info: info.clone(), tx, next_seq: 0, pending: HashMap::new() });
         tracing::info!(
-            product_id = info.product_id,
+            game = %info.game_ref(),
             surface = %info.surface,
+            module = info.module.as_deref().unwrap_or("?"),
             conn = id,
             proto = info.proto,
             sdk = %info.sdk,
             caps = ?granted,
+            session = info.session.as_deref().unwrap_or("-"),
             "mod connected through the SDK"
         );
         self.options_sink().connected(&info);
@@ -524,7 +572,7 @@ impl ModRegistry {
         let gone = self.conns.lock().unwrap().remove(&id);
         if let Some(c) = gone {
             // Pending acks resolve as Dropped (their senders drop here).
-            tracing::info!(product_id = c.info.product_id, surface = %c.info.surface, conn = id, refused = s.refused, "mod disconnected: {result:?}");
+            tracing::info!(game = %c.info.game_ref(), surface = %c.info.surface, conn = id, refused = s.refused, "mod disconnected: {result:?}");
             self.options_sink().disconnected(&c.info);
             self.metrics_sink().disconnected(&c.info);
             let _ = self.events.send(ModEvent { connected: false, conn: c.info });
@@ -545,12 +593,14 @@ impl ModRegistry {
         let granted: Vec<String> = wire::CAPS.iter().filter(|c| wanted.contains(c)).map(|c| (*c).to_owned()).collect();
         let module = hello.module.as_deref().map(|m| wire::sanitize(m.rsplit(['\\', '/']).next().unwrap_or(m), 64));
         let conns = self.conns.lock().unwrap();
-        if conns.len() >= MAX_CONNECTIONS || conns.values().filter(|c| c.info.product_id == origin.product_id).count() >= MAX_PER_GAME {
+        let game = origin.game.unwrap_or(quiver_api::GameRef::ubisoft(origin.product_id));
+        if conns.len() >= MAX_CONNECTIONS || conns.values().filter(|c| c.info.game_ref() == game).count() >= MAX_PER_GAME {
             return Err("too many mod connections".into());
         }
         let info = ModSdkConnection {
             conn: self.next_id.fetch_add(1, Ordering::Relaxed),
             product_id: origin.product_id,
+            game: origin.game.filter(|g| !g.is_ubisoft()),
             surface: hello.surface.clone(),
             sdk: wire::sanitize(&hello.sdk, 64),
             proto,
@@ -686,7 +736,13 @@ impl ModRegistry {
                 if let Some(info) = self.with_info(s.id, |i| i.stereo = layout.clone())
                     && before != layout
                 {
-                    tracing::info!(product_id = info.product_id, surface = %info.surface, stereo = ?layout, "mod set its stereo layout");
+                    tracing::info!(
+                        game = %info.game_ref(),
+                        surface = %info.surface,
+                        session = info.session.as_deref().unwrap_or("-"),
+                        stereo = layout.as_deref().unwrap_or("withdrawn"),
+                        "mod set its stereo layout"
+                    );
                     self.metrics_sink().stereo(&info);
                 }
             }

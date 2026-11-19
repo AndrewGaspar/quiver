@@ -14,6 +14,46 @@ pub const SESSION_PREFIX: &str = "lab-";
 /// The play-session holder name of a lab launch's bridge.
 pub const LAB_HOLDER: &str = "lab";
 
+/// In a run's Sight session dir: the stereo layout a mod in the instance declared through the
+/// mod SDK (`quiver_set_stereo_layout`), written by the instance's supervisor (its read-only
+/// mod endpoint, design/LAB.md "Mod SDK") and read by the run's lab `quiver-sight`. Absent: no
+/// mod said one (or it withdrew it), so the launch's setting applies.
+pub const SDK_STEREO_FILE: &str = "sdk-stereo.json";
+
+/// In a run's folder: the mods connected through the SDK to the instance's endpoint
+/// (`Vec<mods::ModSdkConnection>`, rewritten as they change).
+pub const SDK_STATUS_FILE: &str = "sdk.json";
+
+/// [`SDK_STEREO_FILE`]'s content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SdkStereo {
+    /// `sbs`, `hsbs`, `tab`, `htab` or `mono` (`quiver_perf::stereo::Stereo::as_str`).
+    pub layout: String,
+    /// The mod's surface id (its `hello`).
+    pub surface: String,
+    /// The endpoint's connection id: the word goes with its connection.
+    pub conn: u64,
+}
+
+impl SdkStereo {
+    /// The word in a run's Sight session dir, if a live mod said one.
+    pub fn read(session_dir: &std::path::Path) -> Option<SdkStereo> {
+        serde_json::from_slice(&std::fs::read(session_dir.join(SDK_STEREO_FILE)).ok()?).ok()
+    }
+
+    /// The layout and who said it, as `perf::StereoInfo::resolve` takes it (`None`: not a
+    /// layout; the file is the instance's, so it's checked like any mod's word).
+    pub fn word(&self) -> Option<(quiver_perf::stereo::Stereo, &str)> {
+        Some((quiver_perf::stereo::Stereo::parse(&self.layout)?, self.surface.as_str()))
+    }
+}
+
+/// The run a lab session id names, when it's `instance`'s (`lab-<instance>-r<run>`).
+pub fn session_run(session: &str, instance: &str) -> Option<u32> {
+    let run: u32 = session.rsplit_once("-r")?.1.parse().ok()?;
+    (session_id(instance, run) == session).then_some(run)
+}
+
 /// A lab launch's session id: `lab-` and then `[A-Za-z0-9_-]`, at most 40 bytes (what
 /// `quiver_proto::modsdk::is_session_id` accepts, so it can name the mod pipe too).
 pub fn is_lab_session(s: &str) -> bool {
