@@ -489,7 +489,9 @@ pub unsafe extern "system" fn create_xlib_surface_khr(
     let r = unsafe { create_surface(c"vkCreateXlibSurfaceKHR", LAYER_X11_SURFACE, instance, ci.cast(), alloc, out) };
     if r == vk::Result::SUCCESS {
         // SAFETY: the app's create info. The window, for whether it's in front (focus.rs).
-        guard("vkCreateXlibSurfaceKHR", || unsafe { crate::focus::note_x11_window((*ci).window) });
+        // Xlib's `Window` is a C `unsigned long`: 32 bits in the i686 layer, 64 in x86_64.
+        #[allow(clippy::useless_conversion)]
+        guard("vkCreateXlibSurfaceKHR", || unsafe { crate::focus::note_x11_window(u64::from((*ci).window)) });
     }
     r
 }
