@@ -1,9 +1,9 @@
 //! The per-instance supervisor (`quiver lab supervise <i>`, started by `quiver lab up`):
 //! the one owner of an instance's launches. It
 //!
-//! - launches on request (`launch`): refuses while the person plays, kills every Wine
-//!   process in the instance, re-checks the Connect guard, puts the mod's files in, applies
-//!   the graphics profile, gets fresh launch material from quiverd, starts the game;
+//! - launches on request (`launch`): kills every Wine process in the instance, re-checks
+//!   the Connect guard, puts the mod's files in, applies the graphics profile, gets fresh
+//!   launch material from quiverd, starts the game;
 //! - kills on request (`kill`);
 //! - watches the run: the readiness ladder (process, window, frame), the mod's state file,
 //!   the game's exit, and Connect (a Connect process kills the run);
@@ -254,13 +254,7 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let inst = &sup.inst;
     let m = inst.load()?;
     let container_id = ops::running_id(&inst.container()).with_context(|| format!("instance '{}' isn't up (quiver lab up {})", inst.name, inst.name))?;
-    // The person's play wins.
     let client = block_on(quiver_api::Client::connect_running(&format!("lab:{}", inst.name))).ok();
-    let sessions: Option<Value> = client.as_ref().and_then(|c| block_on(c.call::<Value>(Request::Sessions)).ok());
-    let playing = ops::person_playing(sessions.as_ref());
-    if !playing.is_empty() {
-        bail!("not launching: the user is playing ({}); try again once they stop", playing.join("; "));
-    }
     if m.licence != Licence::None && client.is_none() {
         bail!("quiverd isn't running: it mints this game's licence (start it with `quiver status`)");
     }

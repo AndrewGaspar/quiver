@@ -53,7 +53,7 @@ A game Quiver launched has `QUIVER_GAME=<ref>` and `QUIVER_SESSION=<id>` in its 
 
   Never read token or credential files or keyring entries.
 - **Ubisoft has one live login per account, and quiverd holds it.** Never run Ubisoft Connect alongside Quiver, and never start a second quiverd against the real data dir. To run a Ubisoft game somewhere else (a container, another prefix), use `quiver context` or `quiver lab`, which borrow quiverd's login.
-- **The person's play comes first.** Check `quiver sessions` before anything GPU-heavy, and don't stop, restart or relaunch a game they are playing.
+- **The person's play comes first.** Don't stop, restart or relaunch a game they are playing.
 - Licensing stays legitimate: real ownership through Quiver, no entitlement stubs or ownership bypasses.
 - Tests or scratch daemons from a Quiver checkout: set `QUIVER_SHM_ROOT` to a scratch dir and use a scratch data dir. Never take X displays `:0`–`:9`.
 
@@ -75,4 +75,4 @@ quiver lab bench …   quiver lab gpu -- CMD   quiver lab fixture …   quiver l
 quiver lab kill NAME && quiver lab down NAME
 ```
 
-Lab rules: `launch` refuses while the person is playing. Use `--bg` and `quiver lab job wait` for long runs instead of sleeping. Every run has its own log folder; read that run's, not an older one. Steamworks games can't run in the lab (they'd need the person's Steam client); DRM-free Steam games can, with `--exe`. Full design: `design/LAB.md` in the Quiver repo.
+Lab rules: use `--bg` and `quiver lab job wait` for long runs instead of sleeping. Every run has its own log folder; read that run's, not an older one. Steamworks games can't run in the lab (they'd need the person's Steam client); DRM-free Steam games can, with `--exe`. Full design: `design/LAB.md` in the Quiver repo.

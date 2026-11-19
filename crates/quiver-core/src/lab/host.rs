@@ -1,6 +1,6 @@
 //! The host's state, logged with every launch and measurement: free memory, load, the GPU
-//! and who else is using it. A number measured while another instance (or the person's
-//! game) was rendering isn't comparable, and the log has to say so.
+//! and who else is using it. A number measured while something else was rendering isn't
+//! comparable, and the log has to say so.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,9 +41,6 @@ pub struct HostState {
     /// Windows programs and other processes holding the GPU, with their owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpu_users: Vec<GpuUser>,
-    /// Windows programs outside containers (the person's games).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub host_games: Vec<String>,
 }
 
 impl HostState {
@@ -66,9 +63,6 @@ impl HostState {
         let others: Vec<String> = self.gpu_users.iter().map(|u| format!("{} ({})", u.program, u.owner)).collect();
         if !others.is_empty() {
             s.push_str(&format!("; gpu users: {}", others.join(", ")));
-        }
-        if !self.host_games.is_empty() {
-            s.push_str(&format!("; HOST GAMES: {}", self.host_games.join(", ")));
         }
         s
     }
@@ -138,8 +132,7 @@ pub fn snapshot(procs: &[Proc], containers: &BTreeMap<String, String>) -> HostSt
         .filter(|p| on_gpu.contains(&p.pid))
         .map(|p| GpuUser { pid: p.pid, program: p.program().to_owned(), owner: procs::owner(p, containers) })
         .collect();
-    let host_games = procs::host_games(procs).iter().map(|p| format!("{} (pid {})", p.program(), p.pid)).collect();
-    HostState { at: Utc::now(), mem_total_mib, mem_available_mib, swap_used_mib, load, gpus, gpu_users, host_games }
+    HostState { at: Utc::now(), mem_total_mib, mem_available_mib, swap_used_mib, load, gpus, gpu_users }
 }
 
 #[cfg(test)]
@@ -171,10 +164,9 @@ mod tests {
                 GpuUser { pid: 2, program: "ACOrigins.exe".into(), owner: "lab:t2".into() },
                 GpuUser { pid: 3, program: "gamescope".into(), owner: "host".into() },
             ],
-            host_games: vec!["AlanWake.exe (pid 9)".into()],
         };
         assert_eq!(h.contenders("lab:t1").len(), 1);
         let s = h.summary();
-        assert!(s.contains("ACOrigins.exe (lab:t2)") && s.contains("HOST GAMES"), "{s}");
+        assert!(s.contains("ACOrigins.exe (lab:t2)") && s.contains("gamescope (host)"), "{s}");
     }
 }
