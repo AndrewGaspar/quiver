@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, UpdatePreview, VerifyReport};
+use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, SampleState, Throughput, UpdatePreview, VerifyReport};
 use quiver_api::{Client, Request, StoreId};
 use quiver_core::install::human_bytes;
 
@@ -14,6 +14,16 @@ pub enum QueueAction {
     Move { game: String, to: QueueMove },
     /// Take a game out of the queue (its downloaded files stay; install again to resume).
     Remove { game: String },
+    /// A queued game's throughput as quiverd sampled it: one sample a second, up to the
+    /// last ten minutes, pauses included (since quiverd started).
+    History {
+        game: String,
+        /// Only the newest this many samples.
+        #[arg(long)]
+        last: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or change download settings.
     Settings {
         /// Downloads that run at the same time.
@@ -76,12 +86,78 @@ fn print_settings(s: &DownloadSettings) {
     );
 }
 
+/// Samples `quiver queue --json` adds to each item: the last minute.
+const QUEUE_JSON_SAMPLES: usize = 60;
+
+/// The queue as JSON, each item with history also carrying it as `throughput` (the
+/// existing fields as they were).
+fn with_throughput(q: &[QueueEntry], history: &[Throughput]) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(q)?;
+    for (item, e) in v.as_array_mut().into_iter().flatten().zip(q) {
+        if let (Some(obj), Some(t)) = (item.as_object_mut(), history.iter().find(|t| t.game == e.game_ref())) {
+            obj.insert("throughput".into(), serde_json::to_value(t)?);
+        }
+    }
+    Ok(v)
+}
+
+/// One character a column, at most 60 columns (wider histories averaged); blank in a gap.
+fn sparkline(t: &Throughput) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let per = t.samples.len().div_ceil(60).max(1);
+    let cols: Vec<Option<u64>> = t
+        .samples
+        .chunks(per)
+        .map(|c| {
+            let ran: Vec<u64> = c.iter().filter(|s| !s.state.is_gap()).map(|s| s.bytes).collect();
+            (!ran.is_empty()).then(|| ran.iter().sum::<u64>() / ran.len() as u64)
+        })
+        .collect();
+    let top = cols.iter().flatten().copied().max().unwrap_or(0).max(1);
+    cols.iter().map(|c| c.map_or(' ', |b| BARS[((b * 7).div_ceil(top) as usize).min(7)])).collect()
+}
+
+fn print_history(name: &str, t: &Throughput) {
+    let secs = |n: usize| n as u64 * t.interval_ms / 1000;
+    let count = |st: SampleState| t.samples.iter().filter(|s| s.state == st).count();
+    let moving: Vec<u64> = t.samples.iter().filter(|s| matches!(s.state, SampleState::Downloading | SampleState::Stalled | SampleState::Retrying)).map(|s| s.bytes).collect();
+    let avg = moving.iter().sum::<u64>() / (moving.len() as u64).max(1);
+    let peak = moving.iter().copied().max().unwrap_or(0);
+    let retries: u64 = t.samples.iter().map(|s| s.retries).sum();
+    println!(
+        "{name}: the last {} s, a sample every {} ms, up to {}",
+        secs(t.samples.len()),
+        t.interval_ms,
+        t.at.with_timezone(&chrono::Local).format("%H:%M:%S")
+    );
+    let mut parts = vec![format!("average {}/s", human_bytes(avg)), format!("peak {}/s", human_bytes(peak))];
+    for (st, word) in [
+        (SampleState::Stalled, "stalled"),
+        (SampleState::Retrying, "retrying"),
+        (SampleState::Verifying, "verifying"),
+        (SampleState::Paused, "paused"),
+        (SampleState::Waiting, "waiting"),
+    ] {
+        if count(st) > 0 {
+            parts.push(format!("{word} {} s", secs(count(st))));
+        }
+    }
+    if retries > 0 {
+        parts.push(format!("{retries} {}", if retries == 1 { "retry" } else { "retries" }));
+    }
+    println!("  {}", parts.join(" · "));
+    println!("  {}", sparkline(t));
+}
+
 pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> Result<()> {
     match action {
         None => {
             let q: Vec<QueueEntry> = client.call(Request::Queue).await?;
             if json {
-                return print_json(&q);
+                // Each item that has run since quiverd started also gets its last minute
+                // of throughput (`throughput`); a daemon from before has none.
+                let history: Vec<Throughput> = client.call(Request::DownloadThroughput { last: Some(QUEUE_JSON_SAMPLES) }).await.unwrap_or_default();
+                return print_json(&with_throughput(&q, &history)?);
             }
             let s: DownloadSettings = client.call(Request::DownloadSettings { max_active: None, bandwidth_limit: None, auto_update: None }).await?;
             print_settings(&s);
@@ -121,6 +197,17 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
             for e in q {
                 println!("{:>2}  {:<11} {}", e.position, state_word(e.state), e.name);
             }
+        }
+        Some(QueueAction::History { game, last, json: own_json }) => {
+            let e = resolve_installable(client, &game).await?;
+            let history: Vec<Throughput> = client.call(Request::DownloadThroughput { last }).await?;
+            let Some(t) = history.into_iter().find(|t| t.game == e.game) else {
+                bail!("no throughput history for {}: it hasn't downloaded since quiverd started, or isn't in the queue", e.name);
+            };
+            if json || own_json {
+                return print_json(&t);
+            }
+            print_history(&e.name, &t);
         }
         Some(QueueAction::Remove { game }) => {
             let e = resolve_installable(client, &game).await?;
@@ -288,5 +375,30 @@ mod tests {
         assert_eq!(parse_rate("off").unwrap(), 0);
         assert_eq!(parse_rate("0").unwrap(), 0);
         assert!(parse_rate("fast").is_err());
+    }
+
+    #[test]
+    fn queue_json_adds_throughput() {
+        use super::*;
+        use quiver_api::downloads::ThroughputSample;
+        let item = |product_id: u32| -> QueueEntry {
+            serde_json::from_value(serde_json::json!({"product_id": product_id, "name": "G", "kind": "install", "state": "downloading", "source": "cli", "added": "2026-11-19T00:00:00Z", "speed": 7}))
+                .unwrap()
+        };
+        let q = vec![item(1), item(2)];
+        let s = |bytes, state| ThroughputSample { bytes, state, retries: 0 };
+        let t = Throughput {
+            game: quiver_api::GameRef::ubisoft(2),
+            interval_ms: 1000,
+            at: "2026-11-19T00:01:00Z".parse().unwrap(),
+            samples: vec![s(10, SampleState::Downloading), s(0, SampleState::Paused), s(70, SampleState::Downloading), s(0, SampleState::Stalled)],
+        };
+        let v = with_throughput(&q, std::slice::from_ref(&t)).unwrap();
+        // Only added: the existing fields stay as they were.
+        assert!(v[0].get("throughput").is_none());
+        assert_eq!(v[0], serde_json::to_value(&q[0]).unwrap());
+        assert_eq!(v[1]["speed"], 7);
+        assert_eq!(v[1]["throughput"]["samples"][2]["bytes"], 70);
+        assert_eq!(sparkline(&t), "▂ █▁");
     }
 }

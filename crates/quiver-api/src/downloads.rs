@@ -103,6 +103,67 @@ impl QueueEntry {
     }
 }
 
+/// A queue item's throughput as quiverd sampled it (`Request::DownloadThroughput`): one
+/// sample every `interval_ms`, oldest first, the newest ending at `at`. quiverd keeps the
+/// last [`THROUGHPUT_KEEP`] samples per item while it is in the queue (pauses included) and
+/// drops them when it leaves; a restart of quiverd starts over.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Throughput {
+    pub game: crate::GameRef,
+    pub interval_ms: u64,
+    /// When the newest sample ended.
+    pub at: DateTime<Utc>,
+    pub samples: Vec<ThroughputSample>,
+}
+
+/// Samples quiverd keeps per queue item: ten minutes at one a second.
+pub const THROUGHPUT_KEEP: usize = 600;
+
+/// One interval of a [`Throughput`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThroughputSample {
+    /// Bytes received from the network in the interval (hashed, while verifying); what an
+    /// earlier run left on disk never counts. 0 in a gap ([`SampleState::is_gap`]).
+    pub bytes: u64,
+    pub state: SampleState,
+    /// Slice downloads tried again during the interval.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retries: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// What an item was doing during a [`ThroughputSample`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleState {
+    /// Bytes came in.
+    Downloading,
+    /// Running, but nothing came in (a slow server, URLs being fetched, files being set
+    /// up or written).
+    Stalled,
+    /// Slices were waiting to be tried again (connection trouble).
+    Retrying,
+    /// Hashing installed files (`bytes` hashed).
+    Verifying,
+    /// Not running because it was paused. A gap, not a zero.
+    Paused,
+    /// Not running: waiting its turn, for the game to exit, or after a failure. A gap.
+    Waiting,
+    /// A state from a newer quiverd.
+    #[serde(other)]
+    Other,
+}
+
+impl SampleState {
+    /// Nothing ran: draw nothing rather than a zero.
+    pub fn is_gap(self) -> bool {
+        matches!(self, Self::Paused | Self::Waiting)
+    }
+}
+
 /// Download settings (`config.json` → `downloads`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DownloadSettings {

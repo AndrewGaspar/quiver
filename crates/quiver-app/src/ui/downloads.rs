@@ -10,11 +10,11 @@
 //! button within the row ([`DlState::col`]). On a queued item LT/RT move it up or down and
 //! X pauses or resumes it.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, Stateful, Styled, Window, div, prelude::*, px};
-use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueKind, QueueMove, QueueState, UpdatePreview, VerifyReport};
+use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueKind, QueueMove, QueueState, Throughput, UpdatePreview, VerifyReport};
 use quiver_api::exports::SteamExportResult;
 use quiver_api::setup::SetupState;
 use quiver_api::{Event, Job, JobKind, Request};
@@ -31,6 +31,9 @@ use crate::model::{Gid, actor, actor_label, ago, clean_name, gb, tilde, Actor};
 use crate::nav::{Input, Page, Section, Target, Zone};
 use crate::theme::{Theme, on_art, rgba};
 use crate::err_text;
+
+mod throughput;
+use throughput::Series;
 
 /// Commands other screens send here (`Cmd::Downloads`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,9 +136,15 @@ pub struct DlState {
     pub settings: Option<DownloadSettings>,
     pub setup: Option<SetupState>,
     setup_at: Option<Instant>,
-    /// Download speed samples per game (one a second while the page is open).
-    pub speeds: HashMap<Gid, VecDeque<u64>>,
+    /// Throughput bars per game: quiverd's history, or (from a quiverd without one) the
+    /// queue's speed sampled here once a second.
+    pub speeds: HashMap<Gid, Series>,
     last_sample: HashMap<Gid, Instant>,
+    /// Whether quiverd keeps throughput history (`None`: not known yet), and when it was
+    /// last read.
+    history: Option<bool>,
+    history_at: Option<Instant>,
+    history_loading: bool,
     /// The button within the focused row.
     pub col: usize,
     pub dialog: Option<DlDialog>,
@@ -295,6 +304,7 @@ impl Quiver {
     /// After the app gets a `Status` on (re)connecting.
     pub fn downloads_status(&mut self, cx: &mut Context<Self>) {
         self.dl.settings = None;
+        self.reseed_throughput();
         self.load_queue(cx);
         self.load_setup(cx);
 
@@ -315,6 +325,7 @@ impl Quiver {
             Event::Reconnected => {
                 self.dl.settings = None;
                 self.dl.setup_at = None;
+                self.reseed_throughput();
                 self.load_queue(cx);
                 self.load_setup(cx);
             }
@@ -373,20 +384,48 @@ impl Quiver {
             this.dl.loading = false;
             let Ok(q) = r else { return };
             let now = Instant::now();
-            for e in q.iter().filter(|e| e.state.is_active()) {
+            // quiverd keeps the history: its samples come through `load_throughput`.
+            for e in q.iter().filter(|e| e.state.is_active() && this.dl.history != Some(true)) {
                 let due = this.dl.last_sample.get(&Gid(e.game_ref())).is_none_or(|t| now.duration_since(*t) >= Duration::from_millis(900));
                 if due {
                     this.dl.last_sample.insert(Gid(e.game_ref()), now);
-                    let s = this.dl.speeds.entry(Gid(e.game_ref())).or_default();
-                    s.push_back(e.speed);
-                    while s.len() > SAMPLES {
-                        s.pop_front();
-                    }
+                    this.dl.speeds.entry(Gid(e.game_ref())).or_default().push(Some(e.speed));
                 }
             }
             this.dl.speeds.retain(|id, _| q.iter().any(|e| Gid(e.game_ref()) == *id));
             this.dl.queue = q;
         });
+        self.load_throughput(cx);
+    }
+
+    /// quiverd's throughput history: the whole window the first time (on connecting), so
+    /// the graph opens full, then what came since the last read.
+    fn load_throughput(&mut self, cx: &mut Context<Self>) {
+        if self.dl.history == Some(false) || self.dl.history_loading {
+            return;
+        }
+        let last = self.dl.history_at.map_or(SAMPLES, |t| (t.elapsed().as_secs() as usize + 3).min(SAMPLES));
+        self.dl.history_loading = true;
+        self.call::<Vec<Throughput>, _>(Request::DownloadThroughput { last: Some(last) }, cx, |this, r, _| {
+            this.dl.history_loading = false;
+            let Ok(list) = r else {
+                // A quiverd from before: sample the queue's speed here instead.
+                this.dl.history = Some(false);
+                return;
+            };
+            this.dl.history = Some(true);
+            this.dl.history_at = Some(Instant::now());
+            for t in &list {
+                this.dl.speeds.entry(Gid(t.game)).or_default().merge(t);
+            }
+        });
+    }
+
+    /// After (re)connecting: quiverd may be another one now, so read its history afresh.
+    fn reseed_throughput(&mut self) {
+        self.dl.history = None;
+        self.dl.history_at = None;
+        self.dl.speeds.values_mut().for_each(Series::reseed);
     }
 
     fn load_dl_settings(&mut self, max_active: Option<usize>, bandwidth_limit: Option<u64>, auto_update: Option<bool>, cx: &mut Context<Self>) {
@@ -1201,15 +1240,15 @@ impl Quiver {
 
     /// The last minute of download speed as bars.
     fn render_throughput(&self, th: &Theme, id: Gid, w: f32, verifying: bool) -> AnyElement {
-        let samples: Vec<u64> = self.dl.speeds.get(&id).map(|s| s.iter().copied().collect()).unwrap_or_default();
-        let peak = samples.iter().copied().max().unwrap_or(0);
+        let samples: Vec<Option<u64>> = self.dl.speeds.get(&id).map(|s| s.bars.iter().copied().collect()).unwrap_or_default();
+        let peak = samples.iter().flatten().copied().max().unwrap_or(0);
         let limit = self.dl.settings.as_ref().and_then(|s| s.bandwidth_limit);
         let top = peak.max(limit.unwrap_or(0)).max(1_000_000) as f32 * 1.1;
         let ch = 64.;
         let bw = ((w - 24.) / SAMPLES as f32 - 2.).max(1.);
         let mut bars = div().flex().items_end().gap(px(2.)).h(px(ch));
         for i in 0..SAMPLES {
-            let v = samples.len().checked_sub(SAMPLES - i).and_then(|k| samples.get(k)).copied();
+            let v = samples.len().checked_sub(SAMPLES - i).and_then(|k| samples.get(k)).copied().flatten();
             let hgt = v.map(|v| (v as f32 / top * ch).max(2.)).unwrap_or(2.);
             let last = i + 1 == SAMPLES && v.is_some();
             bars = bars.child(

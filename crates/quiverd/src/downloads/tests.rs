@@ -470,3 +470,62 @@ fn auto_update_across_stores() {
         assert!(files_ok(&root, C, &contents[&C]));
     });
 }
+
+/// Throughput history through the queue: samples from the bytes a run receives, a pause as
+/// gaps, nothing for items that never ran, and gone with the item.
+#[test]
+fn throughput_history() {
+    use quiver_api::downloads::SampleState;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let mut cdn = Cdn::default();
+    let mut plans = HashMap::new();
+    for id in [A, B] {
+        plans.insert(id, fixture(id, 2, 20, &mut cdn).0);
+    }
+    let cdn = Arc::new(cdn);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        d.start(&host);
+        let (t0, wall) = (Instant::now(), chrono::Utc::now());
+        let n = std::cell::Cell::new(0u64);
+        let tick = || {
+            n.set(n.get() + 1);
+            d.sample(t0 + Duration::from_secs(n.get()), wall + chrono::Duration::seconds(n.get() as i64));
+        };
+        let received = || d.items.lock().unwrap().iter().find(|i| i.entry.product_id == A).and_then(|i| i.progress.as_ref().map(|p| p.received.load(Ordering::Relaxed)));
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None).unwrap();
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None).unwrap();
+        assert!(d.throughput(None).is_empty(), "nothing sampled yet");
+        tick(); // A runs, nothing in yet
+        cdn.gate.add_permits(5);
+        until("A's first slices", || received() == Some(5 * SLICE as u64)).await;
+        tick();
+        d.pause(&host, "cli", A).unwrap();
+        cdn.open();
+        until("A paused", || state(&d, A) == Some(QueueState::Paused)).await;
+        until("B done", || d.get(B).is_none()).await;
+        cdn.gate.forget_permits(1 << 30);
+        tick();
+        tick();
+        let t = d.throughput(None);
+        assert_eq!(t.len(), 1, "B finished; A is the only item left");
+        let a = &t[0];
+        assert_eq!((a.game, a.interval_ms, a.at), (quiver_api::GameRef::ubisoft(A), 1000, wall + chrono::Duration::seconds(4)));
+        let s: Vec<(u64, SampleState)> = a.samples.iter().map(|s| (s.bytes, s.state)).collect();
+        assert_eq!(s, [(0, SampleState::Stalled), (5 * SLICE as u64, SampleState::Downloading), (0, SampleState::Paused), (0, SampleState::Paused)]);
+        assert_eq!(d.throughput(Some(1))[0].samples.len(), 1);
+
+        // Resumed: sampled again, then gone with the item once it finishes.
+        d.resume(&host, "cli", A).unwrap();
+        until("A running", || received().is_some()).await;
+        tick();
+        assert_eq!(d.throughput(None)[0].samples.len(), 5);
+        cdn.open();
+        until("A done", || d.get(A).is_none()).await;
+        tick();
+        assert!(d.throughput(None).is_empty());
+    });
+}

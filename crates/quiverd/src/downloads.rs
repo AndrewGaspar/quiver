@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use quiver_api::downloads::{DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, VerifyReport};
+use quiver_api::downloads::{DownloadSettings, QueueEntry, QueueKind, QueueMove, QueueState, SampleState, Throughput, VerifyReport};
 use quiver_api::{Event, GameRef, Job, JobKind, Request, StoreId};
 use quiver_core::builds::{self, Latest, RepairPhase};
 use quiver_core::install::{Progress, Throttle, human_bytes, is_cancelled};
@@ -26,6 +26,9 @@ use quiver_core::launcher::{self, Config, Games};
 use quiver_core::settings;
 
 use crate::{Daemon, run_local};
+
+mod throughput;
+use throughput::History;
 
 pub(crate) type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -94,6 +97,8 @@ struct Item {
     stop: Option<Stop>,
     /// Latest status line from the worker.
     status: Option<String>,
+    /// Throughput samples, once it has run since quiverd started.
+    history: Option<History>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -143,7 +148,7 @@ impl Downloads {
                 entry.job_id = None;
                 entry.speed = 0;
                 entry.retries = 0;
-                Item { entry, progress: None, stop: None, status: None }
+                Item { entry, progress: None, stop: None, status: None, history: None }
             })
             .collect();
         let throttle = Arc::new(Throttle::new(settings.bandwidth_limit.unwrap_or(0)));
@@ -214,6 +219,43 @@ impl Downloads {
     pub(crate) fn get(&self, game: impl Into<GameRef>) -> Option<QueueEntry> {
         let game: GameRef = game.into();
         self.items.lock().unwrap().iter().find(|i| i.entry.game_ref() == game).map(|i| i.entry.clone())
+    }
+
+    /// Throughput history of the items that have some, in queue order (newest `last`
+    /// samples of each).
+    pub(crate) fn throughput(&self, last: Option<usize>) -> Vec<Throughput> {
+        let items = self.items.lock().unwrap();
+        items.iter().filter_map(|i| Some(i.history.as_ref()?.snapshot(i.entry.game_ref(), last))).collect()
+    }
+
+    /// One throughput sample for every item that has run since quiverd started: from its
+    /// run's counters while it runs, a gap (paused or waiting) while it doesn't.
+    pub(crate) fn sample(&self, now: Instant, wall: chrono::DateTime<chrono::Utc>) {
+        for it in self.items.lock().unwrap().iter_mut() {
+            match &it.progress {
+                Some(p) => History::running(&mut it.history, p, it.entry.state == QueueState::Verifying, now, wall),
+                None => {
+                    let state = if it.entry.state == QueueState::Paused { SampleState::Paused } else { SampleState::Waiting };
+                    if let Some(h) = &mut it.history {
+                        h.idle(state, now, wall);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sample throughput every [`throughput::INTERVAL`].
+    pub(crate) fn spawn_sampler(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(throughput::INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                this.sample(Instant::now(), chrono::Utc::now());
+            }
+        });
     }
 
     fn save(&self) {
@@ -306,7 +348,7 @@ impl Downloads {
             speed: 0,
             retries: 0,
         };
-        self.items.lock().unwrap().push(Item { entry, progress: None, stop: None, status: None });
+        self.items.lock().unwrap().push(Item { entry, progress: None, stop: None, status: None, history: None });
         let what = match kind {
             QueueKind::Install => "install",
             QueueKind::Update => "update",
@@ -1025,6 +1067,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
     let d = &daemon.downloads;
     Ok(match req {
         Request::Queue => json!(d.list()),
+        Request::DownloadThroughput { last } => json!(d.throughput(last)),
         Request::QueueMove { game, to } => {
             d.move_item(daemon, game.0, to)?;
             json!(d.list())
@@ -1126,6 +1169,7 @@ pub(crate) fn load(cfg: &Config) -> Arc<Downloads> {
 pub(crate) fn start(daemon: &Arc<Daemon>) {
     daemon.downloads.start(daemon);
     daemon.downloads.spawn_upkeep(daemon);
+    daemon.downloads.spawn_sampler();
 }
 
 #[cfg(test)]
