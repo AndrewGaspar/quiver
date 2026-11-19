@@ -58,9 +58,14 @@ pub struct VirtualClock {
     /// A released frame's timing isn't repeatable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_ms: Option<u32>,
-    /// The longest real sleep a game's Sleep gets while the clock runs (default 0: a yield).
+    /// The longest real sleep a shortened Sleep gets while the clock runs (default 0: a yield).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_max_ms: Option<u32>,
+    /// Whose sleeps get shorter: `present` (default: the thread that presents, so a frame
+    /// limiter that sleeps ends fast), `all` (every thread: background threads that sleep-poll
+    /// then spin and read the clock thousands of times a frame), or `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleeps: Option<String>,
     /// Uncapped presentation (sync interval 0, no frame-rate caps, gamescope at 1000 Hz).
     /// Off: the game presents as it would, and runs at most at the display's rate.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -76,7 +81,7 @@ fn is_true(b: &bool) -> bool {
 
 impl VirtualClock {
     pub fn new(rate: f64) -> Self {
-        Self { rate, modules: Vec::new(), proxy: None, creep_after: None, stuck_ms: None, sleep_max_ms: None, uncap: true }
+        Self { rate, modules: Vec::new(), proxy: None, creep_after: None, stuck_ms: None, sleep_max_ms: None, sleeps: None, uncap: true }
     }
 
     pub fn describe(&self) -> String {
@@ -121,8 +126,15 @@ pub fn edit(m: &mut Manifest, key: &str, value: &str) -> Result<bool> {
         "creep_after" => c.creep_after = num(value)?,
         "stuck_ms" => c.stuck_ms = num(value)?,
         "sleep_max_ms" => c.sleep_max_ms = num(value)?,
+        "sleeps" => {
+            c.sleeps = match value.trim() {
+                "" | "present" => None,
+                v @ ("all" | "none") => Some(v.to_owned()),
+                _ => bail!("clock.sleeps: present (the presenting thread's sleeps get shorter), all or none"),
+            }
+        }
         "uncap" => c.uncap = !matches!(value, "false" | "0" | "no" | "off"),
-        _ => bail!("unknown clock key '{key}' (clock.modules, clock.proxy, clock.creep_after, clock.stuck_ms, clock.sleep_max_ms, clock.uncap)"),
+        _ => bail!("unknown clock key '{key}' (clock.modules, clock.proxy, clock.creep_after, clock.stuck_ms, clock.sleep_max_ms, clock.sleeps, clock.uncap)"),
     }
     Ok(true)
 }
@@ -256,7 +268,12 @@ pub fn prepare(inst: &Inst, m: &mut Manifest, launch: Option<&str>, mod_dir: Opt
         modules.push("UnityPlayer.dll".into());
         notes.push("virtual clock: a Unity game: UnityPlayer.dll's clock imports go virtual too (clock.modules to change)".into());
     }
-    let mut env: Vec<(String, String)> = vec![("QUIVER_VCLOCK".into(), c.rate.to_string())];
+    // QUIVER_VCLOCK_EXE: other processes that load the proxy (a crash handler, a launcher) don't
+    // replace the game's report unless they present.
+    let mut env: Vec<(String, String)> = vec![("QUIVER_VCLOCK".into(), c.rate.to_string()), ("QUIVER_VCLOCK_EXE".into(), m.exe_name())];
+    if let Some(sl) = &c.sleeps {
+        env.push(("QUIVER_VCLOCK_SLEEPS".into(), sl.clone()));
+    }
     if !modules.is_empty() {
         env.push(("QUIVER_VCLOCK_MODULES".into(), modules.join(";")));
     }
@@ -362,12 +379,13 @@ pub fn brief_section(i: &str) -> String {
          **Reading the report** (`quiver lab status {i}`, `quiver lab logs {i}`; the DLL's own files are \
          `runs/r<N>/vclock.status` and `vclock.log`): engaged or not (it engages at the first Present it sees; until then \
          the game is on real time), frames, virtual vs real seconds and the speed-up, and a census of the steps the game \
-         read between frames (one value, the frame, means exact). The counters: **creeping frames** (a frame read the clock \
-         more than 4096 times, a busy-wait: time creeps so the wait ends; repeatable), **escapes** (a frame took over \
+         read between frames (one value, the frame, means exact). The counters: **creeping frames** (one thread read the clock \
+         more than 4096 times in a frame, a busy-wait: time creeps so the wait ends; repeatable), **escapes** (a frame took over \
          1000 ms of real time and was released to real time: that frame's timing followed the machine, so the run is \
          flagged NOT FULLY DETERMINISTIC; raise `clock.stuck_ms` if loading screens trip it), **overruns** (the frames \
-         creep or escape had already moved past the grid), sleeps shortened (a Sleep never advances game time; it \
-         just gets shorter).\n\n\
+         creep or escape had already moved past the grid), sleeps shortened (a Sleep never advances game time; the \
+         presenting thread's get shorter so a sleeping frame limiter ends fast, other threads' stay real so pollers \
+         don't spin; `clock.sleeps=all|none` to change that).\n\n\
          **Limits.** Audio runs on a clock this can't reach and drifts (or stutters) at other speeds. Games that pace on \
          audio, on timers (waitable timers, timeSetEvent, WaitForSingleObject timeouts) or on clocks outside the list \
          (QueryPerformanceCounter, GetTickCount(64), timeGetTime, GetSystemTimeAsFileTime, Sleep) keep real time there. \
@@ -396,6 +414,8 @@ mod tests {
         assert!(edit(&mut m, "clock", "virtual:62.5").unwrap());
         edit(&mut m, "clock.modules", "Engine.dll, Game.dll").unwrap();
         edit(&mut m, "clock.stuck_ms", "2000").unwrap();
+        edit(&mut m, "clock.sleeps", "all").unwrap();
+        assert!(edit(&mut m, "clock.sleeps", "some").is_err());
         edit(&mut m, "clock.proxy", "WINMM.dll").unwrap();
         assert!(edit(&mut m, "clock.proxy", "d3d9").is_err() && edit(&mut m, "clock.bogus", "1").is_err());
         assert!(!edit(&mut m, "display", "1x1").unwrap());
@@ -454,6 +474,8 @@ mod tests {
         assert_eq!(std::fs::read(bin.join("version.dll")).unwrap(), b"the game's own");
         assert_eq!(m.dll_overrides.get("winmm").map(String::as_str), Some("n,b"));
         assert_eq!(m.env.get("QUIVER_VCLOCK").map(String::as_str), Some("62.5"));
+        assert_eq!(m.env.get("QUIVER_VCLOCK_EXE").map(String::as_str), Some("Game.exe"));
+        assert!(!m.env.contains_key("QUIVER_VCLOCK_SLEEPS"), "present is the default");
         let dx = m.env.get("DXVK_CONFIG").unwrap();
         assert!(dx.starts_with("dxgi.customVendorId = 10de;") && dx.contains("dxgi.syncInterval = 0"), "{dx}");
         // The next launch with the clock off: the DLL is gone, the game's own file stays.

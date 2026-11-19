@@ -75,7 +75,7 @@ pub enum LabAction {
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
     /// log_file=PATH, args="…", notes="…" (key= clears); the fixed-step virtual clock:
     /// clock=virtual:HZ|real, clock.modules=A.dll,B.dll, clock.proxy=NAME|auto,
-    /// clock.stuck_ms=N, clock.creep_after=N, clock.sleep_max_ms=N, clock.uncap=false.
+    /// clock.stuck_ms=N, clock.creep_after=N, clock.sleeps=present|all|none, clock.sleep_max_ms=N, clock.uncap=false.
     Edit {
         instance: String,
         #[arg(required = true)]

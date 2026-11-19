@@ -79,6 +79,8 @@ static vc_clock g_clock;
 static struct {
     double rate;
     uint32_t creep_after, stuck_ms, sleep_max_ms;
+    int sleeps; /* which sleeps get shorter: 0 none, 1 the presenting thread's, 2 all */
+    char exe[MAX_PATH];
     int sync0;
     char modules[1024]; /* lowercase names, ';'-separated */
     char dir[MAX_PATH];
@@ -95,7 +97,11 @@ static int g_mm_origin_set;
 
 static CRITICAL_SECTION g_cs;      /* log, status, module list, vtable registry writes */
 static HANDLE g_log = INVALID_HANDLE_VALUE;
-static DWORD g_tls = TLS_OUT_OF_INDEXES;
+static DWORD g_tls = TLS_OUT_OF_INDEXES;     /* present nesting depth */
+static DWORD g_tls_thr = TLS_OUT_OF_INDEXES; /* the thread's vc_thread */
+static vc_thread g_thr_fallback;             /* if a thread's couldn't be allocated */
+static volatile DWORD g_present_tid;         /* the thread that last presented */
+static int g_main = 1;                       /* this process is the game (QUIVER_VCLOCK_EXE) */
 static volatile LONG g_quit;
 
 enum { PATH_NONE, PATH_VK, PATH_GL, PATH_D3D8, PATH_D3D9, PATH_DXGI };
@@ -173,7 +179,7 @@ static double real_since_install(void) {
 static void ss_log(const char *fmt, ...) {
     if (g_log == INVALID_HANDLE_VALUE) return;
     char buf[1024];
-    int n = snprintf(buf, sizeof buf, "[vclock %9.3f] ", g_clock.real_freq ? real_since_install() : 0.0);
+    int n = snprintf(buf, sizeof buf, "[vclock pid %lu %9.3f] ", (unsigned long)GetCurrentProcessId(), g_clock.real_freq ? real_since_install() : 0.0);
     va_list ap;
     va_start(ap, fmt);
     int m = vsnprintf(buf + n, sizeof buf - (size_t)n - 2, fmt, ap);
@@ -200,6 +206,9 @@ static void note_hooked(const char *what) {
 static void write_status(const char *why) {
     if (!g_cfg.dir[0]) return;
     vc_clock *c = &g_clock;
+    /* A helper process (a crash handler, a launcher) loads the proxy too: it never replaces
+     * the game's report unless it is the one presenting. */
+    if (!g_main && !__atomic_load_n(&c->engaged, __ATOMIC_ACQUIRE)) return;
     double vs = vc_virtual_seconds(c), rs = vc_real_seconds(c);
     char cq[512], cm[512];
     census_text(&g_cqpc, cq, sizeof cq);
@@ -212,7 +221,8 @@ static void write_status(const char *why) {
         "frames=%llu\nvirtual_s=%.6f\nreal_s=%.6f\nspeedup=%.4f\nqueries=%llu\nworst_frame_queries=%llu\n"
         "creep_after=%llu\ncreep_frames=%llu\nstuck_ms=%u\nescapes=%llu\noverruns=%llu\n"
         "sleeps=%llu\nsleep_ms_requested=%llu\nsleep_ms_slept=%llu\nsleep_max_ms=%u\nsync0=%d\nsince_install_s=%.3f\n"
-        "census_qpc=%s\ncensus_qpc_other=%llu\ncensus_ms=%s\ncensus_ms_other=%llu\n",
+        "census_qpc=%s\ncensus_qpc_other=%llu\ncensus_ms=%s\ncensus_ms_other=%llu\n"
+        "sleeps_real=%llu\nsleep_mode=%s\npresent_thread=%lu\ngame_process=%d\n",
         why, (unsigned long)GetCurrentProcessId(), ss_proxy, sizeof(void *) == 8 ? "x64" : "x86", c->rate,
         (long long)c->ticks_per_frame, (long long)c->vfreq, (long long)c->real_freq, (int)__atomic_load_n(&c->engaged, __ATOMIC_ACQUIRE),
         PATH_NAMES[g_path], (long)g_ignored_presents, g_hooked[0] ? g_hooked : "-", (long)g_patched_slots, (long)g_vtable_hooks,
@@ -223,7 +233,9 @@ static void write_status(const char *why) {
         (unsigned long long)vc_load_u64(&c->escapes), (unsigned long long)vc_load_u64(&c->overruns),
         (unsigned long long)vc_load_u64(&c->sleeps), (unsigned long long)vc_load_u64(&c->sleep_ms_requested),
         (unsigned long long)vc_load_u64(&c->sleep_ms_slept), g_cfg.sleep_max_ms, g_cfg.sync0, real_since_install(),
-        cq, (unsigned long long)g_cqpc.other, cm, (unsigned long long)g_cms.other);
+        cq, (unsigned long long)g_cqpc.other, cm, (unsigned long long)g_cms.other,
+        (unsigned long long)vc_load_u64(&c->sleeps_real), g_cfg.sleeps == 2 ? "all" : g_cfg.sleeps == 1 ? "present" : "none",
+        (unsigned long)g_present_tid, g_main);
     LeaveCriticalSection(&g_cs);
     if (n <= 0) return;
     if (n > (int)sizeof buf) n = (int)sizeof buf;
@@ -242,13 +254,13 @@ static void report(const char *tag) {
     vc_clock *c = &g_clock;
     double vs = vc_virtual_seconds(c), rs = vc_real_seconds(c);
     ss_log("%s: %s  frames=%llu  virtual=%.3fs  real=%.3fs  speedup=%.3fx  presents from %s (ignored %ld)  "
-           "queries=%llu worst-frame=%llu  creeping frames=%llu  escapes=%llu  overruns=%llu  sleeps=%llu (%llu ms asked, %llu slept)",
+           "reads=%llu worst thread-frame=%llu  creeping frames=%llu  escapes=%llu  overruns=%llu  sleeps shortened=%llu (%llu ms asked, %llu slept)  kept real=%llu",
            tag, c->engaged ? "engaged" : "PASS-THROUGH (no Present yet)", (unsigned long long)vc_load_u64(&c->frames), vs, rs,
            rs > 0 ? vs / rs : 0.0, PATH_NAMES[g_path], (long)g_ignored_presents, (unsigned long long)vc_load_u64(&c->queries_total),
            (unsigned long long)vc_load_u64(&c->queries_max), (unsigned long long)vc_load_u64(&c->creep_frames),
            (unsigned long long)vc_load_u64(&c->escapes), (unsigned long long)vc_load_u64(&c->overruns),
            (unsigned long long)vc_load_u64(&c->sleeps), (unsigned long long)vc_load_u64(&c->sleep_ms_requested),
-           (unsigned long long)vc_load_u64(&c->sleep_ms_slept));
+           (unsigned long long)vc_load_u64(&c->sleep_ms_slept), (unsigned long long)vc_load_u64(&c->sleeps_real));
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -275,6 +287,7 @@ static void on_present(int path) {
     }
     int was = __atomic_load_n(&g_clock.engaged, __ATOMIC_ACQUIRE);
     vc_present(&g_clock);
+    g_present_tid = GetCurrentThreadId();
     if (!was) {
         ss_log("engaged at the first %s Present: virtual time starts at %.3f s; every frame is now %lld/%lld s (%.9f s)",
                PATH_NAMES[path], (double)g_clock.vnow / (double)g_clock.vfreq, (long long)g_clock.ticks_per_frame,
@@ -735,9 +748,26 @@ static void(WINAPI *o_Sleep)(DWORD);
 static DWORD(WINAPI *o_SleepEx)(DWORD, BOOL);
 static FARPROC(WINAPI *o_GetProcAddress)(HMODULE, LPCSTR);
 
+/* This thread's reads (vclock.h): allocated on its first read, kept for its life. */
+static vc_thread *thr(void) {
+    DWORD err = GetLastError();
+    vc_thread *t = (vc_thread *)TlsGetValue(g_tls_thr);
+    if (!t) {
+        t = (vc_thread *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *t);
+        if (!t) t = &g_thr_fallback;
+        TlsSetValue(g_tls_thr, t);
+    }
+    SetLastError(err);
+    return t;
+}
+
+static int shorten_sleep(void) {
+    return g_cfg.sleeps == 2 || (g_cfg.sleeps == 1 && GetCurrentThreadId() == g_present_tid);
+}
+
 static BOOL WINAPI h_QPC(LARGE_INTEGER *out) {
     if (!out) return FALSE;
-    out->QuadPart = vc_now(&g_clock);
+    out->QuadPart = vc_now(&g_clock, thr());
     census_add(&g_cqpc, out->QuadPart);
     return TRUE;
 }
@@ -747,7 +777,7 @@ static BOOL WINAPI h_QPF(LARGE_INTEGER *out) {
     return TRUE;
 }
 static uint64_t vms(void) {
-    uint64_t ms = vc_ticks_ms(&g_clock, vc_now(&g_clock));
+    uint64_t ms = vc_ticks_ms(&g_clock, vc_now(&g_clock, thr()));
     census_add(&g_cms, (int64_t)ms);
     return ms;
 }
@@ -755,7 +785,7 @@ static DWORD WINAPI h_GetTickCount(void) { return (DWORD)(g_tick_origin + vms())
 static ULONGLONG WINAPI h_GetTickCount64(void) { return g_tick64_origin + vms(); }
 static DWORD WINAPI h_timeGetTime(void) { return (DWORD)(g_mm_origin + vms()); }
 static void vfiletime(FILETIME *ft) {
-    uint64_t v = g_ft_origin + vc_ticks_100ns(&g_clock, vc_now(&g_clock));
+    uint64_t v = g_ft_origin + vc_ticks_100ns(&g_clock, vc_now(&g_clock, thr()));
     ft->dwLowDateTime = (DWORD)(v & 0xffffffffu);
     ft->dwHighDateTime = (DWORD)(v >> 32);
 }
@@ -766,11 +796,11 @@ static void WINAPI h_GetSystemTimePreciseAsFileTime(FILETIME *ft) {
     if (ft) vfiletime(ft);
 }
 static void WINAPI h_Sleep(DWORD ms) {
-    o_Sleep(ms == INFINITE ? ms : vc_sleep(&g_clock, ms, g_cfg.sleep_max_ms));
+    o_Sleep(ms == INFINITE ? ms : vc_sleep(&g_clock, ms, g_cfg.sleep_max_ms, shorten_sleep()));
 }
 static DWORD WINAPI h_SleepEx(DWORD ms, BOOL alertable) {
     /* Alertable waits stay alertable: a shorter wait is fine, a swallowed APC is not. */
-    return o_SleepEx(ms == INFINITE ? ms : vc_sleep(&g_clock, ms, g_cfg.sleep_max_ms), alertable);
+    return o_SleepEx(ms == INFINITE ? ms : vc_sleep(&g_clock, ms, g_cfg.sleep_max_ms, shorten_sleep()), alertable);
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -1123,6 +1153,16 @@ static int read_config(void) {
     g_cfg.creep_after = env_u32("QUIVER_VCLOCK_CREEP_AFTER", 4096);
     g_cfg.stuck_ms = env_u32("QUIVER_VCLOCK_STUCK_MS", 1000);
     g_cfg.sleep_max_ms = env_u32("QUIVER_VCLOCK_SLEEP_MAX_MS", 0);
+    char sm[16];
+    n = GetEnvironmentVariableA("QUIVER_VCLOCK_SLEEPS", sm, sizeof sm);
+    g_cfg.sleeps = 1;
+    if (n && n < sizeof sm) {
+        lower_ascii(sm);
+        g_cfg.sleeps = !strcmp(sm, "all") ? 2 : !strcmp(sm, "none") ? 0 : 1;
+    }
+    n = GetEnvironmentVariableA("QUIVER_VCLOCK_EXE", g_cfg.exe, sizeof g_cfg.exe);
+    if (!n || n >= sizeof g_cfg.exe) g_cfg.exe[0] = 0;
+    lower_ascii(g_cfg.exe);
     g_cfg.sync0 = env_u32("QUIVER_VCLOCK_SYNC0", 1) != 0;
     n = GetEnvironmentVariableA("QUIVER_VCLOCK_MODULES", g_cfg.modules, sizeof g_cfg.modules);
     if (n >= sizeof g_cfg.modules) g_cfg.modules[0] = 0;
@@ -1152,6 +1192,15 @@ static void start(void) {
     if (n && n < MAX_PATH) {
         lower_w(exe, n);
         WCHAR *slash = wcsrchr(exe, L'\\');
+        if (g_cfg.exe[0]) {
+            /* QUIVER_VCLOCK_EXE names the game's executable: other processes that load the
+             * proxy (a crash handler, a launcher) still run the clock, but don't report
+             * unless they present. */
+            char base[MAX_PATH];
+            WideCharToMultiByte(CP_UTF8, 0, slash ? slash + 1 : exe, -1, base, sizeof base, NULL, NULL);
+            lower_ascii(base);
+            g_main = !strcmp(base, g_cfg.exe);
+        }
         if (slash) slash[1] = 0;
         lstrcpynW(g_exe_dir, exe, MAX_PATH);
     }
@@ -1176,8 +1225,14 @@ static void start(void) {
 
     char exe8[MAX_PATH * 2];
     WideCharToMultiByte(CP_UTF8, 0, g_exe_dir, -1, exe8, sizeof exe8, NULL, NULL);
-    ss_log("--- quiver virtual clock (%s.dll proxy, %s) in pid %lu, game folder %s", ss_proxy, sizeof(void *) == 8 ? "x64" : "x86",
-           (unsigned long)GetCurrentProcessId(), exe8);
+    WCHAR self[MAX_PATH];
+    char self8[MAX_PATH * 2] = "?";
+    DWORD sn = GetModuleFileNameW(NULL, self, MAX_PATH);
+    if (sn && sn < MAX_PATH) WideCharToMultiByte(CP_UTF8, 0, self, -1, self8, sizeof self8, NULL, NULL);
+    ss_log("--- quiver virtual clock (%s.dll proxy, %s) in pid %lu, %s, game folder %s", ss_proxy, sizeof(void *) == 8 ? "x64" : "x86",
+           (unsigned long)GetCurrentProcessId(), self8, exe8);
+    if (!g_main)
+        ss_log("this isn't the game's executable (%s): the clock runs here too, but this process reports only if it presents", g_cfg.exe);
     double period_ms = 1000.0 / g_cfg.rate;
     ss_log("virtual clock: %.4f Hz -> %lld ticks per frame at a reported QPF of %lld (real QPF %lld); a frame is %.9f s (%.4f ms)",
            g_cfg.rate, (long long)g_clock.ticks_per_frame, (long long)g_clock.vfreq, (long long)g_clock.real_freq,
@@ -1189,9 +1244,10 @@ static void start(void) {
         ss_log("WARNING: a %.4f ms frame isn't a whole number of milliseconds: games timing frames with timeGetTime or "
                "GetTickCount see %lld and %lld ms frames alternate. 125 Hz (8 ms), 100 Hz (10 ms) or 62.5 Hz (16 ms) are exact.",
                period_ms, (long long)period_ms, (long long)period_ms + 1);
-    ss_log("creep after %u queries in a frame (%lld ticks each), real-time escape after %u ms, sleeps at most %u ms real; "
-           "present sync interval forced to 0: %s; extra clock modules: %s",
+    ss_log("creep after %u reads by one thread in a frame (%lld ticks each), real-time escape after %u ms; sleeps shortened "
+           "(to at most %u ms real) on %s; present sync interval forced to 0: %s; extra clock modules: %s",
            (unsigned)g_clock.creep_after, (long long)g_clock.creep_per_query, g_clock.stuck_ms, g_cfg.sleep_max_ms,
+           g_cfg.sleeps == 2 ? "every thread" : g_cfg.sleeps == 1 ? "the presenting thread only" : "no thread",
            g_cfg.sync0 ? "yes" : "no", g_cfg.modules[0] ? g_cfg.modules : "none");
     for (int i = 0; i < ss_count; i++)
         if (!ss_real[i]) ss_log("WARNING: the real %s.dll has no export %s (ordinal %u): calling it would crash", ss_proxy,
@@ -1211,8 +1267,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         InitializeCriticalSection(&g_cs);
         InitializeCriticalSection(&g_census_cs);
         g_tls = TlsAlloc();
+        g_tls_thr = TlsAlloc();
         load_real();
-        if (g_tls != TLS_OUT_OF_INDEXES && read_config()) start();
+        if (g_tls != TLS_OUT_OF_INDEXES && g_tls_thr != TLS_OUT_OF_INDEXES && read_config()) start();
     } else if (reason == DLL_PROCESS_DETACH && g_on) {
         g_quit = 1;
         report("exit");

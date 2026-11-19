@@ -2,7 +2,14 @@
  * the clocks a game reads, through its own imports (so through the virtual clock when it's on).
  * Real time comes from ntdll's NtQueryPerformanceCounter, which the clock never touches.
  *
- *   clock_test.exe <d3d11|d3d9> <frames> <slow_ms> <title>
+ *   clock_test.exe <d3d11|d3d11dev|d3d9> <frames> <slow_ms> <title> [helper.exe]
+ *   helper.exe child                  (a second process loading the proxy that never presents)
+ *
+ * d3d11 makes its swap chain with D3D11CreateDeviceAndSwapChain; d3d11dev with D3D11CreateDevice
+ * and the factory it gets from the device (IDXGIDevice -> adapter -> parent), as Unity does.
+ * With a helper path, that copy of this exe is started first (a crash handler's place).
+ * Background threads run throughout: one polls the clock every Sleep(1), one every Sleep(100),
+ * as a game's timer and streaming threads do.
  *
  * slow_ms > 0 makes every frame take at least that long in real time (NtDelayExecution, not
  * Sleep, which the clock shortens): a presenter slower than the virtual rate.
@@ -10,7 +17,9 @@
  * Phase A: <frames> frames, each starting with a read of QueryPerformanceCounter, timeGetTime,
  * GetTickCount and GetTickCount64. Phase B: 30 frames, each waiting in a QPC busy-wait for two
  * frame periods (it can only ever see one per Present: must terminate through the creep).
- * Phase C: 30 frames waiting with `while (timeGetTime() - t0 < 2 periods) Sleep(1)`. Then, for
+ * Phase C: 30 frames waiting with `while (timeGetTime() - t0 < 2 periods) Sleep(1)`. Phase D:
+ * 10 frames, each waiting on a worker thread that busy-waits on QPC for two periods while this
+ * thread is blocked (no Present can come). Then, for
  * every loaded module, how many of its clock imports point into the hook DLL. */
 #define COBJMACROS
 #define CINTERFACE
@@ -98,11 +107,54 @@ static int hooked_slots(HMODULE mod, BYTE *lo, BYTE *hi) {
     return n;
 }
 
+static volatile LONG g_stop;
+static DWORD WINAPI poller(void *arg) {
+    DWORD ms = (DWORD)(uintptr_t)arg;
+    while (!g_stop) {
+        Sleep(ms);
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        timeGetTime();
+    }
+    return 0;
+}
+
+static LONGLONG g_wait_ticks;
+static DWORD WINAPI spinner(void *arg) {
+    (void)arg;
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    do QueryPerformanceCounter(&b);
+    while (b.QuadPart - a.QuadPart < g_wait_ticks);
+    return 0;
+}
+
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM a, LPARAM b) { return DefWindowProcA(w, m, a, b); }
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "child")) {
+        /* A process that loads the proxy, reads the clock and never presents. */
+        LARGE_INTEGER t;
+        for (int i = 0; i < 200; i++) {
+            QueryPerformanceCounter(&t);
+            Sleep(10);
+        }
+        return 0;
+    }
     if (argc < 5) return 2;
     g_d3d9 = !strcmp(argv[1], "d3d9");
+    int devfactory = !strcmp(argv[1], "d3d11dev");
+    if (argc >= 6) {
+        STARTUPINFOA si = {sizeof si};
+        PROCESS_INFORMATION pi;
+        char cmd[MAX_PATH + 16];
+        snprintf(cmd, sizeof cmd, "\"%s\" child", argv[5]);
+        if (CreateProcessA(argv[5], cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            printf("helper pid %lu\n", (unsigned long)pi.dwProcessId);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else printf("helper failed %lu\n", (unsigned long)GetLastError());
+    }
     int frames = atoi(argv[2]), slow = atoi(argv[3]);
     setvbuf(stdout, NULL, _IONBF, 0);
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
@@ -154,7 +206,18 @@ int main(int argc, char **argv) {
         sd.Windowed = TRUE;
         sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
         ID3D11Device *dev;
-        if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &g_sc, &dev, NULL, &g_ctx))) {
+        if (devfactory) {
+            IDXGIDevice *dd;
+            IDXGIAdapter *ad;
+            IDXGIFactory *f;
+            if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &dev, NULL, &g_ctx)) ||
+                FAILED(ID3D11Device_QueryInterface(dev, &IID_IDXGIDevice, (void **)&dd)) || FAILED(IDXGIDevice_GetAdapter(dd, &ad)) ||
+                FAILED(IDXGIAdapter_GetParent(ad, &IID_IDXGIFactory, (void **)&f)) ||
+                FAILED(IDXGIFactory_CreateSwapChain(f, (IUnknown *)dev, &sd, &g_sc))) {
+                printf("no d3d11 device or swap chain (device factory)\n");
+                return 3;
+            }
+        } else if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &g_sc, &dev, NULL, &g_ctx))) {
             printf("no d3d11 device\n");
             return 3;
         }
@@ -163,6 +226,9 @@ int main(int argc, char **argv) {
         ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)bb, NULL, &g_rtv);
         ID3D11Texture2D_Release(bb);
     }
+
+    HANDLE bg1 = CreateThread(NULL, 0, poller, (void *)(uintptr_t)1, 0, NULL);
+    HANDLE bg2 = CreateThread(NULL, 0, poller, (void *)(uintptr_t)100, 0, NULL);
 
     /* Phase A. */
     LONGLONG *q = calloc((size_t)frames, sizeof *q);
@@ -250,6 +316,20 @@ int main(int argc, char **argv) {
         frame(i);
     }
     printf("C frames 30 sleeps %lld real_s %.6f period_ms %lu\n", sleeps, real_s() - r0, (unsigned long)period_ms);
+
+    /* Phase D: a worker busy-waits for two periods while this (presenting) thread is blocked. */
+    g_wait_ticks = 2 * period;
+    r0 = real_s();
+    for (int i = 0; i < 10; i++) {
+        HANDLE w = CreateThread(NULL, 0, spinner, NULL, 0, NULL);
+        WaitForSingleObject(w, INFINITE);
+        CloseHandle(w);
+        frame(i);
+    }
+    printf("D frames 10 real_s %.6f\n", real_s() - r0);
+    g_stop = 1;
+    WaitForSingleObject(bg1, INFINITE);
+    WaitForSingleObject(bg2, INFINITE);
 
     /* Which modules' clock imports point into the hook DLL. */
     HMODULE proxy = GetModuleHandleA("version.dll");

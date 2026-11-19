@@ -81,7 +81,8 @@ mod ffi {
         pub vnow: i64,
         pub frame_base: i64,
         pub real_frame_start: i64,
-        pub queries: u64,
+        pub generation: u64,
+        pub frame_max_reads: u64,
         pub frame_escaped: u32,
         pub engaged_real: i64,
         pub engaged_v: i64,
@@ -94,6 +95,15 @@ mod ffi {
         pub sleeps: u64,
         pub sleep_ms_requested: u64,
         pub sleep_ms_slept: u64,
+        pub sleeps_real: u64,
+    }
+
+    /// `vc_thread`.
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct VcThread {
+        pub frame: u64,
+        pub reads: u64,
     }
 
     unsafe extern "C" {
@@ -101,11 +111,11 @@ mod ffi {
         #[cfg_attr(not(test), allow(dead_code))]
         pub fn vc_init(c: *mut VcClock, rate: f64, real_freq: i64, creep_after: u32, stuck_ms: u32, real_now: RealNow, ctx: *mut c_void) -> i32;
         #[cfg_attr(not(test), allow(dead_code))]
-        pub fn vc_now(c: *mut VcClock) -> i64;
+        pub fn vc_now(c: *mut VcClock, t: *mut VcThread) -> i64;
         #[cfg_attr(not(test), allow(dead_code))]
         pub fn vc_present(c: *mut VcClock);
         #[cfg_attr(not(test), allow(dead_code))]
-        pub fn vc_sleep(c: *mut VcClock, requested: u32, max_ms: u32) -> u32;
+        pub fn vc_sleep(c: *mut VcClock, requested: u32, max_ms: u32, shorten: i32) -> u32;
         #[cfg_attr(not(test), allow(dead_code))]
         pub fn vc_ticks_ms(c: *const VcClock, ticks: i64) -> u64;
         #[cfg_attr(not(test), allow(dead_code))]
@@ -211,6 +221,10 @@ pub struct Report {
     /// The same for the millisecond clocks (timeGetTime, GetTickCount).
     pub census_ms: Vec<(i64, u64)>,
     pub census_ms_other: u64,
+    /// Sleeps left as asked (threads other than the presenting one, by default).
+    pub sleeps_real: u64,
+    /// Whose sleeps get shorter: `present` (the presenting thread's), `all`, `none`.
+    pub sleep_mode: String,
 }
 
 fn parse_census(v: &str) -> Vec<(i64, u64)> {
@@ -284,6 +298,8 @@ impl Report {
                 "census_qpc_other" => r.census_qpc_other = n(),
                 "census_ms" => r.census_ms = parse_census(v),
                 "census_ms_other" => r.census_ms_other = n(),
+                "sleeps_real" => r.sleeps_real = n(),
+                "sleep_mode" => r.sleep_mode = s(),
                 _ => {}
             }
         }
@@ -320,7 +336,7 @@ impl Report {
     /// The safety valves, counted.
     pub fn counters(&self) -> String {
         format!(
-            "creeping frames {} (creep after {} queries/frame; worst frame {}), real-time escapes {} (after {} ms), overruns {}, sleeps shortened {} ({} ms asked, {} ms slept), presents ignored from a second path {}",
+            "creeping frames {} (creep after {} reads by one thread in a frame; the most: {}), real-time escapes {} (after {} ms), overruns {}, sleeps shortened {} ({} ms asked, {} ms slept; shortened on: {}), kept real {}, presents ignored from a second path {}",
             self.creep_frames,
             self.creep_after,
             self.worst_frame_queries,
@@ -330,6 +346,12 @@ impl Report {
             self.sleeps,
             self.sleep_ms_requested,
             self.sleep_ms_slept,
+            match self.sleep_mode.as_str() {
+                "all" => "every thread",
+                "none" => "no thread",
+                _ => "the presenting thread",
+            },
+            self.sleeps_real,
             self.ignored_presents
         )
     }
@@ -373,7 +395,7 @@ impl Report {
         }
         if self.creep_frames > 0 {
             v.push(format!(
-                "{} of {} frames crept (over {} clock reads in one frame, a busy-wait or many threads reading the clock): their time isn't exactly 1/{} s, though it depends on the reads, not the machine (raise clock.creep_after if it's threads, not a wait)",
+                "{} of {} frames crept (a thread read the clock over {} times in one frame: a busy-wait): their time isn't exactly 1/{} s, though it depends on the reads, not the machine (if it's a polling thread rather than a wait, raise clock.creep_after; if its sleeps are shortened, clock.sleeps=present)",
                 self.creep_frames, self.frames, self.creep_after, self.rate
             ));
         }
@@ -393,6 +415,8 @@ mod tests {
     struct Fake {
         c: Box<VcClock>,
         real: Box<AtomicI64>,
+        /// The "main" thread's reads.
+        t: Box<VcThread>,
     }
 
     extern "C" fn read_fake(ctx: *mut c_void) -> i64 {
@@ -407,13 +431,16 @@ mod tests {
             let mut c: Box<VcClock> = Box::new(unsafe { std::mem::zeroed() });
             let ok = unsafe { vc_init(&mut *c, rate, WINE_QPF, creep_after, stuck_ms, read_fake, &*real as *const AtomicI64 as *mut c_void) };
             assert_eq!(ok, 1);
-            Fake { c, real }
+            Fake { c, real, t: Box::default() }
         }
         fn advance_real_ms(&self, ms: i64) {
             self.real.fetch_add(ms * 10_000, Ordering::SeqCst);
         }
         fn now(&mut self) -> i64 {
-            unsafe { vc_now(&mut *self.c) }
+            unsafe { vc_now(&mut *self.c, &mut *self.t) }
+        }
+        fn now_on(&mut self, t: &mut VcThread) -> i64 {
+            unsafe { vc_now(&mut *self.c, t) }
         }
         fn present(&mut self) {
             unsafe { vc_present(&mut *self.c) }
@@ -513,6 +540,45 @@ mod tests {
     }
 
     #[test]
+    fn many_threads_reading_a_little_dont_creep_but_one_spinning_does() {
+        let mut f = Fake::new(62.5, 4096, 1000);
+        f.present();
+        // 64 threads (a job system, timer threads polling with real sleeps) each read the clock
+        // 1000 times a frame: 64000 reads a frame in all, none of them a spin.
+        let mut threads: Vec<VcThread> = (0..64).map(|_| VcThread::default()).collect();
+        for _ in 0..50 {
+            let base = f.now();
+            for t in threads.iter_mut() {
+                for _ in 0..1000 {
+                    assert_eq!(f.now_on(t), base, "time moved inside a frame");
+                }
+            }
+            f.present();
+            assert_eq!(f.now() - base, 160_000);
+        }
+        assert_eq!((f.c.creep_frames, f.c.overruns), (0, 0));
+        assert_eq!(f.c.queries_max, 1000);
+        // One background thread spinning past creep_after does creep (and its wait ends),
+        // whether or not it is the presenting thread.
+        let start = f.now();
+        let mut spin = VcThread::default();
+        let mut n = 0;
+        while f.now_on(&mut spin) - start < 160_000 {
+            n += 1;
+            assert!(n < 10_000);
+        }
+        f.present();
+        assert_eq!(f.c.creep_frames, 1);
+        // A thread's count starts again each frame.
+        let t = f.now();
+        for _ in 0..4000 {
+            assert_eq!(f.now_on(&mut spin), t);
+        }
+        f.present();
+        assert_eq!(f.c.creep_frames, 1);
+    }
+
+    #[test]
     fn a_stuck_frame_escapes_to_real_time() {
         let mut f = Fake::new(60.0, 1_000_000, 250);
         f.present();
@@ -561,14 +627,16 @@ mod tests {
     fn sleeps_shorten_and_never_move_time() {
         let mut f = Fake::new(60.0, 4096, 250);
         // Before engagement a Sleep is a Sleep.
-        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 0) }, 10);
+        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 0, 1) }, 10);
         f.present();
         let t = f.now();
-        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 0) }, 0);
-        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 2) }, 2);
-        assert_eq!(unsafe { vc_sleep(&mut *f.c, 1, 2) }, 1);
+        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 0, 1) }, 0);
+        assert_eq!(unsafe { vc_sleep(&mut *f.c, 10, 2, 1) }, 2);
+        assert_eq!(unsafe { vc_sleep(&mut *f.c, 1, 2, 1) }, 1);
+        // Not shortened (a thread that doesn't present): as asked, counted apart.
+        assert_eq!(unsafe { vc_sleep(&mut *f.c, 100, 0, 0) }, 100);
         assert_eq!(f.now(), t);
-        assert_eq!((f.c.sleeps, f.c.sleep_ms_requested, f.c.sleep_ms_slept), (3, 21, 3));
+        assert_eq!((f.c.sleeps, f.c.sleep_ms_requested, f.c.sleep_ms_slept, f.c.sleeps_real), (3, 21, 3, 1));
     }
 
     #[test]
@@ -592,6 +660,7 @@ mod tests {
         let c = r.census();
         assert!(c[0].contains("160000 ticks x5990 (99.3%)") && c[1].contains("16 ms x5999 (100.0%)"), "{c:?}");
         // Slower than real time is normal: it says so, and isn't flagged.
+        assert!(r.counters().contains("shortened on: the presenting thread"), "{}", r.counters());
         let slow = Report::parse("rate=62.5\nengaged=1\nproxy=version.dll\nticks_per_frame=160000\nframes=100\nvirtual_s=1.6\nreal_s=2.5\nspeedup=0.64\ncensus_qpc=160000:99\n");
         assert!(slow.summary().contains("0.64x (slower than real time") && slow.verdict().is_empty() && slow.exact() && slow.deterministic(), "{}", slow.summary());
         let idle = Report::parse("rate=60\nproxy=winmm.dll\nengaged=0\nhooked=-\n");

@@ -63,13 +63,23 @@ static int64_t advance(vc_clock *c, int64_t want) {
     return cur;
 }
 
-int64_t vc_now(vc_clock *c) {
+int64_t vc_now(vc_clock *c, vc_thread *t) {
     if (!LOAD(&c->engaged)) {
         /* Pass-through until the first Present, monotonic all the same. */
         return advance(c, passthrough(c, c->real_now(c->ctx)));
     }
-    uint64_t q = ADD(&c->queries, 1);
+    /* This thread's reads in this frame: the creep is for a thread spinning on the clock, not
+     * for many threads that each read it now and then. */
+    uint64_t gen = LOAD(&c->gen) + 1;
+    if (t->frame != gen) {
+        t->frame = gen;
+        t->reads = 0;
+    }
+    uint64_t q = ++t->reads;
     ADD(&c->queries_total, 1);
+    uint64_t most = LOAD(&c->frame_max_reads);
+    while (q > most && !__atomic_compare_exchange_n(&c->frame_max_reads, &most, q, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    }
     int64_t base = LOAD(&c->frame_base);
     int64_t want = base;
     if (q > c->creep_after) {
@@ -77,9 +87,9 @@ int64_t vc_now(vc_clock *c) {
         if (steps > (1ull << 40)) steps = 1ull << 40;
         want = base + (int64_t)steps * c->creep_per_query;
     }
-    /* The escape: real time is read for the first 64 queries of a frame and every 64th
-     * after, so a frame that queries rarely (a loading thread) is still released on time and
-     * a spinning one costs a real read only now and then. */
+    /* The escape: real time is read for a thread's first 64 reads of a frame and every 64th
+     * after, so a frame that reads rarely (a loading thread) is still released on time and a
+     * spinning one costs a real read only now and then. */
     if (q <= 64 || (q & 63) == 0) {
         int64_t elapsed = c->real_now(c->ctx) - LOAD(&c->real_frame_start);
         if (elapsed > c->stuck_real) {
@@ -107,11 +117,12 @@ void vc_present(vc_clock *c) {
         STORE(&c->real_frame_start, real);
         STORE(&c->engaged_real, real);
         STORE(&c->engaged_v, t);
-        STORE(&c->queries, 0);
+        STORE(&c->frame_max_reads, 0);
+        ADD(&c->gen, 1);
         STORE(&c->engaged, 1);
         return;
     }
-    uint64_t q = XCHG(&c->queries, 0);
+    uint64_t q = XCHG(&c->frame_max_reads, 0);
     uint64_t worst = LOAD(&c->queries_max);
     while (q > worst && !__atomic_compare_exchange_n(&c->queries_max, &worst, q, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     }
@@ -122,11 +133,16 @@ void vc_present(vc_clock *c) {
     if (next != grid) ADD(&c->overruns, 1);
     STORE(&c->frame_base, next);
     STORE(&c->real_frame_start, real);
+    ADD(&c->gen, 1);
     ADD(&c->frames, 1);
 }
 
-uint32_t vc_sleep(vc_clock *c, uint32_t requested, uint32_t max_ms) {
+uint32_t vc_sleep(vc_clock *c, uint32_t requested, uint32_t max_ms, int shorten) {
     if (!LOAD(&c->engaged)) return requested;
+    if (!shorten) {
+        ADD(&c->sleeps_real, 1);
+        return requested;
+    }
     uint32_t real = requested < max_ms ? requested : max_ms;
     ADD(&c->sleeps, 1);
     ADD(&c->sleep_ms_requested, (uint64_t)requested);
