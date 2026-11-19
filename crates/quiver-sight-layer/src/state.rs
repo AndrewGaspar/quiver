@@ -348,12 +348,16 @@ pub fn retarget() {
                     st.flags |= LAYER_BLUR_READY;
                 }
                 st.backdrop_error = blur_error as u16;
+                crate::panel::set_target(s.comp.as_ref().is_some_and(|c| c.can_draw_images()), (s.extent.width, s.extent.height));
                 best = Some((area, s.id, st));
                 best_latency = Some((d.handle, *handle, s.latency.clone()));
             }
         }
     }
     let target = best.as_ref().map_or(0, |(_, id, _)| *id);
+    if best.is_none() {
+        crate::panel::set_target(false, (0, 0));
+    }
     *lock(&latency::TARGET) = best_latency;
     let prev = TARGET.swap(target, Ordering::Relaxed);
     if let Some(t) = telemetry::get() {

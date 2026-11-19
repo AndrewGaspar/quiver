@@ -14,6 +14,11 @@
 //!   quiver-sight's request in `hud.image`'s header is live, the game's frame is blurred under
 //!   the HUD at present time, so the panel's backdrop works under any compositor (`SAMPLED`
 //!   usage is added at swapchain creation for it);
+//! - **composites the Sight panel** ([`panel`], design/SIGHT.md §14) while it's open in the
+//!   game: `panel.image`, which quiver-sight renders off-screen at the swapchain's size, over
+//!   the HUD, with the panel's cursor; the input preload (`libquiver_sight_input.so`) gives
+//!   the panel the game's keyboard and mouse meanwhile, and gives them back when the panel
+//!   stops appearing in frames;
 //! - **watches Reflex** (`VK_NV_low_latency2`, [`latency`]): the sleep mode and frame cap the
 //!   app sets, its latency markers and sleeps, so the status block carries the Reflex mode,
 //!   PC latency and the frame-generation multiplier the layer can see;
@@ -57,6 +62,7 @@ mod hooks;
 pub mod keys;
 pub mod latency;
 mod pipelines;
+pub mod panel;
 mod present;
 mod state;
 mod telemetry;
