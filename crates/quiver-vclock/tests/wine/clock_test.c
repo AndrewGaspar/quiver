@@ -20,7 +20,12 @@
  * Phase C: 30 frames waiting with `while (timeGetTime() - t0 < 2 periods) Sleep(1)`. Phase D:
  * 10 frames, each waiting on a worker thread that busy-waits on QPC for two periods while this
  * thread is blocked (no Present can come). Then, for
- * every loaded module, how many of its clock imports point into the hook DLL. */
+ * every loaded module, how many of its clock imports point into the hook DLL.
+ *
+ * With QUIVER_TEST_KEYS set (the stepped case, which pauses and steps it through the control
+ * page while the test presses keys in the Xvfb), phase A also samples the Right arrow at the
+ * start of every frame as window messages, raw input and GetAsyncKeyState see it, and prints
+ * the frames each saw it down. */
 #define COBJMACROS
 #define CINTERFACE
 #define PSAPI_VERSION 2
@@ -129,7 +134,35 @@ static DWORD WINAPI spinner(void *arg) {
     return 0;
 }
 
-static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM a, LPARAM b) { return DefWindowProcA(w, m, a, b); }
+/* QUIVER_TEST_KEYS: the Right arrow as three input APIs see it, sampled at the start of every
+ * phase A frame: window messages (WM_KEYDOWN/UP), raw input (WM_INPUT) and the polled state
+ * (GetAsyncKeyState). */
+static int g_keys, g_msg_down, g_raw_down, g_keydowns, g_raw_makes;
+static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM a, LPARAM b) {
+    if (g_keys && (m == WM_KEYDOWN || m == WM_KEYUP) && a == VK_RIGHT) {
+        if (m == WM_KEYDOWN && !g_msg_down) g_keydowns++;
+        g_msg_down = m == WM_KEYDOWN;
+    }
+    if (g_keys && m == WM_INPUT) {
+        RAWINPUT ri;
+        UINT sz = sizeof ri;
+        if (GetRawInputData((HRAWINPUT)b, RID_INPUT, &ri, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1 && ri.header.dwType == RIM_TYPEKEYBOARD &&
+            ri.data.keyboard.VKey == VK_RIGHT) {
+            int down = !(ri.data.keyboard.Flags & RI_KEY_BREAK);
+            if (down && !g_raw_down) g_raw_makes++;
+            g_raw_down = down;
+        }
+    }
+    return DefWindowProcA(w, m, a, b);
+}
+
+typedef struct { int frames, first, last; } span;
+static void span_add(span *s, int on, int i) {
+    if (!on) return;
+    if (!s->frames) s->first = i;
+    s->frames++;
+    s->last = i;
+}
 
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "child")) {
@@ -227,6 +260,14 @@ int main(int argc, char **argv) {
         ID3D11Texture2D_Release(bb);
     }
 
+    g_keys = getenv("QUIVER_TEST_KEYS") != NULL;
+    if (g_keys) {
+        RAWINPUTDEVICE rid = {1, 6, 0, wnd}; /* generic desktop, keyboard */
+        printf("raw_input %d\n", RegisterRawInputDevices(&rid, 1, sizeof rid) ? 1 : 0);
+        SetForegroundWindow(wnd);
+        SetFocus(wnd);
+    }
+    span k_msg = {0}, k_raw = {0}, k_async = {0};
     HANDLE bg1 = CreateThread(NULL, 0, poller, (void *)(uintptr_t)1, 0, NULL);
     HANDLE bg2 = CreateThread(NULL, 0, poller, (void *)(uintptr_t)100, 0, NULL);
 
@@ -252,6 +293,11 @@ int main(int argc, char **argv) {
             gpa_qpc(&a);
             gpa_virtual = a.QuadPart == t.QuadPart;
         }
+        if (g_keys) {
+            span_add(&k_msg, g_msg_down, i);
+            span_add(&k_raw, g_raw_down, i);
+            span_add(&k_async, GetAsyncKeyState(VK_RIGHT) < 0, i);
+        }
         if (slow > 0) real_delay_ms(slow);
         frame(i);
     }
@@ -275,6 +321,11 @@ int main(int argc, char **argv) {
     printf("A frames %d virtual_s %.6f real_s %.6f\n", frames - 1, (double)(q[frames - 1] - q[1]) / (double)qpf.QuadPart, rb - ra);
     printf("A sequence_hash %016llx\n", hash);
     printf("gpa_virtual %d\n", gpa_virtual);
+    if (g_keys) {
+        printf("keys messages %d first %d last %d presses %d\n", k_msg.frames, k_msg.first, k_msg.last, g_keydowns);
+        printf("keys raw %d first %d last %d presses %d\n", k_raw.frames, k_raw.first, k_raw.last, g_raw_makes);
+        printf("keys async %d first %d last %d\n", k_async.frames, k_async.first, k_async.last);
+    }
 
     /* Phase B: a QPC busy-wait for two frame periods. */
     LONGLONG period = qpf.QuadPart / 60; /* any period: the wait is for 2 virtual frames */

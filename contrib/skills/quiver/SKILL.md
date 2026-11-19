@@ -74,7 +74,11 @@ quiver lab set NAME FILE:[section]key=value --wait   # live config edit, waits f
 quiver lab bench …   quiver lab gpu -- CMD   quiver lab fixture …   quiver lab logs NAME
 quiver lab kill NAME && quiver lab down NAME
 quiver lab edit NAME clock=virtual:62.5    # fixed-step virtual clock (clock=real: off); or launch --clock virtual:62.5
+quiver lab clock NAME pause|step [K]|resume|status   # with the clock on: hold the game, let exactly K frames through
+quiver lab key NAME --down Right; quiver lab key NAME --up Right   # keys held across steps
 ```
+
+Pause and frame stepping (virtual clock on): `quiver lab clock NAME pause` holds the game at the end of the frame in flight (that frame stays on screen; game time stops however long you take, and never times out unless you pass `--auto-resume SECS`); `quiver lab clock NAME step 12` lets exactly 12 more frames through, each exactly 1/rate s, and holds again, printing the frame number and virtual time; `resume` runs free. Each waits for the hold, so `quiver lab clock NAME step 12 && quiver lab shot NAME` shoots that frame (`shot --hdr` works while held too). Input sent while held is read when the game next steps: to hold a key over frames, `quiver lab key NAME --down Right`, `step 12`, `quiver lab key NAME --up Right`, `step 1`; a plain `key` while held puts the press and release in one frame. `quiver lab logs NAME` lists the pauses and steps.
 
 Sight in an instance (the HUD and the in-game panel): `quiver lab create GAME --sight` (or `quiver lab edit NAME sight=on`, then down/up). Then `quiver lab key NAME shift+F2` opens the panel drawn in the game (the game keeps focus), `quiver lab key NAME Down Return Escape` drives and closes it (the game gets none of it while open), `quiver lab key NAME shift+F3` shows the HUD, and `quiver lab sight NAME status` and `quiver lab logs NAME` show where it's drawn, whether input is captured, and failsafe releases. Its quiver-sight never talks to quiverd: panel changes to settings are refused, nothing is reported.
 
