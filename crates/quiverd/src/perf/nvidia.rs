@@ -6,6 +6,7 @@
 //! | `nv.frames.app`, `nv.frames.generated` → `fps.base`, `fg.ratio`, `fg.active` | the layer's frame counting (sleeps or present markers) |
 //! | `nv.latency.pc` → `latency.pc` | the layer's markers and its own present timing |
 //! | `nv.latency.render` → `latency.render` | opt-in: the layer's `vkGetLatencyTimingsNV` reads |
+//! | `nv.latency.sim`, `.submit`, `.queue`, `.gpu` → `latency.split.*` | the same reports, split into stages that add up to `latency.render` |
 //! | `nv.fg.driver` | the launch's environment: NVIDIA Smooth Motion is on (it sits above the layer) |
 //! | `dlss.version`, `dlss.fg.version`, `dlss.rr.version` | the DLLs mapped in the game process (`/proc/<pid>/maps`) and their version resources |
 //! | `dlss.sr`, `dlss.sr.preset`, `dlss.sr.model`, `dlss.sr.quality`, `dlss.sr.render`, `dlss.sr.output` → `upscaler`, `render.resolution` | opt-in: NGX's own log in the session dir (`ngx_log`) |
@@ -158,6 +159,23 @@ pub fn descriptors() -> Vec<MetricDescriptor> {
     v
 }
 
+/// The stages of game-to-render latency from the same reports (`latency.split.*`). Declared
+/// only once the layer's reports split ([`apply_layer`]): the roles aren't generic, so until
+/// then a mod with Reflex markers of its own can fill them.
+pub fn split_descriptors() -> Vec<MetricDescriptor> {
+    SPLIT
+        .iter()
+        .zip(catalog::LATENCY_SPLIT)
+        .map(|(id, (role_id, label, short, help))| {
+            let mut x = d(id, MetricKind::Gauge, Unit::Ms, label, Some(short), &format!("{help} From the driver's Reflex reports (opt-in: quiver hud set GAME reflex_timings=on)."), "Latency");
+            x.visibility = Some(quiver_perf::descriptor::Visibility::Advanced);
+            x.sample = Some(SampleRate::Hz(4.0));
+            role(&mut x, role_id);
+            x
+        })
+        .collect()
+}
+
 /// Declares the producer and its metrics once.
 pub fn ensure(store: &mut Store) -> bool {
     if store.producer_mut(PRODUCER).is_some() {
@@ -170,6 +188,9 @@ pub fn ensure(store: &mut Store) -> bool {
     true
 }
 
+/// The latency split's metrics, in `LayerStatus::split_sum_us` order.
+pub const SPLIT: [&str; 4] = ["nv.latency.sim", "nv.latency.submit", "nv.latency.queue", "nv.latency.gpu"];
+
 /// The layer status counters at the last drain, for deltas, and when each last moved.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Last {
@@ -177,6 +198,20 @@ pub struct Last {
     render: (u64, u64),
     pc_at: i64,
     render_at: i64,
+    report_pc: (u64, u64),
+    split: (u64, [u64; 4]),
+    split_at: i64,
+}
+
+/// The mean of what a (frames, sum µs) counter pair added since `prev`, ms; `prev` moves on.
+/// A counter going back (a new swapchain) starts over.
+fn mean_since(prev: &mut (u64, u64), frames: u64, sum: u64) -> Option<f64> {
+    if frames < prev.0 || sum < prev.1 {
+        *prev = (0, 0);
+    }
+    let (n, us) = (frames - prev.0, sum - prev.1);
+    *prev = (frames, sum);
+    (n > 0).then(|| us as f64 / n as f64 / 1000.0)
 }
 
 /// A latency with no new sample for this long is cleared rather than shown frozen: the
@@ -186,11 +221,20 @@ const LATENCY_STALE_NS: i64 = 2_000_000_000;
 /// What the layer's status block says, into the store. Returns whether the producer was
 /// declared now (a catalog change).
 pub fn apply_layer(store: &mut Store, s: &LayerStatus, last: &mut Last, now: i64) -> bool {
-    let active = s.reflex_flags & (REFLEX_MODE_SET | REFLEX_COUNTING_SLEEP | REFLEX_COUNTING_MARKERS) != 0 || s.pc_latency_frames > 0 || s.render_latency_frames > 0;
+    let active = s.reflex_flags & (REFLEX_MODE_SET | REFLEX_COUNTING_SLEEP | REFLEX_COUNTING_MARKERS) != 0
+        || s.pc_latency_frames > 0
+        || s.render_latency_frames > 0
+        || s.report_pc_frames > 0;
     if !active && store.producer_mut(PRODUCER).is_none() {
         return false;
     }
-    let fresh = ensure(store);
+    let mut fresh = ensure(store);
+    if s.split_frames > 0 && store.descriptor(SPLIT[0]).is_none() {
+        for d in split_descriptors() {
+            store.declare(PRODUCER, d);
+        }
+        fresh = true;
+    }
     if s.reflex_flags & REFLEX_MODE_SET != 0 {
         let mode = match (s.reflex_flags & REFLEX_LOW_LATENCY != 0, s.reflex_flags & REFLEX_BOOST != 0) {
             (false, _) => "off",
@@ -208,23 +252,43 @@ pub fn apply_layer(store: &mut Store, s: &LayerStatus, last: &mut Last, now: i64
         store.push_counter("nv.frames.app", now, s.app_frames);
         store.push_counter("nv.frames.generated", now, s.app_presents.saturating_sub(s.app_frames));
     }
-    let mut delta = |id: &str, prev: &mut (u64, u64), at: &mut i64, frames: u64, sum: u64| {
-        if frames < prev.0 || sum < prev.1 {
-            // A new swapchain started its counters again.
-            *prev = (0, 0);
-        }
-        let (n, us) = (frames - prev.0, sum - prev.1);
-        if n > 0 {
-            store.push_num(id, now, us as f64 / n as f64 / 1000.0);
-            *prev = (frames, sum);
+    let mut show = |id: &str, ms: Option<f64>, at: &mut i64| match ms {
+        Some(ms) => {
+            store.push_num(id, now, ms);
             *at = now;
-        } else if *at != 0 && now - *at > LATENCY_STALE_NS {
+        }
+        None if *at != 0 && now - *at > LATENCY_STALE_NS => {
             store.clear(id);
             *at = 0;
         }
+        None => {}
     };
-    delta("nv.latency.pc", &mut last.pc, &mut last.pc_at, s.pc_latency_frames, s.pc_latency_sum_us);
-    delta("nv.latency.render", &mut last.render, &mut last.render_at, s.render_latency_frames, s.render_latency_sum_us);
+    // PC latency from the layer's own marker timing, else from the driver's reports (when a
+    // translation layer remaps present ids, the layer can't pair a present with its frame,
+    // but the driver's report still has the frame's present end).
+    let marker = mean_since(&mut last.pc, s.pc_latency_frames, s.pc_latency_sum_us);
+    let report = mean_since(&mut last.report_pc, s.report_pc_frames, s.report_pc_sum_us);
+    show("nv.latency.pc", marker.or(report), &mut last.pc_at);
+    let render = mean_since(&mut last.render, s.render_latency_frames, s.render_latency_sum_us);
+    show("nv.latency.render", render, &mut last.render_at);
+    // The split: each stage's mean over the same new reports.
+    let (frames, sums) = (s.split_frames, s.split_sum_us);
+    if frames < last.split.0 || sums.iter().zip(last.split.1).any(|(a, b)| *a < b) {
+        last.split = (0, [0; 4]);
+    }
+    let n = frames - last.split.0;
+    if n > 0 {
+        for (i, id) in SPLIT.iter().enumerate() {
+            store.push_num(id, now, (sums[i] - last.split.1[i]) as f64 / n as f64 / 1000.0);
+        }
+        last.split = (frames, sums);
+        last.split_at = now;
+    } else if last.split_at != 0 && now - last.split_at > LATENCY_STALE_NS {
+        for id in SPLIT {
+            store.clear(id);
+        }
+        last.split_at = 0;
+    }
     fresh
 }
 
@@ -633,7 +697,7 @@ mod tests {
 
     #[test]
     fn descriptors_validate() {
-        for d in descriptors() {
+        for d in descriptors().into_iter().chain(split_descriptors()) {
             d.validate(None).unwrap_or_else(|e| panic!("{}: {e}", d.id));
             assert!(d.short.as_ref().is_none_or(|s| s.chars().count() <= 6), "{}", d.id);
         }
@@ -675,6 +739,55 @@ mod tests {
         apply_layer(&mut s, &st, &mut last, 3200 * MS);
         let at = |s: &Store, id: &str| s.formatted(id, Stat::Last, super::super::registry::WINDOW_1S, 3200 * MS).map(|v| v.text);
         assert_eq!(at(&s, "latency.pc").as_deref(), Some("9.0"));
+    }
+
+    #[test]
+    fn timing_reports_fill_the_latency_split_and_pc_latency() {
+        let mut s = Store::new(0, Utc::now());
+        let mut last = Last::default();
+        let mut st = LayerStatus::ZERO;
+        st.reflex_flags = REFLEX_MODE_SET | REFLEX_LOW_LATENCY;
+        // Ten reports: simulation 6 ms, submit 9, queue 4, GPU 9 (the mock-up's numbers);
+        // the layer's own marker timing has nothing (present ids remapped), the reports'
+        // present end gives PC latency.
+        st.render_latency_frames = 10;
+        st.render_latency_sum_us = 10 * 28_000;
+        st.split_frames = 10;
+        st.split_sum_us = [60_000, 90_000, 40_000, 90_000];
+        st.report_pc_frames = 10;
+        st.report_pc_sum_us = 10 * 15_000;
+        apply_layer(&mut s, &st, &mut last, 1000 * MS);
+        let txt = |s: &Store, id: &str, t: i64| s.formatted(id, Stat::Last, super::super::registry::WINDOW_1S, t).map(|v| v.text);
+        let split: Vec<Option<String>> = catalog::LATENCY_SPLIT.iter().map(|(id, ..)| txt(&s, id, 1000 * MS)).collect();
+        assert_eq!(split, ["6.0", "9.0", "4.0", "9.0"].map(|x| Some(x.to_owned())));
+        assert_eq!(txt(&s, "latency.render", 1000 * MS).as_deref(), Some("28.0"), "the stages add up to game-to-render");
+        assert_eq!(txt(&s, "latency.pc", 1000 * MS).as_deref(), Some("15.0"), "PC latency from the reports");
+        assert_eq!(s.producer_of("latency.split.sim", 1000 * MS), Some(PRODUCER));
+        // Declared with the first split report, not before (a mod's markers may fill them).
+        let mut quiet = Store::new(0, Utc::now());
+        let mut q = LayerStatus { split_frames: 0, split_sum_us: [0; 4], ..st };
+        apply_layer(&mut quiet, &q, &mut Last::default(), 1000 * MS);
+        assert!(quiet.descriptor("nv.latency.sim").is_none());
+        q.split_frames = 1;
+        assert!(apply_layer(&mut quiet, &q, &mut Last::default(), 1000 * MS), "a catalog change");
+        // The layer's own marker timing wins when it has frames.
+        st.pc_latency_frames = 10;
+        st.pc_latency_sum_us = 10 * 17_000;
+        st.report_pc_frames = 20;
+        st.report_pc_sum_us = 20 * 15_000;
+        st.split_frames = 20;
+        st.split_sum_us = [120_000, 190_000, 80_000, 180_000];
+        apply_layer(&mut s, &st, &mut last, 1250 * MS);
+        assert_eq!(txt(&s, "latency.pc", 1250 * MS).as_deref(), Some("17.0"));
+        assert_eq!(txt(&s, "latency.split.render", 1250 * MS).as_deref(), Some("10.0"), "the new reports' mean");
+        // The reports stop: the split is cleared after the grace, not shown frozen.
+        apply_layer(&mut s, &st, &mut last, 3500 * MS);
+        assert_eq!(s.state("latency.split.sim", 3500 * MS), quiver_api::perf::MetricState::Declared);
+        // A new swapchain starts its counters again.
+        st.split_frames = 1;
+        st.split_sum_us = [5_000, 5_000, 1_000, 7_000];
+        apply_layer(&mut s, &st, &mut last, 3600 * MS);
+        assert_eq!(txt(&s, "latency.split.gpu", 3600 * MS).as_deref(), Some("7.0"));
     }
 
     #[test]

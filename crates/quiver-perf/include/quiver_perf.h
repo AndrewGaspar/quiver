@@ -275,6 +275,11 @@ typedef struct qv_layer_status {
     /* appended (depth): zero from layers before */
     uint32_t depth_setting;     /* QUIVER_SIGHT_DEPTH: 0 unset (100%), QV_DEPTH_SETTING_SET | percent, or _INVALID */
     uint32_t depth_drawn;       /* QV_DEPTH_DRAWN_VALID | the largest total disparity drawn last (px) */
+    /* appended (latency split): zero from layers before; opt-in vkGetLatencyTimingsNV reports */
+    uint64_t split_frames;      /* reports whose stages could be split */
+    uint64_t split_sum_us[4];   /* sim start->end, sim end->submit end, submit end->GPU start, ->GPU end */
+    uint64_t report_pc_frames;  /* reports with a present end: input (or sim start) -> present end */
+    uint64_t report_pc_sum_us;
 } qv_layer_status;
 
 #define QV_HDR_METADATA_SET   (1u << 0)
@@ -389,7 +394,7 @@ QV_ASSERT_OFFSET(qv_record, swapchain, 12);
 QV_ASSERT_OFFSET(qv_record, key, 16);
 QV_ASSERT_OFFSET(qv_record, t, 24);
 QV_ASSERT_OFFSET(qv_record, f, 32);
-QV_ASSERT_SIZE(qv_layer_status, 416);
+QV_ASSERT_SIZE(qv_layer_status, 472);
 QV_ASSERT_OFFSET(qv_layer_status, struct_bytes, 0);
 QV_ASSERT_OFFSET(qv_layer_status, flags, 4);
 QV_ASSERT_OFFSET(qv_layer_status, extent_w, 8);
@@ -436,6 +441,10 @@ QV_ASSERT_OFFSET(qv_layer_status, stereo_setting, 400);
 QV_ASSERT_OFFSET(qv_layer_status, stereo_drawn, 404);
 QV_ASSERT_OFFSET(qv_layer_status, depth_setting, 408);
 QV_ASSERT_OFFSET(qv_layer_status, depth_drawn, 412);
+QV_ASSERT_OFFSET(qv_layer_status, split_frames, 416);
+QV_ASSERT_OFFSET(qv_layer_status, split_sum_us, 424);
+QV_ASSERT_OFFSET(qv_layer_status, report_pc_frames, 456);
+QV_ASSERT_OFFSET(qv_layer_status, report_pc_sum_us, 464);
 QV_ASSERT_SIZE(qv_hud_header, 4096);
 QV_ASSERT_OFFSET(qv_hud_header, magic, 0);
 QV_ASSERT_OFFSET(qv_hud_header, version, 8);

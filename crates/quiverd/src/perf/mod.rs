@@ -129,6 +129,8 @@ pub struct Session {
     noted: Option<Presenter>,
     /// The layer's Reflex counters at the last drain (`nvidia::apply_layer`).
     nv_last: nvidia::Last,
+    /// The HUD card's height so far for this layout ([`hud::CardHold`]).
+    card: hud::CardHold,
     /// A live mod's stereo layout (`quiver_set_stereo_layout`): the layout, its surface, its
     /// connection (design/SIGHT.md §15). The newest declaration wins; it goes with its
     /// connection.
@@ -477,6 +479,7 @@ impl PerfHub {
             monitor: None,
             noted: None,
             nv_last: nvidia::Last::default(),
+            card: hud::CardHold::default(),
             sdk_stereo: None,
         };
         {
@@ -847,6 +850,7 @@ impl PerfHub {
                 stereo: Some(s.stereo()),
             };
             let mut m = hud::build_model(&inp, &s.store, now);
+            s.card.apply(&layout, &mut m);
             if s.model.as_ref().is_some_and(|old| hud::same(old, &m)) {
                 continue;
             }

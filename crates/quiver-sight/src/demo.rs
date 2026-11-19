@@ -90,7 +90,7 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
     let split = |numbers: bool| HudCell::Split {
         numbers,
         label: None,
-        parts: [("latency.split.sim", "SIM", 6.0), ("latency.split.render", "RENDER", 9.0), ("latency.split.queue", "QUEUE", 4.0), ("latency.split.out", "OUT", 9.0)]
+        parts: [("latency.split.sim", "SIM", 6.0), ("latency.split.render", "RENDER", 9.0), ("latency.split.queue", "QUEUE", 4.0), ("latency.split.gpu", "GPU", 9.0)]
             .iter()
             .map(|(m, l, x)| SplitPart { metric: (*m).into(), label: (*l).into(), value: *x })
             .collect(),
@@ -222,14 +222,9 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
     };
     let background = 0.62;
     let text_px = extent.map(|[_, h]| h as f32 * 0.016).unwrap_or(17.0);
-    // As quiverd sizes the presets: their width, and the height of every row (Full keeps
-    // room for a second mod strip).
+    // As quiverd sizes the presets: their width, and the height of the rows shown.
     let width = hud_card::preset_width(layout).unwrap_or(hud_card::default_width(orientation));
-    let mut slots: Vec<f32> = rows.iter().map(hud_card::row_height).collect();
-    if layout == "full" {
-        slots.push(hud_card::LINE);
-    }
-    let size = [width, hud_card::height(orientation, &slots, hud_card::panel(background))];
+    let size = [width, fit_height(orientation, &rows, background)];
     HudModel {
         session: "s-demo".into(),
         product_id: 0,
@@ -262,10 +257,17 @@ pub fn sample_model(layout: &str, i: u32, presenter: Presenter, extent: Option<[
     }
 }
 
-/// Demo content variants (`--variant`), for checking that the card keeps its size whatever
-/// it holds: `long` stretches every value (4-digit fps, long text values and badges), `short`
-/// is what quiverd sends for the same game without the mod and frame generation ("Standard,
-/// Vanilla profile": no base FPS, no latency, no split, no strip; one graph line).
+/// The card's height for these rows, as quiverd fits it (`hud::fit_size`).
+pub fn fit_height(o: Orientation, rows: &[HudRow], background: f32) -> f32 {
+    let slots: Vec<f32> = rows.iter().map(hud_card::row_height).collect();
+    hud_card::height(o, &slots, hud_card::panel(background))
+}
+
+/// Demo content variants (`--variant`), for checking the card's size: `long` stretches every
+/// value (4-digit fps, long text values and badges) and keeps the size, `short` is what
+/// quiverd sends for the same game without the mod and frame generation ("Standard, Vanilla
+/// profile": no base FPS, no latency, no split, no strip; one graph line), in a card fitted to
+/// those rows as a session of that game gets.
 pub const VARIANTS: [&str; 3] = ["base", "long", "short"];
 
 pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
@@ -335,6 +337,7 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
                 }
             }
             m.rows.retain(|r| r.cells.iter().any(is_content));
+            m.size[1] = fit_height(m.orientation, &m.rows, m.background);
         }
         _ => {}
     }

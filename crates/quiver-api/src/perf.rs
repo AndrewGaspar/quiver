@@ -1174,7 +1174,7 @@ impl CellStyle {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SplitPart {
     pub metric: String,
-    /// "SIM", "RENDER", "QUEUE", "OUT".
+    /// "SIM", "RENDER", "QUEUE", "GPU".
     pub label: String,
     /// Its share, in the parts' unit (ms).
     pub value: f32,

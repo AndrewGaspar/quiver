@@ -467,11 +467,49 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
         color_space: status.map(|s| s.color_space),
         monitor: inp.monitor.map(str::to_owned),
         captures: inp.cfg.captures,
-        size: inp.layout.size(hud_card::panel(background)),
+        size: fit_size(inp.layout, &rows, hud_card::panel(background)),
         rows,
         backdrop: inp.backdrop.clone().map(Box::new),
         game_focus: inp.game_focus,
         stereo: inp.stereo.clone(),
+    }
+}
+
+/// The card's size for the rows a model shows (SIGHT-HUD §1.4, as built 2026-11-19): the
+/// layout's width, and its height when it sets one, else the height of these rows' slots. A
+/// Full card without frame generation or a mod is as tall as what it holds, not the 380 px
+/// its every row would need. [`CardHold`] keeps it from shrinking while a session runs.
+pub fn fit_size(layout: &Layout, rows: &[HudRow], panel: bool) -> [f32; 2] {
+    let [w, h] = layout.size(panel);
+    if layout.height.is_some() {
+        return [w, h];
+    }
+    let slots: Vec<f32> = rows.iter().map(hud_card::row_height).collect();
+    [w, hud_card::height(layout.orientation(), &slots, panel)]
+}
+
+/// The tallest card a session's layout has needed: the card grows when a row shows up (frame
+/// generation turns on, a mod connects, the latency reports start) and keeps that height
+/// while it runs, so a row that comes and goes (a gated tag's row, a latency that pauses on
+/// a loading screen) never makes the card jump. Values changing never change the size: rows
+/// with stale values keep their place.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CardHold {
+    /// The layout (its id and rows), its width and whether it has a panel.
+    key: String,
+    height: f32,
+}
+
+impl CardHold {
+    /// `m.size` at least as tall as before for the same layout; a new layout starts over.
+    pub fn apply(&mut self, layout: &Layout, m: &mut HudModel) {
+        let key = format!("{}|{}|{}|{:?}", layout.id, m.size[0], hud_card::panel(m.background), layout.rows);
+        if self.key != key {
+            *self = CardHold { key, height: m.size[1] };
+            return;
+        }
+        self.height = self.height.max(m.size[1]);
+        m.size[1] = self.height;
     }
 }
 
@@ -640,9 +678,9 @@ mod tests {
         let m = model(&s, "full", now);
         let t = text_of(&m);
         let split = m.rows.iter().flat_map(|r| &r.cells).find_map(|c| if let HudCell::Split { parts, style, .. } = c { Some((parts.clone(), style.clone())) } else { None }).unwrap();
-        assert_eq!(split.0.iter().map(|p| (p.label.as_str(), p.value)).collect::<Vec<_>>(), [("SIM", 6.0), ("RENDER", 9.0), ("QUEUE", 6.0), ("OUT", 6.0)]);
+        assert_eq!(split.0.iter().map(|p| (p.label.as_str(), p.value)).collect::<Vec<_>>(), [("SIM", 6.0), ("RENDER", 9.0), ("QUEUE", 6.0), ("GPU", 6.0)]);
         assert_eq!((split.1.source, split.1.source_name.as_deref()), (SourceKind::Mod, Some("aco-dlss")));
-        assert!(t.contains("[SIM 6 · RENDER 9 · QUEUE 6 · OUT 6]\n[SIM 6 · RENDER 9 · QUEUE 6 · OUT 6]"), "the bar and its numbers: {t}");
+        assert!(t.contains("[SIM 6 · RENDER 9 · QUEUE 6 · GPU 6]\n[SIM 6 · RENDER 9 · QUEUE 6 · GPU 6]"), "the bar and its numbers: {t}");
         assert!(t.contains("VRR on"), "{t}");
         // The mod's strip: its name and its basic metrics (not the counter, not the advanced
         // split parts), under a rule.
@@ -691,38 +729,69 @@ mod tests {
     }
 
     #[test]
-    fn the_card_keeps_the_layouts_size_whatever_it_holds() {
+    fn the_card_fits_the_rows_it_shows() {
         let (plain, now) = session(false);
         let (modded, now2) = session(true);
+        let fits = |m: &HudModel| {
+            let slots: Vec<f32> = m.rows.iter().map(hud_card::row_height).collect();
+            hud_card::height(m.orientation, &slots, hud_card::panel(m.background))
+        };
         for id in crate::perf::layout::PRESETS {
             let a = model(&plain, id, now);
             let b = model(&modded, id, now2);
-            // FG on and an upscaler (cells and a whole row appear) or not: the same card.
-            if !["clock", "diagnostics"].contains(&id) {
-                assert_ne!(text_of(&a), text_of(&b), "{id}");
-            }
-            assert_eq!(a.size, b.size, "{id}");
             assert_eq!(a.size[0], hud_card::preset_width(id).unwrap(), "{id}");
-            // Stale values (— everywhere) too.
+            assert_eq!(a.size[0], b.size[0], "{id}: the width is the layout's");
+            assert_eq!(a.size[1], fits(&a), "{id}: as tall as its rows");
+            assert_eq!(b.size[1], fits(&b), "{id}");
+            // Stale values (— everywhere) keep their rows, so the size holds.
             assert_eq!(model(&modded, id, now2 + 5_000 * MS).size, b.size, "{id}");
         }
-        // Standard: the hero's line, a two-row graph, three lines and the split, in a panel.
-        let content = 30.0 + 30.0 + 3.0 * 20.0 + 8.0 + 5.0 * 4.0;
+        // Full without frame generation or a mod (Alan Wake Remastered): no empty half.
+        let vanilla = model(&plain, "full", now);
+        let every_row = builtin("full").unwrap().size(true)[1];
+        assert!(vanilla.size[1] < every_row * 0.6, "{} of {every_row}", vanilla.size[1]);
+        // Standard with FG: the hero's line, a two-row graph and three lines, in a panel.
         let m = model(&modded, "standard", now2);
-        assert_eq!(m.size, [284.0, content + 2.0 * (6.0 + 1.0)]);
+        assert_eq!(m.size, [284.0, 30.0 + 30.0 + 3.0 * 20.0 + 4.0 * 4.0 + 2.0 * (6.0 + 1.0)]);
         assert_eq!(model(&plain, "fps", now).size, [150.0, 20.0 + 2.0 * (6.0 + 1.0)], "a panel by default, as in the mock-up");
         // Without a panel the padding goes, the slots stay.
         let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
         let l = builtin("standard").unwrap();
         let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
-        assert_eq!(build_model(&inp, &modded, now2).size, [284.0, content]);
-        // The model's rows never need more than the layout's slots.
-        for id in crate::perf::layout::PRESETS {
-            let m = model(&modded, id, now2);
-            let slots: Vec<f32> = m.rows.iter().map(hud_card::row_height).collect();
-            let need = hud_card::height(m.orientation, &slots, true);
-            assert!(need <= m.size[1] + 0.01, "{id}: {need} > {}", m.size[1]);
-        }
+        assert_eq!(build_model(&inp, &modded, now2).size, [284.0, 30.0 + 30.0 + 3.0 * 20.0 + 4.0 * 4.0]);
+        // A layout that sets its height keeps it.
+        let sized = crate::perf::layout::parse("x", "height = 200\n[[row]]\ncells = [{ metric = \"fps\" }]\n[[row]]\ncells = [{ metric = \"fps.base\" }]").unwrap();
+        let cfg = HudConfig::default();
+        let inp = ModelInput { layout: &sized, cfg: &cfg, ..inp };
+        assert_eq!(build_model(&inp, &plain, now).size[1], 200.0);
+    }
+
+    #[test]
+    fn the_card_grows_with_a_row_and_never_jumps_back() {
+        let (plain, now) = session(false);
+        let (modded, now2) = session(true);
+        let l = builtin("full").unwrap();
+        let mut hold = CardHold::default();
+        let sized = |m: HudModel, hold: &mut CardHold| {
+            let mut m = m;
+            hold.apply(&l, &mut m);
+            m.size
+        };
+        let small = sized(model(&plain, "full", now), &mut hold);
+        assert_eq!(small, model(&plain, "full", now).size, "the first model sets it");
+        // FG turns on and the latency comes: the card grows to fit.
+        let big = sized(model(&modded, "full", now2), &mut hold);
+        assert!(big[1] > small[1]);
+        // FG off again (a loading screen): the card keeps its height, no jump.
+        assert_eq!(sized(model(&plain, "full", now), &mut hold), big);
+        // Values moving never change it.
+        assert_eq!(sized(model(&modded, "full", now2 + 5_000 * MS), &mut hold), big);
+        // Another layout starts over.
+        let s = builtin("standard").unwrap();
+        let mut m = model(&plain, "standard", now);
+        let want = m.size;
+        hold.apply(&s, &mut m);
+        assert_eq!(m.size, want);
     }
 
     #[test]

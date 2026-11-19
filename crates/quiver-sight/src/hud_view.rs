@@ -8,10 +8,11 @@
 //! carries the swapchain-derived size; on the desktop, the output's scale is the window's and
 //! `unit` is the model's `scale`.
 //!
-//! The card has the model's fixed size (`HudModel::size`, [`hud_card`]); its contents never
-//! resize it. Rows sit in fixed-height slots packed from the top; within a row cells go left
-//! to right and what doesn't fit is cut: text values and badges shrink first with an
-//! ellipsis, numbers never shrink. A number keeps a reserved width (tabular digits, right
+//! The card has the model's size (`HudModel::size`, [`hud_card`]): quiverd fits it to the rows
+//! the layout shows in this session and never lets it shrink while the session runs, so values
+//! changing never resize it. Rows sit in fixed-height slots packed from the top; within a row
+//! cells go left to right and what doesn't fit is cut: text values and badges shrink first
+//! with an ellipsis, numbers never shrink. A number keeps a reserved width (tabular digits, right
 //! aligned, at least the unit's usual digit count and the widest it has been for this
 //! layout), so values ticking don't move the cells after them.
 //!
@@ -21,6 +22,10 @@
 //! FPS", "8.5 MS"); values tinted by their producer (the Sight layer neutral, a mod teal,
 //! the system grey, Quiver Tweaks the accent; a threshold level wins); the frame-time graph
 //! with presented frames in blue and rendered ones in amber over a faint reference line.
+//!
+//! **Sides.** A card anchored on the right mirrors its rows' groups ([`mirrored`]): the hero
+//! FPS stays the big headline at the card's outer edge with base FPS opposite it, and the
+//! numbers line up on the anchor's side.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -79,11 +84,14 @@ pub struct HudView {
     /// for the layout in `reserved_for`.
     reserved: HashMap<String, (usize, usize)>,
     reserved_for: String,
+    /// The Sight panel's layout editor: these model rows are outlined (dashed), with a
+    /// "MOVING" tag while picked up.
+    pub highlight: Option<(std::ops::Range<usize>, bool)>,
 }
 
 impl HudView {
     pub fn new(model: HudModel, unit: f32, mode: Mode) -> Self {
-        Self { model, unit, mode, measure: Rc::default(), reserved: HashMap::new(), reserved_for: String::new() }
+        Self { model, unit, mode, measure: Rc::default(), reserved: HashMap::new(), reserved_for: String::new(), highlight: None }
     }
 
     /// Folds the model's values into the reserved widths (reset when the layout changes).
@@ -472,6 +480,28 @@ impl HudView {
     }
 }
 
+/// Whether a card at `anchor` has its rows' groups mirrored (the right side).
+pub fn mirrors(anchor: Anchor) -> bool {
+    matches!(anchor, Anchor::TopRight | Anchor::Right | Anchor::BottomRight)
+}
+
+/// A row's cells for a card on the right: the groups between spacers in reverse order, each
+/// group as it was ("118 FPS" stays "118 FPS"). `118 FPS ~ 59 BASE` becomes `59 BASE ~ 118
+/// FPS`, so the hero sits at the outer edge with base FPS opposite, and `8.5 MS · 1% LOW 94 ~
+/// FG 2.0×` becomes `FG 2.0× ~ 8.5 MS · 1% LOW 94` with the numbers on the anchor's side. A
+/// row without a spacer is one group (it is right-aligned instead).
+pub fn mirrored(cells: &[HudCell]) -> Vec<HudCell> {
+    let groups: Vec<&[HudCell]> = cells.split(|c| matches!(c, HudCell::Spacer)).collect();
+    let mut out = Vec::with_capacity(cells.len());
+    for (i, g) in groups.iter().rev().enumerate() {
+        if i > 0 {
+            out.push(HudCell::Spacer);
+        }
+        out.extend(g.iter().cloned());
+    }
+    out
+}
+
 /// The latency split: a thin stacked bar of its parts, in proportion.
 fn split_bar(cx: &Ctx, parts: &[SplitPart]) -> Div {
     let total: f32 = parts.iter().map(|p| p.value.max(0.0)).sum();
@@ -592,14 +622,22 @@ impl Render for HudView {
         let panel = hud_card::panel(m.background);
         let (cw, ch) = model_size(m);
         // Rows lean towards the anchor's side (panel or not): a right-anchored card's
-        // contents are flush right, a centred card's centred; the card keeps its fixed size.
+        // contents are flush right with their groups mirrored (the hero at the outer edge), a
+        // centred card's centred.
+        let mirror = mirrors(m.anchor) && m.orientation == Orientation::Block;
+        let right = mirrors(m.anchor);
         let justify = |d: Div| match m.anchor {
-            Anchor::TopRight | Anchor::Right | Anchor::BottomRight => d.justify_end(),
             Anchor::Top | Anchor::Bottom => d.justify_center(),
             _ => d,
         };
         let row = |cells: &[HudCell], slot: f32, divider: bool| {
+            let cells = if mirror { mirrored(cells) } else { cells.to_vec() };
+            // Flush right through a filler that gives way first, not `justify_end`: a row too
+            // long for the card is then cut at its far end, as on the left, not at its start.
+            let grows = |c: &HudCell| matches!(c, HudCell::Spacer | HudCell::Split { numbers: false, .. }) || (matches!(c, HudCell::Graph { .. }) && m.orientation == Orientation::Block);
+            let fill = right && !cells.iter().any(grows);
             let line = justify(div().flex().flex_none().w_full().h(ctx.px(slot)).items_center().gap(ctx.px(hud_card::CELL_GAP)).overflow_hidden())
+                .when(fill, |d| d.child(div().flex_1().min_w_0()))
                 .children(cells.iter().map(|c| self.cell(&ctx, c)));
             if divider {
                 // The rule at the top of the slot, the line below it.
@@ -620,12 +658,33 @@ impl Render for HudView {
                 let slot = hud_card::row_slot(&all);
                 div().flex().flex_col().size_full().child(row(&all, slot, false))
             }
-            Orientation::Block => div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .gap(ctx.px(hud_card::ROW_GAP))
-                .children(m.rows.iter().map(|r: &HudRow| row(&r.cells, hud_card::row_slot(&r.cells), r.divider))),
+            Orientation::Block => {
+                let hl = self.highlight.clone();
+                div().flex().flex_col().size_full().gap(ctx.px(hud_card::ROW_GAP)).children(m.rows.iter().enumerate().map(|(i, r): (usize, &HudRow)| {
+                    let line = row(&r.cells, hud_card::row_slot(&r.cells), r.divider);
+                    match &hl {
+                        // The editor's picked row: a dashed outline around it, "MOVING" while
+                        // it is being moved.
+                        Some((range, moving)) if range.contains(&i) => {
+                            let first = i == range.start;
+                            let last = i + 1 == range.end;
+                            let mut d = div().relative().flex_none().w_full().child(line).border_color(th.acc_hi).border_dashed();
+                            d = d.border_l(px(1.5f32.max(u))).border_r(px(1.5f32.max(u)));
+                            if first {
+                                d = d.border_t(px(1.5f32.max(u))).rounded_t(ctx.px(4.));
+                            }
+                            if last {
+                                d = d.border_b(px(1.5f32.max(u))).rounded_b(ctx.px(4.));
+                            }
+                            if first && *moving {
+                                d = d.child(div().absolute().top(ctx.px(1.)).right(ctx.px(4.)).child(ctx.label_in("moving", th.acc_hi)));
+                            }
+                            d
+                        }
+                        _ => line,
+                    }
+                }))
+            }
         };
         let measure = self.measure.clone();
         let desktop = self.mode == Mode::Desktop;
@@ -702,9 +761,15 @@ mod tests {
             let want = model_size(&base);
             assert_eq!(want, (base.size[0], base.size[1]), "{layout}");
             for v in VARIANTS {
-                assert_eq!(model_size(&vary(base.clone(), v)), want, "{layout}/{v}");
+                let m = vary(base.clone(), v);
+                assert_eq!(model_size(&m), (m.size[0], m.size[1]), "{layout}/{v}");
             }
+            // Long values never resize it; the vanilla game's card is fitted to fewer rows.
+            assert_eq!(model_size(&vary(base.clone(), "long")), want, "{layout}");
+            assert!(model_size(&vary(base.clone(), "short")).1 <= want.1, "{layout}");
         }
+        let full = sample_model("full", 0, Presenter::Game, Some([2560, 1600]));
+        assert!(model_size(&vary(full.clone(), "short")).1 < model_size(&full).1 * 0.7, "Full without FG or a mod has no empty half");
         // A model from an older quiverd (no size): the default width and its rows' height.
         let mut m = sample_model("standard", 0, Presenter::Game, None);
         m.size = [0.0, 0.0];
@@ -785,6 +850,27 @@ mod tests {
         // The marks are the theme's actor tokens.
         assert_eq!(source_mark(&th, SourceKind::Mod), th.who_cli);
         assert_eq!(split_colors(&th)[0], th.who_gui);
+    }
+
+    #[test]
+    fn a_card_on_the_right_mirrors_its_groups() {
+        let m = sample_model("standard", 0, Presenter::Game, None);
+        let ids = |cells: &[HudCell]| cells.iter().map(|c| c.metric().unwrap_or(if matches!(c, HudCell::Spacer) { "~" } else { "·" }).to_owned()).collect::<Vec<_>>();
+        // The hero at the outer edge, base FPS opposite it.
+        assert_eq!(ids(&mirrored(&m.rows[0].cells)), ["fps.base", "~", "fps"]);
+        // Groups keep their order inside; the numbers go to the anchor's side.
+        assert_eq!(ids(&mirrored(&m.rows[2].cells)), ["fg.ratio", "~", "frametime", "·", "fps.p1low"]);
+        // Without frame generation the hero is alone: it stays (right-aligned).
+        let v = vary(m.clone(), "short");
+        assert_eq!(ids(&mirrored(&v.rows[0].cells)), ["fps"]);
+        // A row without a spacer is one group; mirroring twice is the row again.
+        assert_eq!(mirrored(&m.rows[5].cells), m.rows[5].cells);
+        for r in &m.rows {
+            assert_eq!(mirrored(&mirrored(&r.cells)), r.cells);
+        }
+        assert!(mirrors(Anchor::BottomRight) && mirrors(Anchor::Right) && !mirrors(Anchor::TopLeft) && !mirrors(Anchor::Top));
+        // The hero keeps its size and its taller row whatever the side.
+        assert_eq!(hud_card::row_slot(&mirrored(&m.rows[0].cells)), hud_card::HERO_LINE);
     }
 
     #[test]
