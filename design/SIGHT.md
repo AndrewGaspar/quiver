@@ -616,6 +616,15 @@ the session's pids). Updates arrive as events (`SessionsChanged`, `ModsChanged`,
   D3D fullscreen paths minimize on deactivation. If a game behaves badly, per-game options:
   "pause via SDK only" (keep focus, rely on `OverlayStateChangedPush`; works only if the game
   honours it) or "toasts only".
+  Seen (2026-11-18): Alan Wake Remastered (D3D12 through vkd3d-proton, exclusive fullscreen) on
+  Hyprland. Within about 1.5 s of the panel taking the keyboard, the game minimised itself. Its
+  toplevel left Hyprland's list, and vkd3d-proton dropped its Vulkan swapchain (a minimised
+  window has a zero max extent: "occlusion"), so the layer reported no swapchain. The game's
+  next launch came up with a swapchain at most 375 px tall, at ~1000 fps: a tiny image
+  stretched over the screen, "a single rectangle flashing colours". The game apparently
+  kept the minimised window's size as its resolution (`resolution.xml`; inferred, not seen). The Sight layer passes vkd3d-proton's swapchain
+  creation and presents through unchanged (tests/wine_vkd3d.rs). The panel's keyboard grab
+  is what deactivated the game.
 - Text entry: hyprpad's OSK (`h.keyboard{…}` on a guide chord, or Sight asks hyprpad to raise it
   when a text field gets focus) types into the Sight surface through the virtual keyboard.
   Fields that matter are short (notes, search, chat quick replies); prefer pickers and steppers.

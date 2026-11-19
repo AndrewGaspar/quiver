@@ -1,5 +1,9 @@
 //! A private Xvfb for the key tests, and XTEST key presses into it. Never the desktop's X
-//! server: Xvfb picks a free display itself (`-displayfd`).
+//! server: the display is an explicit high number (400 and up) whose socket and lock files
+//! don't exist. Not `-displayfd` alone: that starts the search at :0, and in a sandbox with its
+//! own network namespace the abstract socket of the desktop's display looks free, so Xvfb
+//! takes :0 and unlinks the desktop's `/tmp/.X11-unix/X0` (then exits, its lock being
+//! held), leaving the desktop's Xwayland without its socket file.
 
 #![allow(dead_code)]
 
@@ -29,11 +33,25 @@ impl Drop for Xvfb {
 impl Xvfb {
     /// `None` (and a note on stderr) when Xvfb isn't installed or doesn't start.
     pub fn start() -> Option<Xvfb> {
+        Xvfb::start_size("640x480x24")
+    }
+
+    /// With a screen of `size` (`<w>x<h>x<depth>`).
+    pub fn start_size(size: &str) -> Option<Xvfb> {
+        let start = 400 + std::process::id() % 400;
+        let free = |n: u32| {
+            !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists() && !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()
+        };
+        let Some(n) = (start..start + 400).find(|&n| free(n)) else {
+            eprintln!("skipping: no free X display number");
+            return None;
+        };
         let mut fds = [0; 2];
         // SAFETY: a plain pipe; the write end is inherited by Xvfb (no CLOEXEC).
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // With an explicit display, -displayfd only reports it once Xvfb accepts connections.
         let spawned = Command::new("Xvfb")
-            .args(["-displayfd", &fds[1].to_string(), "-nolisten", "tcp", "-screen", "0", "640x480x24"])
+            .args([format!(":{n}").as_str(), "-displayfd", &fds[1].to_string(), "-nolisten", "tcp", "-screen", "0", size])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
