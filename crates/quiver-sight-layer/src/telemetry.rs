@@ -52,6 +52,8 @@ pub struct Telemetry {
     pub blur_error: AtomicU32,
     /// `STEREO_DRAWN_VALID | STEREO_*`: the layout of the last image drawn (status block).
     pub stereo_drawn: AtomicU32,
+    /// `DEPTH_DRAWN_VALID | px`: the largest total disparity of the last stereo frame drawn.
+    pub depth_drawn: AtomicU32,
 }
 
 /// `LAYER_BLURRING` stays set this long after a blurred present.
@@ -87,6 +89,13 @@ pub fn note_blur_gpu(ns: u64) {
 pub fn note_stereo_drawn(code: u32) {
     if let Some(t) = get() {
         t.stereo_drawn.store(quiver_perf::layout::STEREO_DRAWN_VALID | (code & 0xff), Ordering::Relaxed);
+    }
+}
+
+/// A stereo frame was drawn with at most `px` of total disparity: the status block says so.
+pub fn note_depth_drawn(px: u32) {
+    if let Some(t) = get() {
+        t.depth_drawn.store(quiver_perf::layout::DEPTH_DRAWN_VALID | px.min(0xffff), Ordering::Relaxed);
     }
 }
 
@@ -135,6 +144,7 @@ pub fn init() -> Option<&'static Telemetry> {
                 backdrop_gpu_ns: AtomicU32::new(0),
                 blur_error: AtomicU32::new(0),
                 stereo_drawn: AtomicU32::new(0),
+                depth_drawn: AtomicU32::new(0),
             })
         })
         .as_ref()
@@ -183,6 +193,8 @@ impl Telemetry {
         s.backdrop_gpu_ns = self.backdrop_gpu_ns.load(Ordering::Relaxed);
         s.stereo_setting = crate::stereo_setting().code();
         s.stereo_drawn = self.stereo_drawn.load(Ordering::Relaxed);
+        s.depth_setting = crate::depth_setting().code();
+        s.depth_drawn = self.depth_drawn.load(Ordering::Relaxed);
         // Contention means another thread is writing it this instant; the next tick retries.
         let _ = self.ring.set_layer_status(&s);
     }

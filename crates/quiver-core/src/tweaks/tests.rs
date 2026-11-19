@@ -87,6 +87,13 @@ fn the_catalog_parses_and_lints_clean_with_the_defaults_game_s_choice() {
     assert_eq!(c.plan.env.get("QUIVER_SIGHT_STEREO").map(String::as_str), Some("hsbs"), "{:?}", c.plan.env);
     let c = plan_with(json!({"sight.stereo": "auto"}), &nvidia(50), &[]);
     assert!(c.plan.env.is_empty());
+    // sight.depth (design/STEREO-UI.md): a percent for the layer, nothing at the default.
+    let c = plan_with(json!({"sight.depth": "150"}), &nvidia(50), &[]);
+    assert_eq!(c.plan.env.get("QUIVER_SIGHT_DEPTH").map(String::as_str), Some("150"), "{:?}", c.plan.env);
+    let c = plan_with(json!({"sight.depth": "off"}), &nvidia(50), &[]);
+    assert_eq!(c.plan.env.get("QUIVER_SIGHT_DEPTH").map(String::as_str), Some("off"), "{:?}", c.plan.env);
+    let c = plan_with(json!({"sight.depth": "auto"}), &nvidia(50), &[]);
+    assert!(c.plan.env.is_empty(), "{:?}", c.plan.env);
     // Every preset validates.
     for p in &s.presets {
         for (id, v) in &p.set {

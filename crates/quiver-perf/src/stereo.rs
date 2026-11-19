@@ -270,6 +270,222 @@ pub fn resolve(sdk: Option<Stereo>, setting: Setting) -> (Stereo, Source) {
     }
 }
 
+// ---------------------------------------------------------------------------------- depth
+
+/// The game's environment variable for the `sight.depth` Tweak: how strongly Sight's HUD and
+/// panel float in front of the game on a packed stereo frame, in percent of the shared ladder
+/// (design/STEREO-UI.md): `0` or `off` draws everything at the game's own screen plane (zero
+/// disparity, as before depth), unset is 100.
+pub const ENV_DEPTH: &str = "QUIVER_SIGHT_DEPTH";
+
+/// The strength's ceiling, percent: at 200 the nearest rung is ≈13 px of total disparity on a
+/// 1920-wide eye, ≈0.3° on an XReal (46° per eye), still well inside HypXRland's 1° cap.
+pub const DEPTH_MAX_PERCENT: u32 = 200;
+
+/// `qv_layer_status.depth_setting`: set (the percent is in the low 16 bits); clear = not set
+/// (100).
+pub const DEPTH_SETTING_SET: u32 = 0x1_0000;
+/// The variable is set but isn't `off` or a percent.
+pub const DEPTH_SETTING_INVALID: u32 = 0x2_0000;
+
+/// A depth is HypXRland's unitless rung (`windowrule = depth`, its 05-configuration.md §8.7):
+/// 0 is the screen plane (the game, the wallpaper), 1 is the top of the ladder. Descriptors
+/// carry it in thousandths ([`HudLift::depth`](crate::layout::HudLift),
+/// `qv_hud_buffer.depth`).
+pub const DEPTH_ONE: u16 = 1000;
+
+/// The rungs Sight draws at (design/STEREO-UI.md "The ladder"). Total disparity at 100% on a
+/// 1920-wide eye in the comment: every step between two things seen together is 2 px
+/// (≈0.05° on an XReal), under the ≈0.1° foveal fusion limit, and the nearest is 7 px
+/// (≈0.17°), a sixth of the 1° comfort budget.
+pub mod rung {
+    /// The perf HUD (2 px): just in front of the game's own HUD, which is at zero.
+    pub const HUD: u16 = 300;
+    /// The panel's card (3 px). Its scrim and the blur stay at the game's plane.
+    pub const PANEL: u16 = 450;
+    /// The focused row or section (5 px).
+    pub const FOCUS: u16 = 750;
+    /// A dialog's box (5 px: over the card's scrim, which is at the card's depth).
+    pub const DIALOG: u16 = 750;
+    /// A dialog's focused button (7 px).
+    pub const DIALOG_FOCUS: u16 = 1000;
+}
+
+/// HypXRland's depth geometry (05-configuration.md §8.7 and research/24 §8.1), shared so a
+/// rung means the same disparity in Sight, the app and the compositor's depth desktop:
+/// a rung of 1 rises `depth_scale` (0.12 m) out of a virtual screen 1.6 m wide at 1.5 m,
+/// seen with a 63 mm interocular distance.
+pub mod geometry {
+    pub const DEPTH_SCALE_M: f64 = 0.12;
+    pub const DISTANCE_M: f64 = 1.5;
+    pub const SCREEN_WIDTH_M: f64 = 1.6;
+    pub const IOD_M: f64 = 0.063;
+}
+
+/// The `sight.depth` setting as the game's environment has it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DepthSetting {
+    /// Unset: 100%.
+    #[default]
+    Default,
+    /// A percent of the ladder, 0 (off) ..= [`DEPTH_MAX_PERCENT`].
+    Percent(u16),
+    /// Set to something else (ignored: 100%, reported).
+    Invalid,
+}
+
+impl DepthSetting {
+    /// `off`, or a percent (`0`..`200`, a decimal like `150.0` too, as a float Tweak writes
+    /// it). Over the ceiling is clamped to it.
+    pub fn parse(v: Option<&str>) -> DepthSetting {
+        let Some(s) = v.map(str::trim) else { return DepthSetting::Default };
+        match s {
+            "" => DepthSetting::Default,
+            "off" => DepthSetting::Percent(0),
+            _ => {
+                let int = s.split_once('.').map_or(s, |(i, f)| if f.bytes().all(|b| b == b'0') { i } else { "" });
+                match int.parse::<u32>() {
+                    Ok(p) => DepthSetting::Percent(p.min(DEPTH_MAX_PERCENT) as u16),
+                    Err(_) => DepthSetting::Invalid,
+                }
+            }
+        }
+    }
+
+    /// The strength it gives, percent.
+    pub fn percent(self) -> u32 {
+        match self {
+            DepthSetting::Percent(p) => p as u32,
+            _ => 100,
+        }
+    }
+
+    /// `qv_layer_status.depth_setting`.
+    pub fn code(self) -> u32 {
+        match self {
+            DepthSetting::Default => 0,
+            DepthSetting::Percent(p) => DEPTH_SETTING_SET | p as u32,
+            DepthSetting::Invalid => DEPTH_SETTING_INVALID,
+        }
+    }
+
+    pub fn from_code(c: u32) -> DepthSetting {
+        if c & DEPTH_SETTING_INVALID != 0 {
+            DepthSetting::Invalid
+        } else if c & DEPTH_SETTING_SET != 0 {
+            DepthSetting::Percent((c & 0xffff).min(DEPTH_MAX_PERCENT) as u16)
+        } else {
+            DepthSetting::Default
+        }
+    }
+}
+
+/// The total disparity, in whole logical pixels of an eye `eye_width` wide, of something at
+/// `depth` (thousandths of a rung) at `percent` strength: HypXRland's formula,
+/// `p = b·h / (D − h)` metres of crossed parallax for a rise `h`, times `P / W` pixels per
+/// metre, rounded to the nearest pixel. Whole pixels keep text crisp in each eye (no
+/// resampling); a pixel of total disparity is ≈1.4′ on an XReal, finer than the ladder's steps.
+pub fn disparity_px(depth: u16, percent: u32, eye_width: u32) -> u32 {
+    use geometry::*;
+    let d = depth.min(DEPTH_ONE) as f64 / DEPTH_ONE as f64;
+    let h = d * DEPTH_SCALE_M * percent.min(DEPTH_MAX_PERCENT) as f64 / 100.0;
+    if h <= 0.0 {
+        return 0;
+    }
+    let p = IOD_M * h / (DISTANCE_M - h);
+    let px = p * eye_width as f64 / SCREEN_WIDTH_M;
+    (px + 0.5) as u32
+}
+
+/// One eye's share of a total disparity, logical px along +x: content in front of the screen
+/// moves right in the left eye (eye 0) and left in the right eye. An odd total gives the left
+/// eye the extra pixel; the half-pixel that moves the fused position is invisible.
+pub fn eye_shift(total: u32, eye: u32) -> i32 {
+    let t = total as i32;
+    if eye == 0 { (t + 1) / 2 } else { -(t / 2) }
+}
+
+/// An eye's shift for something `margin_left` / `margin_right` logical px from the eye's
+/// edges, limited so it never slides past the edge: a sliver one eye sees and the other
+/// doesn't is the worst stereo artifact (frame violation). HypXRland's rule: a shift may not
+/// exceed the greater of the margin on the side it moves toward and a 2 px slack.
+pub fn clamp_to_frame(shift: i32, margin_left: i32, margin_right: i32) -> i32 {
+    const SLACK: i32 = 2;
+    if shift > 0 {
+        shift.min(margin_right.max(SLACK))
+    } else {
+        shift.max(-margin_left.max(SLACK))
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    #[test]
+    fn the_ladder_in_pixels() {
+        // HypXRland's own table (05 §8.7): 0.2 → 1.2, 0.6 → 3.8, 0.8 → 5.2, 1.0 → 6.6 px total
+        // on a 1920 pane; whole pixels here.
+        assert_eq!(disparity_px(200, 100, 1920), 1);
+        assert_eq!(disparity_px(600, 100, 1920), 4);
+        assert_eq!(disparity_px(800, 100, 1920), 5);
+        assert_eq!(disparity_px(1000, 100, 1920), 7);
+        // Sight's rungs: 2, 3, 5, 7.
+        assert_eq!(disparity_px(rung::HUD, 100, 1920), 2);
+        assert_eq!(disparity_px(rung::PANEL, 100, 1920), 3);
+        assert_eq!(disparity_px(rung::FOCUS, 100, 1920), 5);
+        assert_eq!(disparity_px(rung::DIALOG_FOCUS, 100, 1920), 7);
+        // Off, and the screen plane.
+        assert_eq!(disparity_px(rung::DIALOG_FOCUS, 0, 1920), 0);
+        assert_eq!(disparity_px(0, 200, 1920), 0);
+        // It scales with the eye's pixels (the eye spans the same screen) and the strength.
+        assert_eq!(disparity_px(rung::FOCUS, 100, 960), 2);
+        assert_eq!(disparity_px(1000, 200, 1920), 14);
+        assert_eq!(disparity_px(1000, 500, 1920), 14, "clamped to 200%");
+        assert_eq!(disparity_px(5000, 100, 1920), 7, "clamped to a rung of 1");
+    }
+
+    #[test]
+    fn eyes_split_the_disparity() {
+        assert_eq!((eye_shift(5, 0), eye_shift(5, 1)), (3, -2));
+        assert_eq!((eye_shift(4, 0), eye_shift(4, 1)), (2, -2));
+        assert_eq!((eye_shift(0, 0), eye_shift(0, 1)), (0, 0));
+        for t in 0..20 {
+            assert_eq!(eye_shift(t, 0) - eye_shift(t, 1), t as i32, "the eyes differ by the total");
+        }
+    }
+
+    #[test]
+    fn nothing_slides_off_the_frame() {
+        // Plenty of room: unchanged.
+        assert_eq!(clamp_to_frame(3, 12, 12), 3);
+        assert_eq!(clamp_to_frame(-2, 12, 12), -2);
+        // Against the right edge, moving right: the slack only.
+        assert_eq!(clamp_to_frame(3, 12, 0), 2);
+        assert_eq!(clamp_to_frame(-3, 0, 40), -2);
+        assert_eq!(clamp_to_frame(-1, 0, 40), -1);
+    }
+
+    #[test]
+    fn the_setting() {
+        assert_eq!(DepthSetting::parse(None), DepthSetting::Default);
+        assert_eq!(DepthSetting::parse(Some("")), DepthSetting::Default);
+        assert_eq!(DepthSetting::parse(Some("off")), DepthSetting::Percent(0));
+        assert_eq!(DepthSetting::parse(Some("0")), DepthSetting::Percent(0));
+        assert_eq!(DepthSetting::parse(Some(" 150 ")), DepthSetting::Percent(150));
+        assert_eq!(DepthSetting::parse(Some("50.0")), DepthSetting::Percent(50));
+        assert_eq!(DepthSetting::parse(Some("900")), DepthSetting::Percent(200));
+        assert_eq!(DepthSetting::parse(Some("12.5")), DepthSetting::Invalid);
+        assert_eq!(DepthSetting::parse(Some("deep")), DepthSetting::Invalid);
+        assert_eq!(DepthSetting::parse(Some("-5")), DepthSetting::Invalid);
+        assert_eq!(DepthSetting::Default.percent(), 100);
+        assert_eq!(DepthSetting::Invalid.percent(), 100);
+        for s in [DepthSetting::Default, DepthSetting::Invalid, DepthSetting::Percent(0), DepthSetting::Percent(175)] {
+            assert_eq!(DepthSetting::from_code(s.code()), s);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

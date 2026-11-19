@@ -684,6 +684,10 @@ fn print_status(s: &HudStatus) {
     }
     if let Some(st) = &s.stereo {
         println!("  stereo: {}", st.line());
+        let d = st.depth_line();
+        if !d.is_empty() {
+            println!("  {d}");
+        }
     }
     println!("  captures: {:?}  model rev {}", s.captures, s.model_rev);
     if let Some(e) = &s.last_error {

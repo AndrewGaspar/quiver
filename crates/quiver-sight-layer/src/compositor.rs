@@ -701,8 +701,8 @@ impl Compositor {
                 &vk::RenderPassBeginInfo::default().render_pass(self.pipes.render_pass).framebuffer(self.framebuffers[image]).render_area(full),
                 vk::SubpassContents::INLINE,
             );
-            for eye in Eyes::of(c, self.extent) {
-                let push = Push { extent: eye.extent, origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: srgb | eye.squeeze };
+            for eye in Eyes::of(c, self.extent, crate::depth_setting().percent()) {
+                let push = eye.push(c, srgb);
                 dev.cmd_set_viewport(cmd, 0, &[eye.viewport]);
                 if let Some(scissor) = eye.scissor {
                     dev.cmd_set_scissor(cmd, 0, &[scissor]);
@@ -711,8 +711,8 @@ impl Compositor {
                     dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, push.bytes());
                     dev.cmd_draw(cmd, 4, 1, 0, 0);
                 }
-                if cursor.is_some() {
-                    let cpush = Push { opacity: 1.0, ..push };
+                if let Some(tip) = cursor {
+                    let cpush = Push { opacity: 1.0, nlifts: 0, shift: [eye.cursor_shift(c, tip) as f32, 0.0], ..push };
                     dev.cmd_set_scissor(cmd, 0, &[eye.clip]);
                     dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.graph);
                     dev.cmd_push_constants(cmd, self.pipes.layout, pc, 0, cpush.bytes());
@@ -1010,6 +1010,11 @@ impl Compositor {
                     }
                     if let Some(c) = panel_shown.map(|(_, c)| c).or(visible) {
                         telemetry::note_stereo_drawn(c.stereo);
+                        if c.stereo != quiver_perf::stereo::STEREO_MONO {
+                            let pct = crate::depth_setting().percent();
+                            let of = |c: &HudBufferHeader| Eyes::disparity(&Eyes::of(c, self.extent, pct).collect::<Vec<_>>());
+                            telemetry::note_depth_drawn(visible.as_ref().map_or(0, of).max(panel_shown.as_ref().map_or(0, |(_, c)| of(c))));
+                        }
                     }
                 }
                 Err(vk::Result::ERROR_DEVICE_LOST) => return Err(DRAW_ERR_DEVICE_LOST),
@@ -1120,10 +1125,10 @@ impl Compositor {
                     .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: self.extent }),
                 vk::SubpassContents::INLINE,
             );
-            for eye in Eyes::of(c, self.extent) {
+            for eye in Eyes::of(c, self.extent, crate::depth_setting().percent()) {
                 // Inside the frame (and the eye): validated against this extent by quiver-perf.
                 let Some(scissor) = eye.scissor else { continue };
-                let push = Push { extent: eye.extent, origin: [c.x as f32, c.y as f32], size: [c.width as f32, c.height as f32], opacity: c.opacity, flags: flags | eye.squeeze };
+                let push = eye.push(c, flags);
                 dev.cmd_set_viewport(cmd, 0, &[eye.viewport]);
                 dev.cmd_set_scissor(cmd, 0, &[scissor]);
                 dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipes.quad);
@@ -1212,10 +1217,56 @@ pub struct Eye {
     pub extent: [f32; 2],
     /// `PUSH_SQUEEZE_*` for the quad.
     pub squeeze: u32,
-    /// The image's swapchain pixels within this eye; `None` when it covers none of them.
+    /// The image's swapchain pixels within this eye (moved by `shift`); `None` when it covers
+    /// none of them.
     pub scissor: Option<vk::Rect2D>,
     /// The whole eye (the cursor's scissor).
     pub clip: vk::Rect2D,
+    /// Depth (design/STEREO-UI.md): this eye's shift of the whole image, logical px; 0 for
+    /// mono and with depth off.
+    pub shift: i32,
+    /// The image's lifts as the quad takes them: in use, rectangles (x0, y0, x1, y1) in image
+    /// texels, and each one's shift beyond `shift`.
+    pub nlifts: u32,
+    pub lift: [[f32; 4]; 4],
+    pub lift_dx: [f32; 4],
+    /// Each lift's whole shift in this eye (`shift` + its `lift_dx`).
+    pub lift_shift: [i32; 4],
+}
+
+impl Eye {
+    /// The push constants for the image's quad (and its graph) in this eye.
+    pub fn push(&self, c: &HudBufferHeader, flags: u32) -> Push {
+        Push {
+            extent: self.extent,
+            origin: [c.x as f32, c.y as f32],
+            size: [c.width as f32, c.height as f32],
+            opacity: c.opacity,
+            flags: flags | self.squeeze,
+            shift: [self.shift as f32, 0.0],
+            nlifts: self.nlifts,
+            _pad: 0,
+            lift: self.lift,
+            lift_dx: self.lift_dx,
+        }
+    }
+
+    /// The cursor's shift with its tip at `tip` (the image's logical px): the depth of the
+    /// front-most lift it's over, else the first lift's (the panel's card: the cursor never
+    /// sits behind the panel), else the image's. It's drawn where what it points at is drawn
+    /// in each eye, so a click lands on what it looks to be over.
+    pub fn cursor_shift(&self, c: &HudBufferHeader, tip: (i32, i32)) -> i32 {
+        let (x, y) = ((tip.0 - c.x) as f32 + 0.5, (tip.1 - c.y) as f32 + 0.5);
+        let n = self.nlifts as usize;
+        (0..n)
+            .rev()
+            .find(|&i| {
+                let r = self.lift[i];
+                x >= r[0] && y >= r[1] && x < r[2] && y < r[3]
+            })
+            .or((n > 0).then_some(0))
+            .map_or(self.shift, |i| self.lift_shift[i])
+    }
 }
 
 /// The eyes an image is drawn into: one for mono, two for a packed stereo frame
@@ -1223,24 +1274,62 @@ pub struct Eye {
 pub struct Eyes;
 
 impl Eyes {
-    pub fn of(c: &HudBufferHeader, extent: vk::Extent2D) -> impl Iterator<Item = Eye> + use<> {
+    /// With the image's depth and lifts at `percent` strength (the `sight.depth` setting).
+    pub fn of(c: &HudBufferHeader, extent: vk::Extent2D, percent: u32) -> impl Iterator<Item = Eye> + use<> {
+        use quiver_perf::stereo::{clamp_to_frame, disparity_px, eye_shift};
         let stereo = Stereo::from_code(c.stereo).unwrap_or_default();
         let ext = (extent.width, extent.height);
         let (lw, lh) = stereo.logical_extent(ext);
         let (x, y, w, h) = (c.x, c.y, c.width, c.height);
+        let lifts: Vec<quiver_perf::layout::HudLift> = if stereo.is_stereo() { c.lifts().to_vec() } else { Vec::new() };
+        let depth = c.depth;
         (0..stereo.eyes()).map(move |e| {
             let r = stereo.eye_rect(ext, e);
-            let s = stereo.eye_scissor(ext, e, x, y, w, h);
-            let rect = |x: u32, y: u32, w: u32, h: u32| vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w, height: h } };
-            Eye {
+            // Depth only where there are two eyes to disagree (on mono everything is at 0).
+            let shift = if stereo.is_stereo() { clamp_to_frame(eye_shift(disparity_px(depth, percent, lw), e), x, lw as i32 - (x + w as i32)) } else { 0 };
+            let mut eye = Eye {
                 viewport: vk::Viewport { x: r.x as f32, y: r.y as f32, width: r.w as f32, height: r.h as f32, min_depth: 0.0, max_depth: 1.0 },
                 extent: [lw as f32, lh as f32],
                 squeeze: squeeze_flags(stereo),
-                scissor: (s.w > 0 && s.h > 0).then(|| rect(s.x, s.y, s.w, s.h)),
-                clip: rect(r.x, r.y, r.w, r.h),
+                scissor: None,
+                clip: rect2d(r.x, r.y, r.w, r.h),
+                shift,
+                nlifts: lifts.len().min(4) as u32,
+                lift: [[0.0; 4]; 4],
+                lift_dx: [0.0; 4],
+                lift_shift: [shift; 4],
+            };
+            for (i, l) in lifts.iter().take(4).enumerate() {
+                let (lx, lwid) = (l.x as i32, l.w as i32);
+                let ex = x + lx;
+                let s = clamp_to_frame(eye_shift(disparity_px(l.depth, percent, lw), e), ex, lw as i32 - (ex + lwid));
+                // Kept inside the image's quad, which is drawn at the image's shift.
+                let dx = (s - shift).clamp(-lx, w as i32 - (lx + lwid));
+                eye.lift[i] = [l.x as f32, l.y as f32, (l.x + l.w) as f32, (l.y + l.h) as f32];
+                eye.lift_dx[i] = dx as f32;
+                eye.lift_shift[i] = shift + dx;
             }
+            let s = stereo.eye_scissor(ext, e, x + shift, y, w, h);
+            eye.scissor = (s.w > 0 && s.h > 0).then(|| rect2d(s.x, s.y, s.w, s.h));
+            eye
         })
     }
+
+    /// The largest total disparity (the left eye's shift less the right's) among the image's
+    /// parts, px: what the status block reports. 0 for mono.
+    pub fn disparity(eyes: &[Eye]) -> u32 {
+        match eyes {
+            [l, r] => {
+                let base = l.shift - r.shift;
+                (0..l.nlifts as usize).map(|i| l.lift_shift[i] - r.lift_shift[i]).fold(base, i32::max).max(0) as u32
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn rect2d(x: u32, y: u32, w: u32, h: u32) -> vk::Rect2D {
+    vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w, height: h } }
 }
 
 #[cfg(test)]
@@ -1257,25 +1346,74 @@ mod eye_tests {
     fn eyes_of_an_image() {
         let ext = vk::Extent2D { width: 3840, height: 1080 };
         // Mono: the whole swapchain, as before stereo.
-        let m: Vec<Eye> = Eyes::of(&desc(Stereo::Mono, 12, 12, 260, 188), ext).collect();
+        let m: Vec<Eye> = Eyes::of(&desc(Stereo::Mono, 12, 12, 260, 188), ext, 100).collect();
         assert_eq!(m.len(), 1);
         assert_eq!((m[0].viewport.width, m[0].extent), (3840.0, [3840.0, 1080.0]));
         assert_eq!(m[0].scissor.unwrap().offset, vk::Offset2D { x: 12, y: 12 });
         // sbs: two 1920-wide eyes at 1:1, the same logical position in each.
-        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Sbs, 12, 12, 260, 188), ext).collect();
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Sbs, 12, 12, 260, 188), ext, 100).collect();
         assert_eq!(e.len(), 2);
         assert_eq!((e[1].viewport.x, e[1].viewport.width, e[1].extent, e[1].squeeze), (1920.0, 1920.0, [1920.0, 1080.0], 0));
         assert_eq!(e[1].scissor.unwrap(), vk::Rect2D { offset: vk::Offset2D { x: 1932, y: 12 }, extent: vk::Extent2D { width: 260, height: 188 } });
         // hsbs on 1920x1080: 960-wide eyes, laid out at 1920 and squeezed.
         let ext = vk::Extent2D { width: 1920, height: 1080 };
-        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Hsbs, 0, 0, 1920, 1080), ext).collect();
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Hsbs, 0, 0, 1920, 1080), ext, 100).collect();
         assert_eq!((e[0].viewport.width, e[0].extent, e[0].squeeze), (960.0, [1920.0, 1080.0], crate::pipelines::PUSH_SQUEEZE_X));
         assert_eq!(e[0].scissor.unwrap().extent.width, 960);
         assert_eq!(e[1].scissor.unwrap().offset.x, 960);
         // htab: squeezed vertically, the bottom eye below 540.
-        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Htab, 0, 1000, 100, 80), ext).collect();
+        let e: Vec<Eye> = Eyes::of(&desc(Stereo::Htab, 0, 1000, 100, 80), ext, 100).collect();
         assert_eq!((e[1].viewport.y, e[1].viewport.height, e[1].squeeze), (540.0, 540.0, crate::pipelines::PUSH_SQUEEZE_Y));
         assert_eq!(e[1].scissor.unwrap(), vk::Rect2D { offset: vk::Offset2D { x: 0, y: 1040 }, extent: vk::Extent2D { width: 100, height: 40 } });
+    }
+
+    #[test]
+    fn depth_per_eye() {
+        use quiver_perf::layout::HudLift;
+        use quiver_perf::stereo::rung;
+        let ext = vk::Extent2D { width: 3840, height: 1080 };
+        // The HUD at its rung: 2 px total on a 1920-wide eye, +1 in the left eye, -1 in the right.
+        let mut hud = desc(Stereo::Sbs, 12, 12, 260, 188);
+        hud.depth = rung::HUD;
+        let e: Vec<Eye> = Eyes::of(&hud, ext, 100).collect();
+        assert_eq!((e[0].shift, e[1].shift, Eyes::disparity(&e)), (1, -1, 2));
+        assert_eq!(e[0].scissor.unwrap().offset.x, 13);
+        assert_eq!(e[1].scissor.unwrap().offset.x, 1920 + 11);
+        assert_eq!(e[0].push(&hud, 0).shift, [1.0, 0.0]);
+        // Off: zero disparity, as before depth; mono: nothing moves whatever it says.
+        let e: Vec<Eye> = Eyes::of(&hud, ext, 0).collect();
+        assert_eq!((e[0].shift, e[1].shift, Eyes::disparity(&e)), (0, 0, 0));
+        hud.stereo = Stereo::Mono.code();
+        let m: Vec<Eye> = Eyes::of(&hud, ext, 100).collect();
+        assert_eq!((m[0].shift, m[0].nlifts), (0, 0));
+        // Against the eye's edge: no further than the 2 px slack.
+        let mut edge = desc(Stereo::Sbs, 1920 - 260, 12, 260, 188);
+        edge.depth = 1000;
+        let e: Vec<Eye> = Eyes::of(&edge, ext, 200).collect();
+        assert_eq!((e[0].shift, e[1].shift), (2, -7));
+
+        // The panel: a full-eye image at the game's plane, its card, focused row and nothing else.
+        let mut p = desc(Stereo::Sbs, 0, 0, 1920, 1080);
+        p.nlifts = 2;
+        p.lifts[0] = HudLift { x: 67, y: 38, w: 1786, h: 1004, depth: rung::PANEL, _pad: 0 };
+        p.lifts[1] = HudLift { x: 400, y: 300, w: 1300, h: 80, depth: rung::FOCUS, _pad: 0 };
+        let e: Vec<Eye> = Eyes::of(&p, ext, 100).collect();
+        assert_eq!((e[0].shift, e[1].shift), (0, 0), "the scrim and blur stay at the game's plane");
+        assert_eq!((e[0].lift_shift[0], e[1].lift_shift[0]), (2, -1), "the card: 3 px");
+        assert_eq!((e[0].lift_shift[1], e[1].lift_shift[1]), (3, -2), "the focused row: 5 px");
+        assert_eq!((e[0].lift_dx, e[0].nlifts), ([2.0, 3.0, 0.0, 0.0], 2));
+        assert_eq!(e[1].lift[1], [400.0, 300.0, 1700.0, 380.0]);
+        assert_eq!(Eyes::disparity(&e), 5);
+        // The cursor sits at the depth of what it's over, and never behind the card.
+        assert_eq!(e[0].cursor_shift(&p, (500, 320)), 3);
+        assert_eq!(e[1].cursor_shift(&p, (500, 320)), -2);
+        assert_eq!(e[0].cursor_shift(&p, (100, 100)), 2);
+        assert_eq!(e[0].cursor_shift(&p, (5, 5)), 2, "over the scrim: at the card's depth");
+        // hsbs: the same logical shifts (the eye is 1920 logical px, squeezed by the viewport).
+        let mut h = p;
+        (h.stereo, h.width) = (Stereo::Hsbs.code(), 1920);
+        let e: Vec<Eye> = Eyes::of(&h, vk::Extent2D { width: 1920, height: 1080 }, 100).collect();
+        assert_eq!((e[0].lift_shift[1], e[1].lift_shift[1]), (3, -2));
     }
 }
 

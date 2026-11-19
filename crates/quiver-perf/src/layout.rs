@@ -264,7 +264,19 @@ pub struct LayerStatus {
     /// The layout of the last frame the layer drew the HUD or the panel on
     /// (`STEREO_*`), with [`STEREO_DRAWN_VALID`] once it has drawn one.
     pub stereo_drawn: u32,
+    // ---- appended (depth, design/STEREO-UI.md, 2026-11-19): zero from layers before.
+    /// The launch's `sight.depth` setting as the layer's environment has it
+    /// (`QUIVER_SIGHT_DEPTH`): 0 unset (100%), `DEPTH_SETTING_SET | percent`, or
+    /// `DEPTH_SETTING_INVALID` (`crate::stereo::DepthSetting`).
+    pub depth_setting: u32,
+    /// The largest total disparity (px, both eyes) the layer drew in the last frame it drew
+    /// the HUD or the panel on a stereo frame, with [`DEPTH_DRAWN_VALID`] once it has drawn
+    /// one (0 px: everything at the game's plane).
+    pub depth_drawn: u32,
 }
+
+/// `LayerStatus::depth_drawn`: the layer has drawn a stereo image (the low 16 bits are px).
+pub const DEPTH_DRAWN_VALID: u32 = 1 << 16;
 
 /// `LayerStatus::stereo_drawn`: the layer has drawn an image (the low byte is its layout).
 pub const STEREO_DRAWN_VALID: u32 = 1 << 8;
@@ -520,8 +532,46 @@ pub struct HudBufferHeader {
     pub dirty_y0: u32,
     pub dirty_y1: u32,
     pub dirty_base: u64,
-    pub _reserved: [u8; HUD_PIXELS_OFFSET - 200],
+    /// Offset 200 (was reserved, zero from writers before): how far in front of the game the
+    /// image floats on a stereo frame, in thousandths of a depth rung (`crate::stereo`,
+    /// design/STEREO-UI.md; 0: at the game's plane, ≤ 1000). The layer turns it into a
+    /// per-eye shift; mono frames ignore it.
+    pub depth: u16,
+    /// Lifts in use, ≤ [`HUD_MAX_LIFTS`].
+    pub nlifts: u16,
+    /// Parts of the image that float at their own depth (the panel's card, its focused row, a
+    /// dialog), back to front: each is drawn with its own shift, so it comes forward of what
+    /// is around it in the same image.
+    pub lifts: [HudLift; HUD_MAX_LIFTS],
+    pub _reserved: [u8; HUD_PIXELS_OFFSET - 252],
 }
+
+/// `qv_hud_lift`: a rectangle of a HUD or panel image at its own depth (design/STEREO-UI.md).
+/// Pad it with a few pixels of the background around the thing it lifts: the pixels a lift
+/// moves off are filled from the column just outside it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HudLift {
+    /// In image pixels; inside the image.
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// Thousandths of a rung, ≤ 1000: absolute, not relative to the image's `depth`.
+    pub depth: u16,
+    pub _pad: u16,
+}
+
+impl HudLift {
+    pub const ZERO: HudLift = HudLift { x: 0, y: 0, w: 0, h: 0, depth: 0, _pad: 0 };
+
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x as f64 && y >= self.y as f64 && x < self.x as f64 + self.w as f64 && y < self.y as f64 + self.h as f64
+    }
+}
+
+/// `qv_hud_buffer.lifts`.
+pub const HUD_MAX_LIFTS: usize = 4;
 
 const _: () = {
     use core::mem::{align_of, offset_of, size_of};
@@ -532,7 +582,6 @@ const _: () = {
     assert!(size_of::<StatusBlock>() == RING_STATUS_BYTES);
     assert!(size_of::<Record>() == SLOT_BYTES);
     assert!(align_of::<Record>() == 8);
-    assert!(size_of::<LayerStatus>() == 408);
     assert!(size_of::<LayerStatus>() <= RING_STATUS_DATA_BYTES);
     assert!(size_of::<HudHeader>() == HUD_HEADER_BYTES);
     assert!(offset_of!(HudHeader, published) == 64);
@@ -544,6 +593,11 @@ const _: () = {
     assert!(offset_of!(HudBufferHeader, stereo) == 172);
     assert!(offset_of!(HudBufferHeader, model_rev) == 176);
     assert!(offset_of!(HudBufferHeader, dirty_base) == 192);
+    assert!(offset_of!(HudBufferHeader, depth) == 200);
+    assert!(offset_of!(HudBufferHeader, nlifts) == 202);
+    assert!(offset_of!(HudBufferHeader, lifts) == 204);
+    assert!(size_of::<HudLift>() == 12);
+    assert!(size_of::<LayerStatus>() == 416);
     assert!(RING_MAGIC.to_le_bytes()[0] == b'Q' && RING_MAGIC.to_le_bytes()[7] == b'G');
     assert!(HUD_MAGIC.to_le_bytes()[4] == b'H' && HUD_MAGIC.to_le_bytes()[7] == b'I');
 };
@@ -641,6 +695,8 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, capture_done),
     o!("qv_layer_status", LayerStatus, stereo_setting),
     o!("qv_layer_status", LayerStatus, stereo_drawn),
+    o!("qv_layer_status", LayerStatus, depth_setting),
+    o!("qv_layer_status", LayerStatus, depth_drawn),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),
@@ -685,6 +741,14 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_hud_buffer", HudBufferHeader, model_rev),
     o!("qv_hud_buffer", HudBufferHeader, dirty_y0),
     o!("qv_hud_buffer", HudBufferHeader, dirty_base),
+    o!("qv_hud_buffer", HudBufferHeader, depth),
+    o!("qv_hud_buffer", HudBufferHeader, nlifts),
+    o!("qv_hud_buffer", HudBufferHeader, lifts),
+    o!("qv_hud_lift", HudLift, x),
+    o!("qv_hud_lift", HudLift, y),
+    o!("qv_hud_lift", HudLift, w),
+    o!("qv_hud_lift", HudLift, h),
+    o!("qv_hud_lift", HudLift, depth),
             ];
 
 const SIZES: &[(&str, usize)] = &[
@@ -695,6 +759,7 @@ const SIZES: &[(&str, usize)] = &[
     ("qv_hud_header", core::mem::size_of::<HudHeader>()),
     ("qv_hud_graph", core::mem::size_of::<HudGraph>()),
     ("qv_hud_buffer", core::mem::size_of::<HudBufferHeader>()),
+    ("qv_hud_lift", core::mem::size_of::<HudLift>()),
 ];
 
 /// `#define`s in the C header and the Rust value each must equal.
@@ -812,4 +877,9 @@ const CONSTANTS: &[(&str, u64)] = &[
     ("QV_STEREO_SETTING_SET", crate::stereo::STEREO_SETTING_SET as u64),
     ("QV_STEREO_SETTING_INVALID", crate::stereo::STEREO_SETTING_INVALID as u64),
     ("QV_STEREO_DRAWN_VALID", STEREO_DRAWN_VALID as u64),
+    ("QV_HUD_MAX_LIFTS", HUD_MAX_LIFTS as u64),
+    ("QV_DEPTH_ONE", crate::stereo::DEPTH_ONE as u64),
+    ("QV_DEPTH_SETTING_SET", crate::stereo::DEPTH_SETTING_SET as u64),
+    ("QV_DEPTH_SETTING_INVALID", crate::stereo::DEPTH_SETTING_INVALID as u64),
+    ("QV_DEPTH_DRAWN_VALID", DEPTH_DRAWN_VALID as u64),
 ];

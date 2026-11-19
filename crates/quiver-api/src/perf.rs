@@ -834,6 +834,16 @@ pub struct StereoInfo {
     /// What the layer last drew with (`None`: it hasn't drawn an image yet, or is older).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawn: Option<String>,
+    /// Depth on a stereo frame (design/STEREO-UI.md): the `sight.depth` strength the layer
+    /// applies, percent (0: off, everything at the game's plane). `None`: an older layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// The setting as the game's environment has it: `100` when unset, `invalid`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub depth_setting: String,
+    /// The largest total disparity (px) in the last stereo frame the layer drew Sight on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_drawn: Option<u32>,
 }
 
 impl StereoInfo {
@@ -858,7 +868,23 @@ impl StereoInfo {
             detail,
             setting: setting_name(setting).into(),
             drawn: status.drawn.and_then(quiver_perf::stereo::Stereo::from_code).map(|s| s.as_str().into()),
+            depth: status.depth.map(|d| d.percent()),
+            depth_setting: status.depth.map_or(String::new(), |d| match d {
+                quiver_perf::stereo::DepthSetting::Default => "unset".into(),
+                quiver_perf::stereo::DepthSetting::Percent(p) => p.to_string(),
+                quiver_perf::stereo::DepthSetting::Invalid => "invalid".into(),
+            }),
+            depth_drawn: status.depth_drawn,
         }
+    }
+
+    /// Depth in words, for a stereo layout: `depth 100% (setting unset; last drawn 5 px)`,
+    /// `depth off (setting 0)`; empty for mono or an older layer.
+    pub fn depth_line(&self) -> String {
+        let Some(p) = self.depth.filter(|_| self.stereo().is_stereo()) else { return String::new() };
+        let strength = if p == 0 { "off".to_string() } else { format!("{p}%") };
+        let drawn = self.depth_drawn.map(|px| format!("; last drawn {px} px")).unwrap_or_default();
+        format!("depth {strength} ({}={}{drawn})", quiver_perf::stereo::ENV_DEPTH, self.depth_setting)
     }
 
     /// One line: `sbs (mod: torchbearer (SDK))`, `mono (default; setting auto)`.
@@ -887,11 +913,21 @@ pub fn setting_name(s: quiver_perf::stereo::Setting) -> &'static str {
 pub struct LayerStereo {
     pub setting: u32,
     pub drawn: Option<u32>,
+    /// `qv_layer_status.depth_setting` (`None`: a layer from before depth, which reported a
+    /// shorter status block, can't be told from one with the setting unset; both are 100%).
+    pub depth: Option<quiver_perf::stereo::DepthSetting>,
+    pub depth_drawn: Option<u32>,
 }
 
 impl LayerStereo {
     pub fn from_status(s: &quiver_perf::LayerStatus) -> LayerStereo {
-        LayerStereo { setting: s.stereo_setting, drawn: (s.stereo_drawn & quiver_perf::layout::STEREO_DRAWN_VALID != 0).then_some(s.stereo_drawn & 0xff) }
+        let drawn = s.depth_drawn & quiver_perf::layout::DEPTH_DRAWN_VALID != 0;
+        LayerStereo {
+            setting: s.stereo_setting,
+            drawn: (s.stereo_drawn & quiver_perf::layout::STEREO_DRAWN_VALID != 0).then_some(s.stereo_drawn & 0xff),
+            depth: Some(quiver_perf::stereo::DepthSetting::from_code(s.depth_setting)),
+            depth_drawn: drawn.then_some(s.depth_drawn & 0xffff),
+        }
     }
 }
 

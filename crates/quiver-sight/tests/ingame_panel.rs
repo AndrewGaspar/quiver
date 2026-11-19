@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::App;
+use gpui::{App, AppContext as _};
 use quiver_api::perf::LayerBackdrop;
 use quiver_api::sight::{PanelAction, PanelCommand, PanelSection};
 use quiver_perf::clock::mono_raw_ns;
@@ -42,6 +42,9 @@ fn main() {
     let r = result.clone();
     gpui_platform::headless().with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         quiver_ui::init(cx, theme::load(&theme::omarchy_state_dir()));
+        // Keeps the app up while the panel reopens laid out for a stereo frame (its window
+        // closes before the next one opens). Without a GPU it fails; the panel says so later.
+        let _keep = cx.open_offscreen_window(gpui::OffscreenWindowOptions { size: gpui::size(gpui::px(8.), gpui::px(8.)), ..Default::default() }, |_| {}, |_, cx| cx.new(|_| Blank));
         let (tx, rx) = futures::channel::mpsc::unbounded::<Msg>();
         let ctl = Rc::new(RefCell::new(PanelCtl::new(false, None, Some(tx))));
         let rx = Rc::new(RefCell::new(rx));
@@ -61,6 +64,14 @@ fn main() {
             eprintln!("ingame_panel: FAILED: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+struct Blank;
+
+impl gpui::Render for Blank {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
     }
 }
 
@@ -159,6 +170,35 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     pump(cx);
     let cur = p.cursor().ok_or("no cursor after motion")?;
     check!(cur == ((300, 200), EXTENT), "cursor {cur:?}");
+
+    // A full-SBS frame (design/STEREO-UI.md): laid out for one eye, with the card and the
+    // focused section as lifts at their rungs, back to front; the scrim at the game's plane.
+    use quiver_perf::stereo::rung;
+    // (The panel reopens at once, on the swapchain it was open on: 1280x800, so 640x800 eyes.)
+    cx.update(|cx| ctl.borrow_mut().set_stereo("s-ingame", Some(quiver_perf::stereo::Stereo::Sbs), cx));
+    check!(cx.update(|_| ctl.borrow().in_game()), "the stereo panel didn't open in the game");
+    wait(300).await;
+    let mut reader = open_panel_image_reader(&dir.join("panel.image")).map_err(|e| format!("no panel.image: {e}"))?;
+    let mut dst = vec![0u8; reader.info().buffer_bytes as usize];
+    let (img, _) = reader.poll_since(EXTENT, &mut dst, 0);
+    let HudPoll::Image { desc, published } = img else { return Err(format!("no stereo image: {img:?}")) };
+    check!(desc.lifts().len() == 1 && desc.lifts()[0].depth == rung::PANEL, "the card alone (nothing focused in an empty section): {:?}", desc.lifts());
+    // Left: the section list, its section focused.
+    p.push(&PanelEvent::key(t, 105, true, 0, 0));
+    p.push(&PanelEvent::key(t, 105, false, 0, 0));
+    wait(100).await;
+    pump(cx);
+    wait(300).await;
+    let (img, _) = reader.poll_since(EXTENT, &mut dst, published);
+    let HudPoll::Image { desc, .. } = img else { return Err(format!("no image after Left: {img:?}")) };
+    check!((desc.width, desc.height, desc.stereo) == (EXTENT.0 / 2, EXTENT.1, quiver_perf::stereo::STEREO_SBS), "stereo image {}x{} layout {}", desc.width, desc.height, desc.stereo);
+    let lifts = desc.lifts().to_vec();
+    eprintln!("stereo panel lifts: {lifts:?}");
+    check!(desc.depth == 0, "the scrim should stay at the game's plane: depth {}", desc.depth);
+    check!(lifts.len() == 2 && lifts[0].depth == rung::PANEL && lifts[1].depth == rung::FOCUS, "lifts {lifts:?}");
+    let (card, focus) = (lifts[0], lifts[1]);
+    check!(card.w as u32 > EXTENT.0 / 4 && card.h as u32 > EXTENT.1 / 2, "the card is the panel's bulk: {card:?}");
+    check!(focus.x >= card.x && focus.y >= card.y && focus.x + focus.w <= card.x + card.w && focus.h < 100, "the focused section is a small part of the card: {focus:?}");
 
     // Close: panel.input closed, the state file gone.
     cx.update(|cx| ctl.borrow_mut().command(cmd(PanelAction::Close), None, cx));

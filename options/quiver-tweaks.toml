@@ -45,7 +45,7 @@ options = ["tex.anisotropy", "tex.lod_bias"]
 [[page]]
 id = "display"
 title = "Display"
-options = ["hdr", "sight.stereo"]
+options = ["hdr", "sight.stereo", "sight.depth"]
 
 # ---------------------------------------------------------------------------- frame rate
 
@@ -434,6 +434,26 @@ apply = "launch"
 # quiver_set_stereo_layout (design/SIGHT.md §15). The spellings are HypXRland's stereo:<layout>.
 via = [
   { mech = "env", label = "Sight", map = { auto = "@unset" }, set = { QUIVER_SIGHT_STEREO = "{v}" } },
+]
+
+[option."sight.depth"]
+type = "enum"
+label = "Stereo 3D depth"
+help = "On stereo 3D frames, how far Quiver's HUD and Sight panel float in front of the game: the panel a little, its focused row and dialogs further, the HUD just in front of the game's own. Normal is a few pixels, comfortable all day; Off draws them at the game's screen depth. No effect without stereo frames."
+values = [
+  { value = "auto", label = "Normal (100%)" },
+  { value = "off", label = "Off (at the screen)" },
+  { value = "50", label = "Subtle (50%)" },
+  { value = "150", label = "Strong (150%)" },
+  { value = "200", label = "Strongest (200%)" },
+]
+default = "auto"
+level = "advanced"
+apply = "launch"
+# The Sight layer reads it and turns each image's depth into a per-eye shift
+# (design/STEREO-UI.md); it reports the strength in its status block.
+via = [
+  { mech = "env", label = "Sight", map = { auto = "@unset" }, set = { QUIVER_SIGHT_DEPTH = "{v}" } },
 ]
 
 # ----------------------------------------------------------------------- built-in conflicts

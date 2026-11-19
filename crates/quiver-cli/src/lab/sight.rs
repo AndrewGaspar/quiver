@@ -284,7 +284,7 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
         let p = panel.as_ref().map(|p| serde_json::json!({ "control": format!("{:?}", p.control()), "capturing": p.capture(now), "input": format!("{:?}", p.input()), "layer": format!("{:?}", p.layer()), "cursor": p.cursor() }));
         let stereo = layer_status.as_ref().zip(dir.as_deref()).map(|(s, d)| lab_stereo(s, d));
         let sdk = run_dir.and_then(super::sdk::read_status);
-        return super::print_json(&serde_json::json!({ "sight": m.sight, "mounted": up.is_some(), "session_dir": dir, "quiver_sight": st, "quiver_sight_alive": alive, "panel_input": p, "stereo": stereo, "mod_sdk": sdk, "layer": layer_status.map(|s| serde_json::json!({ "extent": [s.extent_w, s.extent_h], "presents": s.presents, "flags": s.flags, "keys": s.keys, "key_panels": s.key_panels, "key_toggles": s.key_toggles, "stereo_setting": s.stereo_setting, "stereo_drawn": s.stereo_drawn })) }));
+        return super::print_json(&serde_json::json!({ "sight": m.sight, "mounted": up.is_some(), "session_dir": dir, "quiver_sight": st, "quiver_sight_alive": alive, "panel_input": p, "stereo": stereo, "mod_sdk": sdk, "layer": layer_status.map(|s| serde_json::json!({ "extent": [s.extent_w, s.extent_h], "presents": s.presents, "flags": s.flags, "keys": s.keys, "key_panels": s.key_panels, "key_toggles": s.key_toggles, "stereo_setting": s.stereo_setting, "stereo_drawn": s.stereo_drawn, "depth_setting": s.depth_setting, "depth_drawn": s.depth_drawn })) }));
     }
     if !m.sight {
         println!("sight: off (quiver lab edit {0} sight=on, then quiver lab down {0} && quiver lab up {0})", inst.name);
@@ -330,6 +330,10 @@ pub fn status(inst: &Inst, run_dir: Option<&Path>, json: bool) -> Result<()> {
                     }
                 };
                 println!("stereo: {}{eyes}", st.line());
+                let d = st.depth_line();
+                if !d.is_empty() {
+                    println!("  {d} — set it with quiver lab edit {} env.{}=0..200, then relaunch", inst.name, quiver_perf::stereo::ENV_DEPTH);
+                }
                 if st.source == "default" {
                     println!(
                         "  (no mod said a layout through the mod SDK; or set it with quiver lab edit {} env.{}=sbs|hsbs|tab|htab, then relaunch)",
