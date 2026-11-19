@@ -34,8 +34,10 @@ pub fn slice_path(sha1: &[u8]) -> String {
 }
 
 /// CDN connect timeout, and how long a response may go without sending a byte.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// The longest gap between reads before a slice is tried again on a fresh connection (the
+// bandwidth limit waits before a request, never between reads).
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Downloader {
     /// Locked so slices can ask for fresh URLs while others download.

@@ -278,7 +278,8 @@ impl Quiver {
         let page = self.nav.page == Page::Downloads;
         if page || self.dl.dialog.is_some() {
             self.load_queue(cx);
-            if self.dl.settings.is_none() {
+            // Re-read now and then: the CLI or an agent can change them while the page is open.
+            if self.dl.settings.is_none() || n % 5 == 0 {
                 self.load_dl_settings(None, None, None, cx);
             }
             if page && self.dl.setup_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {

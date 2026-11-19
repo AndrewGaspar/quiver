@@ -61,10 +61,24 @@ pub struct HttpChunks {
 impl HttpChunks {
     pub fn new(base_urls: Vec<String>, user_agent: &str) -> Result<Self> {
         ensure!(!base_urls.is_empty(), "no download locations for this build");
-        let client = reqwest::Client::builder().user_agent(user_agent).connect_timeout(Duration::from_secs(20)).timeout(Duration::from_secs(120)).build()?;
+        // A connection that stops sending is given up on after STALL (and the chunk tried again
+        // on a fresh one), not after the whole-request timeout: chunks are written in order, so
+        // one stalled chunk held every worker behind it, and throughput fell to ~0 for up to
+        // 2 minutes on a flaky Wi-Fi link. The bandwidth limit waits before a request, never
+        // between reads, so a read gap this long is a real stall.
+        let client = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(STALL_TIMEOUT)
+            .timeout(Duration::from_secs(120))
+            .build()?;
         Ok(HttpChunks { client, bases: base_urls.into_iter().map(|b| b.trim_end_matches('/').to_owned()).collect(), preferred: AtomicUsize::new(0) })
     }
 }
+
+/// Connecting to a CDN host, and the longest gap between reads of a response.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A URL's host, for messages (never the path or query, which can carry signatures).
 fn host(url: &str) -> &str {
