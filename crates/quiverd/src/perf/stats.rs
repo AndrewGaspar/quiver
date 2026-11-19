@@ -155,6 +155,10 @@ pub struct FrameStore {
     counts: HashMap<u32, u32>,
     /// (time of the present ns, frame time ms), the last [`KEEP_NS`].
     recent: VecDeque<(i64, f64)>,
+    /// The same for application-rendered frames on the primary swapchain (the presents the
+    /// layer's Reflex counting says start one): the graph's base series.
+    recent_base: VecDeque<(i64, f64)>,
+    last_base: Option<i64>,
     pub hist: LogHistogram,
     pub frames: u64,
     /// Sum of frame times counted, ns (the time the summary covers).
@@ -211,6 +215,30 @@ impl FrameStore {
     /// The most recent `n` frame times, oldest first (the desktop presenter's graph).
     pub fn tail(&self, since: i64) -> Vec<f32> {
         self.recent.iter().filter(|(t, _)| *t > since).map(|(_, ms)| *ms as f32).collect()
+    }
+
+    /// A present that starts an application-rendered frame (entry time). Only the primary
+    /// swapchain's count; returns the base frame time in ms if it counted.
+    pub fn base(&mut self, swapchain: u32, t: i64) -> Option<f64> {
+        if self.primary != Some(swapchain) {
+            return None;
+        }
+        let prev = self.last_base.replace(t);
+        let dt = t - prev?;
+        if dt <= 0 || dt > MAX_FRAME_NS {
+            return None;
+        }
+        let ms = dt as f64 / 1e6;
+        self.recent_base.push_back((t, ms));
+        while self.recent_base.front().is_some_and(|(ft, _)| t - ft > KEEP_NS) {
+            self.recent_base.pop_front();
+        }
+        Some(ms)
+    }
+
+    /// Base frame times since `since`, oldest first (the desktop graph's base series).
+    pub fn base_tail(&self, since: i64) -> Vec<f32> {
+        self.recent_base.iter().filter(|(t, _)| *t > since).map(|(_, ms)| *ms as f32).collect()
     }
 }
 

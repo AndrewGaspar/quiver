@@ -311,9 +311,9 @@ typedef struct qv_hud_graph {       /* a rectangle the layer fills with the live
     int32_t  x, y, w, h;            /* in image pixels */
     uint32_t span_ms;               /* 1000..10000 */
     float    min_ms, max_ms;        /* vertical range; max_ms = 0: auto */
-    uint32_t line, fill, muted;     /* premultiplied RGBA8, bytes R,G,B,A in memory */
+    uint32_t line, fill, muted;     /* premultiplied RGBA8, bytes R,G,B,A in memory; muted: the base series' line */
     uint32_t warn_above_ms, bad_above_ms, warn, bad;
-    uint32_t series;                /* QV_GRAPH_SERIES_* */
+    uint32_t series;                /* QV_GRAPH_SERIES_*: BASE adds the rendered frames (the layer's Reflex counting) */
 } qv_hud_graph;
 
 /* A part of a HUD/panel image at its own depth, back to front, in image pixels. */

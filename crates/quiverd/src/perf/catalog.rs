@@ -45,6 +45,14 @@ pub const GENERIC_ROLES: [&str; 11] = [
     "latency.frame",
 ];
 
+/// The latency split's stages: (role and canonical id, label, short label, help).
+pub const LATENCY_SPLIT: [(&str, &str, &str, &str); 4] = [
+    ("latency.split.sim", "Latency: simulation", "SIM", "Simulation start to simulation end."),
+    ("latency.split.render", "Latency: render", "RENDER", "Render submit start to GPU render end."),
+    ("latency.split.queue", "Latency: queue", "QUEUE", "Time the frame waited in the driver's and the OS's queues."),
+    ("latency.split.out", "Latency: present and scan-out", "OUT", "Present start to the frame reaching the display."),
+];
+
 /// Whether `producer` may fill generic roles: built-in producers only, not mods.
 pub fn agnostic(producer: &str) -> bool {
     !producer.starts_with("mod:")
@@ -67,6 +75,8 @@ pub enum Source {
     Alias(&'static str),
     /// `output.resolution`: a mod's role, else the layer's swapchain extent.
     OutputResolution,
+    /// `frametime.base`: 1000 ÷ `fps.base`.
+    BaseFrameTime,
     /// Seconds since the session started.
     SessionTime,
     /// Local wall-clock time.
@@ -164,6 +174,15 @@ pub fn canonical() -> Vec<Canonical> {
         "Frames the game rendered per second: application frames the Sight layer counts from Reflex (sleeps or present markers); else presented FPS. Mean only in this version.",
         Source::CounterRate(ROLE_BASE_COUNT),
     );
+    alias(
+        "frametime.base",
+        MetricKind::Gauge,
+        Unit::Ms,
+        "Base frame time",
+        Some("FT"),
+        "Mean time between the frames the game rendered (1000 ÷ base FPS). The frame-time graph draws them as its second line while frame generation is on.",
+        Source::BaseFrameTime,
+    );
     alias("fps.generated", MetricKind::Gauge, Unit::Fps, "Generated FPS", Some("GEN"), "Presents beyond the first of each game frame, per second (the Sight layer's Reflex counting).", Source::CounterRate(ROLE_GENERATED_COUNT));
     alias(
         "fg.ratio",
@@ -194,6 +213,12 @@ pub fn canonical() -> Vec<Canonical> {
         "Simulation start (or the marked input sample) to the frame's present returning at the Sight layer, from Reflex markers. Excludes queued GPU work and scan-out.",
         Source::Alias(ROLE_LATENCY_PC),
     );
+    // The frame's latency split into stages (SIGHT-HUD §1.1's stacked bar), each a gauge in
+    // ms. Not generic roles: a mod with Reflex markers of its own may fill them; nothing
+    // built in does yet (the layer's opt-in timing reports are the likely source).
+    for (role, label, short, help) in LATENCY_SPLIT {
+        alias(role, MetricKind::Gauge, Unit::Ms, label, Some(short), help, Source::Alias(role));
+    }
     alias("upscaler", MetricKind::Text, Unit::None, "Upscaler", None, "The upscaler and preset NGX logged (\"DLSS K\"; opt-in NGX log).", Source::Alias(ROLE_UPSCALER));
     alias("render.resolution", MetricKind::Text, Unit::None, "Render resolution", None, "DLSS's input size at feature creation, from NGX's log.", Source::Alias(ROLE_RENDER_RES));
     alias("output.resolution", MetricKind::Text, Unit::None, "Output resolution", None, "DLSS's output size from NGX's log, else the swapchain's size from the Sight layer.", Source::OutputResolution);

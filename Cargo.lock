@@ -4792,6 +4792,7 @@ dependencies = [
  "libc",
  "quiver-api",
  "quiver-perf",
+ "quiver-sight-layer",
  "quiver-ui",
  "serde",
  "serde_json",

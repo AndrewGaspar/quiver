@@ -5,7 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use quiver_api::perf::{HudCell, HudConfig, HudImageStatus, HudModel, HudRow, LayerBackdrop, Level, MetricState, PerfValue, Presenter, PresenterSetting, Stat, hud_card};
+use quiver_api::perf::{
+    CellStyle, Emphasis, HudCell, HudConfig, HudImageStatus, HudModel, HudRow, LayerBackdrop, Level, MetricState, PerfValue, Presenter, PresenterSetting, SourceKind, SplitPart, Stat,
+    hud_card,
+};
 use quiver_perf::descriptor::{Display, MetricKind, Range, Unit};
 use quiver_perf::layout::{
     BACKDROP_ERR_DEVICE_LOST, BACKDROP_ERR_FORMAT, BACKDROP_ERR_INTERNAL, BACKDROP_ERR_NONE, BACKDROP_ERR_OFF, BACKDROP_ERR_QUEUE, BACKDROP_ERR_USAGE, DRAW_ERR_DEVICE_LOST,
@@ -226,7 +229,15 @@ fn fraction(desc: &quiver_perf::descriptor::MetricDescriptor, v: Option<f64>) ->
     v.map(|v| ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32).unwrap_or(0.0)
 }
 
-fn metric_cell(store: &Store, c: &Cell, id: &str, now: i64, label: Option<String>) -> Option<HudCell> {
+/// Who produced `id`'s value right now, for the renderer's tint.
+fn source_style(store: &Store, id: &str, now: i64) -> CellStyle {
+    let Some(p) = store.producer_of(id, now) else { return CellStyle::default() };
+    let source = SourceKind::of_producer(p);
+    let source_name = (source == SourceKind::Mod).then(|| p.trim_start_matches("mod:").to_owned());
+    CellStyle { source, source_name, ..Default::default() }
+}
+
+fn metric_cell(store: &Store, c: &Cell, id: &str, now: i64, label: Option<String>, mut style: CellStyle) -> Option<HudCell> {
     let desc = store.descriptor(id)?.clone();
     match store.state(id, now) {
         MetricState::Declared | MetricState::Gone => return None,
@@ -238,26 +249,92 @@ fn metric_cell(store: &Store, c: &Cell, id: &str, now: i64, label: Option<String
         // A canonical metric nobody provides right now (no upscaler, no latency).
         return None;
     }
+    let src = source_style(store, id, now);
+    (style.source, style.source_name) = (src.source, src.source_name);
     let display = c.display.or(desc.display).unwrap_or(if desc.kind == MetricKind::State { Display::Badge } else { Display::Number });
+    // A tag is a word in the label style, not a pill.
+    let display = if style.emphasis == Emphasis::Tag && display == Display::Badge { Display::Number } else { display };
     let metric = id.to_owned();
     Some(match display {
-        Display::Badge => HudCell::Badge { metric, label, value },
+        Display::Badge => HudCell::Badge { metric, label, value, style },
         Display::Bar => {
             let fraction = fraction(&desc, value.value);
-            HudCell::Bar { metric, label, value, fraction }
+            HudCell::Bar { metric, label, value, fraction, style }
         }
         Display::Sparkline | Display::Graph => {
             let tail = store.tail(id, SPARK_POINTS);
             let (lo, hi) = tail.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
             let points = tail.iter().map(|v| if hi > lo { ((v - lo) / (hi - lo)) as f32 } else { 0.5 }).collect();
-            HudCell::Sparkline { metric, label, value, points }
+            HudCell::Sparkline { metric, label, value, points, style }
         }
-        Display::Number | Display::Stack => HudCell::Value { metric, label, value },
+        Display::Number | Display::Stack => HudCell::Value { metric, label, value, style },
     })
 }
 
+/// A split bar over `parts`: drawn while at least two have a positive value.
+fn split_cell(store: &Store, c: &Cell, now: i64) -> Option<HudCell> {
+    let mut parts = Vec::new();
+    for id in &c.parts {
+        if !matches!(store.state(id, now), MetricState::Live) {
+            continue;
+        }
+        let Some(v) = store.value(id, c.stat.unwrap_or(Stat::Mean), WINDOW_1S, now).and_then(|r| r.num()).filter(|v| v.is_finite() && *v > 0.0) else { continue };
+        let label = store.descriptor(id).and_then(|d| d.short.clone().or_else(|| d.label.clone())).unwrap_or_else(|| id.clone());
+        parts.push(SplitPart { metric: id.clone(), label, value: v as f32 });
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut style = source_style(store, &parts[0].metric, now);
+    style.emphasis = c.emphasis.unwrap_or_default();
+    Some(HudCell::Split { label: c.short.clone().or_else(|| c.label.clone()), parts, numbers: c.numbers, style })
+}
+
+/// Most metrics a mod's strip shows.
+const STRIP_METRICS: usize = 6;
+
+/// The `mods` row: a strip per connected mod, its name and the gauges, states and texts it
+/// declares (basic visibility), each with its short label, "·" between them.
+fn mod_strips(store: &Store, row: &super::layout::Row, now: i64) -> Vec<HudRow> {
+    let mut out = Vec::new();
+    for (pid, p) in &store.producers {
+        if !pid.starts_with("mod:") || !p.info.connected || out.len() >= row.strips() as usize {
+            continue;
+        }
+        let name = pid.trim_start_matches("mod:");
+        let style = CellStyle { emphasis: Emphasis::Tag, source: SourceKind::Mod, source_name: Some(name.to_owned()), after: false };
+        let mut cells = vec![HudCell::Text { text: name.to_uppercase(), level: Level::Normal, style: style.clone() }];
+        let mut shown = 0;
+        for d in store.metrics_of(pid) {
+            if shown == STRIP_METRICS {
+                break;
+            }
+            let visible = matches!(d.visibility, None | Some(quiver_perf::descriptor::Visibility::Basic));
+            if !visible || !matches!(d.kind, MetricKind::Gauge | MetricKind::State | MetricKind::Text) {
+                continue;
+            }
+            let c = Cell { metric: Some(d.id.clone()), ..Default::default() };
+            let label = d.short.clone().filter(|s| !s.is_empty());
+            let Some(mut cell) = metric_cell(store, &c, &d.id, now, label, CellStyle::emphasis(Emphasis::Quiet)) else { continue };
+            // States read as words in a strip ("FG on"), not pills.
+            if let HudCell::Badge { metric, label, value, style } = cell {
+                cell = HudCell::Value { metric, label, value, style };
+            }
+            if shown > 0 {
+                cells.push(HudCell::text("·", Level::Dim));
+            }
+            cells.push(cell);
+            shown += 1;
+        }
+        if shown > 0 {
+            out.push(HudRow { cells, divider: row.divider && out.is_empty() });
+        }
+    }
+    out
+}
+
 fn is_content(c: &HudCell) -> bool {
-    !matches!(c, HudCell::Text { .. } | HudCell::Separator)
+    !matches!(c, HudCell::Text { .. } | HudCell::Separator | HudCell::Spacer)
 }
 
 /// Builds the model (rev 0: the caller numbers it).
@@ -269,11 +346,16 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
     let text_px = extent.map(|[w, h]| stereo.logical_extent((w, h)).1 as f32 * TEXT_FRACTION).unwrap_or(17.0);
     let has_frames = store.frames.frames > 0 || store.producers.get(super::catalog::PRODUCER_LAYER).is_some_and(|p| p.info.connected);
     let mut rows = Vec::new();
+    let fg = store.fg_active(now);
     for r in &inp.layout.rows {
+        if r.mods {
+            rows.extend(mod_strips(store, r, now));
+            continue;
+        }
         let mut cells: Vec<HudCell> = Vec::new();
         let mut last_label: Option<String> = None;
         // A dropped cell's label goes to the next value in its group ("CPU" stays with the
-        // temperature while the load has no sample yet).
+        // temperature while the load has no sample yet). Labels after values stay theirs.
         let mut carry: Option<String> = None;
         for c in &r.cells {
             let own = c.short.clone().or_else(|| c.label.clone()).filter(|l| !l.is_empty());
@@ -285,26 +367,43 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
                 }
                 continue;
             }
+            let emphasis = c.emphasis.unwrap_or_default();
             if c.separator {
                 last_label = None;
                 carry = None;
                 cells.push(HudCell::Separator);
+            } else if c.spacer {
+                cells.push(HudCell::Spacer);
+            } else if c.split.is_some() {
+                cells.extend(split_cell(store, c, now));
             } else if let Some(t) = &c.text {
-                cells.push(HudCell::Text { text: t.clone(), level: c.level.unwrap_or(Level::Normal) });
+                cells.push(HudCell::Text { text: t.clone(), level: c.level.unwrap_or(Level::Normal), style: CellStyle::emphasis(emphasis) });
             } else if c.graph.is_some() {
                 if !has_frames {
                     continue;
                 }
                 let span_ms = c.span.as_ref().and_then(|s| s.ms()).unwrap_or(inp.cfg.graph_span_ms).clamp(1000, 10_000);
-                let points = if inp.presenter == Presenter::Desktop { store.frames.tail(now - span_ms as i64 * 1_000_000) } else { Vec::new() };
-                let series = if c.series.is_empty() { vec!["frametime".to_owned()] } else { c.series.clone() };
-                cells.push(HudCell::Graph { series, span_ms, rows: c.rows.unwrap_or(2), min_ms: 0.0, max_ms: 0.0, warn_above_ms: 33.4, bad_above_ms: 50.0, points });
+                let since = now - span_ms as i64 * 1_000_000;
+                // The base series only while frame generation is on: without it, rendered
+                // frames are the presented ones and a second line would only repeat the first.
+                let mut series = if c.series.is_empty() { vec!["frametime".to_owned()] } else { c.series.clone() };
+                series.retain(|s| s != "frametime.base" || fg);
+                let desktop = inp.presenter == Presenter::Desktop;
+                let points = if desktop { store.frames.tail(since) } else { Vec::new() };
+                let base_points = if desktop && series.iter().any(|s| s == "frametime.base") { store.frames.base_tail(since) } else { Vec::new() };
+                cells.push(HudCell::Graph { series, span_ms, rows: c.rows.unwrap_or(2), min_ms: 0.0, max_ms: 0.0, warn_above_ms: 33.4, bad_above_ms: 50.0, points, base_points });
             } else if let Some(id) = &c.metric {
+                if let Some(s) = c.suffix.clone().filter(|s| !s.is_empty()) {
+                    // "118 FPS": the label is the value's own, after it.
+                    let style = CellStyle { emphasis, after: true, ..Default::default() };
+                    cells.extend(metric_cell(store, c, id, now, Some(s), style));
+                    continue;
+                }
                 let mut label = own.clone().or_else(|| carry.clone());
                 if label.is_some() && label == last_label {
                     label = None;
                 }
-                match metric_cell(store, c, id, now, label.clone()) {
+                match metric_cell(store, c, id, now, label.clone(), CellStyle::emphasis(emphasis)) {
                     Some(cell) => {
                         if label.is_some() {
                             last_label = label;
@@ -328,12 +427,19 @@ pub fn build_model(inp: &ModelInput, store: &Store, now: i64) -> HudModel {
             }
             tidy.push(c);
         }
-        while matches!(tidy.last(), Some(HudCell::Separator)) {
+        while matches!(tidy.last(), Some(HudCell::Separator | HudCell::Spacer)) {
             tidy.pop();
         }
+        // A "·" joins two values: without one on each side it goes.
+        let joins = |c: &HudCell| matches!(c, HudCell::Text { text, .. } if text == "·");
+        let keep: Vec<bool> = (0..tidy.len())
+            .map(|i| !joins(&tidy[i]) || (i > 0 && is_content(&tidy[i - 1]) && tidy.get(i + 1).is_some_and(is_content)))
+            .collect();
+        let mut keep = keep.into_iter();
+        tidy.retain(|_| keep.next().unwrap_or(true));
         // A separator followed only by text (a gated group's leftovers) goes too.
         if tidy.iter().any(is_content) {
-            rows.push(HudRow { cells: tidy });
+            rows.push(HudRow { cells: tidy, divider: r.divider });
         }
     }
     let background = inp.layout.background.unwrap_or(inp.cfg.background);
@@ -391,18 +497,9 @@ mod tests {
         m.rows
             .iter()
             .map(|r| {
-                r.cells
-                    .iter()
-                    .map(|c| match c {
-                        HudCell::Value { label, value, .. } | HudCell::Badge { label, value, .. } | HudCell::Bar { label, value, .. } | HudCell::Sparkline { label, value, .. } => {
-                            format!("{}{}", label.as_ref().map(|l| format!("{l} ")).unwrap_or_default(), value.display())
-                        }
-                        HudCell::Text { text, .. } => text.clone(),
-                        HudCell::Separator => "│".into(),
-                        HudCell::Graph { .. } => "[graph]".into(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                let rule = if r.divider { "— " } else { "" };
+                let cells: Vec<String> = r.cells.iter().map(|c| if matches!(c, HudCell::Spacer) { "~".into() } else { c.plain() }).collect();
+                format!("{rule}{}", cells.join(" "))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -446,6 +543,9 @@ mod tests {
         for i in 0..2 * 160 {
             t = 1_000 * MS + i * 6_250_000;
             s.present(7, t, t);
+            if with_nv && i % 2 == 0 {
+                s.base_frame(7, t);
+            }
             if with_nv && i % 16 == 0 {
                 s.push_counter("nv.frames.app", t, (i / 2) as u64);
                 s.push_counter("nv.frames.generated", t, (i / 2) as u64);
@@ -478,28 +578,100 @@ mod tests {
     fn compact_line_with_and_without_frame_generation() {
         let (s, now) = session(false);
         let m = model(&s, "compact", now);
-        assert_eq!(text_of(&m), "FPS 160 6.2 ms 1%↓ 160 │ GPU 97% 71° 92 W │ CPU 38% 64°");
+        assert_eq!(text_of(&m), "160 FPS 6.2 ms 160 1% LOW │ GPU 97% 71° 92 W │ CPU 38% 64°");
         assert_eq!(m.text_px, 1600.0 * 0.016);
         let (s, now) = session(true);
         let m = model(&s, "compact", now);
-        assert_eq!(text_of(&m), "FPS 80 → 160 6.2 ms 1%↓ 160 │ GPU 97% 71° 92 W │ CPU 38% 64° │ DLSS K FG 2.0× PC 21.0 ms");
+        assert_eq!(text_of(&m), "160 FPS 80 BASE 6.2 ms 160 1% LOW 21.0 ms LAT │ GPU 97% 71° 92 W │ CPU 38% 64° │ DLSS K FG 2.0×");
     }
 
     #[test]
     fn fps_only_and_standard_drop_what_nobody_provides() {
         let (s, now) = session(false);
-        assert_eq!(text_of(&model(&s, "fps", now)), "160");
+        assert_eq!(text_of(&model(&s, "fps", now)), "160 FPS");
         let m = model(&s, "standard", now);
-        let t = text_of(&m);
-        assert!(t.starts_with("FPS 160 1% low 160\nFT 6.2 ms\n[graph]\nGPU 97% 71° 92 W"), "{t}");
-        assert!(!t.contains("LAT"), "no latency provider: the row is gone");
+        // The mock-up's "Standard, Vanilla profile": no base FPS, no latency, one graph line.
+        assert_eq!(text_of(&m), "160 FPS\n[graph frametime]\n6.2 ms · 1% low 160\nGPU 97% 71° 92 W CPU 38% 64°");
         let (s, now) = session(true);
-        assert_eq!(text_of(&model(&s, "fps", now)), "80 → 160");
+        assert_eq!(text_of(&model(&s, "fps", now)), "160 FPS 80 BASE");
         let t = text_of(&model(&s, "standard", now));
-        assert!(t.contains("PC 21.0 ms") && !t.contains("99") && !t.contains("TAA"), "{t}");
+        assert_eq!(t, "160 FPS ~ 80 BASE\n[graph frametime+frametime.base]\n6.2 ms · 1% low 160 ~ FG 2.0×\n21.0 ms PC LATENCY\nGPU 97% 71° 92 W CPU 38% 64°");
+        // A mod's numbers for generic roles never show as the generic metrics.
+        assert!(!t.contains("99") && !t.contains("TAA"), "{t}");
         // Stale frames show —, and the model says so.
         let m = model(&s, "fps", now + 5_000 * MS);
         assert!(text_of(&m).contains('—'));
+    }
+
+    #[test]
+    fn hierarchy_and_producers_reach_the_model() {
+        let (s, now) = session(true);
+        let m = model(&s, "standard", now);
+        let cell = |id: &str| m.rows.iter().flat_map(|r| &r.cells).find(|c| c.metric() == Some(id)).unwrap().clone();
+        let style = |id: &str| cell(id).style().unwrap().clone();
+        assert_eq!((style("fps").emphasis, style("fps").after, style("fps").source), (Emphasis::Hero, true, SourceKind::Layer));
+        assert_eq!((style("fps.base").emphasis, style("fps.base").source), (Emphasis::Secondary, SourceKind::Layer), "base FPS is the layer's Reflex counting");
+        assert_eq!(style("gpu.load").source, SourceKind::System);
+        assert_eq!((style("gpu.temp").emphasis, style("gpu.load").after), (Emphasis::Quiet, false));
+        assert_eq!(style("fg.ratio").emphasis, Emphasis::Tag);
+        assert!(matches!(cell("fg.ratio"), HudCell::Value { .. }), "a tag is a word, not a pill");
+        // The hero's row is the taller one.
+        assert_eq!(hud_card::row_height(&m.rows[0]), hud_card::HERO_LINE);
+        // frametime.base: 1000 ÷ base FPS.
+        assert_eq!(s.formatted("frametime.base", Stat::Mean, WINDOW_1S, now).unwrap().text, "12.5");
+    }
+
+    #[test]
+    fn full_has_the_split_the_flags_and_a_strip_per_mod() {
+        let (mut s, now) = session(true);
+        // A mod with Reflex markers of its own fills the latency stages (not generic roles).
+        for (role, ..) in catalog::LATENCY_SPLIT {
+            let id = format!("aco-dlss.{}", role.trim_start_matches("latency.split."));
+            let mut d = MetricDescriptor::new(&id, MetricKind::Gauge);
+            d.unit = Unit::Ms;
+            d.visibility = Some(quiver_perf::descriptor::Visibility::Advanced);
+            d.roles = vec![RoleClaim { role: role.into(), flags: vec![], on: None }];
+            s.declare("mod:aco-dlss", d);
+            s.push_num(&id, now, if role.ends_with("render") { 9.0 } else { 6.0 });
+        }
+        s.declare("display", catalog::display().into_iter().find(|d| d.id == "display.vrr").unwrap());
+        s.producer("display", "Display", true);
+        s.push_state_value("display.vrr", now, "on");
+        let m = model(&s, "full", now);
+        let t = text_of(&m);
+        let split = m.rows.iter().flat_map(|r| &r.cells).find_map(|c| if let HudCell::Split { parts, style, .. } = c { Some((parts.clone(), style.clone())) } else { None }).unwrap();
+        assert_eq!(split.0.iter().map(|p| (p.label.as_str(), p.value)).collect::<Vec<_>>(), [("SIM", 6.0), ("RENDER", 9.0), ("QUEUE", 6.0), ("OUT", 6.0)]);
+        assert_eq!((split.1.source, split.1.source_name.as_deref()), (SourceKind::Mod, Some("aco-dlss")));
+        assert!(t.contains("[SIM 6 · RENDER 9 · QUEUE 6 · OUT 6]\n[SIM 6 · RENDER 9 · QUEUE 6 · OUT 6]"), "the bar and its numbers: {t}");
+        assert!(t.contains("VRR on"), "{t}");
+        // The mod's strip: its name and its basic metrics (not the counter, not the advanced
+        // split parts), under a rule.
+        let strip = m.rows.last().unwrap();
+        assert!(strip.divider);
+        assert_eq!(text_of(&HudModel { rows: vec![strip.clone()], ..m.clone() }), "— ACO-DLSS off · 99.0 ms · TAA");
+        assert!(strip.cells.iter().filter(|c| c.metric().is_some()).all(|c| c.style().is_some_and(|s| s.source == SourceKind::Mod)));
+        // Diagnostics has what Full dropped.
+        let d = text_of(&model(&s, "diagnostics", now));
+        assert!(d.starts_with("160 FPS 6.2 ms ~ TIME"), "{d}");
+        assert!(!text_of(&model(&s, "full", now)).contains("TIME"));
+    }
+
+    #[test]
+    fn the_base_series_follows_frame_generation() {
+        let (s, now) = session(true);
+        let cfg = HudConfig::default();
+        let l = builtin("standard").unwrap();
+        let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Desktop, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
+        let m = build_model(&inp, &s, now);
+        let Some(HudCell::Graph { series, points, base_points, .. }) = m.rows.iter().flat_map(|r| &r.cells).find(|c| matches!(c, HudCell::Graph { .. })) else { panic!() };
+        assert_eq!(series, &["frametime", "frametime.base"]);
+        assert!(points.len() > 300 && base_points.len() > 150, "{} {}", points.len(), base_points.len());
+        assert!(base_points.iter().all(|ms| (ms - 12.5).abs() < 0.01) && points.iter().all(|ms| (ms - 6.25).abs() < 0.01));
+        // FG off: one line.
+        let (plain, now) = session(false);
+        let m = build_model(&inp, &plain, now);
+        let Some(HudCell::Graph { series, base_points, .. }) = m.rows.iter().flat_map(|r| &r.cells).find(|c| matches!(c, HudCell::Graph { .. })) else { panic!() };
+        assert_eq!((series.as_slice(), base_points.len()), (&["frametime".to_owned()][..], 0));
     }
 
     #[test]
@@ -522,11 +694,11 @@ mod tests {
     fn the_card_keeps_the_layouts_size_whatever_it_holds() {
         let (plain, now) = session(false);
         let (modded, now2) = session(true);
-        for id in ["fps", "compact", "standard", "full", "clock"] {
+        for id in crate::perf::layout::PRESETS {
             let a = model(&plain, id, now);
             let b = model(&modded, id, now2);
             // FG on and an upscaler (cells and a whole row appear) or not: the same card.
-            if id != "clock" {
+            if !["clock", "diagnostics"].contains(&id) {
                 assert_ne!(text_of(&a), text_of(&b), "{id}");
             }
             assert_eq!(a.size, b.size, "{id}");
@@ -534,15 +706,23 @@ mod tests {
             // Stale values (— everywhere) too.
             assert_eq!(model(&modded, id, now2 + 5_000 * MS).size, b.size, "{id}");
         }
-        // Standard: six lines and a two-row graph, in a panel.
+        // Standard: the hero's line, a two-row graph, three lines and the split, in a panel.
+        let content = 30.0 + 30.0 + 3.0 * 20.0 + 8.0 + 5.0 * 4.0;
         let m = model(&modded, "standard", now2);
-        assert_eq!(m.size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0 + 2.0 * (6.0 + 1.0)]);
-        assert_eq!(model(&plain, "fps", now).size, [100.0, 20.0], "bare: no padding");
+        assert_eq!(m.size, [284.0, content + 2.0 * (6.0 + 1.0)]);
+        assert_eq!(model(&plain, "fps", now).size, [150.0, 20.0 + 2.0 * (6.0 + 1.0)], "a panel by default, as in the mock-up");
         // Without a panel the padding goes, the slots stay.
         let cfg = HudConfig { background: 0.0, ..HudConfig::default() };
         let l = builtin("standard").unwrap();
         let inp = ModelInput { session: "s-1", product_id: 1, cfg: &cfg, on: true, layout: &l, presenter: Presenter::Game, reason: "", image: None, monitor: None, backdrop: None, game_focus: None, stereo: None };
-        assert_eq!(build_model(&inp, &modded, now2).size, [260.0, 6.0 * 20.0 + 30.0 + 6.0 * 4.0]);
+        assert_eq!(build_model(&inp, &modded, now2).size, [284.0, content]);
+        // The model's rows never need more than the layout's slots.
+        for id in crate::perf::layout::PRESETS {
+            let m = model(&modded, id, now2);
+            let slots: Vec<f32> = m.rows.iter().map(hud_card::row_height).collect();
+            let need = hud_card::height(m.orientation, &slots, true);
+            assert!(need <= m.size[1] + 0.01, "{id}: {need} > {}", m.size[1]);
+        }
     }
 
     #[test]

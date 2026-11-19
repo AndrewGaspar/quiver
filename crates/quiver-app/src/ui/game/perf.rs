@@ -828,15 +828,29 @@ fn preset_rows(layout: &str) -> Vec<Vec<Option<(&'static str, &'static str)>>> {
     let base = Some(("BASE", "fps.base"));
     match layout {
         "fps" => vec![vec![fps]],
-        "compact" => vec![vec![fps, base, Some(("MS", "frametime")), Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))]],
-        "standard" => vec![vec![fps, base], vec![None], vec![Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("GPU", "gpu.load"))], vec![Some(("CPU", "cpu.load"))]],
-        "full" => vec![
-            vec![fps, Some(("1%", "fps.p1low")), base],
+        "compact" => vec![vec![fps, base, Some(("MS", "frametime")), Some(("LAT", "latency.pc")), Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))]],
+        // As quiverd's presets (design canvas mock-ups): the shown FPS big, base beside it, the
+        // graph, frame time and FG, latency and Reflex, then GPU and CPU.
+        "standard" => vec![
+            vec![fps, base],
             vec![None],
-            vec![Some(("LAT", "latency.render")), Some(("PC", "latency.pc")), Some(("MS", "frametime"))],
-            vec![Some(("RFX", "nv.reflex.mode")), Some(("FG", "fg.ratio"))],
+            vec![Some(("MS", "frametime")), Some(("FG", "fg.ratio"))],
+            vec![Some(("PC LATENCY", "latency.pc")), Some(("REFLEX", "nv.reflex.mode"))],
+            vec![Some(("GPU", "gpu.load")), Some(("CPU", "cpu.load"))],
+        ],
+        "full" => vec![
+            vec![fps, base],
+            vec![None],
+            vec![Some(("MS", "frametime")), Some(("1% LOW", "fps.p1low")), Some(("FG", "fg.ratio"))],
+            vec![Some(("PC LAT", "latency.pc")), Some(("RENDER", "latency.render")), Some(("REFLEX", "nv.reflex.mode"))],
             vec![Some(("GPU", "gpu.load")), Some(("°", "gpu.temp")), Some(("W", "gpu.power"))],
             vec![Some(("CPU", "cpu.load")), Some(("°", "cpu.temp"))],
+            vec![Some(("VRR", "display.vrr")), Some(("TEAR", "display.tearing"))],
+        ],
+        "diagnostics" => vec![
+            vec![fps, Some(("TIME", "session.time"))],
+            vec![Some(("GPU MHz", "gpu.clock")), Some(("CPU MHz", "cpu.clock"))],
+            vec![Some(("BAT", "bat.level")), Some(("DISP", "display.mode"))],
         ],
         "clock" => vec![vec![Some(("TIME", "clock.time")), Some(("SESSION", "session.time"))]],
         _ => vec![vec![fps], vec![None]],

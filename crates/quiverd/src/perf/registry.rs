@@ -292,6 +292,11 @@ impl Store {
         true
     }
 
+    /// A layer present that starts an application-rendered frame (the base series).
+    pub fn base_frame(&mut self, swapchain: u32, t: i64) {
+        self.frames.base(swapchain, t);
+    }
+
     pub fn set_layer_status(&mut self, s: LayerStatus) {
         if s.swapchain != 0 {
             self.frames.set_primary(s.swapchain);
@@ -415,6 +420,10 @@ impl Store {
                 let s = self.layer_status.as_ref().filter(|s| s.extent_w > 0)?;
                 Some(Raw::Text(format!("{}×{}", s.extent_w, s.extent_h)))
             }
+            Source::BaseFrameTime => {
+                let fps = self.value("fps.base", Stat::Mean, window_ns, now)?.num()?;
+                (fps > 0.0).then(|| Raw::Num(1000.0 / fps))
+            }
             Source::SessionTime => Some(Raw::Num((now - self.started_ns).max(0) as f64 / 1e9)),
             Source::Clock => Some(Raw::Text(chrono::Local::now().format("%H:%M").to_string())),
         }
@@ -476,6 +485,32 @@ impl Store {
             Some(Values::Num(s)) => s.tail(n),
             _ => Vec::new(),
         }
+    }
+
+    /// The producer whose data a metric shows right now: its own for a producer's metric, the
+    /// source's for a canonical one (the role's holder; presents are the layer's).
+    pub fn producer_of(&self, id: &str, now: i64) -> Option<&str> {
+        if let Some(m) = self.metrics.get(id) {
+            return Some(m.producer.as_str());
+        }
+        let c = self.canonical.iter().find(|c| c.desc.id == id)?;
+        let holder = |role: &str| self.role(role).and_then(|src| self.metrics.get(src)).map(|m| m.producer.as_str());
+        match c.source {
+            Source::Frames => Some(catalog::PRODUCER_LAYER),
+            Source::CounterRate(role) => self.fresh_role(role, now).and_then(|src| self.metrics.get(src)).map(|m| m.producer.as_str()).or(Some(catalog::PRODUCER_LAYER)),
+            Source::FgRatio | Source::FgActive => holder(catalog::ROLE_BASE_COUNT).or(Some(catalog::PRODUCER_LAYER)),
+            Source::Alias(role) => holder(role),
+            Source::OutputResolution => holder(catalog::ROLE_OUTPUT_RES).or(Some(catalog::PRODUCER_LAYER)),
+            Source::BaseFrameTime => self.producer_of("fps.base", now),
+            Source::SessionTime | Source::Clock => Some(catalog::PRODUCER_QUIVERD),
+        }
+    }
+
+    /// A producer's metrics, in the order a strip shows them (`order`, then id).
+    pub fn metrics_of(&self, producer: &str) -> Vec<&MetricDescriptor> {
+        let mut v: Vec<&MetricDescriptor> = self.metrics.values().filter(|m| m.producer == producer).map(|m| &m.desc).collect();
+        v.sort_by_key(|d| (d.order.unwrap_or(0), d.id.clone()));
+        v
     }
 
     /// Every metric id: canonical first, then producers' in id order.

@@ -218,6 +218,11 @@ unsafe fn finish(dev: &DeviceData, pi: &vk::PresentInfoKHR<'_>, plan: &Plan, ent
         };
         // Reflex frame attribution and counting, on the HUD's swapchain only.
         let app_frame = latency.and_then(|l| l.on_present(ret));
+        // The graph's base series: the presents that start an application frame (their
+        // entry times, like the presented series').
+        if app_frame == Some(true) {
+            lock(&HISTORY).push_base(entry);
+        }
         let rec = LayerPresent {
             swapchain: id,
             present_id: plan.present_ids[i],
