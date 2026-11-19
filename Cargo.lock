@@ -4693,6 +4693,7 @@ dependencies = [
  "quiver-api",
  "quiver-core",
  "quiver-ipc",
+ "quiver-perf",
  "regex",
  "rpassword",
  "serde",

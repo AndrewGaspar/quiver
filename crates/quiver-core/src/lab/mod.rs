@@ -33,6 +33,7 @@ pub mod manifest;
 pub mod podman;
 pub mod procs;
 pub mod ready;
+pub mod sight;
 pub mod wincert;
 
 use std::path::{Path, PathBuf};

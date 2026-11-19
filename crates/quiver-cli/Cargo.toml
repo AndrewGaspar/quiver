@@ -17,6 +17,7 @@ path = "src/alias.rs"
 
 [dependencies]
 quiver-core.workspace = true
+quiver-perf.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 clap.workspace = true

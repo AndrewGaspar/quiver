@@ -15,7 +15,7 @@ RUN printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.c
       libx11 lib32-libx11 libxext lib32-libxext libxrandr lib32-libxrandr \
       libxi lib32-libxi libxtst lib32-libxtst libxcursor lib32-libxcursor libxcomposite lib32-libxcomposite \
       libxfixes lib32-libxfixes libxrender lib32-libxrender libxinerama lib32-libxinerama \
-      libxkbcommon lib32-libxkbcommon libxxf86vm lib32-libxxf86vm \
+      libxkbcommon lib32-libxkbcommon libxkbcommon-x11 libxxf86vm lib32-libxxf86vm \
       freetype2 lib32-freetype2 fontconfig lib32-fontconfig ttf-liberation \
       gnutls lib32-gnutls libpulse lib32-libpulse alsa-lib lib32-alsa-lib \
       sdl2 dbus lib32-dbus libgcrypt lib32-libgcrypt \

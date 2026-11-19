@@ -75,4 +75,6 @@ quiver lab bench …   quiver lab gpu -- CMD   quiver lab fixture …   quiver l
 quiver lab kill NAME && quiver lab down NAME
 ```
 
+Sight in an instance (the HUD and the in-game panel): `quiver lab create GAME --sight` (or `quiver lab edit NAME sight=on`, then down/up). Then `quiver lab key NAME shift+F2` opens the panel drawn in the game (the game keeps focus), `quiver lab key NAME Down Return Escape` drives and closes it (the game gets none of it while open), `quiver lab key NAME shift+F3` shows the HUD, and `quiver lab sight NAME status` and `quiver lab logs NAME` show where it's drawn, whether input is captured, and failsafe releases. Its quiver-sight never talks to quiverd: panel changes to settings are refused, nothing is reported.
+
 Lab rules: use `--bg` and `quiver lab job wait` for long runs instead of sleeping. Every run has its own log folder; read that run's, not an older one. Steamworks games can't run in the lab (they'd need the person's Steam client); DRM-free Steam games can, with `--exe`. Full design: `design/LAB.md` in the Quiver repo.

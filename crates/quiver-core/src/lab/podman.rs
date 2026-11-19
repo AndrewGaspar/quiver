@@ -59,6 +59,9 @@ pub struct Host {
     /// Host files mounted read-only at the same path: 32-bit NVIDIA libraries, NVIDIA's Wine
     /// DLLs (DLSS), `/etc/machine-id`.
     pub ro_mounts: Vec<PathBuf>,
+    /// For a `sight = true` instance: the host's Sight pieces and the instance's shared-memory
+    /// root ([`super::sight`]).
+    pub sight: Option<(super::sight::HostSight, PathBuf)>,
 }
 
 /// 32-bit NVIDIA driver libraries and NVIDIA's Wine folder on this host.
@@ -123,6 +126,13 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
     a.extend(["-v".into(), mount(&inst.lab(), Path::new(LAB_MOUNT), "")]);
     for p in &host.ro_mounts {
         a.extend(["-v".into(), mount(p, p, "ro")]);
+    }
+    if m.sight
+        && let Some((h, shm)) = &host.sight
+    {
+        for v in super::sight::mounts(h, shm) {
+            a.extend(["-v".into(), v]);
+        }
     }
     let env: [(&str, String); 12] = [
         ("HOME", "/tmp/home".into()),
@@ -265,6 +275,22 @@ exe = "ACOrigins.exe"
         assert!(hosts.contains(&&"api-gamedev.ol.epicgames.net:127.0.0.1".to_owned()));
         let a = run_args(&inst, &m, &Host { eos_proxy_port: Some(40123), ..Default::default() });
         assert!(a.contains(&"--network=pasta:-T,443:40123".to_owned()), "{a:?}");
+    }
+
+    #[test]
+    fn sight_mounts_only_for_sight_instances() {
+        let (inst, mut m) = sample();
+        let h = super::super::sight::HostSight { lib_dir: "/h/sight".into(), binary: "/h/quiver-sight".into(), extra_libs: vec![], i686: false };
+        let host = Host { sight: Some((h, "/dev/shm/quiver-lab-1000/t1".into())), ..Default::default() };
+        let a = run_args(&inst, &m, &host);
+        assert!(!a.iter().any(|x| x.contains("/opt/quiver") || x.contains("quiver-lab-1000")), "sight off: nothing of it ({a:?})");
+        m.sight = true;
+        let a = run_args(&inst, &m, &host);
+        assert!(a.contains(&"/h/sight:/opt/quiver/sight:ro".to_owned()), "{a:?}");
+        assert!(a.contains(&"/h/quiver-sight:/opt/quiver/bin/quiver-sight:ro".to_owned()));
+        assert!(a.contains(&"/dev/shm/quiver-lab-1000/t1:/dev/shm/quiver-lab-1000/t1".to_owned()));
+        // Still its own namespaces: no host pid, ipc or network namespace for Sight.
+        assert!(!a.iter().any(|x| x.starts_with("--pid") || x.starts_with("--ipc") || x.contains("network=host")));
     }
 
     #[test]

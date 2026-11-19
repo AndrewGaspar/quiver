@@ -182,6 +182,11 @@ pub struct Manifest {
     pub log_file: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Launches carry Sight: the layer (HUD, the panel drawn in the game), the input preload,
+    /// and a lab `quiver-sight` in the container (`lab::sight`). Off by default; changing it
+    /// needs `quiver lab down`/`up` (the container's mounts).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sight: bool,
 }
 
 impl Manifest {
@@ -272,6 +277,7 @@ pub(crate) mod tests {
             reload_pattern: Some("reloaded".into()),
             log_file: None,
             notes: String::new(),
+            sight: false,
         }
     }
 

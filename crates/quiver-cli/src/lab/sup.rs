@@ -447,6 +447,11 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
         }
     }
     let run_mount = format!("{}/runs/r{run}", lab::LAB_MOUNT);
+    // Sight (design/LAB.md §12): the session dir, the layer's manifests, the environment.
+    let sight = super::sight::prepare(inst, &m, &session, &run_mount)?;
+    if let Some(s) = &sight {
+        notes.extend(s.notes.iter().cloned());
+    }
     let hs = host::snapshot(&procs::scan(), &ops::containers());
     std::fs::write(run_dir.join("host.json"), serde_json::to_vec_pretty(&hs)?)?;
     notes.push(format!("host: {}", hs.summary()));
@@ -519,6 +524,11 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
         env.retain(|(ek, _)| ek != k);
         env.push((k.clone(), v.clone()));
     }
+    // Sight's after the manifest's (it merges the manifest's LD_PRELOAD and layer paths).
+    for (k, v) in sight.as_ref().map(|s| s.env.clone()).unwrap_or_default() {
+        env.retain(|(ek, _)| *ek != k);
+        env.push((k, v));
+    }
     let overrides: Vec<String> = m.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let base = env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES").map(|(_, v)| v.clone()).into_iter().chain((!overrides.is_empty()).then(|| overrides.join(";")));
     let base: Vec<String> = base.collect();
@@ -540,6 +550,12 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
         st.run = Some(r);
         Some(format!("launch r{run} by {source} ({})", m.licence.describe()))
     });
+    // The run's quiver-sight first: it waits for the layer's ring.
+    if let Some(s) = &sight
+        && let Err(e) = ops::podman_ok(&podman::exec_args(&inst.container(), true, None, &[], &s.cmd))
+    {
+        bail!("starting the run's quiver-sight: {e:#}");
+    }
     let args = podman::exec_args(&inst.container(), true, Some(&workdir), &env, &cmd);
     if let Err(e) = ops::podman_ok(&args) {
         sup.update(|st| {

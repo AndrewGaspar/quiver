@@ -33,6 +33,7 @@ quiver lab set N FILE:[section]key=value… [--wait] | profile N [NAME]
 quiver lab fixture save|install|list … | call N VERB … | where N | teleport N LOC
 quiver lab gpu [--for N] -- CMD… | bench N --variant A=… --variant B=… … | host
 quiver lab brief <game> | doctor | image build|status | job list|show|wait
+quiver lab sight N status [--json]                  (instances with sight = on, section 12)
 quiver lab … --bg      (any command, as a background job)
 ```
 
@@ -308,6 +309,7 @@ Each is enforced in code, not by convention, and has a test.
 | One live login per account | launch material comes from quiverd; no store client runs in an instance; no credential file is read |
 | An EOS game reports nothing to Epic | every container resolves Epic's names to the instance's EOS proxy (3.1), which forwards only the allowlist and answers the rest 403; the CA is trusted only in the instance's cloned prefix; an EOS game's launch is refused unless a probe from inside the container reaches the proxy; a :443 connection to the real host's addresses outside the proxy kills the run (`lab::eos`, `lab::eosproxy`, `lab::wincert`; tests `tests/eos_proxy.rs`, `podman::tests::epic_names_go_to_the_eos_proxy`) |
 | **Nothing is reported** (section 5) | quiverd, by session kind |
+| Sight in an instance changes none of the person's settings | the lab `quiver-sight` never connects to quiverd; panel actions that would change settings are refused and logged (section 12; `quiver-sight/src/lab.rs`) |
 
 ## 5. Nothing is reported
 
@@ -465,3 +467,109 @@ CA, it shows `tls failed … rejected the lab's certificate`: EOS was offline, f
    concern, not Quiver's. Quiver has no user-playing check: a launch never refuses, warns
    about or reports the user's games (`quiver lab host` lists GPU users as plain facts). The
    GPU lock (`quiver lab gpu`) only coordinates lab runs with each other.
+
+## 12. Sight in an instance (2026-11-19)
+
+An agent can test Sight (the HUD and the panel drawn in the game, design/SIGHT.md §14) in a
+real game without the person. Off by default, so existing instances don't change:
+`quiver lab create … --sight`, or `quiver lab edit N sight=on` then `quiver lab down N && quiver
+lab up N` (the container's mounts change). Code: `quiver_core::lab::sight`,
+`crates/quiver-cli/src/lab/sight.rs`, `quiver-sight --lab` (`crates/quiver-sight/src/lab.rs`).
+
+```sh
+quiver lab launch awr --wait frame
+quiver lab key awr shift+F2           # the panel, drawn in the game's frames; the game keeps focus
+quiver lab sight awr status           # drawn: in the game, capture on, the preload, the layer
+quiver lab shot awr                   # the panel on the game's frame
+quiver lab key awr Down Return        # drives the panel; the game gets none of it
+quiver lab key awr Escape             # closes it; the game has its input again
+quiver lab key awr shift+F3           # the HUD
+quiver lab logs awr                   # presenter chosen, captures, releases and why
+```
+
+**What a launch gets** (`sight = true`):
+
+- **The libraries**, mounted read-only at `up`: the installed Sight libraries
+  (`<prefix>/lib/quiver/sight/{x86_64,i686}`, next to the `quiver` that runs `up`) at
+  `/opt/quiver/sight`, `quiver-sight` at `/opt/quiver/bin/quiver-sight`, and
+  `libxkbcommon-x11.so.0` from the host at `/opt/quiver/lib` (image `quiver-lab:1` lacks it;
+  the Containerfile has it now for the next build). `QUIVER_LAB_SIGHT_DIR` and
+  `QUIVER_LAB_SIGHT_BIN` point at other builds (the tests).
+- **The environment**, the same as quiverd's launches (`quiver_core::sightenv`, shared with
+  `quiverd::perf::launch`): `QUIVER_PERF_DIR` (the run's session dir), `QUIVER_SIGHT=1`,
+  `VK_ADD_IMPLICIT_LAYER_PATH=/lab/sight/layer` (the layer's manifests, written at each launch,
+  pointing at the mounted libraries), `VK_INSTANCE_LAYERS` in quiverd's order, `LD_PRELOAD`
+  with `/opt/quiver/sight/$PLATFORM/libquiver_sight_input.so` after the manifest's own, and
+  `QUIVER_SIGHT_LOG=1` (the layer's and preload's lines go to `game.log`).
+  `env.QUIVER_SIGHT_INPUT=0` drops the preload.
+- **A `quiver-sight` for the run, inside the container** (`podman exec -d`, started just
+  before the game, killed with every Wine process at kill-all). Inside, it shares the game's
+  pid namespace and `/dev/shm`, so the preload's "the panel's owner still exists" failsafe works
+  as on the desktop. It renders off-screen with GPUI on the container's GPU (CDI).
+- **The session dir** is in a per-instance tmpfs folder on the host,
+  `/dev/shm/quiver-lab-<uid>/<instance>/quiver-<uid>/lab-<instance>-r<N>/`, bind-mounted at the
+  same path. The supervisor makes it and `hud.image` at each launch (removing the last run's),
+  and `quiver lab sight` reads `panel.input` and the layer's ring from the host. It goes at
+  `down` and `rm`. The container keeps its own `/dev/shm`, pid and network namespaces.
+
+**Nothing reaches the person's settings.** The lab `quiver-sight` (`--lab`) never connects to
+quiverd; none is reachable from the container anyway. Chosen over a read-only view of
+quiverd because then there's nothing to get wrong: no request reaches quiverd, so no
+setting, profile, Tweak or report can change, and the session stays `lab-<instance>-r<N>`
+(holder `lab`).
+
+- The HUD model comes from the layer's ring: frame rate, frame time and 1% low from its
+  present records, the graph the layer draws itself, and a `LAB r<N>` tag. It has no GPU or CPU
+  sensors (those are quiverd's) and no mod metrics.
+- The keys come from the layer's status block, as quiverd's ring thread reads them:
+  Shift+F2 (panel), Shift+F3 (HUD), Ctrl+Shift+F3 (preset).
+- The panel shows the instance's game and run. Mods, Tweaks and Achievements say they're
+  read-only (mod settings go through `quiver lab set`).
+- Every change the panel would send (an option, a Tweak, HUD settings, quitting the game) is
+  refused, logged in `sight.log` and `sight.json`, and shown as refused in the panel.
+  Showing or hiding the HUD only changes this run's `quiver-sight`.
+
+**Logs.** `runs/r<N>/sight.log` (quiver-sight), `runs/r<N>/sight.json` (its status: the
+panel's report, the HUD, frames per second, refused actions), and the `quiver-sight-input[…]`
+and `quiver-sight-layer:` lines in `game.log`. The preload now says why it gave input back
+(`input back to the game (panel N): the panel closed | failsafe: quiver-sight is gone |
+failsafe: quiver-sight stopped renewing the panel's deadline | failsafe: the panel isn't in the
+game's frames`). `quiver lab logs` summarises per panel across the prefix's processes: input
+hooked (X11 or Wayland), the presenter chosen and why, the layer drawing it, captures,
+releases by reason, failsafe releases, and refused actions. `quiver lab sight N status
+[--json]` shows the live state: quiver-sight alive, the HUD, the panel (open, drawn where,
+backdrop), capture, the preload's and layer's words, the cursor.
+
+**Doctor and brief.** `quiver lab doctor` checks that the Sight libraries and `quiver-sight`
+are installed next to `quiver` (and whether the i686 build and `libxkbcommon-x11` are there).
+`quiver lab brief` has a "Sight in the instance" section with the commands above.
+
+**Verified.** Unit tests:
+- the mounts only for `sight = true` instances, and no host pid, ipc or network namespace;
+- the environment (merged with the manifest's own `LD_PRELOAD`, layer path and
+  `VK_INSTANCE_LAYERS`; the opt-out);
+- the layer manifests (the same as the layer's own template);
+- the `quiver-sight` command line;
+- the log summary over interleaved lines from several processes;
+- the lab HUD's frame statistics and models, the read-only panel data.
+
+End to end, `crates/quiver-cli/tests/lab_sight.rs`. It runs the real `quiver lab up/launch/key/
+shot/sight/logs` on a hand-made DRM-free instance of the Sight layer's D3D12 test program
+(vkd3d-proton under GE-Proton11-12), in the real lab image with gamescope headless and the GPU:
+- keys reach the program;
+- Shift+F2 opens the panel drawn in the game (the screenshot's middle changes, mean difference
+  ~61/255);
+- keys don't reach the program while it's open; Escape closes it, and its Escape never reaches
+  the program;
+- Shift+F3 shows the HUD (top-left changes);
+- with the panel open, killing the run's `quiver-sight` gives the input back (~1 s, counting
+  the CLI's polling);
+- `quiver lab logs` reports the presenter and the failsafe.
+
+Not run: a real game in an instance (AWR, Origins), winewayland in an instance (gamescope
+headless has no Wayland input), a 32-bit game.
+
+**Limits.** A debug build of `quiver-sight` can't run in the container: rust-embed reads its
+fonts from the source tree in debug builds, so the installed (release) one is what's mounted.
+Test programs built as console programs get Wine's console window, which takes gamescope's
+focus (games are GUI programs). The lab HUD has no sensors.

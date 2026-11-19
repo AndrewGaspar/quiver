@@ -130,6 +130,7 @@ pub struct CreateOpts {
     pub graphics: Option<String>,
     pub created_by: String,
     pub regold: bool,
+    pub sight: bool,
 }
 
 /// Make an instance of `src` named `o.name`.
@@ -200,6 +201,7 @@ pub fn create(lab: &Lab, src: &Source, o: &CreateOpts) -> Result<(Inst, Vec<Stri
         reload_pattern: None,
         log_file: None,
         notes: String::new(),
+        sight: o.sight,
     };
     m.save(&inst.manifest_path())?;
     Ok((inst, notes))

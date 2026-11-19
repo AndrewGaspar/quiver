@@ -12,6 +12,9 @@
  * With resize_at > 0 the swapchain's buffers are resized (ResizeBuffers) at that frame, so
  * the Vulkan swapchain is recreated with oldSwapchain.
  *
+ * Key and mouse-button messages are printed (KEYDOWN 0x41, KEYUP …, BUTTON L DOWN 0 x y), and
+ * appended to the file QUIVER_PROBE_LOG names.
+ *
  * Build: x86_64-w64-mingw32-gcc -O2 -o d3d12_present.exe d3d12_present.c -ld3d12 -ldxgi -luuid -ldxguid
  */
 #define COBJMACROS
@@ -24,11 +27,44 @@
 
 #define BUFFERS 3
 
+/* Key and mouse messages go to stdout, and to the file QUIVER_PROBE_LOG names (a Windows
+ * path; `proton run` doesn't pass a program's stdout on): the lab test checks what reached
+ * the game. */
+static void input_line(const char *fmt, unsigned a, int x, int y)
+{
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        const char *p = getenv("QUIVER_PROBE_LOG");
+        tried = 1;
+        if (p && *p)
+            f = fopen(p, "a");
+    }
+    printf(fmt, a, x, y);
+    printf("\n");
+    fflush(stdout);
+    if (f) {
+        fprintf(f, fmt, a, x, y);
+        fprintf(f, "\n");
+        fflush(f);
+    }
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-    if (m == WM_DESTROY) {
+    switch (m) {
+    case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        input_line("KEYDOWN 0x%02x", (unsigned)w, 0, 0);
+        break;
+    case WM_KEYUP: case WM_SYSKEYUP:
+        input_line("KEYUP 0x%02x", (unsigned)w, 0, 0);
+        break;
+    case WM_LBUTTONDOWN:
+        input_line("BUTTON L DOWN %u %d %d", 0, (short)LOWORD(l), (short)HIWORD(l));
+        break;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -66,6 +102,7 @@ int main(int argc, char **argv)
     /* Undecorated at (0, 0): the client area is the screen's top-left w x h (tests read it
      * back from the X server). */
     HWND hwnd = CreateWindowExA(0, "QuiverSightD3D12", title, WS_POPUP | WS_VISIBLE, 0, 0, (int)w, (int)h, NULL, NULL, wc.hInstance, NULL);
+    input_line("START %u", 0, 0, 0);
     if (!hwnd) {
         fprintf(stderr, "CreateWindow failed\n");
         return 1;

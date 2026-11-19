@@ -6,6 +6,7 @@ mod bench;
 mod create;
 mod jobs;
 mod ops;
+mod sight;
 mod sup;
 
 use std::path::{Path, PathBuf};
@@ -59,6 +60,10 @@ pub enum LabAction {
         /// Make the game's gold copy again from your current prefix and install.
         #[arg(long)]
         regold: bool,
+        /// Launches carry Sight: the HUD and the panel drawn in the game, the input preload,
+        /// and a lab quiver-sight (read-only: nothing reaches your settings). `quiver lab sight`.
+        #[arg(long)]
+        sight: bool,
     },
     /// Instances, with their game, display and state.
     List {
@@ -73,7 +78,7 @@ pub enum LabAction {
     },
     /// Change an instance's manifest: display=WxH@HZ, proton=NAME, mod_dir=DIR, graphics=NAME,
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
-    /// log_file=PATH, args="…", notes="…" (key= clears).
+    /// log_file=PATH, args="…", notes="…", sight=on|off (key= clears).
     Edit {
         instance: String,
         #[arg(required = true)]
@@ -253,6 +258,18 @@ pub enum LabAction {
         #[arg(long)]
         tail: Option<usize>,
     },
+    /// Sight in the instance (sight = on): the run's quiver-sight, the panel (drawn where, input
+    /// captured or not), the layer and the input preload.
+    Sight {
+        instance: String,
+        /// `status` (the only one; open the panel with `quiver lab key N shift+F2`).
+        #[arg(default_value = "status")]
+        what: String,
+        #[arg(long)]
+        run: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// A ready-to-paste brief for an agent starting to mod this game.
     Brief {
         game: String,
@@ -427,11 +444,11 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{} {}", lab::IMAGE, if ok { "present" } else { "missing (quiver lab image build)" });
             }
         },
-        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold } => {
+        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
             let src = create::source(&client, &game, exe.as_deref(), true).await?;
             let name = name.unwrap_or_else(|| default_name(&src.title));
-            let o = create::CreateOpts { name, display: Display::parse(&display)?, proton, mod_dir, graphics, created_by: source.to_owned(), regold };
+            let o = create::CreateOpts { name, display: Display::parse(&display)?, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight };
             println!("cloning {} (reflinks; a big game takes a minute)…", src.title);
             let (inst, notes) = create::create(&lab, &src, &o)?;
             for n in notes {
@@ -487,8 +504,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             m.save(&inst.manifest_path())?;
             println!("saved {}", inst.manifest_path().display());
-            if changes.iter().any(|c| c.starts_with("display=")) && ops::running_id(&inst.container()).is_some() {
-                println!("the display changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
+            if changes.iter().any(|c| c.starts_with("display=") || c.starts_with("sight=")) && ops::running_id(&inst.container()).is_some() {
+                println!("that changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
             }
         }
         LabAction::Up { instance } => up(&lab, &instance)?,
@@ -500,6 +517,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 c.write_all(b"{\"op\":\"quit\"}\n")
             });
             let _ = ops::podman_cmd(&["rm".into(), "-f".into(), "-t".into(), "5".into(), inst.container()]).output();
+            sight::down(&inst);
             println!("{} is down", inst.name);
         }
         LabAction::Rm { instance } => {
@@ -507,6 +525,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             if ops::running_id(&inst.container()).is_some() {
                 bail!("{0} is up; quiver lab down {0} first", inst.name);
             }
+            sight::down(&inst);
             std::fs::remove_dir_all(&inst.dir).with_context(|| format!("remove {}", inst.dir.display()))?;
             println!("removed {}", inst.name);
         }
@@ -732,6 +751,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     println!("  {l}");
                 }
             }
+            // Sight (design/LAB.md §12): presenter, captures, releases and why.
+            sight::print_summary(&dir);
             if let Some(n) = tail {
                 let text = std::fs::read_to_string(dir.join("game.log")).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
@@ -739,6 +760,15 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                     println!("{l}");
                 }
             }
+        }
+        LabAction::Sight { instance, what, run, json } => {
+            let (inst, _) = inst_of(&lab, &instance)?;
+            if what != "status" {
+                bail!("quiver lab sight {instance} status (open and drive the panel with quiver lab key {instance} shift+F2, Down, Return, …)");
+            }
+            let run = run.or(read_state(&inst).run.map(|r| r.id));
+            let dir = run.map(|r| inst.run_dir(r));
+            sight::status(&inst, dir.as_deref(), json)?;
         }
         LabAction::Brief { game, instance, display, out, exe } => {
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
@@ -789,6 +819,13 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
         }
         "log_file" => m.log_file = opt(v),
         "notes" => m.notes = v.to_owned(),
+        "sight" => {
+            m.sight = match v {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" | "" => false,
+                _ => bail!("sight=on or sight=off"),
+            }
+        }
         "args" => m.paths.args = v.split_whitespace().map(str::to_owned).collect(),
         "exe" if !v.is_empty() => m.paths.exe = v.to_owned(),
         _ => {
@@ -833,6 +870,7 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         broker_port,
         eos_proxy_port: Some(eos_port),
         ro_mounts: podman::host_ro_mounts(),
+        sight: sight::up(&inst, &m)?,
     };
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
@@ -1138,6 +1176,22 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
             ),
         },
     );
+    // Sight in instances (sight = on; design/LAB.md §12): the libraries, the binary, and that
+    // the binary's libraries resolve in the image.
+    match quiver_core::lab::sight::HostSight::discover() {
+        Ok(h) => check(
+            "Sight for instances (sight = on)",
+            true,
+            format!(
+                "{} and {}{}; {}",
+                h.lib_dir.display(),
+                h.binary.display(),
+                if h.i686 { "" } else { " (no i686 build: 32-bit games without the preload and layer)" },
+                if h.extra_libs.is_empty() { "libxkbcommon-x11 not on the host: quiver-sight may not start in the image".to_owned() } else { "libxkbcommon-x11 mounted from the host".to_owned() }
+            ),
+        ),
+        Err(e) => check("Sight for instances (sight = on)", false, e),
+    }
     if json {
         return print_json(&checks.iter().map(|(n, ok, d)| serde_json::json!({ "check": n, "ok": ok, "detail": d })).collect::<Vec<_>>());
     }

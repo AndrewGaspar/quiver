@@ -1580,6 +1580,15 @@ fake one), Steam copies inside pressure-vessel (`$PLATFORM` in `LD_PRELOAD` ther
 are unaffected: the pad is hyprpad's), IME text input, multi-monitor, HDR swapchains (the
 panel isn't drawn on them; the desktop panel opens).
 
+**In a lab instance** (design/LAB.md §12, 2026-11-19): `quiver lab create … --sight` gives an
+agent the same panel and HUD in a headless game. A lab `quiver-sight` runs inside the game's
+container, sharing its pid namespace and `/dev/shm`, so the failsafe's pid check works. It has
+no quiverd: its HUD model comes from the layer's ring, and panel actions that would change
+settings are refused and logged. `quiver lab sight N status` and `quiver lab logs N` show the
+presenter, capture and failsafe releases. The preload's release lines now name the panel's
+epoch and the reason (`input back to the game (panel N): failsafe: …`), from the same snapshot
+as the decision (quiver-perf `panel::capture_why`).
+
 **Known limits.** Several held raw-input buttons across an open are paired by count, not code.
 A game that keeps its own cursor visible and confines the pointer shows it under the panel's
 (they coincide on X11; on Wayland the panel follows deltas). Wine's client-side key repeat on

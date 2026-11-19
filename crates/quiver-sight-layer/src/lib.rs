@@ -149,7 +149,9 @@ macro_rules! log {
         if $crate::log_enabled() {
             // Not eprintln!: a closed stderr would panic, inside the game.
             use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "quiver-sight-layer: {}", format_args!($($t)*));
+            // One write per line: other processes append to the same log.
+            let line = format!("quiver-sight-layer: {}\n", format_args!($($t)*));
+            let _ = std::io::stderr().write_all(line.as_bytes());
         }
     };
 }

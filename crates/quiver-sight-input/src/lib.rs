@@ -38,7 +38,9 @@ macro_rules! log {
     ($($t:tt)*) => {
         if $crate::log_enabled() {
             use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "quiver-sight-input[{}]: {}", std::process::id(), format_args!($($t)*));
+            // One write per line: every process of the prefix appends to the same log.
+            let line = format!("quiver-sight-input[{}]: {}\n", std::process::id(), format_args!($($t)*));
+            let _ = std::io::stderr().write_all(line.as_bytes());
         }
     };
 }
