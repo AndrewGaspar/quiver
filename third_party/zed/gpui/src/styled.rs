@@ -749,10 +749,34 @@ pub trait Styled: Sized {
     }
 
     /// Quiver: paints this element and its children at a stereo depth (HypXRland's unitless
-    /// rung, 0..1); see [`crate::Window::with_stereo_depth`]. Does nothing unless the window
-    /// packs stereo frames.
+    /// rung, 0..1), whatever the depth of what it's drawn on: for overlays and the page's
+    /// background. See [`crate::resolve_stereo_depth`]. Does nothing unless the window packs
+    /// stereo frames.
     fn stereo_depth(mut self, depth: f32) -> Self {
         self.style().stereo_depth = Some(depth);
+        self
+    }
+
+    /// Quiver: raises this element and its children `lift` above the depth of what it's drawn
+    /// on (a card on the page, a panel on a card). Does nothing unless the window packs stereo
+    /// frames.
+    fn stereo_lift(mut self, lift: f32) -> Self {
+        self.style().stereo_lift = Some(lift);
+        self
+    }
+
+    /// Quiver: the element can take the app's keyboard/controller focus, and has it when
+    /// `focused`: it's a control (it rises above its surface) and rises further while focused.
+    fn stereo_focused(mut self, focused: bool) -> Self {
+        self.style().stereo_focused = Some(focused);
+        self
+    }
+
+    /// Quiver: whether this element is a control, which rises above its surface. By default
+    /// anything with a pointer or text cursor is; `false` keeps a clickable scrim or a
+    /// whole-area click target flat.
+    fn stereo_control(mut self, control: bool) -> Self {
+        self.style().stereo_control = Some(control);
         self
     }
 
