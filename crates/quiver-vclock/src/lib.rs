@@ -25,6 +25,8 @@ use serde::Serialize;
 
 include!(concat!(env!("OUT_DIR"), "/dlls.rs"));
 
+pub mod control;
+
 /// The system DLLs the hook can stand in for, in the order the lab prefers them.
 pub const PROXIES: &[&str] = &["version", "winmm", "dinput8", "dsound"];
 
@@ -96,6 +98,22 @@ mod ffi {
         pub sleep_ms_requested: u64,
         pub sleep_ms_slept: u64,
         pub sleeps_real: u64,
+        pub hold: i32,
+        pub held: i32,
+        pub hold_at: u64,
+        pub hold_timeout_real: i64,
+        pub held_since: i64,
+        pub held_v: i64,
+        pub pub_lock: i32,
+        pub pad0: i32,
+        pub pauses: u64,
+        pub steps: u64,
+        pub stepped: u64,
+        pub holds: u64,
+        pub held_real: i64,
+        pub held_reads: u64,
+        pub leaked: i64,
+        pub auto_resumes: u64,
     }
 
     /// `vc_thread`.
@@ -124,6 +142,22 @@ mod ffi {
         pub fn vc_virtual_seconds(c: *mut VcClock) -> f64;
         #[cfg_attr(not(test), allow(dead_code))]
         pub fn vc_real_seconds(c: *mut VcClock) -> f64;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_hold_cmd(c: *mut VcClock, cmd: i32, arg: u64, timeout_ms: u32) -> u64;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_must_hold(c: *mut VcClock) -> i32;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_hold_begin(c: *mut VcClock);
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_hold_end(c: *mut VcClock);
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_hold_expired(c: *mut VcClock) -> i32;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_ctl_attach(k: *mut super::control::Page, c: *mut VcClock, pid: u64);
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_ctl_poll(k: *mut super::control::Page, c: *mut VcClock, cmd: *mut u64, arg: *mut u64) -> i32;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_ctl_publish(k: *mut super::control::Page, c: *mut VcClock);
     }
 }
 
@@ -225,6 +259,24 @@ pub struct Report {
     pub sleeps_real: u64,
     /// Whose sleeps get shorter: `present` (the presenting thread's), `all`, `none`.
     pub sleep_mode: String,
+    /// The control page is mapped (pause and step reach this process).
+    pub control: bool,
+    /// `running`, `holding` (asked to hold; the frame in flight hasn't presented) or `held`.
+    pub hold_state: String,
+    pub hold_at: u64,
+    /// Holds started (a pause, or a step from running).
+    pub pauses: u64,
+    /// Frames asked for by steps.
+    pub steps: u64,
+    /// Presents while a hold was on.
+    pub stepped: u64,
+    /// Times the game blocked at its Present.
+    pub holds: u64,
+    pub held_s: f64,
+    pub held_reads: u64,
+    /// Virtual ticks time moved while held (0 by design).
+    pub leaked_ticks: i64,
+    pub auto_resumes: u64,
 }
 
 fn parse_census(v: &str) -> Vec<(i64, u64)> {
@@ -300,6 +352,17 @@ impl Report {
                 "census_ms_other" => r.census_ms_other = n(),
                 "sleeps_real" => r.sleeps_real = n(),
                 "sleep_mode" => r.sleep_mode = s(),
+                "control" => r.control = n() != 0,
+                "hold_state" => r.hold_state = s(),
+                "hold_at" => r.hold_at = n(),
+                "pauses" => r.pauses = n(),
+                "steps" => r.steps = n(),
+                "stepped" => r.stepped = n(),
+                "holds" => r.holds = n(),
+                "held_s" => r.held_s = f(),
+                "held_reads" => r.held_reads = n(),
+                "leaked_ticks" => r.leaked_ticks = i(),
+                "auto_resumes" => r.auto_resumes = n(),
                 _ => {}
             }
         }
@@ -356,6 +419,30 @@ impl Report {
         )
     }
 
+    /// Pause and step (`quiver lab clock`), once they were used: the state and the counters.
+    pub fn hold_line(&self) -> Option<String> {
+        let used = self.pauses > 0 || self.holds > 0 || matches!(self.hold_state.as_str(), "held" | "holding");
+        if !used {
+            return None;
+        }
+        let state = match self.hold_state.as_str() {
+            "held" => format!("HELD at frame {} (virtual time stopped)", self.frames),
+            "holding" => format!("holding: stops at frame {}", self.hold_at),
+            _ => "running free".into(),
+        };
+        Some(format!(
+            "pause/step: {state}; {} hold(s) started, {} step frame(s) asked, {} present(s) while holding, blocked {} time(s), {:.1} s held (left out of the speed-up), {} clock read(s) while held (frozen; no creep, no escape), leaked {} tick(s){}",
+            self.pauses,
+            self.steps,
+            self.stepped,
+            self.holds,
+            self.held_s,
+            self.held_reads,
+            self.leaked_ticks,
+            if self.auto_resumes > 0 { format!(", {} hold(s) ended by their timeout", self.auto_resumes) } else { String::new() }
+        ))
+    }
+
     /// What the game saw: the steps between successive clock values.
     pub fn census(&self) -> Vec<String> {
         let mut v = Vec::new();
@@ -391,6 +478,13 @@ impl Report {
             v.push(format!(
                 "NOT FULLY DETERMINISTIC: {} frame(s) took over {} ms of real time and were released to real time (the escape); their timing followed the machine, so another run can differ there (a loading screen without presents, or frames slower than the escape: raise clock.stuck_ms)",
                 self.escapes, self.stuck_ms
+            ));
+        }
+        if self.leaked_ticks != 0 {
+            v.push(format!(
+                "virtual time moved {} tick(s) ({:.6} s) while the game was held: pause/step slipped there (a race between a clock read and the hold)",
+                self.leaked_ticks,
+                if self.qpf > 0 { self.leaked_ticks as f64 / self.qpf as f64 } else { 0.0 }
             ));
         }
         if self.creep_frames > 0 {
@@ -681,5 +775,396 @@ mod tests {
         }
         assert!(!is_ours(b"MZ plain dll"));
         assert!(unavailable("arm64").is_some());
+    }
+
+    // ---- Pause and step ------------------------------------------------------------------
+
+    impl Fake {
+        fn cmd(&mut self, cmd: i32, arg: u64) -> u64 {
+            unsafe { vc_hold_cmd(&mut *self.c, cmd, arg, 0) }
+        }
+        fn must_hold(&mut self) -> bool {
+            unsafe { vc_must_hold(&mut *self.c) != 0 }
+        }
+        fn hold_begin(&mut self) {
+            unsafe { vc_hold_begin(&mut *self.c) }
+        }
+        fn hold_end(&mut self) {
+            unsafe { vc_hold_end(&mut *self.c) }
+        }
+    }
+
+    const PAUSE: i32 = 1;
+    const STEP: i32 = 2;
+    const RESUME: i32 = 3;
+
+    /// What the hook does at a Present (hook.c's on_present), with the controller's part done
+    /// by `held` each time the game blocks: it may advance real time, read the clock from
+    /// other threads, and must eventually issue a command that releases the game.
+    fn present_gated(f: &mut Fake, held: &mut dyn FnMut(&mut Fake)) {
+        while f.must_hold() {
+            f.hold_begin();
+            held(f);
+            f.hold_end();
+        }
+        f.present();
+        while f.must_hold() {
+            f.hold_begin();
+            let mut n = 0;
+            while f.must_hold() {
+                held(f);
+                n += 1;
+                assert!(n < 1000, "the controller never released the game");
+            }
+            f.hold_end();
+        }
+    }
+
+    #[test]
+    fn a_pause_holds_at_the_end_of_the_frame_in_flight_and_steps_count_presents() {
+        let mut f = Fake::new(62.5, 4096, 1000);
+        f.present();
+        for _ in 0..10 {
+            f.present();
+        }
+        assert_eq!(f.c.frames, 10);
+        // Pause mid-frame 11: the frame finishes, presents, the clock moves on, then it holds.
+        assert_eq!(f.cmd(PAUSE, 0), 11);
+        assert!(!f.must_hold(), "the frame in flight presents first");
+        f.present();
+        assert!(f.must_hold());
+        f.hold_begin();
+        let frozen = f.now();
+        assert_eq!(frozen, WINE_QPF + 11 * 160_000);
+        // Ten seconds of real time held, another thread hammering the clock: nothing moves,
+        // no creep, no escape.
+        let mut other = VcThread::default();
+        f.advance_real_ms(10_000);
+        for _ in 0..100_000 {
+            assert_eq!(f.now_on(&mut other), frozen);
+            assert_eq!(f.now(), frozen);
+        }
+        assert_eq!((f.c.escapes, f.c.creep_frames), (0, 0));
+        assert_eq!(f.c.held_reads, 200_001, "the frozen read too");
+        // A second pause while held changes nothing; step 3 holds three presents later.
+        assert_eq!(f.cmd(PAUSE, 0), 11);
+        assert_eq!(f.cmd(STEP, 3), 14);
+        assert!(!f.must_hold());
+        f.hold_end();
+        assert_eq!(f.c.leaked, 0);
+        assert!((f.c.held_real - 10_000 * 10_000).abs() < 10, "{}", f.c.held_real);
+        // The frame after the release starts its real time at the release: no escape.
+        assert_eq!(f.now(), frozen);
+        for k in 1..=3 {
+            f.advance_real_ms(5);
+            f.present();
+            assert_eq!(f.now(), frozen + k * 160_000);
+            assert_eq!(f.must_hold(), k == 3);
+        }
+        assert_eq!(f.c.escapes, 0);
+        // Steps add up while one is in progress.
+        f.hold_begin();
+        assert_eq!(f.cmd(STEP, 2), 16);
+        f.hold_end();
+        f.present();
+        assert_eq!(f.cmd(STEP, 5), 21, "a step while stepping extends it");
+        // Pause stops a step early: at the end of the frame in flight.
+        assert_eq!(f.cmd(PAUSE, 0), 16);
+        f.present();
+        assert!(f.must_hold());
+        f.hold_begin();
+        assert_eq!(f.cmd(RESUME, 0), 0);
+        assert!(!f.must_hold());
+        f.hold_end();
+        for _ in 0..5 {
+            f.present();
+            assert!(!f.must_hold());
+        }
+        // A step from running pauses: the frame in flight is the first of the K.
+        let at = f.c.frames;
+        assert_eq!(f.cmd(STEP, 2), at + 2);
+        f.present();
+        assert!(!f.must_hold());
+        f.present();
+        assert!(f.must_hold());
+        assert_eq!((f.c.pauses, f.c.steps, f.c.holds), (2, 3 + 2 + 5 + 2, 3));
+        assert_eq!(f.c.stepped, 1 + 3 + 2 + 2, "presents while a hold was on");
+        assert_eq!(f.c.leaked, 0);
+    }
+
+    #[test]
+    fn a_pause_before_the_first_present_holds_at_frame_one() {
+        let mut f = Fake::new(62.5, 4096, 1000);
+        assert_eq!(f.cmd(PAUSE, 0), 1);
+        f.present(); // engagement doesn't count as a frame
+        assert!(!f.must_hold());
+        f.present();
+        assert!(f.must_hold() && f.c.frames == 1);
+    }
+
+    #[test]
+    fn the_hold_times_out_only_when_asked_to() {
+        let mut f = Fake::new(62.5, 4096, 1000);
+        f.present();
+        f.cmd(PAUSE, 0);
+        f.present();
+        f.hold_begin();
+        f.advance_real_ms(3_600_000);
+        assert_eq!(unsafe { vc_hold_expired(&mut *f.c) }, 0, "a deliberate pause never times out by default");
+        unsafe { vc_hold_cmd(&mut *f.c, STEP, 1, 0) };
+        f.hold_end();
+        f.present();
+        assert!(f.must_hold());
+        unsafe { vc_hold_cmd(&mut *f.c, PAUSE, 0, 2000) };
+        f.hold_begin();
+        f.advance_real_ms(1999);
+        assert_eq!(unsafe { vc_hold_expired(&mut *f.c) }, 0);
+        f.advance_real_ms(2);
+        assert_eq!(unsafe { vc_hold_expired(&mut *f.c) }, 1);
+        assert!(!f.must_hold());
+        f.hold_end();
+        assert_eq!(f.c.auto_resumes, 1);
+    }
+
+    /// One frame of a stand-in game: reads at the start of the frame, sometimes a busy-wait for
+    /// two frames (which can only end by creeping), a few reads by a background thread, real
+    /// time passing by an amount that depends on `i` (a busy machine).
+    fn game_frame(f: &mut Fake, bg: &mut VcThread, i: u64, trace: &mut Vec<i64>) {
+        let t0 = f.now();
+        trace.push(t0);
+        trace.push(unsafe { vc_ticks_ms(&*f.c, t0) } as i64);
+        if i % 37 == 5 {
+            let mut n = 0;
+            while f.now() - t0 < 2 * f.c.ticks_per_frame {
+                n += 1;
+                assert!(n < 100_000);
+            }
+            trace.push(f.now());
+        }
+        for _ in 0..(i % 5) {
+            f.now_on(bg);
+        }
+        f.advance_real_ms(1 + (i * 7919 % 23) as i64);
+    }
+
+    #[test]
+    fn stepping_gives_the_same_virtual_time_as_running_free() {
+        const FRAMES: u64 = 600;
+        let free = {
+            let mut f = Fake::new(62.5, 4096, 1000);
+            let mut bg = VcThread::default();
+            let mut trace = Vec::new();
+            f.present();
+            for i in 0..FRAMES {
+                game_frame(&mut f, &mut bg, i, &mut trace);
+                f.present();
+            }
+            (trace, f.c.creep_frames, f.c.overruns, f.c.escapes, f.c.frames)
+        };
+        assert!(free.1 > 0, "the busy-waits crept");
+        // The same game, paused after frame 3, stepped in uneven amounts with long real-time
+        // holds in between (longer than the escape) and other threads reading the clock
+        // while held, then resumed for the rest.
+        let mut f = Fake::new(62.5, 4096, 1000);
+        let mut bg = VcThread::default();
+        let mut poller = VcThread::default();
+        let mut trace = Vec::new();
+        let script = [1u64, 12, 1, 7, 64, 3, 100, 1, 1, 2, 250];
+        let mut next = 0usize;
+        let mut released_at = Vec::new();
+        f.present();
+        for i in 0..FRAMES {
+            if i == 3 {
+                f.cmd(PAUSE, 0);
+            }
+            game_frame(&mut f, &mut bg, i, &mut trace);
+            present_gated(&mut f, &mut |f: &mut Fake| {
+                let frozen = f.now_on(&mut poller);
+                f.advance_real_ms(2500);
+                for _ in 0..10_000 {
+                    assert_eq!(f.now_on(&mut poller), frozen, "time moved while held");
+                }
+                released_at.push(f.c.frames);
+                if next < script.len() {
+                    f.cmd(STEP, script[next]);
+                    next += 1;
+                } else {
+                    f.cmd(RESUME, 0);
+                }
+            });
+        }
+        assert_eq!(next, script.len(), "the whole script ran");
+        assert_eq!(released_at.len(), script.len() + 1);
+        // Held exactly where the steps said: after frame 4, then 4 + 1, + 12, ...
+        let mut want = vec![4u64];
+        for s in script {
+            want.push(want.last().unwrap() + s);
+        }
+        assert_eq!(released_at, want);
+        assert_eq!(trace, free.0, "the virtual-time sequence differs from running free");
+        assert_eq!((f.c.creep_frames, f.c.overruns, f.c.escapes, f.c.frames), (free.1, free.2, free.3, free.4));
+        assert_eq!(f.c.leaked, 0);
+        assert!(f.c.held_reads >= 10_000 * want.len() as u64);
+    }
+
+    #[test]
+    fn the_control_page_carries_commands_and_state() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join(control::CTL_FILE);
+        let page = control::Control::create(&path).unwrap();
+        assert!(control::Control::open(t.path()).is_err(), "not claimed by a clock yet");
+        let mut f = Fake::new(62.5, 4096, 1000);
+        // A command written before the game's process claims the page was for another one.
+        page.send(control::Cmd::Pause, 0, 0);
+        unsafe { vc_ctl_attach(page.page_ptr(), &mut *f.c, 4242) };
+        let ctl = control::Control::open(t.path()).unwrap();
+        let (mut cmd, mut arg) = (0u64, 0u64);
+        assert_eq!(unsafe { vc_ctl_poll(ctl.page_ptr(), &mut *f.c, &mut cmd, &mut arg) }, 0);
+        f.present();
+        for _ in 0..20 {
+            f.present();
+        }
+        unsafe { vc_ctl_publish(ctl.page_ptr(), &mut *f.c) };
+        let s = ctl.snapshot();
+        assert_eq!((s.state.as_str(), s.engaged, s.frames, s.vticks, s.pid), ("running", true, 20, 20 * 160_000, 4242));
+        assert_eq!((s.ticks_per_frame, s.qpf, s.rate()), (160_000, 10_000_000, 62.5));
+        assert!((s.virtual_s - 0.32).abs() < 1e-12);
+        // step 12 from running: acknowledged with its target.
+        let seq = ctl.send(control::Cmd::Step, 12, 0);
+        assert!(!ctl.acked(seq));
+        assert_eq!(unsafe { vc_ctl_poll(ctl.page_ptr(), &mut *f.c, &mut cmd, &mut arg) }, 1);
+        assert_eq!((cmd, arg), (2, 12));
+        assert!(ctl.acked(seq));
+        let s = ctl.snapshot();
+        assert_eq!((s.state.as_str(), s.hold_at, s.ack_hold_at, s.ack_frames, s.ack_cmd), ("holding", 32, 32, 20, Some(control::Cmd::Step)));
+        // Applied once.
+        assert_eq!(unsafe { vc_ctl_poll(ctl.page_ptr(), &mut *f.c, &mut cmd, &mut arg) }, 0);
+        for _ in 0..12 {
+            f.present();
+        }
+        f.hold_begin();
+        unsafe { vc_ctl_publish(ctl.page_ptr(), &mut *f.c) };
+        let s = ctl.snapshot();
+        assert!(s.held() && s.frames == 32 && s.vticks == 32 * 160_000 && s.steps == 12 && s.pauses == 1 && s.holds == 1, "{s:?}");
+        let seq = ctl.send(control::Cmd::Resume, 0, 0);
+        assert_eq!(unsafe { vc_ctl_poll(ctl.page_ptr(), &mut *f.c, &mut cmd, &mut arg) }, 1);
+        f.hold_end();
+        unsafe { vc_ctl_publish(ctl.page_ptr(), &mut *f.c) };
+        let s = ctl.snapshot();
+        assert!(ctl.acked(seq) && s.running() && s.hold_at == 0 && s.leaked == 0, "{s:?}");
+    }
+
+    struct Shared(*mut VcClock, *mut control::Page);
+    unsafe impl Send for Shared {}
+    unsafe impl Sync for Shared {}
+
+    /// The hook's loop on real threads: a game thread presenting as fast as it can and holding
+    /// the way hook.c does (polling the page), a background thread reading the clock
+    /// throughout, and the controller on the test's thread.
+    #[test]
+    fn pause_and_step_across_threads() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        let t = tempfile::tempdir().unwrap();
+        let page = control::Control::create(&t.path().join(control::CTL_FILE)).unwrap();
+        let mut f = Fake::new(62.5, 4096, 1000);
+        unsafe { vc_ctl_attach(page.page_ptr(), &mut *f.c, 1) };
+        let ctl = control::Control::open(t.path()).unwrap();
+        let sh = Arc::new(Shared(&mut *f.c, page.page_ptr()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let real = &*f.real as *const AtomicI64 as usize;
+        let game = {
+            let (sh, stop) = (sh.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (c, k) = (sh.0, sh.1);
+                let mut me = VcThread::default();
+                let mut seen = Vec::new();
+                unsafe { vc_present(c) };
+                let real = unsafe { &*(real as *const AtomicI64) };
+                while !stop.load(Ordering::SeqCst) {
+                    seen.push(unsafe { vc_now(c, &mut me) });
+                    real.fetch_add(20_000, Ordering::SeqCst); // 2 ms a frame
+                    unsafe {
+                        vc_ctl_poll(k, c, std::ptr::null_mut(), std::ptr::null_mut());
+                        vc_present(c);
+                        vc_ctl_publish(k, c);
+                        if vc_must_hold(c) != 0 {
+                            vc_hold_begin(c);
+                            vc_ctl_publish(k, c);
+                            while vc_must_hold(c) != 0 && !stop.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_micros(200));
+                                vc_ctl_poll(k, c, std::ptr::null_mut(), std::ptr::null_mut());
+                            }
+                            vc_hold_end(c);
+                            vc_ctl_publish(k, c);
+                        }
+                    }
+                }
+                seen
+            })
+        };
+        let reader = {
+            let (sh, stop) = (sh.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut me = VcThread::default();
+                while !stop.load(Ordering::SeqCst) {
+                    unsafe { vc_now(sh.0, &mut me) };
+                    std::thread::sleep(Duration::from_micros(20));
+                }
+            })
+        };
+        let wait = |what: &dyn Fn(&control::Snapshot) -> bool| {
+            let end = Instant::now() + Duration::from_secs(20);
+            loop {
+                let s = ctl.snapshot();
+                if what(&s) {
+                    return s;
+                }
+                assert!(Instant::now() < end, "timed out at {s:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        let seq = ctl.send(control::Cmd::Pause, 0, 0);
+        let s = wait(&|s| s.ack_seq >= seq && s.held());
+        // Held: frozen across real time while the reader keeps reading.
+        f.real.fetch_add(50_000_000, Ordering::SeqCst); // 5 s
+        std::thread::sleep(Duration::from_millis(100));
+        let s2 = ctl.snapshot();
+        assert_eq!((s2.frames, s2.vticks), (s.frames, s.vticks));
+        assert_eq!(s.vticks, s.frames as i64 * 160_000);
+        let mut at = s.frames;
+        for k in [1u64, 12, 1, 30] {
+            let seq = ctl.send(control::Cmd::Step, k, 0);
+            let s = wait(&|s| s.ack_seq >= seq && s.held() && s.frames >= s.ack_hold_at && s.frames > at);
+            assert_eq!(s.frames, at + k, "step {k}");
+            assert_eq!(s.vticks, s.frames as i64 * 160_000, "exactly 1/62.5 s per frame");
+            at = s.frames;
+        }
+        let seq = ctl.send(control::Cmd::Resume, 0, 0);
+        wait(&|s| s.ack_seq >= seq && s.running() && s.frames > at + 100);
+        stop.store(true, Ordering::SeqCst);
+        let seen = game.join().unwrap();
+        reader.join().unwrap();
+        let s = ctl.snapshot();
+        assert_eq!((s.leaked, s.escapes), (0, 0), "{s:?}");
+        assert!(s.held_reads > 0, "the reader read while held");
+        // The game thread saw exactly one frame per step, throughout.
+        for w in seen.windows(2) {
+            assert_eq!(w[1] - w[0], 160_000);
+        }
+    }
+
+    #[test]
+    fn reports_carry_pause_and_step() {
+        let r = Report::parse("rate=62.5\nengaged=1\nproxy=version.dll\nticks_per_frame=160000\nqpf=10000000\nframes=40\ncontrol=1\nhold_state=held\nhold_at=40\npauses=1\nsteps=13\nstepped=14\nholds=3\nheld_s=12.5\nheld_reads=900\nleaked_ticks=0\nauto_resumes=0\n");
+        assert!(r.control && r.hold_state == "held" && r.steps == 13);
+        let l = r.hold_line().unwrap();
+        assert!(l.contains("HELD at frame 40") && l.contains("13 step frame(s)") && l.contains("leaked 0 tick(s)"), "{l}");
+        assert!(r.verdict().is_empty());
+        let leaky = Report::parse("rate=62.5\nengaged=1\nqpf=10000000\nholds=1\nleaked_ticks=5000\n");
+        assert!(leaky.verdict().iter().any(|v| v.contains("moved 5000 tick(s)")));
+        assert!(Report::parse("rate=62.5\nengaged=1\n").hold_line().is_none());
     }
 }

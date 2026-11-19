@@ -210,7 +210,13 @@ impl ClientUpdate {
 
     /// One line for people: "Steam is updating it · 42% of 3.1 GB", "Update queued in Steam".
     pub fn describe(&self, client: &str) -> String {
-        let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+        // Under 1 GB in MB, so a 5.6 MB patch isn't "0.0 GB".
+        let gb = |b: u64| match b {
+            b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
+            b if b >= 10_000_000 => format!("{} MB", (b as f64 / 1e6).round() as u64),
+            b if b >= 100_000 => format!("{:.1} MB", b as f64 / 1e6),
+            _ => "less than 0.1 MB".to_string(),
+        };
         let pct = self.fraction().map(|f| format!(" · {}%", (f * 100.0).round() as u32)).unwrap_or_default();
         let size = if self.bytes_to_download > 0 { format!(" of {}", gb(self.bytes_to_download)) } else { String::new() };
         let mut line = match self.state {

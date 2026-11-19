@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::Inst;
 use super::manifest::Manifest;
 
-pub use quiver_vclock::{LOG_FILE, Report, STATUS_FILE, unavailable};
+pub use quiver_vclock::{LOG_FILE, Report, STATUS_FILE, control, unavailable};
 
 /// gamescope's refresh while the clock is on: high enough not to pace an uncapped game.
 pub const UNCAPPED_REFRESH: u32 = 1000;
@@ -342,6 +342,7 @@ pub fn report_lines(run_dir: &Path, full: bool) -> Option<Vec<String>> {
     if full || r.engaged {
         out.push(r.counters());
     }
+    out.extend(r.hold_line());
     if full {
         out.extend(r.census());
         if r.engaged {
@@ -359,6 +360,19 @@ pub fn report_lines(run_dir: &Path, full: bool) -> Option<Vec<String>> {
     }
     out.extend(r.verdict().into_iter().filter(|v| full || !v.starts_with("NOT FULLY")));
     Some(out)
+}
+
+/// The pause/step lines of the run's `vclock.log` (`control: …`), oldest first, without the
+/// DLL's prefix.
+pub fn control_lines(run_dir: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(run_dir.join(LOG_FILE)).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (head, rest) = l.split_once("] control: ")?;
+            let t = head.rsplit(' ').next().unwrap_or("").trim();
+            Some(format!("+{t}s {rest}"))
+        })
+        .collect()
 }
 
 /// The brief's section.
@@ -386,6 +400,14 @@ pub fn brief_section(i: &str) -> String {
          creep or escape had already moved past the grid), sleeps shortened (a Sleep never advances game time; the \
          presenting thread's get shorter so a sleeping frame limiter ends fast, other threads' stay real so pollers \
          don't spin; `clock.sleeps=all|none` to change that).\n\n\
+         **Pause and frame stepping** (clock on): `quiver lab clock {i} pause` holds the game at the end of the frame \
+         in flight (it stays on screen; virtual time stops, however long you take), `quiver lab clock {i} step 12` lets \
+         exactly 12 more frames through (each exactly 1/62.5 s) and holds again, `quiver lab clock {i} resume` runs \
+         free, `quiver lab clock {i} status` says where it is. Each waits until the game holds, so `quiver lab clock {i} \
+         step 12 && quiver lab shot {i}` shoots the 12th frame (`shot --hdr` works while held too). Input sent while held \
+         is read when the game next steps: hold a key across steps with `quiver lab key {i} --down Right`, `quiver lab \
+         clock {i} step 12`, `quiver lab key {i} --up Right`, `quiver lab clock {i} step 1`. A pause never times out \
+         unless you say so (`--auto-resume SECS`). `quiver lab logs {i}` lists every pause and step.\n\n\
          **Limits.** Audio runs on a clock this can't reach and drifts (or stutters) at other speeds. Games that pace on \
          audio, on timers (waitable timers, timeSetEvent, WaitForSingleObject timeouts) or on clocks outside the list \
          (QueryPerformanceCounter, GetTickCount(64), timeGetTime, GetSystemTimeAsFileTime, Sleep) keep real time there. \
@@ -543,8 +565,27 @@ mod tests {
     #[test]
     fn the_brief_explains_it() {
         let s = brief_section("t1");
-        for want in ["clock=virtual:62.5", "--clock virtual:62.5", "Repeatable", "below 1.0x is normal", "Audio", "Denuvo", "NOT FULLY DETERMINISTIC", "creeping frames", "fps_limit"] {
+        for want in ["clock=virtual:62.5", "--clock virtual:62.5", "Repeatable", "below 1.0x is normal", "Audio", "Denuvo", "NOT FULLY DETERMINISTIC", "creeping frames", "fps_limit", "clock t1 step 12 && quiver lab shot t1", "--down Right"] {
             assert!(s.contains(want), "{want}");
         }
+    }
+
+    #[test]
+    fn pause_and_step_lines_from_the_log() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(control_lines(t.path()).is_empty());
+        std::fs::write(
+            t.path().join(LOG_FILE),
+            "[vclock pid 512     0.001] control page Z:\\lab\\runs\\r1\\vclock.ctl: quiver lab clock pause|step|resume reach this process\n\
+             [vclock pid 512     0.053] control: pause at frame 0 (virtual 0.000000 s): holds at frame 1\n\
+             [vclock pid 512     0.596] control: held at frame 1 (virtual 0.016000 s)\n\
+             [vclock pid 512    10.000] report: engaged ...\n",
+        )
+        .unwrap();
+        assert_eq!(control_lines(t.path()), vec!["+0.053s pause at frame 0 (virtual 0.000000 s): holds at frame 1", "+0.596s held at frame 1 (virtual 0.016000 s)"]);
+        // The report's line once pause/step was used.
+        std::fs::write(t.path().join(STATUS_FILE), "rate=62.5\nengaged=1\nframes=40\nhold_state=held\npauses=1\nholds=2\nsteps=12\n").unwrap();
+        let l = report_lines(t.path(), false).unwrap();
+        assert!(l.iter().any(|x| x.starts_with("pause/step: HELD at frame 40")), "{l:?}");
     }
 }

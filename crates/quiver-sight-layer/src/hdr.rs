@@ -14,14 +14,21 @@
 //!   `capture-<n>.json` (format, colour space, size, metadata), then `capture_done = n` in the
 //!   status block. `TRANSFER_SRC` usage is added at swapchain creation when the surface allows
 //!   it (`HDR_CAPTURE_READY`).
+//! - **Holding** (design/LAB.md §8.2): while `capture.hold` exists in the session dir (`quiver
+//!   lab clock` writes it when it pauses or steps the game's virtual clock), every present on
+//!   the target swapchain copies its image and waits for the copy, keeping the latest
+//!   ([`RETAINED`], `HDR_CAPTURE_HELD`). A held game presents nothing, so requests are served
+//!   from that copy once no newer frame has come for 100 ms (the frame in flight when the hold
+//!   began is in by then).
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use ash::vk;
 use quiver_perf::LayerStatus;
-use quiver_perf::layout::{HDR_CAPTURE_READY, HDR_COLOR_SPACE, HDR_METADATA_SET};
+use quiver_perf::layout::{HDR_CAPTURE_HELD, HDR_CAPTURE_READY, HDR_COLOR_SPACE, HDR_METADATA_SET};
 
 use crate::{log, state};
 
@@ -35,6 +42,16 @@ pub static DONE: AtomicU64 = AtomicU64::new(0);
 pub static TARGET_FLAGS: AtomicU32 = AtomicU32::new(0);
 
 pub const REQUEST_FILE: &str = "capture.req";
+/// Present while the game's clock is held: keep every presented frame (module docs).
+pub const HOLD_FILE: &str = "capture.hold";
+
+/// Holding: `HOLD_FILE` exists.
+pub static HOLD: AtomicBool = AtomicBool::new(false);
+/// The latest frame kept while holding, and when it came.
+pub static RETAINED: Mutex<Option<(Captured, Instant)>> = Mutex::new(None);
+/// When the pending request was first seen (a held request waits for the frames to settle,
+/// but not for ever).
+static REQUEST_SEEN: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// The last metadata set on a swapchain.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -137,8 +154,25 @@ pub fn fill_status(s: &mut LayerStatus) {
             *o = to(v, 100_000.0);
         }
     }
+    if HOLD.load(Ordering::Relaxed) && RETAINED.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+        flags |= HDR_CAPTURE_HELD;
+    }
     s.hdr_flags = flags;
     s.capture_done = DONE.load(Ordering::Relaxed);
+}
+
+fn write_capture(dir: &Path, c: &Captured, id: u64) {
+    let md = *METADATA.lock().unwrap_or_else(|p| p.into_inner());
+    let meta = sidecar(c, id, md.as_ref());
+    let raw = dir.join(format!("capture-{id}.raw"));
+    let json = dir.join(format!("capture-{id}.json"));
+    match std::fs::write(&raw, &c.data).and_then(|_| std::fs::write(&json, meta.as_bytes())) {
+        Ok(()) => {
+            log!("capture {id} written: {}x{} {:?} {:?}", c.width, c.height, c.format, c.color_space);
+            DONE.store(id, Ordering::Relaxed);
+        }
+        Err(e) => log!("capture {id}: {e}"),
+    }
 }
 
 /// The target swapchain's capture readiness and colour space (from `retarget`).
@@ -149,31 +183,43 @@ pub fn set_target(capture: bool, cs: vk::ColorSpaceKHR) {
 
 /// The heartbeat thread's part: pick up a request, write a finished capture out.
 pub fn tick(dir: &Path) {
+    let hold = dir.join(HOLD_FILE).exists();
+    if HOLD.swap(hold, Ordering::Relaxed) != hold {
+        log!("capture hold {}", if hold { "on: keeping every presented frame (the game's clock is held or stepped)" } else { "off" });
+        if !hold {
+            *RETAINED.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
     if let Ok(text) = std::fs::read_to_string(dir.join(REQUEST_FILE))
         && let Ok(n) = text.trim().parse::<u64>()
         && n > REQUEST.load(Ordering::Relaxed)
     {
         log!("capture {n} requested");
         REQUEST.store(n, Ordering::Relaxed);
+        *REQUEST_SEEN.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+    }
+    if hold {
+        // Served from the kept frame once it has settled (or after 2 s, whatever is newest).
+        let n = REQUEST.load(Ordering::Relaxed);
+        if n > DONE.load(Ordering::Relaxed) {
+            let seen = REQUEST_SEEN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(Instant::now);
+            let kept = RETAINED.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((c, at)) = kept.as_ref()
+                && (at.elapsed() >= Duration::from_millis(100) || seen.elapsed() >= Duration::from_secs(2))
+            {
+                log!("capture {n} from the kept frame (held)");
+                TAKEN.fetch_max(n, Ordering::Relaxed);
+                write_capture(dir, c, n);
+            }
+        }
     }
     let Some(c) = CAPTURED.lock().unwrap_or_else(|p| p.into_inner()).take() else { return };
-    let md = *METADATA.lock().unwrap_or_else(|p| p.into_inner());
-    let meta = sidecar(&c, md.as_ref());
-    let raw = dir.join(format!("capture-{}.raw", c.id));
-    let json = dir.join(format!("capture-{}.json", c.id));
-    let ok = std::fs::write(&raw, &c.data).and_then(|_| std::fs::write(&json, meta.as_bytes()));
-    match ok {
-        Ok(()) => {
-            log!("capture {} written: {}x{} {:?} {:?}", c.id, c.width, c.height, c.format, c.color_space);
-            DONE.store(c.id, Ordering::Relaxed);
-        }
-        Err(e) => log!("capture {}: {e}", c.id),
-    }
+    write_capture(dir, &c, c.id);
 }
 
 /// The capture's JSON sidecar (by hand: the layer has no JSON dependency; every value is a
 /// number or a Vulkan enum's Rust name).
-fn sidecar(c: &Captured, md: Option<&Metadata>) -> String {
+fn sidecar(c: &Captured, id: u64, md: Option<&Metadata>) -> String {
     let num = |v: f32| if v.is_finite() { format!("{v}") } else { "null".into() };
     let md = md.map_or("null".to_owned(), |m| {
         let p: Vec<String> = m.primaries.iter().map(|&v| num(v)).collect();
@@ -189,7 +235,7 @@ fn sidecar(c: &Captured, md: Option<&Metadata>) -> String {
     });
     format!(
         "{{\n  \"id\": {},\n  \"format\": {},\n  \"format_name\": \"{:?}\",\n  \"color_space\": {},\n  \"color_space_name\": \"{:?}\",\n  \"width\": {},\n  \"height\": {},\n  \"bytes_per_pixel\": {},\n  \"row_bytes\": {},\n  \"swapchain\": {},\n  \"hdr_metadata\": {}\n}}\n",
-        c.id,
+        id,
         c.format.as_raw(),
         c.format,
         c.color_space.as_raw(),
@@ -221,13 +267,13 @@ mod tests {
     fn sidecar_is_json() {
         let c = Captured { id: 3, format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT, width: 4, height: 2, bytes_per_pixel: 4, swapchain: 1, data: vec![] };
         let m = Metadata { max_cll: 4000.0, max_fall: f32::NAN, ..Default::default() };
-        let v: serde_json::Value = serde_json::from_str(&sidecar(&c, Some(&m))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sidecar(&c, 3, Some(&m))).unwrap();
         assert_eq!(v["format"], 64);
         assert_eq!(v["color_space_name"], "HDR10_ST2084_EXT");
         assert_eq!(v["row_bytes"], 16);
         assert_eq!(v["hdr_metadata"]["max_cll"], 4000.0);
         assert!(v["hdr_metadata"]["max_fall"].is_null());
-        let v: serde_json::Value = serde_json::from_str(&sidecar(&c, None)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sidecar(&c, 3, None)).unwrap();
         assert!(v["hdr_metadata"].is_null());
     }
 

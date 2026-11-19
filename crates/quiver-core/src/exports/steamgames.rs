@@ -977,7 +977,12 @@ mod tests {
         // Downloading (1026: update started, update required; the installed bit is off).
         let d = m(1026 | flags::DOWNLOADING, "100", "\t\"BytesToDownload\"\t\t\"2000\"\n\t\"BytesDownloaded\"\t\t\"500\"\n").update().unwrap();
         assert_eq!((d.state, d.fraction()), (S::Downloading, Some(0.25)));
-        assert_eq!(d.describe("Steam"), "Steam is updating it · 25% of 0.0 GB");
+        assert_eq!(d.describe("Steam"), "Steam is updating it · 25% of less than 0.1 MB");
+        // Small patches in MB, not "0.0 GB" (Marque & Reprisal's 5.6 MB update).
+        let small = m(6, "100", "\t\"TargetBuildID\"\t\t\"101\"\n\t\"BytesToDownload\"\t\t\"5577232\"\n").update().unwrap();
+        assert_eq!(small.describe("Steam"), "Update queued in Steam of 5.6 MB");
+        let mid = m(6, "100", "\t\"TargetBuildID\"\t\t\"101\"\n\t\"BytesToDownload\"\t\t\"268014400\"\n").update().unwrap();
+        assert_eq!(mid.describe("Steam"), "Update queued in Steam of 268 MB");
         // Staging, paused, failed, only-on-launch.
         assert_eq!(m(1026 | flags::STAGING, "100", "\t\"BytesToStage\"\t\t\"10\"\n\t\"BytesStaged\"\t\t\"5\"\n").update().unwrap().fraction(), Some(0.5));
         assert_eq!(m(1538, "100", "").update().unwrap().state, S::Paused);
