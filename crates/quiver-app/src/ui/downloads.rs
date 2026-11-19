@@ -172,6 +172,20 @@ pub fn eta(seconds: u64) -> String {
     }
 }
 
+/// The time left at the recent average rate (the last ~20 s the graph has, pauses left out;
+/// the instant `speed` before the graph has any), or `None` when that would be absurd: under
+/// 100 kB/s, or more than two days, as during a stall (a near-0 instant speed gave
+/// "12772993 h 19 min").
+pub fn eta_for(left: u64, recent: &[Option<u64>], speed: u64) -> Option<String> {
+    let window: Vec<u64> = recent.iter().rev().take(20).flatten().copied().collect();
+    let avg = if window.len() >= 5 { window.iter().sum::<u64>() / window.len() as u64 } else { speed };
+    if avg < 100_000 {
+        return None;
+    }
+    let secs = left / avg;
+    (secs <= 2 * 24 * 3600).then(|| eta(secs))
+}
+
 /// Sizes up to terabytes: "1.21 TB", "48.7 GB".
 pub fn size(bytes: u64) -> String {
     if bytes >= 1_000_000_000_000 { format!("{:.2} TB", bytes as f64 / 1e12) } else { gb(bytes) }
@@ -1055,7 +1069,11 @@ impl Quiver {
         }
         if speed > 0 {
             nums = nums.child(num(rate(speed), "network"));
-            nums = nums.child(num(eta(left / speed.max(1)), "left"));
+            let recent: Vec<Option<u64>> = self.dl.speeds.get(&id).map(|s| s.bars.iter().copied().collect()).unwrap_or_default();
+            match eta_for(left, &recent, speed) {
+                Some(t) => nums = nums.child(num(t, "left")),
+                None => nums = nums.child(div().text_color(on_art::tx2()).child("time left unknown")),
+            }
         }
         if e.retries > 0 {
             nums = nums.child(
@@ -2438,6 +2456,13 @@ mod tests {
         assert_eq!(eta(206), "3 min 26 s");
         assert_eq!(eta(12), "12 s");
         assert_eq!(eta(3840), "1 h 04 min");
+        // A stall's near-0 instant speed doesn't give "12772993 h": the recent average, else nothing.
+        assert_eq!(eta_for(50_000_000_000, &[], 1), None);
+        let steady: Vec<Option<u64>> = vec![Some(25_000_000); 30];
+        assert_eq!(eta_for(25_000_000 * 60, &steady, 3).as_deref(), Some("1 min 00 s"));
+        let stalled: Vec<Option<u64>> = vec![Some(0); 30];
+        assert_eq!(eta_for(1_000_000_000, &stalled, 25_000_000), None);
+        assert_eq!(eta_for(10_000_000_000_000, &steady, 25_000_000), None, "more than two days left (10 TB at 25 MB/s): hidden");
         assert_eq!(rate(84_600_000), "84.6 MB/s");
         assert_eq!(rate(212_000_000), "212 MB/s");
         assert_eq!(rate(500_000), "500 KB/s");
