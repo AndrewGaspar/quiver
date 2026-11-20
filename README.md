@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/mark-dark.svg">
+    <img src="docs/brand/mark-light.svg" alt="Quiver's mark: a Q whose tail is an arrow, drawn as a cyan and red pair" width="112">
+  </picture>
+</p>
+
 # Quiver
 
 A third-party launcher for your Ubisoft library on Linux. Not affiliated with or endorsed by
