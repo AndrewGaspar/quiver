@@ -4695,6 +4695,7 @@ dependencies = [
  "quiver-api",
  "quiver-core",
  "quiver-ipc",
+ "quiver-pad",
  "quiver-perf",
  "regex",
  "rpassword",
@@ -4757,6 +4758,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "quiver-pad"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

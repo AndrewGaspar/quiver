@@ -81,6 +81,29 @@ pub fn sight_section(i: &str) -> String {
     )
 }
 
+/// The game controller section of the brief (design/LAB.md §16).
+pub fn pad_section(i: &str) -> String {
+    format!(
+        "Off unless the instance has pads: `quiver lab create … --pads` (or `--pads 2` for player 2), or \
+         `quiver lab edit {i} pads=1` and then `quiver lab down {i} && quiver lab up {i}`. Each pad is an Xbox 360 \
+         controller that only this instance's container can open (a udev rule hides it from the host; `quiver lab \
+         doctor` says whether it's installed). Windows games see it through XInput, DirectInput, raw input and \
+         Windows.Gaming.Input; native Linux games through evdev and SDL.\n\n\
+         ```sh\n\
+         quiver lab pad {i} press a                       # press and let go (120 ms; --for 500ms or --for 12f)\n\
+         quiver lab pad {i} hold lb; quiver lab pad {i} release lb\n\
+         quiver lab pad {i} stick left 0 1 --for 2s       # left stick up (Y up, -1..1) for 2 s, then back\n\
+         quiver lab pad {i} trigger rt 1                  # right trigger fully pulled (stays; 0 to release)\n\
+         quiver lab pad {i} seq \"a 100ms; wait 200ms; lstick=0,1 1s; +rt=1; x; neutral\"\n\
+         quiver lab pad {i} --pad 2 press start           # player 2\n\
+         quiver lab pad {i} status                        # what the game sees: XInput slot, DirectInput, HID; rumble\n\
+         ```\n\n\
+         With the virtual clock on, durations are frames: the game is held, the input applied, and exactly that many \
+         frames stepped, so a script lands on the same frames every run. A Steam Controller's grips (`r4 r5 l4 l5`) \
+         work when `pad.grips` says what they are (a hyprpad `pad_map`, e.g. `quiver lab edit {i} pad.grips=r4=a,r5=b`).\n\n"
+    )
+}
+
 pub fn hdr_section(i: &str) -> String {
     format!(
         "Off unless the instance has it: `quiver lab create … --hdr` (or `--display 1920x1080@60+hdr`), or \
@@ -202,6 +225,9 @@ pub fn render(b: &BriefInput) -> String {
     s.push_str("## Sight in the instance (the HUD and the in-game panel)\n\n");
     s.push_str(&sight_section(i));
 
+    s.push_str("## Game controllers in the instance\n\n");
+    s.push_str(&pad_section(i));
+
     s.push_str("## HDR in the instance\n\n");
     s.push_str(&hdr_section(i));
 
@@ -285,6 +311,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("quiver lab shot <i> [FILE] [--settle S] [--crop C]", "screenshot from the instance's display (full resolution)"),
     ("quiver lab key <i> KEY… [--hold MS]", "press keys (xdotool names: Return, Escape, w, shift+Tab)"),
     ("quiver lab type <i> TEXT", "type text"),
+    ("quiver lab pad <i> press|hold|release|stick|trigger|seq|status …", "a virtual Xbox 360 pad (pads=N): buttons, sticks, triggers, scripts timed in frames on the virtual clock; status shows what the game sees"),
     ("quiver lab mouse <i> DX DY [--steps N] [--repeat N --gap A-B --log FILE]", "relative mouse motion (mouse-look), optionally timed and logged for latency work"),
     ("quiver lab click <i> FX FY [--button N] [--expect-change]", "click at a fraction of the window; --expect-change fails if the screen didn't change"),
     ("quiver lab set <i> FILE:[section]key=value… [--wait]", "edit the instance's config files (manifest aliases, install:, prefix paths); --wait waits for the mod's reload"),
@@ -324,7 +351,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5"] {
+        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));
