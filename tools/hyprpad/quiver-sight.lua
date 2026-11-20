@@ -15,11 +15,14 @@
 --      layer-shell surface, namespace exactly `quiver-sight`, matched as before. The mode
 --      doesn't forward, so the game's virtual pad goes neutral (held buttons released) while
 --      the panel is open, and comes back when it closes.
---   2. In that mode the pad types keys: D-pad / left stick: arrows · A: Enter · B: Escape ·
---      X: Space · LB / RB (and LT / RT): Page Up / Page Down (previous / next section). The
---      keys go to the focused window: the game, whose input Quiver's preload hands to the
---      panel while it's open (or the desktop panel's surface). Held buttons hold the key, so
---      the panel's own key repeat applies.
+--   2. In that mode the pad types keys: D-pad: arrows · A: Enter · B: Escape · X: x (reset
+--      to default; Achievements: reveal) · Y: y (tap: pin to the quick menu; hold on a live
+--      option: compare its old and new value until you let go) · LB / RB: Page Up / Page Down
+--      (previous / next section) · LT / RT: Home / End (the section's tabs: Mods' and
+--      Tweaks' pages) · R3 (right stick click): Tab (dock the panel as a column beside the
+--      game, or centre it). The keys go to the focused window: the game, whose input
+--      Quiver's preload hands to the panel while it's open (or the desktop panel's surface).
+--      Held buttons hold the key, so the panel's own key repeat applies, and Y's hold is seen.
 --   3. Guide+Start opens and closes the panel (`quiver sight toggle`). See "The chord" below:
 --      Guide+Start is Guide+Menu, which your config may already use.
 --
@@ -63,16 +66,15 @@ end)
 -- 2. Buttons -> keys, only while the panel is up. hyprpad key names (evdev style).
 local keys = {
   dpad_up = "up", dpad_down = "down", dpad_left = "left", dpad_right = "right",
-  a = "enter", b = "escape", x = "space",
-  l1 = "pageup", r1 = "pagedown", l2 = "pageup", r2 = "pagedown",
+  a = "enter", b = "escape", x = "x", y = "y",
+  l1 = "pageup", r1 = "pagedown", l2 = "home", r2 = "end",
+  r3 = "tab",
 }
 for button, key in pairs(keys) do
   h.button(button, "Quiver Sight: " .. key, h.key(key)):only_in("quiver-sight")
 end
--- Stick flicks (left/right only: lstick_up/down are often bound already, e.g. to paging;
--- add "quiver-sight" to those binds' modes, sending Up/Down, if you want them too).
-h.bind("lstick_left", "Quiver Sight: left", h.key "left"):only_in("quiver-sight")
-h.bind("lstick_right", "Quiver Sight: right", h.key "right"):only_in("quiver-sight")
+-- (No stick flicks: hyprpad's h.bind takes guide chords only, and an `h.bind("lstick_left",
+-- …)` line stops the whole config from loading. The D-pad moves.)
 
 -- 3. The chord. A guide chord has exactly ONE binding in hyprpad: binding it again replaces
 -- the earlier one everywhere (and keeps the earlier guard). So pick one:

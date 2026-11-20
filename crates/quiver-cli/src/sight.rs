@@ -172,6 +172,9 @@ fn print_status(s: &SightStatus) {
                 let why = if p.presenter_detail.is_empty() { String::new() } else { format!(" — {}", p.presenter_detail) };
                 println!("drawn:    {how}{why}");
             }
+            if p.docked {
+                println!("layout:   docked (a column on the left, the game in full view; R3 or Tab centres it)");
+            }
             println!("backdrop: {} — {}", p.backdrop.as_str(), if p.backdrop_detail.is_empty() { "-" } else { &p.backdrop_detail });
             println!("pad:      {}{}", if p.pad.is_empty() { "none" } else { &p.pad }, if p.pad_chord { " · Select+Start held opens the panel" } else { "" });
             if let Some(e) = &p.last_error {

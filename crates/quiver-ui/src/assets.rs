@@ -1,4 +1,4 @@
-//! Assets compiled into the binary: Lucide icons (ISC) and the UI fonts (Geist, Geist Mono,
+//! Assets compiled into the binary: Lucide icons (ISC), Quiver's own mark (`brand/`) and the UI fonts (Geist, Geist Mono,
 //! Archivo SemiExpanded; all SIL OFL 1.1). Licenses are next to the files in `assets/`.
 
 use std::borrow::Cow;
@@ -10,6 +10,7 @@ use rust_embed::RustEmbed;
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/*.svg"]
+#[include = "brand/*.svg"]
 #[include = "fonts/*.ttf"]
 pub struct Assets;
 

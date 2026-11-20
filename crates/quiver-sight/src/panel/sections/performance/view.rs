@@ -71,6 +71,13 @@ fn text_of(d: &PanelData, id: &str, stat: Stat) -> Option<String> {
     metric(d, id, stat).filter(|v| !v.stale && v.text != "—").map(|v| v.text.clone())
 }
 
+/// The section's body as the shell places it: scrolled when it's taller than its room (the
+/// editor sizes itself to the room).
+pub fn body(v: &PanelView, th: &Theme, docked: bool, cx: &mut Context<PanelView>) -> AnyElement {
+    let inner = render(v, th, v.room, cx);
+    div().id("perf-body").size_full().overflow_y_scroll().when(docked, |d| d.px(px(12.)).py(px(8.))).child(inner).into_any_element()
+}
+
 /// The section: the tiles, the graph, the cap, the HUD and latency cards; or the editor.
 pub fn render(v: &PanelView, th: &Theme, room: Room, cx: &mut Context<PanelView>) -> AnyElement {
     if v.perf.editor.is_some() {

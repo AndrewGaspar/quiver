@@ -3,8 +3,10 @@
 //! the panel makes. Each part fails on its own ([`Load::Failed`]), so a missing piece
 //! never blanks the panel.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
-use quiver_api::options::{Level, OptionOp, OptionsChange, OptionsRequest, SurfaceKind, SurfaceState};
+use quiver_api::options::{Level, Live, OptionOp, OptionsChange, OptionsRequest, SurfaceKind, SurfaceState};
 use quiver_api::perf::{HudScope, HudScopeRef, HudSettingsView, HudStatus, PerfRequest, PerfSessionInfo};
 use quiver_api::tweaks::{Scope, TweaksRequest};
 use quiver_api::{ActiveSession, Client, GameRef, Request};
@@ -157,6 +159,9 @@ pub async fn refresh(client: &Client, session: &str, part: Part, d: &mut PanelDa
     };
     if matches!(part, Part::All | Part::Options) {
         d.options = options(client, &s).await;
+        if let Some(list) = d.options.ready() {
+            d.readouts = readouts(client, &s, list).await;
+        }
     }
     if matches!(part, Part::All | Part::Tweaks) {
         d.tweak_scope_name = tweak_scope(&s).1;
@@ -186,16 +191,59 @@ impl<T> SetFailed for Load<T> {
 
 // ---- Changes ---------------------------------------------------------------------------------
 
-pub async fn set_option(client: &Client, s: &SessionView, op: OptionOp) -> Result<OptionsChange> {
+/// Options of the running profile, as one revision (`live`: `only` for Session only and A/B
+/// compare, which save nothing).
+pub async fn set_options(client: &Client, s: &SessionView, ops: Vec<OptionOp>, live: Live) -> Result<OptionsChange> {
     let profile = Some(s.profile_id.clone().unwrap_or_else(|| quiver_api::mods::VANILLA.into()));
-    client
-        .call(Request::Options(OptionsRequest::Set { game: s.game.into(), profile, ops: vec![op], live: Default::default(), message: Some("in game (Sight)".into()), confirmed: false }))
-        .await
+    let message = Some(if live == Live::Only { "in game, this session only (Sight)" } else { "in game (Sight)" }.into());
+    client.call(Request::Options(OptionsRequest::Set { game: s.game.into(), profile, ops, live, message, confirmed: false })).await
 }
 
-pub async fn set_tweak(client: &Client, s: &SessionView, op: OptionOp) -> Result<OptionsChange> {
+pub async fn set_tweaks(client: &Client, s: &SessionView, ops: Vec<OptionOp>) -> Result<OptionsChange> {
     let (scope, _) = tweak_scope(s);
-    client.call(Request::Tweaks(TweaksRequest::Set { scope, ops: vec![op], message: Some("in game (Sight)".into()), confirmed: false })).await
+    client.call(Request::Tweaks(TweaksRequest::Set { scope, ops, message: Some("in game (Sight)".into()), confirmed: false })).await
+}
+
+/// "Revert this session": quiverd puts back the values the session launched with, live
+/// where it can (`OptionsRevertSession`).
+pub async fn revert_session(client: &Client, s: &SessionView) -> Result<OptionsChange> {
+    client.call(Request::Options(OptionsRequest::RevertSession { game: s.game.into(), session: s.session.clone() })).await
+}
+
+/// "Session only": the profile back to what the session launched with, without touching the
+/// game (`back`, `live: no`), then the session's values again for this session only (`live`,
+/// `live: only`). In that order, in one task. The answer is the second's, with the first's
+/// warnings.
+pub async fn session_only(client: &Client, s: &SessionView, back: Vec<OptionOp>, live: Vec<OptionOp>) -> Result<OptionsChange> {
+    let first = if back.is_empty() { OptionsChange::default() } else { set_options(client, s, back, Live::No).await.context("taking the changes out of the profile")? };
+    let mut second = if live.is_empty() { OptionsChange::default() } else { set_options(client, s, live, Live::Only).await.context("keeping them for this session")? };
+    second.warnings.extend(first.warnings);
+    Ok(second)
+}
+
+/// The mods' readouts: each surface's `state`, `text`, gauge and counter metrics in the
+/// session's catalog (SIGHT-HUD §3.13: a surface's `metrics`, or its `mod:<surface>`
+/// producer's), with their labels. Empty when the catalog can't be had.
+pub async fn readouts(client: &Client, s: &SessionView, surfaces: &[SurfaceState]) -> BTreeMap<String, Vec<(String, String)>> {
+    use quiver_perf::descriptor::MetricKind;
+    let catalog: Vec<quiver_api::perf::MetricInfo> = match client.call(Request::Perf(PerfRequest::Catalog { session: Some(s.session.clone()), game: None })).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("perf catalog: {e:#}");
+            return BTreeMap::new();
+        }
+    };
+    let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for m in catalog {
+        let d = &m.descriptor;
+        if !matches!(d.kind, MetricKind::State | MetricKind::Text | MetricKind::Gauge | MetricKind::Counter) {
+            continue;
+        }
+        let Some(surface) = surfaces.iter().find(|x| x.metrics.contains(&d.id) || m.producer == format!("mod:{}", x.surface)) else { continue };
+        let label = d.label.clone().or_else(|| d.short.clone()).unwrap_or_else(|| d.id.rsplit('.').next().unwrap_or(&d.id).to_owned());
+        out.entry(surface.key.clone()).or_default().push((d.id.clone(), label));
+    }
+    out
 }
 
 pub async fn hud_set(client: &Client, game: GameRef, set: HudScope) -> Result<HudSettingsView> {
@@ -236,13 +284,13 @@ pub const METRICS: [&str; 20] = [
     "fg.ratio",
 ];
 
-pub async fn subscribe(client: &Client, session: &str) -> Result<u64> {
+pub async fn subscribe(client: &Client, session: &str, extra: &[String]) -> Result<u64> {
     use quiver_api::perf::Stat;
     client
         .call(Request::Perf(PerfRequest::Subscribe {
             session: Some(session.into()),
             game: None,
-            select: METRICS.iter().map(|s| s.to_string()).collect(),
+            select: METRICS.iter().map(|s| s.to_string()).chain(extra.iter().cloned()).collect(),
             every_ms: 500,
             window_ms: 1000,
             stats: vec![Stat::Last, Stat::Mean, Stat::P1low],

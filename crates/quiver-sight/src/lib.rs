@@ -260,6 +260,7 @@ impl Sight {
             }
             Msg::GameInput { session, events } => self.panel.game_input(&session, &events, cx),
             Msg::Perf { session, reply } => self.panel.perf_reply(&session, reply, cx),
+            Msg::PanelLayout { docked, prefs } => self.panel.layout(docked, prefs, cx),
         }
     }
 
@@ -434,6 +435,8 @@ pub fn run() -> anyhow::Result<()> {
         }
         (None, None) => {
             panel = panel::PanelCtl::new(layer_shell, Some(req_tx), Some(tx.clone()));
+            // The real one keeps the sections' layout in sight.toml.
+            panel.persist = true;
             let tx = tx.clone();
             std::thread::Builder::new().name("quiver-sight-link".into()).spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");

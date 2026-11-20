@@ -2,10 +2,12 @@
 //! session ([`PanelData`]), the rows each section shows ([`rows`]), focus and navigation
 //! ([`Nav`]), and what Left / Right / A do to a value ([`step_value`]).
 //!
-//! Navigation is the app's model in small: a side list of sections and a body of rows.
-//! D-pad or stick moves, A activates, B goes back (body → side list → closes), LB / RB
-//! (and LT / RT) switch sections from anywhere, Left / Right adjust the focused stepper or
-//! toggle (and, on a row with nothing to adjust, Left goes back to the side list).
+//! Navigation (the shell of the mock-ups, design/SIGHT.md §9): a tab row of sections on top
+//! (LB / RB from anywhere, wrapping) and the section's rows. D-pad or stick moves, A
+//! activates, Left / Right adjust the focused stepper or toggle, B goes back (in Mods, from
+//! the rows to its surface list) and then closes. LT / RT are the section's tabs (Mods' and
+//! Tweaks' pages), X and Y the section's own (reset, pin), R3 docks or centres the panel
+//! ([`DockPrefs`], remembered per section).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -142,6 +144,10 @@ pub struct PanelData {
     pub achievements: Load<Achs>,
     /// Live metrics: id → stat → value.
     pub metrics: BTreeMap<String, BTreeMap<Stat, PerfValue>>,
+    /// The mods' readouts ("DLSS right now": a surface's `state` and `text` metrics, SIGHT-HUD
+    /// §3.13), by surface key: (metric id, label), in the catalog's order. Their values are
+    /// in [`Self::metrics`].
+    pub readouts: BTreeMap<String, Vec<(String, String)>>,
 }
 
 // ---- Rows -------------------------------------------------------------------------------------
@@ -178,11 +184,27 @@ pub enum Row {
     /// The Performance section's body: its own controls and editor
     /// (`sections::performance`), one row for the panel's navigation.
     Performance,
+    /// A surface's preset picker (surface key).
+    Preset { surface: String },
+    /// One of the Mods and Tweaks sections' buttons (Undo, Revert this session, Session only).
+    Act(Act),
+}
+
+/// The Mods and Tweaks sections' buttons (design/SIGHT.md §9 "Mods section").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Act {
+    /// Undo the saved changes that wait for the next launch (`tweaks`: the Tweaks section's).
+    UndoRestart { tweaks: bool },
+    /// Put back the values the session launched with (`OptionsRevertSession`).
+    RevertSession,
+    /// This session's changes for this session only: the profile goes back to what it
+    /// launched with, the game keeps them (`live: only`), and later changes aren't saved.
+    SessionOnly,
 }
 
 impl Row {
     pub fn focusable(&self) -> bool {
-        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Performance)
+        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Preset { .. } | Row::Act(_) | Row::Performance)
     }
 }
 
@@ -215,39 +237,13 @@ pub fn adjustable(st: &OptionState) -> bool {
         }
 }
 
-fn option_rows(surface: &SurfaceState, out: &mut Vec<Row>, row: impl Fn(&str) -> Row) -> usize {
-    let mut n = 0;
-    for page in &surface.pages {
-        for g in &page.groups {
-            let ids: Vec<&String> = g.options.iter().filter(|id| surface.options.get(*id).is_some_and(shown_in_game)).collect();
-            if ids.is_empty() {
-                continue;
-            }
-            let title = if surface.pages.len() > 1 && !g.title.is_empty() && g.title != page.title {
-                format!("{} · {}", page.title, g.title)
-            } else if !g.title.is_empty() {
-                g.title.clone()
-            } else {
-                page.title.clone()
-            };
-            if !title.is_empty() {
-                out.push(Row::Heading { title, detail: None });
-            }
-            for id in ids {
-                out.push(row(id));
-                n += 1;
-            }
-        }
-    }
-    n
-}
-
 fn hm(secs: u64) -> String {
     let m = secs / 60;
     if m >= 60 { format!("{} h {} m", m / 60, m % 60) } else { format!("{m} m") }
 }
 
-fn status<T>(l: &Load<T>, what: &str) -> Option<Row> {
+/// A note while `l` isn't ready ("Loading mod options…", why it failed).
+pub fn status<T>(l: &Load<T>, what: &str) -> Option<Row> {
     match l {
         Load::Loading => Some(Row::Note(format!("Loading {what}…"))),
         Load::Failed(e) => Some(Row::Note(format!("Couldn't load {what}: {e}"))),
@@ -288,48 +284,10 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
             out.push(Row::Button(Button::Quit));
             out.push(Row::Button(Button::ForceQuit));
         }
-        PanelSection::Mods => {
-            if let Some(r) = status(&d.options, "mod options") {
-                out.push(r);
-            }
-            if let Some(list) = d.options.ready() {
-                let mut any = false;
-                for s in list {
-                    let title = match (&s.version_label, &s.version) {
-                        (Some(l), _) | (None, Some(l)) => format!("{} {l}", s.title),
-                        _ => s.title.clone(),
-                    };
-                    let detail = Some(if s.live.connected { "live".to_owned() } else { live_word(s) });
-                    let at = out.len();
-                    out.push(Row::Heading { title, detail });
-                    let key = s.key.clone();
-                    if option_rows(s, &mut out, |id| Row::Opt { surface: key.clone(), id: id.to_owned() }) == 0 {
-                        out.truncate(at);
-                    } else {
-                        any = true;
-                    }
-                }
-                if !any {
-                    let no_mods = d.session.ready().is_some_and(|s| s.mods.is_empty());
-                    out.push(Row::Note(if no_mods {
-                        "This profile has no mods: it's a setup of the game's settings. Tweaks has the ones Quiver can change in game.".into()
-                    } else {
-                        "No mod in this profile has options to change in game.".into()
-                    }));
-                }
-            }
-        }
-        PanelSection::Tweaks => {
-            if let Some(r) = status(&d.tweaks, "tweaks") {
-                out.push(r);
-            }
-            if let Some(s) = d.tweaks.ready() {
-                out.push(Row::Note(format!("Saved to {}. Most tweaks apply when the game next starts.", d.tweak_scope_name)));
-                if option_rows(s, &mut out, |id| Row::Tweak { id: id.to_owned() }) == 0 {
-                    out.push(Row::Note("No tweaks to change in game.".into()));
-                }
-            }
-        }
+        // Mods and Tweaks lay out by surface and page (`panel/sections/mods.rs`): their first
+        // page here, for callers without the panel's navigation.
+        PanelSection::Mods => out = super::sections::mods::rows(d, &Nav::default(), &Default::default()),
+        PanelSection::Tweaks => out = super::sections::mods::tweak_rows(d, &Nav::default(), &Default::default()),
         PanelSection::Performance => {
             if let Some(r) = status(&d.hud, "the HUD") {
                 out.push(r);
@@ -347,14 +305,6 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
         }
     }
     out
-}
-
-fn live_word(s: &SurfaceState) -> String {
-    use quiver_api::options::LiveChannel;
-    match s.live.channel {
-        LiveChannel::None => "next launch".into(),
-        _ => "live".into(),
-    }
 }
 
 // ---- Values --------------------------------------------------------------------------------
@@ -416,9 +366,11 @@ pub fn step_scale(cur: f32, dir: i32) -> f32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Zone {
+    /// The section's rows.
     #[default]
-    Side,
     Body,
+    /// Mods' surface list (the mods, the game's settings, DXVK, …).
+    Surfaces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,39 +392,136 @@ pub enum Effect {
     Confirmed(Button),
     /// A on an achievement (reveal a hidden one).
     Reveal(usize),
+    /// LT / RT (-1 / +1): the section's tabs (Mods' and Tweaks' pages); a section without
+    /// tabs switches sections.
+    Tab(i32),
+    /// X on the focused row (`None`: nothing focused): Mods and Tweaks reset it to default.
+    X(Option<Row>),
+    /// Y tapped on the focused row: pin it to the quick menu (held, on a live option, Y
+    /// compares instead: the view times it).
+    Pin(Option<Row>),
+    /// A on one of the Mods / Tweaks buttons.
+    Act(Act),
+    /// Another surface in Mods' list.
+    Surface,
+}
+
+/// Which sections are docked (design/SIGHT.md §9, the docked proposal): Mods and Tweaks open
+/// docked as a column on the left with the game in full view, the others centred over the
+/// blurred game; R3 (or Tab) swaps, and each section remembers (`sight.toml`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DockPrefs {
+    set: BTreeMap<usize, bool>,
+}
+
+impl DockPrefs {
+    /// Until toggled: the sections you tune the game with dock.
+    pub fn default_for(s: PanelSection) -> bool {
+        matches!(s, PanelSection::Mods | PanelSection::Tweaks)
+    }
+
+    pub fn docked(&self, s: PanelSection) -> bool {
+        self.set.get(&s.index()).copied().unwrap_or_else(|| Self::default_for(s))
+    }
+
+    /// Docks or centres `s`; returns whether it's docked now.
+    pub fn toggle(&mut self, s: PanelSection) -> bool {
+        let d = !self.docked(s);
+        self.set.insert(s.index(), d);
+        d
+    }
+
+    /// As `sight.toml` keeps it: section (lowercase) → docked.
+    pub fn to_map(&self) -> BTreeMap<String, bool> {
+        self.set.iter().filter_map(|(i, d)| PanelSection::ALL.get(*i).map(|s| (s.label().to_lowercase(), *d))).collect()
+    }
+
+    pub fn from_map(m: &BTreeMap<String, bool>) -> DockPrefs {
+        DockPrefs { set: m.iter().filter_map(|(k, d)| PanelSection::parse(k).map(|s| (s.index(), *d))).collect() }
+    }
+}
+
+/// Where Mods and Tweaks are: the surface picked in Mods' list, and the page per surface.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pages {
+    /// Mods' surface (an index into its list).
+    pub surface: usize,
+    /// How many surfaces Mods lists now (the view sets it before applying input).
+    pub surfaces: usize,
+    /// Surface key → page index.
+    page: BTreeMap<String, usize>,
+}
+
+impl Pages {
+    pub fn page(&self, key: &str, n: usize) -> usize {
+        self.page.get(key).copied().unwrap_or(0).min(n.saturating_sub(1))
+    }
+
+    /// Steps the page of `key` (of `n`), wrapping; false if there's one page or none.
+    pub fn step(&mut self, key: &str, n: usize, d: i32) -> bool {
+        if n < 2 {
+            return false;
+        }
+        let i = (self.page(key, n) as i32 + d).rem_euclid(n as i32) as usize;
+        self.page.insert(key.to_owned(), i);
+        true
+    }
+
+    pub fn set_page(&mut self, key: &str, i: usize) {
+        self.page.insert(key.to_owned(), i);
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Nav {
     pub section: PanelSection,
     pub zone: Zone,
-    /// The focused row (an index into the section's focusable rows), per section.
-    body: BTreeMap<usize, usize>,
+    /// The focused row (an index into the section's focusable rows), per section (Mods: per
+    /// surface, [`Nav::body_key`]).
+    body: BTreeMap<(usize, usize), usize>,
     pub confirm: Option<Confirm>,
     /// Hidden achievements revealed with A.
     pub revealed: BTreeSet<usize>,
+    pub dock: DockPrefs,
+    pub pages: Pages,
 }
 
 impl Nav {
     pub fn open(&mut self, section: Option<PanelSection>) {
         if let Some(s) = section {
             self.section = s;
-            self.zone = Zone::Body;
         }
+        self.zone = Zone::Body;
         self.confirm = None;
+    }
+
+    /// The section's panel is docked.
+    pub fn docked(&self) -> bool {
+        self.dock.docked(self.section)
+    }
+
+    /// R3 / Tab: docks or centres the section; returns whether it's docked now.
+    pub fn toggle_dock(&mut self) -> bool {
+        self.dock.toggle(self.section)
+    }
+
+    /// Where the focused row is remembered: the section, and Mods' surface (a new page
+    /// starts at its top: [`Nav::set_focus_index`]).
+    fn body_key(&self) -> (usize, usize) {
+        (self.section.index(), if self.section == PanelSection::Mods { self.pages.surface } else { 0 })
     }
 
     fn focus_list(rows: &[Row]) -> Vec<usize> {
         rows.iter().enumerate().filter(|(_, r)| r.focusable()).map(|(i, _)| i).collect()
     }
 
-    /// The focused row's index in `rows`, when the body has focus.
+    /// The focused row's index in `rows`, when the rows have focus.
     pub fn focused_row(&self, rows: &[Row]) -> Option<usize> {
         if self.zone != Zone::Body {
             return None;
         }
         let f = Self::focus_list(rows);
-        let i = self.body.get(&self.section.index()).copied().unwrap_or(0).min(f.len().checked_sub(1)?);
+        let i = self.body.get(&self.body_key()).copied().unwrap_or(0).min(f.len().checked_sub(1)?);
         f.get(i).copied()
     }
 
@@ -480,19 +529,33 @@ impl Nav {
     pub fn focus_row(&mut self, rows: &[Row], row: usize) {
         if let Some(i) = Self::focus_list(rows).iter().position(|r| *r == row) {
             self.zone = Zone::Body;
-            self.body.insert(self.section.index(), i);
+            let k = self.body_key();
+            self.body.insert(k, i);
         }
+    }
+
+    /// Focus the `i`th focusable row (a new page starts at its top).
+    pub fn set_focus_index(&mut self, i: usize) {
+        let k = self.body_key();
+        self.body.insert(k, i);
     }
 
     pub fn select_section(&mut self, s: PanelSection) {
         self.section = s;
+        self.zone = Zone::Body;
         self.confirm = None;
     }
 
-    fn step_section(&mut self, d: i32) {
+    pub fn step_section(&mut self, d: i32) {
         let all = PanelSection::ALL;
         let n = all.len() as i32;
         self.section = all[((self.section.index() as i32 + d).rem_euclid(n)) as usize];
+        self.zone = Zone::Body;
+    }
+
+    /// Mods lists surfaces to go back to.
+    fn has_surfaces(&self) -> bool {
+        self.section == PanelSection::Mods && self.pages.surfaces > 0
     }
 
     /// `rows`: the current section's; `adjustable`: whether a focused row takes Left / Right.
@@ -515,25 +578,25 @@ impl Nav {
             };
         }
         let f = Self::focus_list(rows);
-        let key = self.section.index();
+        let key = self.body_key();
         let cur = self.body.get(&key).copied().unwrap_or(0).min(f.len().saturating_sub(1));
         let focused = (self.zone == Zone::Body).then(|| f.get(cur).map(|&i| &rows[i])).flatten();
         match input {
-            Input::PrevSection | Input::PrevTab | Input::NextSection | Input::NextTab => {
-                self.step_section(if matches!(input, Input::NextSection | Input::NextTab) { 1 } else { -1 });
+            Input::PrevSection | Input::NextSection => {
+                self.step_section(if input == Input::NextSection { 1 } else { -1 });
                 Effect::Moved
             }
+            Input::PrevTab | Input::NextTab => Effect::Tab(if input == Input::NextTab { 1 } else { -1 }),
             Input::Up | Input::Down => {
                 let d = if input == Input::Down { 1 } else { -1 };
                 match self.zone {
-                    Zone::Side => {
-                        let n = PanelSection::ALL.len() as i32;
-                        let i = self.section.index() as i32 + d;
-                        if !(0..n).contains(&i) {
+                    Zone::Surfaces => {
+                        let i = self.pages.surface as i32 + d;
+                        if !(0..self.pages.surfaces as i32).contains(&i) {
                             return Effect::None;
                         }
-                        self.step_section(d);
-                        Effect::Moved
+                        self.pages.surface = i as usize;
+                        Effect::Surface
                     }
                     Zone::Body => {
                         let i = cur as i32 + d;
@@ -548,20 +611,20 @@ impl Nav {
             Input::Right | Input::Left => {
                 let d = if input == Input::Right { 1 } else { -1 };
                 match (self.zone, focused) {
-                    (Zone::Side, _) if d > 0 && !f.is_empty() => {
+                    (Zone::Surfaces, _) if d > 0 => {
                         self.zone = Zone::Body;
                         Effect::Moved
                     }
                     (Zone::Body, Some(r)) if adjustable(r) => Effect::Adjust(r.clone(), d),
-                    (Zone::Body, _) if d < 0 => {
-                        self.zone = Zone::Side;
+                    (Zone::Body, _) if d < 0 && self.has_surfaces() => {
+                        self.zone = Zone::Surfaces;
                         Effect::Moved
                     }
                     _ => Effect::None,
                 }
             }
             Input::Activate => match (self.zone, focused) {
-                (Zone::Side, _) if !f.is_empty() => {
+                (Zone::Surfaces, _) => {
                     self.zone = Zone::Body;
                     Effect::Moved
                 }
@@ -573,23 +636,46 @@ impl Nav {
                     self.revealed.insert(*i);
                     Effect::Reveal(*i)
                 }
+                (Zone::Body, Some(Row::Act(a))) => Effect::Act(*a),
                 (Zone::Body, Some(r)) if adjustable(r) => Effect::Adjust(r.clone(), 0),
                 _ => Effect::None,
             },
             Input::Back => match self.zone {
-                Zone::Body => {
-                    self.zone = Zone::Side;
+                Zone::Body if self.has_surfaces() => {
+                    self.zone = Zone::Surfaces;
                     Effect::Moved
                 }
-                Zone::Side => Effect::Close,
+                _ => Effect::Close,
             },
+            Input::PlayOptions => Effect::X(focused.cloned()),
+            Input::Menu => Effect::Pin(focused.cloned()),
             _ => Effect::None,
         }
     }
 }
 
-/// The keyboard's keys as [`Input`]s (hyprpad's controller mapping types these too; see
-/// `tools/hyprpad/quiver-sight.lua`). `None`: not the panel's.
+/// What a key does in the panel: one of the shared [`Input`]s, or the panel's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Input(Input),
+    /// R3 (hyprpad types Tab): dock or centre.
+    Dock,
+    /// Y: tapped, pin to the quick menu; held, compare (the view times it on its key-up).
+    Y,
+}
+
+/// The keyboard's keys ([`Key`]); hyprpad's controller mapping types these too
+/// (`tools/hyprpad/quiver-sight.lua`: D-pad arrows, A Enter, B Escape, X `x`, Y `y`, LB / RB
+/// Page Up / Down, LT / RT Home / End, R3 Tab). `None`: not the panel's.
+pub fn panel_key(key: &str, shift: bool, ctrl: bool) -> Option<Key> {
+    Some(match (key, shift, ctrl) {
+        ("tab", false, false) => Key::Dock,
+        ("y", false, false) => Key::Y,
+        _ => Key::Input(key_input(key, shift, ctrl)?),
+    })
+}
+
+/// The keyboard's keys as [`Input`]s. `None`: not one.
 pub fn key_input(key: &str, shift: bool, ctrl: bool) -> Option<Input> {
     Some(match (key, shift, ctrl) {
         ("up", _, _) | ("k", false, false) => Input::Up,
@@ -598,11 +684,11 @@ pub fn key_input(key: &str, shift: bool, ctrl: bool) -> Option<Input> {
         ("right", _, _) | ("l", false, false) => Input::Right,
         ("enter", _, _) | ("space", _, _) => Input::Activate,
         ("escape", _, _) | ("backspace", _, _) => Input::Back,
-        ("tab", true, _) | ("[", _, _) | ("pageup", _, _) | ("q", false, false) => Input::PrevSection,
-        ("tab", false, _) | ("]", _, _) | ("pagedown", _, _) | ("e", false, false) => Input::NextSection,
-        // The pad's X and Y (hyprpad types these; gilrs maps West / North the same).
-        ("x", false, false) => Input::PlayOptions,
-        ("y", false, false) => Input::Menu,
+        ("tab", true, _) | ("pageup", _, _) | ("q", false, false) => Input::PrevSection,
+        ("pagedown", _, _) | ("e", false, false) => Input::NextSection,
+        ("home", _, _) | ("[", _, _) => Input::PrevTab,
+        ("end", _, _) | ("]", _, _) => Input::NextTab,
+        ("x", false, false) | ("delete", _, _) => Input::PlayOptions,
         _ => return None,
     })
 }
@@ -642,7 +728,6 @@ mod tests {
         let r = rows(PanelSection::Mods, &d, Utc::now());
         let opts: Vec<&str> = r.iter().filter_map(|r| if let Row::Opt { id, .. } = r { Some(id.as_str()) } else { None }).collect();
         assert_eq!(opts, ["fg.enabled"], "no overlay=false option, no debug-level one");
-        assert!(matches!(&r[0], Row::Heading { title, .. } if title == "DLSS v3"));
         let empty = PanelData { options: Load::Ready(vec![]), ..Default::default() };
         assert!(matches!(&rows(PanelSection::Mods, &empty, Utc::now())[0], Row::Note(_)));
         // A profile without mods is a settings profile, not an error.
@@ -679,42 +764,68 @@ mod tests {
         let rows = vec![Row::Heading { title: "x".into(), detail: None }, Row::Hud(HudRow::Shown), Row::Note("n".into()), Row::Hud(HudRow::Preset), Row::Button(Button::Quit)];
         let adj = |r: &Row| matches!(r, Row::Hud(_));
         let mut n = Nav::default();
-        assert_eq!(n.focused_row(&rows), None, "the side list has focus first");
-        assert_eq!(n.apply(Input::Down, &rows, adj), Effect::Moved);
-        assert_eq!(n.section, PanelSection::Mods);
-        assert_eq!(n.apply(Input::Up, &rows, adj), Effect::Moved);
-        assert_eq!(n.apply(Input::Up, &rows, adj), Effect::None, "top of the list");
-        assert_eq!(n.apply(Input::Right, &rows, adj), Effect::Moved);
+        // No side list: the rows have focus from the start.
+        assert_eq!(n.zone, Zone::Body);
         assert_eq!(n.focused_row(&rows), Some(1), "the first focusable row");
+        assert_eq!(n.apply(Input::Up, &rows, adj), Effect::None, "top of the rows");
         assert_eq!(n.apply(Input::Right, &rows, adj), Effect::Adjust(Row::Hud(HudRow::Shown), 1));
         assert_eq!(n.apply(Input::Activate, &rows, adj), Effect::Adjust(Row::Hud(HudRow::Shown), 0));
         assert_eq!(n.apply(Input::Down, &rows, adj), Effect::Moved);
         assert_eq!(n.focused_row(&rows), Some(3), "skips the note");
         n.apply(Input::Down, &rows, adj);
-        assert_eq!(n.apply(Input::Down, &rows, adj), Effect::None, "end of the body");
-        // Left on a button: back to the side list; B there closes.
-        assert_eq!(n.apply(Input::Left, &rows, adj), Effect::Moved);
-        assert_eq!(n.zone, Zone::Side);
+        assert_eq!(n.apply(Input::Down, &rows, adj), Effect::None, "end of the rows");
+        // Left on a button: nothing (no list to go back to); B closes.
+        assert_eq!(n.apply(Input::Left, &rows, adj), Effect::None);
         assert_eq!(n.apply(Input::Back, &rows, adj), Effect::Close);
-        // The body remembers its row per section; LB/RB wrap.
-        n.apply(Input::Activate, &rows, adj);
+        // The tab row: LB / RB wrap, from anywhere; each section remembers its row.
         assert_eq!(n.focused_row(&rows), Some(4));
         assert_eq!(n.apply(Input::PrevSection, &rows, adj), Effect::Moved);
         assert_eq!(n.section, PanelSection::Achievements);
-        n.apply(Input::NextTab, &rows, adj);
+        assert_eq!(n.focused_row(&rows), Some(1), "Achievements starts at its top");
+        assert_eq!(n.apply(Input::NextSection, &rows, adj), Effect::Moved);
         assert_eq!((n.section, n.focused_row(&rows)), (PanelSection::Session, Some(4)));
-        // B in the body goes back to the side list.
-        assert_eq!(n.apply(Input::Back, &rows, adj), Effect::Moved);
-        assert_eq!(n.zone, Zone::Side);
+        // LT / RT are the section's tabs (a section without them steps sections: the view).
+        assert_eq!(n.apply(Input::NextTab, &rows, adj), Effect::Tab(1));
+        assert_eq!(n.apply(Input::PrevTab, &rows, adj), Effect::Tab(-1));
+        n.step_section(-1);
+        assert_eq!(n.section, PanelSection::Achievements);
+        n.step_section(1);
+        // X and Y name the focused row.
+        assert_eq!(n.apply(Input::PlayOptions, &rows, adj), Effect::X(Some(Row::Button(Button::Quit))));
+        assert_eq!(n.apply(Input::Menu, &rows, adj), Effect::Pin(Some(Row::Button(Button::Quit))));
         // A click focuses a row directly.
         n.focus_row(&rows, 3);
         assert_eq!(n.focused_row(&rows), Some(3));
-        // Opening on a section focuses its body.
+        // Opening on a section focuses its rows.
         let mut n = Nav::default();
         n.open(Some(PanelSection::Performance));
         assert_eq!((n.section, n.zone), (PanelSection::Performance, Zone::Body));
     }
 
+    #[test]
+    fn docking_per_section() {
+        let mut d = DockPrefs::default();
+        // Mods and Tweaks dock until told otherwise; the rest centre.
+        assert!(d.docked(PanelSection::Mods) && d.docked(PanelSection::Tweaks));
+        assert!(!d.docked(PanelSection::Session) && !d.docked(PanelSection::Performance) && !d.docked(PanelSection::Achievements));
+        assert!(!d.toggle(PanelSection::Mods), "Mods centred");
+        assert!(d.toggle(PanelSection::Achievements), "Achievements docked");
+        assert!(!d.docked(PanelSection::Mods) && d.docked(PanelSection::Tweaks) && d.docked(PanelSection::Achievements));
+        // As sight.toml keeps it, and back.
+        let m = d.to_map();
+        assert_eq!(m, [("achievements".to_owned(), true), ("mods".to_owned(), false)].into());
+        assert_eq!(DockPrefs::from_map(&m), d);
+        assert_eq!(DockPrefs::from_map(&[("nonsense".to_owned(), true)].into()), DockPrefs::default());
+        // Through the navigation: the section switch carries the layout with it.
+        let mut n = Nav { dock: d, ..Default::default() };
+        n.open(Some(PanelSection::Tweaks));
+        assert!(n.docked());
+        n.step_section(-1);
+        assert_eq!(n.section, PanelSection::Mods);
+        assert!(!n.docked());
+        assert!(n.toggle_dock());
+        assert!(n.docked() && n.dock.docked(PanelSection::Mods));
+    }
     #[test]
     fn quitting_needs_a_confirmation() {
         let rows = vec![Row::Button(Button::Quit), Row::Button(Button::ForceQuit)];
@@ -776,10 +887,18 @@ mod tests {
     #[test]
     fn keys() {
         assert_eq!(key_input("tab", true, false), Some(Input::PrevSection));
-        assert_eq!(key_input("]", false, false), Some(Input::NextSection));
+        assert_eq!(key_input("pagedown", false, false), Some(Input::NextSection));
+        assert_eq!(key_input("]", false, false), Some(Input::NextTab), "[ ] are the section's tabs now");
+        assert_eq!(key_input("home", false, false), Some(Input::PrevTab), "hyprpad's LT");
         assert_eq!(key_input("escape", false, false), Some(Input::Back));
         assert_eq!(key_input("enter", false, false), Some(Input::Activate));
+        assert_eq!(key_input("x", false, false), Some(Input::PlayOptions), "X: reset");
         assert_eq!(key_input("f2", true, false), None, "Shift+F2 is the panel's own close, handled before");
+        // The panel's own: R3 (Tab) docks, Y is timed (tap pins, hold compares).
+        assert_eq!(panel_key("tab", false, false), Some(Key::Dock));
+        assert_eq!(panel_key("y", false, false), Some(Key::Y));
+        assert_eq!(panel_key("down", false, false), Some(Key::Input(Input::Down)));
+        assert_eq!(panel_key("y", false, true), None, "Ctrl+Y isn't the panel's");
     }
 
     #[test]
@@ -795,8 +914,8 @@ mod tests {
         assert_eq!(rows(PanelSection::Performance, &d, Utc::now()), [Row::Performance]);
         assert!(Row::Performance.focusable());
         assert!(matches!(&rows(PanelSection::Performance, &PanelData::default(), Utc::now())[..], [Row::Note(_), Row::Performance]));
-        assert_eq!(key_input("x", false, false), Some(Input::PlayOptions));
-        assert_eq!(key_input("y", false, false), Some(Input::Menu));
+        // Y reaches the section as Input::Menu (PanelView::key), X as PlayOptions.
+        assert_eq!(panel_key("y", false, false), Some(Key::Y));
     }
 
     #[test]

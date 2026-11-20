@@ -1962,18 +1962,8 @@ fn path_field(th: &Theme, path: &str) -> Div {
         .child(mono(12., th.tx1).flex_1().min_w_0().truncate().child(path.to_owned()))
 }
 
-/// The Quiver mark (three stacked squares), at `size`.
-pub fn brand_mark(th: &Theme, size: f32) -> Div {
-    let s = size / 24.;
-    div()
-        .relative()
-        .size(px(size))
-        .flex_none()
-        .child(div().absolute().left(px(0.)).top(px(8. * s)).size(px(16. * s)).rounded(px(5. * s)).bg(th.mark1))
-        .child(div().absolute().left(px(4. * s)).top(px(4. * s)).size(px(16. * s)).rounded(px(5. * s)).bg(th.mark2))
-        .child(div().absolute().left(px(8. * s)).top(px(0.)).size(px(16. * s)).rounded(px(5. * s)).bg(gpui::linear_gradient(
-            135.,
-            gpui::linear_color_stop(th.acc_hi, 0.),
-            gpui::linear_color_stop(th.acc, 1.),
-        )))
+/// The Quiver mark ("Parallax": a Q whose tail is an arrow, drawn as a left/right pair), at
+/// `size`: the dark-ground artwork on dark themes, the light one on light themes.
+pub fn brand_mark(th: &Theme, size: f32) -> gpui::Img {
+    gpui::img(if th.dark { "brand/mark-dark.svg" } else { "brand/mark-light.svg" }).size(px(size)).flex_none()
 }

@@ -28,6 +28,7 @@ use quiver_ui::input::Input;
 use quiver_ui::options::Tone;
 use serde_json::{Value, json};
 
+use super::super::hints::Glyph;
 use super::super::state::{ANCHORS, Load, PRESETS, PanelData, SessionView, cycle, step_scale};
 pub use link::{Reply, Req};
 
@@ -869,29 +870,29 @@ impl PerfSection {
     }
 
     /// The hint bar's entries: (glyphs, words).
-    pub fn hints(&self, d: &PanelData) -> Vec<(Vec<&'static str>, String)> {
-        let h = |g: &[&'static str], t: &str| (g.to_vec(), t.to_owned());
+    pub fn hints(&self, d: &PanelData) -> Vec<(Vec<Glyph>, String)> {
+        let h = |g: &[Glyph], t: &str| (g.to_vec(), t.to_owned());
         let Some(e) = &self.editor else {
             let mut v = match self.focused(d) {
-                Some(Ctl::Edit) => vec![h(&["A"], "Edit the HUD layout")],
-                Some(_) => vec![h(&["◀", "▶"], "Change"), h(&["A"], "Next value")],
+                Some(Ctl::Edit) => vec![h(&[Glyph::A], "Edit the HUD layout")],
+                Some(_) => vec![h(&[Glyph::LeftRight], "Change"), h(&[Glyph::A], "Next value")],
                 None => vec![],
             };
-            v.push(h(&["X"], &format!("Save a {} s performance log", SPAN_MS / 1000)));
-            v.push(h(&["B"], "Back"));
+            v.push(h(&[Glyph::X], &format!("Save a {} s performance log", SPAN_MS / 1000)));
+            v.push(h(&[Glyph::B], "Back"));
             return v;
         };
         let mut v = match (e.zone, e.moving.is_some()) {
-            (_, true) => vec![h(&["▲", "▼"], "Move the row"), h(&["A"], "Put it down"), h(&["B"], "Put it back")],
-            (Zone::Metrics, _) => vec![h(&["A"], "Add or remove"), h(&["▶"], "Rows")],
-            (Zone::Preview, _) => vec![h(&["A"], "Pick up the row"), h(&["◀", "▶"], "Metrics · Layout")],
-            (Zone::Settings, _) => vec![h(&["◀", "▶"], "Change"), h(&["A"], "Next value")],
+            (_, true) => vec![h(&[Glyph::UpDown], "Move the row"), h(&[Glyph::A], "Put it down"), h(&[Glyph::B], "Put it back")],
+            (Zone::Metrics, _) => vec![h(&[Glyph::A], "Add or remove"), h(&[Glyph::LeftRight], "Rows")],
+            (Zone::Preview, _) => vec![h(&[Glyph::A], "Pick up the row"), h(&[Glyph::LeftRight], "Metrics · Layout")],
+            (Zone::Settings, _) => vec![h(&[Glyph::LeftRight], "Change"), h(&[Glyph::A], "Next value")],
         };
         if e.moving.is_none() {
             let shown = d.hud.ready().and_then(|h| h.status.as_ref()).is_some_and(|s| s.on);
-            v.push(h(&["X"], if shown { "Hide the HUD now" } else { "Pin the HUD now" }));
-            v.push(h(&["Y"], "Save as preset"));
-            v.push(h(&["B"], if e.zone == Zone::Settings { "Back to the rows" } else { "Back" }));
+            v.push(h(&[Glyph::X], if shown { "Hide the HUD now" } else { "Pin the HUD now" }));
+            v.push(h(&[Glyph::Y], "Save as preset"));
+            v.push(h(&[Glyph::B], if e.zone == Zone::Settings { "Back to the rows" } else { "Back" }));
         }
         v
     }

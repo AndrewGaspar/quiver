@@ -437,7 +437,7 @@ pub fn feed(demo: &str, a: &Args, tx: UnboundedSender<Msg>) -> Result<()> {
 /// panel's fixture.
 pub fn sample_panel() -> crate::panel::state::PanelData {
     use crate::panel::state::{Ach, Achs, HudState, Load, PanelData, SessionView};
-    use quiver_api::options::{Apply, EnumValue, GroupState, LiveChannel, LiveInfo, Mark, OptionDef, OptionState, OptionType, PageState, Pending, SurfaceState};
+    use quiver_api::options::{Apply, EnumValue, GroupState, LiveChannel, LiveInfo, Mark, OptionDef, OptionState, OptionType, PageState, Pending, PresetInfo, SurfaceFile, SurfaceKind, SurfaceState};
     use quiver_api::perf::{HudConfig, HudSettingsView, HudStatus, PerfValue, Stat};
     use serde_json::json;
     let now = chrono::Utc::now();
@@ -451,6 +451,7 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     let choices = |vals: &[(&str, &str)]| vals.iter().map(|(v, l)| EnumValue { value: json!(v), label: Some((*l).into()), ..Default::default() }).collect::<Vec<_>>();
     let mut dlss = SurfaceState {
         key: "m1/aco-dlss".into(),
+        kind: SurfaceKind::Mod,
         surface: "aco-dlss".into(),
         title: "DLSS".into(),
         version_label: Some("v3".into()),
@@ -472,9 +473,25 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     fgmode.def.at = Some("swapchain creation (the game makes its swapchain at startup and on mode changes)".into());
     fgmode.def.values = choices(&[("d3d11", "D3D11"), ("d3d12", "D3D12 (vkd3d)")]);
     dlss.options.insert("fg.mode".into(), fgmode);
-    let mut npc = opt(OptionType::Float, "Crowd density", Some("Multiplies the game's NPC cap"), Apply::Live, json!(1.6));
-    (npc.def.min, npc.def.max, npc.def.step, npc.def.precision, npc.def.latency) = (Some(1.0), Some(3.0), Some(0.1), Some(1), Some("about 10 seconds".into()));
+    let mut npc = opt(OptionType::Float, "Crowd density", Some("Raises the engine's cap on people near you. Costs CPU in cities."), Apply::Live, json!(2.0));
+    (npc.def.min, npc.def.max, npc.def.step, npc.def.precision, npc.def.unit) = (Some(1.0), Some(5.0), Some(0.1), Some(1), Some("×".into()));
+    npc.default = json!(1.0);
+    npc.def.default = Some(json!(1.0));
     dlss.options.insert("world.npc_density".into(), npc);
+    let mut spawn = opt(OptionType::Float, "Crowd spawn distance", Some("How far away people appear. Experimental."), Apply::Live, json!(1.0));
+    (spawn.def.min, spawn.def.max, spawn.def.step, spawn.def.precision, spawn.def.unit) = (Some(1.0), Some(3.0), Some(0.1), Some(1), Some("×".into()));
+    dlss.options.insert("world.spawn".into(), spawn);
+    let mut lod = opt(OptionType::Float, "Draw distance", Some("Multiplies the level-of-detail distance."), Apply::At, json!(1.5));
+    (lod.def.min, lod.def.max, lod.def.step, lod.def.precision, lod.def.unit) = (Some(1.0), Some(2.75), Some(0.25), Some(1), Some("×".into()));
+    lod.def.at = Some("next area load (the game streams areas in as you travel)".into());
+    lod.default = json!(1.0);
+    dlss.options.insert("world.lod".into(), lod);
+    let mut cloth = opt(OptionType::Enum, "Cloth simulation", Some("Every frame: never slower than the game; costs CPU in crowds."), Apply::Live, json!("every"));
+    cloth.def.values = choices(&[("every", "Every frame"), ("half", "Every other frame"), ("off", "Off")]);
+    dlss.options.insert("world.cloth".into(), cloth);
+    let mut handles = opt(OptionType::Bool, "Hide 64-bit image view handles", None, Apply::Restart, json!(false));
+    handles.def.danger = Some("some drivers crash with it".into());
+    dlss.options.insert("compat.handles".into(), handles);
     let mut cap = opt(OptionType::Int, "Frame cap", None, Apply::Live, json!(0));
     (cap.def.min, cap.def.max, cap.def.step) = (Some(30.0), Some(240.0), Some(1.0));
     cap.def.special = vec![Mark { value: json!(0), label: "No cap".into() }];
@@ -483,16 +500,49 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     reset.def.danger = Some("the next start takes several minutes".into());
     dlss.options.insert("debug.rebuild".into(), reset);
     let group = |title: &str, ids: &[&str]| GroupState { title: title.into(), options: ids.iter().map(|s| s.to_string()).collect() };
-    dlss.pages = vec![PageState {
-        id: "main".into(),
-        title: "DLSS".into(),
-        groups: vec![
-            group("Upscaling", &["upscale.mode", "upscale.preset", "upscale.scale"]),
-            group("Frame generation", &["fg.enabled", "fg.mode", "pace.cap"]),
-            group("World", &["world.npc_density", "debug.rebuild"]),
-        ],
-    }];
-    let mut tweaks = SurfaceState { key: "quiver/tweaks".into(), surface: "tweaks".into(), title: "Quiver Tweaks".into(), ..Default::default() };
+    let page = |id: &str, title: &str, groups: Vec<GroupState>| PageState { id: id.into(), title: title.into(), groups };
+    dlss.pages = vec![
+        page("upscaling", "Upscaling", vec![group("", &["upscale.mode", "upscale.preset", "upscale.scale"])]),
+        page("latency", "Latency", vec![group("", &["pace.cap"])]),
+        page("fg", "Frame Generation", vec![group("", &["fg.enabled", "fg.mode"])]),
+        page("world", "World", vec![group("", &["world.npc_density", "world.spawn", "world.lod", "world.cloth", "debug.rebuild", "compat.handles"])]),
+    ];
+    dlss.presets = vec![
+        PresetInfo { id: "busy".into(), label: "Busy cities".into(), help: None, set: [("world.npc_density".to_owned(), json!(2.0)), ("world.spawn".to_owned(), json!(1.0))].into() },
+        PresetInfo { id: "default".into(), label: "The game's".into(), help: None, set: [("world.npc_density".to_owned(), json!(1.0)), ("world.spawn".to_owned(), json!(1.0))].into() },
+    ];
+    dlss.metrics = ["aco-dlss.fg", "aco-dlss.res", "aco-dlss.fps", "aco-dlss.reflex"].map(String::from).to_vec();
+    // The game's own settings and DXVK: next-launch surfaces.
+    let mut game = SurfaceState { key: "game/aco-ini".into(), surface: "aco-ini".into(), title: "Game settings".into(), kind: SurfaceKind::Game, ..Default::default() };
+    game.files = vec![SurfaceFile { rel: "Documents/ACO.ini".into(), ..Default::default() }];
+    let mut res = opt(OptionType::Enum, "Resolution", None, Apply::Launch, json!("2560x1600"));
+    res.def.values = choices(&[("1920x1200", "1920 × 1200"), ("2560x1600", "2560 × 1600")]);
+    game.options.insert("display.res".into(), res);
+    game.options.insert("display.vsync".into(), opt(OptionType::Bool, "V-sync", Some("The game's own; Quiver's frame cap is in Tweaks"), Apply::Launch, json!(false)));
+    game.pages = vec![page("display", "Display", vec![group("", &["display.res", "display.vsync"])])];
+    let mut dxvk = SurfaceState { key: "runtime/dxvk".into(), surface: "dxvk".into(), title: "DXVK".into(), kind: SurfaceKind::Runtime, ..Default::default() };
+    dxvk.files = vec![SurfaceFile { rel: "dxvk.conf".into(), ..Default::default() }];
+    let mut lat = opt(OptionType::Int, "Maximum frame latency", Some("Frames the CPU may queue ahead of the GPU"), Apply::Launch, json!(0));
+    (lat.def.min, lat.def.max, lat.def.step) = (Some(1.0), Some(16.0), Some(1.0));
+    lat.def.special = vec![Mark { value: json!(0), label: "The game's".into() }];
+    dxvk.options.insert("dxgi.maxFrameLatency".into(), lat);
+    dxvk.pages = vec![page("dxvk", "DXVK", vec![group("", &["dxgi.maxFrameLatency"])])];
+    let mut tweaks = SurfaceState { key: "quiver/tweaks".into(), surface: "tweaks".into(), title: "Quiver Tweaks".into(), kind: SurfaceKind::Platform, ..Default::default() };
+    let mut lsfg = opt(OptionType::Enum, "Lossless Scaling FG", Some("Generated frames between the game's own (lsfg-vk). Adds latency."), Apply::Live, json!("2"));
+    lsfg.def.values = choices(&[("off", "Off"), ("2", "2×"), ("3", "3×"), ("4", "4×")]);
+    lsfg.default = json!("off");
+    tweaks.options.insert("lsfg.multiplier".into(), lsfg);
+    let mut flow = opt(OptionType::Float, "Flow scale", Some("Lower is faster; higher keeps fine motion cleaner."), Apply::Live, json!(0.8));
+    (flow.def.min, flow.def.max, flow.def.step, flow.def.precision) = (Some(0.25), Some(1.0), Some(0.05), Some(2));
+    tweaks.options.insert("lsfg.flow".into(), flow);
+    tweaks.options.insert("lsfg.performance".into(), opt(OptionType::Bool, "Performance mode", None, Apply::Live, json!(false)));
+    let mut dfg = opt(OptionType::Enum, "DLSS Frame Generation", Some("Can't run with Lossless Scaling FG; turning it on turns that off."), Apply::Launch, json!("off"));
+    dfg.def.values = choices(&[("off", "Off"), ("on", "On")]);
+    tweaks.options.insert("dlss.fg".into(), dfg);
+    let mut tcap = opt(OptionType::Int, "Frame-rate cap", None, Apply::Launch, json!(120));
+    (tcap.def.min, tcap.def.max, tcap.def.step) = (Some(30.0), Some(240.0), Some(1.0));
+    tcap.pending = Pending::Restart;
+    tweaks.options.insert("fps.cap".into(), tcap);
     tweaks.options.insert("dxvk.async".into(), opt(OptionType::Bool, "Asynchronous shader compiles", Some("Fewer stutters the first time effects show up"), Apply::Launch, json!(true)));
     tweaks.options.insert("nvidia.reflex".into(), opt(OptionType::Bool, "NVIDIA Reflex", Some("Lower latency on RTX cards"), Apply::Launch, json!(true)));
     let mut hdr = opt(OptionType::Enum, "HDR", None, Apply::Launch, json!("off"));
@@ -501,29 +551,32 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     let mut fsync = opt(OptionType::Bool, "Fsync", None, Apply::Launch, json!(true));
     fsync.def.help = Some("Faster Wine synchronisation on this kernel".into());
     tweaks.options.insert("wine.fsync".into(), fsync);
-    // The frame-rate cap, which the DLSS mod implements (its Reflex limiter).
-    let mut cap = opt(OptionType::Float, "Max frame rate", Some("Caps the frame rate"), Apply::Launch, json!(120));
-    (cap.def.min, cap.def.max, cap.def.step) = (Some(20.0), Some(500.0), Some(1.0));
-    cap.def.special = vec![Mark { value: json!(0), label: "No cap".into() }, Mark { value: json!("vrr"), label: "Refresh rate − 3".into() }];
-    cap.tweak = Some(Box::new(quiver_api::tweaks::TweakRow {
-        profile: Some(json!(120)),
-        at: quiver_api::tweaks::ScopeKind::Profile,
-        planned: Some(quiver_api::tweaks::Planned::Provided {
-            by: "DLSS".into(),
-            surface: "m1/aco-dlss".into(),
-            option: "reflex.fps_limit".into(),
-            value: Some(json!(120)),
-            mode: "bind".into(),
-            can_prefer_quiver: true,
-        }),
-        ..Default::default()
-    }));
-    tweaks.options.insert("fps.cap".into(), cap);
-    tweaks.pages = vec![PageState {
-        id: "main".into(),
-        title: "Tweaks".into(),
-        groups: vec![group("Frame rate", &["fps.cap"]), group("Graphics", &["dxvk.async", "nvidia.reflex", "display.hdr"]), group("Wine", &["wine.fsync"])],
-    }];
+    // The frame-rate cap, which the DLSS mod implements (its Reflex limiter): the
+    // Performance section says who enforces it.
+    if let Some(cap) = tweaks.options.get_mut("fps.cap") {
+        cap.def.special = vec![Mark { value: json!(0), label: "No cap".into() }, Mark { value: json!("vrr"), label: "Refresh rate − 3".into() }];
+        cap.tweak = Some(Box::new(quiver_api::tweaks::TweakRow {
+            profile: Some(json!(120)),
+            at: quiver_api::tweaks::ScopeKind::Profile,
+            planned: Some(quiver_api::tweaks::Planned::Provided {
+                by: "DLSS".into(),
+                surface: "m1/aco-dlss".into(),
+                option: "reflex.fps_limit".into(),
+                value: Some(json!(120)),
+                mode: "bind".into(),
+                can_prefer_quiver: true,
+            }),
+            ..Default::default()
+        }));
+    }
+    tweaks.pages = vec![
+        page("fg", "Frame generation", vec![group("", &["lsfg.multiplier", "lsfg.flow", "lsfg.performance", "dlss.fg"])]),
+        page("rate", "Frame rate", vec![group("", &["fps.cap"])]),
+        page("gfx", "Graphics", vec![group("", &["dxvk.async", "nvidia.reflex", "display.hdr"])]),
+        page("wine", "Wine", vec![group("", &["wine.fsync"])]),
+    ];
+    let readouts: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        [("m1/aco-dlss".to_owned(), [("aco-dlss.fg", "Frame Generation"), ("aco-dlss.res", "Rendered → shown"), ("aco-dlss.fps", "Rendered / presented"), ("aco-dlss.reflex", "Reflex")].map(|(a, b)| (a.to_owned(), b.to_owned())).to_vec())].into();
     let effective = HudConfig { enabled: true, on: true, layout: "standard".into(), scale: 1.0, ..HudConfig::default() };
     let status: HudStatus = serde_json::from_value(json!({
         "session": "s-demo", "product_id": 3539, "enabled": true, "on": true, "layout": "standard",
@@ -556,6 +609,10 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     put("latency.render", Stat::Mean, pv("21", "ms", Level::Normal));
     put("nv.reflex.mode", Stat::Last, PerfValue { text: "boost".into(), ..Default::default() });
     put("nv.reflex.cap", Stat::Last, pv("120", "fps", Level::Normal));
+    put("aco-dlss.fg", Stat::Last, pv("On · F9", "", Level::Normal));
+    put("aco-dlss.res", Stat::Last, pv("1280×800 → 2560×1600", "", Level::Normal));
+    put("aco-dlss.fps", Stat::Last, pv("59 / 118", "fps", Level::Normal));
+    put("aco-dlss.reflex", Stat::Last, pv("On + Boost", "", Level::Normal));
     let ach = |id: &str, name: &str, desc: &str, hidden: bool, at: Option<i64>| Ach {
         id: id.into(),
         name: name.into(),
@@ -579,7 +636,7 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
             reported: Some(true),
             pids: vec![],
         }),
-        options: Load::Ready(vec![dlss]),
+        options: Load::Ready(vec![dlss, game, dxvk]),
         tweaks: Load::Ready(tweaks),
         tweak_scope_name: "the DLSS profile".into(),
         hud: Load::Ready(HudState { status: Some(status), settings: HudSettingsView { scope: Default::default(), set: Default::default(), effective, revision: 4, anti_cheat: None } }),
@@ -591,6 +648,7 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
             ach("44", "Photo Finish", "Win a chariot race in the Hippodrome.", false, None),
         ])),
         metrics,
+        readouts,
     }
 }
 
