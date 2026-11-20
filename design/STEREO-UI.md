@@ -460,7 +460,7 @@ gets a horizontal shift per eye from its rung.
   image at their own depth, back to front. The panel sends its card, then the focused row or
   section, or a dialog and its focused button. quiver-perf validates them (inside the image,
   ≤ 1000).
-- `qv_layer_status.depth_setting` / `depth_drawn` (appended; the struct is 416 bytes): the
+- `qv_layer_status.depth_setting` / `depth_drawn` (appended; the struct was 416 bytes, 472 since the latency split's fields): the
   strength and the largest total disparity the layer last drew. `quiver hud status`,
   `quiver sight status` and `quiver lab sight N status` print `depth 100% (…; last drawn 5 px)`.
 

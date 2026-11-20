@@ -288,6 +288,10 @@ impl LayerStatus {
         stereo_drawn: 0,
         depth_setting: 0,
         depth_drawn: 0,
+        split_frames: 0,
+        split_sum_us: [0; 4],
+        report_pc_frames: 0,
+        report_pc_sum_us: 0,
     };
 
     /// The X11 keymap polling's state (`KEYS_*`).
@@ -301,7 +305,7 @@ impl LayerStatus {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 416).
+        // SAFETY: repr(C), integers and byte arrays only, no padding (size asserted 472).
         unsafe { core::slice::from_raw_parts((self as *const LayerStatus).cast::<u8>(), core::mem::size_of::<LayerStatus>()) }
     }
 
@@ -404,7 +408,13 @@ mod tests {
         s.extent_w = 2560;
         LayerStatus::set_str(&mut s.engine_name, "DXVK");
         let b = s.as_bytes();
-        assert_eq!(b.len(), 416);
+        assert_eq!(b.len(), 472);
+        // A layer from before the latency split wrote 416 bytes: its fields read as zero.
+        let mut sp = s;
+        (sp.split_frames, sp.split_sum_us, sp.report_pc_frames) = (3, [1, 2, 3, 4], 5);
+        let old = LayerStatus::from_bytes(&sp.as_bytes()[..416]);
+        assert_eq!((old.split_frames, old.split_sum_us, old.report_pc_frames, old.extent_w), (0, [0; 4], 0, 2560));
+        assert_eq!(LayerStatus::from_bytes(sp.as_bytes()).split_sum_us, [1, 2, 3, 4]);
         // A layer from before depth wrote 408 bytes: the depth fields read as zero.
         let mut dp = s;
         (dp.depth_setting, dp.depth_drawn) = (0x1_0096, 0x1_0005);

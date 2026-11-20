@@ -157,11 +157,18 @@ Diagnostics, Clock.
   quiverd sends `base_points` from the same flag in the layer's present records.
   `frametime.base` is a canonical metric (1000 ÷ `fps.base`).
 - **The latency split** is a layout cell, `{ split = "latency", parts = [...] }`, drawn while
-  at least two parts have values: a thin stacked bar (sim, render, queue, present + scan-out),
-  or with `numbers = true` its numbers in a line ("■ SIM 6 · ■ RENDER 9 · …"). The parts are
-  canonical metrics `latency.split.{sim,render,queue,out}` over roles of the same names. They
-  aren't generic roles, so a mod with its own Reflex markers can fill them; nothing built in
-  does yet (the layer's opt-in `vkGetLatencyTimingsNV` reports are the obvious source).
+  at least two parts have values: a thin stacked bar (sim, render submit, queue, GPU), or with
+  `numbers = true` its numbers in a line ("■ SIM 6 · ■ RENDER 9 · …"). The parts are
+  canonical metrics `latency.split.{sim,render,queue,gpu}` over roles of the same names. They
+  aren't generic roles, so a mod with its own Reflex markers can fill them. Built in (as built
+  later on 2026-11-19, §3.17): the layer's opt-in `vkGetLatencyTimingsNV` reports. The fourth
+  stage was `out` ("present and scan-out") while nothing filled it; no report has scan-out,
+  so it is the GPU's.
+- **Sides** (as built later on 2026-11-19). A card anchored on the right mirrors each row's
+  groups (the cells between spacers): the hero FPS stays the big headline at the card's outer
+  edge, base FPS opposite it, and the numbers line up on the anchor's side. Rows flush right
+  through a filler that gives way first, so a row too long is cut at its far end, not its
+  start.
 - **Per-mod strips.** A `[[row]] mods = true` (with `divider`, `max`) becomes one row per
   connected mod under a rule: its name as a teal tag, then up to six gauges, states and texts
   it declares (basic visibility), each with its `short` label, "·" between them.
@@ -399,21 +406,26 @@ cells = [
 ]
 ```
 
-**Fixed size.** A layout's card has one size, whatever it holds; values changing length,
-`when` cells flipping, or rows appearing and disappearing never resize it (a HUD that jumps
-around is harder to read than one with a gap). The size is in logical px at `scale` 1, so it
-follows the swapchain height and `scale` like the text does:
+**Size** (changed later on 2026-11-19: the card fits its rows). A Full card that kept every
+row's room was half empty in a game without frame generation or a mod (Alan Wake
+Remastered). Now quiverd sizes the card to the rows the layout shows in this session
+(`hud::fit_size`): the layout's width, and its height when it sets one, else the height of
+the shown rows' slots. A session's card never shrinks (`hud::CardHold`, per layout): it grows
+when a row first shows up (frame generation, a mod, the latency reports) and keeps that
+height while the game runs, so a row that comes and goes never makes it jump, and values
+changing never resize it (stale values keep their rows). The size is in logical px at `scale`
+1, so it follows the swapchain height and `scale` like the text does:
 
 - `width`: default 260 (block) or 640 (one line); 40–1200. Presets: FPS only 150, Compact
   720, Standard 284, Full 320, Diagnostics 340, Clock 220 (before 2026-11-19: FPS only 100, Compact 780, Standard 260).
 - `height`: default from the layout's rows: a 20 px slot per text row, `rows` × 15 px per
   graph row (30 for the default 2), 4 px between rows, plus padding (6 + a 1 px border top
   and bottom with a panel, none without); 16–1000. A row with a `hero` cell is 30, a row of
-  split bars 8, a `divider` adds 5, a `mods` row keeps a line per strip. Standard: 162, Full:
-  335, Compact: 34.
+  split bars 8, a `divider` adds 5. With every row shown: Standard 162, Full 335, Compact 34;
+  Full in a vanilla game about 190.
 - Rows the model leaves out (nobody provides them, or everything in them is gated off) don't
-  keep their place: the shown rows pack from the top and the space is left empty at the
-  bottom.
+  keep their place: the shown rows pack from the top; space left at the bottom is only what
+  the card's held height keeps for a row that went away.
 - Within a row, cells go left to right. Numbers never shrink and keep a reserved width
   (Geist Mono's tabular digits, right aligned: at least the unit's usual digit count, e.g. 3
   for fps and %, 4 for ms and GB, and the widest the value has been for this layout), so a
@@ -1969,6 +1981,20 @@ preset doesn't show them (a person's layout can).
   8333 µs, 237 frames / 473 presents (2.0×), PC latency 16.8 ms against the driver's
   game-to-render 17.5 ms; 4.0× with out-of-band markers and no sleeps; nothing counted with
   the extension enabled but unused; the app's two timing reads identical.
+
+#### Latency split and PC latency from the reports (as built later on 2026-11-19)
+
+The opt-in timing reads now also split each report into stages that add up to its
+game-to-render latency (`latency::split`): simulation (start → end), render submit
+(simulation end → submit end), queue (submit end → GPU start, 0 when the GPU starts first)
+and GPU (→ GPU end). `qv_layer_status` grows to 472 bytes: `split_frames`, `split_sum_us[4]`,
+and `report_pc_frames` / `report_pc_sum_us` (input sample, else simulation start → present
+end). The `nvidia` producer declares `nv.latency.sim`, `.submit`, `.queue`, `.gpu` (roles
+`latency.split.*`) with the first split report, not before, so until then a mod's markers can
+fill those roles; and fills `latency.pc` from the reports when the layer's own marker timing
+has no frames (a translation layer that remaps present ids). Unverified on hardware: which
+stamps the driver fills for DXVK's and vkd3d-proton's frames (`tests/vulkan_reflex.rs` reads
+the reports but doesn't print the split yet).
 
 #### Follow-ups
 

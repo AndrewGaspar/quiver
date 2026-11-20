@@ -479,6 +479,15 @@ impl Store {
         Some(format::format(&desc, self.value(id, stat, window_ns, now).as_ref()))
     }
 
+    /// A numeric metric's (time, value) samples since `since`, oldest first (the last
+    /// [`super::stats::KEEP_NS`]).
+    pub fn samples_since(&self, id: &str, since: i64) -> Vec<(i64, f64)> {
+        match self.metrics.get(id).map(|m| &m.values) {
+            Some(Values::Num(s)) => s.since(since),
+            _ => Vec::new(),
+        }
+    }
+
     /// Recent values of a numeric metric (sparklines), oldest first.
     pub fn tail(&self, id: &str, n: usize) -> Vec<f64> {
         match self.metrics.get(id).map(|m| &m.values) {
@@ -540,6 +549,7 @@ impl Store {
                 _ => None,
             };
             let stat = format::default_stat(&c.desc);
+            let live = self.producer_of(&c.desc.id, now).map(str::to_owned);
             out.push(MetricInfo {
                 descriptor: c.desc.clone(),
                 producer: catalog::PRODUCER_QUIVERD.into(),
@@ -550,6 +560,8 @@ impl Store {
                 conflicts: Vec::new(),
                 state: self.state(&c.desc.id, now),
                 last: self.formatted(&c.desc.id, stat, WINDOW_1S, now),
+                live_producer_label: live.as_deref().map(|p| self.producer_label(p)),
+                live_producer: live,
             });
         }
         for (id, m) in &self.metrics {
@@ -564,9 +576,20 @@ impl Store {
                 conflicts: m.conflicts.clone(),
                 state: self.state(id, now),
                 last: self.formatted(id, stat, WINDOW_1S, now),
+                live_producer: Some(m.producer.clone()),
+                live_producer_label: Some(self.producer_label(&m.producer)),
             });
         }
         out
+    }
+
+    /// A producer's label ("Sight layer", "aco-dlss"; "Quiver" for quiverd's own).
+    pub fn producer_label(&self, producer: &str) -> String {
+        match self.producers.get(producer) {
+            Some(p) => p.info.label.clone(),
+            None if producer == catalog::PRODUCER_QUIVERD => "Quiver".into(),
+            None => producer.to_owned(),
+        }
     }
 
     pub fn producer_infos(&self) -> Vec<ProducerInfo> {

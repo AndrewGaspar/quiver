@@ -229,6 +229,7 @@ impl SystemProducer {
         if let Some(n) = s.name {
             g_r.texts.push(("gpu.name", n));
         }
+        g_r.texts.push(("gpu.source", "nvml".into()));
         r.nums.extend(g_r.nums.iter().cloned());
         r.texts.extend(g_r.texts.iter().cloned());
         self.last_nvidia = Some(g_r);
@@ -263,6 +264,7 @@ impl SystemProducer {
             _ => "GPU",
         };
         r.texts.push(("gpu.name", format!("{vendor} ({})", g.slot)));
+        r.texts.push(("gpu.source", "sysfs".into()));
     }
 
     fn cpu(&mut self, r: &mut Reading) {

@@ -1,7 +1,8 @@
-//! The HUD card keeps its layout's size whatever it holds: every preset's demo model in each
-//! content variant (long values, cells and rows gone) goes through the game presenter's real
-//! path (`GameHud`: off-screen GPUI render → `hud.image`), and the published images and graph
-//! rectangles must not move. GPUI runs on the main thread, hence `harness = false`. Without a
+//! The HUD card follows the model's size and values never move it: every preset's demo model
+//! in each content variant (long values; cells and rows gone, in a card quiverd fitted to
+//! them) goes through the game presenter's real path (`GameHud`: off-screen GPUI render →
+//! `hud.image`); the published images match the model's card, and base and long values give
+//! the same image and graph rectangles (the vanilla variant the same graph). GPUI runs on the main thread, hence `harness = false`. Without a
 //! GPU adapter the test says so and passes.
 
 use std::path::PathBuf;
@@ -72,9 +73,12 @@ fn check(image: &std::path::Path, extent: [u32; 2], cx: &mut App) -> Result<(), 
                 return Err(format!("{layout}/{variant}: image {}x{}, the model's card is {want:?}", desc.width, desc.height));
             }
             let got = (desc.width, desc.height, desc.graphs().iter().map(|g| (g.x, g.y, g.w, g.h)).collect::<Vec<_>>());
+            // `short` is the vanilla game's model, whose card quiverd fits to its fewer rows (a
+            // session of its own): only its graph must stay where it was.
             match &first {
                 None => first = Some(got),
-                Some(f) if *f != got => return Err(format!("{layout}/{variant}: {got:?}, first {f:?}")),
+                Some(f) if *variant == "short" && f.2 != got.2 => return Err(format!("{layout}/{variant}: graphs {:?}, first {:?}", got.2, f.2)),
+                Some(f) if *variant != "short" && *f != got => return Err(format!("{layout}/{variant}: {got:?}, first {f:?}")),
                 Some(_) => {}
             }
         }

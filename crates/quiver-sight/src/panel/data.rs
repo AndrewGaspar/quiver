@@ -259,8 +259,30 @@ pub async fn stop(client: &Client, game: GameRef) -> Result<()> {
     client.call::<serde_json::Value>(Request::Stop { game: game.into() }).await.map(|_| ())
 }
 
-/// The key metrics, twice a second while the panel shows them.
-pub const METRICS: [&str; 9] = ["fps", "fps.base", "frametime", "gpu.load", "gpu.temp", "gpu.power", "gpu.vram.used", "cpu.load", "mem.used"];
+/// The key metrics, twice a second while the panel shows them (the Performance section's
+/// tiles and latency card).
+pub const METRICS: [&str; 20] = [
+    "fps",
+    "fps.base",
+    "fps.generated",
+    "fps.p1low",
+    "frametime",
+    "gpu.load",
+    "gpu.temp",
+    "gpu.power",
+    "gpu.vram.used",
+    "gpu.vram.total",
+    "gpu.source",
+    "cpu.load",
+    "cpu.temp",
+    "proc.rss",
+    "mem.used",
+    "latency.pc",
+    "latency.render",
+    "nv.reflex.mode",
+    "nv.reflex.cap",
+    "fg.ratio",
+];
 
 pub async fn subscribe(client: &Client, session: &str, extra: &[String]) -> Result<u64> {
     use quiver_api::perf::Stat;

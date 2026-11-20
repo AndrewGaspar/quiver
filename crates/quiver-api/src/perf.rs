@@ -144,10 +144,89 @@ pub enum PerfRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         sight: bool,
     },
+    /// A running game's presented and rendered frame times over the last `span_ms` (≤ 30 s),
+    /// the worst of each of `buckets` slots, oldest first, with its hitches (`FrameTimes`):
+    /// the Sight panel's frame-time graph.
+    FrameTimes {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
+        #[serde(default = "default_span_ms")]
+        span_ms: u32,
+        #[serde(default = "default_buckets")]
+        buckets: u32,
+    },
+    /// Writes a running game's last `seconds` (≤ 30) of frames, with the sensors beside each,
+    /// to a CSV in MangoHud's log format in the game's data folder (`PerfLogSaved`).
+    SaveLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        #[serde(flatten, with = "crate::game::persisted::option")]
+        game: Option<GameRef>,
+        #[serde(default = "default_log_seconds")]
+        seconds: u32,
+    },
+    /// A layout's model with a running session's values (`HudPreview`), for the Sight panel's
+    /// layout editor: every row of the layout has a model row, a dim placeholder when nothing
+    /// in it has a value now.
+    HudPreview { session: String, layout: HudLayout },
+    /// Saves a user layout (`<data>/hud/layouts/<id>.toml`) from its rows, as `HudLayout`
+    /// returns them (`HudLayoutInfo`). The id can't be a preset's.
+    HudLayoutSave { layout: HudLayout },
 }
 
 fn default_limit() -> usize {
     20
+}
+
+fn default_span_ms() -> u32 {
+    30_000
+}
+
+fn default_buckets() -> u32 {
+    300
+}
+
+fn default_log_seconds() -> u32 {
+    30
+}
+
+/// [`PerfRequest::FrameTimes`]: a running game's recent frame times.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FrameTimes {
+    pub session: String,
+    pub span_ms: u32,
+    /// Presented frames: the longest frame time (ms) in each slot, oldest first; `None` where
+    /// no frame was presented.
+    pub presented: Vec<Option<f32>>,
+    /// Application-rendered frames (the layer's Reflex counting), the same way; empty when
+    /// nothing counts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendered: Vec<Option<f32>>,
+    /// Frames in the span.
+    pub frames: u32,
+    /// Frames longer than four times the median in the span, per minute (the session
+    /// summary's hitch rule); `None` with under five seconds of frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hitches_per_min: Option<f32>,
+}
+
+/// [`PerfRequest::SaveLog`]'s answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerfLogSaved {
+    pub path: PathBuf,
+    pub frames: u32,
+    /// Seconds of frames written.
+    pub seconds: f32,
+}
+
+/// [`PerfRequest::HudPreview`]'s answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HudPreview {
+    pub model: HudModel,
+    /// For each layout row, its first row in `model.rows` (a `mods` row can make several).
+    pub rows: Vec<usize>,
 }
 
 fn default_every_ms() -> u32 {
@@ -395,6 +474,12 @@ pub struct MetricInfo {
     pub state: MetricState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<PerfValue>,
+    /// Who produces the value now (a canonical metric's source, `layer`, `system`, `mod:x`):
+    /// the Sight panel's metric picker groups by it. Appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_producer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_producer_label: Option<String>,
 }
 
 /// A play session's performance summary (`PlaySession.perf`, decision 13): ~1 KB.
@@ -1174,7 +1259,7 @@ impl CellStyle {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SplitPart {
     pub metric: String,
-    /// "SIM", "RENDER", "QUEUE", "OUT".
+    /// "SIM", "RENDER", "QUEUE", "GPU".
     pub label: String,
     /// Its share, in the parts' unit (ms).
     pub value: f32,

@@ -259,6 +259,7 @@ impl Sight {
                 self.apply_front(cx);
             }
             Msg::GameInput { session, events } => self.panel.game_input(&session, &events, cx),
+            Msg::Perf { session, reply } => self.panel.perf_reply(&session, reply, cx),
             Msg::PanelLayout { docked, prefs } => self.panel.layout(docked, prefs, cx),
         }
     }

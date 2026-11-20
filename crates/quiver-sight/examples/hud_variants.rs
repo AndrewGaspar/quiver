@@ -3,7 +3,8 @@
 //! the way the layer does, and saves it over a stand-in backdrop with the live frame-time
 //! graph drawn in by the layer's own graph code (`quiver_sight_layer::graph`, from synthetic
 //! present times: 2× frame generation in the `base` and `long` variants, none in `short`).
-//! Prints each image's size, to check that a layout's card keeps its size whatever it holds.
+//! Prints each image's size: `base` and `long` must match (values never resize a card); `short` is
+//! the vanilla game's card, fitted to its fewer rows.
 //!
 //! ```text
 //! cargo run -p quiver-sight --example hud_variants -- OUT_DIR [--extent 2560x1600]
@@ -204,8 +205,8 @@ fn main() {
                         println!("{layout:>11} {variant:<6} {}x{} graphs [{}]  {}", desc.width, desc.height, graphs.join(" "), file.display());
                         sizes.push((desc.width, desc.height));
                     }
-                    let same = sizes.windows(2).all(|w| w[0] == w[1]);
-                    println!("{layout:>11} size {}", if same { "constant" } else { "VARIES" });
+                    let same = sizes.len() < 2 || sizes[0] == sizes[1];
+                    println!("{layout:>11} size {} (base vs long)", if same { "constant" } else { "VARIES" });
                     hud.close(cx);
                 }
                 let _ = std::fs::remove_file(&image_path);
