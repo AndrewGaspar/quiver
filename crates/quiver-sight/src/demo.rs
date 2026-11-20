@@ -507,6 +507,8 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     scale.pending = Pending::Restart;
     dlss.options.insert("upscale.scale".into(), scale);
     dlss.options.insert("fg.enabled".into(), opt(OptionType::Bool, "Frame generation", Some("F9 in game"), Apply::Live, json!(true)));
+    // The key the mod flips it with (the quick menu's tile says "On · F9").
+    dlss.actions.insert("fg.toggle".into(), quiver_api::options::ActionInfo { label: "Toggle frame generation".into(), hotkey: Some("F9".into()) });
     let mut fgmode = opt(OptionType::Enum, "Frame generation path", None, Apply::At, json!("d3d12"));
     fgmode.def.at = Some("swapchain creation (the game makes its swapchain at startup and on mode changes)".into());
     fgmode.def.values = choices(&[("d3d11", "D3D11"), ("d3d12", "D3D12 (vkd3d)")]);

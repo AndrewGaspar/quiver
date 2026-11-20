@@ -95,7 +95,9 @@ end
 -- (a) Tap and hold, in games and over Sight (recommended where Guide+Start is free in games).
 --     The key goes to the focused window, so keep it out of the desktop with the guard; if
 --     your `h.bind("guide+menu", …)` opens the Omarchy menu, this replaces it (move the menu
---     to another chord, e.g. guide+view, or use (b)):
+--     to another chord, e.g. guide+view, or use (b)). Delete your own guide+menu line: a
+--     later bind of the chord replaces this one's action (keeping this guard), and an
+--     earlier one is replaced by it. Checked with `hyprpad bindings` (hyprpad of 2026-11):
 --
 -- h.bind("guide+menu", "Quiver Sight: tap panel, hold quick menu", h.key "shift+f2"):only_in("game", "quiver-sight")
 --

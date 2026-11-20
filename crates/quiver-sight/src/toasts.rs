@@ -318,7 +318,9 @@ fn look(th: &Theme, t: &ToastData) -> (Hsla, Hsla, Icon) {
 /// The body, with the key as a keycap where the text says ([`KEY_SLOT`]).
 fn body(th: &Theme, text: &str, key: Option<&str>) -> Div {
     let line = |s: &str| div().child(s.to_owned());
-    let d = div().flex().flex_wrap().items_center().gap(px(4.)).text_size(px(13.)).line_height(px(18.)).text_color(th.tx2);
+    let base = div().text_size(px(13.)).line_height(px(18.)).text_color(th.tx2);
+    let Some(_) = key else { return base.w_full().line_clamp(3).child(text.to_owned()) };
+    let d = base.flex().flex_wrap().items_center().gap(px(4.));
     match key {
         Some(k) if text.contains(KEY_SLOT) => {
             let (a, b) = text.split_once(KEY_SLOT).unwrap_or((text, ""));
@@ -327,7 +329,7 @@ fn body(th: &Theme, text: &str, key: Option<&str>) -> Div {
                 .when(!b.trim().is_empty(), |d| d.child(line(b.trim_start())))
         }
         Some(k) => d.child(line(text)).child(kbd(th, k.to_owned())),
-        None => d.line_clamp(3).child(text.to_owned()),
+        None => d,
     }
 }
 
