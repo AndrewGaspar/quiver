@@ -178,13 +178,14 @@ Panel {
       Item {
         width: 16
         height: 16
-        Ring {
+        // Quiver's mark, its ring the progress track (BrandRing.qml); the panel keeps Ring.
+        BrandRing {
           anchors.fill: parent
           fraction: root.summary.active.length > 0 ? root.summary.fraction : 0
           color: root.urgentState ? root.barUrgent : root.barColor
-          mark: root.markFor(root.phase)
           broken: root.phase === "stalled"
-          trackStrength: root.phase === "failed" ? 1 : 0.28
+          badge: root.phase === "paused" ? "pause" : root.phase === "failed" ? "bang" : root.phase === "verifying" ? "check" : ""
+          trackStrength: root.phase === "failed" ? 1 : 0.32
         }
         // A failure behind an active download: a small urgent dot on the ring.
         Rectangle {

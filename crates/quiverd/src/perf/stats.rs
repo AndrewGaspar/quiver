@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 /// How long raw samples are kept (the 10 s window, plus slack).
-pub const KEEP_NS: i64 = 12_000_000_000;
+pub const KEEP_NS: i64 = 32_000_000_000;
 /// Intervals longer than this are gaps (a loading screen, alt-tab, a breakpoint), not frames.
 pub const MAX_FRAME_NS: i64 = 1_000_000_000;
 /// Samples per numeric series kept for the session (decimated beyond).
@@ -236,6 +236,13 @@ impl FrameStore {
         Some(ms)
     }
 
+    /// (present time ns, frame time ms) since `since`, oldest first: presented frames, and the
+    /// application-rendered ones (the Sight panel's 30 s graph and the performance log).
+    pub fn timed(&self, since: i64) -> (Vec<(i64, f64)>, Vec<(i64, f64)>) {
+        let f = |q: &VecDeque<(i64, f64)>| q.iter().filter(|(t, _)| *t > since).copied().collect();
+        (f(&self.recent), f(&self.recent_base))
+    }
+
     /// Base frame times since `since`, oldest first (the desktop graph's base series).
     pub fn base_tail(&self, since: i64) -> Vec<f32> {
         self.recent_base.iter().filter(|(t, _)| *t > since).map(|(_, ms)| *ms as f32).collect()
@@ -298,6 +305,11 @@ impl NumSeries {
 
     pub fn mean(&self) -> Option<f64> {
         (self.count > 0).then(|| self.sum / self.count as f64)
+    }
+
+    /// (time ns, value) since `since`, oldest first.
+    pub fn since(&self, since: i64) -> Vec<(i64, f64)> {
+        self.recent.iter().filter(|(t, _)| *t > since).copied().collect()
     }
 
     /// The last `n` values, oldest first (sparklines).

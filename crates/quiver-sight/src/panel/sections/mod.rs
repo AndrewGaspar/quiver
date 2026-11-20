@@ -4,10 +4,13 @@
 //!
 //! - [`mods`]: the Mods and Tweaks sections (option surfaces, pages, presets, the session's
 //!   changes, the change chip, A/B compare).
-//! - Session, Performance and Achievements still draw from `panel::state::rows`.
+//! - [`performance`]: the Performance section and the HUD layout editor (its own model, input
+//!   and drawing behind one `Row::Performance`).
+//! - Session and Achievements still draw from `panel::state::rows`.
 
 pub mod mods;
 pub mod mods_view;
+pub mod performance;
 
 use chrono::{DateTime, Utc};
 use quiver_api::sight::PanelSection;

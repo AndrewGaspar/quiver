@@ -1081,6 +1081,9 @@ impl Quiver {
         let f = if total > 0 { (done as f64 / total as f64).clamp(0., 1.) as f32 } else { 0. };
         let status = job.as_ref().map(|j| j.status.clone()).unwrap_or_default();
         let retrying = status.starts_with("Retrying");
+        // Waiting to try the whole download again (the connection to the store dropped):
+        // it keeps its place; quiverd says when it goes again.
+        let reconnect = e.retry.clone().filter(|_| !status.starts_with("Pausing") && !status.starts_with("Cancelling"));
         let verifying = e.state == QueueState::Verifying;
         let h = if e.kind == QueueKind::Install { 352. } else { 300. };
         // Tight: title and buttons on one line, the numbers under them, and the card grows
@@ -1113,7 +1116,7 @@ impl Quiver {
             (QueueKind::Update, _) => (PillKind::Accent, "Updating"),
             (QueueKind::Repair, _) => (PillKind::Warn, "Repairing"),
         };
-        let speed = if verifying { 0 } else { e.speed };
+        let speed = if verifying || reconnect.is_some() { 0 } else { e.speed };
         let left = total.saturating_sub(done);
         let mut nums = div().flex().flex_wrap().items_center().gap_x(px(18.)).gap_y(px(2.)).text_size(px(13.)).text_color(on_art::tx1());
         let num = |b: String, s: &str| {
@@ -1143,6 +1146,9 @@ impl Quiver {
                     .child(icon(Icon::RefreshCw, 13., th.warn))
                     .child(format!("{} {}", e.retries, if e.retries == 1 { "retry" } else { "retries" })),
             );
+        }
+        if let Some(w) = &reconnect {
+            nums = nums.child(div().min_w_0().text_size(px(12.)).text_color(on_art::tx2()).truncate().child(format!("try {} · {}", w.attempt + 1, w.error)));
         }
 
         let btns = rows.get(r).map(|x| x.1.clone()).unwrap_or_default();
@@ -1226,7 +1232,8 @@ impl Quiver {
                             .gap(px(8.))
                                     .child(pill(th, pill_kind, None, label))
                                     .child(who(th, &e.source))
-                            .when(retrying, |d| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), status.clone())))
+                            .when_some(reconnect.as_ref(), |d, w| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), w.line(chrono::Utc::now()))))
+                            .when(retrying && reconnect.is_none(), |d| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), status.clone())))
                             .when(switching_out, |d| d.child(pill(th, PillKind::Muted, Some(Icon::ArrowDownUp), status.clone())))
                             .when_some(e.job_id, |d, j| d.child(mono(11., on_art::tx2()).child(format!("job {j}")))),
                     )

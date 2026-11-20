@@ -55,6 +55,8 @@ pub enum Msg {
     Settings(Box<SightSettings>),
     /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
     QuickPoll,
+    /// quiverd's answer to the Performance section (`panel::sections::performance`).
+    Perf { session: String, reply: crate::panel::sections::performance::Reply },
     /// The panel's layout changed (docked or centred, design/SIGHT.md §9): the backdrop
     /// follows (no blur or dim while docked), and the sections' choices are saved.
     PanelLayout { docked: bool, prefs: std::collections::BTreeMap<String, bool> },
@@ -121,6 +123,8 @@ pub enum LinkReq {
     NoticeAct { id: String, button: String },
     SettingsSet { key: String, value: serde_json::Value },
     Pin { scope: String, pin: QuickPin, on: bool },
+    /// The Performance section's requests (`panel::sections::performance::link`).
+    Perf { session: String, req: crate::panel::sections::performance::Req },
 }
 
 /// After the last session ends, wait this long for another before quitting.
@@ -341,6 +345,10 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                 if let Err(e) = client.call::<serde_json::Value>(Request::Sight(SightRequest::Report { report })).await {
                     tracing::debug!("panel report: {e:#}");
                 }
+            }
+            LinkReq::Perf { session, req } => {
+                let reply = crate::panel::sections::performance::link::run(&client, &session, req).await;
+                send(Msg::Perf { session, reply });
             }
             LinkReq::Toggle => {
                 if let Err(e) = client.call::<PanelCommand>(Request::Sight(SightRequest::Toggle { session: None, section: None })).await {

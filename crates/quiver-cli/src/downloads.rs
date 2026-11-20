@@ -194,11 +194,11 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
                 } else {
                     String::new()
                 };
-                let speed = if e.state == QueueState::Downloading && e.speed > 0 { format!("{}/s", human_bytes(e.speed)) } else { String::new() };
+                let speed = if e.state == QueueState::Downloading && e.speed > 0 && e.retry.is_none() { format!("{}/s", human_bytes(e.speed)) } else { String::new() };
                 println!(
                     "{:>2}  {:<11} {:<7} {:<24} {:<11} {} ({})",
                     e.position,
-                    state_word(e.state),
+                    if e.retry.is_some() { "retrying" } else { state_word(e.state) },
                     format!("{:?}", e.kind).to_lowercase(),
                     progress,
                     speed,
@@ -207,6 +207,11 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
                 );
                 if let Some(err) = &e.error {
                     println!("      {err}");
+                }
+                if let Some(w) = &e.retry {
+                    let now = chrono::Utc::now();
+                    let left = (w.until - now).num_minutes().max(0);
+                    println!("      {} (try {}; gives up in {left} min without progress): {}", w.line(now), w.attempt + 1, w.error);
                 }
                 if let Some(a) = after_words(e) {
                     println!("      when it finishes: {a}");

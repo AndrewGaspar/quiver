@@ -273,7 +273,25 @@ pub struct LayerStatus {
     /// the HUD or the panel on a stereo frame, with [`DEPTH_DRAWN_VALID`] once it has drawn
     /// one (0 px: everything at the game's plane).
     pub depth_drawn: u32,
+    // ---- appended (latency split, design/SIGHT-HUD.md §3.17, 2026-11-19): zero from layers
+    // before. Cumulative over the opt-in `vkGetLatencyTimingsNV` reports of the target
+    // swapchain, like `render_latency_*`.
+    /// Reports whose stages could be split (simulation, render submit, queue and GPU stamps
+    /// in order).
+    pub split_frames: u64,
+    /// Each stage's sum over them, µs, in [`LATENCY_SPLIT_STAGES`] order: simulation (start →
+    /// end), render submit (simulation end → submit end), queue (submit end → GPU start), GPU
+    /// (→ GPU end). They add up to the report's game-to-render latency.
+    pub split_sum_us: [u64; 4],
+    /// Reports with a present end: the driver's PC latency to present (input sample, else
+    /// simulation start → present end), summed, µs. Fills PC latency when the layer's own
+    /// marker timing has nothing (a translation layer that remaps present ids).
+    pub report_pc_frames: u64,
+    pub report_pc_sum_us: u64,
 }
+
+/// `LayerStatus::split_sum_us`'s stages, in order.
+pub const LATENCY_SPLIT_STAGES: [&str; 4] = ["sim", "render", "queue", "gpu"];
 
 /// `LayerStatus::depth_drawn`: the layer has drawn a stereo image (the low 16 bits are px).
 pub const DEPTH_DRAWN_VALID: u32 = 1 << 16;
@@ -599,7 +617,7 @@ const _: () = {
     assert!(offset_of!(HudBufferHeader, nlifts) == 202);
     assert!(offset_of!(HudBufferHeader, lifts) == 204);
     assert!(size_of::<HudLift>() == 12);
-    assert!(size_of::<LayerStatus>() == 416);
+    assert!(size_of::<LayerStatus>() == 472);
     assert!(RING_MAGIC.to_le_bytes()[0] == b'Q' && RING_MAGIC.to_le_bytes()[7] == b'G');
     assert!(HUD_MAGIC.to_le_bytes()[4] == b'H' && HUD_MAGIC.to_le_bytes()[7] == b'I');
 };
@@ -699,6 +717,10 @@ const OFFSETS: &[(&str, &str, usize)] = &[
     o!("qv_layer_status", LayerStatus, stereo_drawn),
     o!("qv_layer_status", LayerStatus, depth_setting),
     o!("qv_layer_status", LayerStatus, depth_drawn),
+    o!("qv_layer_status", LayerStatus, split_frames),
+    o!("qv_layer_status", LayerStatus, split_sum_us),
+    o!("qv_layer_status", LayerStatus, report_pc_frames),
+    o!("qv_layer_status", LayerStatus, report_pc_sum_us),
     o!("qv_hud_header", HudHeader, magic),
     o!("qv_hud_header", HudHeader, version),
     o!("qv_hud_header", HudHeader, header_bytes),

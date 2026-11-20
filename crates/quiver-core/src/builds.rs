@@ -65,13 +65,13 @@ pub struct Latest {
 }
 
 impl Latest {
-    pub async fn fetch(online: &Online, product_id: u32) -> Result<Self> {
+    pub async fn fetch(online: &Arc<Online>, product_id: u32) -> Result<Self> {
         let demux = online.demux().await?;
         let mut lib = Library::fetch(&demux).await?;
-        let product = lib.get(product_id).context("not in your library")?.clone();
-        let hash = product.latest_manifest.clone().context("product has no PC build")?;
+        let product = lib.get(product_id).ok_or_else(|| crate::retry::permanent("not in your library"))?.clone();
+        let hash = product.latest_manifest.clone().ok_or_else(|| crate::retry::permanent("product has no PC build"))?;
         let name = product.name.clone().unwrap_or_else(|| product_id.to_string());
-        let mut dl = Downloader::open(&demux, &mut lib, product_id).await?;
+        let mut dl = Downloader::open_online(online, &demux, &mut lib, product_id).await?;
         let (manifest, raw) = fetch_manifest(&mut dl, &hash).await?;
         Ok(Self { lib, dl, name, hash, manifest, raw, _demux: demux })
     }
@@ -141,7 +141,7 @@ fn pending(dest: &Path, hash: &str, plan: &Plan, language: &str) -> Result<Pendi
 /// when the download doesn't fit on the library's filesystem.
 pub async fn install_game(
     cfg: &Config,
-    online: &Online,
+    online: &Arc<Online>,
     product_id: u32,
     language: &str,
     progress: &Progress,
@@ -296,7 +296,7 @@ pub enum RepairPhase {
 
 /// Verify a game, then re-download only its missing or corrupt slices.
 pub async fn repair_game(
-    online: &Online,
+    online: &Arc<Online>,
     game: &Game,
     language: &str,
     progress: Arc<Progress>,
@@ -316,7 +316,7 @@ pub async fn repair_game(
     progress.downloaded.store(0, Ordering::Relaxed);
     let demux = online.demux().await?;
     let mut lib = Library::fetch(&demux).await?;
-    let mut dl = Downloader::open(&demux, &mut lib, game.product_id).await?;
+    let mut dl = Downloader::open_online(online, &demux, &mut lib, game.product_id).await?;
     verify::prepare_repair(dest, &repair, &v)?;
     install::install(&mut dl, &repair, dest, true, &progress).await?;
     let mut report = v.report;

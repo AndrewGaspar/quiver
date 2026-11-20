@@ -144,7 +144,32 @@ pub struct Latency {
     // The timings reader's.
     render_frames: AtomicU64,
     render_sum_us: AtomicU64,
+    split_frames: AtomicU64,
+    split_sum_us: [AtomicU64; 4],
+    report_pc_frames: AtomicU64,
+    report_pc_sum_us: AtomicU64,
     last_report: AtomicU64,
+}
+
+/// A report's game-to-render latency split into stages that add up to it, µs (simulation,
+/// render submit, queue, GPU; `LATENCY_SPLIT_STAGES`): simulation start → end → render
+/// submit end → GPU start → GPU end. A GPU that starts before the submit ends (it takes work
+/// as it comes) leaves no queue and the GPU stage starts at the submit's end. `None` when a
+/// stamp is missing or they're out of order.
+pub fn split(r: &vk::LatencyTimingsFrameReportNV<'_>) -> Option<[u64; 4]> {
+    let (s0, s1, submit, g0, g1) = (r.sim_start_time_us, r.sim_end_time_us, r.render_submit_end_time_us, r.gpu_render_start_time_us, r.gpu_render_end_time_us);
+    if s0 == 0 || s1 < s0 || submit < s1 || g0 == 0 || g1 < submit || g1 < g0 || g1 - s0 >= MAX_LATENCY_NS as u64 / 1000 {
+        return None;
+    }
+    let gpu_from = g0.max(submit);
+    Some([s1 - s0, submit - s1, gpu_from - submit, g1 - gpu_from])
+}
+
+/// A report's PC latency to present, µs: the input sample (else simulation start) to the
+/// present's end.
+pub fn report_pc(r: &vk::LatencyTimingsFrameReportNV<'_>) -> Option<u64> {
+    let start = if r.input_sample_time_us > 0 { r.input_sample_time_us } else { r.sim_start_time_us };
+    (start > 0 && r.present_end_time_us > start && r.present_end_time_us - start < MAX_LATENCY_NS as u64 / 1000).then(|| r.present_end_time_us - start)
 }
 
 impl Latency {
@@ -268,10 +293,15 @@ impl Latency {
         s.pc_latency_sum_us = self.pc_sum_us.load(Ordering::Relaxed);
         s.render_latency_frames = self.render_frames.load(Ordering::Relaxed);
         s.render_latency_sum_us = self.render_sum_us.load(Ordering::Relaxed);
+        s.split_frames = self.split_frames.load(Ordering::Relaxed);
+        s.split_sum_us = std::array::from_fn(|i| self.split_sum_us[i].load(Ordering::Relaxed));
+        s.report_pc_frames = self.report_pc_frames.load(Ordering::Relaxed);
+        s.report_pc_sum_us = self.report_pc_sum_us.load(Ordering::Relaxed);
     }
 
     /// Game-to-render latency from timing reports (oldest first): simulation start → GPU
-    /// render end, for reports newer than the last one used.
+    /// render end, for reports newer than the last one used; its split into stages
+    /// ([`split`]) and the reports' PC latency to present ([`report_pc`]).
     pub fn take_reports(&self, reports: &[vk::LatencyTimingsFrameReportNV<'_>]) {
         let mut last = self.last_report.load(Ordering::Relaxed);
         for r in reports {
@@ -284,6 +314,17 @@ impl Latency {
                     self.render_frames.fetch_add(1, Ordering::Relaxed);
                     self.render_sum_us.fetch_add(us, Ordering::Relaxed);
                 }
+            }
+            if let Some(parts) = split(r) {
+                // The sums before the count, so a reader never sees a frame without its parts.
+                for (sum, us) in self.split_sum_us.iter().zip(parts) {
+                    sum.fetch_add(us, Ordering::Relaxed);
+                }
+                self.split_frames.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(us) = report_pc(r) {
+                self.report_pc_sum_us.fetch_add(us, Ordering::Relaxed);
+                self.report_pc_frames.fetch_add(1, Ordering::Relaxed);
             }
             last = r.present_id;
         }
@@ -517,5 +558,50 @@ mod tests {
         l.take_reports(&[r(2, 0, 9), r(3, 50, 10_050), r(4, 10, 15_010)]);
         let s = status(&l, 112 * MS);
         assert_eq!((s.render_latency_frames, s.render_latency_sum_us), (3, 45_000));
+        // Without the other stamps nothing is split, and no present end: no PC latency.
+        assert_eq!((s.split_frames, s.report_pc_frames), (0, 0));
+    }
+
+    /// A full report: simulation 6 ms, submit 9, queue 4, GPU 9 (the mock-up's numbers).
+    fn full(id: u64, t0: u64) -> vk::LatencyTimingsFrameReportNV<'static> {
+        vk::LatencyTimingsFrameReportNV {
+            present_id: id,
+            input_sample_time_us: t0 + 500,
+            sim_start_time_us: t0,
+            sim_end_time_us: t0 + 6_000,
+            render_submit_start_time_us: t0 + 6_200,
+            render_submit_end_time_us: t0 + 15_000,
+            present_start_time_us: t0 + 15_100,
+            present_end_time_us: t0 + 15_500,
+            gpu_render_start_time_us: t0 + 19_000,
+            gpu_render_end_time_us: t0 + 28_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn timing_reports_split_into_stages_that_add_up() {
+        assert_eq!(split(&full(1, 1_000)), Some([6_000, 9_000, 4_000, 9_000]));
+        let total: u64 = split(&full(1, 1_000)).unwrap().iter().sum();
+        assert_eq!(total, 28_000, "the split adds up to the game-to-render latency");
+        // The GPU started before the submit ended: no queue, the GPU stage from the submit.
+        let early = vk::LatencyTimingsFrameReportNV { gpu_render_start_time_us: 1_000 + 12_000, ..full(1, 1_000) };
+        assert_eq!(split(&early), Some([6_000, 9_000, 0, 13_000]));
+        // A missing or out-of-order stamp: not split.
+        assert_eq!(split(&vk::LatencyTimingsFrameReportNV { gpu_render_start_time_us: 0, ..full(1, 1_000) }), None);
+        assert_eq!(split(&vk::LatencyTimingsFrameReportNV { sim_end_time_us: 500, ..full(1, 1_000) }), None);
+        // PC latency to present from the input sample, else the simulation start.
+        assert_eq!(report_pc(&full(1, 1_000)), Some(15_000));
+        assert_eq!(report_pc(&vk::LatencyTimingsFrameReportNV { input_sample_time_us: 0, ..full(1, 1_000) }), Some(15_500));
+        assert_eq!(report_pc(&vk::LatencyTimingsFrameReportNV { present_end_time_us: 0, ..full(1, 1_000) }), None);
+        // Into the status block, each report once.
+        let l = Latency::default();
+        l.take_reports(&[full(1, 1_000), full(2, 40_000)]);
+        l.take_reports(&[full(2, 40_000), full(3, 80_000)]);
+        let s = status(&l, 0);
+        assert_eq!(s.split_frames, 3);
+        assert_eq!(s.split_sum_us, [18_000, 27_000, 12_000, 27_000]);
+        assert_eq!((s.report_pc_frames, s.report_pc_sum_us), (3, 45_000));
+        assert_eq!((s.render_latency_frames, s.render_latency_sum_us), (3, 84_000));
     }
 }

@@ -1156,11 +1156,20 @@ impl PanelCtl {
         }
     }
 
-    /// Redraws the clock and play time (called once a second while open).
+    /// Redraws the clock and play time, and refreshes what the section shows (called once a
+    /// second while open).
     pub fn tick(&mut self, cx: &mut App) {
         if self.is_shown() {
-            self.with_view(cx, |_, _| {});
+            self.with_view(cx, |v, cx| v.tick(cx));
         }
+    }
+
+    /// quiverd's answer to the Performance section.
+    pub fn perf_reply(&mut self, session: &str, reply: sections::performance::Reply, cx: &mut App) {
+        if self.open.as_ref().is_none_or(|o| o.session != session) {
+            return;
+        }
+        self.with_view(cx, |v, cx| v.perf_reply(reply, cx));
     }
 
     /// Feeds an input as if from the keyboard (tests, demo).

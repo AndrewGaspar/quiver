@@ -19,6 +19,7 @@ pub mod api;
 pub mod catalog;
 pub mod display;
 pub mod format;
+pub mod frames;
 pub mod hud;
 pub mod hudcfg;
 pub mod keybinds;
@@ -129,6 +130,8 @@ pub struct Session {
     noted: Option<Presenter>,
     /// The layer's Reflex counters at the last drain (`nvidia::apply_layer`).
     nv_last: nvidia::Last,
+    /// The HUD card's height so far for this layout ([`hud::CardHold`]).
+    card: hud::CardHold,
     /// A live mod's stereo layout (`quiver_set_stereo_layout`): the layout, its surface, its
     /// connection (design/SIGHT.md §15). The newest declaration wins; it goes with its
     /// connection.
@@ -477,6 +480,7 @@ impl PerfHub {
             monitor: None,
             noted: None,
             nv_last: nvidia::Last::default(),
+            card: hud::CardHold::default(),
             sdk_stereo: None,
         };
         {
@@ -758,6 +762,60 @@ impl PerfHub {
         Ok(st.sessions[id].status(mono_raw_ns()))
     }
 
+    /// The Sight panel's frame-time graph ([`frames::frame_times`]).
+    pub fn frame_times(&self, session: Option<&str>, game: Option<GameRef>, span_ms: u32, buckets: u32) -> Result<quiver_api::perf::FrameTimes> {
+        let st = self.lock();
+        let id = Self::pick(&st, session, game)?;
+        Ok(frames::frame_times(id, &st.sessions[id].store, mono_raw_ns(), span_ms, buckets))
+    }
+
+    /// The last `seconds` of a running game as a MangoHud-style log in its data folder
+    /// ([`frames::mangohud_csv`]). Returns the game too, for the activity log.
+    pub fn save_log(&self, session: Option<&str>, game: Option<GameRef>, seconds: u32) -> Result<(quiver_api::perf::PerfLogSaved, GameRef)> {
+        let machine = frames::Machine::read();
+        let (csv, n, secs, id, g) = {
+            let st = self.lock();
+            let id = Self::pick(&st, session, game)?;
+            let s = &st.sessions[id];
+            let (csv, n, secs) = frames::mangohud_csv(&s.store, mono_raw_ns(), seconds, &machine);
+            (csv, n, secs, id.to_owned(), s.game)
+        };
+        if n == 0 {
+            bail!("no frames from the Sight layer in the last {seconds} s");
+        }
+        let path = frames::log_path(&quiver_core::paths::game_dir(&g), &id, chrono::Local::now());
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::write(&path, csv).with_context(|| format!("writing {}", path.display()))?;
+        tracing::info!(session = %id, frames = n, path = %path.display(), "performance log saved");
+        Ok((quiver_api::perf::PerfLogSaved { path, frames: n, seconds: secs }, g))
+    }
+
+    /// A layout being edited, with a running session's values: the Sight panel's preview
+    /// ([`hud::build_preview`]). Graph points included (drawn by the panel, not the layer).
+    pub fn preview(&self, session: &str, layout: &quiver_api::perf::HudLayout) -> Result<quiver_api::perf::HudPreview> {
+        let l = layout::from_api(layout).map_err(|e| anyhow::anyhow!(e))?;
+        let st = self.lock();
+        let s = st.sessions.get(session).with_context(|| format!("no perf session {session}"))?;
+        let inp = hud::ModelInput {
+            session: &s.id,
+            product_id: s.product_id(),
+            cfg: &s.cfg,
+            on: true,
+            layout: &l,
+            presenter: Presenter::Desktop,
+            reason: "preview",
+            image: None,
+            monitor: None,
+            backdrop: None,
+            game_focus: None,
+            stereo: None,
+        };
+        let (model, rows) = hud::build_preview(&inp, &s.store, mono_raw_ns());
+        Ok(quiver_api::perf::HudPreview { model, rows })
+    }
+
     /// The HUD's keys and, per running game with a layer, whether the layer reads them.
     pub fn keybinds(&self) -> quiver_api::perf::HudKeybinds {
         let st = self.lock();
@@ -853,6 +911,7 @@ impl PerfHub {
                 stereo: Some(s.stereo()),
             };
             let mut m = hud::build_model(&inp, &s.store, now);
+            s.card.apply(&layout, &mut m);
             if s.model.as_ref().is_some_and(|old| hud::same(old, &m)) {
                 continue;
             }

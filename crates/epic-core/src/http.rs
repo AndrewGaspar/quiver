@@ -122,12 +122,24 @@ impl Transport for Reqwest {
                 b = b.header(reqwest::header::CONTENT_TYPE, ct).body(data);
             }
             // reqwest's errors name the URL, which can hold a token: keep only the kind.
-            let r = b.send().await.map_err(|e| anyhow::anyhow!("Epic {label}: {}", describe(&e)))?;
+            let r = b.send().await.map_err(|e| failed(label, &e))?;
             let status = r.status().as_u16();
-            let body = r.bytes().await.map_err(|e| anyhow::anyhow!("Epic {label}: {}", describe(&e)))?.to_vec();
+            let body = r.bytes().await.map_err(|e| failed(label, &e))?.to_vec();
             tracing::debug!(status, bytes = body.len(), "Epic {label}");
             Ok(Response { status, body })
         })
+    }
+}
+
+/// A request that got no reply: a network failure, worth trying again later
+/// ([`quiver_core::retry::Transient`]); anything else (a request reqwest couldn't build)
+/// isn't.
+fn failed(label: &str, e: &reqwest::Error) -> anyhow::Error {
+    let msg = format!("Epic {label}: {}", describe(e));
+    if e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode() || e.is_request() {
+        quiver_core::retry::transient(msg)
+    } else {
+        anyhow::anyhow!(msg)
     }
 }
 

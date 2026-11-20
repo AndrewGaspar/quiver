@@ -30,6 +30,7 @@ pub mod paths;
 pub mod playsession;
 pub mod private;
 pub mod progress;
+pub mod retry;
 pub mod saves;
 pub mod secret;
 pub mod savestores;
