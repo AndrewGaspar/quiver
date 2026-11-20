@@ -24,6 +24,7 @@ mod steammods;
 mod stores;
 mod epic;
 mod epicgame;
+mod sightinfo;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -635,7 +636,7 @@ impl Daemon {
             // The connection loop passes connection-bound perf requests (subscriptions, HUD
             // attachment) with their connection; this path has none.
             Request::Perf(req) => self.handle_perf(source, None, req).await?,
-            Request::Sight(req) => self.handle_sight(source, req)?,
+            Request::Sight(req) => sightinfo::handle(self, source, req).await?,
             Request::LaunchMaterial { game, session, savegame_path, install_dir, ovt_dir, account } => {
                 let r = lab::MaterialRequest { game, session, savegame_path, install_dir, ovt_dir, account };
                 lab::launch_material(self, source, r).await?
@@ -1185,6 +1186,7 @@ async fn main() -> Result<()> {
     steamgames::start(&daemon);
     achievements::start(&daemon);
     epicgame::start(&daemon);
+    sightinfo::start(&daemon);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);

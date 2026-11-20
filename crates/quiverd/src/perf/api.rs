@@ -114,6 +114,8 @@ impl Daemon {
                 hub.panel_report(report);
                 Value::Null
             }
+            // The Session and Achievements sections' requests (`crate::sightinfo`, async).
+            SightRequest::Session { .. } | SightRequest::Achievements { .. } | SightRequest::Icons { .. } | SightRequest::Screenshot { .. } => bail!("handled by sightinfo"),
         })
     }
 

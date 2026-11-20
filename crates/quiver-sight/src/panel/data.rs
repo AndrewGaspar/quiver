@@ -131,7 +131,7 @@ pub async fn achievements(client: &Client, game: GameRef) -> Load<Achs> {
             Some(a) if !a.list.is_empty() => Load::Ready(Achs::sorted(
                 a.list
                     .into_iter()
-                    .map(|x| Ach { id: x.id, name: x.name, description: x.description, hidden: x.hidden, unlocked: x.unlocked, unlocked_at: x.unlocked_at })
+                    .map(|x| Ach { id: x.id, name: x.name, description: x.description, hidden: x.hidden, unlocked: x.unlocked, unlocked_at: x.unlocked_at, icon: x.icon, icon_gray: x.icon_gray, progress: x.progress })
                     .collect(),
             )),
             _ => Load::Unavailable("No achievements known for this game (Quiver hasn't read them from the store yet).".into()),
@@ -166,7 +166,10 @@ pub async fn refresh(client: &Client, session: &str, part: Part, d: &mut PanelDa
         d.hud = hud(client, &s).await;
     }
     if part == Part::All {
-        d.achievements = achievements(client, s.game).await;
+        // The Achievements and Session sections' own data (`sections::*`).
+        d.achievements = super::sections::achievements::load(client, &s).await;
+        d.extras = super::sections::session::load(client, &s).await;
+        d.prefs = super::sections::prefs::load();
     }
 }
 

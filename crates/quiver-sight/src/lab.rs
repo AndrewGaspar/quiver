@@ -202,6 +202,8 @@ pub fn panel_data(session: &str, title: &str, game: &str, started: chrono::DateT
         hud: Load::Unavailable("the lab HUD: Shift+F3 shows it, Ctrl+Shift+F3 steps the preset".into()),
         achievements: Load::Unavailable("nothing is reported from a lab instance".into()),
         metrics: Default::default(),
+        extras: crate::panel::sections::session::Extras { saves: Load::Unavailable(ro()), ..Default::default() },
+        prefs: Default::default(),
     }
 }
 
@@ -290,6 +292,10 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                 LinkReq::Stop { .. } => {
                     let why = l.refuse("quit the game (use quiver lab kill)".into());
                     let _ = l.tx.unbounded_send(Msg::Done { change: Change::Stop, result: Err(why) });
+                }
+                LinkReq::Screenshot { .. } => {
+                    let why = l.refuse("screenshot (use quiver lab shot)".into());
+                    let _ = l.tx.unbounded_send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(why) });
                 }
                 LinkReq::Report(r) => {
                     l.shared.lock().unwrap_or_else(|p| p.into_inner()).report = Some(r);

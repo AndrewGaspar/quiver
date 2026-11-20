@@ -77,12 +77,15 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     // (section, presses after opening on it, file name)
     let shots: Vec<(PanelSection, Vec<Input>, &str)> = vec![
+        // The first quick toggle focused, as in the mock-up.
         (PanelSection::Session, vec![], "session"),
-        (PanelSection::Session, vec![Input::Down, Input::Activate, Input::Right], "session-force-quit"),
+        (PanelSection::Session, vec![Input::Down; 7].into_iter().chain([Input::Activate, Input::Right]).collect(), "session-force-quit"),
         (PanelSection::Mods, vec![Input::Down, Input::Down, Input::Down], "mods"),
         (PanelSection::Tweaks, vec![Input::Down], "tweaks"),
         (PanelSection::Performance, vec![Input::Down], "performance"),
         (PanelSection::Achievements, vec![Input::Down, Input::Down, Input::Down], "achievements"),
+        // RT twice: Locked (progress bars), the hidden one focused.
+        (PanelSection::Achievements, vec![Input::NextTab, Input::NextTab, Input::Down, Input::Down, Input::Down, Input::Down, Input::Down], "achievements-locked"),
     ];
     gpui_platform::headless().with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         quiver_ui::init(cx, theme::load(&theme::omarchy_state_dir()));
@@ -99,10 +102,6 @@ fn main() {
                     cx.new(|cx| {
                         let mut nav = Nav::default();
                         nav.open(Some(section));
-                        if section == PanelSection::Session && name == "session" {
-                            nav.zone = quiver_sight::panel::state::Zone::Side;
-                            nav.open(None);
-                        }
                         let mut v = PanelView::new("s-demo".into(), sample_panel(), nav, backdrop, Wiring::default(), cx);
                         v.footer = Footer { pad: "Steam Controller".into(), pad_shared: false };
                         for i in presses {

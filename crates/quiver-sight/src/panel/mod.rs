@@ -40,6 +40,7 @@
 
 pub mod data;
 pub mod ingame;
+pub mod sections;
 pub mod state;
 pub mod view;
 

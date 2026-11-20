@@ -10,6 +10,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// The Session and Achievements sections' requests' answers.
+pub mod session;
+
 /// The panel's sections, in the order of its side list (LB/RB step through them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -224,6 +227,21 @@ pub enum SightRequest {
     Status,
     /// `quiver-sight` only: what the panel shows now.
     Report { report: PanelReport },
+    // ---- The Session and Achievements sections (appended; see [`session`]). All read-only
+    // towards the stores.
+    /// `session::SessionInfo`: the Proton build, box art, what happened while it ran.
+    Session { session: String },
+    /// `session::SessionAchievements`: the game's achievements with their report state.
+    Achievements { game: crate::GameRef },
+    /// Achievement icons on this machine (`Vec<Option<PathBuf>>`, one per URL): from
+    /// quiverd's icon cache, downloaded into it first when missing (known image hosts only).
+    Icons { urls: Vec<String> },
+    /// `session::Screenshot`: the game's next frame, saved under `~/Pictures/Quiver/<game>/`.
+    /// No session named: the focused game, else the only one running.
+    Screenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
 }
 
 /// Commands older than this are not replayed to a `quiver-sight` that starts after them.

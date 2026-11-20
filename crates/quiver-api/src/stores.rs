@@ -335,6 +335,41 @@ pub struct Achievement {
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_gray: Option<String>,
+    /// How far along a locked one is, when the store tracks it (appended; Steam's progress
+    /// stats, Epic's progress).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<AchievementProgress>,
+}
+
+/// A locked achievement's progress: `current` of `max` (`22 / 50`). A store that only keeps
+/// a fraction reports it out of 100 with `percent` set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AchievementProgress {
+    pub current: f64,
+    pub max: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub percent: bool,
+}
+
+impl AchievementProgress {
+    /// 0..=1.
+    pub fn fraction(&self) -> f64 {
+        if self.max > 0.0 { (self.current / self.max).clamp(0.0, 1.0) } else { 0.0 }
+    }
+
+    /// Started and not done.
+    pub fn in_progress(&self) -> bool {
+        self.current > 0.0 && self.current < self.max
+    }
+
+    /// `22 / 50`, `44%`.
+    pub fn text(&self) -> String {
+        if self.percent { format!("{:.0}%", self.fraction() * 100.0) } else { format!("{} / {}", trim_num(self.current), trim_num(self.max)) }
+    }
+}
+
+fn trim_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-6 { format!("{}", v.round() as i64) } else { format!("{v:.1}") }
 }
 
 /// What the store's client last knew of the game's cloud files (Steam: `remotecache.vdf`).

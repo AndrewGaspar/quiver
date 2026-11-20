@@ -74,6 +74,19 @@ pub struct Achievement {
     /// When it was unlocked, unix seconds; `None` when locked or when the client kept no
     /// time for it.
     pub unlocked_at: Option<i64>,
+    /// A locked one's progress, (current, max), when the schema ties it to a stat and the
+    /// user's file has the stat.
+    pub progress: Option<(f64, f64)>,
+}
+
+/// An achievement's `progress` block: `statvalue` of a stat, from `min` to `max`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressDef {
+    /// The stat's name, and its id once found among the schema's stats.
+    pub stat: String,
+    pub stat_id: Option<u32>,
+    pub min: f64,
+    pub max: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +108,7 @@ pub struct AchievementDef {
     pub hidden: bool,
     pub icon: Option<String>,
     pub icon_gray: Option<String>,
+    pub progress: Option<ProgressDef>,
 }
 
 /// One user's achievement bits.
@@ -102,6 +116,8 @@ pub struct AchievementDef {
 pub struct UserStats {
     /// Stat id -> its `data` bit field.
     pub data: HashMap<u32, u32>,
+    /// Stat id -> its `data` as a number (ordinary INT and FLOAT stats, for progress).
+    pub values: HashMap<u32, f64>,
     /// (stat id, bit) -> unlock time.
     pub times: HashMap<(u32, u32), i64>,
 }
@@ -142,6 +158,16 @@ pub fn parse_schema(buf: &[u8], app_id: u32) -> Result<Vec<AchievementDef>> {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
+    let number = |k: Option<&Kv>| k.and_then(Kv::text).and_then(|t| t.trim().parse::<f64>().ok());
+    // Ordinary stats by name, for achievements whose progress is one of them.
+    let mut stat_ids: HashMap<String, u32> = HashMap::new();
+    for (sid, stat) in app.get("stats").map(Kv::entries).unwrap_or_default() {
+        if !is_achievement_stat(stat)
+            && let (Ok(id), Some(name)) = (key_str(sid).parse::<u32>(), stat.str_at("name"))
+        {
+            stat_ids.insert(name.into_owned(), id);
+        }
+    }
     for (sid, stat) in app.get("stats").map(Kv::entries).unwrap_or_default() {
         if !is_achievement_stat(stat) {
             continue;
@@ -153,7 +179,18 @@ pub fn parse_schema(buf: &[u8], app_id: u32) -> Result<Vec<AchievementDef>> {
             let (Some(bit), Some(api_name)) = (bit, def.str_at("name")) else { continue };
             let display = def.get("display");
             let field = |k: &str| display.and_then(|d| d.str_at(k)).map(|s| s.into_owned()).filter(|s| !s.is_empty());
+            let progress = def.get("progress").and_then(|p| {
+                let v = p.get("value")?;
+                if !v.str_at("operation").is_some_and(|o| o.eq_ignore_ascii_case("statvalue")) {
+                    return None;
+                }
+                let stat = v.str_at("operand1")?.into_owned();
+                let max = number(p.get("max_val"))?;
+                let min = number(p.get("min_val")).unwrap_or(0.0);
+                (max > min).then(|| ProgressDef { stat_id: stat_ids.get(&stat).copied(), stat, min, max })
+            });
             out.push(AchievementDef {
+                progress,
                 stat_id,
                 bit,
                 name: localized(display.and_then(|d| d.get("name"))).unwrap_or_else(|| api_name.to_string()),
@@ -177,6 +214,9 @@ pub fn parse_user(buf: &[u8]) -> Result<UserStats> {
         if let Some(d) = stat.int_at("data") {
             out.data.insert(stat_id, d as u32);
         }
+        if let Some(v) = stat.get("data").and_then(Kv::text).and_then(|t| t.trim().parse::<f64>().ok()) {
+            out.values.insert(stat_id, v);
+        }
         for (bit, t) in stat.get("AchievementTimes").map(Kv::entries).unwrap_or_default() {
             if let (Ok(bit), Some(t)) = (key_str(bit).parse::<u32>(), t.int()) {
                 // Times are int32 holding unsigned seconds.
@@ -197,7 +237,12 @@ pub fn join(defs: Vec<AchievementDef>, user: Option<&UserStats>) -> Achievements
                 .filter(|_| unlocked)
                 .and_then(|u| u.times.get(&(d.stat_id, d.bit)).copied())
                 .filter(|&t| t > 0);
+            let progress = d.progress.as_ref().filter(|_| !unlocked).and_then(|p| {
+                let v = user?.values.get(&p.stat_id?)?;
+                Some(((v - p.min).clamp(0.0, p.max - p.min), p.max - p.min))
+            });
             Achievement {
+                progress,
                 api_name: d.api_name,
                 name: d.name,
                 description: d.description,
@@ -320,6 +365,60 @@ mod tests {
         });
         b.end();
         b.out
+    }
+
+    /// An achievement whose progress is the `kills` stat (id 3) from 0 to 50, and one tied to
+    /// a stat the user's file doesn't have.
+    #[test]
+    fn progress_from_a_stat() {
+        let mut b = Kb::default();
+        b.map("620", |b| {
+            b.map("stats", |b| {
+                b.map("1", |b| {
+                    b.str("type", "ACHIEVEMENTS");
+                    b.map("bits", |b| {
+                        for (key, api, stat) in [("0", "ACH_KILLS", "kills"), ("1", "ACH_JUMPS", "jumps"), ("2", "ACH_DONE", "kills")] {
+                            b.map(key, |b| {
+                                b.str("name", api);
+                                b.map("display", |b| {
+                                    b.str("name", api);
+                                });
+                                b.map("progress", |b| {
+                                    b.int("min_val", 0).int("max_val", 50);
+                                    b.map("value", |b| {
+                                        b.str("operation", "statvalue").str("operand1", stat);
+                                    });
+                                });
+                            });
+                        }
+                    });
+                });
+                b.map("3", |b| {
+                    b.str("type", "INT").str("name", "kills");
+                });
+                b.map("4", |b| {
+                    b.str("type", "INT").str("name", "jumps");
+                });
+            });
+        });
+        b.end();
+        let defs = parse_schema(&b.out, 620).unwrap();
+        assert_eq!(defs[0].progress, Some(ProgressDef { stat: "kills".into(), stat_id: Some(3), min: 0.0, max: 50.0 }));
+        let mut u = Kb::default();
+        u.map("cache", |b| {
+            b.map("1", |b| {
+                b.int("data", 0b100);
+            });
+            b.map("3", |b| {
+                b.int("data", 22);
+            });
+        });
+        u.end();
+        let user = parse_user(&u.out).unwrap();
+        let a = join(defs, Some(&user));
+        assert_eq!(a.list[0].progress, Some((22.0, 50.0)));
+        assert_eq!(a.list[1].progress, None, "the user has no jumps stat");
+        assert_eq!(a.list[2].progress, None, "unlocked: no progress shown");
     }
 
     #[test]

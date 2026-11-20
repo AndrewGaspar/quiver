@@ -183,6 +183,14 @@ pub struct Unlock {
     pub unlocked_at: DateTime<Utc>,
 }
 
+/// A locked achievement's progress as Epic keeps it: a fraction (0..1, as EOS reports it) or,
+/// above 1, a percentage. Shown as a percentage; `None` when not started.
+pub fn progress_of(p: Option<f64>) -> Option<quiver_api::stores::AchievementProgress> {
+    let p = p.filter(|p| p.is_finite() && *p > 0.0)?;
+    let pct = if p <= 1.0 { p * 100.0 } else { p.min(100.0) };
+    (pct < 100.0).then_some(quiver_api::stores::AchievementProgress { current: pct, max: 100.0, percent: true })
+}
+
 /// Definitions and the player's record as the page and Sight show them.
 pub fn merge(defs: &Definitions, player: &PlayerRecord) -> Achievements {
     let mine: HashMap<&str, &PlayerAchievement> = player.achievements.iter().map(|p| (p.achievement_name.as_str(), p)).collect();
@@ -202,6 +210,7 @@ pub fn merge(defs: &Definitions, player: &PlayerRecord) -> Achievements {
                 unlocked,
                 icon: d.unlocked_icon_link.clone(),
                 icon_gray: d.locked_icon_link.clone(),
+                progress: if unlocked { None } else { mine.get(d.name.as_str()).and_then(|p| progress_of(p.progress)) },
             }
         })
         .collect();
@@ -348,6 +357,16 @@ fn without_nulls(mut v: serde_json::Value) -> serde_json::Value {
 
 #[cfg(test)]
 mod null_tests {
+    #[test]
+    fn progress_as_a_percentage() {
+        let p = super::progress_of(Some(0.44)).unwrap();
+        assert_eq!((p.current.round(), p.max, p.percent), (44.0, 100.0, true));
+        assert_eq!(super::progress_of(Some(25.0)).unwrap().text(), "25%", "already a percentage");
+        assert_eq!(super::progress_of(Some(0.0)), None, "not started");
+        assert_eq!(super::progress_of(Some(1.0)), None, "done");
+        assert_eq!(super::progress_of(None), None);
+    }
+
     #[test]
     fn nulls_become_defaults() {
         let v = serde_json::json!({"totalAchievements": 3, "totalProductXP": null, "achievements": [{"achievement": null}]});

@@ -1615,6 +1615,39 @@ A game that keeps its own cursor visible and confines the pointer shows it under
 Wayland repeats a key the game held when the panel opened until it's released. hyprpad's mode
 follows within its rescan interval.
 
+### Session and Achievements as cards (2026-11-19)
+
+Both sections follow the `SightSession` / `SightAchievements` mock-ups
+(`quiver-sight/src/panel/sections/`). Their rows are only what takes focus; the cards draw the
+rest.
+
+- **Session**: now playing (box art from the app's art cache, its 240:280 crop when there;
+  nothing downloaded), profile / Proton build / copy chips, this session and total play time;
+  mods with their versions and the options revision with "N changed in game" (the options'
+  session record); saves (the profile's save store, the cloud state in each store's words: a
+  Ubisoft store's slots waiting for upload at exit, Epic's sync state, Steam Cloud's unsynced
+  files; the newest save; the profiles sharing it); "While you were playing" (the activity log
+  since the start, the downloads and unlocks quiverd saw go by, and unlocks with a time inside
+  the session); quick toggles (a mod's `fg.enabled`, the HUD and its preset, Tweaks'
+  `fps.cap` with the mod that provides it, Do not disturb); the achievements' progress;
+  Screenshot, Quit, Force quit.
+- **Achievements**: progress card, who records the unlocks (Ubisoft's report journal read
+  offline: `Engine::status_offline` reads nothing from Ubisoft and sends nothing), On unlock
+  (`toast`, `toast_screenshot`, `off`), filters on LT / RT (All, Unlocked, Locked, Recent: the
+  last 7 days), hidden ones Masked / Shown (X or A reveals one), progress bars where the store
+  keeps progress (Steam's `progress` stats; Epic's fraction, as a percentage), icons as files.
+- **Requests** (`quiver_api::sight::session`): `SightRequest::Session` (Proton, art,
+  events, whether a screenshot can be taken), `Achievements { game }`, `Icons { urls }`
+  (quiverd's `~/.cache/quiver/achievement-icons`, known image hosts only), `Screenshot`.
+- **Screenshots** use the layer's capture (`capture.req`, as `quiver lab shot --hdr`): launches
+  now get `QUIVER_SIGHT_CAPTURE=1` unless their settings set it (`0`: none). The frame is the
+  game's own, before the HUD and the panel; it's saved as `~/Pictures/Quiver/<game>/<game>
+  <date> <time>.png` (8-bit for SDR, the 16-bit PQ PNG for HDR). A game started before this
+  can't be captured until it's restarted.
+- **Settings** in `sight.toml`: `[toasts] dnd`, `[achievements] on_unlock` and `hidden`. The
+  toast lane reads `dnd` and `on_unlock`; `toast_screenshot` takes a screenshot 0.5 s after an
+  unlock (quiver-sight's link).
+
 
 ---
 

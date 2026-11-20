@@ -25,7 +25,7 @@ use quiver_ui::options::{Tone, apply_badge, draft_value, outcome_text, pending_t
 use quiver_ui::theme::Theme;
 use serde_json::Value;
 
-use super::state::{ANCHORS, Button, Effect, HudRow, Load, Nav, PRESETS, PanelData, Row, Zone, adjustable, cycle, key_input, rows, step_scale, step_value};
+use super::state::{ANCHORS, Button, Effect, HudRow, Load, Nav, PRESETS, PanelData, Row, Zone, adjustable, cycle, key_input, rows_nav, step_scale, step_value};
 use crate::link::{Change, LinkReq, Loaded, Msg};
 
 /// Widest the card gets (ultra-wide outputs), logical px (SIGHT §9).
@@ -101,6 +101,12 @@ impl DepthMarks {
 /// element) and a pixel of what's behind it, which a lift's moved-off strip is filled from.
 const MARK_PAD: f32 = 6.0;
 
+/// The focused part's depth marker, for the sections that draw their own rows
+/// (`sections::session`, `sections::achievements`).
+pub fn focus_mark(marks: &Rc<RefCell<DepthMarks>>) -> impl IntoElement {
+    mark(marks, Mark::Focus, MARK_PAD)
+}
+
 /// An invisible child covering its (relative) parent that records the parent's bounds, padded
 /// and clipped to the content mask, as part `m`.
 fn mark(marks: &Rc<RefCell<DepthMarks>>, m: Mark, pad: f32) -> impl IntoElement {
@@ -142,6 +148,10 @@ pub struct PanelView {
     side_scroll: ScrollHandle,
     /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
     pub marks: Rc<RefCell<DepthMarks>>,
+    /// What came of the last screenshot (the Session section shows it under the button).
+    pub shot: Option<(String, Tone)>,
+    /// The Achievements list's own scroll.
+    pub ach_scroll: ScrollHandle,
 }
 
 fn tone_color(th: &Theme, t: Tone) -> Hsla {
@@ -197,6 +207,8 @@ impl PanelView {
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             marks: Rc::default(),
+            shot: None,
+            ach_scroll: ScrollHandle::new(),
         }
     }
 
@@ -221,10 +233,16 @@ impl PanelView {
     }
 
     pub fn rows(&self) -> Vec<Row> {
-        rows(self.nav.section, &self.data, Utc::now())
+        rows_nav(&self.nav, &self.data, Utc::now())
     }
 
-    fn option_state(&self, row: &Row) -> Option<&OptionState> {
+    /// The value a row shows: what was asked for, else the option's own.
+    pub fn draft_of(&self, row: &Row) -> Option<Value> {
+        let st = self.option_state(row)?;
+        Some(Self::row_key(row).and_then(|k| self.drafts.get(&k).cloned()).unwrap_or_else(|| draft_value(st, None)))
+    }
+
+    pub fn option_state(&self, row: &Row) -> Option<&OptionState> {
         match row {
             Row::Opt { surface, id } => self.data.options.ready()?.iter().find(|s| &s.key == surface)?.options.get(id),
             Row::Tweak { id } => self.data.tweaks.ready()?.options.get(id),
@@ -240,10 +258,11 @@ impl PanelView {
         }
     }
 
-    fn can_adjust(&self, row: &Row) -> bool {
+    pub fn can_adjust(&self, row: &Row) -> bool {
         match row {
             Row::Opt { .. } | Row::Tweak { .. } => self.option_state(row).is_some_and(adjustable),
             Row::Hud(_) => self.data.hud.ready().is_some(),
+            Row::Pref(_) | Row::AchFilter => true,
             _ => false,
         }
     }
@@ -264,8 +283,18 @@ impl PanelView {
     }
 
     fn scroll_to_focus(&self) {
-        if let Some(r) = self.nav.focused_row(&self.rows()) {
-            self.scroll.scroll_to_item(r);
+        let rows = self.rows();
+        if let Some(r) = self.nav.focused_row(&rows) {
+            match self.nav.section {
+                // These draw their rows in cards: the Achievements list scrolls on its own.
+                PanelSection::Achievements => {
+                    if let Some(p) = super::sections::achievements::list_pos(&rows, r) {
+                        self.ach_scroll.scroll_to_item(p);
+                    }
+                }
+                PanelSection::Session => {}
+                _ => self.scroll.scroll_to_item(r),
+            }
         }
         self.side_scroll.scroll_to_item(self.nav.section.index());
     }
@@ -296,6 +325,10 @@ impl PanelView {
                 }
                 None => self.flash = Some(("The session isn't loaded yet.".into(), Tone::Warn)),
             },
+            Button::Screenshot => {
+                self.send(LinkReq::Screenshot { session: self.session.clone() });
+                self.shot = Some(("Taking a screenshot…".into(), Tone::Muted));
+            }
         }
     }
 
@@ -321,6 +354,13 @@ impl PanelView {
                 .detach();
             }
             Row::Hud(h) => self.adjust_hud(*h, dir),
+            Row::Pref(p) => {
+                super::sections::prefs::step(&mut self.data.prefs, *p, dir);
+                if let Err(e) = super::sections::prefs::save_to(&super::sections::prefs::path(), &self.data.prefs, *p) {
+                    self.flash = Some((format!("Couldn't save the setting: {e}"), Tone::Bad));
+                }
+            }
+            Row::AchFilter => self.nav.ach_filter = self.nav.ach_filter.step(dir),
             _ => {}
         }
     }
@@ -348,7 +388,7 @@ impl PanelView {
         }
     }
 
-    fn hud_value(&self, h: HudRow) -> String {
+    pub fn hud_value(&self, h: HudRow) -> String {
         if let Some(v) = self.hud_draft.get(&h) {
             return v.clone();
         }
@@ -438,6 +478,13 @@ impl PanelView {
                 self.flash = Some(match result {
                     Ok(_) => ("Stopped the game".into(), Tone::Ok),
                     Err(e) => (format!("Couldn't stop the game: {e}"), Tone::Bad),
+                });
+                return;
+            }
+            Change::Screenshot(path) => {
+                self.shot = Some(match result {
+                    Ok(_) => (format!("Saved {}", crate::panel::sections::session::home_relative(path)), Tone::Ok),
+                    Err(e) => (format!("No screenshot: {e}"), Tone::Bad),
                 });
                 return;
             }
@@ -782,6 +829,7 @@ impl PanelView {
                 let (label, help, col, ic) = match b {
                     Button::Quit => ("Quit game", "Asks the game to close, like its window's close button", th.tx1, Icon::LogOut),
                     Button::ForceQuit => ("Force quit", "Stops the game's processes at once; unsaved progress is lost", th.bad, Icon::CircleX),
+                    Button::Screenshot => ("Screenshot", "The game's next frame, saved under Pictures › Quiver", th.tx1, Icon::Image),
                 };
                 div()
                     .id(SharedString::from(format!("row-{i}")))
@@ -807,6 +855,8 @@ impl PanelView {
                     }))
                     .into_any_element()
             }
+            // Drawn by the sections that have them (`sections::*`).
+            Row::Pref(_) | Row::AchFilter => div().into_any_element(),
             Row::Achievement(k) => {
                 let Some(a) = self.data.achievements.ready().and_then(|a| a.list.get(*k)) else { return div().into_any_element() };
                 let masked = a.hidden && !a.unlocked && !self.nav.revealed.contains(k);
@@ -861,6 +911,14 @@ impl PanelView {
                 Some(_) => hints.push(hint(vec!["A"], "Select")),
                 None => hints.push(hint(vec!["A"], "Open")),
             }
+            if self.nav.section == PanelSection::Achievements {
+                if let Some(Row::Achievement(k)) = focused
+                    && self.data.achievements.ready().and_then(|a| a.list.get(*k)).is_some_and(|a| super::sections::achievements::masked(a, self.data.prefs.show_hidden, self.nav.revealed.contains(k)))
+                {
+                    hints.push(hint(vec!["X"], "Reveal"));
+                }
+                hints.push(hint(vec!["LT", "RT"], "Filter"));
+            }
             hints.push(hint(vec!["B"], if self.nav.zone == Zone::Body { "Back" } else { "Close" }));
             hints.push(hint(vec!["LB", "RB"], "Section"));
         }
@@ -889,6 +947,7 @@ impl PanelView {
         let (title, body, yes) = match c.what {
             Button::Quit => (format!("Quit {game}?"), "Asks the game to close, as its window's close button does. The game may ask you first; anything unsaved may be lost.", "Quit"),
             Button::ForceQuit => (format!("Force quit {game}?"), "Stops the game's processes at once. Anything unsaved is lost.", "Force quit"),
+            Button::Screenshot => return None,
         };
         let btn = |id: &'static str, label: &'static str, on: bool, danger: bool, yes: bool| {
             div()
@@ -961,7 +1020,13 @@ impl Render for PanelView {
         let rows = self.rows();
         let focused = self.nav.focused_row(&rows);
         let dialog = self.nav.confirm.is_some();
-        let body: Vec<AnyElement> = rows.iter().enumerate().map(|(i, r)| self.render_row(&th, i, r, focused == Some(i) && !dialog, cx)).collect();
+        let f = focused.filter(|_| !dialog);
+        let body: Vec<AnyElement> = match self.nav.section {
+            // The sections laid out as cards draw their own rows.
+            PanelSection::Session => vec![super::sections::session::body(self, &th, &rows, f, cx)],
+            PanelSection::Achievements => vec![super::sections::achievements::body(self, &th, &rows, f, cx)],
+            _ => rows.iter().enumerate().map(|(i, r)| self.render_row(&th, i, r, focused == Some(i) && !dialog, cx)).collect(),
+        };
         let confirm = self.confirm(&th, cx);
         div()
             .id("panel")
