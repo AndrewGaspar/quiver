@@ -224,10 +224,29 @@ pub fn host(lab: &Lab, name: &str) -> Result<()> {
     log(&format!("{} pad(s) ready; serving {}", pads.len(), sock(&inst).display()));
 
     let mut frames = vec![0u64; pads.len()];
-    let started = Instant::now();
-    let mut seen_up = false;
-    let mut down_checks = 0;
-    let mut last_check = Instant::now();
+    // The container's lifetime is the pads'. Checked on a thread of its own: `podman inspect`
+    // can take seconds on a loaded machine, and requests must never wait behind it.
+    let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (gone, container) = (gone.clone(), inst.container());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let (mut seen_up, mut down_checks) = (false, 0);
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if ops::running_id(&container).is_some() {
+                    seen_up = true;
+                    down_checks = 0;
+                } else {
+                    down_checks += 1;
+                    if (seen_up && down_checks >= 2) || (!seen_up && started.elapsed() > Duration::from_secs(120)) {
+                        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                }
+            }
+        });
+    }
     let mut last_recheck = Instant::now();
     loop {
         let mut fds: Vec<libc::pollfd> = std::iter::once(listener.as_raw_fd()).chain(pads.iter().map(|p| p.fd())).map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
@@ -247,21 +266,11 @@ pub fn host(lab: &Lab, name: &str) -> Result<()> {
                 }
             }
         }
-        // The container's lifetime is the pads'.
-        if last_check.elapsed() > Duration::from_secs(2) {
-            last_check = Instant::now();
-            if ops::running_id(&inst.container()).is_some() {
-                seen_up = true;
-                down_checks = 0;
-            } else {
-                down_checks += 1;
-                if (seen_up && down_checks >= 2) || (!seen_up && started.elapsed() > Duration::from_secs(120)) {
-                    log(&format!("the container {} isn't running: destroying the pads", inst.container()));
-                    let _ = std::fs::remove_file(sock(&inst));
-                    let _ = std::fs::remove_file(ready_file(&inst));
-                    return Ok(());
-                }
-            }
+        if gone.load(std::sync::atomic::Ordering::SeqCst) {
+            log(&format!("the container {} isn't running: destroying the pads", inst.container()));
+            let _ = std::fs::remove_file(sock(&inst));
+            let _ = std::fs::remove_file(ready_file(&inst));
+            return Ok(());
         }
         // Still hidden? (A rule changed and re-triggered would show here.)
         if last_recheck.elapsed() > Duration::from_secs(5) {
@@ -475,7 +484,7 @@ fn request(inst: &Inst, req: &Request) -> Result<Reply> {
             _ => anyhow::anyhow!("{0}'s pads aren't up (quiver lab up {0}; its pad host's log is {1})", inst.name, dir(inst).join("host.log").display()),
         }
     })?;
-    c.set_read_timeout(Some(Duration::from_secs(5)))?;
+    c.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut line = serde_json::to_vec(req)?;
     line.push(b'\n');
     c.write_all(&line)?;

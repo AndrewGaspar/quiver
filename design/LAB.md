@@ -1166,6 +1166,25 @@ Back Start Guide LS RS, both sticks ±32767 on ABS_X/Y/RX/RY (Y flipped as xpad 
 Names: `Quiver Lab Pad <instance>`, then `… P2` for the second. The container has no udevd, so
 the pad host writes a minimal `/run/udev` for it (`data/c13:<minor>` and `+input:inputN` with
 `ID_INPUT_JOYSTICK=1`, mounted read-only), for libudev users. At most four pads per instance.
+The socket is `$XDG_RUNTIME_DIR/quiver-lab-pad-<hash of the instance folder>.sock` (a lab root
+can be deeper than a unix socket path may be long).
+
+Two details found live, both about matching what a real xpad pad does:
+
+- **Rest values.** xpad reports a centred Y as `!0 = -1`, and Wine's XInput inverts it back to
+  0. The kernel starts a uinput axis at 0, which XInput read as `ry -1` until the stick first
+  moved, so the device is made with both Y axes at -1.
+- **SDL's trigger heuristic.** A trigger rests at SDL's minimum, and until an axis has had a
+  "second value" SDL takes a move to |v| < 8192 (raw 96..160 of 0..255, about 0.37-0.63) for the
+  real rest position and drops it (`SDL_SendJoystickAxis`). A real trigger passes through lower
+  values on its way, so it never hits this; ours jumped straight to 0.5 and XInput never saw it.
+  So a trigger moving from rest into that band gets raw 64 first, in the same evdev frame. Under
+  the virtual clock the game is held while both arrive, so it can't see the 64.
+
+Measured in the container, without `SDL_JOYSTICK_DISABLE_UDEV`: SDL3 (native) lists the pad as
+"Xbox 360 Controller" (type XBOX360) both through its udev path (the minimal database) and
+without it; Wine shows exactly one controller per pad (no second copy through winebus's own
+udev/evdev backend).
 
 ### 15.3 Timing and the virtual clock
 
@@ -1224,9 +1243,49 @@ session of its own). `--no-probe` skips it; `--json` has everything.
   the right slot and the screen; evdev and SDL3 in the container; each container has only its
   own nodes; on the virtual clock a script lands on frames 0, 10, 15, 18, 24, the same in two
   runs; a killed pad host's pads go at once; `down` removes them; a stale pad host is stopped by
-  the next `up`.
+  the next `up`. The virtual-clock runs come before the second instance, and the first
+  instance's game is killed before the second comes up: the GPU is shared, and the NVIDIA driver
+  runs out of channels (`NV_ERR_STATE_IN_USE`, gamescope's `vkCreateDevice` -3) with many lab
+  containers up.
 
-### 15.6 Not covered
+### 15.6 Verified live (2026-11-20)
+
+With the rule installed (`/etc/udev/rules.d`, group `quiver-lab-pad` 105000), GE-Proton11-12:
+
+- **Hidden from the host.** The canary and every pad: `root:quiver-lab-pad 0660`, `getfacl`
+  shows no user entry, no `CURRENT_TAGS`, `LIBINPUT_IGNORE_DEVICE=1`, and open() as the user
+  fails with EACCES (the pad host's check and the test's own). Inside the container the same
+  node is `65534:5001 0660` and the container user (groups 1000, 5001) opens it.
+- **`lab_pad.rs` passes** (56 s): `pad status` printed "the game sees it as XInput slot 0",
+  `winedevice.exe` with `/dev/input/event21` and `event22` open, two XInput slots, two
+  DirectInput devices "Controller (XBOX 360 For Windows)" 045e:028e (5 axes, 10 buttons, a
+  POV), two HID gamepads `VID_045E&PID_028E&IG_00`, two raw input gamepads; A + RT + left stick up
+  showed as bright green with the block moved up; pad 2's B on slot 1 only; evdev
+  X down and up (`0x133` 1, 0) and SDL3 listing both pads in the container; the script on frames 0, 10, 15,
+  18, 24 in two runs (frames 4427… and 4301…); each container listing only its own nodes and the
+  other instance failing to open the first's; teardown.
+- **XInput values**, through the probe's watch mode in a session that stayed up: A 0x1000 for
+  the 300 ms asked, left stick (-1, 0.5) as lx -32768 ly 16384 (Y up survives), Up+Start 0x0011,
+  LT 0.5 → 128, RT 0.25 → 64, LT 1 → 255, right stick (0.5, -0.5) → 16384 / -16384, all 0 at
+  rest.
+- **The pad host's lifetime.** A container removed: its pads gone within 5 s. A pad host
+  killed with SIGKILL: its pads gone at once.
+- **A real game.** Alan Wake Remastered (Epic) in an instance of its own (`pad-awr`, made with
+  `quiver lab create … --pads`, removed after):
+  - `pad status`: "the game sees it as XInput slot 0", with `winedevice.exe` holding
+    `/dev/input/event21`;
+  - `pad press a` during the intro cinematic skipped to the title screen;
+  - `press a` again opened the main menu, now with Xbox prompts ("Ⓐ Select");
+  - `press down` moved the selection from New Game to Episodes;
+  - `stick left 0 -1 --for 250ms` moved it on to Options.
+- **Under load.** The first AWR launches showed AWR's "Your GPU must support DX12 with feature
+  level 12_0" box: with several lab instances up, the NVIDIA driver had no channel left for
+  vkd3d's device. The third relaunch, a few minutes later, got past it. Once, under the same
+  load, a `pad` command timed out on the pad host: it checked the container with `podman
+  inspect` on the thread that serves requests, and podman was slow. That check now runs on its
+  own thread.
+
+### 15.7 Not covered
 
 - **Without the rule, no pads**: installing it is root's (a system package does it; a per-user
   install prints the commands).
