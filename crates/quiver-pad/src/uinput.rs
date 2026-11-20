@@ -188,7 +188,9 @@ impl Pad {
             ioctl(fd, UI_SET_FFBIT, FF_RUMBLE as usize)?;
             for (code, min, max, fuzz, flat) in ABS_AXES {
                 ioctl(fd, UI_SET_ABSBIT, code as usize)?;
-                let a = UinputAbsSetup { code, absinfo: InputAbsinfo { value: 0, minimum: min, maximum: max, fuzz, flat, resolution: 0 } };
+                // Start where the model's rest is (xpad's centred Y is -1), so the first state a
+                // game reads matches PadState::default.
+                let a = UinputAbsSetup { code, absinfo: InputAbsinfo { value: model::rest(code), minimum: min, maximum: max, fuzz, flat, resolution: 0 } };
                 ioctl(fd, UI_ABS_SETUP, &a as *const _ as usize).context("UI_ABS_SETUP")?;
             }
         }

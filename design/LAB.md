@@ -1113,6 +1113,10 @@ hyprpad and the compositor would all see a phantom pad. That must never happen, 
   ("Unknown group"), hence the sysusers file.
 - **Why there is no window.** devtmpfs makes the node root 0600, and udev applies the rule
   before it tells listeners (Steam's SDL, libinput, hyprpad) about the device.
+- **Reading `udevadm info` for a pad.** `TAGS=:seat:uaccess:` stays: it's udev's sticky list of
+  every tag the device ever had. What counts is that there's no `CURRENT_TAGS` with `uaccess`
+  (the pad host checks the database's `Q:` lines) and no ACL (`getfacl` shows only
+  `user::rw- group::rw- other::---`).
 - **The container's gid.** Rootless podman maps the user's gid to 0 of its namespace and the
   subordinate range after it, and `--userns=keep-id` then maps container gid G > 1000 to host
   `100000 + G - 1` (subgid 100000:65536). So host 105000 is container gid **5001**

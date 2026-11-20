@@ -92,6 +92,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
             if (slot == 0) s0 = s;
             if (log && (on != had[slot] || !seen[slot])) {
                 fprintf(log, "frame %lu t %lu slot %lu %s\n", frame, (unsigned long)ms, (unsigned long)slot, on ? "connected" : "disconnected");
+                fflush(log);
                 had[slot] = on;
                 seen[slot] = TRUE;
             }

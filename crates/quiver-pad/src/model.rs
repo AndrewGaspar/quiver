@@ -302,6 +302,13 @@ impl PadState {
         }
         for ((code, v), (_, pv)) in self.abs().into_iter().zip(prev.abs()) {
             if v != pv {
+                // SDL takes a trigger's first move from rest into the middle of its range
+                // (|v| < 8192 of ±32767, raw 96..=160) for its real rest value and drops it
+                // (SDL_SendJoystickAxis's initial-value heuristic). A real trigger passes through
+                // lower values first; so does this one, in the same frame.
+                if matches!(code, ABS_Z | ABS_RZ) && pv == 0 && (TRIGGER_SDL_BAND).contains(&v) {
+                    ev.push((EV_ABS, code, TRIGGER_PRIMER));
+                }
                 ev.push((EV_ABS, code, v));
             }
         }
@@ -329,6 +336,16 @@ impl PadState {
         }
         parts.join(", ")
     }
+}
+
+/// Raw trigger values SDL would mistake for the rest position on a first move (see
+/// [`PadState::events_from`]), and the value sent just before them.
+pub const TRIGGER_SDL_BAND: std::ops::RangeInclusive<i32> = 96..=160;
+pub const TRIGGER_PRIMER: i32 = 64;
+
+/// The value an axis has when nothing touches it (xpad reports `!0 = -1` for a centred Y).
+pub fn rest(code: u16) -> i32 {
+    if matches!(code, ABS_Y | ABS_RY) { -1 } else { 0 }
 }
 
 /// -1..1 to XInput's thumb range (-32768..32767).
@@ -425,6 +442,18 @@ mod tests {
         s.apply(&Change::Press { button: Button::Up });
         assert_eq!(s.events_from(&prev), vec![(EV_ABS, ABS_Y, -32768), (EV_ABS, ABS_RZ, 255), (EV_ABS, ABS_HAT0Y, -1), (EV_SYN, SYN_REPORT, 0)]);
         assert_eq!(s.rt, 1.0, "clamped");
+        // A trigger from rest straight to the middle passes through a lower value (SDL).
+        let mut half = PadState::default();
+        half.apply(&Change::Axis { axis: Axis::Lt, value: 0.5 });
+        assert_eq!(half.events_from(&PadState::default()), vec![(EV_ABS, ABS_Z, TRIGGER_PRIMER), (EV_ABS, ABS_Z, 128), (EV_SYN, SYN_REPORT, 0)]);
+        let mut more = half;
+        more.apply(&Change::Axis { axis: Axis::Lt, value: 0.55 });
+        assert_eq!(more.events_from(&half), vec![(EV_ABS, ABS_Z, 140), (EV_SYN, SYN_REPORT, 0)], "only from rest");
+        let mut low = PadState::default();
+        low.apply(&Change::Axis { axis: Axis::Rt, value: 0.25 });
+        assert_eq!(low.events_from(&PadState::default()), vec![(EV_ABS, ABS_RZ, 64), (EV_SYN, SYN_REPORT, 0)], "outside the band: as is");
+        assert_eq!((rest(ABS_Y), rest(ABS_RY), rest(ABS_X), rest(ABS_Z)), (-1, -1, 0, 0));
+        assert_eq!(PadState::default().abs().iter().map(|(c, v)| (*c, *v)).filter(|(_, v)| *v != 0).collect::<Vec<_>>(), vec![(ABS_Y, -1), (ABS_RY, -1)], "the device starts at the model's rest");
         let prev = s;
         s.apply(&Change::Axis { axis: Axis::Ly, value: -1.0 });
         s.apply(&Change::Press { button: Button::Down });

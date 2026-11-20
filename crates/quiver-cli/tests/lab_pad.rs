@@ -10,8 +10,8 @@
 //! 3. buttons, sticks and triggers reach the game, on the pad they're sent to; the screen
 //!    changes with them;
 //! 4. native Linux: evdev events on the node, and SDL3 lists the pads, inside the container;
-//! 5. two instances at once: each container has only its own nodes;
-//! 6. on the virtual clock, a script lands on exact frames, the same in two runs;
+//! 5. on the virtual clock, a script lands on exact frames, the same in two runs;
+//! 6. two instances at once: each container has only its own nodes;
 //! 7. teardown: `down` removes the pads; a killed pad host takes its pads with it; a stale pad
 //!    host is stopped by the next `up`.
 //!
@@ -216,6 +216,8 @@ fn pads_in_lab_instances() {
     // The block moved up by a third of the screen with the stick.
     assert_eq!(px(&held, 0.5, 0.5 - 0.333)[0], 255, "the white block follows the left stick");
     ok(&root, &["pad", A, "--pad", "2", "press", "b", "--for", "300ms"]);
+    // The release reaches the game a moment after the command returns.
+    wait_for("pad 2's release on slot 1", Duration::from_secs(5), || last_state(&game_log(&root, A), 1).is_some_and(|s| s.starts_with("buttons 0x0000")));
     let l = game_log(&root, A);
     let p2: Vec<String> = changes(&l, 1).into_iter().map(|c| c.1).collect();
     assert!(p2.iter().any(|s| s.starts_with("buttons 0x2000")) && p2.last().unwrap().starts_with("buttons 0x0000"), "pad 2's B on slot 1: {p2:?}");
@@ -259,25 +261,7 @@ for i in range(n.value):
     let out = ok(&root, &["exec", A, "env", "SDL_JOYSTICK_DISABLE_UDEV=1", "python3", "-c", sdl]);
     assert_eq!(out.matches("gamepad ").count(), 2, "SDL3 lists both pads: {out}");
 
-    // 5. A second instance at once: its own pad, and only its own nodes.
-    eprintln!("{}", ok(&root, &["up", B]));
-    assert_eq!((pads_of(A), pads_of(B)), (2, 1));
-    let a_nodes: Vec<String> = pad_status(&root, A)["host"]["pads"].as_array().unwrap().iter().map(|p| p["nodes"]["event"].as_str().unwrap().to_owned()).collect();
-    let b_nodes: Vec<String> = pad_status(&root, B)["host"]["pads"].as_array().unwrap().iter().map(|p| p["nodes"]["event"].as_str().unwrap().to_owned()).collect();
-    let list = |i: &str| ok(&root, &["exec", i, "bash", "-c", "ls /dev/input"]);
-    let (la, lb) = (list(A), list(B));
-    for n in &a_nodes {
-        let base = Path::new(n).file_name().unwrap().to_str().unwrap();
-        assert!(la.contains(base) && !lb.contains(base), "{base}: A has it, B doesn't (A: {la}; B: {lb})");
-    }
-    for n in &b_nodes {
-        let base = Path::new(n).file_name().unwrap().to_str().unwrap();
-        assert!(lb.contains(base) && !la.contains(base), "{base}: B has it, A doesn't");
-    }
-    let (good, _) = quiver(&root, &["exec", B, "python3", "-c", "import os,sys; os.open(sys.argv[1], os.O_RDONLY)", &a_nodes[0]]);
-    assert!(!good, "B's container can't open A's pad");
-
-    // 6. The virtual clock: a script on exact frames, twice the same.
+    // 5. The virtual clock: a script on exact frames, twice the same.
     let mut runs = Vec::new();
     for _ in 0..2 {
         ok(&root, &["launch", A, "--clock", "virtual:62.5", "--wait", "frame", "--timeout", "300"]);
@@ -296,6 +280,25 @@ for i in range(n.value):
     // stick for 6 (100 ms at 62.5 Hz).
     assert_eq!(r.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 10, 15, 18, 24], "{r:?}");
     assert!(r[0].1.starts_with("buttons 0x1000") && r[2].1.starts_with("buttons 0x2000 lt 0 rt 128") && r[3].1 == "buttons 0x0000 lt 0 rt 0 lx 32767 ly 0 rx 0 ry 0", "{r:?}");
+
+    // 6. A second instance at once (A's game killed first: one GPU context fewer, the GPU is shared): its own pad, and only its own nodes.
+    ok(&root, &["kill", A]);
+    eprintln!("{}", ok(&root, &["up", B]));
+    assert_eq!((pads_of(A), pads_of(B)), (2, 1));
+    let a_nodes: Vec<String> = pad_status(&root, A)["host"]["pads"].as_array().unwrap().iter().map(|p| p["nodes"]["event"].as_str().unwrap().to_owned()).collect();
+    let b_nodes: Vec<String> = pad_status(&root, B)["host"]["pads"].as_array().unwrap().iter().map(|p| p["nodes"]["event"].as_str().unwrap().to_owned()).collect();
+    let list = |i: &str| ok(&root, &["exec", i, "bash", "-c", "ls /dev/input"]);
+    let (la, lb) = (list(A), list(B));
+    for n in &a_nodes {
+        let base = Path::new(n).file_name().unwrap().to_str().unwrap();
+        assert!(la.contains(base) && !lb.contains(base), "{base}: A has it, B doesn't (A: {la}; B: {lb})");
+    }
+    for n in &b_nodes {
+        let base = Path::new(n).file_name().unwrap().to_str().unwrap();
+        assert!(lb.contains(base) && !la.contains(base), "{base}: B has it, A doesn't");
+    }
+    let (good, _) = quiver(&root, &["exec", B, "python3", "-c", "import os,sys; os.open(sys.argv[1], os.O_RDONLY)", &a_nodes[0]]);
+    assert!(!good, "B's container can't open A's pad");
 
     // 7. Teardown.
     let pid = pad_status(&root, B)["host"]["pid"].as_u64().unwrap();

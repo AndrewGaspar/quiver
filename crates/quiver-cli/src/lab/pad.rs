@@ -110,8 +110,15 @@ pub enum PadCmd {
 pub fn dir(inst: &Inst) -> PathBuf {
     inst.dir.join("pad")
 }
+/// The pad host's socket: in the runtime dir, named by a stable hash of the instance's folder
+/// (a lab root can be deeper than a unix socket path may be long).
 fn sock(inst: &Inst) -> PathBuf {
-    dir(inst).join("host.sock")
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in inst.dir.as_os_str().as_encoded_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+    }
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
+    base.join(format!("quiver-lab-pad-{h:016x}.sock"))
 }
 fn ready_file(inst: &Inst) -> PathBuf {
     dir(inst).join("host.json")
