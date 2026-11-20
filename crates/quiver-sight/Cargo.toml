@@ -19,6 +19,10 @@ harness = false
 name = "ingame_panel"
 harness = false
 
+[[test]]
+name = "panel_view"
+harness = false
+
 [dependencies]
 quiver-api.workspace = true
 quiver-perf.workspace = true
