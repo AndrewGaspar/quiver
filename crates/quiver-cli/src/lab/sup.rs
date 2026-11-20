@@ -74,6 +74,9 @@ struct Sup {
     eos: Option<EosProxy>,
     /// What the watch loop has already said about the current run's network.
     net_seen: Mutex<(u32, std::collections::BTreeSet<String>, eosproxy::Stats)>,
+    /// The run whose launch made it one the EOS proxy watches (an Epic game, or one with the
+    /// EOS SDK: `eos::plan`); only that run's other :443 connections are noted (OUTSIDE).
+    eos_run: Mutex<Option<u32>>,
     /// The instance's read-only mod SDK endpoint's port (`super::sdk`), when it runs.
     mods_port: Mutex<Option<u16>>,
 }
@@ -153,7 +156,9 @@ fn eos_ready(sup: &Sup, run_dir: &Path, run: u32) -> Result<Vec<String>> {
 
 /// During a run: say when the proxy first sees the game's TLS (or its rejection), and look
 /// for :443 connections that didn't go through it. One to an address of the real
-/// `api.epicgames.dev` kills the run (as a Connect process does). True: killed.
+/// `api.epicgames.dev` kills the run (as a Connect process does), in any run; any other is
+/// noted (OUTSIDE) only in a run the proxy watches (`eos::around`): a Ubisoft game's own
+/// HTTPS is on every run and has nothing to do with EOS. True: killed.
 fn eos_watch(sup: &Sup, p: &EosProxy, all: &[procs::Proc], cid: &str) -> bool {
     let Some(run) = sup.state.lock().unwrap().run.as_ref().filter(|r| r.phase != Phase::Exited).map(|r| r.id) else { return false };
     let Some(pid) = procs::instance_wine(all, cid).first().map(|p| p.pid) else { return false };
@@ -183,9 +188,11 @@ fn eos_watch(sup: &Sup, p: &EosProxy, all: &[procs::Proc], cid: &str) -> bool {
         say.push(format!("EOS proxy: the game's requests arrive ({} allowed, {} blocked so far)", stats.allowed, stats.blocked));
     }
     let mut killed = false;
+    let watched = *sup.eos_run.lock().unwrap() == Some(run);
     for c in fresh {
         let to = format!("{}:{} ({})", c.remote, c.port, c.state);
-        if epic.contains(&c.remote) {
+        let Some(what) = eos::around(&c.remote, &epic, watched) else { continue };
+        if what == eos::Around::Bypass {
             let msg = format!("!!! BYPASS {to} is one of api.epicgames.dev's addresses and didn't go through the EOS proxy (a hard-coded address?); run killed");
             p.shared.log(&msg);
             sup.update(|st| {
@@ -262,7 +269,7 @@ pub fn supervise(lab: Lab, name: &str) -> Result<()> {
         Ok(None) => (None, "; no EOS proxy (a container from before it: quiver lab down/up)".into()),
         Err(e) => (None, format!("; the EOS proxy didn't start: {e:#}")),
     };
-    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()), eos, net_seen: Mutex::default(), mods_port: Mutex::new(None) });
+    let sup = Arc::new(Sup { lab, inst, state: Mutex::new(st), busy: Mutex::new(()), eos, net_seen: Mutex::default(), eos_run: Mutex::new(None), mods_port: Mutex::new(None) });
     let _ = lab::write_atomic(&sup.inst.state_path(), &serde_json::to_vec_pretty(&*sup.state.lock().unwrap())?);
     // The mod SDK endpoint: a lab mod's channel ends here, never in quiverd.
     let weak = Arc::downgrade(&sup);
@@ -468,6 +475,7 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     std::fs::create_dir_all(&run_dir)?;
     let session = quiver_api::lab::session_id(&inst.name, run);
     let run_win = format!(r"{}\runs\r{run}", lab::LAB_WIN);
+    *sup.eos_run.lock().unwrap() = eos_plan.is_some().then_some(run);
     if let Some(plan) = &eos_plan {
         let ready = eos_ready(sup, &run_dir, run);
         if let (Err(e), Some(p)) = (&ready, &sup.eos) {

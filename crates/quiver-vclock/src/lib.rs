@@ -124,7 +124,32 @@ mod ffi {
         pub reads: u64,
     }
 
+    /// `vc_vhook` (win/vclock.h): one vtable hook's entry.
+    #[repr(C)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub struct VcVhook {
+        pub vt: *mut *mut c_void,
+        pub hook: *mut c_void,
+        pub orig: *mut c_void,
+        pub slot: u32,
+        pub noted: u32,
+    }
+
+    /// `vc_vtreg`: the vtable hook registry.
+    #[repr(C)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub struct VcVtreg {
+        pub e: [VcVhook; 128],
+        pub n: i32,
+    }
+
     unsafe extern "C" {
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_vt_plan(r: *mut VcVtreg, vt: *mut *mut c_void, slot: u32, cur: *mut c_void, hook: *mut c_void, entry: *mut *mut VcVhook) -> i32;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_vt_orig(r: *const VcVtreg, vt: *mut *mut c_void, slot: u32, hook: *mut c_void) -> *mut c_void;
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub fn vc_vtreg_size() -> u64;
         pub fn vc_timing(rate: f64, real_freq: i64, tpf: *mut i64, vfreq: *mut i64) -> i32;
         #[cfg_attr(not(test), allow(dead_code))]
         pub fn vc_init(c: *mut VcClock, rate: f64, real_freq: i64, creep_after: u32, stuck_ms: u32, real_now: RealNow, ctx: *mut c_void) -> i32;
@@ -1166,5 +1191,152 @@ mod tests {
         let leaky = Report::parse("rate=62.5\nengaged=1\nqpf=10000000\nholds=1\nleaked_ticks=5000\n");
         assert!(leaky.verdict().iter().any(|v| v.contains("moved 5000 tick(s)")));
         assert!(Report::parse("rate=62.5\nengaged=1\n").hold_line().is_none());
+    }
+
+    // The vtable hook registry (vc_vt_plan, vc_vt_orig in win/vclock.c), on fake vtables whose
+    // "functions" are ids: D the translation layer's (DXVK's), H ours, P and Q other modules'
+    // hooks (Pharos's d3d11.dll proxy), each calling what it saved.
+    const VT_NEW: i32 = 0;
+    const VT_OURS: i32 = 1;
+    const VT_WRAPPED: i32 = 2;
+    const VT_RESTORED: i32 = 3;
+    const VT_FULL: i32 = 4;
+    const D: usize = 0x1000;
+    const H: usize = 0x2000;
+    const P: usize = 0x3000;
+    const Q: usize = 0x4000;
+    const SLOT: usize = 10; // IDXGIFactory::CreateSwapChain
+
+    fn registry() -> Box<VcVtreg> {
+        // SAFETY: all-zero is the C side's empty registry (pointers null, n 0).
+        Box::new(unsafe { std::mem::zeroed() })
+    }
+
+    fn vtable(f: usize) -> Box<[*mut c_void; 16]> {
+        let mut vt = Box::new([std::ptr::null_mut(); 16]);
+        vt[SLOT] = f as *mut c_void;
+        vt
+    }
+
+    /// What vt_hook does: ask the registry, write our hook when told to.
+    fn hook(r: &mut VcVtreg, vt: &mut [*mut c_void; 16], h: usize) -> i32 {
+        // SAFETY: the registry and the vtable are live; nothing is dereferenced through the ids.
+        let plan = unsafe { vc_vt_plan(r, vt.as_mut_ptr(), SLOT as u32, vt[SLOT], h as *mut c_void, std::ptr::null_mut()) };
+        if plan == VT_NEW || plan == VT_RESTORED {
+            vt[SLOT] = h as *mut c_void;
+        }
+        plan
+    }
+
+    /// Another module hooking the slot the usual way: save what's there, write its own.
+    fn foreign(saved: &mut std::collections::HashMap<usize, usize>, vt: &mut [*mut c_void; 16], f: usize) {
+        saved.insert(f, vt[SLOT] as usize);
+        vt[SLOT] = f as *mut c_void;
+    }
+
+    /// A call through the slot: who ran, in order. Panics on a loop or a dead end.
+    fn call(r: &VcVtreg, vt: &mut [*mut c_void; 16], saved: &std::collections::HashMap<usize, usize>) -> String {
+        let mut f = vt[SLOT] as usize;
+        let mut trace = Vec::new();
+        loop {
+            assert!(trace.len() < 12, "the chain loops: {trace:?}");
+            match f {
+                D => {
+                    trace.push("D");
+                    return trace.join(">");
+                }
+                H => {
+                    trace.push("H");
+                    // SAFETY: as in hook().
+                    f = unsafe { vc_vt_orig(r, vt.as_mut_ptr(), SLOT as u32, H as *mut c_void) } as usize;
+                    assert_ne!(f, 0, "our hook has no original: {trace:?}");
+                }
+                x => {
+                    trace.push(if x == P { "P" } else { "Q" });
+                    f = saved[&x];
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_registry_mirror_matches() {
+        // SAFETY: a plain function.
+        assert_eq!(unsafe { vc_vtreg_size() } as usize, std::mem::size_of::<VcVtreg>());
+    }
+
+    #[test]
+    fn another_modules_hook_over_ours_stays_in_the_chain() {
+        // Origins with Pharos: the clock hooks the factory's CreateSwapChain (from the game's
+        // CreateDXGIFactory import), Pharos's proxy hooks it over ours, then the clock sees the
+        // device's factory (same class, same vtable) after D3D11CreateDevice and is asked again.
+        let (mut r, mut vt, mut saved) = (registry(), vtable(D), std::collections::HashMap::new());
+        assert_eq!(hook(&mut r, &mut vt, H), VT_NEW);
+        assert_eq!(call(&r, &mut vt, &saved), "H>D");
+        foreign(&mut saved, &mut vt, P);
+        assert_eq!(call(&r, &mut vt, &saved), "P>H>D");
+        assert_eq!(hook(&mut r, &mut vt, H), VT_WRAPPED, "left alone");
+        assert_eq!(vt[SLOT] as usize, P);
+        assert_eq!(call(&r, &mut vt, &saved), "P>H>D", "Pharos sees the call and ours runs once");
+        // Every further object of the class asks again: nothing changes, no new entries.
+        for _ in 0..50 {
+            assert_eq!(hook(&mut r, &mut vt, H), VT_WRAPPED);
+        }
+        assert_eq!(r.n, 1);
+        // A third module over both.
+        foreign(&mut saved, &mut vt, Q);
+        assert_eq!(hook(&mut r, &mut vt, H), VT_WRAPPED);
+        assert_eq!(call(&r, &mut vt, &saved), "Q>P>H>D");
+        // They unhook (each restores what it saved): ours is back on top, still ours.
+        vt[SLOT] = saved[&Q] as *mut c_void;
+        vt[SLOT] = saved[&P] as *mut c_void;
+        assert_eq!(hook(&mut r, &mut vt, H), VT_OURS);
+        assert_eq!(call(&r, &mut vt, &saved), "H>D");
+        // Someone puts the original back under us: hooked again, same entry.
+        vt[SLOT] = D as *mut c_void;
+        assert_eq!(hook(&mut r, &mut vt, H), VT_RESTORED);
+        assert_eq!((call(&r, &mut vt, &saved).as_str(), r.n), ("H>D", 1));
+    }
+
+    #[test]
+    fn a_hook_already_there_is_chained_onto() {
+        // Pharos first, then the clock: ours goes in front and calls Pharos's.
+        let (mut r, mut vt, mut saved) = (registry(), vtable(D), std::collections::HashMap::new());
+        foreign(&mut saved, &mut vt, P);
+        assert_eq!(hook(&mut r, &mut vt, H), VT_NEW);
+        assert_eq!(call(&r, &mut vt, &saved), "H>P>D");
+        assert_eq!(hook(&mut r, &mut vt, H), VT_OURS, "asked again: nothing to do");
+        assert_eq!((call(&r, &mut vt, &saved).as_str(), r.n), ("H>P>D", 1));
+    }
+
+    #[test]
+    fn vtables_are_told_apart_and_copies_find_their_original() {
+        let (mut r, saved) = (registry(), std::collections::HashMap::new());
+        let (mut a, mut b) = (vtable(D), vtable(D + 8));
+        assert_eq!(hook(&mut r, &mut a, H), VT_NEW);
+        // A copy of a hooked vtable (a per-object vtable some hookers make): its slot is ours
+        // but it isn't registered. It gets the one original this hook has for the slot.
+        let mut copy = Box::new(*a);
+        assert_eq!(call(&r, &mut copy, &saved), "H>D");
+        // A second class with another original: copies are ambiguous now, so none is guessed.
+        assert_eq!(hook(&mut r, &mut b, H), VT_NEW);
+        // SAFETY: as in hook().
+        let o = unsafe { vc_vt_orig(&*r, copy.as_mut_ptr(), SLOT as u32, H as *mut c_void) };
+        assert!(o.is_null());
+        // The registered ones still get their own.
+        // SAFETY: as in hook().
+        let (oa, ob) = unsafe { (vc_vt_orig(&*r, a.as_mut_ptr(), SLOT as u32, H as *mut c_void), vc_vt_orig(&*r, b.as_mut_ptr(), SLOT as u32, H as *mut c_void)) };
+        assert_eq!((oa as usize, ob as usize), (D, D + 8));
+    }
+
+    #[test]
+    fn a_full_registry_leaves_slots_alone() {
+        let mut r = registry();
+        let mut vts: Vec<Box<[*mut c_void; 16]>> = (0..129).map(|_| vtable(D)).collect();
+        for (i, vt) in vts.iter_mut().enumerate() {
+            let want = if i < 128 { VT_NEW } else { VT_FULL };
+            assert_eq!(hook(&mut r, vt, H), want, "vtable {i}");
+        }
+        assert_eq!(vts[128][SLOT] as usize, D);
     }
 }

@@ -7,6 +7,12 @@
  *
  * d3d11 makes its swap chain with D3D11CreateDeviceAndSwapChain; d3d11dev with D3D11CreateDevice
  * and the factory it gets from the device (IDXGIDevice -> adapter -> parent), as Unity does.
+ * d3d11chain is d3d11dev with another module's hooks in the chain, as Pharos's d3d11.dll proxy
+ * puts them in AC Origins: a factory from CreateDXGIFactory1 first (the clock hooks its
+ * CreateSwapChain), then this exe hooks the same slot over the clock's (saving and calling what
+ * was there), then D3D11CreateDevice (the clock is asked to hook the device's factory, the same
+ * class and vtable, again), then CreateSwapChain; this exe's CreateSwapChain hook also hooks the
+ * swap chain's Present over the clock's. It prints how often its hooks ran.
  * With a helper path, that copy of this exe is started first (a crash handler's place).
  * Background threads run throughout: one polls the clock every Sleep(1), one every Sleep(100),
  * as a game's timer and streaming threads do.
@@ -77,6 +83,40 @@ static ID3D11DeviceContext *g_ctx;
 static ID3D11RenderTargetView *g_rtv;
 static IDirect3DDevice9 *g_d9;
 static int g_d3d9;
+
+/* d3d11chain: another module's hooks, each calling what it found in the slot. */
+static HRESULT(STDMETHODCALLTYPE *their_csc_next)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
+static HRESULT(STDMETHODCALLTYPE *their_present_next)(IDXGISwapChain *, UINT, UINT);
+static LONG their_csc_calls, their_presents;
+
+static void *patch_slot(void **slot, void *fn) {
+    DWORD old;
+    void *was = *slot;
+    VirtualProtect(slot, sizeof(void *), PAGE_EXECUTE_READWRITE, &old);
+    *slot = fn;
+    VirtualProtect(slot, sizeof(void *), old, &old);
+    return was;
+}
+
+static HRESULT STDMETHODCALLTYPE their_present(IDXGISwapChain *sc, UINT sync, UINT flags) {
+    their_presents++;
+    return their_present_next(sc, sync, flags);
+}
+
+static HRESULT STDMETHODCALLTYPE their_csc(IDXGIFactory *f, IUnknown *dev, DXGI_SWAP_CHAIN_DESC *d, IDXGISwapChain **out) {
+    their_csc_calls++;
+    HRESULT hr = their_csc_next(f, dev, d, out);
+    if (SUCCEEDED(hr) && out && *out && !their_present_next)
+        their_present_next = patch_slot((void **)&(*out)->lpVtbl->Present, (void *)their_present);
+    return hr;
+}
+
+/* Which module an address is in. */
+static HMODULE module_at(void *p) {
+    HMODULE m = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)p, &m);
+    return m;
+}
 
 static void frame(int i) {
     float col[4] = {(float)(i % 64) / 64.0f, 0.2f, 0.4f, 1.0f};
@@ -176,7 +216,8 @@ int main(int argc, char **argv) {
     }
     if (argc < 5) return 2;
     g_d3d9 = !strcmp(argv[1], "d3d9");
-    int devfactory = !strcmp(argv[1], "d3d11dev");
+    int chain = !strcmp(argv[1], "d3d11chain");
+    int devfactory = chain || !strcmp(argv[1], "d3d11dev");
     if (argc >= 6) {
         STARTUPINFOA si = {sizeof si};
         PROCESS_INFORMATION pi;
@@ -239,6 +280,17 @@ int main(int argc, char **argv) {
         sd.Windowed = TRUE;
         sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
         ID3D11Device *dev;
+        IDXGIFactory1 *f0 = NULL;
+        if (chain) {
+            HMODULE proxy = GetModuleHandleA("version.dll");
+            if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f0))) {
+                printf("no dxgi factory\n");
+                return 3;
+            }
+            void **slot = (void **)&f0->lpVtbl->CreateSwapChain;
+            printf("chain clock_first %d\n", module_at(*slot) == proxy ? 1 : 0);
+            their_csc_next = patch_slot(slot, (void *)their_csc);
+        }
         if (devfactory) {
             IDXGIDevice *dd;
             IDXGIAdapter *ad;
@@ -249,6 +301,10 @@ int main(int argc, char **argv) {
                 FAILED(IDXGIFactory_CreateSwapChain(f, (IUnknown *)dev, &sd, &g_sc))) {
                 printf("no d3d11 device or swap chain (device factory)\n");
                 return 3;
+            }
+            if (chain) {
+                void *slot = (void *)f->lpVtbl->CreateSwapChain;
+                printf("chain same_vtable %d slot_theirs %d\n", (void *)f->lpVtbl == (void *)f0->lpVtbl ? 1 : 0, slot == (void *)their_csc ? 1 : 0);
             }
         } else if (FAILED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &g_sc, &dev, NULL, &g_ctx))) {
             printf("no d3d11 device\n");
@@ -378,6 +434,7 @@ int main(int argc, char **argv) {
         frame(i);
     }
     printf("D frames 10 real_s %.6f\n", real_s() - r0);
+    if (chain) printf("chain their_create_calls %ld their_presents %ld\n", (long)their_csc_calls, (long)their_presents);
     g_stop = 1;
     WaitForSingleObject(bg1, INFINITE);
     WaitForSingleObject(bg2, INFINITE);

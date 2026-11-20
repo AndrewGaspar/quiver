@@ -30,7 +30,8 @@ quiver lab status N | wait N STATE [--stable]       quiver lab logs N [--tail 40
 quiver lab shot N [--settle S] [--crop C] [--metrics]
 quiver lab key N KEY… | type N TEXT | mouse N DX DY | click N FX FY [--expect-change]
 quiver lab set N FILE:[section]key=value… [--wait] | profile N [NAME]
-quiver lab fixture save|install|list … | call N VERB … | where N | teleport N LOC
+quiver lab fixture save|import|install|list … | call N VERB … [--timeout S] | where N [--timeout S]
+quiver lab teleport N LOC|X Y Z [YAW [PITCH]] [--no-turn] | turn N YAW [PITCH] [--tolerance DEG] [--moves K]
 quiver lab gpu [--for N] -- CMD… | bench N --variant A=… --variant B=… … | host
 quiver lab brief <game> | doctor | image build|status | job list|show|wait
 quiver lab sight N status [--json]                  (instances with sight = on, section 12)
@@ -79,6 +80,11 @@ registry recorded keep working), the exe and its arguments, environment and DLL 
 (the game's Quiver settings when made), the mod folder, the graphics profile, the save folders
 fixtures copy, file aliases for `set` (`pharos = "install:pharos.ini"`), `throttle` lines for
 the GPU lock, and the mod's `reload_pattern` and `log_file`. Change it with `quiver lab edit`.
+File references (`log_file`, `files` aliases, `set`) are `install:<rel>`, `lab:<rel>`,
+`run:<rel>` (the current run's folder `lab/runs/r<N>/`, where a mod writing to
+`QUIVER_LAB_RUN_DIR` puts its log: `log_file=run:pharos.log`; resolved at each use, so after
+a relaunch it names the new run's file, and `bench --relaunch` re-resolves it per launch), or
+a path relative to the prefix.
 
 **The container** (`quiver_core::lab::podman`, image `localhost/quiver-lab:1` from
 `contrib/lab/Containerfile`, built with `quiver lab image build`):
@@ -250,7 +256,11 @@ container's loopback.
 
 - One to an address the real `api.epicgames.dev` has (as the proxy resolved it) is logged as
   `!!! BYPASS` and kills the run as a violation, the way a Connect process does.
-- Any other is logged as `!!! OUTSIDE`, and added to the run's notes and events.
+- Any other is logged as `!!! OUTSIDE`, and added to the run's notes and events, **only in a
+  run the proxy watches** (an Epic game or one shipping the EOS SDK, the runs the launch
+  checks below apply to; `eos::around`). Every Ubisoft run used to get one for the game's own
+  UbiServices HTTPS, which has nothing to do with EOS; other games' runs still get the BYPASS
+  check (test `eos::tests::outside_notes_only_where_the_proxy_watches`).
 
 **At each launch** (`lab::eos`, the supervisor), for an Epic game or any game shipping
 `EOSSDK-Win64/Win32-Shipping.dll`, after the kill-all:
@@ -370,8 +380,37 @@ game exited). `--stable` then waits until consecutive frames stop changing.
   place. Only writes after the run started count.
 - `%QUIVER_LAB%\req\<id>.json` → `%QUIVER_LAB%\rsp\<id>.json`: `quiver lab call N VERB ARGS…`
   (`{"id","verb","args"}` → `{"ok":true,"result":…}`). `where` and `teleport` are calls;
-  `teleport LOCATION` reads `fixtures/<game>/locations.txt` (`name x y z [yaw [pitch]]`). This
-  is the generic form of Pharos's `where`/`teleport` files: any mod can fill it.
+  `teleport LOCATION [MORE…]` reads `fixtures/<game>/locations.txt` (`name x y z [yaw
+  [pitch]] [# comment]`; the comment is dropped, blank and `#` lines skipped, and any further
+  arguments, such as Pharos's `hold=S`, follow the row's). This is the generic form of
+  Pharos's `where`/`teleport` files: any mod can fill it.
+- **Options after arguments.** `call`, `teleport` and `turn` take negative numbers as
+  arguments, but anything else starting with `-` is an option, wherever it is:
+  `quiver lab call N cfg stereo.depth -1.5 --timeout 60` is the verb `cfg` with two arguments
+  and a 60 s timeout (it used to send `--timeout 60` to the mod). For an argument that starts
+  with `-` and isn't a number, put it after `--`: `quiver lab call N VERB -- --raw`. `where`
+  takes `--timeout S` (default 15; `call` 15, `teleport` 120). Single-number siblings
+  (`mouse DX DY`, `pad stick X Y`) already took negatives and options after them.
+- **Turning the camera** (`lab::teleport`). A mod can move the player from inside the game but
+  often can't turn the camera: under Wine, `SendInput` from inside the game doesn't reach
+  AC Origins' raw-input mouse-look, while XTEST motion from the host does. So a mod answers
+  `teleport x y z yaw pitch` by moving the player and returning `"want":{"yaw":…,"pitch":…}`,
+  and `quiver lab teleport` turns the camera there (unless `--no-turn`), as `quiver lab turn N
+  YAW [PITCH]` does on its own: read the camera with `where` (`camera.yaw`/`camera.pitch` in
+  degrees, else top-level `yaw`/`pitch`), move the mouse through the XTEST path of `quiver lab
+  mouse` (in steps of at most 400 px, which games don't clamp), read again once two readings
+  100 ms apart agree (camera smoothing), until both axes are within `--tolerance` (0.5°) or
+  `--moves` (10) moves are spent. The gain (degrees per pixel, signed, per axis) is measured
+  from the moves: an axis with none yet gets a 100 px probe (400, then 1600 if it didn't
+  move), each move updates it (a secant), yaw takes the short way round, so sensitivity,
+  inverted axes and the game's yaw convention don't matter. The learned gain is kept in
+  `<instance>/camera-gain.json` as the next turn's first guess. A pitch past the game's limit
+  stops after two moves that did nothing. The answer is the mod's JSON with `"camera":{"camera",
+  "moves","converged","error","gain"}` added; not converging, a mouse that never moves the
+  camera, a `where` without a camera, or a game held by `quiver lab clock` is an error (exit
+  1). Pharos's `tools/lab/camera` did this with fixed gains (yaw -0.117 °/px, pitch -0.077
+  °/px), which the unit tests' simulated camera uses, with smoothing, a pitch limit, a stale
+  gain of the wrong sign, the other yaw convention and a dead mouse.
 - Live config: the mod re-reads its file; `quiver lab set … --wait` waits for the manifest's
   `reload_pattern` in its `log_file` instead of sleeping.
 
@@ -411,8 +450,8 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 | clicks at 2560×1600 pixels | `quiver lab click FX FY`: fractions of the manifest's display; `--expect-change` fails when the screen didn't change (clicks missed silently before) |
 | `ini-set` | `quiver lab set FILE:[section]key=value` (INI and XML through `confpatch`, byte for byte except the value; Unreal section names with dots work; `{width}`/`{height}`/`{refresh}`), `--wait` for the reload line |
 | `profiles/<p>.ini` | `quiver lab profile` (`profiles/<game>/<name>.set`, applied before every launch when it is the manifest's) |
-| `fixture` / `fixture-save` | `quiver lab fixture save|install|list` (the manifest's save folders; read-only once saved; the instance's own saves kept once before the first install; refused while the game runs) |
-| `where`, `teleport`, `locations.txt` | `quiver lab call|where|teleport` over the lab channel |
+| `fixture` / `fixture-save` | `quiver lab fixture save|import|install|list` (the manifest's save folders; read-only once saved; the instance's own saves kept once before the first install; refused while the game runs). `import` (below) |
+| `where`, `teleport`, `locations.txt`, `tools/lab/camera` | `quiver lab call|where|teleport|turn` over the lab channel; teleport turns the camera to the mod's `want` (section 6) |
 | `gpu-exclusive` | `quiver lab gpu [--for N] -- CMD` (a lock others queue on; other running instances throttled through their manifests' `throttle` lines and restored after; host state logged before and after to `gpu.log`) |
 | `bench`, `abtest` | `quiver lab bench`: variants `LABEL=assign;assign`, `--rounds` interleaved, `--samples` shots over `--crop` (Laplacian sharpness, temporal noise, mean level), `--log-metric NAME=REGEX` numbers from the log written meanwhile, host state per variant, `--relaunch --ready STATE` for settings that need a restart, `--gpu`; originals restored; `bench.json` and a table |
 | `userplaying.sh` | not built as a guard: sharing the machine is the user's call (section 11). The user can set limits instead, enforced quietly on instances only (section 15) |
@@ -420,6 +459,30 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 
 Long runs go in the background: `quiver lab … --bg` prints a job id; `quiver lab job wait ID`
 returns with the job's output and exit code.
+
+**Importing fixtures** (2026-11-20). `quiver lab fixture import N NAME FROM… [--into FOLDER]
+[--note TEXT]` makes a fixture from saves someone has, stored as `fixture save` stores them
+(`fixtures/<game>/<NAME>/prefix/<save folder>/…`, a `README.md` with the note, every file
+read-only), so `fixture install` and `fixture list` treat it like any other:
+
+- `FROM` is save files (`{1..6}.save`), one folder of them, or one archive (`.zip`, `.tar`,
+  `.tar.gz`/`.tgz`, `.tar.xz`, `.tar.zst`, `.tar.bz2`, `.7z`), unpacked with `bsdtar`
+  (libarchive refuses absolute paths and `..` and won't write through symlinks; owners,
+  permissions, xattrs and ACLs aren't kept);
+- the files go into the instance's save folder: the manifest's one `saves` folder as found in
+  the instance's prefix (`savegames/*/3539` expanded to the person's user id), or `--into`
+  (relative to the prefix, no `..`); with several, `--into` is required;
+- a folder or archive holding only one folder is unwrapped (an archive of `3539/`); one
+  holding `prefix/` (a fixture copied from another lab) is taken as it is;
+- only plain files and folders are imported: a symlink or special file anywhere inside is
+  refused (the paths given are followed, nothing inside them is). It is built in a hidden
+  folder next to the fixtures and renamed into place, so a failure leaves nothing behind;
+  an existing name is refused.
+
+Tests: `lab::fixture::tests` (six save files, then installed; a wrapped folder, a zip and a
+tar.gz made by bsdtar; a fixture taken as it is; bad names, a missing file, `--into ../`, a
+symlink in a folder and in a tar, two save folders without `--into`, a manifest folder not
+made yet).
 
 ### 8.1 The virtual clock (fixed step: faster, and repeatable)
 
@@ -487,7 +550,27 @@ corrections included:
   factories and D3D10/11 device-and-swap-chain (then `CreateSwapChain*`, then the swap chain's
   `Present`/`Present1`; a device made without a factory has its adapter's factory hooked),
   OpenGL `SwapBuffers`/`wglSwapBuffers`, and Vulkan `vkQueuePresentKHR` through its
-  proc-address lookups. Vtable slots are patched per class, with a registry of originals.
+  proc-address lookups. Vtable slots are patched per class, with a registry of originals: one entry per (vtable,
+  slot), the hook and what the slot held before it (`vc_vt_plan`/`vc_vt_orig` in `vclock.c`,
+  so the host tests run them). **Other modules' hooks stay in the chain** (2026-11-20). A
+  vtable is shared by every object of its class, so the hook is asked for again for each new
+  factory, device or swap chain. When a registered slot holds something else by then, another
+  module hooked it after us; it read the slot then, so the function it saved and calls is
+  ours, and it is left in front (it runs, then ours, then the original). When the slot holds
+  our original again (someone unhooked), ours goes back, same entry. Until then the DLL hooked
+  over the other module with a second entry, but the lookup returned the first entry's
+  original, so the other module's hook was skipped: in AC Origins, Pharos's `d3d11.dll` proxy
+  hooks the factory's `CreateSwapChain` after the clock hooked it from the game's
+  `CreateDXGIFactory` import, the clock then saw the device's factory (same vtable) after the
+  patched `D3D11CreateDevice` returned and hooked again, and Pharos never saw the swap chain.
+  Chaining onto the other hook instead (ours → theirs → ours) is wrong for a shared vtable:
+  with one original per slot it recurses for ever, with a per-call depth it runs ours twice,
+  and the two hookers would take the slot back from each other for every new object. The log
+  says `… now starts at <addr> in <module>, another module's hook over ours: left in front`.
+  A hook that was there before ours is chained onto as before (ours → theirs → original). An
+  unregistered copy of a hooked vtable (a per-object vtable) whose slot reached our hook gets
+  the original of that hook's entries for the slot when they all agree, else the call fails
+  as before.
   Nested presents on one thread count once; when two paths present, a D3D Present outranks
   OpenGL, which outranks Vulkan.
   **Why not the Sight layer's present count:** under DXVK and vkd3d-proton,
@@ -583,7 +666,11 @@ followed by whether every step was a frame, and the determinism verdict.
   ticks per frame and the reported QPF, exactly one period per frame whatever the real frame
   took, a busy-wait that terminates by creeping (with the overrun after it), the escape (once
   per frame, then back on the grid), never backwards under random interleavings, sleeps,
-  FILETIME and ms scaling, the report's parsing and verdicts, and the embedded DLLs.
+  FILETIME and ms scaling, the report's parsing and verdicts, and the embedded DLLs. The
+  vtable registry on fake vtables whose calls are traced: another module's hook over ours
+  stays in front and each runs once (`P>H>D`), 50 more objects of the class change nothing,
+  a third module over both, unhooking, the original put back, a hook already there chained
+  onto (`H>P>D`), vtables told apart, a copied vtable's original, a full registry.
 - `cargo test -p quiver-core vclock`: `clock=` edits and the manifest, proxy choice (an
   import, a DLL beside the exe, a shipped DLL skipped, a mod's refused when forced, no way in),
   the DLL placed in the clone and removed at the next launch, never outside the instance, the
@@ -607,6 +694,15 @@ followed by whether every step was a frame, and the determinism verdict.
   - `GetProcAddress("QueryPerformanceCounter")` gives the virtual value;
   - only the executable's 7 clock imports point into the DLL; none of the other 28 modules'
     (Wine's builtins, DXVK's d3d11, dxgi and d3d9) do.
+
+  `another_modules_hooks_stay_in_the_chain` (`d3d11chain`, x64 and x86, 2026-11-20 on
+  GE-Proton11-12) replays Origins with Pharos: a factory from `CreateDXGIFactory1` (the clock
+  hooks its `CreateSwapChain`), the test exe hooks the same slot over the clock's, then
+  `D3D11CreateDevice` (the clock is asked for the device's factory, the same vtable), then
+  `CreateSwapChain`, whose hook also hooks the swap chain's `Present` over the clock's. Its
+  CreateSwapChain hook ran once and its Present 671 times (every present), the slot still
+  held its hook, the clock counted 670 frames after engaging with every step exactly 160000
+  ticks. With the old DLL the same run gave `their_create_calls 0 their_presents 0`.
 
 ### 8.2 Pause and frame stepping (2026-11-19)
 
@@ -1483,3 +1579,22 @@ With the rule installed (`/etc/udev/rules.d`, group `quiver-lab-pad` 105000), GE
   modelled; only hyprpad's grip map.
 - **Input on a thread the clock doesn't hold** sees changes during the settle, before the next
   step; its simulation still only gets time one frame per step (§8.2).
+
+## 17. Gaps Pharos found moving to the lab (2026-11-20)
+
+Pharos (the AC Origins DLSS/stereo mod) moved its testing from its own harness onto `quiver
+lab` and reported these, most important first. Each is fixed and tested where it lives:
+
+1. **The virtual clock dropped another module's DXGI hooks**: re-hooking a factory vtable
+   over Pharos's `d3d11.dll` proxy bypassed it (§8.1, "Other modules' hooks stay in the
+   chain"). Proved by the registry's unit tests and the Wine test `d3d11chain`, which fails
+   with the old DLL; not run live in Origins (that needs Pharos's build in an Origins instance).
+2. **`log_file` couldn't name the run folder**: `run:<file>` (§2).
+3. **locations.txt's `# comments` reached the mod** as arguments (§6).
+4. **teleport couldn't turn the camera**: `teleport` turns it to the mod's `want` in a closed
+   loop on `where`, and `quiver lab turn` does it alone (§6). Proved against a simulated camera
+   with Origins' gains; not run live.
+5. **`where` had a fixed 15 s timeout and options after `call` arguments went to the mod**:
+   `--timeout` everywhere, options after arguments, `--` for the rest (§6).
+6. **`!!! OUTSIDE …:443` on every Ubisoft run**: only runs the EOS proxy watches get it (§3.1).
+7. **No fixture import**: `quiver lab fixture import` (§8).

@@ -37,6 +37,7 @@ pub mod ready;
 pub mod hdr;
 pub mod nvml;
 pub mod sight;
+pub mod teleport;
 pub mod vclock;
 pub mod wincert;
 
@@ -172,6 +173,11 @@ impl Inst {
     }
     pub fn state_path(&self) -> PathBuf {
         self.dir.join("state.json")
+    }
+    /// The current (latest) run's id, from the supervisor's `state.json`.
+    pub fn current_run(&self) -> Option<u32> {
+        let st: ready::State = serde_json::from_slice(&std::fs::read(self.state_path()).ok()?).ok()?;
+        st.run.map(|r| r.id)
     }
     pub fn events_path(&self) -> PathBuf {
         self.dir.join("events.jsonl")

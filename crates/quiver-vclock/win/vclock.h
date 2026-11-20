@@ -187,6 +187,52 @@ void vc_ctl_attach(vc_ctl *k, vc_clock *c, uint64_t pid);
 int vc_ctl_poll(vc_ctl *k, vc_clock *c, uint64_t *cmd, uint64_t *arg);
 void vc_ctl_publish(vc_ctl *k, vc_clock *c);
 
+/* The vtable hook registry (hook.c's Present and CreateSwapChain hooks), here so the host tests
+ * run its decisions. One entry per (vtable, slot): the hook we put there and `orig`, what the
+ * slot held before it, which the hook calls (vc_vt_orig). Vtables are per class, so every
+ * object of a class shares one, and a hook is asked for again for each new object.
+ *
+ * When a registered slot no longer holds our hook, vc_vt_plan decides:
+ * - it holds `orig` again (someone unhooked down to the original): put ours back, same entry;
+ * - it holds anything else: another module hooked the slot after us. It read the slot then,
+ *   so the function it saved and calls is ours: it is in front of us in the chain and calls
+ *   through us to `orig`. Leave it alone. Hooking over it again (the old behaviour) put ours
+ *   in front with a second entry whose original vc_vt_orig never returned, so the other
+ *   module's hook was skipped (Pharos's d3d11.dll proxy never saw the swap chain). Chaining
+ *   onto it instead (ours -> theirs -> ours) would run ours twice per call, or recurse for
+ *   ever with one original per slot, and the two hookers would take the slot back from each
+ *   other for every new object of the class.
+ * The caller holds a lock around vc_vt_plan; vc_vt_orig is lock-free (entries are appended
+ * and never change after `n` is published). */
+#define VC_MAX_VH 128
+typedef struct vc_vhook {
+    void **vt;
+    void *hook;
+    void *orig;
+    uint32_t slot;
+    uint32_t noted; /* the caller logged a foreign hook over this one */
+} vc_vhook;
+typedef struct vc_vtreg {
+    vc_vhook e[VC_MAX_VH];
+    int32_t n;
+} vc_vtreg;
+enum {
+    VC_VT_NEW = 0,      /* registered (orig = the slot's value): write the hook */
+    VC_VT_OURS = 1,     /* the slot holds our hook: nothing to do */
+    VC_VT_WRAPPED = 2,  /* another module's hook over ours (which it calls): leave it */
+    VC_VT_RESTORED = 3, /* the slot holds our original again: write the hook back */
+    VC_VT_FULL = 4,     /* no room: left alone */
+};
+/* What to do about `hook` for (vt, slot), whose slot holds `cur` now. `entry` (may be NULL)
+ * gets the registry entry, when there is one. */
+int vc_vt_plan(vc_vtreg *r, void **vt, uint32_t slot, void *cur, void *hook, vc_vhook **entry);
+/* What `hook`, called for an object whose vtable is `vt`, calls next: the entry's original.
+ * An unregistered vtable (a copy of a hooked one, say) whose slot holds `hook` gets the
+ * original of the entries for the same slot and hook when they all agree, else NULL. */
+void *vc_vt_orig(const vc_vtreg *r, void **vt, uint32_t slot, void *hook);
+/* sizeof(vc_vtreg), for the Rust mirror's test. */
+uint64_t vc_vtreg_size(void);
+
 /* Virtual ticks as milliseconds and as 100 ns units (FILETIME), without overflow. */
 uint64_t vc_ticks_ms(const vc_clock *c, int64_t ticks);
 uint64_t vc_ticks_100ns(const vc_clock *c, int64_t ticks);
