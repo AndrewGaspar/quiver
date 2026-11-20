@@ -86,23 +86,6 @@ pub struct Settings {
     pub docked: std::collections::BTreeMap<String, bool>,
 }
 
-/// Writes the sections' layout into `sight.toml`, keeping whatever else is there (the CLI's
-/// `pad_chord`, keys from newer builds). Best effort.
-pub fn save_docked(docked: &std::collections::BTreeMap<String, bool>) {
-    let p = settings_path();
-    let mut t: toml::Table = std::fs::read_to_string(&p).ok().and_then(|s| s.parse().ok()).unwrap_or_default();
-    if docked.is_empty() {
-        t.remove("docked");
-    } else {
-        t.insert("docked".into(), toml::Value::Table(docked.iter().map(|(k, v)| (k.clone(), toml::Value::Boolean(*v))).collect()));
-    }
-    let tmp = p.with_extension("toml.tmp");
-    let r = p.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&tmp, t.to_string())).and_then(|_| std::fs::rename(&tmp, &p));
-    if let Err(e) = r {
-        tracing::debug!("couldn't write {}: {e}", p.display());
-    }
-}
-
 pub fn settings_path() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
     base.join("quiver").join("sight.toml")
@@ -298,8 +281,10 @@ impl PanelCtl {
     pub fn layout(&mut self, docked: bool, prefs: std::collections::BTreeMap<String, bool>, cx: &mut App) {
         if prefs != self.settings.docked {
             self.settings.docked = prefs;
+            // quiverd writes Sight's settings (one writer, design/SIGHT.md §16).
             if self.persist {
-                save_docked(&self.settings.docked);
+                let v = serde_json::to_value(&self.settings.docked).unwrap_or_default();
+                self.send(LinkReq::SettingsSet { key: "docked".into(), value: v });
             }
         }
         self.nav.dock = state::DockPrefs::from_map(&self.settings.docked);
@@ -441,6 +426,15 @@ impl PanelCtl {
     }
 
     // ---- For the quick menu and the overlay (`crate::quick`, `crate::overlay`) --------------
+
+    /// Sight's settings changed (quiverd, `Event::SightSettingsChanged`): the sections' layout,
+    /// and the open panel's own rows (do not disturb, on unlock, hidden achievements).
+    pub fn settings_changed(&mut self, s: &quiver_api::sight::SightSettings, cx: &mut App) {
+        self.settings.docked = s.docked.clone();
+        self.nav.dock = state::DockPrefs::from_map(&self.settings.docked);
+        let prefs = sections::prefs::Prefs::of(s);
+        self.with_view(cx, |v, _| v.data.prefs = prefs);
+    }
 
     /// What's pinned to the quick menu for the open panel's game and profile (Y toggles it).
     pub fn set_pinned(&mut self, pins: Vec<quiver_api::sight::QuickPin>, cx: &mut App) {

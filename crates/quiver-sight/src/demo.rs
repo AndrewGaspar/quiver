@@ -512,6 +512,10 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     dlss.options.insert("fg.enabled".into(), opt(OptionType::Bool, "Frame generation", Some("F9 in game"), Apply::Live, json!(true)));
     // The key the mod flips it with (the quick menu's tile says "On · F9").
     dlss.actions.insert("fg.toggle".into(), quiver_api::options::ActionInfo { label: "Toggle frame generation".into(), hotkey: Some("F9".into()) });
+    // Its toggle key (not on a page: the Session section's Frame generation toggle names it).
+    let mut fgkey = opt(OptionType::Key, "Toggle key", None, Apply::Live, json!("F9"));
+    fgkey.def.allowed = Some("F1-F24".into());
+    dlss.options.insert("fg.toggle_key".into(), fgkey);
     let mut fgmode = opt(OptionType::Enum, "Frame generation path", None, Apply::At, json!("d3d12"));
     fgmode.def.at = Some("swapchain creation (the game makes its swapchain at startup and on mode changes)".into());
     fgmode.def.values = choices(&[("d3d11", "D3D11"), ("d3d12", "D3D12 (vkd3d)")]);
@@ -585,6 +589,11 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     let mut tcap = opt(OptionType::Int, "Frame-rate cap", None, Apply::Launch, json!(120));
     (tcap.def.min, tcap.def.max, tcap.def.step) = (Some(30.0), Some(240.0), Some(1.0));
     tcap.pending = Pending::Restart;
+    // The DLSS mod provides it (Reflex's limiter): the Session section's quick toggle says so.
+    tcap.tweak = Some(Box::new(quiver_api::tweaks::TweakRow {
+        planned: Some(quiver_api::tweaks::Planned::Provided { by: "DLSS".into(), surface: "m1/aco-dlss".into(), option: "reflex.fps_limit".into(), value: None, mode: "bind".into(), can_prefer_quiver: true }),
+        ..Default::default()
+    }));
     tweaks.options.insert("fps.cap".into(), tcap);
     tweaks.options.insert("dxvk.async".into(), opt(OptionType::Bool, "Asynchronous shader compiles", Some("Fewer stutters the first time effects show up"), Apply::Launch, json!(true)));
     tweaks.options.insert("nvidia.reflex".into(), opt(OptionType::Bool, "NVIDIA Reflex", Some("Lower latency on RTX cards"), Apply::Launch, json!(true)));
@@ -656,13 +665,55 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     put("aco-dlss.res", Stat::Last, pv("1280×800 → 2560×1600", "", Level::Normal));
     put("aco-dlss.fps", Stat::Last, pv("59 / 118", "fps", Level::Normal));
     put("aco-dlss.reflex", Stat::Last, pv("On + Boost", "", Level::Normal));
-    let ach = |id: &str, name: &str, desc: &str, hidden: bool, at: Option<i64>| Ach {
+    // Minutes ago it was unlocked (`None`: locked), and progress (current, max).
+    let ach = |id: &str, name: &str, desc: &str, hidden: bool, at: Option<i64>, progress: Option<(f64, f64)>| Ach {
         id: id.into(),
         name: name.into(),
         description: desc.into(),
         hidden,
         unlocked: at.is_some(),
-        unlocked_at: at.map(|d| now - chrono::Duration::days(d)),
+        unlocked_at: at.map(|m| now - chrono::Duration::minutes(m)),
+        progress: progress.map(|(current, max)| quiver_api::stores::AchievementProgress { current, max, percent: false }),
+        ..Default::default()
+    };
+    let mut achs = Achs::sorted(vec![
+        ach("12", "Hidden Ones", "Complete the main quest \"The Hidden Ones\".", false, Some(12), None),
+        ach("7", "First Visit", "Complete one tour.", false, Some(55), None),
+        ach("3", "The Medjay", "Complete the main quest's first chapter.", false, Some(60 * 24 * 9), None),
+        ach("21", "Seasoned Seer", "Find 50 papyrus puzzles.", false, None, Some((22.0, 50.0))),
+        ach("41", "Who Watches the Watchers", "Reach the end of the story.", true, None, None),
+        ach("33", "Phylakes Slayer", "Kill all the Phylakes.", false, None, Some((3.0, 30.0))),
+        ach("44", "Photo Finish", "Win a chariot race in the Hippodrome.", false, None, None),
+        ach("40", "Seasoned Hunter", "Kill 10 hippos.", false, None, Some((6.0, 10.0))),
+    ]);
+    // The rest of the game's 70 aren't listed in the fixture.
+    (achs.unlocked, achs.total) = (31, 70);
+    achs.reporting = Some(quiver_api::sight::session::Reporting { store: Some(quiver_api::StoreId::Ubisoft), mode: "on".into() });
+    use crate::panel::sections::session::{Extras, ModLine, OptionsLine, SavesSummary};
+    use quiver_api::sight::session::{SessionEvent, SessionEventKind, SessionInfo};
+    let event = |mins: i64, kind, text: &str, by: Option<&str>| SessionEvent { at: now - chrono::Duration::minutes(mins), kind, text: text.into(), by: by.map(String::from) };
+    let extras = Extras {
+        info: Some(SessionInfo {
+            session: "s-demo".into(),
+            proton: Some("GE-Proton10-25".into()),
+            events: vec![
+                event(59, SessionEventKind::Mods, "DLSS v4 is ready", Some("aco-dlss")),
+                event(33, SessionEventKind::Download, "Download finished: Far Cry 5", None),
+            ],
+            ..Default::default()
+        }),
+        info_error: None,
+        mods: vec![ModLine { name: "DLSS".into(), chip: Some("v3 · current".into()) }, ModLine { name: "Skip intro videos".into(), chip: Some("built-in · 2".into()) }],
+        saves: Load::Ready(SavesSummary {
+            store: "Default".into(),
+            state: "Cloud in sync".into(),
+            tone: Some(quiver_ui::options::Tone::Ok),
+            last_save: Some(now - chrono::Duration::minutes(2)),
+            last_what: Some("slot 3".into()),
+            shared_with: vec!["Vanilla".into()],
+            note: None,
+        }),
+        options: Some(OptionsLine { launched: 14, changed: 3 }),
     };
     PanelData {
         session: Load::Ready(SessionView {
@@ -683,14 +734,10 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
         tweaks: Load::Ready(tweaks),
         tweak_scope_name: "the DLSS profile".into(),
         hud: Load::Ready(HudState { status: Some(status), settings: HudSettingsView { scope: Default::default(), set: Default::default(), effective, revision: 4, anti_cheat: None } }),
-        achievements: Load::Ready(Achs::sorted(vec![
-            ach("12", "Mysteries of Egypt", "Find every tomb in the Giza necropolis.", false, Some(0)),
-            ach("3", "The Medjay", "Complete the main quest's first chapter.", false, Some(9)),
-            ach("40", "Seasoned Hunter", "Kill 10 hippos.", false, None),
-            ach("41", "Who Watches the Watchers", "Reach the end of the story.", true, None),
-            ach("44", "Photo Finish", "Win a chariot race in the Hippodrome.", false, None),
-        ])),
+        achievements: Load::Ready(achs),
         metrics,
+        extras,
+        prefs: Default::default(),
         readouts,
     }
 }

@@ -1242,6 +1242,13 @@ fn session_build(game: &Game) -> Option<PathBuf> {
     build.join("files/bin/wineserver").is_file().then_some(build)
 }
 
+/// The name (folder) of the Proton build that started the game's latest session
+/// (`GE-Proton10-25`), as its launch recorded it; for the in-game panel.
+pub fn session_proton(game: &Game) -> Option<String> {
+    let text = std::fs::read_to_string(session_build_path(game)).ok()?;
+    Path::new(text.trim()).file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| !n.is_empty())
+}
+
 /// Ask a running game to stop by shutting its prefix down, with the wineserver of the
 /// Proton build that launched it.
 pub async fn stop(cfg: &Config, game: &Game) -> Result<()> {

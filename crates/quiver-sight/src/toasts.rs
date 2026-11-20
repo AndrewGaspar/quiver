@@ -262,6 +262,20 @@ pub fn from_options(e: &OptionsEvent) -> Option<ToastData> {
     })
 }
 
+/// Where a screenshot went (or why there's none).
+pub fn shot_toast(r: Result<PathBuf, String>) -> ToastData {
+    match r {
+        Ok(p) => ToastData {
+            kind: ToastKind::Screenshot,
+            caption: "Screenshot".into(),
+            title: "Saved".into(),
+            body: Some(p.parent().and_then(|d| d.file_name()).map(|d| format!("Pictures › Quiver › {}", d.to_string_lossy())).unwrap_or_else(|| p.display().to_string())),
+            ..Default::default()
+        },
+        Err(e) => ToastData { kind: ToastKind::Error, caption: "Screenshot".into(), title: "No screenshot".into(), body: Some(e), urgent: true, ..Default::default() },
+    }
+}
+
 /// The first-launch hint as a toast (the desktop fallback; in the game it's its own bar).
 pub fn hint_toast() -> ToastData {
     ToastData {

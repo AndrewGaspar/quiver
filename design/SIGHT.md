@@ -1693,6 +1693,40 @@ Toward the SightMods / SightSession / docked mock-ups (`panel/view.rs`, `panel/h
   lines are gone: hyprpad's `h.bind` takes guide chords only, and they stopped the whole
   config from loading.
 
+### Session and Achievements as cards (2026-11-19)
+
+Both sections follow the `SightSession` / `SightAchievements` mock-ups
+(`quiver-sight/src/panel/sections/{session,achievements}.rs`), centred by default (docked, they
+stack in the column). Their rows are only what takes focus; the cards draw the
+rest.
+
+- **Session**: now playing (box art from the app's art cache, its 240:280 crop when there;
+  nothing downloaded), profile / Proton build / copy chips, this session and total play time;
+  mods with their versions and the options revision with "N changed in game" (the options'
+  session record); saves (the profile's save store, the cloud state in each store's words: a
+  Ubisoft store's slots waiting for upload at exit, Epic's sync state, Steam Cloud's unsynced
+  files; the newest save; the profiles sharing it); "While you were playing" (the activity log
+  since the start, the downloads and unlocks quiverd saw go by, and unlocks with a time inside
+  the session); quick toggles (a mod's `fg.enabled`, the HUD and its preset, Tweaks'
+  `fps.cap` with the mod that provides it, Do not disturb); the achievements' progress;
+  Screenshot, Quit, Force quit.
+- **Achievements**: progress card, who records the unlocks (Ubisoft's report journal read
+  offline: `Engine::status_offline` reads nothing from Ubisoft and sends nothing), On unlock
+  (`toast`, `toast_screenshot`, `off`), filters on LT / RT (All, Unlocked, Locked, Recent: the
+  last 7 days), hidden ones Masked / Shown (X or A reveals one; X reaches the section as `Effect::X`, LT / RT as `Effect::Tab`), progress bars where the store
+  keeps progress (Steam's `progress` stats; Epic's fraction, as a percentage), icons as files.
+- **Requests** (`quiver_api::sight::session`): `SightRequest::Session` (Proton, art,
+  events, whether a screenshot can be taken), `Achievements { game }`, `Icons { urls }`
+  (quiverd's `~/.cache/quiver/achievement-icons`, known image hosts only), `Screenshot`.
+- **Screenshots** use the layer's capture (`capture.req`, as `quiver lab shot --hdr`): launches
+  now get `QUIVER_SIGHT_CAPTURE=1` unless their settings set it (`0`: none). The frame is the
+  game's own, before the HUD and the panel; it's saved as `~/Pictures/Quiver/<game>/<game>
+  <date> <time>.png` (8-bit for SDR, the 16-bit PQ PNG for HDR). A game started before this
+  can't be captured until it's restarted.
+- **Settings** in `sight.toml`: `[toasts] dnd`, `[achievements] on_unlock` and `hidden`. The
+  toast lane reads `dnd` and `on_unlock`; `toast_screenshot` takes a screenshot 0.5 s after an
+  unlock (quiver-sight's link).
+
 
 ---
 
@@ -1904,8 +1938,10 @@ quiverd's options sink is now wired (`notices::ModSink`): a non-persisted `chang
 the hotkey notice. Persisted changes (a mod's own menu) are still only logged.
 
 **Do not disturb** (`toasts.dnd`): only urgent toasts (errors, rejections, failed downloads)
-show. **`achievements.on_unlock`** = `toast` (default) | `toast_screenshot`: the screenshot is
-taken first (so the toast isn't in it), then the toast shows.
+show. **`achievements.on_unlock`** = `toast` (default) | `toast_screenshot` | `off`: with
+`toast_screenshot` the toast shows and the game's frame is captured half a second later (the
+Sight layer's capture is taken under Sight's own drawing, so the toast isn't in it); `off`
+shows nothing. The Session and Achievements sections' rows (Sight C) set these.
 
 ### The notice API
 
@@ -1941,9 +1977,10 @@ or a game it can't be drawn in: the panel, as a tap would. There's no desktop fa
 
 Tiles: notices' buttons; frame generation (a mod's live, adjustable `fg.enabled`, with its key);
 the HUD preset (cycles the presets, shows the HUD if hidden); the frame-rate cap (`fps.cap`
-through No cap, 30, 60, 90, 120, 144, refresh − 3); pins; screenshot (`grim` of the game's
-monitor into `$OMARCHY_SCREENSHOT_DIR`, else `$XDG_PICTURES_DIR`, else `~/Pictures`, 250 ms
-after the menu leaves the frames); save replay (only while a `gpu-screen-recorder -r` replay
+through No cap, 30, 60, 90, 120, 144, refresh − 3); pins; screenshot ("Game only": the same
+path as the Session section's button and the unlock screenshot, `SightRequest::Screenshot`,
+the Sight layer's capture of the game's frame into `~/Pictures/Quiver/<game>/`; where the layer
+can't, `grim` of the game's monitor into the same folder; `link::LinkReq::Shot`); save replay (only while a `gpu-screen-recorder -r` replay
 buffer runs: SIGUSR1); quit (A held 1 s; released on it, the menu latches: Hyprland closes the
 game's window, else quiverd stops it). Applying says what it did in a short toast. The menu writes
 the `sight-panel` state file while up, so hyprpad's `quiver-sight` mode holds the pad.
@@ -1975,12 +2012,15 @@ again.
 
 ### Sight settings
 
-`$XDG_DATA_HOME/quiver/sight.toml` (`quiver_api::sight::SightSettings`), owned by quiverd:
-`SightRequest::Settings`, `SettingsSet { key, value }`, `Pin`; each change goes out as
-`Event::SightSettingsChanged`, which quiver-sight follows. Keys: `toasts.dnd`,
-`achievements.on_unlock` (`toast` | `toast_screenshot`), `status_chip.enabled`, `hint.shown`,
-`pad_chord`, and `pins`. Every writer keeps keys it doesn't know (the CLI's `pad-chord` writes
-the file directly, as before). CLI: `quiver sight settings [KEY [VALUE]]`.
+`$XDG_DATA_HOME/quiver/sight.toml` (`quiver_api::sight::SightSettings`). quiverd is its one
+writer: `SightRequest::Settings`, `SettingsSet { key, value }`, `Pin`; each change goes out as
+`Event::SightSettingsChanged`, which quiver-sight follows (the toast lane, the quick menu, the
+open panel's rows and its sections' layout). Keys: `toasts.dnd`, `achievements.on_unlock`
+(`toast` | `toast_screenshot` | `off`), `achievements.hidden` (`masked` | `shown`),
+`status_chip.enabled`, `hint.shown`, `pad_chord`, `docked` (the sections' R3 layout, a map),
+and `pins`. The panel's rows (`panel/sections/prefs.rs`), its layout and `quiver sight
+pad-chord` all send `SettingsSet`; nothing in quiver-sight or the CLI writes the file. quiverd
+keeps keys it doesn't know. CLI: `quiver sight settings [KEY [VALUE]]`.
 
 ### Verification
 

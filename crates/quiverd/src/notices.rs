@@ -62,6 +62,7 @@ pub struct SightState {
 }
 
 impl SightState {
+    #[cfg(test)]
     pub fn with_path(path: PathBuf) -> SightState {
         let s = SightState::default();
         let _ = s.path.set(path);

@@ -179,7 +179,7 @@ pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: Op
             out.push(t);
         }
     }
-    out.push(tile(TileKind::Screenshot, "Screenshot", "This screen", None, Icon::Image));
+    out.push(tile(TileKind::Screenshot, "Screenshot", "Game only", None, Icon::Image));
     if let Some(pid) = replay {
         out.push(tile(TileKind::Replay { pid }, "Save replay", "The replay buffer", None, Icon::History));
     }
@@ -715,7 +715,7 @@ mod tests {
     fn tiles_like_the_mock() {
         let t = tiles(&data(), &[pin()], &[], None);
         let names: Vec<(&str, &str)> = t.iter().map(|t| (t.label.as_str(), t.value.as_str())).collect();
-        assert_eq!(names, [("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Crowd density", "2"), ("Screenshot", "This screen"), ("Quit game", "Hold A")]);
+        assert_eq!(names, [("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Crowd density", "2"), ("Screenshot", "Game only"), ("Quit game", "Hold A")]);
         // A replay buffer and a notice's buttons; no frame generation without the option.
         let mut d = data();
         if let Load::Ready(v) = &mut d.options {

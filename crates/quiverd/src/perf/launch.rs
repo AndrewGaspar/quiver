@@ -12,6 +12,7 @@
 //! | `MANGOHUD_CONFIG` | `…,toggle_logging=Shift_L+F7` | only when the launch runs MangoHud: moves its logging key off Sight's Shift+F2 |
 //! | `__NGX_LOG_LEVEL`, `__NGX_ENABLE_OVERRIDE_LOG_PATH`, `__NGX_LOG_PATH_OVERRIDE` | `1`, `1`, `Z:\…\<session>\ngx\` | only with `ngx_log` on: NGX's own log, for the DLSS preset, quality and render resolution (SIGHT-HUD §3.17) |
 //! | `QUIVER_SIGHT_REFLEX_TIMINGS` | `1` | only with `reflex_timings` on: the layer reads Reflex's timing reports |
+//! | `QUIVER_SIGHT_CAPTURE` | `1` | unless the launch sets it: swapchains readable for the Sight panel's Screenshot (TRANSFER_SRC usage where the surface allows it) |
 //! | `LD_PRELOAD` | the launch's own, then `<lib>/sight/$PLATFORM/libquiver_sight_input.so` | the Sight panel's input in the game ([`add_input_preload`], design/SIGHT.md §14); with the layer, never without it. `$PLATFORM` is ld.so's (`x86_64`, `i686`), so 32-bit processes load the 32-bit build. Steam copies keep Steam's own first (STORE-STEAM G6) |
 //!
 //! Layer order, application first: the user's own `VK_INSTANCE_LAYERS`, then the
@@ -28,6 +29,8 @@ use quiver_api::perf::{Captures, HudConfig, LaunchPerfPlan};
 
 // The layer order and the preload's entry are shared with `quiver lab` (quiver_core::sightenv).
 pub use quiver_core::sightenv::{ENV_INPUT, ENV_SIGHT, input_preload_in, layer_order, truthy, uses_obs_capture};
+/// The Sight layer's capture switch (screenshots of the game's frames).
+pub const ENV_CAPTURE: &str = "QUIVER_SIGHT_CAPTURE";
 /// MangoHud's logging key moves here (§1.3).
 pub const MANGOHUD_LOGGING_KEY: &str = "Shift_L+F7";
 
@@ -100,6 +103,12 @@ pub fn plan(cfg: &HudConfig, session_env: &[(&str, String)], env: &BTreeMap<Stri
     }
     if cfg.reflex_timings {
         p.env.insert("QUIVER_SIGHT_REFLEX_TIMINGS".into(), "1".into());
+    }
+    // Screenshots from the Sight panel (design/SIGHT.md §3.7): the layer adds TRANSFER_SRC to
+    // the swapchain's usage where the surface allows it. The launch's own value wins (`0`:
+    // no screenshots).
+    if !env.contains_key(ENV_CAPTURE) {
+        p.env.insert(ENV_CAPTURE.into(), "1".into());
     }
     p.notes.push(format!("HUD: {} ({}), presenter {:?}, captures {:?}", cfg.layout, if cfg.on { "shown" } else { "hidden until Shift+F3" }, cfg.presenter, cfg.captures).to_lowercase());
     p
@@ -179,6 +188,10 @@ mod tests {
         assert_eq!(p.layer_order, [SIGHT_LAYER]);
         let p = plan(&on(), &sess(), &BTreeMap::new(), &[], Some(Path::new("/q/sight/layer")));
         assert_eq!(p.env["VK_ADD_IMPLICIT_LAYER_PATH"], "/q/sight/layer");
+        // Screenshots: on unless the launch says otherwise.
+        assert_eq!(p.env[ENV_CAPTURE], "1");
+        let p = plan(&on(), &sess(), &env(&[(ENV_CAPTURE, "0")]), &[], None);
+        assert!(!p.env.contains_key(ENV_CAPTURE), "the launch's own value stays (it's in its env already)");
     }
 
     #[test]

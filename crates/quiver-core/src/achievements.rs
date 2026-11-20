@@ -882,6 +882,36 @@ impl Engine {
     /// Unlock status for a game: the journal's set if fresh (or `refresh`), else read
     /// again; merged with the definitions in `locale`. Pending reports are sent afterwards
     /// when the read worked.
+    /// [`Self::status`] from what Quiver already knows: the journal as it is (no read of
+    /// Ubisoft's unlocks) and the definitions; nothing is sent, and nothing is announced. The
+    /// in-game panel's view (design/SIGHT.md §3.3).
+    pub async fn status_offline(self: &Arc<Self>, account: Option<&str>, product_id: u32, locale: &str) -> Result<Status> {
+        let user = self.up.user_id(account).await?;
+        let mut errors = Vec::new();
+        let refs = match self.refs_for(&user, product_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("product config: {e:#}"));
+                AchRefs::default()
+            }
+        };
+        let j = Journal::load(&self.dir, &user, product_id)?;
+        let mut achievements = match self.definitions(product_id, &refs, locale).await {
+            Ok(d) => d,
+            Err(e) => {
+                errors.push(format!("achievement definitions: {e:#}"));
+                None
+            }
+        };
+        if achievements.is_none() && (!j.known.is_empty() || !j.entries.is_empty()) {
+            achievements = Some(Achievements::default());
+        }
+        if let Some(a) = &mut achievements {
+            merge(a, &j);
+        }
+        Ok(Status { user, journal: j, achievements, mode: (self.mode)(product_id), errors })
+    }
+
     pub async fn status(self: &Arc<Self>, account: Option<&str>, product_id: u32, refresh: bool, locale: &str) -> Result<Status> {
         let user = self.up.user_id(account).await?;
         let mut errors = Vec::new();

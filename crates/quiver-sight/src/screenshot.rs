@@ -1,19 +1,19 @@
-//! Screenshots from Sight (design/SIGHT.md §16): the quick menu's Screenshot tile, and
-//! `achievements.on_unlock = toast_screenshot` (taken before the toast shows, so it isn't in
-//! the picture). `grim` of the game's monitor, into Omarchy's screenshot folder
-//! (`$OMARCHY_SCREENSHOT_DIR`), else `$XDG_PICTURES_DIR`, else `~/Pictures`. It captures what
-//! the compositor shows: the game with the HUD if it's up (the menu closes first).
+//! The fallback screenshot (design/SIGHT.md §16): the quick menu's Screenshot tile and
+//! `achievements.on_unlock = toast_screenshot` ask quiverd for the game's own frame first
+//! (`SightRequest::Screenshot`: the Sight layer's capture, under Sight's drawing). Where the
+//! layer can't (no layer, an older one, an OpenGL game), `grim` of the game's monitor, into the
+//! same folder: `<pictures>/Quiver/<game>/`. grim captures what the compositor shows: the game
+//! with the HUD and any toast.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// Where screenshots go.
-pub fn folder() -> PathBuf {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    env("OMARCHY_SCREENSHOT_DIR")
-        .or_else(|| env("XDG_PICTURES_DIR"))
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Pictures"))
+/// Where a game's screenshots go: `<pictures>/Quiver/<game>/` (`$XDG_PICTURES_DIR`, else
+/// `~/Pictures`), as quiverd's.
+pub fn folder(game: &str) -> PathBuf {
+    let pictures = std::env::var_os("XDG_PICTURES_DIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Pictures"));
+    quiver_api::sight::session::captures_dir(&pictures, game)
 }
 
 /// A file name for a shot of `game` at `stamp` ("Assassin's Creed Origins 2026-11-19 21-14-03.png"):
@@ -26,7 +26,11 @@ pub fn file_name(game: &str, stamp: &str) -> String {
 }
 
 /// Takes it (blocking: call it off the UI thread).
-pub fn take(monitor: Option<&str>, game: &str, dir: &Path) -> Result<PathBuf> {
+pub fn take(monitor: Option<&str>, game: &str) -> Result<PathBuf> {
+    take_into(monitor, game, &folder(game))
+}
+
+pub fn take_into(monitor: Option<&str>, game: &str, dir: &Path) -> Result<PathBuf> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         bail!("no Wayland display to capture");
     }

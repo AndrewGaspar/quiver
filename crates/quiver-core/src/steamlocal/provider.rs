@@ -253,6 +253,7 @@ fn achievements_of(app_id: u32, a: stats::Achievements) -> Achievements {
                 unlocked: x.unlocked,
                 icon: icon(x.icon),
                 icon_gray: icon(x.icon_gray),
+                progress: x.progress.map(|(current, max)| quiver_api::stores::AchievementProgress { current, max, percent: false }),
             })
             .collect(),
     }

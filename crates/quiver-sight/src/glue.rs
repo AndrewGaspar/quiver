@@ -16,7 +16,7 @@ use crate::link::{Loaded, LinkReq, Msg};
 use crate::panel::ingame::{self, InGame};
 use crate::quick::{self, Act, Effect, Key, QuickView, TileKind};
 use crate::toasts::{self, ToastData, ToastKind};
-use crate::{Sight, overlay, screenshot};
+use crate::{Sight, overlay};
 
 /// The quick menu drawn in the game.
 pub struct QuickShown {
@@ -47,6 +47,7 @@ impl Sight {
         if s.toasts.dnd != self.settings.toasts.dnd {
             tracing::info!(dnd = s.toasts.dnd, "do not disturb");
         }
+        self.panel.settings_changed(&s, cx);
         self.settings = s;
         self.panel_pins(cx);
     }
@@ -64,12 +65,23 @@ impl Sight {
             tracing::info!(title = %t.title, "toast held back: do not disturb");
             return;
         }
-        if t.kind == ToastKind::Achievement && !t.shot && self.settings.achievements.on_unlock == OnUnlock::ToastScreenshot {
-            // The picture first, so the toast isn't in it.
-            t.shot = true;
-            let session = t.session.clone().or_else(|| self.some_session());
-            self.screenshot(session.as_deref(), Some(t), Duration::from_millis(0));
-            return;
+        if t.kind == ToastKind::Achievement {
+            match self.settings.achievements.on_unlock {
+                OnUnlock::Off => {
+                    tracing::info!(title = %t.title, "achievement: no toast (achievements.on_unlock = off)");
+                    return;
+                }
+                // Half a second after (SIGHT §3.7: the moment in the frame); the layer's capture
+                // is under Sight's drawing, so the toast isn't in it.
+                OnUnlock::ToastScreenshot if !t.shot => {
+                    t.shot = true;
+                    let session = t.session.clone().or_else(|| self.some_session());
+                    if let Some(s) = session {
+                        self.screenshot(&s, Duration::from_millis(500), false);
+                    }
+                }
+                _ => {}
+            }
         }
         if t.session.is_none() {
             t.session = self.some_session();
@@ -191,43 +203,12 @@ impl Sight {
 
     // ---- Screenshots ---------------------------------------------------------------------
 
-    /// Takes a screenshot of the session's monitor after `after` (the quick menu leaves the
-    /// frames first), then shows `then` (the achievement's toast) or says where it went.
-    fn screenshot(&mut self, session: Option<&str>, then: Option<ToastData>, after: Duration) {
-        let monitor = session.and_then(|s| self.huds.get(s)?.model.as_ref()?.monitor.clone());
-        let game = session.and_then(|s| self.quick_data.get(s)?.session.ready().map(|v| v.name.clone())).unwrap_or_else(|| "Game".into());
-        let Some(tx) = self.tx.clone() else { return };
-        let dir = screenshot::folder();
-        let _ = std::thread::Builder::new().name("quiver-sight-shot".into()).spawn(move || {
-            std::thread::sleep(after);
-            let r = screenshot::take(monitor.as_deref(), &game, &dir);
-            match (&r, &then) {
-                (Ok(p), _) => tracing::info!(path = %p.display(), "screenshot"),
-                (Err(e), _) => tracing::info!("screenshot: {e:#}"),
-            }
-            let note = match r {
-                Ok(p) => ToastData {
-                    kind: ToastKind::Screenshot,
-                    caption: "Screenshot".into(),
-                    title: "Saved".into(),
-                    body: Some(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                    ..Default::default()
-                },
-                Err(e) => ToastData { kind: ToastKind::Error, caption: "Screenshot".into(), title: "No screenshot".into(), body: Some(format!("{e:#}")), urgent: true, ..Default::default() },
-            };
-            match then {
-                // The achievement's toast says it all; a failed shot still says why.
-                Some(t) => {
-                    let _ = tx.unbounded_send(Msg::Toast(t));
-                    if note.kind == ToastKind::Error {
-                        let _ = tx.unbounded_send(Msg::Toast(note));
-                    }
-                }
-                None => {
-                    let _ = tx.unbounded_send(Msg::Toast(note));
-                }
-            }
-        });
+    /// A screenshot of the session's game after `after` (`link::LinkReq::Shot`: the layer's
+    /// capture through quiverd, else grim); `say`: a toast with where it went.
+    fn screenshot(&mut self, session: &str, after: Duration, say: bool) {
+        let monitor = self.huds.get(session).and_then(|h| h.model.as_ref()?.monitor.clone());
+        let game = self.quick_data.get(session).and_then(|d| d.session.ready().map(|v| v.name.clone())).filter(|n| !n.is_empty()).unwrap_or_else(|| "Game".into());
+        self.send_link(LinkReq::Shot { session: session.to_owned(), after, monitor, game, say });
     }
 
     // ---- The quick menu ------------------------------------------------------------------
@@ -499,7 +480,7 @@ impl Sight {
                 self.toasts.dismiss_notice(&id, cx);
                 self.send_link(LinkReq::NoticeAct { id, button });
             }
-            Act::Screenshot => self.screenshot(Some(session), None, Duration::from_millis(250)),
+            Act::Screenshot => self.screenshot(session, Duration::from_millis(150), true),
             Act::Replay { pid } => {
                 // gpu-screen-recorder saves its replay buffer on SIGUSR1.
                 let ok = unsafe { libc::kill(pid as i32, libc::SIGUSR1) } == 0;

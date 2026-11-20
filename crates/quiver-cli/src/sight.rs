@@ -197,27 +197,19 @@ pub async fn run(client: &Client, action: SightAction) -> Result<()> {
             }
         }
         SightAction::PadChord { value } => {
-            let path = sight_settings_path();
-            let mut v: toml::Table = std::fs::read_to_string(&path).ok().and_then(|s| s.parse().ok()).unwrap_or_default();
-            match value.as_deref() {
-                None => {}
-                Some("on" | "true" | "1") => {
-                    v.insert("pad_chord".into(), toml::Value::Boolean(true));
-                }
-                Some("off" | "false" | "0") => {
-                    v.insert("pad_chord".into(), toml::Value::Boolean(false));
-                }
+            // Sight's settings have one writer, quiverd (design/SIGHT.md §16).
+            let on = match value.as_deref() {
+                None => None,
+                Some("on" | "true" | "1") => Some(true),
+                Some("off" | "false" | "0") => Some(false),
                 Some(other) => bail!("pad-chord takes on or off, not {other:?}"),
-            }
-            if value.is_some() {
-                if let Some(d) = path.parent() {
-                    std::fs::create_dir_all(d)?;
-                }
-                std::fs::write(&path, toml::to_string(&v)?)?;
-            }
-            let on = v.get("pad_chord").and_then(|x| x.as_bool()).unwrap_or(false);
-            println!("Select+Start held 0.6 s: {} ({})", if on { "opens the panel" } else { "off" }, path.display());
-            if value.is_some() {
+            };
+            let s: SightSettings = match on {
+                Some(on) => client.call(Request::Sight(SightRequest::SettingsSet { key: "pad_chord".into(), value: serde_json::Value::Bool(on) })).await?,
+                None => client.call(Request::Sight(SightRequest::Settings)).await?,
+            };
+            println!("Select+Start held 0.6 s: {} ({})", if s.pad_chord { "opens the panel" } else { "off" }, quiver_api::sight::settings_path().display());
+            if on.is_some() {
                 println!("quiver-sight reads it when it starts (the next game launch).");
             }
         }
@@ -283,12 +275,6 @@ pub async fn run(client: &Client, action: SightAction) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// `$XDG_DATA_HOME/quiver/sight.toml` (quiver-sight's `panel::settings_path`).
-fn sight_settings_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("quiver").join("sight.toml")
 }
 
 fn print_status(s: &SightStatus) {

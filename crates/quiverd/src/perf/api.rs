@@ -140,6 +140,8 @@ impl Daemon {
             SightRequest::Settings => json!(self.sight.settings()),
             SightRequest::SettingsSet { key, value } => json!(self.sight_settings_set(&key, &value, source)?),
             SightRequest::Pin { scope, pin, on } => json!(self.sight_pin(&scope, pin, on, source)?),
+            // The Session and Achievements sections' requests (`crate::sightinfo`, async).
+            SightRequest::Session { .. } | SightRequest::Achievements { .. } | SightRequest::Icons { .. } | SightRequest::Screenshot { .. } => bail!("handled by sightinfo"),
         })
     }
 

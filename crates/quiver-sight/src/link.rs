@@ -80,6 +80,8 @@ pub enum Change {
     Tweak(String),
     Hud,
     Stop,
+    /// A screenshot, and where it went (empty when it failed).
+    Screenshot(std::path::PathBuf),
     /// A batch from Mods (`tweaks` false) or Tweaks: Undo, X, a preset, Revert this session,
     /// Session only, an A/B compare.
     Ops { tweaks: bool, why: Why },
@@ -113,6 +115,13 @@ pub enum LinkReq {
     HudSet { view: SessionView, set: HudScope },
     HudToggle { session: String },
     Stop { game: GameRef },
+    /// The game's next frame as a PNG (`SightRequest::Screenshot`).
+    Screenshot { session: String },
+    /// A screenshot for the quick menu or an unlock (design/SIGHT.md §16): the game's frame
+    /// through quiverd (the Sight layer's capture, under Sight's own drawing) after `after`;
+    /// where the layer can't, `grim` of `monitor` into the same folder. `say`: a toast with
+    /// where it went (errors are said either way when `say`, logged otherwise).
+    Shot { session: String, after: std::time::Duration, monitor: Option<String>, game: String, say: bool },
     /// The panel's metrics, and `extra` ones (the mods' readouts).
     Subscribe { session: String, extra: Vec<String> },
     Unsubscribe,
@@ -289,6 +298,25 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
     }
 }
 
+async fn screenshot(client: &Client, session: &str) -> Result<quiver_api::sight::session::Screenshot> {
+    client.call(Request::Sight(SightRequest::Screenshot { session: Some(session.to_owned()) })).await
+}
+
+/// The layer's capture, else `grim`: the file, or both reasons.
+async fn shot(client: &Client, session: &str, monitor: Option<String>, game: String) -> Result<std::path::PathBuf, String> {
+    match screenshot(client, session).await {
+        Ok(s) => Ok(s.path),
+        Err(e) => {
+            tracing::info!(session, "the game's own frame: {e:#}; grim instead");
+            match tokio::task::spawn_blocking(move || crate::screenshot::take(monitor.as_deref(), &game)).await {
+                Ok(Ok(p)) => Ok(p),
+                Ok(Err(g)) => Err(format!("{e:#}; grim: {g:#}")),
+                Err(j) => Err(format!("{e:#}; {j}")),
+            }
+        }
+    }
+}
+
 /// Runs a panel request in its own task, so the event loop never waits on it.
 fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64>>>, r: LinkReq) {
     let (client, tx, sub) = (client.clone(), tx.clone(), sub.clone());
@@ -325,6 +353,21 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
             LinkReq::HudSet { view, set } => send(done(Change::Hud, data::hud_set(&client, view.game, set).await.map(|_| None))),
             LinkReq::HudToggle { session } => send(done(Change::Hud, data::hud_toggle(&client, &session).await.map(|_| None))),
             LinkReq::Stop { game } => send(done(Change::Stop, data::stop(&client, game).await.map(|_| None))),
+            LinkReq::Shot { session, after, monitor, game, say } => {
+                tokio::time::sleep(after).await;
+                let r = shot(&client, &session, monitor, game).await;
+                match &r {
+                    Ok(p) => tracing::info!(path = %p.display(), "screenshot"),
+                    Err(e) => tracing::info!("screenshot: {e}"),
+                }
+                if say {
+                    send(Msg::Toast(crate::toasts::shot_toast(r)));
+                }
+            }
+            LinkReq::Screenshot { session } => match screenshot(&client, &session).await {
+                Ok(s) => send(Msg::Done { change: Change::Screenshot(s.path), result: Ok(None) }),
+                Err(e) => send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(format!("{e:#}")) }),
+            },
             LinkReq::Subscribe { session, extra } => {
                 let old = sub.lock().unwrap().take();
                 if let Some(s) = old {

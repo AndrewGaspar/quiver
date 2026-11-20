@@ -10,6 +10,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// The Session and Achievements sections' requests' answers.
+pub mod session;
+
 /// The panel's sections, in the order of its side list (LB/RB step through them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -263,6 +266,21 @@ pub enum SightRequest {
     /// Pins (or with `on: false` unpins) an item to the quick menu for a game, or one of its
     /// profiles (`scope`: [`pin_scope`]).
     Pin { scope: String, pin: QuickPin, on: bool },
+    // ---- The Session and Achievements sections (appended; see [`session`]). All read-only
+    // towards the stores.
+    /// `session::SessionInfo`: the Proton build, box art, what happened while it ran.
+    Session { session: String },
+    /// `session::SessionAchievements`: the game's achievements with their report state.
+    Achievements { game: crate::GameRef },
+    /// Achievement icons on this machine (`Vec<Option<PathBuf>>`, one per URL): from
+    /// quiverd's icon cache, downloaded into it first when missing (known image hosts only).
+    Icons { urls: Vec<String> },
+    /// `session::Screenshot`: the game's next frame, saved under `~/Pictures/Quiver/<game>/`.
+    /// No session named: the focused game, else the only one running.
+    Screenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
 }
 
 // ---- Notices (toasts from quiverd, agents and mods) ----------------------------------------
@@ -425,8 +443,48 @@ impl NoticeSpec {
 pub enum OnUnlock {
     #[default]
     Toast,
-    /// The toast, and a screenshot of the game once the toast has gone (SIGHT §3.7).
+    /// The toast, and the game's frame half a second later (the Sight layer's capture, which
+    /// is taken under Sight's own drawing: SIGHT §3.7).
     ToastScreenshot,
+    /// Nothing (no toast).
+    Off,
+}
+
+impl OnUnlock {
+    pub const ALL: [OnUnlock; 3] = [OnUnlock::Toast, OnUnlock::ToastScreenshot, OnUnlock::Off];
+
+    /// As the file and `SettingsSet` spell it.
+    pub fn key(self) -> &'static str {
+        match self {
+            OnUnlock::Toast => "toast",
+            OnUnlock::ToastScreenshot => "toast_screenshot",
+            OnUnlock::Off => "off",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnUnlock::Toast => "Toast",
+            OnUnlock::ToastScreenshot => "Toast and screenshot",
+            OnUnlock::Off => "Nothing",
+        }
+    }
+
+    /// `toast`, `toast_screenshot` (also `toast-screenshot`, `toast and screenshot`), `off`.
+    pub fn parse(s: &str) -> Option<OnUnlock> {
+        let s = s.trim().to_ascii_lowercase().replace(" and ", "_").replace(['-', ' '], "_");
+        OnUnlock::ALL.into_iter().find(|o| o.key() == s)
+    }
+}
+
+/// Hidden achievements' names and descriptions (`achievements.hidden`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HiddenAchievements {
+    /// Masked until revealed (A on the row).
+    #[default]
+    Masked,
+    Shown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -440,6 +498,8 @@ pub struct ToastSettings {
 pub struct AchievementSettings {
     #[serde(default)]
     pub on_unlock: OnUnlock,
+    #[serde(default)]
+    pub hidden: HiddenAchievements,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -519,12 +579,17 @@ pub struct SightSettings {
     /// Quick-menu pins per scope ([`pin_scope`]).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, Vec<QuickPin>>,
+    /// The panel's sections docked (true) or centred (false) by R3, where that differs from
+    /// their default (design/SIGHT.md §9): section id → docked.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub docked: std::collections::BTreeMap<String, bool>,
 }
 
 /// The settings `SettingsSet` takes, with their values.
 pub const SETTING_KEYS: &[(&str, &str)] = &[
     ("toasts.dnd", "true | false: silence toasts while playing, except errors"),
-    ("achievements.on_unlock", "toast | toast_screenshot"),
+    ("achievements.on_unlock", "toast | toast_screenshot | off"),
+    ("achievements.hidden", "masked | shown: hidden achievements' names"),
     ("status_chip.enabled", "true | false: the corner chip when the panel closes"),
     ("hint.shown", "true | false: false shows the first-launch hint again"),
     ("pad_chord", "true | false: Select+Start held opens the panel (no hyprpad)"),
@@ -561,9 +626,23 @@ impl SightSettings {
                 self.hint.shown_at = if self.hint.shown { Some(Utc::now()) } else { None };
             }
             "achievements.on_unlock" => {
-                let s = value.as_str().ok_or_else(|| format!("{key} takes toast or toast_screenshot"))?;
-                self.achievements.on_unlock = serde_json::from_value(serde_json::Value::String(s.trim().replace('-', "_").replace(" and ", "_").to_ascii_lowercase()))
-                    .map_err(|_| format!("{key} takes toast or toast_screenshot, not {s:?}"))?;
+                let s = value.as_str().unwrap_or_default();
+                self.achievements.on_unlock = OnUnlock::parse(s).ok_or_else(|| format!("{key} takes toast, toast_screenshot or off, not {value}"))?;
+            }
+            "achievements.hidden" => {
+                self.achievements.hidden = match value.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                    Some("masked") => HiddenAchievements::Masked,
+                    Some("shown") => HiddenAchievements::Shown,
+                    _ => return Err(format!("{key} takes masked or shown, not {value}")),
+                };
+            }
+            // The panel's layout: the whole map (`{"mods": true, …}`).
+            "docked" => {
+                let m: std::collections::BTreeMap<String, bool> = serde_json::from_value(value.clone()).map_err(|_| format!("{key} takes a map of section → bool"))?;
+                if m.len() > 32 || m.keys().any(|k| k.len() > 32) {
+                    return Err(format!("{key}: too many sections"));
+                }
+                self.docked = m;
             }
             other => {
                 let known: Vec<&str> = SETTING_KEYS.iter().map(|(k, _)| *k).collect();
@@ -635,7 +714,7 @@ pub fn load_settings_at(path: &std::path::Path) -> SightSettings {
 pub fn save_settings_at(path: &std::path::Path, s: &SightSettings) -> std::io::Result<()> {
     let mut table: toml::Table = std::fs::read_to_string(path).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
     let ours: toml::Table = toml::Table::try_from(s).map_err(std::io::Error::other)?;
-    for k in ["pad_chord", "toasts", "achievements", "status_chip", "hint", "pins"] {
+    for k in ["pad_chord", "toasts", "achievements", "status_chip", "hint", "pins", "docked"] {
         table.remove(k);
     }
     table.extend(ours);
@@ -726,6 +805,16 @@ mod tests {
         assert!(s.set("nope", &serde_json::json!(1)).is_err());
         s.set("hint.shown", &serde_json::json!(false)).unwrap();
         assert!(!s.hint.shown && s.hint.shown_at.is_none(), "reset");
+        // Sight C's keys and values (the Session and Achievements sections' rows).
+        s.set("achievements.on_unlock", &serde_json::json!("off")).unwrap();
+        s.set("achievements.hidden", &serde_json::json!("shown")).unwrap();
+        assert_eq!((s.achievements.on_unlock, s.achievements.hidden), (OnUnlock::Off, HiddenAchievements::Shown));
+        let t = toml::to_string(&s).unwrap();
+        assert!(t.contains("on_unlock = \"off\"") && t.contains("hidden = \"shown\""), "{t}");
+        assert_eq!(SightSettings::from_toml("[achievements]\non_unlock = \"toast_screenshot\"\nhidden = \"masked\"\n").achievements.on_unlock, OnUnlock::ToastScreenshot);
+        s.set("docked", &serde_json::json!({"mods": false})).unwrap();
+        assert_eq!(s.docked.get("mods"), Some(&false));
+        assert!(s.set("docked", &serde_json::json!("yes")).is_err());
         // Pins: per profile, then the game's; no twice; at most MAX_PINS.
         let g = crate::GameRef::ubisoft(3539);
         let pin = |id: &str| QuickPin { kind: PinKind::Option, surface: "m1/aco-dlss".into(), id: id.into(), label: id.into() };

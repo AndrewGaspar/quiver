@@ -16,6 +16,7 @@
 //! with the play session. A tokio task publishes both every 100 ms.
 
 pub mod api;
+pub mod capture;
 pub mod catalog;
 pub mod display;
 pub mod format;
