@@ -19,6 +19,7 @@ use sha1::{Digest, Sha1};
 use quiver_proto::download;
 
 use crate::download::slice_path_for;
+use crate::retry::{Kind, Permanent, Transient};
 
 /// How many slices are fetched concurrently.
 const PARALLEL: usize = 24;
@@ -443,6 +444,16 @@ impl Progress {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+
+    /// Before the same job runs again (after a transient failure): the counters an install
+    /// fills from what is on disk start over. `received`, `retries` and the cancel flag
+    /// carry on.
+    pub fn restart(&self) {
+        for c in [&self.total, &self.downloaded, &self.written, &self.files_done, &self.hashed, &self.hash_total, &self.retrying] {
+            c.store(0, Ordering::Relaxed);
+        }
+        self.finalizing.store(false, Ordering::Relaxed);
+    }
 }
 
 /// The error an install returns when it was cancelled through [`Progress::cancel`].
@@ -546,28 +557,42 @@ async fn fetch_slice(
 ) -> Result<Option<Vec<u8>>> {
     let policy = progress.retry;
     let mut attempt = 0;
+    // Whether the last try to renew the URL failed (download_service unreachable).
+    let mut renew_failed = false;
     loop {
         attempt += 1;
         if issued.elapsed() > policy.url_max_age {
-            if let Ok(mut fresh) = dl.urls(&[path.to_owned()]).await
-                && let Some(m) = fresh.pop()
-            {
-                (mirrors, issued) = (m, Instant::now());
+            match dl.urls(&[path.to_owned()]).await {
+                Ok(mut fresh) => {
+                    renew_failed = false;
+                    if let Some(m) = fresh.pop() {
+                        (mirrors, issued) = (m, Instant::now());
+                    }
+                }
+                Err(_) => renew_failed = true,
             }
         }
+        let mut bad_hash = false;
         let err = match dl.get(&mirrors).await {
             Ok(body) if Sha1::digest(&body).as_slice() == sha1 => return Ok(Some(body)),
             // A cut-off or mangled body: the next try usually works.
-            Ok(_) => SliceError::Retry(anyhow::anyhow!("slice {} failed SHA-1 check", hex::encode_upper(sha1))),
+            Ok(_) => {
+                bad_hash = true;
+                SliceError::Retry(anyhow::anyhow!("slice {} failed SHA-1 check", hex::encode_upper(sha1)))
+            }
             Err(e) => e,
         };
         let refresh = matches!(err, SliceError::Refresh(_));
         let e = match err {
-            SliceError::Fatal(e) => return Err(e.context(path.to_owned())),
+            SliceError::Fatal(e) => return Err(e.context(Permanent(path.to_owned()))),
             SliceError::Retry(e) | SliceError::Refresh(e) => e,
         };
         if attempt >= policy.attempts {
-            return Err(e.context(format!("{path}: gave up after {attempt} tries")));
+            // Out of tries. Network trouble (or URLs that couldn't be renewed for it) may
+            // pass: the queue tries the game again later. A slice that keeps failing its
+            // hash, or URLs refused even fresh, won't.
+            let why = format!("{path}: gave up after {attempt} tries");
+            return Err(if bad_hash || (refresh && !renew_failed) { e.context(Permanent(why)) } else { e.context(Transient(why)) });
         }
         tracing::debug!("{path}: try {attempt} failed ({e:#}); retrying");
         progress.retries.fetch_add(1, Ordering::Relaxed);
@@ -580,22 +605,31 @@ async fn fetch_slice(
         if refresh {
             // Expired or refused: ask download_service again (that can fail transiently too).
             match dl.urls(&[path.to_owned()]).await {
-                Ok(mut fresh) if !fresh.is_empty() => (mirrors, issued) = (fresh.pop().unwrap(), Instant::now()),
-                Ok(_) => {}
-                Err(e) => tracing::debug!("{path}: renewing the URL failed: {e:#}"),
+                Ok(mut fresh) if !fresh.is_empty() => {
+                    renew_failed = false;
+                    (mirrors, issued) = (fresh.pop().unwrap(), Instant::now());
+                }
+                Ok(_) => renew_failed = false,
+                Err(e) => {
+                    renew_failed = true;
+                    tracing::debug!("{path}: renewing the URL failed: {e:#}");
+                }
             }
         }
     }
 }
 
-/// Signed URLs for a batch, retrying transient download_service failures.
+/// Signed URLs for a batch, retrying transient download_service failures (each try after
+/// a closed connection or a dropped socket reconnects: see `Downloader::urls`).
 async fn batch_urls(dl: &impl SliceSource, paths: &[String], progress: &Progress) -> Result<Vec<Vec<String>>> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         match dl.urls(paths).await {
             Ok(u) => return Ok(u),
-            Err(e) if attempt >= progress.retry.attempts => return Err(e.context("requesting download URLs")),
+            Err(e) if attempt >= progress.retry.attempts || crate::retry::marked(&e) == Some(Kind::Permanent) => {
+                return Err(e.context("requesting download URLs"));
+            }
             Err(e) => {
                 tracing::debug!("URL request failed ({e:#}); retrying");
                 progress.retries.fetch_add(1, Ordering::Relaxed);
