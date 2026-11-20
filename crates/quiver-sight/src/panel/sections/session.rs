@@ -333,13 +333,14 @@ pub fn home_relative(p: &std::path::Path) -> String {
 
 // ---- Rendering -------------------------------------------------------------------------------
 
-/// The section's body: two columns of cards.
-pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, cx: &mut Context<PanelView>) -> AnyElement {
+/// The section's body: two columns of cards (docked: one, scrolling).
+pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, docked: bool, cx: &mut Context<PanelView>) -> AnyElement {
     let now = Utc::now();
     let s = v.data.session.ready();
     let x = v.data.extras.clone();
     let mut left = div().flex_1().min_w_0().flex().flex_col().gap(px(16.));
-    let mut right = div().w(gpui::relative(0.42)).flex_none().flex().flex_col().gap(px(16.));
+    let mut right = div().flex().flex_col().gap(px(16.));
+    right = if docked { right.w_full() } else { right.w(gpui::relative(0.42)).flex_none() };
     for r in rows {
         if let Row::Note(t) = r {
             left = left.child(div().text_size(px(13.)).text_color(th.tx3).child(t.clone()));
@@ -364,7 +365,11 @@ pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, cx:
         actions = actions.child(div().pt(px(10.)).text_size(px(12.)).text_color(th.tx3).child(format!("Screenshots: {why}")));
     }
     right = right.child(actions);
-    div().flex().gap(px(16.)).w_full().child(left).child(right).into_any_element()
+    if docked {
+        // A narrow column: the controls first, then the cards.
+        return div().id("session-body").size_full().overflow_y_scroll().track_scroll(&v.scroll).px(px(12.)).py(px(8.)).flex().flex_col().gap(px(16.)).child(right).child(left.w_full()).into_any_element();
+    }
+    div().id("session-body").size_full().overflow_y_scroll().flex().gap(px(16.)).child(left).child(right).into_any_element()
 }
 
 fn now_playing(v: &PanelView, th: &Theme, s: &SessionView, info: Option<&SessionInfo>, now: DateTime<Utc>) -> gpui::Div {
@@ -510,7 +515,7 @@ fn achievements_card(th: &Theme, a: &Achs, started: Option<DateTime<Utc>>) -> gp
 fn toggle(v: &PanelView, th: &Theme, i: usize, r: &Row, focused: bool, cx: &mut Context<PanelView>) -> AnyElement {
     let (label, sub, value): (String, Option<String>, Result<bool, String>) = match r {
         Row::Opt { surface, .. } => {
-            let on = v.draft_of(r).and_then(|x| x.as_bool()).unwrap_or(false);
+            let on = v.shown_value(r).and_then(|x| x.as_bool()).unwrap_or(false);
             let fg = v.data.options.ready().and_then(|o| fg_toggle(o)).filter(|f| &f.0 == surface);
             let sub = fg.map(|(_, _, title, key)| [Some(title), key].into_iter().flatten().collect::<Vec<_>>().join(" · "));
             ("Frame generation".to_owned(), sub, Ok(on))
@@ -523,7 +528,7 @@ fn toggle(v: &PanelView, th: &Theme, i: usize, r: &Row, focused: bool, cx: &mut 
         }
         Row::Tweak { .. } => {
             let st = v.option_state(r);
-            let val = match (st, v.draft_of(r)) {
+            let val = match (st, v.shown_value(r)) {
                 (Some(st), Some(x)) => short_value(&st.def, &x),
                 _ => "—".into(),
             };

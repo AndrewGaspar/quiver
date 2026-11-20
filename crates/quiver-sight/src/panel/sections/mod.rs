@@ -1,13 +1,36 @@
-//! The Session and Achievements sections (design/SIGHT.md §3.3; the `SightSession` and
-//! `SightAchievements` mock-ups): their data beyond the session itself, their rows, and their
-//! card layouts. The panel's shell (`view.rs`) hands them the body; everything they change
-//! goes through the same rows and link requests as the other sections.
+//! The panel's sections, each in its own module: what it lists, the hints it gives
+//! ([`super::hints`]), and how it draws. The shell (`panel/view.rs`) picks the section's
+//! rows and layout through [`rows`] and `PanelView::section_body`.
+//!
+//! - [`mods`]: the Mods and Tweaks sections (option surfaces, pages, presets, the session's
+//!   changes, the change chip, A/B compare).
+//! - [`session`] and [`achievements`]: the Session and Achievements sections as cards (the
+//!   `SightSession` and `SightAchievements` mock-ups); [`prefs`]: the panel's own settings
+//!   they change (Do not disturb, On unlock, hidden achievements).
+//! - Performance still draws from `panel::state::rows`.
 
 pub mod achievements;
+pub mod mods;
+pub mod mods_view;
 pub mod prefs;
 pub mod session;
 
 use chrono::{DateTime, Local, Utc};
+use quiver_api::sight::PanelSection;
+
+use super::state::{Nav, PanelData, Row};
+use mods::SessionLog;
+
+/// The rows of the current section (in focus order).
+pub fn rows(nav: &Nav, d: &PanelData, log: &SessionLog, now: DateTime<Utc>) -> Vec<Row> {
+    match nav.section {
+        PanelSection::Mods => mods::rows(d, nav, log),
+        PanelSection::Tweaks => mods::tweak_rows(d, nav, log),
+        PanelSection::Achievements => achievements::rows(d, nav.ach_filter, now),
+        s => super::state::rows(s, d, now),
+    }
+}
+
 use gpui::{Div, Hsla, IntoElement, ParentElement, Styled, div, px};
 use quiver_ui::components::{MEDIUM, SEMIBOLD};
 use quiver_ui::options::Tone;

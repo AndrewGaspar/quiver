@@ -204,6 +204,7 @@ pub fn panel_data(session: &str, title: &str, game: &str, started: chrono::DateT
         metrics: Default::default(),
         extras: crate::panel::sections::session::Extras { saves: Load::Unavailable(ro()), ..Default::default() },
         prefs: Default::default(),
+        readouts: Default::default(),
     }
 }
 
@@ -278,6 +279,18 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                 LinkReq::SetTweak { id, .. } => {
                     let why = l.refuse(format!("set tweak {id}"));
                     let _ = l.tx.unbounded_send(Msg::Done { change: Change::Tweak(id), result: Err(why) });
+                }
+                LinkReq::OptionOps { tweaks, why, ops, .. } => {
+                    let refused = l.refuse(format!("{} {} change(s) ({why:?})", ops.len(), if tweaks { "tweak" } else { "option" }));
+                    let _ = l.tx.unbounded_send(Msg::Done { change: Change::Ops { tweaks, why }, result: Err(refused) });
+                }
+                LinkReq::RevertSession { .. } => {
+                    let refused = l.refuse("revert the session's options".into());
+                    let _ = l.tx.unbounded_send(Msg::Done { change: Change::Ops { tweaks: false, why: crate::link::Why::Revert }, result: Err(refused) });
+                }
+                LinkReq::SessionOnly { .. } => {
+                    let refused = l.refuse("make the session's options session-only".into());
+                    let _ = l.tx.unbounded_send(Msg::Done { change: Change::Ops { tweaks: false, why: crate::link::Why::SessionOnly }, result: Err(refused) });
                 }
                 LinkReq::HudSet { .. } => {
                     let why = l.refuse("HUD settings".into());

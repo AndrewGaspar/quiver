@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
-use quiver_api::options::{OptionOp, OptionsChange, OptionsEvent};
+use quiver_api::options::{Live, OptionOp, OptionsChange, OptionsEvent};
 use quiver_api::perf::{HudModel, HudScope, PerfEvent, PerfRequest, PerfSessionInfo, PerfUpdate};
 use quiver_api::sight::{PanelCommand, PanelReport, SightRequest, SightStatus};
 use quiver_api::{Client, Event, GameRef, Request};
@@ -45,13 +45,17 @@ pub enum Msg {
     /// Keyboard and mouse input the game's input preload forwarded to the panel drawn in the
     /// game (`panel::ingame`).
     GameInput { session: String, events: Vec<quiver_perf::panel::PanelEvent> },
+    /// The panel's layout changed (docked or centred, design/SIGHT.md §9): the backdrop
+    /// follows (no blur or dim while docked), and the sections' choices are saved.
+    PanelLayout { docked: bool, prefs: std::collections::BTreeMap<String, bool> },
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.
 #[allow(clippy::large_enum_variant)]
 pub enum Loaded {
     All(Box<PanelData>),
-    Options(Load<Vec<quiver_api::options::SurfaceState>>),
+    /// The option surfaces, and their readouts (`PanelData::readouts`).
+    Options(Load<Vec<quiver_api::options::SurfaceState>>, std::collections::BTreeMap<String, Vec<(String, String)>>),
     Tweaks(Load<quiver_api::options::SurfaceState>),
     Hud(Load<HudState>),
 }
@@ -66,19 +70,43 @@ pub enum Change {
     Stop,
     /// A screenshot, and where it went (empty when it failed).
     Screenshot(std::path::PathBuf),
+    /// A batch from Mods (`tweaks` false) or Tweaks: Undo, X, a preset, Revert this session,
+    /// Session only, an A/B compare.
+    Ops { tweaks: bool, why: Why },
+}
+
+/// Why the Mods or Tweaks section sent a batch ([`Change::Ops`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    Undo,
+    Reset,
+    Preset,
+    Revert,
+    SessionOnly,
+    Compare,
 }
 
 /// What the panel asks of quiverd.
 pub enum LinkReq {
     Load { session: String, part: Part, view: Option<SessionView> },
-    SetOption { view: SessionView, op: OptionOp, key: (String, String) },
+    /// One option (`live: only` while the Mods section's "Session only" is on).
+    SetOption { view: SessionView, op: OptionOp, key: (String, String), live: Live },
     SetTweak { view: SessionView, op: OptionOp, id: String },
+    /// Several changes as one revision (Mods: `OptionsSet`; `tweaks`: `TweaksSet`, which has no
+    /// `live`).
+    OptionOps { view: SessionView, tweaks: bool, ops: Vec<OptionOp>, live: Live, why: Why },
+    /// `OptionsRevertSession`: back to what the session launched with.
+    RevertSession { view: SessionView },
+    /// Session only: `back` saved without touching the game (`live: no`), then `live` for the
+    /// running session only (`live: only`).
+    SessionOnly { view: SessionView, back: Vec<OptionOp>, live: Vec<OptionOp> },
     HudSet { view: SessionView, set: HudScope },
     HudToggle { session: String },
     Stop { game: GameRef },
     /// The game's next frame as a PNG (`SightRequest::Screenshot`).
     Screenshot { session: String },
-    Subscribe { session: String },
+    /// The panel's metrics, and `extra` ones (the mods' readouts).
+    Subscribe { session: String, extra: Vec<String> },
     Unsubscribe,
     Report(PanelReport),
     /// The pad's long-press chord: what `quiver sight toggle` does.
@@ -261,14 +289,22 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                 data::refresh(&client, &session, part, &mut d).await;
                 let data = Box::new(match part {
                     Part::All => Loaded::All(Box::new(d)),
-                    Part::Options => Loaded::Options(d.options),
+                    Part::Options => Loaded::Options(d.options, d.readouts),
                     Part::Tweaks => Loaded::Tweaks(d.tweaks),
                     Part::Hud => Loaded::Hud(d.hud),
                 });
                 send(Msg::Loaded { session, data });
             }
-            LinkReq::SetOption { view, op, key } => send(done(Change::Option(key.0, key.1), data::set_option(&client, &view, op).await.map(Some))),
-            LinkReq::SetTweak { view, op, id } => send(done(Change::Tweak(id), data::set_tweak(&client, &view, op).await.map(Some))),
+            LinkReq::SetOption { view, op, key, live } => send(done(Change::Option(key.0, key.1), data::set_options(&client, &view, vec![op], live).await.map(Some))),
+            LinkReq::SetTweak { view, op, id } => send(done(Change::Tweak(id), data::set_tweaks(&client, &view, vec![op]).await.map(Some))),
+            LinkReq::OptionOps { view, tweaks, ops, live, why } => {
+                let r = if tweaks { data::set_tweaks(&client, &view, ops).await } else { data::set_options(&client, &view, ops, live).await };
+                send(done(Change::Ops { tweaks, why }, r.map(Some)));
+            }
+            LinkReq::RevertSession { view } => send(done(Change::Ops { tweaks: false, why: Why::Revert }, data::revert_session(&client, &view).await.map(Some))),
+            LinkReq::SessionOnly { view, back, live } => {
+                send(done(Change::Ops { tweaks: false, why: Why::SessionOnly }, data::session_only(&client, &view, back, live).await.map(Some)));
+            }
             LinkReq::HudSet { view, set } => send(done(Change::Hud, data::hud_set(&client, view.game, set).await.map(|_| None))),
             LinkReq::HudToggle { session } => send(done(Change::Hud, data::hud_toggle(&client, &session).await.map(|_| None))),
             LinkReq::Stop { game } => send(done(Change::Stop, data::stop(&client, game).await.map(|_| None))),
@@ -276,12 +312,12 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                 Ok(s) => send(Msg::Done { change: Change::Screenshot(s.path), result: Ok(None) }),
                 Err(e) => send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(format!("{e:#}")) }),
             },
-            LinkReq::Subscribe { session } => {
+            LinkReq::Subscribe { session, extra } => {
                 let old = sub.lock().unwrap().take();
                 if let Some(s) = old {
                     data::unsubscribe(&client, s).await;
                 }
-                match data::subscribe(&client, &session).await {
+                match data::subscribe(&client, &session, &extra).await {
                     Ok(s) => *sub.lock().unwrap() = Some(s),
                     Err(e) => tracing::debug!("metrics: {e:#}"),
                 }

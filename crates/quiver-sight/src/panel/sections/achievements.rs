@@ -24,6 +24,8 @@ use quiver_ui::components::{BOLD, FocusExt, Icon, MEDIUM, SEMIBOLD, glyph, icon}
 use quiver_ui::input::Input;
 use quiver_ui::theme::Theme;
 
+use crate::panel::hints::{Glyph, Hints};
+
 use super::prefs::{OnUnlock, Pref};
 use super::{bar, card, heading, when};
 use crate::panel::state::{Ach, Achs, Load, PanelData, Row, SessionView};
@@ -108,7 +110,10 @@ pub fn rows(d: &PanelData, filter: Filter, now: DateTime<Utc>) -> Vec<Row> {
         Load::Unavailable(w) => out.push(Row::Note(w.clone())),
         Load::Ready(_) => {}
     }
-    out.push(Row::Pref(Pref::OnUnlock));
+    // The setting once there's an answer (while loading the section has nothing to focus).
+    if !matches!(d.achievements, Load::Loading) {
+        out.push(Row::Pref(Pref::OnUnlock));
+    }
     if let Some(a) = d.achievements.ready() {
         out.push(Row::AchFilter);
         out.push(Row::Pref(Pref::Hidden));
@@ -172,12 +177,34 @@ pub async fn load(client: &Client, s: &SessionView) -> Load<Achs> {
 
 // ---- Rendering -------------------------------------------------------------------------------
 
-pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, cx: &mut Context<PanelView>) -> AnyElement {
+/// The hint bar while the section is shown.
+pub fn hints(v: &PanelView, h: &mut Hints) {
+    let rows = v.rows();
+    match v.nav.focused_row(&rows).and_then(|i| rows.get(i)) {
+        Some(Row::Achievement(k)) => {
+            if v.data.achievements.ready().and_then(|a| a.list.get(*k)).is_some_and(|a| masked(a, v.data.prefs.show_hidden, v.nav.revealed.contains(k))) {
+                h.add([Glyph::X], "Reveal hidden");
+            }
+        }
+        Some(Row::AchFilter) => {
+            h.add([Glyph::LeftRight], "Filter");
+        }
+        Some(Row::Pref(_)) => {
+            h.add([Glyph::LeftRight], "Change").add([Glyph::A], "Next");
+        }
+        _ => {}
+    }
+    h.add([Glyph::LT, Glyph::RT], "Filter");
+}
+
+/// The section's body: the cards on the left, the list on the right (docked: one column).
+pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, docked: bool, cx: &mut Context<PanelView>) -> AnyElement {
     let now = Utc::now();
     let started = v.data.session.ready().and_then(|s| s.started);
     let a = v.data.achievements.ready();
     let pos = |r: &Row| rows.iter().position(|x| x == r);
-    let mut left = div().w(px(330.)).flex_none().flex().flex_col().gap(px(16.));
+    let mut left = div().flex().flex_col().gap(px(16.));
+    left = if docked { left.w_full().flex_none() } else { left.w(px(330.)).flex_none() };
     for r in rows {
         if let Row::Note(t) = r {
             left = left.child(div().text_size(px(13.)).text_color(th.tx3).child(t.clone()));
@@ -306,8 +333,12 @@ pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, cx:
         .gap(px(8.))
         .children(items)
         .when(empty, |d| d.child(div().p(px(8.)).text_size(px(13.)).text_color(th.tx3).child(format!("Nothing under {}.", v.nav.ach_filter.label()))));
-    let right = div().flex_1().min_w_0().h_full().flex().flex_col().rounded(px(14.)).bg(th.ink2).border_1().border_color(th.line1).child(bar_row).child(list);
-    div().flex().gap(px(20.)).w_full().h_full().child(left).child(right).into_any_element()
+    let right = div().flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(14.)).bg(th.ink2).border_1().border_color(th.line1).child(bar_row.flex_wrap()).child(list);
+    if docked {
+        // A narrow column: the cards, then the list.
+        return div().size_full().px(px(12.)).py(px(8.)).flex().flex_col().gap(px(12.)).child(left).child(right).into_any_element();
+    }
+    div().flex().gap(px(20.)).size_full().child(left).child(right.h_full()).into_any_element()
 }
 
 fn reporting_note(r: &Reporting, a: &Achs) -> String {
@@ -516,7 +547,7 @@ mod tests {
         assert_eq!(list_pos(&r, 6), Some(3));
         assert_eq!(list_pos(&r, 1), None);
         let loading = rows(&PanelData::default(), Filter::All, now);
-        assert!(matches!(&loading[0], Row::Note(_)));
+        assert!(matches!(&loading[..], [Row::Note(_)]), "nothing to focus while loading");
     }
 
     #[test]
