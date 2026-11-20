@@ -192,6 +192,9 @@ quiver install origins --dry-run               # sizes, free space, languages; n
 quiver queue                                   # the download queue: state, progress, speed
 quiver queue history origins                   # throughput quiverd sampled: 1/s, last 10 min, pauses as gaps
 quiver queue move origins top                  # or up / down
+quiver queue now origins                       # download it now (also `queue move origins now`): the running
+                                               # download stops at a safe point and goes back behind it
+quiver queue after origins --steam on --desktop on   # when it finishes: Steam shortcut, .desktop entry
 quiver pause origins                           # stops at a slice boundary; keeps its place
 quiver resume origins                          # also retries a failed item
 quiver queue remove origins                    # files stay; installing again resumes
@@ -319,8 +322,15 @@ Installs, updates and repairs go through one queue in `quiverd` (`<data>/queue.j
 a time unless `--max-active` says otherwise. A download refuses to start if what it will write
 plus a margin (1 GiB or 5%) doesn't fit on the library's filesystem. Progress is kept per file
 (`.quiver-install/done`) and per slice (`.quiver-install/slices`), so pausing, a crash or a daemon
-restart loses at most the slices in flight; a restarted daemon resumes what was running and
-leaves paused items paused. Each slice is tried up to six times (1 s doubling to 30 s, with
+restart loses at most the slices in flight; a restarted daemon resumes what was running first
+(whatever its place in the queue), then the rest in order, and leaves paused items paused.
+"Download now" (`quiver queue now`, the app's download button on a queued row) moves an item to
+the top and, when the queue is busy, switches the lowest-placed running download out: it stops
+at a slice boundary like a pause, keeps what it finished and goes back to the queue right behind.
+A download verifying files isn't switched out, and one registering its install is left to finish.
+"When it finishes" choices (add to Steam, a .desktop entry) live on the queue item in quiverd,
+which does them itself when the install completes, app open or not; a Steam shortcut is staged
+while Steam runs, and Steam is never restarted for it. Each slice is tried up to six times (1 s doubling to 30 s, with
 jitter) on connection errors, timeouts, cut-off bodies, 5xx and 429, and its signed URL is
 renewed when the CDN refuses it. Updates reuse every slice whose bytes are already in place.
 Verify hashes each slice of each file the manifest lists (other files, such as mods or extra

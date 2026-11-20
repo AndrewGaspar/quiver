@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use quiver_api::exports::{ExportKind, SteamUsers};
+use quiver_api::downloads::{AFTER_DESKTOP, AFTER_STEAM, QueueEntry};
+use quiver_api::exports::{ExportKind, SteamExportResult, SteamUsers};
 use quiver_api::{GameRef, Request, StoreId};
 use quiver_core::exports::{self, ExportKey, Paths, Target, desktop, steam};
 use quiver_core::launcher::{Config, Games};
@@ -135,6 +136,84 @@ fn find_steam(paths: &Paths) -> Result<steam::Steam> {
         .context("Steam not found (looked in ~/.steam/steam, ~/.local/share/Steam and the Flatpak's data)")
 }
 
+/// Write a game's .desktop entry (`Request::ExportDesktop`). `why` ends the activity line.
+async fn export_desktop(daemon: &Arc<Daemon>, source: &str, game: GameRef, why: &str) -> Result<quiver_api::exports::ExportRecord> {
+    let t = target(daemon, game).await?;
+    let rec = desktop::export(&Paths::from_env(), &t).await?;
+    daemon.log_activity_game(source, format!("wrote .desktop entry for {}{why}", t.name), Some(game));
+    Ok(rec)
+}
+
+/// Add (or remove) a game's Steam shortcut (`Request::ExportSteam`): staged while Steam
+/// runs, never restarting it. `why` ends the activity line.
+async fn export_steam(daemon: &Arc<Daemon>, source: &str, game: GameRef, remove: bool, steam_user: Option<String>, why: &str) -> Result<SteamExportResult> {
+    let paths = Paths::from_env();
+    if game.store == StoreId::Steam && !remove {
+        bail!("{game} is a Steam game: Steam lists and starts it, so it needs no shortcut from Quiver");
+    }
+    let steam = find_steam(&paths)?;
+    let users = steam.users()?;
+    let mut cfg = Config::load()?;
+    let running = steam::is_running();
+    let key = ExportKey::for_game(game);
+    let result = if remove {
+        // The recorded user wins; this is only for shortcuts Quiver has no record of.
+        let user = steam::choose_user(&users, steam_user.as_deref(), cfg.steam_user.as_deref()).ok();
+        steam::remove(&paths, &steam, user.as_ref().map(|u| u.id.as_str()), &key, running)?
+    } else {
+        let user = steam::choose_user(&users, steam_user.as_deref(), cfg.steam_user.as_deref())?;
+        if steam_user.is_some() && cfg.steam_user.as_deref() != Some(&user.id) {
+            cfg.steam_user = Some(user.id.clone());
+            cfg.save()?;
+        }
+        let t = target(daemon, game).await?;
+        steam::export(&paths, &steam, &user.id, &t, running).await?
+    };
+    daemon.log_activity_game(
+        source,
+        format!(
+            "{} Steam shortcut for {} (user {}){}{why}",
+            if remove { "removed" } else { "wrote" },
+            daemon.game_name(game).await,
+            result.steam_user,
+            if result.staged { "; staged until Steam restarts" } else { "" }
+        ),
+        Some(game),
+    );
+    Ok(result)
+}
+
+/// A queued install finished: write what its "when it finishes" choices ask for, the way
+/// the game page's buttons do (a Steam shortcut is staged while Steam runs; Steam is never
+/// restarted). Returns lines for the install's job; failures are logged and returned as
+/// lines, the install stays a success.
+pub(crate) async fn after_install(daemon: &Arc<Daemon>, item: &QueueEntry) -> Vec<String> {
+    let game = item.game_ref();
+    let source = item.source.as_str();
+    let why = " (chosen for when its install finished)";
+    let mut out = Vec::new();
+    if item.after.desktop {
+        out.push(match export_desktop(daemon, source, game, why).await {
+            Ok(_) => format!("{AFTER_DESKTOP}created"),
+            Err(e) => {
+                daemon.log_activity_game(source, format!("couldn't write the .desktop entry for {} after its install: {e:#}", item.name), Some(game));
+                format!("{AFTER_DESKTOP}couldn't create it: {e:#}")
+            }
+        });
+    }
+    if item.after.steam {
+        out.push(match export_steam(daemon, source, game, false, None, why).await {
+            Ok(r) if r.staged => format!("{AFTER_STEAM}added; it shows after Steam restarts (Quiver won't restart Steam without asking)"),
+            Ok(_) => format!("{AFTER_STEAM}added"),
+            Err(e) => {
+                daemon.log_activity_game(source, format!("couldn't add {} to Steam after its install: {e:#}", item.name), Some(game));
+                format!("{AFTER_STEAM}couldn't add it: {e:#}")
+            }
+        });
+    }
+    out
+}
+
 pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> Result<Value> {
     let paths = Paths::from_env();
     Ok(match req {
@@ -147,48 +226,10 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
                 daemon.log_activity_game(source, format!("removed .desktop entry for {}", daemon.game_name(game).await), Some(game));
                 json!({ "removed": existed, "path": desktop::path(&paths, &key) })
             } else {
-                let t = target(daemon, game).await?;
-                let rec = desktop::export(&paths, &t).await?;
-                daemon.log_activity_game(source, format!("wrote .desktop entry for {}", t.name), Some(game));
-                json!(rec)
+                json!(export_desktop(daemon, source, game, "").await?)
             }
         }
-        Request::ExportSteam { game, remove, steam_user } => {
-            let game = game.0;
-            if game.store == StoreId::Steam && !remove {
-                bail!("{game} is a Steam game: Steam lists and starts it, so it needs no shortcut from Quiver");
-            }
-            let steam = find_steam(&paths)?;
-            let users = steam.users()?;
-            let mut cfg = Config::load()?;
-            let running = steam::is_running();
-            let key = ExportKey::for_game(game);
-            let result = if remove {
-                // The recorded user wins; this is only for shortcuts Quiver has no record of.
-                let user = steam::choose_user(&users, steam_user.as_deref(), cfg.steam_user.as_deref()).ok();
-                steam::remove(&paths, &steam, user.as_ref().map(|u| u.id.as_str()), &key, running)?
-            } else {
-                let user = steam::choose_user(&users, steam_user.as_deref(), cfg.steam_user.as_deref())?;
-                if steam_user.is_some() && cfg.steam_user.as_deref() != Some(&user.id) {
-                    cfg.steam_user = Some(user.id.clone());
-                    cfg.save()?;
-                }
-                let t = target(daemon, game).await?;
-                steam::export(&paths, &steam, &user.id, &t, running).await?
-            };
-            daemon.log_activity_game(
-                source,
-                format!(
-                    "{} Steam shortcut for {} (user {}){}",
-                    if remove { "removed" } else { "wrote" },
-                    daemon.game_name(game).await,
-                    result.steam_user,
-                    if result.staged { "; staged until Steam restarts" } else { "" }
-                ),
-                Some(game),
-            );
-            json!(result)
-        }
+        Request::ExportSteam { game, remove, steam_user } => json!(export_steam(daemon, source, game.0, remove, steam_user, "").await?),
         Request::SteamUsers => {
             let cfg = Config::load()?;
             let steam = steam::Steam::find(&paths.home);

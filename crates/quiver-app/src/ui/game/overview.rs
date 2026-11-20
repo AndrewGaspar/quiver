@@ -230,6 +230,7 @@ impl Quiver {
                     .py(px(10.))
                     .when(i > 0, |d| d.border_t_1().border_color(th.line1))
                     .when(focused, |d| d.bg(th.acc_soft))
+                    .stereo_focused(focused)
                     .child(
                         div()
                             .w(px(130.))

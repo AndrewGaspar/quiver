@@ -6,6 +6,7 @@
 //! `global_status`, `global_input`, ...), so the screens in `settings.rs`,
 //! `palette.rs`, `activity.rs` and `signin.rs` stay out of the shared files.
 
+use quiver_ui::depth::DepthExt;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -926,6 +927,7 @@ impl Quiver {
             .child(
                 div()
                     .id("confirm")
+                    .depth_overlay()
                     .absolute()
                     .top(px((self.viewport.1 * 0.28).max(80.)))
                     .left(px(left))
@@ -1101,6 +1103,7 @@ impl Quiver {
             .child(
                 div()
                     .id("now-playing")
+                    .depth_overlay()
                     .absolute()
                     .top(px(58.))
                     // Under the pill on wide windows; at the right edge once it moves.
@@ -1327,6 +1330,8 @@ impl Quiver {
                             }
                         }
                         "palette" => this.nav.open_palette(),
+                        // A toast that stays (`toast=Some text`), for screenshots.
+                        "toast" => this.toast_for(v.to_owned().into(), false, 600_000, cx),
                         "add-account" => this.start_add_account(cx),
                         // With `signed-out`: sign in from the library's card after N s.
                         "autosignin" => this.demo_auto_signin(v.parse().unwrap_or(4), cx),

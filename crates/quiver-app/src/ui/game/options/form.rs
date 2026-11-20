@@ -3,6 +3,7 @@
 //! unsaved bar under the pane. Rows show the apply mode, who set the value and, after a
 //! save, the daemon's outcome for it.
 
+use quiver_ui::depth::DepthExt;
 use std::collections::BTreeMap;
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px, relative};
@@ -1383,6 +1384,7 @@ impl Quiver {
         let discard_focus = self.focused(crate::nav::Target::Body(bar_i + 1));
         let bar = div()
             .id("options-pending")
+            .depth_overlay()
             .absolute()
             .left(px(inset))
             .right(px(inset))

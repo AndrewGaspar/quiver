@@ -110,7 +110,7 @@ pub(crate) fn is_installed(d: &Daemon, game: GameRef) -> bool {
 }
 
 /// `Request::Install` for an Epic game: queue the install, or an update when installed.
-pub(crate) async fn install(d: &Arc<Daemon>, source: &str, game: GameRef) -> Result<u64> {
+pub(crate) async fn install(d: &Arc<Daemon>, source: &str, game: GameRef, after: Option<quiver_api::downloads::AfterInstall>) -> Result<u64> {
     let a = app(game)?;
     let lib = d.epic.library(false).await?;
     let t = match lib.title(&a) {
@@ -127,7 +127,7 @@ pub(crate) async fn install(d: &Arc<Daemon>, source: &str, game: GameRef) -> Res
         }
     }
     let kind = if d.epic.installed_game(&a).is_some() { QueueKind::Update } else { QueueKind::Install };
-    d.downloads.enqueue(d, source, game, t.title.clone(), kind, None, None)
+    d.downloads.enqueue(d, source, game, t.title.clone(), kind, None, None, after)
 }
 
 pub(crate) async fn install_preview(d: &Arc<Daemon>, game: GameRef) -> Result<InstallPreview> {
@@ -189,7 +189,7 @@ pub(crate) async fn verify(d: &Arc<Daemon>, source: &str, game: GameRef, repair:
     let a = app(game)?;
     let i = d.epic.installed_game(&a).with_context(|| format!("{game} isn't installed"))?;
     if repair {
-        return d.downloads.enqueue(d, source, game, i.title, QueueKind::Repair, None, None);
+        return d.downloads.enqueue(d, source, game, i.title, QueueKind::Repair, None, None, None);
     }
     let (id, progress) = crate::downloads::begin_verify(d, source, game, &i.title)?;
     let this = d.clone();

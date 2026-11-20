@@ -8,14 +8,20 @@
 //!
 //! Focus: every row of the page is one body row of [`crate::nav::Nav`]; Left/Right pick a
 //! button within the row ([`DlState::col`]). On a queued item LT/RT move it up or down and
-//! X pauses or resumes it.
+//! X pauses or resumes it; its "Download now" button switches the running download for it.
+//!
+//! "When it finishes" (add to Steam, a .desktop entry) lives on the queue item in quiverd
+//! ([`QueueEntry::after`]), which does it when the install completes: this page only shows
+//! and changes the choices.
 
+use quiver_ui::depth::DepthExt;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, Stateful, Styled, Window, div, prelude::*, px};
-use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueKind, QueueMove, QueueState, Throughput, UpdatePreview, VerifyReport};
-use quiver_api::exports::SteamExportResult;
+use quiver_api::downloads::{
+    AfterInstall, DownloadSettings, InstallPreview, QueueEntry, QueueKind, QueueMove, QueueState, RunNow, Throughput, UpdatePreview, VerifyReport, is_after_note,
+};
 use quiver_api::setup::SetupState;
 use quiver_api::{Event, Job, JobKind, Request};
 
@@ -59,6 +65,8 @@ pub enum Btn {
     Up(Gid),
     Down(Gid),
     Retry(Gid),
+    /// "Download now": to the top, switching the running download out for it.
+    Now(Gid),
     Open(Gid),
     FinishSteam(Gid),
     FinishDesktop(Gid),
@@ -87,12 +95,8 @@ pub enum Row {
 pub const LIMITS: [u64; 5] = [0, 10, 25, 50, 100];
 const SAMPLES: usize = 60;
 
-/// "When it finishes" for one install.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct After {
-    pub steam: bool,
-    pub desktop: bool,
-}
+/// "When it finishes" for one install: kept on its queue item in quiverd.
+pub type After = AfterInstall;
 
 #[derive(Clone)]
 pub enum DlDialog {
@@ -150,8 +154,9 @@ pub struct DlState {
     pub dialog: Option<DlDialog>,
     /// The focused dialog control.
     pub dsel: usize,
-    /// Exports to write when an install started here finishes.
-    pub after: HashMap<Gid, After>,
+    /// "Download now" sent for this game: its row says "Switching…" until it runs (or
+    /// a while passes).
+    pub switching: Option<(Gid, Instant)>,
     /// Finished jobs hidden with "Clear".
     pub cleared: HashSet<u64>,
     /// Which left-column child each row is (for scrolling), as of the last render.
@@ -197,6 +202,26 @@ pub fn rate(bps: u64) -> String {
     if m >= 100. { format!("{m:.0} MB/s") } else if m >= 1. { format!("{m:.1} MB/s") } else { format!("{:.0} KB/s", bps as f64 / 1e3) }
 }
 
+/// A queued or paused row's buttons, in focus order (left to right as drawn): up, down,
+/// download now, pause or resume, remove. "Download now" isn't first, so landing on a row
+/// (column 0) and pressing A never switches downloads by accident.
+fn queued_buttons(id: Gid, toggle: Btn) -> Vec<Btn> {
+    vec![Btn::Up(id), Btn::Down(id), Btn::Now(id), toggle, Btn::Remove(id)]
+}
+
+/// What a finished job's detail line count says on its row, leaving out the lines about
+/// "when it finishes" (shown as they are instead).
+fn recent_detail(j: &Job) -> String {
+    let after: Vec<&str> = j.detail.iter().map(String::as_str).filter(|l| is_after_note(l)).collect();
+    let n = j.detail.len() - after.len();
+    let files = match n {
+        0 => String::new(),
+        n if j.kind == JobKind::Import => format!("{n} other file{} left in place (mods, extras)", if n == 1 { "" } else { "s" }),
+        n => format!("{n} file{} listed", if n == 1 { "" } else { "s" }),
+    };
+    [files.as_str()].into_iter().chain(after).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+}
+
 fn kind_word(k: QueueKind) -> &'static str {
     match k {
         QueueKind::Install => "Install",
@@ -237,8 +262,10 @@ pub fn who(th: &Theme, source: &str) -> Div {
 const DL_SIDE_W: f32 = 340.;
 
 fn seg(th: &Theme, first: bool, last: bool) -> Div {
+    // Stereo: each piece of the card is the card's surface; its controls pop from it.
     div()
         .flex()
+        .depth_surface()
         .bg(th.ink2)
         .border_l_1()
         .border_r_1()
@@ -359,30 +386,14 @@ impl Quiver {
         if j.kind != JobKind::Install || j.error.is_some() || !j.status.starts_with("Installed") {
             return;
         }
-        let Some(after) = self.dl.after.remove(&id) else { return };
+        // quiverd did the "when it finishes" choices before the job ended; its lines say how.
         let name = self.game_name(id);
-        if after.desktop {
-            self.call::<serde_json::Value, _>(Request::ExportDesktop { game: id.0.into(), remove: false }, cx, move |this, r, cx| {
-                if let Err(e) = r {
-                    this.show_toast(format!(".desktop entry: {}", err_text(&e)), cx);
-                }
-                this.load_global_exports(cx);
-            });
-        }
-        if after.steam {
-            self.call::<SteamExportResult, _>(Request::ExportSteam { game: id.0.into(), remove: false, steam_user: None }, cx, move |this, r, cx| {
-                match r {
-                    Ok(r) if r.staged => this.show_toast(
-                        format!("{name} is installed. Its Steam shortcut shows after Steam restarts; Quiver won't restart Steam without asking"),
-                        cx,
-                    ),
-                    Ok(_) => this.show_toast(format!("{name} is installed and in Steam"), cx),
-                    Err(e) => this.show_toast(format!("{name} is installed. Add to Steam: {}", err_text(&e)), cx),
-                }
-                this.load_global_exports(cx);
-            });
-        } else {
+        let notes: Vec<&str> = j.detail.iter().map(String::as_str).filter(|l| is_after_note(l)).collect();
+        if notes.is_empty() {
             self.show_toast(format!("{name} is installed"), cx);
+        } else {
+            self.show_toast(format!("{name} is installed. {}", notes.join(". ")), cx);
+            self.load_global_exports(cx);
         }
     }
 
@@ -407,6 +418,12 @@ impl Quiver {
                 }
             }
             this.dl.speeds.retain(|id, _| q.iter().any(|e| Gid(e.game_ref()) == *id));
+            // "Switching…" until the chosen one runs (or leaves the queue).
+            if let Some((g, _)) = this.dl.switching
+                && q.iter().find(|e| Gid(e.game_ref()) == g).is_none_or(|e| e.state.is_active())
+            {
+                this.dl.switching = None;
+            }
             this.dl.queue = q;
         });
         self.load_throughput(cx);
@@ -540,14 +557,55 @@ impl Quiver {
                     Err(e) => this.show_error(&e, cx),
                 });
             }
+            Btn::Now(id) => {
+                let who = name(self, id);
+                self.dl.switching = Some((id, Instant::now()));
+                // To the top now, so the row (and focus) moves at once; quiverd's order comes
+                // back with the next queue read.
+                if let Some(i) = self.dl.queue.iter().position(|e| Gid(e.game_ref()) == id) {
+                    let e = self.dl.queue.remove(i);
+                    self.dl.queue.insert(0, e);
+                }
+                self.call::<RunNow, _>(Request::QueueRunNow { game: id.0.into() }, cx, move |this, r, cx| {
+                    match r {
+                        Ok(r) => this.show_toast(r.message(&who), cx),
+                        Err(e) => {
+                            this.dl.switching = None;
+                            this.show_error(&e, cx);
+                        }
+                    }
+                    // Focus follows it to its card once it runs (on Pause, not on another
+                    // row's "Download now" that a second press would hit).
+                    this.call::<Vec<QueueEntry>, _>(Request::Queue, cx, move |this, r, _| {
+                        let Ok(q) = r else { return };
+                        let running = q.iter().any(|e| Gid(e.game_ref()) == id && e.state.is_active());
+                        this.dl.queue = q;
+                        let on_page = this.nav.page == Page::Downloads && this.nav.zone == Zone::Body;
+                        if running && on_page {
+                            this.follow_row(Row::Active(id));
+                            this.dl.col = 0;
+                        }
+                    });
+                });
+            }
             Btn::Open(id) => self.open_game(id, cx),
             Btn::FinishSteam(id) | Btn::FinishDesktop(id) => {
-                let a = self.dl.after.entry(id).or_default();
-                if matches!(b, Btn::FinishSteam(_)) {
-                    a.steam = !a.steam;
+                let steam = matches!(b, Btn::FinishSteam(_));
+                let Some(e) = self.dl.queue.iter_mut().find(|e| Gid(e.game_ref()) == id) else { return };
+                // Shown at once; quiverd keeps it (and does it when the install finishes).
+                let (s, d) = if steam {
+                    e.after.steam = !e.after.steam;
+                    (Some(e.after.steam), None)
                 } else {
-                    a.desktop = !a.desktop;
-                }
+                    e.after.desktop = !e.after.desktop;
+                    (None, Some(e.after.desktop))
+                };
+                self.call::<QueueEntry, _>(Request::QueueSetAfter { game: id.0.into(), steam: s, desktop: d }, cx, |this, r, cx| {
+                    if let Err(e) = r {
+                        this.show_error(&e, cx);
+                    }
+                    this.load_queue(cx);
+                });
             }
             Btn::ClearRecent => {
                 let ids: Vec<u64> = self.recent_jobs().iter().map(|j| j.id).collect();
@@ -631,7 +689,7 @@ impl Quiver {
         for e in &waiting {
             let id = Gid(e.game_ref());
             let toggle = if e.state == QueueState::Paused { Btn::Resume(id) } else { Btn::Pause(id) };
-            rows.push((Row::Queued(id), vec![Btn::Up(id), Btn::Down(id), toggle, Btn::Remove(id)]));
+            rows.push((Row::Queued(id), queued_buttons(id, toggle)));
         }
         for e in &failed {
             let id = Gid(e.game_ref());
@@ -1089,7 +1147,16 @@ impl Quiver {
 
         let btns = rows.get(r).map(|x| x.1.clone()).unwrap_or_default();
         let pausing = status.starts_with("Pausing") || status.starts_with("Cancelling");
-        let pause = button(("dl-pause", id.ix()), th, Kind::OnArt, Size::Medium, Some(Icon::Pause), if pausing { "Pausing…" } else { "Pause" })
+        // Switched out for another item ("Download now"): stopping at a slice boundary.
+        let switching_out = status.starts_with("Switching to");
+        let pause = button(
+            ("dl-pause", id.ix()),
+            th,
+            Kind::OnArt,
+            Size::Medium,
+            Some(Icon::Pause),
+            if switching_out { "Switching…" } else if pausing { "Pausing…" } else { "Pause" },
+        )
             .focus_ring(self.btn_focused(r, 0, btns.len()), th, 8.)
             .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Pause(id), cx)));
         let remove = button(("dl-x", id.ix()), th, Kind::OnArt, Size::Medium, Some(Icon::X), "")
@@ -1160,6 +1227,7 @@ impl Quiver {
                                     .child(pill(th, pill_kind, None, label))
                                     .child(who(th, &e.source))
                             .when(retrying, |d| d.child(pill(th, PillKind::Warn, Some(Icon::RefreshCw), status.clone())))
+                            .when(switching_out, |d| d.child(pill(th, PillKind::Muted, Some(Icon::ArrowDownUp), status.clone())))
                             .when_some(e.job_id, |d, j| d.child(mono(11., on_art::tx2()).child(format!("job {j}")))),
                     )
                     .child(nums);
@@ -1195,7 +1263,7 @@ impl Quiver {
             .child(phase_row)
             .child(chart);
         if e.kind == QueueKind::Install {
-            let after = self.dl.after.get(&id).copied().unwrap_or_default();
+            let after = e.after;
             let steam_running = matches!(&self.ui.steam, Some(Ok(s)) if s.running && s.root.is_some());
             let fb = rows.get(fr).map(|x| x.1.len()).unwrap_or(2);
             let check = |key: &'static str, on: bool, label: &str, f: bool, b: Btn, cx: &mut Context<Self>| {
@@ -1234,7 +1302,7 @@ impl Quiver {
                     .child(div().text_size(px(11.5)).text_color(th.tx3).min_w_0().when(!tight, |d| d.truncate()).child(if after.steam && steam_running {
                         "Steam is running: the shortcut shows after it restarts, and Quiver asks first"
                     } else if after.steam || after.desktop {
-                        "Quiver does this when the install finishes, while the app is open"
+                        "Quiver does this when the install finishes, even with the app closed"
                     } else {
                         "Nothing ticked: add it later from the game page"
                     })),
@@ -1333,7 +1401,10 @@ impl Quiver {
         if let Some(l) = &e.language {
             what.push(l.clone());
         }
-        let state = if paused {
+        let switching = self.dl.switching.is_some_and(|(g, at)| g == id && at.elapsed() < Duration::from_secs(30));
+        let state = if switching {
+            pill(th, PillKind::Accent, Some(Icon::LoaderCircle), "Switching…")
+        } else if paused {
             pill(th, PillKind::Muted, Some(Icon::Pause), "Paused")
         } else if waiting {
             pill(th, PillKind::Warn, Some(Icon::Gamepad), "Waits for the game to exit")
@@ -1344,16 +1415,30 @@ impl Quiver {
         let tight = self.dl_tight();
         let first_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| Gid(x.game_ref())).next() == Some(id);
         let last_q = self.dl.queue.iter().filter(|x| matches!(x.state, QueueState::Queued | QueueState::Paused)).map(|x| Gid(x.game_ref())).next_back() == Some(id);
-        let up = ibtn(("q-up", id.ix()), th, Icon::ChevronUp, None, self.btn_focused(r, 0, n))
+        let up = ibtn(("q-up", id.ix()), th, Icon::ChevronUp, None, self.btn_focused(r, btns.iter().position(|x| *x == Btn::Up(id)).unwrap_or(usize::MAX), n))
             .when(first_q, |d| d.opacity(0.4))
             .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Up(id), cx)));
-        let down = ibtn(("q-down", id.ix()), th, Icon::ChevronDown, None, self.btn_focused(r, 1, n))
+        let down = ibtn(("q-down", id.ix()), th, Icon::ChevronDown, None, self.btn_focused(r, btns.iter().position(|x| *x == Btn::Down(id)).unwrap_or(usize::MAX), n))
             .when(last_q, |d| d.opacity(0.4))
             .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Down(id), cx)));
+        let col = |b: Btn| btns.iter().position(|x| *x == b).unwrap_or(usize::MAX);
+        let busy = self.dl.queue.iter().find(|x| x.state.is_active()).map(|x| self.game_name(Gid(x.game_ref())));
+        let now_tip = match &busy {
+            Some(other) => format!("Download now: {other} goes back to the queue, keeping its progress"),
+            None => "Download now".to_owned(),
+        };
+        let now = ibtn(("q-now", id.ix()), th, Icon::Download, Some(th.acc_hi), self.btn_focused(r, col(Btn::Now(id)), n))
+            .tooltip(super::responsive::tip(th, now_tip))
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Now(id), cx)));
+        let up = up.tooltip(super::responsive::tip(th, "Move up"));
+        let down = down.tooltip(super::responsive::tip(th, "Move down"));
         let tb = if paused { Btn::Resume(id) } else { Btn::Pause(id) };
-        let toggle = ibtn(("q-pp", id.ix()), th, if paused { Icon::Play } else { Icon::Pause }, None, self.btn_focused(r, 2, n))
+        let toggle = ibtn(("q-pp", id.ix()), th, if paused { Icon::Play } else { Icon::Pause }, None, self.btn_focused(r, col(tb), n))
+            .tooltip(super::responsive::tip(th, if paused { "Resume" } else { "Pause" }))
             .on_click(cx.listener(move |this, _, _, cx| this.press(tb, cx)));
-        let remove = ibtn(("q-x", id.ix()), th, Icon::X, None, self.btn_focused(r, 3, n)).on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx)));
+        let remove = ibtn(("q-x", id.ix()), th, Icon::X, None, self.btn_focused(r, col(Btn::Remove(id)), n))
+            .tooltip(super::responsive::tip(th, "Remove from the queue (files stay)"))
+            .on_click(cx.listener(move |this, _, _, cx| this.press(Btn::Remove(id), cx)));
         seg(th, false, last)
             .id(("q-row", id.ix()))
             .when(tight, |d| d.flex_wrap())
@@ -1380,7 +1465,7 @@ impl Quiver {
             .when(!tight, |d| {
                 d.child(div().flex().flex_col().items_end().gap(px(3.)).w(px(150.)).child(who(th, &e.source)).child(div().text_size(px(11.)).text_color(th.tx4).child(format!("added {}", ago(e.added)))))
             })
-            .child(div().flex().gap(px(6.)).when(tight, |d| d.ml_auto()).child(up).child(down).child(toggle).child(remove))
+            .child(div().flex().gap(px(6.)).when(tight, |d| d.ml_auto()).child(up).child(down).child(now).child(toggle).child(remove))
             .into_any_element()
     }
 
@@ -1451,11 +1536,9 @@ impl Quiver {
             JobKind::Import => "Import",
             _ => "Download",
         };
-        let detail = match (&j.error, j.detail.len()) {
-            (Some(e), _) => e.clone(),
-            (None, 0) => String::new(),
-            (None, n) if j.kind == JobKind::Import => format!("{n} other file{} left in place (mods, extras)", if n == 1 { "" } else { "s" }),
-            (None, n) => format!("{n} file{} listed", if n == 1 { "" } else { "s" }),
+        let detail = match &j.error {
+            Some(e) => e.clone(),
+            None => recent_detail(j),
         };
         let n = if r == self.dl_rows().iter().position(|(x, _)| matches!(x, Row::Recent(_))).unwrap_or(usize::MAX) { 2 } else { 1 };
         seg(th, false, last)
@@ -1805,11 +1888,9 @@ impl Quiver {
                 let name = self.game_name(id);
                 let busy = self.dl.queue.iter().any(|e| e.state.is_active());
                 self.dl.dialog = None;
-                self.call::<u64, _>(Request::Install { game: id.0.into(), language }, cx, move |this, r, cx| match r {
+                // The choices go with the install: quiverd keeps them on the queue item.
+                self.call::<u64, _>(Request::Install { game: id.0.into(), language, after: Some(after) }, cx, move |this, r, cx| match r {
                     Ok(_) => {
-                        if after != After::default() {
-                            this.dl.after.insert(id, after);
-                        }
                         this.show_toast(if busy { format!("Queued {name}: it starts when the download ahead of it finishes") } else { format!("Installing {name}") }, cx);
                         this.load_queue(cx);
                     }
@@ -2057,6 +2138,7 @@ impl Quiver {
             .child(
                 div()
                     .id("dl-dialog")
+                    .depth_overlay()
                     .absolute()
                     .top(px((self.viewport.1 * 0.12).max(60.)))
                     .left(px(left))
@@ -2277,7 +2359,8 @@ impl Quiver {
                         }
                         ("dl-col", Some(c)) => this.dl.col = c as usize,
                         ("after", Some(id)) => {
-                            this.dl.after.insert(Gid::from(id), After { steam: true, desktop: true });
+                            let req = Request::QueueSetAfter { game: Gid::from(id).0.into(), steam: Some(true), desktop: Some(true) };
+                            this.queue_req(req, None, cx);
                         }
                         (k, _) => this.welcome_demo(k, v, cx),
                     }
@@ -2450,6 +2533,38 @@ fn verify_report(th: &Theme, r: &VerifyReport, stale: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Queued rows carry "Download now" in their focus order, between the arrows and pause,
+    /// so Left/Right (keyboard, gamepad) reach it like the others.
+    #[test]
+    fn queued_rows_have_download_now() {
+        let id = Gid(quiver_api::GameRef::ubisoft(5059));
+        let b = queued_buttons(id, Btn::Pause(id));
+        assert_eq!(b, [Btn::Up(id), Btn::Down(id), Btn::Now(id), Btn::Pause(id), Btn::Remove(id)]);
+        assert_eq!(queued_buttons(id, Btn::Resume(id))[3], Btn::Resume(id), "paused rows too");
+        assert_ne!(b[0], Btn::Now(id), "not where focus lands first");
+    }
+
+    #[test]
+    fn recent_rows_show_after_notes() {
+        let mut j = Job {
+            id: 1,
+            kind: JobKind::Install,
+            game: quiver_api::GameRef::ubisoft(1),
+            name: "G".into(),
+            status: "Installed G".into(),
+            downloaded: 0,
+            total: 0,
+            done: true,
+            error: None,
+            detail: vec!["Steam: added".into(), ".desktop entry: created".into()],
+        };
+        assert_eq!(recent_detail(&j), "Steam: added · .desktop entry: created");
+        j.detail.insert(0, "3 files written".into());
+        assert_eq!(recent_detail(&j), "1 file listed · Steam: added · .desktop entry: created");
+        j.detail.clear();
+        assert_eq!(recent_detail(&j), "");
+    }
 
     #[test]
     fn formats() {

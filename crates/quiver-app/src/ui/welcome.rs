@@ -9,6 +9,7 @@
 //! When setup was finished but "recommended fixes" was left at "ask me later", only that
 //! question comes back, once per app start. Skipping setup doesn't ask again.
 
+use quiver_ui::depth::DepthExt;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -756,6 +757,9 @@ impl Quiver {
             .border_color(th.line2)
             .shadow(vec![soft_shadow(th.acc.opacity(0.10), 0., 180.), soft_shadow(rgba(0x000000, 0.6), 30., 80.)])
             .on_click(|_, _, cx| cx.stop_propagation());
+        // Stereo: over the app (compact) the panel is an overlay; full screen it is the page,
+        // raised two steps over the art behind it so its own cards and controls have room.
+        panel = if compact { panel.depth_overlay() } else { panel.depth_raised() };
         if rail {
             panel = panel.child(self.welcome_rail(th, cx));
         }

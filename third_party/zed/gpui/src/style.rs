@@ -301,9 +301,20 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
-    /// Quiver: the stereo depth this element and its children are painted at (see
-    /// [`crate::Window::with_stereo_depth`]); `None` keeps the parent's.
+    /// Quiver: the stereo depth this element and its children are painted at, replacing
+    /// the parent's (see [`crate::resolve_stereo_depth`]); `None` keeps the parent's.
     pub stereo_depth: Option<f32>,
+
+    /// Quiver: how far this element and its children rise above the depth they're drawn on
+    /// (the parent's, or `stereo_depth`).
+    pub stereo_lift: Option<f32>,
+
+    /// Quiver: the element has (`Some(true)`) or can have (`Some(false)`) the app's
+    /// keyboard/controller focus: it's a control, and rises further while focused.
+    pub stereo_focused: Option<bool>,
+
+    /// Quiver: whether the element is a control, overriding the guess from its cursor.
+    pub stereo_control: Option<bool>,
 
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
@@ -814,6 +825,9 @@ impl Default for Style {
             mouse_cursor: None,
             opacity: None,
             stereo_depth: None,
+            stereo_lift: None,
+            stereo_focused: None,
+            stereo_control: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

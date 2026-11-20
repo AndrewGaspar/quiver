@@ -2,6 +2,9 @@
 //! shows the daemon's state and sends it requests; installs, launches and settings all live
 //! in the daemon, so the CLI and agents see and drive the same thing.
 //!
+//! Arguments: `--page library|downloads|activity` opens on that page, or turns the Quiver
+//! that is already open to it and exits (`handoff.rs`).
+//!
 //! Environment:
 //! - `QUIVER_DEMO=1`: built-in fixture data instead of the daemon (`demo.rs`); never
 //!   connects to or starts `quiverd`.
@@ -24,6 +27,7 @@ mod app;
 mod art;
 mod demo;
 mod gamepad;
+mod handoff;
 mod model;
 mod nav;
 mod selfupdate;
@@ -77,8 +81,16 @@ fn main() {
         stereo_ui::shot::run(dir.into());
         return;
     }
+    let page = handoff::requested_page(std::env::args().skip(1));
     let resume = selfupdate::take_resume();
+    let resumed = resume.is_some();
     let demo = source::demo_requested();
+    // `--page`: an open Quiver turns to it, and this launch is done.
+    if let Some(p) = page.filter(|_| !resumed && !demo) {
+        if handoff::forward(p) {
+            return;
+        }
+    }
     if demo {
         tracing::info!("demo mode: fixture data, no daemon");
     }
@@ -104,7 +116,13 @@ fn main() {
                 window.set_window_title(title);
                 cx.new(|cx| {
                     let mut q = app::Quiver::new(demo, window, cx);
+                    if let Some(p) = page.filter(|_| !resumed) {
+                        q.nav.open_section(p);
+                    }
                     q.start_self_update(resume, window, cx);
+                    if !demo {
+                        cx.spawn_in(window, async move |this, cx| handoff::listen(resumed, this, cx).await).detach();
+                    }
                     q
                 })
             },

@@ -50,6 +50,8 @@ mod platform_scheduler;
 mod scene;
 mod shared_uri;
 mod spring;
+// Quiver: stereo depth (design/STEREO-UI.md).
+mod stereo;
 mod style;
 mod styled;
 mod subscription;
@@ -142,6 +144,7 @@ pub use refineable::*;
 pub use scene::*;
 pub use shared_uri::*;
 pub use spring::*;
+pub use stereo::*;
 pub use style::*;
 pub use styled::*;
 pub use subscription::*;
