@@ -72,6 +72,7 @@ fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<LinkReq>) -> Vec<String> 
             LinkReq::SessionOnly { back, live, .. } => format!("session only back=[{}] live=[{}]", ops_words(&back), ops_words(&live)),
             LinkReq::Load { .. } => "load".into(),
             LinkReq::Subscribe { extra, .. } => format!("subscribe +{}", extra.len()),
+            LinkReq::Pin { scope, pin, on } => format!("pin {scope} {} on={on}", pin.id),
             _ => "other".into(),
         });
     }
@@ -133,12 +134,19 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     check!(sent == ["ops tweaks=false live=Only why=Compare world.npc_density=2.0"], "after letting go: {sent:?}");
     check!(cx.update(|cx| view.read(cx).compare.is_none()), "still comparing");
 
-    // Y tapped: a pin, nothing sent.
+    // Y tapped: pinned to the quick menu (design/SIGHT.md §16), no value changed; again: unpinned.
     upd(cx, &|v, cx| v.key(Key::Y, false, cx));
     wait(50).await;
     upd(cx, &|v, cx| v.key_up(&y_up, cx));
     wait(150).await;
-    check!(drain(&mut rx).is_empty(), "a tap changed something");
+    let sent = drain(&mut rx);
+    check!(sent.len() == 1 && sent[0].starts_with("pin ") && sent[0].ends_with("world.npc_density on=true"), "a tap: {sent:?}");
+    upd(cx, &|v, cx| v.key(Key::Y, false, cx));
+    wait(50).await;
+    upd(cx, &|v, cx| v.key_up(&y_up, cx));
+    wait(150).await;
+    let sent = drain(&mut rx);
+    check!(sent.len() == 1 && sent[0].ends_with("world.npc_density on=false"), "a second tap unpins: {sent:?}");
     check!(cx.update(|cx| view.read(cx).compare.is_none()), "a tap compared");
 
     // X: back to the default.

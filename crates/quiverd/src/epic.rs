@@ -481,6 +481,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                     *exit.lock().unwrap() = code;
                     ev.update_job(id, |j| j.status = "Game exited".into());
                 }
+                LaunchEvent::SavesUploaded(_) => {}
                 LaunchEvent::Pids(pids) => {
                     if let (Some(id), Some(pid)) = (*local.lock().unwrap(), pids.first()) {
                         ev.local.set_pid(id, *pid);

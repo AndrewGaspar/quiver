@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, AppContext, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OffscreenWindowOptions,
-    PlatformInput, ScrollDelta, ScrollEvent, TouchPhase, WindowHandle, point, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    OffscreenWindowOptions, Pixels, PlatformInput, ScrollDelta, ScrollEvent, TouchPhase, point, px, size,
 };
 use quiver_perf::HudBufferHeader;
 use quiver_perf::layout::{HUD_MAX_LIFTS, HudLift};
@@ -52,8 +52,31 @@ use quiver_perf::panel::{
 use quiver_perf::shm::Mapping;
 use quiver_perf::stereo::Stereo;
 
-use super::view::{DepthMarks, PanelView};
+use super::view::PanelView;
 use crate::link::Msg;
+
+/// The parts of a view at their own depth in its last frame, back to front: window logical
+/// px and rung (thousandths, `quiver_perf::stereo::rung`).
+pub type DepthParts = Rc<dyn Fn() -> Vec<(Bounds<Pixels>, u16)>>;
+
+/// What the in-game presenter needs from a view: the panel, the quick menu, the overlay with
+/// the toasts (design/SIGHT.md §14, §16).
+pub trait InGameView: gpui::Render + Sized + 'static {
+    /// Where its parts at their own depth are (read in the frame callback).
+    fn depth_parts(&self) -> DepthParts;
+    /// What takes the keyboard in its window (`None`: nothing, it takes no input).
+    fn focus_handle(&self) -> Option<FocusHandle>;
+}
+
+impl InGameView for PanelView {
+    fn depth_parts(&self) -> DepthParts {
+        let m = self.marks.clone();
+        Rc::new(move || m.borrow().parts().collect())
+    }
+    fn focus_handle(&self) -> Option<FocusHandle> {
+        Some(self.focus.clone())
+    }
+}
 
 /// The layer must have composited the panel within this of opening, or the desktop panel
 /// takes over (the game isn't presenting, or the layer can't after all).
@@ -100,9 +123,9 @@ struct Publish {
     /// The swapchain's, and how it packs its eyes.
     swapchain: (u32, u32),
     stereo: Stereo,
-    /// Where the view's parts at their own depth are ([`DepthMarks`]), and the lifts last
+    /// Where the view's parts at their own depth are ([`DepthParts`]), and the lifts last
     /// published from them.
-    marks: Rc<RefCell<DepthMarks>>,
+    marks: DepthParts,
     prev_lifts: Vec<HudLift>,
     prev: Vec<u8>,
     prev_dims: (u32, u32, u32),
@@ -120,7 +143,7 @@ impl Publish {
         let len = (fr.stride as usize * (h as usize - 1) + w as usize * 4).min(fr.data.len());
         let data = &fr.data[..len];
         let dims = (w, h, fr.stride);
-        let lifts = if self.stereo.is_stereo() { lifts(&self.marks.borrow(), scale, (w, h)) } else { Vec::new() };
+        let lifts = if self.stereo.is_stereo() { lifts(&(self.marks)(), scale, (w, h)) } else { Vec::new() };
         let same_lifts = lifts == self.prev_lifts;
         // The rows that differ from the last image (whole rows of `w` pixels).
         let dirty = if self.last != 0 && self.prev_dims == dims && self.prev.len() == data.len() {
@@ -176,9 +199,10 @@ impl Publish {
 
 /// The image's lifts from the view's marks: logical px × `scale` image px, rounded out and
 /// kept inside the image (`size`), back to front, at most [`HUD_MAX_LIFTS`].
-pub fn lifts(marks: &DepthMarks, scale: f32, size: (u32, u32)) -> Vec<HudLift> {
-    marks
-        .parts()
+pub fn lifts(parts: &[(Bounds<Pixels>, u16)], scale: f32, size: (u32, u32)) -> Vec<HudLift> {
+    parts
+        .iter()
+        .copied()
         .filter_map(|(b, depth)| {
             let x0 = (f32::from(b.origin.x) * scale).floor().max(0.0) as u32;
             let y0 = (f32::from(b.origin.y) * scale).floor().max(0.0) as u32;
@@ -437,11 +461,14 @@ impl Translate {
     }
 }
 
-/// The panel open in the game.
+/// A view drawn in the game: the panel (input captured), or an image shown over the game
+/// that takes none (`capture` false: toasts, the status chip, the first-launch hint).
 pub struct InGame {
     pub session: String,
     input: Arc<PanelInput<Mapping>>,
-    window: WindowHandle<PanelView>,
+    window: AnyWindowHandle,
+    /// Input is the view's while it's up (else the game keeps it).
+    pub capture: bool,
     publish: Rc<RefCell<Publish>>,
     /// The swapchain's extent (the image is `tr.extent`).
     pub extent: (u32, u32),
@@ -459,13 +486,25 @@ impl InGame {
     /// Opens it: `panel.image` at the swapchain's size, the off-screen window around `view`,
     /// the panel open in `panel.input`, and the thread that drains the input ring.
     #[allow(clippy::too_many_arguments)]
-    pub fn open(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, swapchain: (u32, u32), stereo: Stereo, factor: f32, view: Entity<PanelView>, ui: UnboundedSender<Msg>, cx: &mut App) -> Result<InGame> {
+    pub fn open<V: InGameView>(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, swapchain: (u32, u32), stereo: Stereo, factor: f32, view: Entity<V>, ui: UnboundedSender<Msg>, cx: &mut App) -> Result<InGame> {
+        Self::open_as(session, input, dir, swapchain, stereo, factor, view, Some(ui), cx)
+    }
+
+    /// Shows `view` over the game without taking its input ([`PanelInput::show`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn show<V: InGameView>(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, swapchain: (u32, u32), stereo: Stereo, factor: f32, view: Entity<V>, cx: &mut App) -> Result<InGame> {
+        Self::open_as(session, input, dir, swapchain, stereo, factor, view, None, cx)
+    }
+
+    /// `ui`: capture input and send it there; `None`: show only.
+    #[allow(clippy::too_many_arguments)]
+    fn open_as<V: InGameView>(session: &str, input: Arc<PanelInput<Mapping>>, dir: &Path, swapchain: (u32, u32), stereo: Stereo, factor: f32, view: Entity<V>, ui: Option<UnboundedSender<Msg>>, cx: &mut App) -> Result<InGame> {
         let extent = stereo.logical_extent(swapchain);
         let bb = buffer_bytes_within(extent.0, extent.1, &PANEL_LIMITS).with_context(|| format!("a {}x{} panel is larger than panel.image allows", extent.0, extent.1))?;
         let writer = create_panel_image(&dir.join(PANEL_IMAGE_FILE), bb).context("creating panel.image")?;
         writer.set_writer_pid(std::process::id());
         writer.heartbeat(mono_raw_ns());
-        let marks = view.read(cx).marks.clone();
+        let marks = view.read(cx).depth_parts();
         let publish = Rc::new(RefCell::new(Publish { writer, extent, swapchain, stereo, marks, prev_lifts: Vec::new(), prev: Vec::new(), prev_dims: (0, 0, 0), last: 0, frames: 0, rows: 0 }));
         let sink = publish.clone();
         let logical = (extent.0 as f32 / factor, extent.1 as f32 / factor);
@@ -480,14 +519,16 @@ impl InGame {
             },
             move |fr| sink.borrow_mut().frame(fr, factor),
             move |window, cx| {
-                let focus = root.read(cx).focus.clone();
-                window.focus(&focus, cx);
+                if let Some(focus) = root.read(cx).focus_handle() {
+                    window.focus(&focus, cx);
+                }
                 root
             },
         )?;
+        let window: AnyWindowHandle = window.into();
         // The first frame now, so the layer has something to draw as the panel opens.
         // Not `window.update`: that holds the view while rendering it.
-        let _ = cx.update_window(window.into(), |_, w, cx| {
+        let _ = cx.update_window(window, |_, w, cx| {
             w.refresh();
             w.render_now(cx);
         });
@@ -496,22 +537,28 @@ impl InGame {
         input.set_sight_pid(std::process::id());
         let tr = Translate::stereo(swapchain, stereo, factor);
         input.set_cursor(tr.cursor.0 as i32, tr.cursor.1 as i32, extent);
-        let mut reader = EventReader::at_end(&input);
-        input.open(epoch, now, now + PANEL_HOLD_NS as i64, false);
         let stop = Arc::new(AtomicBool::new(false));
-        let (inp, st, s) = (input.clone(), stop.clone(), session.to_owned());
-        std::thread::Builder::new().name("quiver-sight-input".into()).spawn(move || {
-            while !st.load(Ordering::Relaxed) {
-                let mut batch = Vec::new();
-                reader.poll(&inp, |e| batch.push(e));
-                if !batch.is_empty() && ui.unbounded_send(Msg::GameInput { session: s.clone(), events: batch }).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(4));
+        let capture = ui.is_some();
+        match ui {
+            Some(ui) => {
+                let mut reader = EventReader::at_end(&input);
+                input.open(epoch, now, now + PANEL_HOLD_NS as i64, false);
+                let (inp, st, s) = (input.clone(), stop.clone(), session.to_owned());
+                std::thread::Builder::new().name("quiver-sight-input".into()).spawn(move || {
+                    while !st.load(Ordering::Relaxed) {
+                        let mut batch = Vec::new();
+                        reader.poll(&inp, |e| batch.push(e));
+                        if !batch.is_empty() && ui.unbounded_send(Msg::GameInput { session: s.clone(), events: batch }).is_err() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                })?;
             }
-        })?;
-        tracing::info!(session, swapchain = ?swapchain, stereo = stereo.as_str(), extent = ?extent, factor, epoch, "panel opened in the game");
-        Ok(InGame { session: session.to_owned(), input, window, publish, extent: swapchain, stereo, factor, epoch, stop, opened: Instant::now(), confirmed: false, tr })
+            None => input.show(epoch),
+        }
+        tracing::info!(session, swapchain = ?swapchain, stereo = stereo.as_str(), extent = ?extent, factor, epoch, capture, "drawn in the game");
+        Ok(InGame { session: session.to_owned(), input, window, capture, publish, extent: swapchain, stereo, factor, epoch, stop, opened: Instant::now(), confirmed: false, tr })
     }
 
     /// The session's `panel.input` (to open it again).
@@ -523,7 +570,9 @@ impl InGame {
     /// layer has drawn it (once it has, this stays true).
     pub fn renew(&mut self) -> bool {
         let now = mono_raw_ns();
-        self.input.renew(now + PANEL_HOLD_NS as i64);
+        if self.capture {
+            self.input.renew(now + PANEL_HOLD_NS as i64);
+        }
         self.publish.borrow().writer.heartbeat(now);
         if !self.confirmed && self.input.layer().drawn_epoch == self.epoch {
             self.confirmed = true;
@@ -542,7 +591,7 @@ impl InGame {
             }
         }
         if !out.is_empty() {
-            let _ = cx.update_window(self.window.into(), |_, w, cx| {
+            let _ = cx.update_window(self.window, |_, w, cx| {
                 for i in out {
                     w.dispatch_event(i, cx);
                 }
@@ -563,11 +612,19 @@ impl InGame {
         )
     }
 
+    /// The image was replaced by another view's drawn in the game since (its epoch moved on).
+    pub fn superseded(&self) -> bool {
+        self.input.control().epoch() != self.epoch
+    }
+
     /// Closes it: input goes back to the game at once, the window goes.
     pub fn close(self, cx: &mut App) {
-        self.input.close();
+        // Only its own state: another view may have taken the image over since.
+        if !self.superseded() {
+            self.input.close();
+        }
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.window.update(cx, |_, w, _| w.remove_window());
+        let _ = cx.update_window(self.window, |_, w, _| w.remove_window());
         tracing::info!(session = %self.session, "panel closed in the game: {}", self.describe());
     }
 }

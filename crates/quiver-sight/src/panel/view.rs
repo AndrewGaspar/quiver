@@ -197,6 +197,9 @@ pub struct PanelView {
     subscribed: Vec<String>,
     /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
     pub marks: Rc<RefCell<DepthMarks>>,
+    /// What's pinned to the quick menu for this game and profile (Y toggles a row's pin;
+    /// `crate::quick::pin_row`).
+    pub pinned: Vec<quiver_api::sight::QuickPin>,
     /// What came of the last screenshot (the Session section shows it under the button).
     pub shot: Option<(String, Tone)>,
     /// The Achievements list's own scroll.
@@ -308,6 +311,7 @@ impl PanelView {
             told_docked: None,
             subscribed: Vec::new(),
             marks: Rc::default(),
+            pinned: Vec::new(),
             shot: None,
             ach_scroll: ScrollHandle::new(),
             perf: PerfSection::default(),
@@ -532,12 +536,25 @@ impl PanelView {
         self.send(LinkReq::OptionOps { view, tweaks, ops: vec![op], live, why: Why::Reset });
     }
 
-    /// Y tapped on a row: pin it to the quick menu. The quick menu (and pinning) is built
-    /// separately; until it's here this says so. (A held Y compares instead: [`Self::y_pressed`].)
-    pub fn pin(&mut self, row: Option<Row>, _cx: &mut Context<Self>) {
-        if row.is_some() {
-            self.flash = Some(("Pinning to the quick menu comes with the quick menu".into(), Tone::Muted));
+    /// Y tapped on a row: pin it to the quick menu, or unpin it if it's there
+    /// (`crate::quick::pin_row`; per game and profile). (A held Y compares instead:
+    /// [`Self::y_pressed`].)
+    pub fn pin(&mut self, row: Option<Row>, cx: &mut Context<Self>) {
+        let Some(row) = row else { return };
+        match crate::quick::pin_row(&self.data, &row, &self.pinned) {
+            Ok(p) => {
+                self.flash = Some((p.said.clone(), Tone::Ok));
+                // Shown at once; quiverd's answer (the settings) confirms it.
+                if p.on {
+                    self.pinned.push(p.pin.clone());
+                } else {
+                    self.pinned.retain(|x| !x.same_item(&p.pin));
+                }
+                self.send(LinkReq::Pin { scope: p.scope, pin: p.pin, on: p.on });
+            }
+            Err(why) => self.flash = Some((why, Tone::Muted)),
         }
+        cx.notify();
     }
 
     /// The Mods / Tweaks buttons.
@@ -737,10 +754,11 @@ impl PanelView {
             }
             Row::Hud(h) => self.adjust_hud(*h, dir),
             Row::Pref(p) => {
+                // Shown at once; quiverd saves it (Sight's settings have one writer) and says so
+                // to every part of quiver-sight (design/SIGHT.md §16).
                 super::sections::prefs::step(&mut self.data.prefs, *p, dir);
-                if let Err(e) = super::sections::prefs::save_to(&super::sections::prefs::path(), &self.data.prefs, *p) {
-                    self.flash = Some((format!("Couldn't save the setting: {e}"), Tone::Bad));
-                }
+                let (key, value) = super::sections::prefs::setting(&self.data.prefs, *p);
+                self.send(LinkReq::SettingsSet { key, value });
             }
             Row::AchFilter => self.nav.ach_filter = self.nav.ach_filter.step(dir),
             _ => {}

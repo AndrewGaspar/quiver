@@ -674,6 +674,9 @@ pub enum LaunchEvent {
     Detail(Vec<String>),
     /// The game's processes (host pids), when they change (options write through them).
     Pids(Vec<u32>),
+    /// Save slots uploaded to the store's cloud after the game exited (Sight's "Saved to the
+    /// cloud", design/SIGHT.md §16).
+    SavesUploaded(Vec<u32>),
 }
 
 /// One line per config patch status, for a launch's job detail.
@@ -937,6 +940,9 @@ pub async fn play(
     events(LaunchEvent::Status("Uploading cloud saves…".into()));
     let pushed = savesync::push(cloud, &mut lib, game.product_id, &saves_dir).await?;
     tracing::info!(?pushed.uploaded, "saves pushed");
+    if !pushed.uploaded.is_empty() {
+        events(LaunchEvent::SavesUploaded(pushed.uploaded.clone()));
+    }
     events(LaunchEvent::Status(format!("Done ({} save slots uploaded)", pushed.uploaded.len())));
     Ok(())
 }

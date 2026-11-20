@@ -694,6 +694,7 @@ pub fn service(now: Instant, presenting: bool) -> Vec<Action> {
     // SAFETY: as above.
     let l = unsafe { &*c.listen };
     set_focus(if l.keyboard.is_null() { None } else { Some(l.focused) });
+    crate::keys::WL_PANEL_HELD.store(!l.keyboard.is_null() && l.focused && l.keys.held(Action::Panel), Ordering::Relaxed);
     let st = if !l.keyboard.is_null() {
         KEYS_WL_ACTIVE
     } else if now.saturating_duration_since(c.since) < SETUP_TIMEOUT {

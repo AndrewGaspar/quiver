@@ -1892,3 +1892,149 @@ across the frame. That is transient skew until the game restarts.
 - Winewayland (pointer deltas only, as before).
 - The panel re-laying itself out when the layout changes while it's open.
 - 32-bit games.
+
+
+---
+
+## 16. The quick menu, toasts, onboarding (2026-11-19)
+
+Built to the mock-ups (`SightQuick.dc.html`, `Main.dc.html`). Code: `quiver-sight/src/quick.rs`,
+`toasts.rs`, `overlay.rs`, `screenshot.rs`, `glue.rs` (how they sit in `Sight`); quiverd's
+`notices.rs`; `quiver-api` `sight.rs` (notices, settings, pins).
+
+### Drawing over the game without taking its input
+
+The panel's in-game path (§14) captured input whenever it drew. Toasts, the status chip and the
+first-launch hint must not. `panel.input` gained a state bit, `PANEL_SHOW` (4): the layer draws
+`panel.image` but nothing is captured. The preload's capture rule still asks for `PANEL_OPEN`
+only, so a preload from before reads it as closed. The layer says it draws such images with
+`PANEL_LAYER_CAN_SHOW` in its word; with an older layer, toasts stay on their layer-shell surface.
+The same `panel.image` serves the overlay, the quick menu and the panel, one at a time: the panel
+or the quick menu takes it over (the overlay closes first; each open bumps the epoch, and a view
+whose epoch was superseded lets go without touching the state). Toasts that come while the panel
+is open in the game go to the desktop surface.
+
+`panel::ingame::InGame` is generic over an `InGameView` (the panel, `QuickView`, `OverlayView`):
+each gives its depth parts and its focus handle. `InGame::show` is the no-capture variant.
+
+Stereo: everything is laid out for one eye and drawn in each, like the panel. Depth rungs
+(design/STEREO-UI.md §12): the toast stack and the hint at `PANEL`, the chip at `HUD`, the
+quick menu's strip at `PANEL` and its focused tile at `FOCUS`.
+
+### Toast kinds
+
+| Kind | From | Notes |
+|---|---|---|
+| Achievement unlocked | `Event::AchievementUnlocked` | as before, now with its session |
+| Mod setting | `OptionsOutcome` (not Sight's own) | as before |
+| Saved to the cloud | quiverd notice (`NoticeKind::CloudSaved`) after a session's upload: Ubisoft (`LaunchEvent::SavesUploaded`), Epic (`epicgame::end`) | the game has exited, so it shows on the desktop; Steam syncs its own saves (no event) |
+| A mod's hotkey | quiverd notice (`ModHotkey`) from an SDK `changed` with `persist: false` | "Frame Generation off · You pressed [F9] · this session only": the option's label and value from the schema, the key from an action sharing the option's first id segment (`fg.toggle` ↔ `fg.enabled`) with a `hotkey_option` |
+| Agent or mod notice | `SightRequest::Notify`, `quiver sight notify`, SDK `{"t":"notice"}` | caption "Agent · name" or the mod's surface; up to three buttons |
+| Download finished / failed | `Event::Job` (install jobs: installs, updates, repairs) | each job once; a failure is an error |
+| Errors | any of the above at error level | shown in do-not-disturb |
+
+quiverd's options sink is now wired (`notices::ModSink`): a non-persisted `changed` goes through
+`options_from_mod` (recorded as what the game runs, `OptionsLive` with `saved: false`) and becomes
+the hotkey notice. Persisted changes (a mod's own menu) are still only logged.
+
+**Do not disturb** (`toasts.dnd`): only urgent toasts (errors, rejections, failed downloads)
+show. **`achievements.on_unlock`** = `toast` (default) | `toast_screenshot` | `off`: with
+`toast_screenshot` the toast shows and the game's frame is captured half a second later (the
+Sight layer's capture is taken under Sight's own drawing, so the toast isn't in it); `off`
+shows nothing. The Session and Achievements sections' rows (Sight C) set these.
+
+### The notice API
+
+```
+Request::Sight(SightRequest::Notify { notice: NoticeSpec { kind, level, caption?, title, body?,
+    key?, session?, buttons: [{id, label, primary}], secs?, tag? } })      → SightNotice { id: "n-7", from, at, … }
+Request::Sight(SightRequest::NoticeAct { id, button })                    → Event::SightNoticeAction { id, button, from, tag, by }
+SDK: mod → {"t":"notice","id":"dlss4","title":…,"body":…,"level":…,"buttons":[{"id":"keep_v3","label":"Keep v3 for now"},…]}
+     ← {"t":"notice_action","id":"dlss4","button":"keep_v3"}
+```
+
+quiverd checks and trims (title ≤ 80, body ≤ 240, ≤ 3 buttons with distinct `[A-Za-z0-9._-]`
+ids), captions agents' and mods', resolves the session (named, else the focused or only game;
+none running: refused), keeps the last 64 for their answers, starts quiver-sight if needed, and
+limits each poster to six a minute (the registry also allows a mod one a second). `{key}` in a
+body is where the key shows as a keycap. No SDK protocol bump: unknown `t` is ignored both ways.
+The C header has no `quiver_notice()` yet.
+
+Buttons are answered from the **quick menu**: while a notice with buttons is up, its buttons are
+the first tiles. `quiver sight answer ID BUTTON` does the same.
+
+### The quick menu
+
+Hold Shift+F2 in the game. The layer counts the press as before (quiverd sends the panel toggle,
+`by: "keys"`) and now also writes the chord's state into `panel.input`'s layer word (offsets 232
+and 240: held, the press count, when it changed; `PANEL_LAYER_CHORD` says it does), from both
+its X11 keymap polling and its Wayland keyboard (`keys::Chords::down`). quiver-sight, on a keys
+toggle with the panel closed and the game able to draw it, waits (`quick::Quick`, polled every
+25 ms): released within 280 ms, a tap, the panel opens as before; still held, the quick menu
+shows. Left / Right choose, releasing applies the focused tile and closes, Escape / B closes.
+`quiver sight quick` opens it latched (A / Enter applies). A layer from before (no chord word),
+or a game it can't be drawn in: the panel, as a tap would. There's no desktop fallback.
+
+Tiles: notices' buttons; frame generation (a mod's live, adjustable `fg.enabled`, with its key);
+the HUD preset (cycles the presets, shows the HUD if hidden); the frame-rate cap (`fps.cap`
+through No cap, 30, 60, 90, 120, 144, refresh − 3); pins; screenshot ("Game only": the same
+path as the Session section's button and the unlock screenshot, `SightRequest::Screenshot`,
+the Sight layer's capture of the game's frame into `~/Pictures/Quiver/<game>/`; where the layer
+can't, `grim` of the game's monitor into the same folder; `link::LinkReq::Shot`); save replay (only while a `gpu-screen-recorder -r` replay
+buffer runs: SIGUSR1); quit (A held 1 s; released on it, the menu latches: Hyprland closes the
+game's window, else quiverd stops it). Applying says what it did in a short toast. The menu writes
+the `sight-panel` state file while up, so hyprpad's `quiver-sight` mode holds the pad.
+
+**Pins** ("pin to quick menu": Y tapped on a Mods or Tweaks row, `PanelView::pin` →
+`quick::pin_row`): per game and profile in Sight's settings (`pins."ubisoft:3539/dlss"` and
+`pins."ubisoft:3539"`; the quick menu shows the profile's, then the game's; eight per scope). Y
+on a pinned row unpins it. `SightRequest::Pin { scope, pin, on }`, `quiver sight pin GAME ID
+--surface S | --tweak [--profile P] [--off]`.
+
+**hyprpad** (`tools/hyprpad/quiver-sight.lua`, option (a)): a key on a guide chord is held for
+as long as the chord is, so `h.bind("guide+menu", …, h.key "shift+f2"):only_in("game",
+"quiver-sight")` makes Guide+Start the keyboard's gesture, tap and hold; `guide+dpad_left/right`
+type the arrows under the guide. One binding per guide chord means this replaces an Omarchy-menu
+bind on Guide+Start; option (b), the mode-branching script, stays tap-only. Checked with `hyprpad
+bindings` against a scratch config.
+
+### The status chip and the first-launch hint
+
+The chip ("Sight · 118 fps · 21:14 · 1 h 12 m", top-left, 4 s) shows when the panel or the quick
+menu closes if `status_chip.enabled` (off by default), and on `quiver sight chip`. FPS is the
+last the panel's metrics subscription saw (absent if the panel hasn't been open this session);
+the play time is the session's. In the game only.
+
+The hint ("Open Sight: Shift+F2 or Guide+Start · shown on the first launch only", bottom centre,
+9 s) shows once per install, when the first game's layer can draw (or after 20 s as a desktop
+toast where it can't), then quiver-sight sets `hint.shown`. `quiver sight hint --reset` shows it
+again.
+
+### Sight settings
+
+`$XDG_DATA_HOME/quiver/sight.toml` (`quiver_api::sight::SightSettings`). quiverd is its one
+writer: `SightRequest::Settings`, `SettingsSet { key, value }`, `Pin`; each change goes out as
+`Event::SightSettingsChanged`, which quiver-sight follows (the toast lane, the quick menu, the
+open panel's rows and its sections' layout). Keys: `toasts.dnd`, `achievements.on_unlock`
+(`toast` | `toast_screenshot` | `off`), `achievements.hidden` (`masked` | `shown`),
+`status_chip.enabled`, `hint.shown`, `pad_chord`, `docked` (the sections' R3 layout, a map),
+and `pins`. The panel's rows (`panel/sections/prefs.rs`), its layout and `quiver sight
+pad-chord` all send `SettingsSet`; nothing in quiver-sight or the CLI writes the file. quiverd
+keeps keys it doesn't know. CLI: `quiver sight settings [KEY [VALUE]]`.
+
+### Verification
+
+- Unit: the quick menu's state machine (tap, hold, release applies, Back, Quit held, latched,
+  stale chord word), its tiles and what they do, caps, replay detection, pinning rows
+  (`quick::tests`); every toast kind and do-not-disturb (`toasts::tests`); the chip
+  (`overlay::tests`); screenshot names; `panel.input`'s show bit and chord word
+  (`quiver-perf panel::tests`); the layer's held chord (`keys::tests`); the SDK notice messages
+  (`quiver-proto`) and their round trip through the registry (`modsdk::tests::
+  notices_and_their_answers`); quiverd's rate, checks, captions, answers, the hotkey notice and
+  the settings file (`notices::tests`).
+- PNGs: `cargo run -p quiver-sight --example sight_png -- OUT` (the quick menu held, with a
+  notice, latched on Quit; the overlay with toasts, chip and hint; every toast kind).
+
+Not verified: anything live in a game (the layer's chord word, the in-game overlay, the quick
+menu's capture, stereo), hyprpad's held key reaching the game, the cloud-save and hotkey notices
+with a real upload or mod, grim from quiver-sight's environment, gpu-screen-recorder's replay.

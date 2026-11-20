@@ -306,6 +306,12 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                     let why = l.refuse("quit the game (use quiver lab kill)".into());
                     let _ = l.tx.unbounded_send(Msg::Done { change: Change::Stop, result: Err(why) });
                 }
+                LinkReq::Shot { say, .. } => {
+                    let why = l.refuse("screenshot (use quiver lab shot)".into());
+                    if say {
+                        let _ = l.tx.unbounded_send(Msg::Toast(crate::toasts::shot_toast(Err(why))));
+                    }
+                }
                 LinkReq::Screenshot { .. } => {
                     let why = l.refuse("screenshot (use quiver lab shot)".into());
                     let _ = l.tx.unbounded_send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(why) });
@@ -321,6 +327,17 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                     let _ = l.tx.unbounded_send(Msg::Perf { session, reply });
                 }
                 LinkReq::Subscribe { .. } | LinkReq::Unsubscribe => {}
+                // Sight's settings and notices are the person's quiverd's (design/SIGHT.md §16).
+                LinkReq::NoticeAct { id, button } => {
+                    let _ = l.refuse(format!("answer notice {id} with {button}"));
+                    let _ = l.tx.unbounded_send(Msg::NoticeAnswered(id));
+                }
+                LinkReq::SettingsSet { key, value } => {
+                    let _ = l.refuse(format!("Sight setting {key} = {value}"));
+                }
+                LinkReq::Pin { scope, pin, on } => {
+                    let _ = l.refuse(format!("{} {} in {scope}", if on { "pin" } else { "unpin" }, pin.id));
+                }
             }
         }
     })?;

@@ -23,7 +23,8 @@
 --      game, or centre it). The keys go to the focused window: the game, whose input
 --      Quiver's preload hands to the panel while it's open (or the desktop panel's surface).
 --      Held buttons hold the key, so the panel's own key repeat applies, and Y's hold is seen.
---   3. Guide+Start opens and closes the panel (`quiver sight toggle`). See "The chord" below:
+--   3. Guide+Start: tapped, opens and closes the panel; held, the quick menu (Shift+F2 held,
+--      which the Sight layer reads in the game). See "The chord" below:
 --      Guide+Start is Guide+Menu, which your config may already use.
 --
 -- When it switches: hyprpad re-runs mode rules on compositor events (focus, layers) and on
@@ -76,12 +77,42 @@ end
 -- (No stick flicks: hyprpad's h.bind takes guide chords only, and an `h.bind("lstick_left",
 -- …)` line stops the whole config from loading. The D-pad moves.)
 
--- 3. The chord. A guide chord has exactly ONE binding in hyprpad: binding it again replaces
--- the earlier one everywhere (and keeps the earlier guard). So pick one:
+-- 3. The chord: tap for the panel, HOLD for the quick menu (design/SIGHT.md §16).
 --
--- (a) Guide+Start for Quiver in games and over the panel, your existing action elsewhere.
---     Replace your `h.bind("guide+menu", ...)` line with one that runs a script branching on
---     the mode hyprpad passes in $HYPRPAD_MODE, e.g. ~/.config/hypr/scripts/hyprpad-start.sh:
+-- A key on a guide chord is HELD for as long as the chord is (hyprpad presses it when the
+-- chord is recognised and lets it go when either button lifts). So binding Guide+Start to
+-- Shift+F2 makes it the keyboard's own gesture, which the Sight layer reads in the game:
+--   * tap  (released within ~0.3 s): the panel opens or closes, as before;
+--   * hold: the quick menu shows along the bottom of the game; D-pad Left / Right (under the
+--     guide, bound below) choose a tile; releasing Guide+Start applies it. "Quit game" needs
+--     A held a second after you let go (the menu stays up on it).
+-- `quiver sight toggle` from a script (option b) can't hold, so it only ever opens the panel;
+-- `quiver sight quick` opens the quick menu latched (A applies, B closes) from anywhere.
+--
+-- A guide chord has exactly ONE binding in hyprpad: binding it again replaces the earlier one
+-- everywhere (and keeps the earlier guard). So pick one:
+--
+-- (a) Tap and hold, in games and over Sight (recommended where Guide+Start is free in games).
+--     The key goes to the focused window, so keep it out of the desktop with the guard; if
+--     your `h.bind("guide+menu", …)` opens the Omarchy menu, this replaces it (move the menu
+--     to another chord, e.g. guide+view, or use (b)). Delete your own guide+menu line: a
+--     later bind of the chord replaces this one's action (keeping this guard), and an
+--     earlier one is replaced by it. Checked with `hyprpad bindings` (hyprpad of 2026-11):
+--
+-- h.bind("guide+menu", "Quiver Sight: tap panel, hold quick menu", h.key "shift+f2"):only_in("game", "quiver-sight")
+--
+--     and the quick menu's Left / Right while the guide is held (free in the stock config;
+--     if you bound guide+dpad_left/right, those lines replace yours):
+--
+-- h.bind("guide+dpad_left",  "Quiver quick menu: previous", h.key "left"):only_in("game", "quiver-sight")
+-- h.bind("guide+dpad_right", "Quiver quick menu: next",     h.key "right"):only_in("game", "quiver-sight")
+--
+--     (Name your game modes in :only_in: "game" here is the stock config's.)
+--
+-- (b) Tap only: Guide+Start for Quiver in games and over the panel, your existing action
+--     elsewhere. Replace your `h.bind("guide+menu", ...)` line with one that runs a script
+--     branching on the mode hyprpad passes in $HYPRPAD_MODE, e.g.
+--     ~/.config/hypr/scripts/hyprpad-start.sh:
 --
 --         #!/bin/sh
 --         case "$HYPRPAD_MODE" in
@@ -91,7 +122,10 @@ end
 --
 --     and:  h.bind("guide+menu", "Omarchy menu / Quiver Sight in game", h.exec "~/.config/hypr/scripts/hyprpad-start.sh")
 --
--- (b) If nothing of yours uses Guide+Start, bind it directly (uncomment):
+--     The quick menu is then the keyboard's (hold Shift+F2), or `quiver sight quick` on a
+--     chord of its own, e.g.  h.bind("guide+view", "Quiver quick menu", h.exec "quiver sight quick")
+--
+-- (c) If nothing of yours uses Guide+Start and you want the tap alone, bind it directly:
 --
 -- h.bind("guide+start", "Quiver Sight", h.exec "quiver sight toggle")
 --

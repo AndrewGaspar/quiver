@@ -1225,6 +1225,22 @@ pub enum Event {
     // ---- appended: the Sight panel (design/SIGHT.md §14). Comes as a perf event
     // (`PerfEvent::Panel`) to every subscriber; only `quiver-sight` acts on it.
     SightPanel(sight::PanelCommand),
+    // ---- appended: Sight notices and settings (design/SIGHT.md §16)
+    /// A notice for the toast lane (quiverd's own: cloud saves, mod hotkeys; agents' and
+    /// mods' through `SightRequest::Notify` and the SDK).
+    SightNotice(sight::SightNotice),
+    /// A notice's button was chosen (`by`: who chose it: `sight`, `cli`).
+    SightNoticeAction {
+        id: String,
+        button: String,
+        /// Who posted the notice, and its tag.
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        by: String,
+    },
+    /// Sight's settings changed (`SightRequest::SettingsSet`, `Pin`).
+    SightSettingsChanged(sight::SightSettings),
 }
 
 impl From<options::OptionsEvent> for Event {

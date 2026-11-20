@@ -35,6 +35,9 @@ impl ModOptionsSink for Rec {
     fn disconnected(&self, m: &ModSdkConnection) {
         self.push(format!("options gone {}", m.surface));
     }
+    fn notice(&self, m: &ModSdkConnection, n: &wire::ModNotice) {
+        self.push(format!("notice {} {} {} {:?}", m.conn, n.id, n.title, n.buttons.iter().map(|b| b.id.as_str()).collect::<Vec<_>>()));
+    }
 }
 
 impl ModMetricsSink for Rec {
@@ -120,6 +123,27 @@ async fn stereo_layout_from_the_sdk() {
     // Withdrawn: the setting applies again.
     m.send(json!({"t":"stereo"})).await;
     until(|| rec.take().into_iter().find(|l| l == "stereo None")).await;
+    m.send(json!({"t":"bye"})).await;
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn notices_and_their_answers() {
+    let (reg, rec) = setup();
+    let (mut m, task) = connect(&reg, 0);
+    m.send(json!({"t":"hello","proto":3,"mod":"aco-dlss","caps":["options"]})).await;
+    assert_eq!(m.recv().await["t"], "welcome");
+    m.send(json!({"t":"notice","id":"dlss4","title":"DLSS v4 is ready","buttons":[{"id":"keep_v3","label":"Keep v3 for now"},{"id":"notes","label":"Notes"}]})).await;
+    let conn = reg.connections(None)[0].conn;
+    let line = until(|| rec.take().into_iter().find(|l| l.starts_with("notice"))).await;
+    assert_eq!(line, format!("notice {conn} dlss4 DLSS v4 is ready [\"keep_v3\", \"notes\"]"));
+    // A second one within the second is over the rate.
+    m.send(json!({"t":"notice","id":"again","title":"x"})).await;
+    until(|| (reg.connections(None)[0].refused == 1).then_some(())).await;
+    // The player's answer goes back to the mod.
+    assert!(reg.notice_action(conn, "dlss4", "keep_v3"));
+    assert_eq!(m.recv().await, json!({"t":"notice_action","id":"dlss4","button":"keep_v3"}));
+    assert!(!reg.notice_action(conn + 100, "dlss4", "keep_v3"), "no such connection");
     m.send(json!({"t":"bye"})).await;
     task.await.unwrap().unwrap();
 }

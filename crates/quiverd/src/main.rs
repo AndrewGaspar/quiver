@@ -7,6 +7,7 @@ mod achievements;
 mod downloads;
 mod exports;
 mod mods;
+mod notices;
 mod perf;
 mod info;
 mod lab;
@@ -120,6 +121,8 @@ struct Daemon {
     conns: Mutex<HashMap<u64, ConnHandle>>,
     /// When the pending 2FA challenge was issued (a restart waits a while for its code).
     pending_2fa_at: Mutex<Option<std::time::Instant>>,
+    /// Sight's notices and settings (`notices`).
+    sight: notices::SightState,
 }
 
 /// A client connection's reply channel, and a signal once a `Reply::Closing` went out on it.
@@ -810,6 +813,13 @@ impl Daemon {
                         ev_this.perf.set_pids(&sid, pids.clone());
                         ev_this.options_pids(&sid, pids)
                     }
+                    LaunchEvent::SavesUploaded(slots) => {
+                        let what = match slots.as_slice() {
+                            [one] => format!("Ubisoft Connect · slot {one}"),
+                            many => format!("Ubisoft Connect · {} save slots", many.len()),
+                        };
+                        ev_this.notice_cloud_saved(&sid, what);
+                    }
                 })
                 .await
             })
@@ -1123,6 +1133,9 @@ async fn main() -> Result<()> {
     // (`set_options_sink`, `set_metrics_sink`).
     let mod_sdk = quiver_core::modsdk::ModRegistry::logging();
     mod_sdk.set_metrics_sink(perf::mods::PerfModSink::new(&perf));
+    // Mods' own changes and notices (Sight, design/SIGHT.md §16); it needs the daemon, below.
+    let mod_sink = notices::ModSink::new();
+    mod_sdk.set_options_sink(mod_sink.clone());
     broker_svc.set_mods(mod_sdk.clone());
     let ach = achievements::engine(accounts.clone(), events.clone());
     broker_svc.set_achievements(ach.clone());
@@ -1182,7 +1195,9 @@ async fn main() -> Result<()> {
         lifecycle,
         conns: Mutex::new(HashMap::new()),
         pending_2fa_at: Mutex::new(None),
+        sight: notices::SightState::default(),
     });
+    mod_sink.attach(&daemon);
     options::test_session(&daemon);
     downloads::start(&daemon);
     steamgames::start(&daemon);

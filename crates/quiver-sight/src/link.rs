@@ -1,8 +1,9 @@
 //! quiver-sight's connection to quiverd, on its own tokio thread: attaches to every running
 //! session whose HUD is enabled (`HudAttach`), follows their `HudModel`s, turns achievement
-//! and option-outcome events of Quiver launches into toasts, passes panel commands on, does
-//! what the panel asks ([`LinkReq`]), and says when to quit (quiverd went away, or no session
-//! for a while). The GPUI side gets [`Msg`]s.
+//! and option-outcome events of Quiver launches, notices (design/SIGHT.md §16) and finished
+//! downloads into toasts, passes panel commands and Sight's settings on, does what the panel
+//! and the quick menu ask ([`LinkReq`]), and says when to quit (quiverd went away, or no
+//! session for a while). The GPUI side gets [`Msg`]s.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,7 +13,7 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
 use quiver_api::options::{Live, OptionOp, OptionsChange, OptionsEvent};
 use quiver_api::perf::{HudModel, HudScope, PerfEvent, PerfRequest, PerfSessionInfo, PerfUpdate};
-use quiver_api::sight::{PanelCommand, PanelReport, SightRequest, SightStatus};
+use quiver_api::sight::{PanelCommand, PanelReport, QuickPin, SightNotice, SightRequest, SightSettings, SightStatus};
 use quiver_api::{Client, Event, GameRef, Request};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -45,6 +46,15 @@ pub enum Msg {
     /// Keyboard and mouse input the game's input preload forwarded to the panel drawn in the
     /// game (`panel::ingame`).
     GameInput { session: String, events: Vec<quiver_perf::panel::PanelEvent> },
+    // ---- design/SIGHT.md §16
+    /// A notice for the toast lane.
+    Notice(Box<SightNotice>),
+    /// A notice was answered (from here or elsewhere): its toast goes.
+    NoticeAnswered(String),
+    /// Sight's settings changed.
+    Settings(Box<SightSettings>),
+    /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
+    QuickPoll,
     /// quiverd's answer to the Performance section (`panel::sections::performance`).
     Perf { session: String, reply: crate::panel::sections::performance::Reply },
     /// The panel's layout changed (docked or centred, design/SIGHT.md §9): the backdrop
@@ -107,12 +117,21 @@ pub enum LinkReq {
     Stop { game: GameRef },
     /// The game's next frame as a PNG (`SightRequest::Screenshot`).
     Screenshot { session: String },
+    /// A screenshot for the quick menu or an unlock (design/SIGHT.md §16): the game's frame
+    /// through quiverd (the Sight layer's capture, under Sight's own drawing) after `after`;
+    /// where the layer can't, `grim` of `monitor` into the same folder. `say`: a toast with
+    /// where it went (errors are said either way when `say`, logged otherwise).
+    Shot { session: String, after: std::time::Duration, monitor: Option<String>, game: String, say: bool },
     /// The panel's metrics, and `extra` ones (the mods' readouts).
     Subscribe { session: String, extra: Vec<String> },
     Unsubscribe,
     Report(PanelReport),
     /// The pad's long-press chord: what `quiver sight toggle` does.
     Toggle,
+    // ---- design/SIGHT.md §16
+    NoticeAct { id: String, button: String },
+    SettingsSet { key: String, value: serde_json::Value },
+    Pin { scope: String, pin: QuickPin, on: bool },
     /// The Performance section's requests (`panel::sections::performance::link`).
     Perf { session: String, req: crate::panel::sections::performance::Req },
 }
@@ -167,6 +186,8 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
     let mut perf_events = client.subscribe_perf().await?;
     let mut options = client.subscribe_options().await?;
     let mut known: HashMap<String, Known> = HashMap::new();
+    // Install jobs already done when we started, or toasted: never again.
+    let mut toasted: std::collections::HashSet<u64> = client.call::<quiver_api::Status>(Request::Status).await.map(|st| st.jobs).unwrap_or_default().into_iter().filter(|j| j.done).map(|j| j.id).collect();
     refresh(&client, &mut known, tx).await?;
     // Started for a panel command we missed (it went out before we subscribed).
     if let Ok(st) = client.call::<SightStatus>(Request::Sight(SightRequest::Status)).await
@@ -188,25 +209,30 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
                     // Quiver launches only: containers' and agents' bridges earn too. An
                     // Epic game's unlocks (`game`) are its session's.
                     let of = game.unwrap_or(GameRef::ubisoft(product_id));
-                    if known.values().any(|k| k.game == of)
-                        && let Some(t) = toasts::from_event(&e)
+                    if let Some((sid, _)) = known.iter().find(|(_, k)| k.game == of)
+                        && let Some(mut t) = toasts::from_event(&e)
                     {
+                        t.session = Some(sid.clone());
                         let _ = tx.unbounded_send(Msg::Toast(t));
                     }
-                    // "On unlock: toast and screenshot" (design/SIGHT.md §3.7: half a second
-                    // after, so the game's frame has the moment; the capture is the game's own
-                    // pixels, without the toast).
-                    if crate::panel::sections::prefs::load().on_unlock == crate::panel::sections::prefs::OnUnlock::ToastScreenshot
-                        && let Some(session) = known.iter().find(|(_, k)| k.game == of).map(|(s, _)| s.clone())
-                    {
-                        let c = client.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            match screenshot(&c, &session).await {
-                                Ok(s) => tracing::info!(path = %s.path.display(), "achievement screenshot"),
-                                Err(e) => tracing::info!("achievement screenshot: {e:#}"),
-                            }
-                        });
+                }
+                // Notices for a running game (or any: the focused one shows it).
+                Some(Event::SightNotice(n)) => {
+                    if n.spec.session.as_ref().is_none_or(|s| known.contains_key(s)) && !known.is_empty() {
+                        let _ = tx.unbounded_send(Msg::Notice(Box::new(n)));
+                    }
+                }
+                Some(Event::SightNoticeAction { id, .. }) => {
+                    let _ = tx.unbounded_send(Msg::NoticeAnswered(id));
+                }
+                Some(Event::SightSettingsChanged(st)) => {
+                    let _ = tx.unbounded_send(Msg::Settings(Box::new(st)));
+                }
+                // A download or update finished while a game runs (each job once).
+                Some(Event::Job(j)) => {
+                    if j.done && !toasted.contains(&j.id) && let Some(t) = toasts::from_job(&j) {
+                        toasted.insert(j.id);
+                        let _ = tx.unbounded_send(Msg::Toast(t));
                     }
                 }
                 Some(_) => {}
@@ -276,6 +302,21 @@ async fn screenshot(client: &Client, session: &str) -> Result<quiver_api::sight:
     client.call(Request::Sight(SightRequest::Screenshot { session: Some(session.to_owned()) })).await
 }
 
+/// The layer's capture, else `grim`: the file, or both reasons.
+async fn shot(client: &Client, session: &str, monitor: Option<String>, game: String) -> Result<std::path::PathBuf, String> {
+    match screenshot(client, session).await {
+        Ok(s) => Ok(s.path),
+        Err(e) => {
+            tracing::info!(session, "the game's own frame: {e:#}; grim instead");
+            match tokio::task::spawn_blocking(move || crate::screenshot::take(monitor.as_deref(), &game)).await {
+                Ok(Ok(p)) => Ok(p),
+                Ok(Err(g)) => Err(format!("{e:#}; grim: {g:#}")),
+                Err(j) => Err(format!("{e:#}; {j}")),
+            }
+        }
+    }
+}
+
 /// Runs a panel request in its own task, so the event loop never waits on it.
 fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64>>>, r: LinkReq) {
     let (client, tx, sub) = (client.clone(), tx.clone(), sub.clone());
@@ -312,6 +353,17 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
             LinkReq::HudSet { view, set } => send(done(Change::Hud, data::hud_set(&client, view.game, set).await.map(|_| None))),
             LinkReq::HudToggle { session } => send(done(Change::Hud, data::hud_toggle(&client, &session).await.map(|_| None))),
             LinkReq::Stop { game } => send(done(Change::Stop, data::stop(&client, game).await.map(|_| None))),
+            LinkReq::Shot { session, after, monitor, game, say } => {
+                tokio::time::sleep(after).await;
+                let r = shot(&client, &session, monitor, game).await;
+                match &r {
+                    Ok(p) => tracing::info!(path = %p.display(), "screenshot"),
+                    Err(e) => tracing::info!("screenshot: {e}"),
+                }
+                if say {
+                    send(Msg::Toast(crate::toasts::shot_toast(r)));
+                }
+            }
             LinkReq::Screenshot { session } => match screenshot(&client, &session).await {
                 Ok(s) => send(Msg::Done { change: Change::Screenshot(s.path), result: Ok(None) }),
                 Err(e) => send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(format!("{e:#}")) }),
@@ -346,6 +398,19 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                     tracing::info!("controller chord: {e:#}");
                 }
             }
+            LinkReq::NoticeAct { id, button } => {
+                if let Err(e) = client.call::<serde_json::Value>(Request::Sight(SightRequest::NoticeAct { id: id.clone(), button })).await {
+                    tracing::info!(%id, "answering the notice: {e:#}");
+                }
+            }
+            LinkReq::SettingsSet { key, value } => match client.call::<SightSettings>(Request::Sight(SightRequest::SettingsSet { key: key.clone(), value })).await {
+                Ok(st) => send(Msg::Settings(Box::new(st))),
+                Err(e) => tracing::info!(%key, "Sight setting: {e:#}"),
+            },
+            LinkReq::Pin { scope, pin, on } => match client.call::<SightSettings>(Request::Sight(SightRequest::Pin { scope, pin, on })).await {
+                Ok(st) => send(Msg::Settings(Box::new(st))),
+                Err(e) => send(Msg::Toast(crate::toasts::ToastData { kind: crate::toasts::ToastKind::Error, title: "Couldn't pin it".into(), body: Some(format!("{e:#}")), urgent: true, ..Default::default() })),
+            },
         }
     });
 }

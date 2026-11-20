@@ -312,6 +312,17 @@ pub(crate) async fn end(d: &Arc<Daemon>, mut s: EpicSession) -> String {
     for u in f.unlocks {
         unlocked(d, u);
     }
+    // Sight's "Saved to the cloud" (design/SIGHT.md §16): shown on the desktop, the game
+    // has gone.
+    if let Some(Ok(r)) = &f.saves
+        && !r.uploaded.is_empty()
+    {
+        let what = match r.uploaded.as_slice() {
+            [one] => one.rsplit(['/', '\\']).next().unwrap_or(one).to_owned(),
+            many => format!("{} save files", many.len()),
+        };
+        d.notice_cloud_saved(&s.id, format!("Epic · {what}"));
+    }
     f.note
 }
 

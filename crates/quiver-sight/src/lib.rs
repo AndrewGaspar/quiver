@@ -10,7 +10,11 @@
 //!   model changes and heartbeating twice a second;
 //! - or, when the model's presenter is `desktop`, shows the same view on a click-through
 //!   layer-shell surface on the game's monitor;
-//! - shows the toast lane: achievements unlocked and mod-setting outcomes of Quiver launches;
+//! - shows the toast lane: achievements unlocked, mod-setting outcomes, notices (saves in the
+//!   cloud, a mod's hotkey, agents' and mods' notes) and finished downloads, drawn in the game
+//!   where its layer can ([`overlay`], with the status chip and the first-launch hint), else
+//!   on the desktop; do-not-disturb holds all but errors (design/SIGHT.md §16);
+//! - shows the quick menu while the panel's chord is held ([`quick`]);
 //! - shows the Sight panel over the game when summoned ([`panel`]: Shift+F2, a hyprpad
 //!   chord, `quiver sight toggle`), driven with the controller;
 //! - ties the panel and the desktop HUD to the game's window ([`front`], from the
@@ -23,7 +27,7 @@
 //!
 //! ```text
 //! quiver-sight                      # what quiverd runs
-//! quiver-sight --demo toasts        # sample toasts on this desktop, then exit
+//! quiver-sight --demo toasts [--variant more]   # sample toasts on this desktop, then exit
 //! quiver-sight --demo desktop [--seconds N]      # a sample desktop HUD
 //! quiver-sight --demo image --image PATH [--extent WxH] [--layout standard] [--variant long]
 //!                                   # render a sample model into a hud.image file
@@ -35,12 +39,16 @@ pub mod demo;
 pub mod desktop;
 pub mod front;
 pub mod game;
+mod glue;
 pub mod hud_view;
 pub mod hypr;
 pub mod lab;
 pub mod link;
+pub mod overlay;
 pub mod panel;
 pub mod place;
+pub mod quick;
+pub mod screenshot;
 pub mod toasts;
 pub mod toplevels;
 
@@ -54,7 +62,7 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::App;
 use quiver_api::perf::{HudModel, Presenter};
-use quiver_api::sight::PanelAction;
+use quiver_api::sight::{PanelAction, PanelCommand, SightSettings};
 use quiver_ui::theme;
 
 use link::Msg;
@@ -82,13 +90,33 @@ pub struct Sight {
     /// To our own loop (re-checks after a timer).
     tx: Option<mpsc::UnboundedSender<Msg>>,
     recheck: Option<Instant>,
+    // ---- design/SIGHT.md §16 (`glue`)
+    /// To quiverd (`None`: the demo).
+    link: Option<tokio::sync::mpsc::UnboundedSender<link::LinkReq>>,
+    settings: SightSettings,
+    /// The toasts, the chip and the hint drawn in the game.
+    overlay: overlay::Overlay,
+    /// Sessions whose game didn't show the overlay lately (toasts on the desktop meanwhile).
+    overlay_failed: HashMap<String, Instant>,
+    quick: quick::Quick,
+    quick_shown: Option<glue::QuickShown>,
+    /// The panel command a press came with: a tap opens the panel with it.
+    quick_cmd: Option<PanelCommand>,
+    quick_data: HashMap<String, panel::state::PanelData>,
+    quick_poll: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The last FPS and the start of each session (the chip).
+    fps: HashMap<String, f64>,
+    started: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// When each session was first seen (the hint waits a little for the game to draw).
+    started_at: HashMap<String, Instant>,
+    hint_done: bool,
 }
 
 /// How often Hyprland may be asked for a session's window while it isn't known.
 const HINT_EVERY: Duration = Duration::from_secs(1);
 
 impl Sight {
-    fn new(layer_shell: bool, panel: panel::PanelCtl, tx: Option<mpsc::UnboundedSender<Msg>>) -> Self {
+    fn new(layer_shell: bool, panel: panel::PanelCtl, tx: Option<mpsc::UnboundedSender<Msg>>, link: Option<tokio::sync::mpsc::UnboundedSender<link::LinkReq>>, settings: SightSettings) -> Self {
         Self {
             huds: HashMap::new(),
             toasts: toasts::ToastLane::new(layer_shell),
@@ -99,7 +127,55 @@ impl Sight {
             hinted: HashMap::new(),
             tx,
             recheck: None,
+            link,
+            settings,
+            overlay: Default::default(),
+            overlay_failed: HashMap::new(),
+            quick: Default::default(),
+            quick_shown: None,
+            quick_cmd: None,
+            quick_data: HashMap::new(),
+            quick_poll: None,
+            fps: HashMap::new(),
+            started: HashMap::new(),
+            started_at: HashMap::new(),
+            hint_done: false,
         }
+    }
+
+    /// A panel command (after the quick menu had its say): ties the game's toplevel, opens hidden
+    /// if the game isn't in front.
+    fn panel_command(&mut self, c: PanelCommand, cx: &mut App) {
+        let opening = c.action == PanelAction::Open || (c.action == PanelAction::Toggle && !self.panel.is_open());
+        let mut hidden = None;
+        if opening
+            && let Some(s) = c.session.clone()
+            && self.layer_shell
+        {
+            self.hint(&s);
+            // Shift+F2 came from the game's own window, so the active toplevel is the
+            // game's (the demo stands in for a game the same way).
+            if (c.by == "keys" || c.by == "demo") && self.front.bind_active(&s, Instant::now()) {
+                tracing::info!(session = %s, by = %c.by, "the game's toplevel: the one active when it was summoned");
+            }
+            // Summoned while the game isn't in front (`quiver sight open` from a
+            // terminal): open hidden, show when the game is.
+            if let v @ front::Verdict::Away(_) = self.front.verdict(&s, false) {
+                hidden = Some(v.why().to_owned());
+            }
+        }
+        // The panel takes the game's image over from the overlay.
+        if opening {
+            self.overlay.close(cx);
+        }
+        let was_open = self.panel.is_open();
+        let session = c.session.clone().or_else(|| self.panel.session().map(str::to_owned));
+        self.panel.command(c, hidden, cx);
+        self.apply_front(cx);
+        if was_open && !self.panel.is_open() {
+            self.chip(session.as_deref(), false, cx);
+        }
+        self.sync_overlay(cx);
     }
 
     /// The sessions something tied to the game is shown (or hidden) for: the panel's, and
@@ -184,6 +260,7 @@ impl Sight {
                 self.panel.set_stereo(&s, None, cx);
                 self.front.ended(&s);
                 self.hinted.remove(&s);
+                self.quick_session_ended(&s, cx);
                 if let Some(mut h) = self.huds.remove(&s) {
                     let (rss, hwm) = game::rss_mib();
                     tracing::info!(session = %s, rss_mib = rss, peak_mib = hwm, "HUD closed: {}", h.game.stats.line());
@@ -192,10 +269,14 @@ impl Sight {
                 }
                 self.place_toasts();
             }
-            Msg::Toast(t) => {
-                self.place_toasts();
-                self.toasts.push(t, cx);
+            Msg::Toast(t) => self.toast(t, cx),
+            Msg::Notice(n) => self.notice(*n, cx),
+            Msg::NoticeAnswered(id) => {
+                self.toasts.dismiss_notice(&id, cx);
+                self.sync_overlay(cx);
             }
+            Msg::Settings(s) => self.settings_changed(*s, cx),
+            Msg::QuickPoll => self.quick_polled(cx),
             Msg::Quit(why) => {
                 tracing::info!("quitting: {why}");
                 for (_, mut h) in self.huds.drain() {
@@ -203,6 +284,7 @@ impl Sight {
                     h.desktop.close(cx);
                 }
                 self.toasts.close(cx);
+                self.overlay.close(cx);
                 self.panel.close(cx);
                 // Leave once the windows are gone. Not through GPUI's teardown: dropping the
                 // app at exit can touch thread-locals that are already destroyed and abort
@@ -217,30 +299,19 @@ impl Sight {
                 .detach();
             }
             Msg::Panel(c) => {
-                let opening = c.action == PanelAction::Open || (c.action == PanelAction::Toggle && !self.panel.is_open());
-                let mut hidden = None;
-                if opening
-                    && let Some(s) = c.session.clone()
-                    && self.layer_shell
-                {
-                    self.hint(&s);
-                    // Shift+F2 came from the game's own window, so the active toplevel is the
-                    // game's (the demo stands in for a game the same way).
-                    if (c.by == "keys" || c.by == "demo") && self.front.bind_active(&s, Instant::now()) {
-                        tracing::info!(session = %s, by = %c.by, "the game's toplevel: the one active when it was summoned");
-                    }
-                    // Summoned while the game isn't in front (`quiver sight open` from a
-                    // terminal): open hidden, show when the game is.
-                    if let v @ front::Verdict::Away(_) = self.front.verdict(&s, false) {
-                        hidden = Some(v.why().to_owned());
-                    }
+                if !self.quick_command(&c, cx) {
+                    self.panel_command(c, cx);
                 }
-                self.panel.command(c, hidden, cx);
-                self.apply_front(cx);
             }
-            Msg::Loaded { session, data } => self.panel.loaded(&session, *data, cx),
+            Msg::Loaded { session, data } => {
+                self.data_seen(&session, &data, cx);
+                self.panel.loaded(&session, *data, cx)
+            }
             Msg::Done { change, result } => self.panel.done(change, result, cx),
-            Msg::Metrics(u) => self.panel.metrics(u, cx),
+            Msg::Metrics(u) => {
+                self.metrics_seen(&u);
+                self.panel.metrics(u, cx)
+            }
             Msg::OptionsChanged { session } => self.panel.options_changed(&session),
             Msg::Pad(e) => self.panel.pad(e, cx),
             Msg::Toplevels(e) => {
@@ -258,7 +329,11 @@ impl Sight {
                 self.recheck = None;
                 self.apply_front(cx);
             }
-            Msg::GameInput { session, events } => self.panel.game_input(&session, &events, cx),
+            Msg::GameInput { session, events } => {
+                if !self.quick_input(&session, &events, cx) {
+                    self.panel.game_input(&session, &events, cx)
+                }
+            }
             Msg::Perf { session, reply } => self.panel.perf_reply(&session, reply, cx),
             Msg::PanelLayout { docked, prefs } => self.panel.layout(docked, prefs, cx),
         }
@@ -318,7 +393,9 @@ impl Sight {
         for h in self.huds.values_mut() {
             h.game.tick(cx);
         }
-        self.toasts.tick(cx);
+        // Toast expiry, the overlay's heartbeat, the first-launch hint, the quick menu's image.
+        self.tick_overlay(cx);
+        self.quick_renew();
         // The panel's clock and play time.
         if self.ticks.is_multiple_of(4) {
             self.panel.tick(cx);
@@ -424,6 +501,9 @@ pub fn run() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::unbounded::<Msg>();
     let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<link::LinkReq>();
     let mut panel = panel::PanelCtl::new(layer_shell, None, Some(tx.clone()));
+    // The demo has no quiverd; a lab instance's link refuses settings writes.
+    let sight_link = (args.demo.is_none()).then(|| req_tx.clone());
+    let settings = if args.lab.is_some() || args.demo.is_some() { SightSettings::default() } else { quiver_api::sight::load_settings_at(&quiver_api::sight::settings_path()) };
     if let Some(ns) = &args.namespace {
         panel.namespace = ns.clone();
     }
@@ -462,7 +542,7 @@ pub fn run() -> anyhow::Result<()> {
     app.with_quit_mode(gpui::QuitMode::Explicit).with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         let dir = theme::omarchy_state_dir();
         quiver_ui::init(cx, theme::load(&dir));
-        let sight = Rc::new(RefCell::new(Sight::new(layer_shell, panel, Some(ui_tx))));
+        let sight = Rc::new(RefCell::new(Sight::new(layer_shell, panel, Some(ui_tx), sight_link, settings)));
         // Theme switches: reload, and re-render what's shown (by replaying the models).
         let (ttx, mut trx) = mpsc::unbounded::<()>();
         theme::watch(dir.clone(), move || {

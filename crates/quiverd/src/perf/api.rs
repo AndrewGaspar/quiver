@@ -125,6 +125,21 @@ impl Daemon {
                 hub.panel_report(report);
                 Value::Null
             }
+            // design/SIGHT.md §16 (`notices.rs`).
+            SightRequest::Quick { session } => json!(hub.panel_command(PanelAction::Quick, session.as_deref(), None, source)?),
+            SightRequest::Chip { session } => json!(hub.panel_command(PanelAction::Chip, session.as_deref(), None, source)?),
+            SightRequest::Notify { notice } => {
+                // Agents and the CLI post under their own name; quiverd's are its own.
+                let from = if source == "quiverd" || source.starts_with("mod:") { format!("cli:{source}") } else { source.to_owned() };
+                json!(self.notify(&from, notice, None)?)
+            }
+            SightRequest::NoticeAct { id, button } => {
+                self.notice_act(&id, &button, source)?;
+                Value::Null
+            }
+            SightRequest::Settings => json!(self.sight.settings()),
+            SightRequest::SettingsSet { key, value } => json!(self.sight_settings_set(&key, &value, source)?),
+            SightRequest::Pin { scope, pin, on } => json!(self.sight_pin(&scope, pin, on, source)?),
             // The Session and Achievements sections' requests (`crate::sightinfo`, async).
             SightRequest::Session { .. } | SightRequest::Achievements { .. } | SightRequest::Icons { .. } | SightRequest::Screenshot { .. } => bail!("handled by sightinfo"),
         })
