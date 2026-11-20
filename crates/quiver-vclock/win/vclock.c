@@ -302,3 +302,46 @@ double vc_real_seconds(vc_clock *c) {
     if (!LOAD(&c->engaged)) return 0.0;
     return (double)(c->real_now(c->ctx) - LOAD(&c->engaged_real)) / (double)c->real_freq;
 }
+
+/* The vtable hook registry (vclock.h). ------------------------------------------------------ */
+
+static vc_vhook *vt_find(vc_vtreg *r, void **vt, uint32_t slot) {
+    int32_t n = LOAD(&r->n);
+    for (int32_t i = 0; i < n; i++)
+        if (r->e[i].vt == vt && r->e[i].slot == slot) return &r->e[i];
+    return NULL;
+}
+
+int vc_vt_plan(vc_vtreg *r, void **vt, uint32_t slot, void *cur, void *hook, vc_vhook **entry) {
+    vc_vhook *e = vt_find(r, vt, slot);
+    if (entry) *entry = e;
+    if (cur == hook) return VC_VT_OURS;
+    if (e) return cur == e->orig ? VC_VT_RESTORED : VC_VT_WRAPPED;
+    int32_t n = r->n;
+    if (n >= VC_MAX_VH) return VC_VT_FULL;
+    r->e[n].vt = vt;
+    r->e[n].slot = slot;
+    r->e[n].hook = hook;
+    r->e[n].orig = cur;
+    r->e[n].noted = 0;
+    STORE(&r->n, n + 1);
+    if (entry) *entry = &r->e[n];
+    return VC_VT_NEW;
+}
+
+void *vc_vt_orig(const vc_vtreg *r, void **vt, uint32_t slot, void *hook) {
+    int32_t n = LOAD(&r->n);
+    for (int32_t i = 0; i < n; i++)
+        if (r->e[i].vt == vt && r->e[i].slot == slot) return r->e[i].orig;
+    /* Not registered: a copy of a hooked vtable. Its slot reached this hook, so it was copied
+     * from one of this hook's entries for the slot; only an unambiguous one will do. */
+    void *found = NULL;
+    for (int32_t i = 0; i < n; i++) {
+        if (r->e[i].slot != slot || r->e[i].hook != hook) continue;
+        if (found && found != r->e[i].orig) return NULL;
+        found = r->e[i].orig;
+    }
+    return found;
+}
+
+uint64_t vc_vtreg_size(void) { return sizeof(vc_vtreg); }

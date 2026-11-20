@@ -74,7 +74,8 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
     let variants: Vec<Variant> = a.variants.iter().map(|v| Variant::parse(v)).collect::<Result<_>>()?;
     let metrics: Vec<LogMetric> = a.log_metrics.iter().map(|v| LogMetric::parse(v)).collect::<Result<_>>()?;
     let crop_spec = a.crop.as_deref().map(Crop::parse).transpose()?;
-    let log_path = match a.log.as_ref().or(m.log_file.as_ref()) {
+    let log_spec = a.log.as_ref().or(m.log_file.as_ref());
+    let mut log_path = match log_spec {
         Some(l) => Some(m.resolve_file(&inst, l)?),
         None if !metrics.is_empty() => bail!("--log-metric needs --log or the manifest's log_file"),
         None => None,
@@ -98,6 +99,10 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
                 let r = sup::request(lab, &inst, &sup::SupRequest::Launch { source: source.into(), mod_dir: None, no_mod: false, args: Vec::new(), clock: None })?;
                 let id = r["run"].as_u64().map(|x| x as u32);
                 super::wait_for(&inst, &Want::parse(&a.ready), id, Duration::from_secs(600))?;
+                // A `run:` log is the new run's.
+                if let Some(l) = log_spec {
+                    log_path = Some(m.resolve_file(&inst, l)?);
+                }
             } else {
                 let done = set_and_wait(&inst, &m, &v.assigns, live_wait, Duration::from_secs(20))?;
                 remember(&mut originals, &done);

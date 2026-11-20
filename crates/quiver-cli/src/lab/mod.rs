@@ -5,6 +5,7 @@
 mod bench;
 mod clock;
 mod create;
+mod fixture;
 mod hdr;
 mod jobs;
 mod limits;
@@ -22,7 +23,7 @@ use clap::Subcommand;
 use quiver_api::Client;
 use quiver_core::lab::manifest::{Display, layer_versions};
 use quiver_core::lab::ready::{State, Want};
-use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, facts, host, podman, procs};
+use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, facts, host, podman, procs, teleport};
 
 use sup::SupRequest;
 
@@ -92,7 +93,7 @@ pub enum LabAction {
     },
     /// Change an instance's manifest: display=WxH@HZ, proton=NAME, mod_dir=DIR, graphics=NAME,
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
-    /// log_file=PATH, args="…", notes="…", sight=on|off, display.hdr=on|off, pads=N (virtual pads, 0-4), pad.grips=r4=a,…,
+    /// log_file=run:FILE|lab:REL|install:REL|PATH (run: is the current run's folder), args="…", notes="…", sight=on|off, display.hdr=on|off, pads=N (virtual pads, 0-4), pad.grips=r4=a,…,
     /// pad.settle_ms=N (key= clears); the fixed-step virtual clock:
     /// clock=virtual:HZ|real, clock.modules=A.dll,B.dll, clock.proxy=NAME|auto,
     /// clock.stuck_ms=N, clock.creep_after=N, clock.sleeps=present|all|none, clock.sleep_max_ms=N, clock.uncap=false.
@@ -252,30 +253,61 @@ pub enum LabAction {
         #[arg(long)]
         default: bool,
     },
-    /// Save fixtures: `save <i> NAME [--note]`, `install <i> NAME` (game stopped), `list <i>`.
+    /// Save fixtures: `save <i> NAME [--note]`, `import <i> NAME FILES…|DIR|ARCHIVE [--into]`,
+    /// `install <i> NAME` (game stopped), `list <i>`.
     Fixture {
         #[command(subcommand)]
-        action: FixtureAction,
+        action: fixture::FixtureAction,
     },
-    /// A request your mod answers through the lab channel (`%QUIVER_LAB%\req`).
+    /// A request your mod answers through the lab channel (`%QUIVER_LAB%\req`). Options may
+    /// follow the verb's arguments (`call N cfg x -1 --timeout 60`); negative numbers are
+    /// arguments; anything after `--` is an argument (`call N VERB -- --raw`).
     Call {
         instance: String,
         verb: String,
-        #[arg(allow_hyphen_values = true)]
+        #[arg(allow_negative_numbers = true)]
         args: Vec<String>,
         #[arg(long, default_value_t = 15)]
         timeout: u64,
     },
-    /// The player's position, as your mod answers `where`.
-    Where { instance: String },
-    /// Move the player to a named location (`locations.txt`) or to `x y z [yaw [pitch]]`;
-    /// `list` shows the locations.
+    /// The player's position and camera, as your mod answers `where`.
+    Where {
+        instance: String,
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+    },
+    /// Move the player to a named location (`locations.txt`, then any extra arguments for the
+    /// mod) or to `x y z [yaw [pitch]]`; `list` shows the locations. When the mod answers with
+    /// `"want":{"yaw","pitch"}` (it can't turn the camera itself), the camera is turned there
+    /// with mouse-look in a closed loop on `where` (as `quiver lab turn`).
     Teleport {
         instance: String,
-        #[arg(allow_hyphen_values = true, required = true)]
+        #[arg(allow_negative_numbers = true, required = true)]
         to: Vec<String>,
+        /// For the teleport, and for each `where` while turning.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+        /// Don't turn the camera to the heading the mod asks for.
+        #[arg(long)]
+        no_turn: bool,
+        #[command(flatten)]
+        turn: TurnArgs,
+    },
+    /// Turn the camera to a heading (degrees, as your mod's `where` reports `camera.yaw` and
+    /// `camera.pitch`) with relative mouse motion (XTEST, as `quiver lab mouse`): read, move,
+    /// read again, until within --tolerance or --moves moves are spent. The mouse's gain is
+    /// measured as it goes and remembered for the instance.
+    Turn {
+        instance: String,
+        #[arg(allow_negative_numbers = true)]
+        yaw: f64,
+        #[arg(allow_negative_numbers = true)]
+        pitch: Option<f64>,
+        /// For each `where`.
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+        #[command(flatten)]
+        turn: TurnArgs,
     },
     /// Run a measurement with the GPU to itself: takes the lab's GPU lock (others queue), and
     /// throttles other running instances through their manifests' `throttle` lines.
@@ -366,6 +398,17 @@ pub enum LabAction {
     Supervise { instance: String },
 }
 
+/// How `teleport` and `turn` turn the camera.
+#[derive(clap::Args, Debug, Clone)]
+pub struct TurnArgs {
+    /// Degrees, on each axis.
+    #[arg(long, default_value_t = 0.5)]
+    pub tolerance: f64,
+    /// Mouse moves at most.
+    #[arg(long, default_value_t = 10)]
+    pub moves: u32,
+}
+
 #[derive(Subcommand)]
 pub enum ImageAction {
     Build {
@@ -373,18 +416,6 @@ pub enum ImageAction {
         tag: String,
     },
     Status,
-}
-
-#[derive(Subcommand)]
-pub enum FixtureAction {
-    Save {
-        instance: String,
-        name: String,
-        #[arg(long, default_value = "")]
-        note: String,
-    },
-    Install { instance: String, name: String },
-    List { instance: String },
 }
 
 /// The lab root (`$QUIVER_LAB_ROOT`, else next to Quiver's prefixes).
@@ -820,34 +851,47 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 m.save(&inst.manifest_path())?;
             }
         }
-        LabAction::Fixture { action } => fixture(&lab, action)?,
+        LabAction::Fixture { action } => fixture::run(&lab, action)?,
         LabAction::Call { instance, verb, args, timeout } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             println!("{}", serde_json::to_string_pretty(&call(&inst, &verb, &args, Duration::from_secs(timeout))?)?);
         }
-        LabAction::Where { instance } => {
+        LabAction::Where { instance, timeout } => {
             let (inst, _) = inst_of(&lab, &instance)?;
-            println!("{}", call(&inst, "where", &[], Duration::from_secs(15))?);
+            println!("{}", call(&inst, "where", &[], Duration::from_secs(timeout))?);
         }
-        LabAction::Teleport { instance, to, timeout } => {
+        LabAction::Teleport { instance, to, timeout, no_turn, turn } => {
             let (inst, m) = inst_of(&lab, &instance)?;
-            let table = std::fs::read_to_string(lab.locations(&m.game.dir_name())).unwrap_or_default();
+            let path = lab.locations(&m.game.dir_name());
+            let table = std::fs::read_to_string(&path).unwrap_or_default();
             if to == ["list"] {
                 print!("{table}");
                 return Ok(());
             }
-            let args = if to.len() == 1 {
-                table
-                    .lines()
-                    .find_map(|l| {
-                        let mut w = l.split_whitespace();
-                        (w.next() == Some(to[0].as_str())).then(|| w.map(str::to_owned).collect::<Vec<_>>())
-                    })
-                    .with_context(|| format!("no location '{}' in {}", to[0], lab.locations(&m.game.dir_name()).display()))?
-            } else {
-                to
+            let args = teleport_args(&table, &to).with_context(|| format!("no location '{}' in {}", to[0], path.display()))?;
+            let timeout = Duration::from_secs(timeout);
+            let mut result = call(&inst, "teleport", &args, timeout)?;
+            let Some((yaw, pitch)) = teleport::want_of(&result).filter(|_| !no_turn) else {
+                println!("{result}");
+                return Ok(());
             };
-            println!("{}", call(&inst, "teleport", &args, Duration::from_secs(timeout))?);
+            let turned = turn_camera(&inst, yaw, pitch, &turn, timeout);
+            if let Ok(t) = &turned {
+                match result.as_object_mut() {
+                    Some(o) => {
+                        o.insert("camera".into(), serde_json::to_value(t)?);
+                    }
+                    None => result = serde_json::json!({ "result": result, "camera": t }),
+                }
+            }
+            println!("{result}");
+            turned_ok(turned?, turn.tolerance)?;
+        }
+        LabAction::Turn { instance, yaw, pitch, timeout, turn } => {
+            let (inst, _) = inst_of(&lab, &instance)?;
+            let t = turn_camera(&inst, yaw, pitch, &turn, Duration::from_secs(timeout))?;
+            println!("{}", serde_json::to_string(&t)?);
+            turned_ok(t, turn.tolerance)?;
         }
         LabAction::Gpu { for_instance, cmd } => gpu(&lab, for_instance.as_deref(), &cmd)?,
         LabAction::Bench(a) => bench::run(&lab, source, a)?,
@@ -1190,6 +1234,71 @@ with open(out, "w") as f:
 print(f"sent {count} motions")
 "#;
 
+/// The mod's `teleport` arguments for `quiver lab teleport N TO…`: coordinates as given, or a
+/// named location's row (its `# comment` dropped) followed by any further arguments.
+fn teleport_args(table: &str, to: &[String]) -> Option<Vec<String>> {
+    if to[0].parse::<f64>().is_ok() {
+        return Some(to.to_vec());
+    }
+    let mut a = teleport::location(table, &to[0])?;
+    a.extend(to[1..].iter().cloned());
+    Some(a)
+}
+
+/// The instance's learned mouse-look gain (`quiver lab turn`), the first guess of the next turn.
+const CAMERA_GAIN_FILE: &str = "camera-gain.json";
+
+/// The camera through the lab channel's `where`, the mouse through XTEST.
+struct LabRig<'a> {
+    inst: &'a Inst,
+    timeout: Duration,
+}
+
+impl teleport::Rig for LabRig<'_> {
+    fn read(&mut self) -> Result<teleport::Camera> {
+        let w = call(self.inst, "where", &[], self.timeout)?;
+        teleport::camera_of(&w).with_context(|| format!("the mod's `where` has no camera heading (camera.yaw, camera.pitch): {w}"))
+    }
+    fn mouse(&mut self, dx: i32, dy: i32) -> Result<()> {
+        // Large turns in steps: games clamp very large single deltas.
+        let steps = (dx.unsigned_abs() / 400 + 1).max(dy.unsigned_abs() / 300 + 1);
+        mouse(self.inst, dx, dy, steps, None, "", None)
+    }
+    fn wait_ms(&mut self, ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+fn turn_camera(inst: &Inst, yaw: f64, pitch: Option<f64>, a: &TurnArgs, timeout: Duration) -> Result<teleport::Turned> {
+    if let Some(s) = clock::snapshot(inst).filter(|s| !s.running()) {
+        bail!("the game is held at frame {} (quiver lab clock): mouse-look needs it running; quiver lab clock {} resume, then turn", s.frames, inst.name);
+    }
+    let gain_file = inst.dir.join(CAMERA_GAIN_FILE);
+    let gain = std::fs::read(&gain_file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let o = teleport::TurnOpts { tolerance: a.tolerance, max_moves: a.moves, gain };
+    let t = teleport::turn(&mut LabRig { inst, timeout }, yaw, pitch, &o)?;
+    if t.gain != o.gain && (t.gain.yaw.is_some() || t.gain.pitch.is_some()) {
+        let _ = lab::write_atomic(&gain_file, &serde_json::to_vec(&t.gain)?);
+    }
+    Ok(t)
+}
+
+/// A turn that stopped short is a failure (after its numbers are printed).
+fn turned_ok(t: teleport::Turned, tolerance: f64) -> Result<()> {
+    if !t.converged {
+        bail!(
+            "camera at yaw {:.2} pitch {} after {} move(s), {:.2}°/{:.2}° from the heading (tolerance {tolerance}°){}",
+            t.camera.yaw,
+            t.camera.pitch.map(|p| format!("{p:.2}")).unwrap_or_else(|| "?".into()),
+            t.moves,
+            t.error.0,
+            t.error.1,
+            t.note.map(|n| format!(": {n}")).unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 fn call(inst: &Inst, verb: &str, args: &[String], timeout: Duration) -> Result<serde_json::Value> {
     if !verb.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         bail!("verbs are letters, digits, - and _");
@@ -1219,100 +1328,6 @@ fn call(inst: &Inst, verb: &str, args: &[String], timeout: Duration) -> Result<s
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn fixture(lab: &Lab, action: FixtureAction) -> Result<()> {
-    let copy_tree = |from: &Path, to: &Path| -> Result<usize> {
-        let mut n = 0;
-        for (rel, is_dir) in facts::walk(from, 16, 100_000) {
-            if is_dir {
-                continue;
-            }
-            let dst = to.join(&rel);
-            std::fs::create_dir_all(dst.parent().unwrap())?;
-            if dst.exists() {
-                let mut p = std::fs::metadata(&dst)?.permissions();
-                #[allow(clippy::permissions_set_readonly_false)]
-                p.set_readonly(false);
-                std::fs::set_permissions(&dst, p)?;
-            }
-            std::fs::copy(from.join(&rel), &dst)?;
-            n += 1;
-        }
-        Ok(n)
-    };
-    match action {
-        FixtureAction::List { instance } => {
-            let (_, m) = inst_of(lab, &instance)?;
-            let dir = lab.fixtures(&m.game.dir_name());
-            println!("fixtures in {}:", dir.display());
-            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
-                let note = std::fs::read_to_string(e.path().join("README.md")).unwrap_or_default();
-                println!("  {:<24} {}", e.file_name().to_string_lossy(), note.lines().find(|l| l.starts_with("Note:")).unwrap_or(""));
-            }
-        }
-        FixtureAction::Save { instance, name, note } => {
-            let (inst, m) = inst_of(lab, &instance)?;
-            if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') || name.is_empty() {
-                bail!("fixture names: lowercase letters, digits, - and _");
-            }
-            let dir = lab.fixtures(&m.game.dir_name()).join(&name);
-            if dir.exists() {
-                bail!("fixture {name} exists ({})", dir.display());
-            }
-            let folders: Vec<String> = m.saves.iter().flat_map(|p| create::expand_saves(&inst.prefix(), p)).collect();
-            if folders.is_empty() {
-                bail!("the manifest names no save folder that exists (quiver lab edit {instance} … or add `saves` to {})", inst.manifest_path().display());
-            }
-            let mut n = 0;
-            for f in &folders {
-                n += copy_tree(&inst.prefix().join(f), &dir.join("prefix").join(f))?;
-            }
-            let st = read_state(&inst);
-            let running = st.run.as_ref().is_some_and(|r| r.phase != quiver_core::lab::ready::Phase::Exited);
-            if running {
-                let _ = ops::shot(&inst, &dir.join("fixture.png"));
-            }
-            let readme = format!(
-                "# Save fixture: {name}\n\nNote: {note}\n\nSaved {} from instance {instance} ({}), {n} file(s): {}.\n{}\nInstall: `quiver lab fixture install <instance> {name}` (game stopped).\n",
-                chrono::Utc::now().to_rfc3339(),
-                m.game,
-                folders.join(", "),
-                if running { "The game was running: files are as of its last save. fixture.png is the screen then.\n" } else { "" }
-            );
-            std::fs::write(dir.join("README.md"), readme)?;
-            for (rel, _) in facts::walk(&dir, 16, 100_000) {
-                let p = dir.join(rel);
-                if p.is_file() {
-                    let mut perm = std::fs::metadata(&p)?.permissions();
-                    perm.set_readonly(true);
-                    std::fs::set_permissions(&p, perm)?;
-                }
-            }
-            println!("saved fixture {name} ({n} files) in {}", dir.display());
-        }
-        FixtureAction::Install { instance, name } => {
-            let (inst, m) = inst_of(lab, &instance)?;
-            let st = read_state(&inst);
-            if st.run.as_ref().is_some_and(|r| r.phase != quiver_core::lab::ready::Phase::Exited) {
-                bail!("stop the game first (quiver lab kill {instance}): it rewrites its saves on exit");
-            }
-            let dir = lab.fixtures(&m.game.dir_name()).join(&name).join("prefix");
-            if !dir.is_dir() {
-                bail!("no fixture {name} ({})", dir.display());
-            }
-            // The instance's own saves, once, before any fixture replaces them.
-            let backup = inst.dir.join("saves-orig");
-            if !backup.exists() {
-                for f in m.saves.iter().flat_map(|p| create::expand_saves(&inst.prefix(), p)) {
-                    copy_tree(&inst.prefix().join(&f), &backup.join(&f))?;
-                }
-            }
-            let n = copy_tree(&dir, &inst.prefix())?;
-            println!("installed fixture {name} ({n} files) in {instance}");
-        }
-    }
-    Ok(())
 }
 
 fn gpu(lab: &Lab, me: Option<&str>, cmd: &[String]) -> Result<()> {
@@ -1540,6 +1555,64 @@ mod tests {
         edit(&mut m, "display.hdr=off").unwrap();
         assert!(!m.display.hdr && m.sight);
         assert!(edit(&mut m, "display.hdr=maybe").is_err());
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        a: LabAction,
+    }
+
+    fn parse(args: &[&str]) -> LabAction {
+        use clap::Parser;
+        Cli::try_parse_from(std::iter::once("lab").chain(args.iter().copied())).unwrap_or_else(|e| panic!("{args:?}: {e}")).a
+    }
+
+    #[test]
+    fn options_after_a_verbs_arguments_are_options() {
+        match parse(&["call", "o", "cfg", "stereo.depth", "-1.5", "--timeout", "60"]) {
+            LabAction::Call { verb, args, timeout, .. } => assert_eq!((verb.as_str(), args, timeout), ("cfg", vec!["stereo.depth".to_owned(), "-1.5".into()], 60)),
+            _ => panic!(),
+        }
+        // `--` passes anything on.
+        match parse(&["call", "o", "echo", "--", "--timeout", "5"]) {
+            LabAction::Call { args, timeout, .. } => assert_eq!((args, timeout), (vec!["--timeout".to_owned(), "5".into()], 15)),
+            _ => panic!(),
+        }
+        match parse(&["teleport", "o", "-749.7", "3574.2", "207.8", "90", "-5", "--timeout", "60", "--tolerance", "1"]) {
+            LabAction::Teleport { to, timeout, no_turn, turn, .. } => {
+                assert_eq!(to, ["-749.7", "3574.2", "207.8", "90", "-5"]);
+                assert_eq!((timeout, no_turn, turn.tolerance, turn.moves), (60, false, 1.0, 10));
+            }
+            _ => panic!(),
+        }
+        match parse(&["teleport", "o", "giza", "hold=3", "--no-turn"]) {
+            LabAction::Teleport { to, no_turn, .. } => assert!(to == ["giza", "hold=3"] && no_turn),
+            _ => panic!(),
+        }
+        match parse(&["where", "o", "--timeout", "60"]) {
+            LabAction::Where { timeout, .. } => assert_eq!(timeout, 60),
+            _ => panic!(),
+        }
+        match parse(&["turn", "o", "-90", "-5.5", "--moves", "4"]) {
+            LabAction::Turn { yaw, pitch, turn, .. } => assert_eq!((yaw, pitch, turn.moves), (-90.0, Some(-5.5), 4)),
+            _ => panic!(),
+        }
+        // Siblings with single numbers still take negatives.
+        match parse(&["mouse", "o", "-100", "-50", "--steps", "4"]) {
+            LabAction::Mouse { dx, dy, steps, .. } => assert_eq!((dx, dy, steps), (-100, -50, 4)),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn teleport_arguments() {
+        let table = "giza -749.7 3574.2 207.8 90 -5 # the Sphinx\n";
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(teleport_args(table, &s(&["giza"])).unwrap(), s(&["-749.7", "3574.2", "207.8", "90", "-5"]));
+        assert_eq!(teleport_args(table, &s(&["giza", "hold=3"])).unwrap(), s(&["-749.7", "3574.2", "207.8", "90", "-5", "hold=3"]));
+        assert_eq!(teleport_args(table, &s(&["1", "2", "3"])).unwrap(), s(&["1", "2", "3"]));
+        assert!(teleport_args(table, &s(&["nowhere"])).is_none());
     }
 
     #[test]

@@ -241,10 +241,16 @@ pub fn render(b: &BriefInput) -> String {
          (write `state.tmp`, rename).\n\
          - **Requests:** `quiver lab call <i> <verb> [args…]` writes `%QUIVER_LAB%\\req\\<id>.json` \
          (`{\"id\":…, \"verb\":…, \"args\":[…]}`) and waits for your mod to write `%QUIVER_LAB%\\rsp\\<id>.json` \
-         (`{\"ok\":true, \"result\":…}`). `quiver lab where <i>` is `call where`; `quiver lab teleport <i> <location>` \
-         is `call teleport x y z [yaw [pitch]]` with the location looked up in the game's `locations.txt`.\n\
+         (`{\"ok\":true, \"result\":…}`). Options go after the arguments (`--timeout 60`); `--` passes \
+         anything after it as arguments. `quiver lab where <i>` is `call where` (answer `\"camera\":{\"yaw\":…,\"pitch\":…}` \
+         in degrees if you can); `quiver lab teleport <i> <location>` is `call teleport x y z [yaw [pitch]]` with the \
+         location looked up in the game's `locations.txt` (`name x y z [yaw [pitch]] [# comment]`; the comment isn't \
+         passed). If your mod can't turn the camera itself (under Wine, SendInput from inside the game doesn't reach \
+         a raw-input mouse-look; XTEST from the host does), answer `\"want\":{\"yaw\":…,\"pitch\":…}` and the lab \
+         turns it with mouse-look in a closed loop on `where` (`quiver lab turn <i> YAW [PITCH]` does that alone).\n\
          - **Live config:** if your mod re-reads its config file, set `reload_pattern` (a regex for the log line \
-         that says it did) and `log_file` in the manifest; `quiver lab set <i> … --wait` and A/B runs then wait \
+         that says it did) and `log_file` in the manifest (`run:<file>` names it in the current run's folder); \
+         `quiver lab set <i> … --wait` and A/B runs then wait \
          for the reload instead of sleeping.\n\n",
     );
 
@@ -316,8 +322,9 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("quiver lab click <i> FX FY [--button N] [--expect-change]", "click at a fraction of the window; --expect-change fails if the screen didn't change"),
     ("quiver lab set <i> FILE:[section]key=value… [--wait]", "edit the instance's config files (manifest aliases, install:, prefix paths); --wait waits for the mod's reload"),
     ("quiver lab profile <i> NAME", "apply a graphics profile (config-set lines with {width}/{height}/{refresh})"),
-    ("quiver lab fixture save|install|list <i> NAME", "save fixtures: archive the instance's saves, install one (game stopped)"),
-    ("quiver lab call|where|teleport <i> …", "requests your mod answers through the lab channel; named locations in locations.txt"),
+    ("quiver lab fixture save|import|install|list <i> NAME", "save fixtures: archive the instance's saves, or import save files, a folder or an archive you have; install one (game stopped)"),
+    ("quiver lab call|where|teleport <i> … [--timeout S]", "requests your mod answers through the lab channel; named locations in locations.txt; teleport turns the camera when the mod answers `want`"),
+    ("quiver lab turn <i> YAW [PITCH] [--tolerance DEG]", "turn the camera to a heading with mouse-look, closed loop on your mod's `where`"),
     ("quiver lab gpu [--for <i>] -- CMD…", "run a measurement with the GPU to itself: a lock, other instances throttled through their manifests' throttle lines"),
     ("quiver lab bench <i> --variant A=… --variant B=… [--rounds N --samples N --settle S --crop C --log-metric NAME=REGEX]", "A/B runs: live config variants, settle, N samples (sharpness, temporal noise, log numbers), aggregated, host state per variant"),
     ("quiver lab edit <i> clock=virtual:62.5 | clock=real", "the fixed-step virtual clock: every frame is exactly 1/62.5 s to the game (faster than real time when frames are cheap, repeatable when the machine is busy); `launch --clock …` for one launch"),

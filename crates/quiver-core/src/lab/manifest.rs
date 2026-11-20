@@ -188,7 +188,9 @@ pub struct Manifest {
     /// --wait` and A/B runs; the mod's log is `log_file`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload_pattern: Option<String>,
-    /// The mod's log, relative to the lab folder or as an `install:`/prefix path.
+    /// The mod's log: `run:<file>` in the current run's folder (`lab/runs/r<N>/`, where a mod
+    /// that writes to `QUIVER_LAB_RUN_DIR` puts it), `lab:<rel>`, `install:<rel>`, or a path
+    /// relative to the prefix ([`Manifest::resolve_file`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -268,16 +270,23 @@ impl Manifest {
         }
     }
 
-    /// A config file reference (an alias from `files`, `install:<rel>`, or a path relative to
-    /// the prefix) as a host path inside the instance's clones.
+    /// A file reference (an alias from `files`, `install:<rel>`, `lab:<rel>`, `run:<rel>` for
+    /// the current run's folder `lab/runs/r<N>/`, or a path relative to the prefix) as a host
+    /// path inside the instance's folders. `run:` is resolved when called: after a relaunch,
+    /// resolve again.
     pub fn resolve_file(&self, inst: &super::Inst, spec: &str) -> Result<PathBuf> {
         let spec = self.files.get(spec).map(String::as_str).unwrap_or(spec);
-        let (base, rel) = match spec.strip_prefix("install:") {
-            Some(rel) => (self.install_in(inst), rel),
-            None => match spec.strip_prefix("lab:") {
-                Some(rel) => (inst.lab(), rel),
-                None => (inst.prefix(), spec.strip_prefix("prefix:").unwrap_or(spec)),
-            },
+        let run_dir;
+        let (base, rel) = if let Some(rel) = spec.strip_prefix("install:") {
+            (self.install_in(inst), rel)
+        } else if let Some(rel) = spec.strip_prefix("lab:") {
+            (inst.lab(), rel)
+        } else if let Some(rel) = spec.strip_prefix("run:") {
+            let run = inst.current_run().with_context(|| format!("'{spec}': instance '{}' has no run yet (run: is the current run's folder)", inst.name))?;
+            run_dir = inst.run_dir(run);
+            (run_dir, rel)
+        } else {
+            (inst.prefix(), spec.strip_prefix("prefix:").unwrap_or(spec))
         };
         let rel = Path::new(rel.trim_start_matches('/'));
         if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
@@ -365,6 +374,34 @@ pub(crate) mod tests {
         assert_eq!(m.resolve_file(&inst, "drive_c/x.ini").unwrap(), Path::new("/l/instances/t1/prefix/drive_c/x.ini"));
         assert_eq!(m.resolve_file(&inst, "lab:state").unwrap(), Path::new("/l/instances/t1/lab/state"));
         assert!(m.resolve_file(&inst, "install:../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn run_files_follow_the_current_run() {
+        let t = tempfile::tempdir().unwrap();
+        let mut m = sample();
+        let inst = super::super::Lab::new(t.path().into()).instance("t1");
+        std::fs::create_dir_all(&inst.dir).unwrap();
+        // No run yet: said so.
+        let e = m.resolve_file(&inst, "run:pharos.log").unwrap_err().to_string();
+        assert!(e.contains("no run yet"), "{e}");
+        let state = |id: u32| {
+            let st = super::super::ready::State {
+                instance: "t1".into(),
+                run: Some(super::super::ready::Run::new(id, format!("lab-t1-r{id}"), chrono::Utc::now())),
+                ..Default::default()
+            };
+            std::fs::write(inst.state_path(), serde_json::to_vec(&st).unwrap()).unwrap();
+        };
+        state(3);
+        assert_eq!(m.resolve_file(&inst, "run:pharos.log").unwrap(), inst.lab().join("runs/r3/pharos.log"));
+        // The next launch: the same spec names the new run's file.
+        state(4);
+        assert_eq!(m.resolve_file(&inst, "run:logs/pharos.log").unwrap(), inst.lab().join("runs/r4/logs/pharos.log"));
+        // Through an alias too, and never out of the run folder.
+        m.files.insert("modlog".into(), "run:pharos.log".into());
+        assert_eq!(m.resolve_file(&inst, "modlog").unwrap(), inst.lab().join("runs/r4/pharos.log"));
+        assert!(m.resolve_file(&inst, "run:../r3/pharos.log").is_err());
     }
 
     #[test]

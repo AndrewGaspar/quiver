@@ -293,6 +293,30 @@ pub struct TcpConn {
     pub state: &'static str,
 }
 
+/// What a :443 connection that didn't go through the EOS proxy means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Around {
+    /// To an address the real `api.epicgames.dev` has: EOS traffic around the proxy, in any
+    /// run (the run is killed).
+    Bypass,
+    /// Some other HTTPS from a run the proxy watches (an Epic game, or one shipping the EOS
+    /// SDK: [`plan`] said so), worth a look.
+    Outside,
+}
+
+/// `None`: nothing to say. Only a run the proxy watches (`eos_run`) gets OUTSIDE notes: every
+/// other game's own HTTPS (a Ubisoft game's UbiServices traffic, on every run) has nothing to
+/// do with EOS.
+pub fn around(remote: &IpAddr, epic: &std::collections::BTreeSet<IpAddr>, eos_run: bool) -> Option<Around> {
+    if epic.contains(remote) {
+        Some(Around::Bypass)
+    } else if eos_run {
+        Some(Around::Outside)
+    } else {
+        None
+    }
+}
+
 /// Connections to a remote :443 that aren't to this namespace's loopback (where the proxy
 /// is): what bypassed the proxy. Listening sockets and closed ones are left out.
 pub fn outside_443(tcp: &str, tcp6: &str) -> Vec<TcpConn> {
@@ -455,6 +479,24 @@ mod tests {
         let out = summarize(&format!("{log}t !!! OUTSIDE 1.2.3.4:443 (ESTABLISHED): …\n"));
         assert_eq!(out.outside, 1);
         assert!(out.verdict().contains("went around it"));
+    }
+
+    #[test]
+    fn outside_notes_only_where_the_proxy_watches() {
+        let epic: std::collections::BTreeSet<IpAddr> = ["104.18.124.108".parse().unwrap()].into();
+        let ubi: IpAddr = "52.29.10.4".parse().unwrap();
+        // A Ubisoft game's own HTTPS, every run: nothing to say.
+        assert_eq!(around(&ubi, &epic, false), None);
+        // An Epic (or EOS SDK) game's: noted.
+        assert_eq!(around(&ubi, &epic, true), Some(Around::Outside));
+        // Epic's own addresses around the proxy: a bypass, whatever the game.
+        for eos_run in [false, true] {
+            assert_eq!(around(&"104.18.124.108".parse().unwrap(), &epic, eos_run), Some(Around::Bypass));
+        }
+        // And the plan says which runs are watched: an Epic game, or any game with the SDK.
+        let t = tempfile::tempdir().unwrap();
+        assert!(plan(t.path(), false).is_none(), "a Ubisoft game without the EOS SDK");
+        assert!(plan(t.path(), true).is_some_and(|p| !p.required));
     }
 
     #[test]

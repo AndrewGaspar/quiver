@@ -445,46 +445,68 @@ static void guard_leave(void) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* Vtable hooks: a registry of (vtable, slot) -> original, so one hook serves every class. */
+/* Vtable hooks: a registry of (vtable, slot) -> original, so one hook serves every class
+ * (vc_vt_plan in vclock.c decides what a re-hook does; vclock.h says why). */
 
-typedef struct { void **vt; unsigned slot; void *orig; } vhook;
-#define MAX_VH 128
-static vhook g_vh[MAX_VH];
-static volatile LONG g_nvh;
+static vc_vtreg g_vt;
 
-static void *vt_orig(void *obj, unsigned slot) {
-    void **vt = *(void ***)obj;
-    LONG n = __atomic_load_n(&g_nvh, __ATOMIC_ACQUIRE);
-    for (LONG i = 0; i < n; i++)
-        if (g_vh[i].vt == vt && g_vh[i].slot == slot) return g_vh[i].orig;
-    return NULL;
+/* The module an address is in, for the log ("?" if none). */
+static void module_of(void *p, char *out, DWORD n) {
+    HMODULE m = NULL;
+    out[0] = '?';
+    out[1] = 0;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)p, &m) && m) {
+        char path[MAX_PATH];
+        DWORD k = GetModuleFileNameA(m, path, sizeof path);
+        if (k && k < sizeof path) {
+            const char *b = path;
+            for (const char *c = path; *c; c++)
+                if (*c == '\\' || *c == '/') b = c + 1;
+            snprintf(out, n, "%s", b);
+        }
+    }
 }
+
+#define vt_orig(obj, slot, hook) vc_vt_orig(&g_vt, *(void ***)(obj), (slot), (void *)(hook))
 
 static void vt_hook(void *obj, unsigned slot, void *hook, const char *what) {
     if (!obj) return;
     EnterCriticalSection(&g_cs);
     void **vt = *(void ***)obj;
-    if (vt[slot] == hook) {
+    void *cur = __atomic_load_n(&vt[slot], __ATOMIC_ACQUIRE);
+    vc_vhook *e = NULL;
+    int plan = vc_vt_plan(&g_vt, vt, slot, cur, hook, &e);
+    if (plan == VC_VT_OURS) {
         LeaveCriticalSection(&g_cs);
         return;
     }
-    LONG n = g_nvh;
-    if (n >= MAX_VH) {
+    if (plan == VC_VT_FULL) {
         LeaveCriticalSection(&g_cs);
         ss_log("too many vtable hooks; %s (vtable %p) left alone", what, (void *)vt);
         return;
     }
-    g_vh[n].vt = vt;
-    g_vh[n].slot = slot;
-    g_vh[n].orig = vt[slot];
-    __atomic_store_n(&g_nvh, n + 1, __ATOMIC_RELEASE);
+    if (plan == VC_VT_WRAPPED) {
+        /* Another module hooked the slot after us and calls ours: leave its hook in front. */
+        int first = e && !e->noted;
+        if (e) e->noted = 1;
+        LeaveCriticalSection(&g_cs);
+        if (first) {
+            char mod[MAX_PATH];
+            module_of(cur, mod, sizeof mod);
+            ss_log("%s (vtable %p slot %u) now starts at %p in %s, another module's hook over ours: left in front of ours, "
+                   "which it calls (ours calls the original %p)",
+                   what, (void *)vt, slot, cur, mod, e ? e->orig : NULL);
+        }
+        return;
+    }
     DWORD old;
     if (VirtualProtect(&vt[slot], sizeof(void *), PAGE_EXECUTE_READWRITE, &old)) {
         __atomic_store_n(&vt[slot], hook, __ATOMIC_RELEASE);
         VirtualProtect(&vt[slot], sizeof(void *), old, &old);
         InterlockedIncrement(&g_vtable_hooks);
         LeaveCriticalSection(&g_cs);
-        ss_log("hooked %s (vtable %p slot %u)", what, (void *)vt, slot);
+        if (plan == VC_VT_RESTORED) ss_log("hooked %s again (vtable %p slot %u: its original was put back)", what, (void *)vt, slot);
+        else ss_log("hooked %s (vtable %p slot %u)", what, (void *)vt, slot);
         note_hooked(what);
     } else {
         LeaveCriticalSection(&g_cs);
@@ -498,7 +520,7 @@ typedef HRESULT(STDMETHODCALLTYPE *pfn_present)(IDXGISwapChain *, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE *pfn_present1)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *);
 
 static HRESULT STDMETHODCALLTYPE h_sc_Present(IDXGISwapChain *sc, UINT sync, UINT flags) {
-    pfn_present o = (pfn_present)vt_orig(sc, SLOT(IDXGISwapChain, Present));
+    pfn_present o = (pfn_present)vt_orig(sc, SLOT(IDXGISwapChain, Present), h_sc_Present);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     if (g_on && g_cfg.sync0 && !(flags & DXGI_PRESENT_TEST)) sync = 0;
     int outer = guard_enter();
@@ -509,7 +531,7 @@ static HRESULT STDMETHODCALLTYPE h_sc_Present(IDXGISwapChain *sc, UINT sync, UIN
 }
 
 static HRESULT STDMETHODCALLTYPE h_sc_Present1(IDXGISwapChain1 *sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS *p) {
-    pfn_present1 o = (pfn_present1)vt_orig(sc, SLOT(IDXGISwapChain1, Present1));
+    pfn_present1 o = (pfn_present1)vt_orig(sc, SLOT(IDXGISwapChain1, Present1), h_sc_Present1);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     if (g_on && g_cfg.sync0 && !(flags & DXGI_PRESENT_TEST)) sync = 0;
     int outer = guard_enter();
@@ -543,7 +565,7 @@ typedef HRESULT(STDMETHODCALLTYPE *pfn_create_sc_comp)(IDXGIFactory2 *, IUnknown
                                                        IDXGISwapChain1 **);
 
 static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChain(IDXGIFactory *f, IUnknown *dev, DXGI_SWAP_CHAIN_DESC *d, IDXGISwapChain **out) {
-    pfn_create_sc o = (pfn_create_sc)vt_orig(f, SLOT(IDXGIFactory, CreateSwapChain));
+    pfn_create_sc o = (pfn_create_sc)vt_orig(f, SLOT(IDXGIFactory, CreateSwapChain), h_f_CreateSwapChain);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = o(f, dev, d, out);
     if (SUCCEEDED(hr) && out && *out) hook_swapchain((IUnknown *)*out);
@@ -552,7 +574,7 @@ static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChain(IDXGIFactory *f, IUnknown *
 
 static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChainForHwnd(IDXGIFactory2 *f, IUnknown *dev, HWND w, const DXGI_SWAP_CHAIN_DESC1 *d,
                                                             const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs, IDXGIOutput *o2, IDXGISwapChain1 **out) {
-    pfn_create_sc_hwnd o = (pfn_create_sc_hwnd)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForHwnd));
+    pfn_create_sc_hwnd o = (pfn_create_sc_hwnd)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForHwnd), h_f_CreateSwapChainForHwnd);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = o(f, dev, w, d, fs, o2, out);
     if (SUCCEEDED(hr) && out && *out) hook_swapchain((IUnknown *)*out);
@@ -561,7 +583,7 @@ static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChainForHwnd(IDXGIFactory2 *f, IU
 
 static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChainForCoreWindow(IDXGIFactory2 *f, IUnknown *dev, IUnknown *w, const DXGI_SWAP_CHAIN_DESC1 *d,
                                                                  IDXGIOutput *o2, IDXGISwapChain1 **out) {
-    pfn_create_sc_cw o = (pfn_create_sc_cw)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForCoreWindow));
+    pfn_create_sc_cw o = (pfn_create_sc_cw)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForCoreWindow), h_f_CreateSwapChainForCoreWindow);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = o(f, dev, w, d, o2, out);
     if (SUCCEEDED(hr) && out && *out) hook_swapchain((IUnknown *)*out);
@@ -570,7 +592,7 @@ static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChainForCoreWindow(IDXGIFactory2 
 
 static HRESULT STDMETHODCALLTYPE h_f_CreateSwapChainForComposition(IDXGIFactory2 *f, IUnknown *dev, const DXGI_SWAP_CHAIN_DESC1 *d,
                                                                   IDXGIOutput *o2, IDXGISwapChain1 **out) {
-    pfn_create_sc_comp o = (pfn_create_sc_comp)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForComposition));
+    pfn_create_sc_comp o = (pfn_create_sc_comp)vt_orig(f, SLOT(IDXGIFactory2, CreateSwapChainForComposition), h_f_CreateSwapChainForComposition);
     if (!o) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = o(f, dev, d, o2, out);
     if (SUCCEEDED(hr) && out && *out) hook_swapchain((IUnknown *)*out);
@@ -688,7 +710,7 @@ static void uncap_d3d9(D3DPRESENT_PARAMETERS *pp) {
 }
 
 static HRESULT STDMETHODCALLTYPE h_d9_Present(IDirect3DDevice9 *d, const RECT *s, const RECT *t, HWND w, const RGNDATA *r) {
-    pfn_d9_present o = (pfn_d9_present)vt_orig(d, SLOT(IDirect3DDevice9, Present));
+    pfn_d9_present o = (pfn_d9_present)vt_orig(d, SLOT(IDirect3DDevice9, Present), h_d9_Present);
     if (!o) return D3DERR_INVALIDCALL;
     int outer = guard_enter();
     HRESULT hr = o(d, s, t, w, r);
@@ -698,7 +720,7 @@ static HRESULT STDMETHODCALLTYPE h_d9_Present(IDirect3DDevice9 *d, const RECT *s
 }
 
 static HRESULT STDMETHODCALLTYPE h_d9_PresentEx(IDirect3DDevice9Ex *d, const RECT *s, const RECT *t, HWND w, const RGNDATA *r, DWORD fl) {
-    pfn_d9_presentex o = (pfn_d9_presentex)vt_orig(d, SLOT(IDirect3DDevice9Ex, PresentEx));
+    pfn_d9_presentex o = (pfn_d9_presentex)vt_orig(d, SLOT(IDirect3DDevice9Ex, PresentEx), h_d9_PresentEx);
     if (!o) return D3DERR_INVALIDCALL;
     int outer = guard_enter();
     HRESULT hr = o(d, s, t, w, r, fl);
@@ -708,7 +730,7 @@ static HRESULT STDMETHODCALLTYPE h_d9_PresentEx(IDirect3DDevice9Ex *d, const REC
 }
 
 static HRESULT STDMETHODCALLTYPE h_d9sc_Present(IDirect3DSwapChain9 *sc, const RECT *s, const RECT *t, HWND w, const RGNDATA *r, DWORD fl) {
-    pfn_d9sc_present o = (pfn_d9sc_present)vt_orig(sc, SLOT(IDirect3DSwapChain9, Present));
+    pfn_d9sc_present o = (pfn_d9sc_present)vt_orig(sc, SLOT(IDirect3DSwapChain9, Present), h_d9sc_Present);
     if (!o) return D3DERR_INVALIDCALL;
     int outer = guard_enter();
     HRESULT hr = o(sc, s, t, w, r, fl);
@@ -718,7 +740,7 @@ static HRESULT STDMETHODCALLTYPE h_d9sc_Present(IDirect3DSwapChain9 *sc, const R
 }
 
 static HRESULT STDMETHODCALLTYPE h_d9_Reset(IDirect3DDevice9 *d, D3DPRESENT_PARAMETERS *pp) {
-    pfn_d9_reset o = (pfn_d9_reset)vt_orig(d, SLOT(IDirect3DDevice9, Reset));
+    pfn_d9_reset o = (pfn_d9_reset)vt_orig(d, SLOT(IDirect3DDevice9, Reset), h_d9_Reset);
     if (!o) return D3DERR_INVALIDCALL;
     uncap_d3d9(pp);
     return o(d, pp);
@@ -742,7 +764,7 @@ static void hook_d3d9_device(IDirect3DDevice9 *dev) {
 
 static HRESULT STDMETHODCALLTYPE h_d9_CreateDevice(IDirect3D9 *d, UINT a, D3DDEVTYPE t, HWND w, DWORD fl, D3DPRESENT_PARAMETERS *pp,
                                                    IDirect3DDevice9 **out) {
-    pfn_d9_create o = (pfn_d9_create)vt_orig(d, SLOT(IDirect3D9, CreateDevice));
+    pfn_d9_create o = (pfn_d9_create)vt_orig(d, SLOT(IDirect3D9, CreateDevice), h_d9_CreateDevice);
     if (!o) return D3DERR_INVALIDCALL;
     uncap_d3d9(pp);
     HRESULT hr = o(d, a, t, w, fl, pp, out);
@@ -752,7 +774,7 @@ static HRESULT STDMETHODCALLTYPE h_d9_CreateDevice(IDirect3D9 *d, UINT a, D3DDEV
 
 static HRESULT STDMETHODCALLTYPE h_d9_CreateDeviceEx(IDirect3D9Ex *d, UINT a, D3DDEVTYPE t, HWND w, DWORD fl, D3DPRESENT_PARAMETERS *pp,
                                                      D3DDISPLAYMODEEX *m, IDirect3DDevice9Ex **out) {
-    pfn_d9_createex o = (pfn_d9_createex)vt_orig(d, SLOT(IDirect3D9Ex, CreateDeviceEx));
+    pfn_d9_createex o = (pfn_d9_createex)vt_orig(d, SLOT(IDirect3D9Ex, CreateDeviceEx), h_d9_CreateDeviceEx);
     if (!o) return D3DERR_INVALIDCALL;
     uncap_d3d9(pp);
     HRESULT hr = o(d, a, t, w, fl, pp, m, out);
@@ -791,7 +813,7 @@ typedef void *(WINAPI *pfn_d3dcreate8)(UINT);
 static pfn_d3dcreate8 o_Direct3DCreate8;
 
 static HRESULT STDMETHODCALLTYPE h_d8_Present(void *d, const RECT *s, const RECT *t, HWND w, const RGNDATA *r) {
-    pfn_d8_present o = (pfn_d8_present)vt_orig(d, D3D8_PRESENT);
+    pfn_d8_present o = (pfn_d8_present)vt_orig(d, D3D8_PRESENT, h_d8_Present);
     if (!o) return D3DERR_INVALIDCALL;
     int outer = guard_enter();
     HRESULT hr = o(d, s, t, w, r);
@@ -801,7 +823,7 @@ static HRESULT STDMETHODCALLTYPE h_d8_Present(void *d, const RECT *s, const RECT
 }
 
 static HRESULT STDMETHODCALLTYPE h_d8_CreateDevice(void *d, UINT a, UINT t, HWND w, DWORD fl, void *pp, void **out) {
-    pfn_d8_create o = (pfn_d8_create)vt_orig(d, D3D8_CREATEDEVICE);
+    pfn_d8_create o = (pfn_d8_create)vt_orig(d, D3D8_CREATEDEVICE, h_d8_CreateDevice);
     if (!o) return D3DERR_INVALIDCALL;
     HRESULT hr = o(d, a, t, w, fl, pp, out);
     if (SUCCEEDED(hr) && out && *out) vt_hook(*out, D3D8_PRESENT, (void *)h_d8_Present, "d3d8.Present");

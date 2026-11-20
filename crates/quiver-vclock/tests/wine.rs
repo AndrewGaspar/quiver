@@ -24,7 +24,12 @@
 //! - QueryPerformanceCounter looked up with GetProcAddress gives the virtual value;
 //! - only the executable's clock imports point into the hook DLL: none of Wine's modules or
 //!   DXVK's;
-//! - no real-time escape fired (the run is deterministic).
+//! - no real-time escape fired (the run is deterministic);
+//! - (`another_modules_hooks_stay_in_the_chain`) another module's hooks between the clock's
+//!   (Pharos's d3d11.dll proxy in AC Origins) stay in the chain: hooked over the clock's
+//!   CreateSwapChain before the clock is asked to hook the same factory vtable again, they run
+//!   once per call, see the swap chain, and their Present runs once per frame, which the clock
+//!   still counts exactly once.
 //!
 //! Opt-in:
 //!
@@ -66,7 +71,7 @@ fn stage(dir: &Path, arch: &str) -> PathBuf {
         .args(["-O2", "-Wall", "-o"])
         .arg(&exe)
         .arg(&src)
-        .args(["-ld3d11", "-ld3d9", "-lversion", "-lwinmm", "-lpsapi", "-luuid", "-ldxguid"])
+        .args(["-ld3d11", "-ldxgi", "-ld3d9", "-lversion", "-lwinmm", "-lpsapi", "-luuid", "-ldxguid"])
         .status()
         .expect(gcc);
     assert!(st.success(), "{gcc} failed");
@@ -209,7 +214,7 @@ fn run_with(display: &str, c: &Case, controller: Option<&dyn Fn(&Path)>) -> Out 
         let mut w = l.splitn(3, ' ');
         let (a, b, rest) = (w.next().unwrap_or(""), w.next().unwrap_or(""), w.next().unwrap_or(""));
         match a {
-            "A" | "B" | "C" | "D" | "keys" => lines.insert(format!("{a} {b}"), rest.to_owned()),
+            "A" | "B" | "C" | "D" | "keys" | "chain" => lines.insert(format!("{a} {b}"), rest.to_owned()),
             "iat" => lines.insert(format!("iat {b}"), rest.to_owned()),
             _ => lines.insert(a.to_owned(), format!("{b} {rest}").trim().to_owned()),
         };
@@ -413,5 +418,29 @@ fn the_game_sees_exactly_one_frame_per_present() {
     if std::env::var("QUIVER_TEST_VCLOCK_32").as_deref() != Ok("0") && quiver_vclock::unavailable("x86").is_none() {
         let x86 = run(&x.display, &Case { tag: "x86", arch: "x86", frames: 600, helper: true, ..Default::default() });
         check(&x86, 600, "d3d11");
+    }
+}
+
+#[test]
+#[ignore = "needs QUIVER_TEST_PROTON, mingw-w64 and Xvfb; see the module docs"]
+fn another_modules_hooks_stay_in_the_chain() {
+    let x = xvfb::Xvfb::start_size("640x480x24").expect("Xvfb");
+    for arch in ["x64", "x86"] {
+        if arch == "x86" && (std::env::var("QUIVER_TEST_VCLOCK_32").as_deref() == Ok("0") || quiver_vclock::unavailable("x86").is_some()) {
+            continue;
+        }
+        let o = run(&x.display, &Case { tag: "chain", arch, api: "d3d11chain", frames: 600, ..Default::default() });
+        check(&o, 600, "d3d11chain");
+        assert_eq!(o.get("chain clock_first"), "1", "{arch}: the clock hooked the factory's CreateSwapChain first (the case Pharos hit)");
+        assert_eq!(
+            o.get("chain same_vtable"),
+            "1 slot_theirs 1",
+            "{arch}: the device's factory shares the vtable, and the clock left the other module's hook in the slot"
+        );
+        // 600 frames in phase A, 31 in B, 30 in C, 10 in D.
+        assert_eq!(o.get("chain their_create_calls"), "1 their_presents 671", "{arch}: the other module's hooks ran once per call");
+        // The first engages the clock; the report counts frames after it.
+        assert_eq!(o.report.frames, 670, "{arch}: the clock counted each of those presents once");
+        assert!(o.log.contains("another module's hook over ours"), "{arch}: the log says so:\n{}", o.log);
     }
 }
