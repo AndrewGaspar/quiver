@@ -45,6 +45,8 @@ pub enum Msg {
     /// Keyboard and mouse input the game's input preload forwarded to the panel drawn in the
     /// game (`panel::ingame`).
     GameInput { session: String, events: Vec<quiver_perf::panel::PanelEvent> },
+    /// quiverd's answer to the Performance section (`panel::sections::performance`).
+    Perf { session: String, reply: crate::panel::sections::performance::Reply },
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.
@@ -79,6 +81,8 @@ pub enum LinkReq {
     Report(PanelReport),
     /// The pad's long-press chord: what `quiver sight toggle` does.
     Toggle,
+    /// The Performance section's requests (`panel::sections::performance::link`).
+    Perf { session: String, req: crate::panel::sections::performance::Req },
 }
 
 /// After the last session ends, wait this long for another before quitting.
@@ -269,6 +273,10 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                 if let Err(e) = client.call::<serde_json::Value>(Request::Sight(SightRequest::Report { report })).await {
                     tracing::debug!("panel report: {e:#}");
                 }
+            }
+            LinkReq::Perf { session, req } => {
+                let reply = crate::panel::sections::performance::link::run(&client, &session, req).await;
+                send(Msg::Perf { session, reply });
             }
             LinkReq::Toggle => {
                 if let Err(e) = client.call::<PanelCommand>(Request::Sight(SightRequest::Toggle { session: None, section: None })).await {

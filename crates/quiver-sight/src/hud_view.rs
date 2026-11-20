@@ -73,6 +73,9 @@ pub enum Mode {
     Image,
     /// On a layer-shell surface: graphs drawn here; the window follows the card's size.
     Desktop,
+    /// Inside another view (the Sight panel's layout editor): graphs drawn here, the window
+    /// left alone.
+    Embedded,
 }
 
 pub struct HudView {
@@ -84,8 +87,8 @@ pub struct HudView {
     /// for the layout in `reserved_for`.
     reserved: HashMap<String, (usize, usize)>,
     reserved_for: String,
-    /// The Sight panel's layout editor: these model rows are outlined (dashed), with a
-    /// "MOVING" tag while picked up.
+    /// The Sight panel's layout editor: these model rows are outlined (dashed), tinted while
+    /// picked up.
     pub highlight: Option<(std::ops::Range<usize>, bool)>,
 }
 
@@ -451,7 +454,7 @@ impl HudView {
     /// frame times drawn here (desktop). Its laid-out bounds go into the descriptor.
     fn graph(&self, cx: &Ctx, rect: GraphRect, rows: u32, points: Vec<f32>, base_points: Vec<f32>) -> AnyElement {
         let measure = self.measure.clone();
-        let desktop = self.mode == Mode::Desktop;
+        let desktop = matches!(self.mode, Mode::Desktop | Mode::Embedded);
         let colors = GraphColors { line: cx.fade(cx.th.who_gui), base: cx.fade(cx.th.warn), warn: cx.fade(cx.th.warn), bad: cx.fade(cx.th.bad), reference: cx.fade(cx.th.tx1.opacity(0.10)) };
         let u = cx.u;
         let height = hud_card::slot(Some(rows));
@@ -676,8 +679,9 @@ impl Render for HudView {
                             if last {
                                 d = d.border_b(px(1.5f32.max(u))).rounded_b(ctx.px(4.));
                             }
-                            if first && *moving {
-                                d = d.child(div().absolute().top(ctx.px(1.)).right(ctx.px(4.)).child(ctx.label_in("moving", th.acc_hi)));
+                            // Picked up: a solid outline (the editor's hint says it's moving).
+                            if *moving {
+                                d = d.border_color(th.acc).bg(th.acc.opacity(0.12));
                             }
                             d
                         }

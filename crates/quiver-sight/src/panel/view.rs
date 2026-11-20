@@ -25,6 +25,7 @@ use quiver_ui::options::{Tone, apply_badge, draft_value, outcome_text, pending_t
 use quiver_ui::theme::Theme;
 use serde_json::Value;
 
+use super::sections::performance::{self as perf, PerfSection};
 use super::state::{ANCHORS, Button, Effect, HudRow, Load, Nav, PRESETS, PanelData, Row, Zone, adjustable, cycle, key_input, rows, step_scale, step_value};
 use crate::link::{Change, LinkReq, Loaded, Msg};
 
@@ -71,7 +72,7 @@ pub struct DepthMarks {
 }
 
 #[derive(Clone, Copy)]
-enum Mark {
+pub(crate) enum Mark {
     Card,
     Focus,
     Dialog,
@@ -99,11 +100,11 @@ impl DepthMarks {
 
 /// Background around a marked part, logical px: covers a focus ring (5 px outside the
 /// element) and a pixel of what's behind it, which a lift's moved-off strip is filled from.
-const MARK_PAD: f32 = 6.0;
+pub(crate) const MARK_PAD: f32 = 6.0;
 
 /// An invisible child covering its (relative) parent that records the parent's bounds, padded
 /// and clipped to the content mask, as part `m`.
-fn mark(marks: &Rc<RefCell<DepthMarks>>, m: Mark, pad: f32) -> impl IntoElement {
+pub(crate) fn mark(marks: &Rc<RefCell<DepthMarks>>, m: Mark, pad: f32) -> impl IntoElement {
     let marks = marks.clone();
     canvas(
         move |bounds, window, _| {
@@ -142,9 +143,15 @@ pub struct PanelView {
     side_scroll: ScrollHandle,
     /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
     pub marks: Rc<RefCell<DepthMarks>>,
+    /// The Performance section's own state (`sections::performance`).
+    pub perf: PerfSection,
+    /// Its layout editor's preview, a HUD view of the edited layout.
+    pub(crate) perf_preview: Option<perf::view::Preview>,
+    /// The body's room in the last frame (logical px), for the section's layout.
+    pub(crate) room: perf::view::Room,
 }
 
-fn tone_color(th: &Theme, t: Tone) -> Hsla {
+pub(crate) fn tone_color(th: &Theme, t: Tone) -> Hsla {
     match t {
         Tone::Ok => th.ok,
         Tone::Warn => th.warn,
@@ -197,6 +204,9 @@ impl PanelView {
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             marks: Rc::default(),
+            perf: PerfSection::default(),
+            perf_preview: None,
+            room: perf::view::Room { w: 900.0, h: 500.0 },
         }
     }
 
@@ -250,6 +260,15 @@ impl PanelView {
 
     /// One input from the keyboard, the controller (gilrs, or hyprpad's keys) or a click.
     pub fn input(&mut self, i: Input, cx: &mut Context<Self>) {
+        // The Performance section's body has its own controls and editor.
+        if self.nav.section == PanelSection::Performance && self.nav.zone == Zone::Body && self.nav.confirm.is_none() {
+            let cap = self.cap_value();
+            if let perf::Outcome::Done(acts) = self.perf.input(i, &self.data, &cap) {
+                self.perf_acts(acts, cx);
+                cx.notify();
+                return;
+            }
+        }
         let rows = self.rows();
         let e = {
             let this = &*self;
@@ -306,23 +325,89 @@ impl PanelView {
                 let Some(st) = self.option_state(&row) else { return };
                 let draft = self.drafts.get(&key).cloned().unwrap_or_else(|| draft_value(st, None));
                 let Some(v) = step_value(st, &draft, dir) else { return };
-                self.drafts.insert(key.clone(), v.clone());
-                self.outcomes.remove(&key);
-                self.edit_gen += 1;
-                let edit_gen = self.edit_gen;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(DEBOUNCE).await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.edit_gen == edit_gen {
-                            this.flush(cx);
-                        }
-                    });
-                })
-                .detach();
+                self.stage(key, v, cx);
             }
             Row::Hud(h) => self.adjust_hud(*h, dir),
             _ => {}
         }
+    }
+
+    /// A value asked for: shown at once, sent after the debounce.
+    fn stage(&mut self, key: (String, String), v: Value, cx: &mut Context<Self>) {
+        self.drafts.insert(key.clone(), v);
+        self.outcomes.remove(&key);
+        self.edit_gen += 1;
+        let edit_gen = self.edit_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.edit_gen == edit_gen {
+                    this.flush(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    // ---- The Performance section's glue (`sections::performance`) ---------------------------
+
+    /// What the section's input asked for.
+    fn perf_acts(&mut self, acts: Vec<perf::Act>, cx: &mut Context<Self>) {
+        for a in acts {
+            match a {
+                perf::Act::Send(req) => self.send(LinkReq::Perf { session: self.session.clone(), req }),
+                perf::Act::SetTweak(id, v) => self.stage(("tweaks".into(), id), v, cx),
+                perf::Act::Note(t, tone) => self.hud_note = Some((t, tone)),
+            }
+        }
+    }
+
+    /// quiverd answered one of the section's requests.
+    pub fn perf_reply(&mut self, r: perf::Reply, _cx: &mut Context<Self>) {
+        let opening = self.perf.editor.is_none();
+        let (note, reload) = self.perf.reply(r, &self.data);
+        if let Some(n) = note {
+            self.hud_note = Some(n);
+        }
+        if reload {
+            self.send(LinkReq::Load { session: self.session.clone(), part: super::data::Part::Hud, view: self.data.session.ready().cloned() });
+        }
+        // The editor just opened (or took another preset): its preview and metrics now.
+        if let Some(e) = self.perf.editor.as_ref().filter(|e| opening || e.preview.is_none()) {
+            let reqs = [perf::Req::Preview(e.layout.clone()), perf::Req::Catalog];
+            for req in reqs {
+                self.send(LinkReq::Perf { session: self.session.clone(), req });
+            }
+        }
+    }
+
+    /// Once a second while the panel shows: the section's graph (and the editor's preview).
+    pub fn tick(&mut self, _cx: &mut Context<Self>) {
+        if self.nav.section == PanelSection::Performance {
+            for req in self.perf.refresh(&self.data) {
+                self.send(LinkReq::Perf { session: self.session.clone(), req });
+            }
+        }
+    }
+
+    /// A click on one of the section's controls focuses it.
+    pub(crate) fn perf_focus(&mut self, c: perf::Ctl, cx: &mut Context<Self>) {
+        if let Some(i) = self.perf.ctls(&self.data).iter().position(|x| *x == c) {
+            self.nav.zone = Zone::Body;
+            self.perf.focus = i;
+            cx.notify();
+        }
+    }
+
+    /// The frame-rate cap as asked (a draft) or as set.
+    pub(crate) fn cap_value(&self) -> Value {
+        let key = ("tweaks".to_owned(), perf::CAP_TWEAK.to_owned());
+        self.drafts.get(&key).cloned().or_else(|| self.data.tweaks.ready().and_then(|t| t.options.get(perf::CAP_TWEAK)).map(|st| draft_value(st, None))).unwrap_or(Value::from(0))
+    }
+
+    /// What came of the last change of a tweak.
+    pub(crate) fn tweak_outcome(&self, id: &str) -> Option<(String, Tone)> {
+        self.outcomes.get(&("tweaks".to_owned(), id.to_owned())).cloned()
     }
 
     /// Sends every staged value (one request per row: outcomes are per row).
@@ -778,6 +863,7 @@ impl PanelView {
             Row::Opt { .. } | Row::Tweak { .. } => self.option_row(th, i, row, focused, cx),
             Row::Hud(h) => self.hud_row(th, i, *h, focused, cx),
             Row::Metrics => self.metrics(th),
+            Row::Performance => perf::view::render(self, th, self.room, cx),
             Row::Button(b) => {
                 let (label, help, col, ic) = match b {
                     Button::Quit => ("Quit game", "Asks the game to close, like its window's close button", th.tx1, Icon::LogOut),
@@ -852,6 +938,11 @@ impl PanelView {
         if self.nav.confirm.is_some() {
             hints.push(hint(vec!["A"], "Select"));
             hints.push(hint(vec!["B"], "Cancel"));
+        } else if self.nav.section == PanelSection::Performance && self.nav.zone == Zone::Body {
+            for (g, t) in self.perf.hints(&self.data) {
+                hints.push(hint(g, &t));
+            }
+            hints.push(hint(vec!["LB", "RB"], "Section"));
         } else {
             match focused {
                 Some(r) if self.can_adjust(r) => {
@@ -957,6 +1048,11 @@ impl Render for PanelView {
         *self.marks.borrow_mut() = DepthMarks::default();
         let vp = window.viewport_size();
         let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
+        // The body's room: the card inside the safe area, less the side list, the header, the
+        // hint bar and the body's padding (approximate; the section lays out within it).
+        let card_w = (vw * (1.0 - 2.0 * SAFE)).min(MAX_W);
+        self.room = perf::view::Room { w: card_w - 230.0 - 56.0, h: vh * (1.0 - 2.0 * SAFE) - 72.0 - 50.0 - 34.0 };
+        perf::view::sync_preview(self, cx);
         let (scrim, card) = backdrop_colors(&th, self.backdrop);
         let rows = self.rows();
         let focused = self.nav.focused_row(&rows);

@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, OffscreenWindowOptions, px, size};
 use quiver_api::sight::{Backdrop, PanelSection};
-use quiver_sight::demo::sample_panel;
+use quiver_api::perf::{HudPreview, Presenter};
+use quiver_sight::demo::{sample_model, sample_panel, sample_perf, standard_layout};
+use quiver_sight::panel::sections::performance as perf;
 use quiver_sight::panel::state::Nav;
 use quiver_sight::panel::view::{Footer, PanelView, Wiring};
 use quiver_ui::input::Input;
@@ -82,6 +84,11 @@ fn main() {
         (PanelSection::Mods, vec![Input::Down, Input::Down, Input::Down], "mods"),
         (PanelSection::Tweaks, vec![Input::Down], "tweaks"),
         (PanelSection::Performance, vec![Input::Down], "performance"),
+        // The layout editor (Edit, A), a metric focused; a row picked up and moved; the
+        // settings.
+        (PanelSection::Performance, vec![Input::Down, Input::Down, Input::Activate, Input::Down, Input::Down, Input::Down], "performance-editor"),
+        (PanelSection::Performance, vec![Input::Down, Input::Down, Input::Activate, Input::Right, Input::Activate, Input::Down, Input::Down], "performance-editor-moving"),
+        (PanelSection::Performance, vec![Input::Down, Input::Down, Input::Activate, Input::Right, Input::Right, Input::Down, Input::Down], "performance-editor-settings"),
         (PanelSection::Achievements, vec![Input::Down, Input::Down, Input::Down], "achievements"),
     ];
     gpui_platform::headless().with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
@@ -105,7 +112,18 @@ fn main() {
                         }
                         let mut v = PanelView::new("s-demo".into(), sample_panel(), nav, backdrop, Wiring::default(), cx);
                         v.footer = Footer { pad: "Steam Controller".into(), pad_shared: false };
-                        for i in presses {
+                        v.perf.data = sample_perf();
+                        let editor = name.starts_with("performance-editor");
+                        // The editor opens when quiverd sends the layout (A on Edit asks).
+                        let open_at = if editor { 3 } else { usize::MAX };
+                        for (k, i) in presses.into_iter().enumerate() {
+                            if k == open_at {
+                                v.perf_reply(perf::Reply::Layout(Ok(standard_layout())), cx);
+                                let l = v.perf.editor.as_ref().unwrap().layout.clone();
+                                let model = sample_model("standard", 3, Presenter::Desktop, None);
+                                let rows = (0..model.rows.len()).collect();
+                                v.perf_reply(perf::Reply::Preview { sent: l, result: Ok(HudPreview { model, rows }) }, cx);
+                            }
                             v.input(i, cx);
                         }
                         v

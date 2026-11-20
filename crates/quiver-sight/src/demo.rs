@@ -501,10 +501,28 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     let mut fsync = opt(OptionType::Bool, "Fsync", None, Apply::Launch, json!(true));
     fsync.def.help = Some("Faster Wine synchronisation on this kernel".into());
     tweaks.options.insert("wine.fsync".into(), fsync);
+    // The frame-rate cap, which the DLSS mod implements (its Reflex limiter).
+    let mut cap = opt(OptionType::Float, "Max frame rate", Some("Caps the frame rate"), Apply::Launch, json!(120));
+    (cap.def.min, cap.def.max, cap.def.step) = (Some(20.0), Some(500.0), Some(1.0));
+    cap.def.special = vec![Mark { value: json!(0), label: "No cap".into() }, Mark { value: json!("vrr"), label: "Refresh rate − 3".into() }];
+    cap.tweak = Some(Box::new(quiver_api::tweaks::TweakRow {
+        profile: Some(json!(120)),
+        at: quiver_api::tweaks::ScopeKind::Profile,
+        planned: Some(quiver_api::tweaks::Planned::Provided {
+            by: "DLSS".into(),
+            surface: "m1/aco-dlss".into(),
+            option: "reflex.fps_limit".into(),
+            value: Some(json!(120)),
+            mode: "bind".into(),
+            can_prefer_quiver: true,
+        }),
+        ..Default::default()
+    }));
+    tweaks.options.insert("fps.cap".into(), cap);
     tweaks.pages = vec![PageState {
         id: "main".into(),
         title: "Tweaks".into(),
-        groups: vec![group("Graphics", &["dxvk.async", "nvidia.reflex", "display.hdr"]), group("Wine", &["wine.fsync"])],
+        groups: vec![group("Frame rate", &["fps.cap"]), group("Graphics", &["dxvk.async", "nvidia.reflex", "display.hdr"]), group("Wine", &["wine.fsync"])],
     }];
     let effective = HudConfig { enabled: true, on: true, layout: "standard".into(), scale: 1.0, ..HudConfig::default() };
     let status: HudStatus = serde_json::from_value(json!({
@@ -517,16 +535,27 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
     let mut put = |id: &str, stat: Stat, v: PerfValue| {
         metrics.entry(id.to_owned()).or_insert_with(std::collections::BTreeMap::new).insert(stat, v);
     };
-    put("fps", Stat::Mean, pv("158", "", Level::Normal));
-    put("fps", Stat::P1low, pv("121", "", Level::Normal));
-    put("fps.base", Stat::Mean, pv("79", "", Level::Normal));
-    put("frametime", Stat::Mean, pv("6.3", "ms", Level::Normal));
-    put("gpu.load", Stat::Last, pv("97", "%", Level::Warn));
-    put("gpu.temp", Stat::Last, pv("71", "°", Level::Normal));
-    put("gpu.power", Stat::Last, pv("92", "W", Level::Normal));
+    // The SightPerformance mock-up's numbers: 118 shown, 59 rendered with 2× frame generation.
+    put("fps", Stat::Mean, pv("118", "", Level::Normal));
+    put("fps", Stat::P1low, pv("94", "", Level::Normal));
+    put("fps.p1low", Stat::Last, pv("94", "", Level::Normal));
+    put("fps.base", Stat::Mean, pv("59", "", Level::Normal));
+    put("fps.generated", Stat::Mean, pv("59", "", Level::Normal));
+    put("frametime", Stat::Mean, pv("8.5", "ms", Level::Normal));
+    put("gpu.load", Stat::Last, pv("87", "%", Level::Normal));
+    put("gpu.temp", Stat::Last, pv("72", "°", Level::Normal));
+    put("gpu.power", Stat::Last, pv("96", "W", Level::Normal));
     put("gpu.vram.used", Stat::Last, pv("6.1", "GB", Level::Normal));
-    put("cpu.load", Stat::Last, pv("38", "%", Level::Normal));
+    put("gpu.vram.total", Stat::Last, pv("8.0", "GB", Level::Normal));
+    put("gpu.source", Stat::Last, PerfValue { text: "nvml".into(), ..Default::default() });
+    put("cpu.load", Stat::Last, pv("41", "%", Level::Normal));
+    put("cpu.temp", Stat::Last, pv("78", "°", Level::Normal));
+    put("proc.rss", Stat::Last, pv("5.4", "GB", Level::Normal));
     put("mem.used", Stat::Last, pv("11.2", "GB", Level::Normal));
+    put("latency.pc", Stat::Mean, pv("28", "ms", Level::Normal));
+    put("latency.render", Stat::Mean, pv("21", "ms", Level::Normal));
+    put("nv.reflex.mode", Stat::Last, PerfValue { text: "boost".into(), ..Default::default() });
+    put("nv.reflex.cap", Stat::Last, pv("120", "fps", Level::Normal));
     let ach = |id: &str, name: &str, desc: &str, hidden: bool, at: Option<i64>| Ach {
         id: id.into(),
         name: name.into(),
@@ -562,6 +591,126 @@ pub fn sample_panel() -> crate::panel::state::PanelData {
             ach("44", "Photo Finish", "Win a chariot race in the Hippodrome.", false, None),
         ])),
         metrics,
+    }
+}
+
+/// Built-in Standard as quiverd's `HudLayout` request returns it (the editor's starting point).
+pub fn standard_layout() -> quiver_api::perf::HudLayout {
+    use serde_json::json;
+    quiver_api::perf::HudLayout {
+        id: "standard".into(),
+        name: "Standard".into(),
+        builtin: true,
+        orientation: Orientation::Block,
+        anchor: None,
+        background: None,
+        size: [284.0, 162.0],
+        rows: vec![
+            vec![json!({"metric": "fps", "suffix": "FPS", "emphasis": "hero"}), json!({"spacer": true}), json!({"metric": "fps.base", "suffix": "BASE", "emphasis": "secondary", "when": "fg.active"})],
+            vec![json!({"graph": "frametime", "series": ["frametime", "frametime.base"], "rows": 2})],
+            vec![
+                json!({"metric": "frametime", "emphasis": "quiet"}),
+                json!({"text": "·", "level": "dim"}),
+                json!({"metric": "fps.p1low", "label": "1% low", "emphasis": "quiet"}),
+                json!({"spacer": true}),
+                json!({"metric": "fg.ratio", "short": "FG", "emphasis": "tag", "when": "fg.active"}),
+                json!({"metric": "nv.fg.driver", "short": "FG", "emphasis": "tag"}),
+            ],
+            vec![json!({"metric": "latency.pc", "suffix": "PC LATENCY"}), json!({"spacer": true}), json!({"metric": "nv.reflex.mode", "short": "REFLEX", "emphasis": "tag", "when": "nv.reflex.mode"})],
+            vec![json!({"split": "latency", "parts": ["latency.split.sim", "latency.split.render", "latency.split.queue", "latency.split.gpu"]})],
+            vec![
+                json!({"metric": "gpu.load", "short": "GPU"}),
+                json!({"metric": "gpu.temp", "emphasis": "quiet"}),
+                json!({"metric": "gpu.power", "emphasis": "quiet"}),
+                json!({"metric": "cpu.load", "short": "CPU"}),
+                json!({"metric": "cpu.temp", "emphasis": "quiet"}),
+            ],
+        ],
+        row_options: Vec::new(),
+    }
+}
+
+/// The Performance section's fixture: 30 s of frame times (presented near 8.5 ms with three
+/// hitches, rendered near 17 ms), the session's catalog (the layer and NVIDIA's counting, a
+/// mod named pharos with its own latency split, the system) and the layouts.
+pub fn sample_perf() -> crate::panel::sections::performance::PerfData {
+    use crate::panel::sections::performance::PerfData;
+    use crate::panel::state::Load;
+    use quiver_api::perf::{FrameTimes, HudLayoutInfo, MetricDescriptor, MetricInfo, MetricKind, MetricState, Unit, Visibility};
+    let presented: Vec<Option<f32>> = (0..300)
+        .map(|k| Some(if [36, 70, 210].contains(&k) { [21.0, 14.0, 25.0][[36, 70, 210].iter().position(|x| *x == k).unwrap()] } else { 8.3 + ((k * 7) % 5) as f32 * 0.12 }))
+        .collect();
+    let rendered: Vec<Option<f32>> = presented.iter().map(|p| p.map(|v| if v > 12.0 { v + 7.0 } else { 16.6 + (v - 8.3) })).collect();
+    let info = |id: &str, kind: MetricKind, unit: Unit, label: &str, short: Option<&str>, canonical: bool, producer: &str, roles: &[&str], state: MetricState| {
+        let mut d = MetricDescriptor::new(id, kind);
+        d.unit = unit;
+        d.label = Some(label.into());
+        d.short = short.map(String::from);
+        let live_label = match producer {
+            "layer" => "Sight layer",
+            "nvidia" => "NVIDIA (Reflex, DLSS)",
+            "system" => "System",
+            "mod:pharos" => "pharos",
+            _ => "Quiver",
+        };
+        MetricInfo {
+            descriptor: d,
+            producer: if canonical { "quiverd".into() } else { producer.into() },
+            producer_label: if canonical { "Quiver".into() } else { live_label.into() },
+            canonical,
+            source: None,
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            conflicts: Vec::new(),
+            state,
+            last: None,
+            live_producer: Some(producer.into()),
+            live_producer_label: Some(live_label.into()),
+        }
+    };
+    use MetricKind::{Gauge, State, Text};
+    use MetricState::{Declared, Live};
+    let mut catalog = vec![
+        info("fps", Gauge, Unit::Fps, "FPS", Some("FPS"), true, "layer", &[], Live),
+        info("fps.base", Gauge, Unit::Fps, "Base FPS", Some("BASE"), true, "nvidia", &[], Live),
+        info("frametime", Gauge, Unit::Ms, "Frame time", Some("FT"), true, "layer", &[], Live),
+        info("frametime.base", Gauge, Unit::Ms, "Rendered frame time", None, true, "nvidia", &[], Live),
+        info("fps.p1low", Gauge, Unit::Fps, "1% low", None, true, "layer", &[], Live),
+        info("latency.pc", Gauge, Unit::Ms, "PC latency", Some("PC"), true, "nvidia", &[], Live),
+        info("fg.ratio", Gauge, Unit::None, "Frame generation", Some("FG"), true, "nvidia", &[], Live),
+        info("upscaler", Text, Unit::None, "Upscaler", None, true, "nvidia", &[], Declared),
+        info("nv.latency.pc", Gauge, Unit::Ms, "PC latency (to present)", Some("PC"), false, "nvidia", &["latency.pc"], Live),
+        info("nv.reflex.mode", State, Unit::None, "Reflex", Some("RFX"), false, "nvidia", &[], Live),
+        info("pharos.fg", State, Unit::None, "Frame Generation", Some("FG"), false, "mod:pharos", &[], Live),
+        info("pharos.render", Text, Unit::None, "Render resolution", None, false, "mod:pharos", &[], Live),
+    ];
+    for (id, label) in [("latency.split.sim", "Latency: simulation"), ("latency.split.render", "Latency: render submit"), ("latency.split.queue", "Latency: queue"), ("latency.split.gpu", "Latency: GPU")] {
+        catalog.push(info(id, Gauge, Unit::Ms, label, None, true, "mod:pharos", &[], Live));
+    }
+    for (id, label, short, unit) in [
+        ("gpu.load", "GPU load", Some("GPU"), Unit::Percent),
+        ("gpu.temp", "GPU temperature", None, Unit::Celsius),
+        ("gpu.power", "GPU power", None, Unit::Watt),
+        ("gpu.vram.used", "VRAM used", Some("VRAM"), Unit::Bytes),
+        ("cpu.load", "CPU load", Some("CPU"), Unit::Percent),
+        ("cpu.temp", "CPU temperature", None, Unit::Celsius),
+        ("proc.rss", "Game RAM", None, Unit::Bytes),
+    ] {
+        catalog.push(info(id, Gauge, unit, label, short, false, "system", &[], Live));
+    }
+    catalog.push(info("bat.level", Gauge, Unit::Percent, "Battery", Some("BAT"), false, "system", &[], Declared));
+    let mut src = info("gpu.source", Text, Unit::None, "GPU sensors", None, false, "system", &[], Live);
+    src.descriptor.visibility = Some(Visibility::Advanced);
+    catalog.push(src);
+    let layouts = crate::panel::state::PRESETS
+        .iter()
+        .map(|(id, name)| HudLayoutInfo { id: (*id).into(), name: (*name).into(), builtin: true, path: None, error: None })
+        .chain(std::iter::once(HudLayoutInfo { id: "dlss-tuning".into(), name: "DLSS tuning".into(), builtin: false, path: None, error: None }))
+        .collect();
+    PerfData {
+        frames: Some(FrameTimes { session: "s-demo".into(), span_ms: 30_000, presented, rendered, frames: 3540, hitches_per_min: Some(3.0) }),
+        catalog: Load::Ready(catalog),
+        layouts: Load::Ready(layouts),
+        scoped: None,
     }
 }
 
