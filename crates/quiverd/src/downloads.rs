@@ -140,6 +140,56 @@ pub(crate) struct Downloads {
     verifying: Mutex<Vec<(GameRef, u64, Arc<Progress>)>>,
     /// What was running when quiverd last stopped: the first pump starts these first.
     resume_first: Mutex<Vec<GameRef>>,
+    /// How patiently slices and whole items are tried again (shorter in tests).
+    retry: Mutex<Retry>,
+}
+
+/// How a running item is tried again after a failure that may pass ([`is_transient`]): it
+/// keeps its place and its slot, waits (backing off from `base` to `max`) and runs again,
+/// resuming from what is on disk. It fails for good once it has kept failing, without
+/// receiving a byte in between, for `give_up_after`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JobRetry {
+    pub base: Duration,
+    pub max: Duration,
+    pub give_up_after: Duration,
+}
+
+impl Default for JobRetry {
+    fn default() -> Self {
+        Self { base: Duration::from_secs(5), max: Duration::from_secs(180), give_up_after: Duration::from_secs(30 * 60) }
+    }
+}
+
+impl JobRetry {
+    /// Wait before retry `n` (1-based): base·2^(n-1), capped.
+    fn delay(&self, n: u32) -> Duration {
+        self.base.saturating_mul(1 << n.saturating_sub(1).min(16)).min(self.max)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Retry {
+    /// Each slice (or URL batch) within a run.
+    pub slices: quiver_core::install::RetryPolicy,
+    /// The whole item, once a run failed.
+    pub job: JobRetry,
+}
+
+/// Whether a failed run is worth trying again: connection trouble, a closed service
+/// connection, server errors (see [`quiver_core::retry`]); Epic's API errors by status.
+pub(crate) fn is_transient(e: &anyhow::Error) -> bool {
+    use quiver_core::retry::{self, Kind};
+    if is_cancelled(e) {
+        return false;
+    }
+    if let Some(k) = retry::marked(e) {
+        return k == Kind::Transient;
+    }
+    if let Some(epic) = e.chain().find_map(|c| c.downcast_ref::<epic_core::api::EpicError>()) {
+        return retry::http_status(epic.status) == Kind::Transient;
+    }
+    retry::is_transient(e)
 }
 
 fn status_line(e: &QueueEntry, waiting: bool) -> Option<String> {
@@ -177,6 +227,7 @@ impl Downloads {
                 entry.job_id = None;
                 entry.speed = 0;
                 entry.retries = 0;
+                entry.retry = None;
                 Item { entry, progress: None, stop: None, status: None, history: None }
             })
             .collect();
@@ -189,6 +240,7 @@ impl Downloads {
             dismissed: Mutex::default(),
             verifying: Mutex::default(),
             resume_first: Mutex::new(resume_first),
+            retry: Mutex::default(),
         });
         d.renumber();
         d
@@ -397,6 +449,7 @@ impl Downloads {
             speed: 0,
             retries: 0,
             after: after.unwrap_or_default(),
+            retry: None,
         };
         self.items.lock().unwrap().push(Item { entry, progress: None, stop: None, status: None, history: None });
         let what = match kind {
@@ -706,7 +759,8 @@ impl Downloads {
                 if it.entry.state != QueueState::Queued || it.progress.is_some() || host.playing(it.entry.game_ref()) {
                     continue;
                 }
-                let progress = Arc::new(Progress { throttle: Some(self.throttle.clone()), ..Progress::default() });
+                let retry = self.retry.lock().unwrap().slices;
+                let progress = Arc::new(Progress { throttle: Some(self.throttle.clone()), retry, ..Progress::default() });
                 it.progress = Some(progress.clone());
                 it.entry.state = QueueState::Downloading;
                 it.entry.done_bytes = 0;
@@ -760,21 +814,36 @@ impl Downloads {
                 let mut last = (Instant::now(), 0u64);
                 let mut speed = 0f64;
                 let mut was_retrying = false;
+                let mut was_verifying = false;
                 loop {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let (done, total, line) = {
                         let mut items = this.items.lock().unwrap();
                         let Some(it) = items.iter_mut().find(|i| i.progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, &progress))) else { break };
-                        let (done, total) = if it.entry.state == QueueState::Verifying {
+                        let verifying = it.entry.state == QueueState::Verifying;
+                        let (done, total) = if verifying {
                             (progress.hashed.load(Ordering::Relaxed), progress.hash_total.load(Ordering::Relaxed))
                         } else {
                             (progress.downloaded.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed))
                         };
+                        // Speed from bytes this run received (hashed, while verifying):
+                        // `downloaded` jumps by what an earlier run left on disk when a
+                        // resumed install starts, which isn't speed.
+                        let moved = if verifying { progress.hashed.load(Ordering::Relaxed) } else { progress.received.load(Ordering::Relaxed) };
                         let now = Instant::now();
                         let dt = now.duration_since(last.0).as_secs_f64();
-                        let rate = done.saturating_sub(last.1) as f64 / dt.max(0.001);
+                        // A switch between counting received and hashed bytes starts over.
+                        let rate = if moved < last.1 || was_verifying != verifying { 0.0 } else { (moved - last.1) as f64 / dt.max(0.001) };
+                        was_verifying = verifying;
                         speed = if speed == 0.0 { rate } else { 0.7 * speed + 0.3 * rate };
-                        last = (now, done);
+                        last = (now, moved);
+                        // Waiting to try again: keep showing where it got to (the counters
+                        // start over when it runs again).
+                        let waiting = it.entry.retry.clone();
+                        if waiting.is_some() {
+                            speed = 0.0;
+                        }
+                        let (done, total) = if waiting.is_some() || (total == 0 && it.entry.total_bytes > 0) { (it.entry.done_bytes, it.entry.total_bytes) } else { (done, total) };
                         it.entry.done_bytes = done;
                         it.entry.total_bytes = total;
                         it.entry.speed = speed as u64;
@@ -783,14 +852,17 @@ impl Downloads {
                         // While slices wait to be tried again, say so (then back to the
                         // worker's own line).
                         let retrying = progress.retrying.load(Ordering::Relaxed) > 0 && it.stop.is_none();
-                        let line = if retrying {
+                        let waiting = waiting.filter(|_| it.stop.is_none());
+                        let line = if let Some(w) = &waiting {
+                            Some(w.line(chrono::Utc::now()))
+                        } else if retrying {
                             Some(format!("Retrying… ({retries} {})", if retries == 1 { "retry" } else { "retries" }))
                         } else if was_retrying {
                             it.status.clone()
                         } else {
                             None
                         };
-                        was_retrying = retrying;
+                        was_retrying = retrying || waiting.is_some();
                         (done, total, line)
                     };
                     if let Some(id) = job {
@@ -807,7 +879,7 @@ impl Downloads {
         }
         let (this, host) = (self.clone(), host.clone());
         tokio::spawn(async move {
-            let mut result = host.clone().run(entry, progress.clone(), phase).await;
+            let mut result = this.run_retrying(&host, entry, &progress, phase).await;
             // Installed: what it should do when it finishes, as chosen now (it can change
             // while it runs).
             if let Ok(o) = &mut result {
@@ -820,6 +892,72 @@ impl Downloads {
         });
     }
 
+    /// Run an item; after a failure that may pass ([`is_transient`]) wait and run it again,
+    /// keeping its place and slot, until it works, fails for good, or has kept failing
+    /// for [`JobRetry::give_up_after`] without receiving anything in between. A pause,
+    /// removal or switch during the wait ends it like a cancel; so does quiverd
+    /// restarting onto a new build (the item is queued again, and starts first after).
+    async fn run_retrying<H: Host>(self: &Arc<Self>, host: &Arc<H>, entry: QueueEntry, progress: &Arc<Progress>, phase: PhaseFn) -> Result<Outcome> {
+        let game = entry.game_ref();
+        let mut failures = 0u32;
+        let mut failing_since: Option<(Instant, chrono::DateTime<chrono::Utc>)> = None;
+        loop {
+            let received = progress.received.load(Ordering::Relaxed);
+            let e = match host.clone().run(entry.clone(), progress.clone(), phase.clone()).await {
+                Err(e) if is_transient(&e) && !progress.cancelled() => e,
+                other => return other,
+            };
+            if progress.received.load(Ordering::Relaxed) > received {
+                // It got somewhere before failing: patience starts over.
+                (failures, failing_since) = (0, None);
+            }
+            let policy = self.retry.lock().unwrap().job;
+            let (since, since_wall) = *failing_since.get_or_insert((Instant::now(), chrono::Utc::now()));
+            if since.elapsed() >= policy.give_up_after {
+                tracing::warn!(game = %game, "download failed; gave up retrying after {failures} tries: {e:#}");
+                return Err(e.context(format!("gave up after {} tries over {}", failures + 1, human_duration(since.elapsed()))));
+            }
+            failures += 1;
+            let delay = policy.delay(failures).min(policy.give_up_after.saturating_sub(since.elapsed()));
+            tracing::warn!(game = %game, attempt = failures, "download interrupted, trying again in {delay:?}: {e:#}");
+            let until = since_wall + chrono::Duration::from_std(policy.give_up_after).unwrap_or_default();
+            let wait = quiver_api::downloads::RetryWait {
+                at: chrono::Utc::now() + chrono::Duration::from_std(delay).unwrap_or_default(),
+                attempt: failures,
+                error: format!("{e:#}"),
+                until,
+            };
+            host.log("quiverd", format!("{}: connection trouble, trying again in {}s ({e:#})", entry.name, delay.as_secs()), Some(game));
+            self.set_waiting(host, progress, Some(wait));
+            let due = Instant::now() + delay;
+            while Instant::now() < due && !progress.cancelled() && host.accepting() {
+                tokio::time::sleep((due - Instant::now()).min(Duration::from_millis(100))).await;
+            }
+            self.set_waiting(host, progress, None);
+            if progress.cancelled() || !host.accepting() {
+                return Err(quiver_core::install::Cancelled.into());
+            }
+            progress.restart();
+        }
+    }
+
+    /// Mark the running item of `progress` as waiting to try again (or not any more).
+    fn set_waiting<H: Host>(&self, host: &Arc<H>, progress: &Arc<Progress>, wait: Option<quiver_api::downloads::RetryWait>) {
+        {
+            let mut items = self.items.lock().unwrap();
+            let Some(it) = items.iter_mut().find(|i| i.progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, progress))) else { return };
+            // The job's line (the ticker keeps the countdown going).
+            if it.stop.is_none() {
+                it.status = Some(wait.as_ref().map_or_else(|| "Starting…".into(), |w| w.line(chrono::Utc::now())));
+            }
+            if wait.is_some() {
+                it.entry.speed = 0;
+            }
+            it.entry.retry = wait;
+        }
+        self.changed(host);
+    }
+
     fn finish<H: Host>(self: &Arc<Self>, host: &Arc<H>, game: GameRef, progress: &Arc<Progress>, result: Result<Outcome>) {
         let cancelled = result.as_ref().err().is_some_and(is_cancelled);
         let (job, done_job, removed, discard, name) = {
@@ -827,6 +965,7 @@ impl Downloads {
             let Some(i) = items.iter().position(|i| i.progress.as_ref().is_some_and(|p| Arc::ptr_eq(p, progress))) else { return };
             let it = &mut items[i];
             it.progress = None;
+            it.entry.retry = None;
             it.status = None;
             let stop = it.stop.take();
             let job = it.entry.job_id;
@@ -926,6 +1065,16 @@ impl Downloads {
                 }
             }
         });
+    }
+}
+
+/// "12s", "4m 05s", "1h 02m".
+fn human_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
     }
 }
 

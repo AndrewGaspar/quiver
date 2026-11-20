@@ -152,7 +152,7 @@ impl Library {
             .await?;
         let t = rsp.ownership_token_rsp.context("no ownership_token_rsp")?;
         if t.success != Some(true) {
-            bail!("ownership token for {product_id} refused");
+            return Err(crate::retry::permanent(format!("ownership token for {product_id} refused (licence)")));
         }
         t.token.context("ownership token response had no token")
     }

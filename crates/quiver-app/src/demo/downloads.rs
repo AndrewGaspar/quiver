@@ -112,6 +112,7 @@ fn entry(st: &State, id: u32, kind: QueueKind, state: QueueState, job_id: u64, s
         speed: 0,
         retries: 0,
         after: AfterInstall::default(),
+        retry: None,
     }
 }
 

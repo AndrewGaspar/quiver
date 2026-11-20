@@ -20,11 +20,24 @@ struct Cdn {
     gate: Semaphore,
     /// Slice hash -> GETs that still fail as timeouts.
     flaky: Mutex<HashMap<String, usize>>,
+    /// Product -> URL requests that still fail as if download_service closed its
+    /// connection.
+    urls_down: Mutex<HashMap<u32, usize>>,
+    /// Product -> until when its URL requests fail as if the demux socket were gone.
+    down_until: Mutex<HashMap<u32, Instant>>,
 }
 
 impl Default for Cdn {
     fn default() -> Self {
-        Self { slices: Mutex::default(), owner: HashMap::new(), gets: Mutex::default(), gate: Semaphore::new(0), flaky: Mutex::default() }
+        Self {
+            slices: Mutex::default(),
+            owner: HashMap::new(),
+            gets: Mutex::default(),
+            gate: Semaphore::new(0),
+            flaky: Mutex::default(),
+            urls_down: Mutex::default(),
+            down_until: Mutex::default(),
+        }
     }
 }
 
@@ -41,7 +54,17 @@ struct Src(Arc<Cdn>);
 
 impl SliceSource for Src {
     async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
-        Ok(paths.iter().map(|p| vec![p.rsplit('/').next().unwrap().to_owned()]).collect())
+        let keys: Vec<String> = paths.iter().map(|p| p.rsplit('/').next().unwrap().to_owned()).collect();
+        if let Some(&p) = keys.first().and_then(|k| self.0.owner.get(k)) {
+            if let Some(n) = self.0.urls_down.lock().unwrap().get_mut(&p).filter(|n| **n > 0) {
+                *n -= 1;
+                return Err(quiver_core::retry::transient("download_service connection 14 was closed by the server"));
+            }
+            if self.0.down_until.lock().unwrap().get(&p).is_some_and(|t| Instant::now() < *t) {
+                return Err(quiver_core::retry::transient("the demux connection is gone").context(quiver_core::retry::Transient("reconnecting to Ubisoft".into())));
+            }
+        }
+        Ok(keys.into_iter().map(|k| vec![k]).collect())
     }
     async fn get(&self, mirrors: &[String]) -> Result<Vec<u8>, SliceError> {
         self.0.gate.acquire().await.map_err(|e| SliceError::Fatal(e.into()))?.forget();
@@ -101,6 +124,10 @@ struct TestHost {
     hold: Mutex<HashSet<u32>>,
     /// Lets held installs finish, and repairs (which only verify here) end their check.
     release: Semaphore,
+    /// Product -> errors its next runs fail with, before downloading anything.
+    fail_runs: Mutex<HashMap<u32, Vec<anyhow::Error>>>,
+    /// Runs per product.
+    runs_of: Mutex<HashMap<u32, usize>>,
 }
 
 impl TestHost {
@@ -117,6 +144,8 @@ impl TestHost {
             afters: Mutex::default(),
             hold: Mutex::default(),
             release: Semaphore::new(0),
+            fail_runs: Mutex::default(),
+            runs_of: Mutex::default(),
         })
     }
     fn job(&self, id: Option<u64>) -> Job {
@@ -153,6 +182,11 @@ impl Host for TestHost {
     fn run(self: Arc<Self>, item: QueueEntry, progress: Arc<Progress>, phase: PhaseFn) -> BoxFut<Result<Outcome>> {
         Box::pin(async move {
             self.runs.fetch_add(1, Ordering::Relaxed);
+            *self.runs_of.lock().unwrap().entry(item.product_id).or_default() += 1;
+            let scripted = self.fail_runs.lock().unwrap().get_mut(&item.product_id).and_then(|v| (!v.is_empty()).then(|| v.remove(0)));
+            if let Some(e) = scripted {
+                return Err(e);
+            }
             // Another store's game (an Epic update): nothing to download here.
             if !item.game_ref().is_ubisoft() {
                 return Ok(Outcome { status: format!("Updated {}", item.name), detail: Vec::new() });
@@ -419,6 +453,7 @@ fn bad_queue_file_is_ignored_and_states_restored() {
         speed: 3,
         retries: 0,
         after: AfterInstall::default(),
+        retry: None,
     };
     let saved = Saved {
         running: None,
@@ -772,6 +807,7 @@ fn restore_resumes_what_was_running_first() {
         speed: 0,
         retries: 0,
         after: AfterInstall::default(),
+        retry: None,
     };
     // A file from before `running`: B was downloading below A (moved to the top while B ran).
     let old = serde_json::json!({ "items": [entry(A, QueueState::Queued), entry(B, QueueState::Downloading), entry(C, QueueState::Queued)] });
@@ -877,5 +913,202 @@ fn after_install_choices_live_in_the_queue() {
         assert!(j.detail.iter().all(|l| quiver_api::downloads::is_after_note(l)));
         assert!(host.job(jb).detail.is_empty());
         assert!(files_ok(&root, A, &contents[&A]) && files_ok(&root, B, &contents[&B]));
+    });
+}
+
+/// Quick slice retries (two tries) and short waits between runs of an item.
+fn quick_retry(d: &Downloads, base_ms: u64, give_up_ms: u64) {
+    *d.retry.lock().unwrap() = Retry {
+        slices: install::RetryPolicy { attempts: 2, base_delay: Duration::from_millis(1), max_delay: Duration::from_millis(2), ..Default::default() },
+        job: JobRetry { base: Duration::from_millis(base_ms), max: Duration::from_millis(base_ms * 4), give_up_after: Duration::from_millis(give_up_ms) },
+    };
+}
+
+fn runs_of(host: &TestHost, id: u32) -> usize {
+    host.runs_of.lock().unwrap().get(&id).copied().unwrap_or(0)
+}
+
+/// download_service closes its connection mid-install more often than the installer
+/// retries a URL request: the item waits at the head of the queue ("Reconnecting…"), the
+/// next one doesn't start meanwhile, and it then finishes on the same job.
+#[test]
+fn transient_failure_retries_the_same_game() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, contents, cdn) = setup(&[A, B], 1, 5);
+    cdn.urls_down.lock().unwrap().insert(A, 3);
+    cdn.open();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        quick_retry(&d, 1500, 60_000);
+        d.start(&host);
+        let ja = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
+        until("A waiting to retry", || d.get(A).is_some_and(|e| e.retry.is_some())).await;
+        let a = d.get(A).unwrap();
+        let w = a.retry.clone().unwrap();
+        assert_eq!(w.attempt, 1);
+        assert!(w.error.contains("closed by the server"), "{}", w.error);
+        assert_eq!(order(&d), [(A, QueueState::Downloading), (B, QueueState::Queued)], "A keeps its place and slot");
+        assert_eq!(a.job_id, Some(ja));
+        until("countdown shown", || host.job(Some(ja)).status.starts_with("Reconnecting… retry in")).await;
+        assert!(!host.job(Some(ja)).done);
+        assert_eq!(runs_of(&host, B), 0, "B doesn't start meanwhile");
+        // The saved queue says it was running: a restart now starts it first.
+        let saved: Saved = serde_json::from_slice(&std::fs::read(tmp.path().join("queue.json")).unwrap()).unwrap();
+        assert_eq!(saved.running, Some(vec![GameRef::ubisoft(A)]));
+
+        until("all done", || d.list().is_empty()).await;
+        let j = host.job(Some(ja));
+        assert!(j.done && j.error.is_none() && j.status == "Installed", "{j:?}");
+        assert_eq!(runs_of(&host, A), 2);
+        for id in [A, B] {
+            assert!(files_ok(&root, id, &contents[&id]), "{id}");
+        }
+    });
+}
+
+/// The demux socket is gone for a while mid-install: the item keeps waiting and trying
+/// (backing off) until it comes back, then resumes where it stopped.
+#[test]
+fn demux_down_for_a_while_then_resumes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    // 400 slices: two URL batches.
+    let (plans, contents, cdn) = setup(&[A, B], 2, 200);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        quick_retry(&d, 20, 60_000);
+        d.start(&host);
+        let ja = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
+        // Most of the first batch's slices come through; then the socket goes for 600 ms,
+        // before the second batch's URLs are asked for.
+        cdn.gate.add_permits(250);
+        until("A's first batch", || cdn.gets(A) >= 250).await;
+        cdn.down_until.lock().unwrap().insert(A, Instant::now() + Duration::from_millis(600));
+        cdn.open();
+        let mut most = 0;
+        for _ in 0..1000 {
+            if d.get(A).is_none() {
+                break;
+            }
+            most = most.max(d.get(A).and_then(|e| e.retry).map_or(0, |w| w.attempt));
+            assert_eq!(state(&d, B), Some(QueueState::Queued), "B waits while A retries");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(most >= 2, "backed off through several tries ({most})");
+        until("all done", || d.list().is_empty()).await;
+        assert_eq!(host.job(Some(ja)).status, "Installed");
+        assert_eq!(cdn.gets(A), slices(&plans[&A]), "resumed: no slice fetched twice");
+        for id in [A, B] {
+            assert!(files_ok(&root, id, &contents[&id]), "{id}");
+        }
+    });
+}
+
+/// A permanent error (a refused licence) fails the item at once and the queue moves on;
+/// transient errors that keep coming past the bound fail it too.
+#[test]
+fn permanent_and_exhausted_failures_move_the_queue_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, contents, cdn) = setup(&[A, B, C], 1, 3);
+    cdn.open();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        host.fail_runs.lock().unwrap().insert(A, vec![quiver_core::retry::permanent("ownership token for 101 refused (licence)")]);
+        // B's download_service never comes back.
+        cdn.down_until.lock().unwrap().insert(B, Instant::now() + Duration::from_secs(3600));
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        quick_retry(&d, 20, 300);
+        d.start(&host);
+        for id in [A, B, C] {
+            d.enqueue(&host, "cli", id, id.to_string(), QueueKind::Install, None, None, None).unwrap();
+        }
+        until("A failed", || state(&d, A) == Some(QueueState::Failed)).await;
+        assert_eq!(runs_of(&host, A), 1, "not retried");
+        let ea = d.get(A).unwrap();
+        assert!(ea.error.as_deref().is_some_and(|e| e.contains("refused")) && ea.retry.is_none(), "{ea:?}");
+
+        until("B failed", || state(&d, B) == Some(QueueState::Failed)).await;
+        assert!(runs_of(&host, B) >= 3, "B was retried ({} runs)", runs_of(&host, B));
+        let eb = d.get(B).unwrap();
+        assert!(eb.error.as_deref().is_some_and(|e| e.contains("gave up after")), "{eb:?}");
+        assert!(host.job(eb.job_id).done);
+        until("C done", || d.get(C).is_none()).await;
+        assert!(files_ok(&root, C, &contents[&C]));
+    });
+}
+
+/// Pausing an item that waits to retry pauses it (no more tries).
+#[test]
+fn pause_while_waiting_to_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, _, cdn) = setup(&[A], 1, 3);
+    cdn.down_until.lock().unwrap().insert(A, Instant::now() + Duration::from_secs(3600));
+    cdn.open();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        quick_retry(&d, 60_000, 600_000);
+        d.start(&host);
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        until("A waiting to retry", || d.get(A).is_some_and(|e| e.retry.is_some())).await;
+        d.pause(&host, "cli", A).unwrap();
+        until("A paused", || state(&d, A) == Some(QueueState::Paused)).await;
+        assert!(d.get(A).unwrap().retry.is_none());
+        assert_eq!(runs_of(&host, A), 1);
+    });
+}
+
+#[test]
+fn transient_errors_are_told_apart() {
+    use quiver_core::retry::{permanent, transient};
+    assert!(is_transient(&transient("download_service connection 14 was closed by the server").context("requesting download URLs")));
+    assert!(!is_transient(&permanent("not in your library")));
+    assert!(!is_transient(&quiver_core::install::Cancelled.into()));
+    assert!(!is_transient(&anyhow::anyhow!("not enough free space for /games: needs 1 GiB")));
+    let full: anyhow::Error = std::io::Error::from(std::io::ErrorKind::StorageFull).into();
+    assert!(!is_transient(&full));
+    let epic = |status| anyhow::Error::from(epic_core::api::EpicError { status, ..Default::default() }).context("Epic build info");
+    assert!(is_transient(&epic(503)));
+    assert!(!is_transient(&epic(403)));
+}
+
+/// A resumed download's speed counts bytes it receives, never what an earlier run left on
+/// disk (which the installer adds to `downloaded` at once when it starts).
+#[test]
+fn resumed_speed_counts_only_received_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, _, cdn) = setup(&[A], 1, 120);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        d.start(&host);
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        cdn.gate.add_permits(20);
+        until("A's first slices", || cdn.gets(A) >= 20).await;
+        d.pause(&host, "cli", A).unwrap();
+        cdn.gate.add_permits(40); // the slices in flight finish
+        until("A paused", || state(&d, A) == Some(QueueState::Paused)).await;
+        cdn.gate.forget_permits(1 << 30);
+        // Resumed with the CDN closed: nothing arrives.
+        d.resume(&host, "cli", A).unwrap();
+        until("A's progress restored", || d.get(A).is_some_and(|e| e.done_bytes > 0)).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let e = d.get(A).unwrap();
+        assert!(e.done_bytes > 0 && e.speed == 0, "{} done, speed {}", e.done_bytes, e.speed);
+        cdn.open();
+        until("A done", || d.list().is_empty()).await;
     });
 }

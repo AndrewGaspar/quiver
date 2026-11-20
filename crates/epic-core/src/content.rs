@@ -92,42 +92,52 @@ impl ChunkSource for HttpChunks {
             let n = self.bases.len();
             let first = self.preferred.load(Ordering::Relaxed) % n;
             let mut last = String::new();
+            // Whether any location failed in a way that may pass (network trouble, 5xx, a
+            // signed location that expired: a later try reads the build's locations anew).
+            let mut passing = false;
             for k in 0..n {
                 let i = (first + k) % n;
                 let base = &self.bases[i];
                 let url = format!("{base}/{rel_path}");
-                let why = match self.client.get(&url).send().await {
+                let (why, transient) = match self.client.get(&url).send().await {
                     Ok(r) if r.status().is_success() => match read_capped(r).await {
                         Ok(b) => {
                             self.preferred.store(i, Ordering::Relaxed);
                             return Ok(b);
                         }
-                        Err(e) => e,
+                        Err(e) => (e.to_owned(), e == CUT_OFF),
                     },
-                    Ok(r) => format!("HTTP {}", r.status().as_u16()),
-                    Err(e) if e.is_timeout() => "timed out".into(),
-                    Err(e) if e.is_connect() => "couldn't connect".into(),
-                    Err(_) => "the request failed".into(),
+                    Ok(r) => {
+                        let s = r.status().as_u16();
+                        (format!("HTTP {s}"), matches!(s, 401 | 403 | 410) || quiver_core::retry::http_status(s) == quiver_core::retry::Kind::Transient)
+                    }
+                    Err(e) if e.is_timeout() => ("timed out".into(), true),
+                    Err(e) if e.is_connect() => ("couldn't connect".into(), true),
+                    Err(e) => ("the request failed".into(), e.is_request() || e.is_body()),
                 };
+                passing |= transient;
                 last = format!("{}: {why}", host(base));
             }
-            bail!("chunk {rel_path}: {last}")
+            let msg = format!("chunk {rel_path}: {last}");
+            if passing { Err(quiver_core::retry::transient(msg)) } else { bail!(msg) }
         })
     }
 }
 
-async fn read_capped(mut r: reqwest::Response) -> std::result::Result<Vec<u8>, String> {
+const CUT_OFF: &str = "the reply was cut off";
+
+async fn read_capped(mut r: reqwest::Response) -> std::result::Result<Vec<u8>, &'static str> {
     let mut out = Vec::with_capacity(r.content_length().unwrap_or(0).min(MAX_CHUNK_DOWNLOAD as u64) as usize);
     loop {
         match r.chunk().await {
             Ok(Some(b)) => {
                 if out.len() + b.len() > MAX_CHUNK_DOWNLOAD {
-                    return Err("the reply is too large for a chunk".into());
+                    return Err("the reply is too large for a chunk");
                 }
                 out.extend_from_slice(&b);
             }
             Ok(None) => return Ok(out),
-            Err(_) => return Err("the reply was cut off".into()),
+            Err(_) => return Err(CUT_OFF),
         }
     }
 }
@@ -847,10 +857,11 @@ impl Builder {
         let stop = self.stop.clone();
         let r = (|| {
             self.advance(&done)?;
+            // On a stop the sender closes the channel; chunks that already arrived (a few
+            // at most) are still written, so files they finish are kept for a resume.
+            // Checking `stop` here instead lost them whenever this thread lagged behind
+            // the downloads, which made a cancel at times keep no file at all.
             while let Some((g, data)) = rx.blocking_recv() {
-                if stop.load(Ordering::Relaxed) {
-                    return Err(Cancelled.into());
-                }
                 self.hold(g, data)?;
                 self.advance(&done)?;
             }

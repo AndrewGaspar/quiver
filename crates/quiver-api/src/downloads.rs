@@ -158,6 +158,41 @@ pub struct QueueEntry {
     /// What quiverd does when the install finishes (left out when nothing).
     #[serde(default, skip_serializing_if = "AfterInstall::is_empty")]
     pub after: AfterInstall,
+    /// Set while the item waits to try again after a failure that may pass (the
+    /// connection to the store dropped, a server error): it keeps its place and its slot
+    /// (`state` stays `downloading`, so the next item doesn't start), and goes again at
+    /// `at`. Left out otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryWait>,
+}
+
+/// A queue item waiting to try again ([`QueueEntry::retry`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetryWait {
+    /// When it tries again.
+    pub at: DateTime<Utc>,
+    /// Tries that failed in a row (1 for the first wait).
+    pub attempt: u32,
+    /// What failed last.
+    pub error: String,
+    /// When it gives up (and fails) should it keep failing without progress.
+    pub until: DateTime<Utc>,
+}
+
+impl RetryWait {
+    /// Whole seconds left until the next try (0 once due).
+    pub fn secs_left(&self, now: DateTime<Utc>) -> u64 {
+        ((self.at - now).num_milliseconds().max(0) as u64).div_ceil(1000)
+    }
+
+    /// For people: "Reconnecting… retry in 12s".
+    pub fn line(&self, now: DateTime<Utc>) -> String {
+        match self.secs_left(now) {
+            0 => "Reconnecting…".into(),
+            s if s < 120 => format!("Reconnecting… retry in {s}s"),
+            s => format!("Reconnecting… retry in {}m {}s", s / 60, s % 60),
+        }
+    }
 }
 
 impl QueueEntry {
