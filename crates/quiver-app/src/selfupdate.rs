@@ -23,6 +23,7 @@
 //!
 //! `QUIVER_AUTO_RELAUNCH=0` (or `false`/`no`/`off`) turns this off.
 
+use quiver_ui::depth::DepthExt;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -911,6 +912,7 @@ impl Quiver {
         Some(
             div()
                 .id("update-notice")
+                .depth_overlay()
                 .absolute()
                 .right(px(20.))
                 .bottom(px(20.))

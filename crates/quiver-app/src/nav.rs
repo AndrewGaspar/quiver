@@ -48,12 +48,14 @@ pub enum SettingsSection {
     Tweaks,
     Steam,
     Appearance,
+    /// How the app draws itself: 3D on stereo displays (`stereo_ui.rs`).
+    Display,
     Automation,
     About,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 9] = [
+    pub const ALL: [SettingsSection; 10] = [
         SettingsSection::Accounts,
         SettingsSection::Library,
         SettingsSection::Compatibility,
@@ -61,6 +63,7 @@ impl SettingsSection {
         SettingsSection::Tweaks,
         SettingsSection::Steam,
         SettingsSection::Appearance,
+        SettingsSection::Display,
         SettingsSection::Automation,
         SettingsSection::About,
     ];
@@ -78,6 +81,7 @@ impl SettingsSection {
             SettingsSection::Tweaks => "Tweaks",
             SettingsSection::Steam => "Steam and shortcuts",
             SettingsSection::Appearance => "Appearance",
+            SettingsSection::Display => "Display",
             SettingsSection::Automation => "Automation and CLI",
             SettingsSection::About => "About",
         }

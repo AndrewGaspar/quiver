@@ -23,7 +23,8 @@ Most commands also take a title, e.g. `quiver play "Alan Wake Remastered"`. `qui
 | Want | Command |
 |---|---|
 | What's running, signed in, queued | `quiver status`, `quiver sessions`, `quiver queue` |
-| Install / update / verify / uninstall | `quiver install GAME`, `quiver update GAME [--preview]`, `quiver verify GAME [--repair]`, `quiver uninstall GAME` |
+| Install / update / verify / uninstall | `quiver install GAME [--add-to-steam] [--desktop-entry]`, `quiver update GAME [--preview]`, `quiver verify GAME [--repair]`, `quiver uninstall GAME` |
+| Download queue order | `quiver queue move GAME up/down/top`, `quiver queue now GAME` (switches the running download for it; that one keeps its progress), `quiver queue after GAME --steam on --desktop on` (done by quiverd when the install finishes) |
 | Launch / stop | `quiver play GAME [--profile P] [--detach]`, `quiver stop GAME` |
 | Launch settings (Proton, env, DLLs, args, wrappers) | `quiver get GAME`, `quiver set GAME key=value` (`key=` unsets), `quiver history GAME`, `quiver restore GAME REV`; `quiver protons` lists the Proton builds |
 | Profiles (named setups: mods + game settings files, Options, Tweaks, launch overrides, save store) | `quiver profiles GAME` (list), `show P`, `create NAME [--from P \| --blank] [--mods a,b] [--shared-settings]` (copies the default profile unless told otherwise; a profile needs no mods), `set P k=v`, `settings [P own\|shared]`, `default P` |

@@ -169,14 +169,18 @@ pub fn focus_halo(th: &Theme) -> BoxShadow {
 
 pub trait FocusExt: ParentElement + Styled + Sized {
     /// Draw the focus ring when `on`. `radius` is the element's corner radius.
+    ///
+    /// On a stereo window the element is a control (it pops a step above its surface) and,
+    /// while `on`, comes further forward (`crate::depth`): the ring moves with it.
     fn focus_ring(self, on: bool, th: &Theme, radius: f32) -> Self {
-        if on { self.relative().children(focus_overlay(th, radius)) } else { self }
+        let this = self.stereo_focused(on);
+        if on { this.relative().children(focus_overlay(th, radius)) } else { this }
     }
 
     /// The ring plus the soft halo. Only for elements with an opaque background: GPUI
     /// paints a shadow's full rectangle, so a transparent element would be tinted.
     fn focus_glow(self, on: bool, th: &Theme, radius: f32) -> Self {
-        if on { self.shadow(vec![focus_halo(th)]).focus_ring(true, th, radius) } else { self }
+        if on { self.shadow(vec![focus_halo(th)]).focus_ring(true, th, radius) } else { self.stereo_focused(false) }
     }
 }
 
@@ -476,8 +480,10 @@ pub fn avatar(label: &str, from: Hsla, to: Hsla, ring: Hsla) -> Div {
         .child(label.to_owned())
 }
 
+/// A card: a content surface, a step above what it's on in stereo (`crate::depth`).
 pub fn card(th: &Theme) -> Div {
-    div().flex().flex_col().bg(th.ink2).border_1().border_color(th.line1).rounded(px(12.))
+    use crate::depth::DepthExt;
+    div().flex().flex_col().bg(th.ink2).border_1().border_color(th.line1).rounded(px(12.)).depth_surface()
 }
 
 pub fn card_header(th: &Theme, title: impl Into<SharedString>) -> Div {

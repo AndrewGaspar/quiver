@@ -416,8 +416,8 @@ impl Daemon {
             Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
             Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
             Request::Epic(r) => epic::handle(self, source, r).await?,
-            Request::Install { game, .. } if !game.is_ubisoft() => json!(epic::install(self, source, game.0).await?),
-            Request::Install { game, language } => json!(downloads::install(self, source, downloads::ubisoft(game.0)?, language).await?),
+            Request::Install { game, after, .. } if !game.is_ubisoft() => json!(epic::install(self, source, game.0, after).await?),
+            Request::Install { game, language, after } => json!(downloads::install(self, source, downloads::ubisoft(game.0)?, language, after).await?),
             Request::Play { game, profile } => json!(self.play(source, game.0, profile).await?),
             Request::Import { game, path, .. } if !game.is_ubisoft() => json!(epic::adopt(self, source, game.0, path).await?),
             Request::Import { game, path, language } => {
@@ -592,6 +592,8 @@ impl Daemon {
             r @ (Request::Queue
             | Request::DownloadThroughput { .. }
             | Request::QueueMove { .. }
+            | Request::QueueRunNow { .. }
+            | Request::QueueSetAfter { .. }
             | Request::QueuePause { .. }
             | Request::QueueResume { .. }
             | Request::QueueRemove { .. }
