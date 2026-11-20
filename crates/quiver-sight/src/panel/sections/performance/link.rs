@@ -71,15 +71,15 @@ pub fn refused(req: &Req, why: String) -> Reply {
 }
 
 /// Runs one request for the panel's `session`.
-pub async fn run(client: &Client, session: &str, req: Req) -> Reply {
-    let session = Some(session.to_owned());
+pub async fn run(client: &Client, id: &str, req: Req) -> Reply {
+    let session = Some(id.to_owned());
     match req {
         Req::Frames => Reply::Frames(s(client.call(perf(PerfRequest::FrameTimes { session, game: None, span_ms: SPAN_MS, buckets: BUCKETS })).await)),
         Req::Catalog => Reply::Catalog(s(client.call(perf(PerfRequest::Catalog { session, game: None })).await)),
         Req::Layouts => Reply::Layouts(s(client.call(perf(PerfRequest::HudLayouts)).await)),
         Req::Layout(id) => Reply::Layout(s(client.call(perf(PerfRequest::HudLayout { id })).await)),
         Req::Preview(layout) => {
-            let result = s(client.call(perf(PerfRequest::HudPreview { session: session.unwrap_or_default(), layout: layout.clone() })).await);
+            let result = s(client.call(perf(PerfRequest::HudPreview { session: id.to_owned(), layout: layout.clone() })).await);
             Reply::Preview { sent: layout, result }
         }
         Req::Settings(scope) => Reply::Settings(s(client.call(perf(PerfRequest::HudGet { scope })).await)),

@@ -12,12 +12,12 @@
 //! is a stacked bar (`numbers = true`: its numbers); a row with `mods = true` becomes a strip
 //! per connected mod, `divider = true` draws a rule above a row.
 //!
-//! Every layout has a fixed card size (logical px at scale 1, so it follows the swapchain
-//! height and the `scale` setting like the text does): `width` (default 260, or 640 for a
-//! one-line layout) and `height` (default: every row's slot stacked, one line per text row
-//! and `rows` × 15 px per graph, [`hud_card`]). The card keeps that size whatever it holds:
-//! rows that are dropped or gated off leave their space empty at the bottom (the rows that
-//! are shown pack from the top), and values that don't fit the width are truncated.
+//! Every layout has a card size (logical px at scale 1, so it follows the swapchain height and
+//! the `scale` setting like the text does): `width` (default 260, or 640 for a one-line
+//! layout) and `height` ([`Layout::size`]: every row's slot stacked, one line per text row and
+//! `rows` × 15 px per graph, [`hud_card`]). Without a `height` of its own the model's card is
+//! fitted to the rows it shows and held while the session runs (`hud::fit_size`,
+//! `hud::CardHold`); values that don't fit the width are truncated.
 //!
 //! ```toml
 //! # <data>/hud/layouts/dlss-tuning.toml

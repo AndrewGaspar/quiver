@@ -1337,6 +1337,28 @@ other than Hyprland, the exclusive fallback on a compositor that needs it, multi
   is open. The HUD: shown (`HudToggle`), preset, position and size (`HudSet` at the game
   scope; `settings_changed` makes them live). When the HUD isn't set up for this launch the
   rows say NEXT LAUNCH and "Use Quiver's HUD" turns it on for the next one.
+  *Rebuilt later on 2026-11-19 after the SightPerformance and HudEditor mock-ups*
+  (`panel/sections/performance/`): four tiles that say where their number comes from
+  (`· layer`, `· nvml`/`sysfs`, `· quiverd`) with "59 rendered · 59 generated", "1% low ·
+  hitches / min", "VRAM used / total", "game RAM"; a 30 s frame-time graph (presented and
+  rendered, grid at 8.3 / 16.7 / 25 ms, legend; `PerfRequest::FrameTimes`); the frame-rate cap
+  (Tweaks' `fps.cap` at the running profile's scope, through the Tweaks section's path) and
+  who enforces it (the tweak's plan: DXVK's limiter, a mod's Reflex cap, the person's own
+  setting; the game's own Reflex cap); the HUD (hidden or a preset, at the profile's scope)
+  and "Edit the layout"; a latency card (Reflex mode, PC latency, game to render, the opt-in
+  driver reports). X saves the last 30 s as a MangoHud-style CSV in
+  `<data>/games/<game>/perf-logs/` (`PerfRequest::SaveLog`; the session dir would go away
+  with the session) and the hint bar shows its path. **The layout editor**: the session's
+  metrics grouped by who produces them now (`MetricInfo::live_producer`: Sight layer, each
+  mod by name, system, Tweaks) with a checkbox and kind; a live preview
+  (`PerfRequest::HudPreview`, every layout row kept, drawn by the HUD view) whose rows A picks
+  up, ▲▼ move, A puts down and B puts back; preset ("(edited)"), position grid, opacity,
+  scale, update rate, toggle key, captures, applies to (profile / game / all) and drawn (in
+  the game or over it). Y saves an edited preset as the user layout `<preset>-edited`
+  (`PerfRequest::HudLayoutSave`) and selects it at that scope; X shows or hides the HUD.
+  Columns switch with ◀▶ where there's nothing to change, B goes back one level. Three
+  columns when the body is 1000 px wide, else the settings take the preview's place while
+  they have focus.
 - **Achievements**: from `GameDetail.achievements` (definitions with unlock state where the
   store's data has it): n / m earned, unlocked first (newest first), hidden ones masked
   until A.
@@ -1389,7 +1411,7 @@ a game stops presenting unfocused), hyprpad's keys reaching the surface, Hyprlan
 
 **Deferred**: per-game "toasts only" / "pause via SDK" fallbacks (6c) and
 `OverlayStateChangedPush` (S7); the quick menu; try-then-keep (`live: Only` + Revert); mod
-actions and status metrics in the Mods section; the frame-time graph in Performance; Club
+actions and status metrics in the Mods section; Club
 challenges; cursor hiding for pad use; on-screen keyboard for text options; Shift+F2 as a
 configurable chord; the panel on the game's own monitor when quiverd hasn't seen it focused
 (falls back to the focused monitor); session id ⇄ window matching beyond `QUIVER_SESSION` in

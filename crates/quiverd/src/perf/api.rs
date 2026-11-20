@@ -205,7 +205,7 @@ impl Daemon {
 /// vanilla). Any store's game with profiles (Ubisoft, Epic, Steam: what mods see through
 /// `installed`, as Tweaks' scopes do); a game without them says so.
 fn profile_id(game: quiver_api::GameRef, name: &str, installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>) -> Result<Option<String>> {
-    profile_id_with(game, name, installed, |g, v| crate::mods::resolve_default(g, v))
+    profile_id_with(game, name, installed, crate::mods::resolve_default)
 }
 
 fn profile_id_with(
@@ -225,7 +225,7 @@ fn profile_id_with(
 
 /// [`Daemon::perf_scope`]: a profile needs a game; its name becomes its id.
 fn resolve_scope(scope: HudScopeRef, installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>) -> Result<HudScopeRef> {
-    resolve_scope_with(scope, installed, |g, v| crate::mods::resolve_default(g, v))
+    resolve_scope_with(scope, installed, crate::mods::resolve_default)
 }
 
 fn resolve_scope_with(

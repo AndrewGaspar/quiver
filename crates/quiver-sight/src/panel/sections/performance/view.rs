@@ -522,9 +522,12 @@ fn preview_pane(v: &PanelView, th: &Theme) -> Div {
         .child(div().text_size(px(13.)).text_color(th.tx1).px(px(10.)).py(px(6.)).rounded(px(8.)).bg(th.ink1.opacity(0.8)).child(hint))
 }
 
+/// The model rows outlined in the preview, and whether they're being moved.
+pub type Highlight = Option<(std::ops::Range<usize>, bool)>;
+
 /// The preview's model: the last preview's rows in the draft's order, a placeholder for rows
 /// added since, and the highlighted range of the selected row.
-pub fn preview_model(v: &PanelView) -> Option<(HudModel, Option<(std::ops::Range<usize>, bool)>)> {
+pub fn preview_model(v: &PanelView) -> Option<(HudModel, Highlight)> {
     let e = v.perf.editor.as_ref()?;
     let (_, p) = e.preview.as_ref()?;
     let mut m = p.model.clone();
@@ -607,7 +610,7 @@ fn settings_pane(v: &PanelView, th: &Theme, wide: bool) -> Div {
     let anchor_name = ANCHORS.iter().find(|a| a.0 == cfg.anchor).map(|a| a.1).unwrap_or("");
     let rate = [2u32, 4, 10].iter().map(|r| (format!("{r}/s"), *r == cfg.rate_hz)).collect();
     let applies: Vec<(String, bool)> = session
-        .map(|s| super::Applies::choices(s))
+        .map(super::Applies::choices)
         .unwrap_or_default()
         .into_iter()
         .map(|a| (a.label().to_owned(), a == e.applies))
