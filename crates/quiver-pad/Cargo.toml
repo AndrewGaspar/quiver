@@ -1,0 +1,16 @@
+[package]
+name = "quiver-pad"
+description = "quiver lab's virtual game controllers: uinput Xbox 360 pads made on the host, hidden from it by a udev rule, passed into one instance's container; and the Windows probe of what a game sees"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

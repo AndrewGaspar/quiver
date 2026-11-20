@@ -1,0 +1,61 @@
+# quiver-lab-pad rule v1 (design/LAB.md §15)
+#
+# quiver lab's virtual game controllers: the uinput pads a lab instance's pad host creates
+# ("Quiver Lab Pad <instance>[ P<k>]", phys "quiver-lab/<instance>/<k>"), passed into that
+# instance's container only. This rule keeps every one of them away from the host: no session
+# ACL, no seat, ignored by libinput, and a group no host process has, so Steam, your own games,
+# hyprpad and the desktop can never open them.
+#
+# HOW IT HIDES THEM
+#   - The node a uinput device gets in devtmpfs is root 0600 until udev has run its rules, and
+#     udev announces the device to listeners (Steam, SDL, libinput) only after that. So there is
+#     no moment where a host process could open it.
+#   - 70-uaccess.rules tags every joystick `uaccess`, and 73-seat-late.rules turns that tag into
+#     an ACL for the logged-in user. The tag is removed here, between the two (hence 72, the
+#     same window as /etc/udev/rules.d/72-hyprpad-puck.rules). 75 or 99 would be too late.
+#   - GROUP quiver-lab-pad is gid 105000 (contrib/lab/quiver-lab-pad.sysusers; udev wants a
+#     group name it can resolve, not a bare number), a host gid inside your subordinate range
+#     (/etc/subgid: e.g. you:100000:65536). Nobody is a member and no host process runs with it. Under rootless podman with --userns=keep-id it is gid 5001
+#     in the container (container gid G > 1000 is host gid 100000 + G - 1), which the lab gives
+#     the instance's processes (--group-add). Quiver reads the node's group and maps it back
+#     through your subgid range, so another number works too as long as it's in that range.
+#   - MODE 0660, OWNER root: nothing for "other", and no host uid owns it.
+#   - LIBINPUT_IGNORE_DEVICE: the compositor (through logind) never opens it either.
+#
+# Quiver refuses to create a pad unless this file is installed, and checks each node after udev
+# is done with it (root-owned, this group, no ACL, not openable by you); if a check fails it
+# destroys the pad at once.
+#
+# INSTALL (the group first: udev ignores a GROUP it can't resolve)
+#     sudo groupadd --system --gid 105000 quiver-lab-pad
+#       (or: sudo install -Dm644 contrib/lab/quiver-lab-pad.sysusers /etc/sysusers.d/quiver-lab-pad.conf
+#            && sudo systemd-sysusers)
+#     sudo install -Dm644 contrib/lab/72-quiver-lab-pad.rules /etc/udev/rules.d/72-quiver-lab-pad.rules
+#       (or, without a checkout: quiver lab pad-rule | sudo install -Dm644 /dev/stdin /etc/udev/rules.d/72-quiver-lab-pad.rules)
+#     sudo udevadm control --reload
+#   A system package (packaging/arch) installs both to /usr/lib; pacman's hooks do the rest.
+#
+# VERIFY
+#     udevadm verify /etc/udev/rules.d/72-quiver-lab-pad.rules
+#     quiver lab doctor            # "virtual pads (pads=N): hidden from the host by …"
+#
+# REVERT
+#     sudo rm /etc/udev/rules.d/72-quiver-lab-pad.rules && sudo udevadm control --reload
+#     sudo groupdel quiver-lab-pad
+
+ACTION=="remove", GOTO="quiver_lab_pad_end"
+SUBSYSTEM!="input", GOTO="quiver_lab_pad_end"
+
+# The input device itself (inputN, no node): no seat, libinput ignores it.
+KERNEL=="input*", ATTR{phys}=="quiver-lab/*", ATTR{name}=="Quiver Lab Pad *", \
+    TAG-="seat", TAG-="uaccess", ENV{ID_SEAT}="", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{QUIVER_LAB_PAD}="1"
+
+# Its event and joystick nodes.
+KERNEL!="event*|js*", GOTO="quiver_lab_pad_end"
+ATTRS{phys}!="quiver-lab/*", GOTO="quiver_lab_pad_end"
+ATTRS{name}!="Quiver Lab Pad *", GOTO="quiver_lab_pad_end"
+TAG-="uaccess", TAG-="seat", ENV{ID_SEAT}="", \
+    ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT}="", \
+    OWNER:="root", GROUP:="quiver-lab-pad", MODE:="0660", ENV{QUIVER_LAB_PAD}="1"
+
+LABEL="quiver_lab_pad_end"

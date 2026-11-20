@@ -66,6 +66,21 @@ pub struct Host {
     /// For a `sight = true` instance: the host's Sight pieces and the instance's shared-memory
     /// root ([`super::sight`]).
     pub sight: Option<(super::sight::HostSight, PathBuf)>,
+    /// The instance's virtual pads (design/LAB.md §15), made on the host before the container.
+    pub pads: Option<PadMounts>,
+}
+
+/// What a container needs for its pads: only this instance's nodes, the one gid that opens
+/// them, and a udev database naming them joysticks (the container has no udevd).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PadMounts {
+    /// Host nodes (`/dev/input/event23`, `/dev/input/js3`), passed in at the same path so
+    /// udev's names (from the shared sysfs) are right inside too.
+    pub devices: Vec<PathBuf>,
+    /// The nodes' group inside the container (the rule's host gid, mapped by keep-id).
+    pub container_gid: u32,
+    /// A folder mounted read-only at /run/udev: `data/c13:<minor>` for the nodes.
+    pub udev: PathBuf,
 }
 
 /// 32-bit NVIDIA driver libraries and NVIDIA's Wine folder on this host.
@@ -137,6 +152,15 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
         for v in super::sight::mounts(h, shm) {
             a.extend(["-v".into(), v]);
         }
+    }
+    // Pads: this instance's nodes and no others (other instances' pads are in the shared sysfs
+    // but have no node here), the gid that opens them, and the udev database for them.
+    if let Some(p) = &host.pads {
+        for d in &p.devices {
+            a.extend(["--device".into(), format!("{0}:{0}:rw", d.display())]);
+        }
+        a.extend(["--group-add".into(), p.container_gid.to_string()]);
+        a.extend(["-v".into(), mount(&p.udev, Path::new("/run/udev"), "ro")]);
     }
     let env: [(&str, String); 13] = [
         ("HOME", "/tmp/home".into()),
@@ -270,6 +294,22 @@ exe = "ACOrigins.exe"
         assert!(!a.iter().any(|x| x.starts_with("/pf/origins:") || x.starts_with("/g/origins:")));
         assert!(a.contains(&"QUIVER_LAB_W=2560".to_owned()));
         assert!(!a.iter().any(|x| x.contains("epicgames")));
+    }
+
+    #[test]
+    fn pads_only_their_own_nodes() {
+        let (inst, m) = sample();
+        let a = run_args(&inst, &m, &Host::default());
+        assert!(!a.iter().any(|x| x.contains("/dev/input") || x == "--group-add" || x.contains("/run/udev")), "no pads: nothing of them ({a:?})");
+        let pads = PadMounts { devices: vec!["/dev/input/event23".into(), "/dev/input/js3".into()], container_gid: 5001, udev: "/l/instances/t1/pad/udev".into() };
+        let a = run_args(&inst, &m, &Host { pads: Some(pads), ..Default::default() });
+        let devs: Vec<&String> = a.windows(2).filter(|w| w[0] == "--device").map(|w| &w[1]).collect();
+        assert_eq!(devs, vec!["nvidia.com/gpu=all", "/dev/input/event23:/dev/input/event23:rw", "/dev/input/js3:/dev/input/js3:rw"]);
+        assert!(a.windows(2).any(|w| w[0] == "--group-add" && w[1] == "5001"));
+        assert!(a.contains(&"/l/instances/t1/pad/udev:/run/udev:ro".to_owned()));
+        // Never /dev/input as a whole: the person's own devices are ACL'd to the same uid.
+        assert!(!a.iter().any(|x| x.starts_with("/dev/input:") || x == "/dev/input"));
+        assert!(a.contains(&"--userns=keep-id".to_owned()));
     }
 
     #[test]

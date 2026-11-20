@@ -131,6 +131,8 @@ pub struct CreateOpts {
     pub created_by: String,
     pub regold: bool,
     pub sight: bool,
+    /// Virtual pads made at every `up` (design/LAB.md §15).
+    pub pads: u8,
 }
 
 /// Make an instance of `src` named `o.name`.
@@ -203,6 +205,7 @@ pub fn create(lab: &Lab, src: &Source, o: &CreateOpts) -> Result<(Inst, Vec<Stri
         notes: String::new(),
         sight: o.sight,
         clock: None,
+        pad: quiver_core::lab::manifest::PadConfig { count: o.pads, ..Default::default() },
     };
     m.save(&inst.manifest_path())?;
     Ok((inst, notes))

@@ -8,6 +8,7 @@ mod create;
 mod hdr;
 mod jobs;
 mod ops;
+mod pad;
 mod sdk;
 mod sight;
 mod sup;
@@ -72,6 +73,10 @@ pub enum LabAction {
         /// `quiver lab hdr`, `quiver lab shot --hdr`.
         #[arg(long)]
         hdr: bool,
+        /// Virtual game controllers (Xbox 360 pads only this instance's container can open;
+        /// needs the udev rule, quiver lab doctor): `quiver lab pad`. `--pads` alone is one.
+        #[arg(long, num_args = 0..=1, default_missing_value = "1", default_value_t = 0)]
+        pads: u8,
     },
     /// Instances, with their game, display and state.
     List {
@@ -86,7 +91,8 @@ pub enum LabAction {
     },
     /// Change an instance's manifest: display=WxH@HZ, proton=NAME, mod_dir=DIR, graphics=NAME,
     /// env.NAME=V, dll.NAME=V, file.ALIAS=PATH, throttle+=LINE, throttle=, reload_pattern=RE,
-    /// log_file=PATH, args="…", notes="…", sight=on|off, display.hdr=on|off (key= clears); the fixed-step virtual clock:
+    /// log_file=PATH, args="…", notes="…", sight=on|off, display.hdr=on|off, pads=N (virtual pads, 0-4), pad.grips=r4=a,…,
+    /// pad.settle_ms=N (key= clears); the fixed-step virtual clock:
     /// clock=virtual:HZ|real, clock.modules=A.dll,B.dll, clock.proxy=NAME|auto,
     /// clock.stuck_ms=N, clock.creep_after=N, clock.sleeps=present|all|none, clock.sleep_max_ms=N, clock.uncap=false.
     Edit {
@@ -308,6 +314,16 @@ pub enum LabAction {
         #[arg(long)]
         json: bool,
     },
+    /// Virtual game controllers (pads=N; design/LAB.md §15): press, hold and release buttons,
+    /// move sticks, pull triggers, run scripts. Durations are frames on the virtual clock.
+    /// `quiver lab pad N status` shows what the game sees.
+    Pad(pad::PadArgs),
+    /// Print the udev rule that keeps lab pads from the host (this build's copy), to install as
+    /// root: `quiver lab pad-rule | sudo install -Dm644 /dev/stdin /etc/udev/rules.d/72-quiver-lab-pad.rules`.
+    PadRule,
+    /// (internal) The instance's pad host: makes and holds its pads.
+    #[command(hide = true)]
+    PadHost { instance: String },
     /// HDR in the instance: the game's swapchain (format, colour space), the HDR metadata it
     /// set (vkSetHdrMetadataEXT), and whether gamescope sees it as HDR. Needs sight = on.
     Hdr {
@@ -466,13 +482,16 @@ pub(crate) fn set_and_wait(inst: &Inst, m: &Manifest, assigns: &[configset::Assi
 }
 
 pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
-    if bg && !matches!(action, LabAction::Job { .. } | LabAction::Supervise { .. }) {
+    if bg && !matches!(action, LabAction::Job { .. } | LabAction::Supervise { .. } | LabAction::PadHost { .. }) {
         let lab = the_lab()?;
         return jobs::start_background(&lab);
     }
     let lab = the_lab()?;
     match action {
         LabAction::Supervise { instance } => sup::supervise(lab, &instance)?,
+        LabAction::PadHost { instance } => pad::host(&lab, &instance)?,
+        LabAction::Pad(a) => pad::run(&lab, a)?,
+        LabAction::PadRule => print!("{}", quiver_pad::rule::RULE),
         LabAction::Job { action } => jobs::run(&lab, action)?,
         LabAction::Doctor { json } => doctor(&lab, json).await?,
         LabAction::Image { action } => match action {
@@ -491,7 +510,10 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("{} {}", lab::IMAGE, if ok { "present" } else { "missing (quiver lab image build)" });
             }
         },
-        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight, hdr } => {
+        LabAction::Create { game, name, display, proton, exe, mod_dir, graphics, regold, sight, hdr, pads } => {
+            if pads > quiver_core::lab::manifest::PadConfig::MAX {
+                bail!("at most {} pads", quiver_core::lab::manifest::PadConfig::MAX);
+            }
             let client = Client::connect_running(source).await.context("quiverd isn't running (quiver status starts it)")?;
             let src = create::source(&client, &game, exe.as_deref(), true).await?;
             let name = name.unwrap_or_else(|| default_name(&src.title));
@@ -499,7 +521,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             display.hdr |= hdr;
             // quiver lab hdr and shot --hdr read the swapchain through the Sight layer.
             let sight = sight || display.hdr;
-            let o = create::CreateOpts { name, display, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight };
+            let o = create::CreateOpts { name, display, proton, mod_dir, graphics, created_by: source.to_owned(), regold, sight, pads };
             println!("cloning {} (reflinks; a big game takes a minute)…", src.title);
             let (inst, notes) = create::create(&lab, &src, &o)?;
             for n in notes {
@@ -555,7 +577,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             m.save(&inst.manifest_path())?;
             println!("saved {}", inst.manifest_path().display());
-            if changes.iter().any(|c| c.starts_with("display=") || c.starts_with("sight=")) && ops::running_id(&inst.container()).is_some() {
+            if changes.iter().any(|c| c.starts_with("display=") || c.starts_with("sight=") || c.starts_with("pads=")) && ops::running_id(&inst.container()).is_some() {
                 println!("that changes at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
             }
             if changes.iter().any(|c| c.starts_with("clock")) && ops::running_id(&inst.container()).is_some() {
@@ -572,6 +594,8 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             });
             let _ = ops::podman_cmd(&["rm".into(), "-f".into(), "-t".into(), "5".into(), inst.container()]).output();
             sight::down(&inst);
+            // Its pads go with the container (the pad host would see it gone in 4 s).
+            pad::stop(&inst);
             println!("{} is down", inst.name);
         }
         LabAction::Rm { instance } => {
@@ -580,6 +604,7 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 bail!("{0} is up; quiver lab down {0} first", inst.name);
             }
             sight::down(&inst);
+            pad::stop(&inst);
             std::fs::remove_dir_all(&inst.dir).with_context(|| format!("remove {}", inst.dir.display()))?;
             println!("removed {}", inst.name);
         }
@@ -972,6 +997,18 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
                 _ => bail!("sight=on or sight=off"),
             }
         }
+        "pads" => {
+            let n: u8 = if v.is_empty() { 0 } else { v.parse().context("pads=N (0-4)")? };
+            if n > quiver_core::lab::manifest::PadConfig::MAX {
+                bail!("at most {} pads (XInput has four slots)", quiver_core::lab::manifest::PadConfig::MAX);
+            }
+            m.pad.count = n;
+        }
+        "pad.grips" => {
+            quiver_pad::model::parse_grip_map(v)?;
+            m.pad.grips = opt(v);
+        }
+        "pad.settle_ms" => m.pad.settle_ms = if v.is_empty() { None } else { Some(v.parse().context("pad.settle_ms=N")?) },
         "args" => m.paths.args = v.split_whitespace().map(str::to_owned).collect(),
         "exe" if !v.is_empty() => m.paths.exe = v.to_owned(),
         _ => {
@@ -1022,12 +1059,24 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         mods_port: Some(mods_port),
         ro_mounts: podman::host_ro_mounts(),
         sight: sight::up(&inst, &m)?,
+        pads: None,
     };
+    let mut h = h;
+    // Pads (design/LAB.md §15) before the container, so their nodes can be passed in.
+    if let Some((mounts, notes)) = pad::start(lab, &inst, &m)? {
+        for n in notes {
+            println!("  {n}");
+        }
+        h.pads = Some(mounts);
+    }
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
     std::fs::write(inst.dir.join(sup::EOS_PORT_FILE), eos_port.to_string())?;
     std::fs::write(inst.dir.join(sdk::PORT_FILE), mods_port.to_string())?;
-    ops::podman_ok(&podman::run_args(&inst, &m, &h))?;
+    if let Err(e) = ops::podman_ok(&podman::run_args(&inst, &m, &h)) {
+        pad::stop(&inst);
+        return Err(e);
+    }
     let deadline = Instant::now() + Duration::from_secs(15);
     let display = loop {
         if let Some(d) = ops::display(&inst) {
@@ -1354,6 +1403,9 @@ async fn doctor(lab: &Lab, json: bool) -> Result<()> {
             if ok { "gamescope's WSI layer in the image; gamescope headless forced to HDR10 PQ".into() } else { format!("{wsi} missing in {}: HDR games will see only SDR formats", lab::IMAGE) },
         );
     }
+    // Virtual pads (pads=N; design/LAB.md §15): never made without the rule that hides them.
+    let (ok, detail) = pad::doctor();
+    check("virtual pads (pads=N)", ok, detail);
     let missing: Vec<String> = ["x64", "x86"].iter().filter_map(|a| lab::vclock::unavailable(a)).collect();
     check("virtual clock DLL (clock=virtual:HZ)", missing.is_empty(), if missing.is_empty() { "x64 and x86, built in".into() } else { missing.join("; ") });
     if json {

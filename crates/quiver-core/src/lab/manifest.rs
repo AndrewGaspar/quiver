@@ -201,6 +201,35 @@ pub struct Manifest {
     /// The fixed-step virtual clock (`[clock]`, [`super::vclock`]); absent: real time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<super::vclock::VirtualClock>,
+    /// Virtual game controllers (`[pad]`, design/LAB.md §15): uinput pads made on the host for
+    /// this instance only. Off by default; changing it needs `quiver lab down`/`up`.
+    #[serde(default, skip_serializing_if = "PadConfig::is_off")]
+    pub pad: PadConfig,
+}
+
+/// `[pad]`: how many virtual pads the instance's container gets, and how they're driven.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PadConfig {
+    /// Pads made at `up` (0: none). Player 1 is the first.
+    #[serde(default)]
+    pub count: u8,
+    /// A hyprpad user's grip map (`r4=a,r5=b,l4=up,l5=down`): what the Steam Controller's
+    /// grips are on an Xbox pad, so scripts can say `r4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grips: Option<String>,
+    /// How long, in real ms, input settles while the game is held on the virtual clock before
+    /// the next step (default 40: evdev, SDL, winebus and XInput's own thread).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u32>,
+}
+
+impl PadConfig {
+    pub fn is_off(&self) -> bool {
+        *self == PadConfig::default()
+    }
+    /// At most this many pads per instance (XInput has four slots).
+    pub const MAX: u8 = 4;
 }
 
 impl Manifest {
@@ -293,6 +322,7 @@ pub(crate) mod tests {
             notes: String::new(),
             sight: false,
             clock: None,
+            pad: Default::default(),
         }
     }
 

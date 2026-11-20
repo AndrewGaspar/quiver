@@ -35,6 +35,7 @@ quiver lab gpu [--for N] -- CMD… | bench N --variant A=… --variant B=… …
 quiver lab brief <game> | doctor | image build|status | job list|show|wait
 quiver lab sight N status [--json]                  (instances with sight = on, section 12)
 quiver lab hdr N [--json] | shot N --hdr [OUT]      (instances with display.hdr = on, section 13)
+quiver lab pad N press|hold|release|stick|trigger|neutral|seq|status [--pad K]   (instances with pads = N, section 15)
 quiver lab … --bg      (any command, as a background job)
 ```
 
@@ -311,6 +312,7 @@ Each is enforced in code, not by convention, and has a test.
 | An EOS game reports nothing to Epic | every container resolves Epic's names to the instance's EOS proxy (3.1), which forwards only the allowlist and answers the rest 403; the CA is trusted only in the instance's cloned prefix; an EOS game's launch is refused unless a probe from inside the container reaches the proxy; a :443 connection to the real host's addresses outside the proxy kills the run (`lab::eos`, `lab::eosproxy`, `lab::wincert`; tests `tests/eos_proxy.rs`, `podman::tests::epic_names_go_to_the_eos_proxy`) |
 | **Nothing is reported** (section 5) | quiverd, by session kind |
 | Sight in an instance changes none of the person's settings | the lab `quiver-sight` never connects to quiverd; panel actions that would change settings are refused and logged (section 12; `quiver-sight/src/lab.rs`) |
+| A lab pad is never visible to the host (Steam, the person's games, hyprpad, the desktop) | the udev rule `contrib/lab/72-quiver-lab-pad.rules` (no `uaccess`, no seat, libinput ignores it, `root:quiver-lab-pad 0660`, a gid only containers map); no pad without the rule; a canary device the rule must hide first; every node checked after udev (not openable by the user, no ACL) and re-checked every 5 s, the pads destroyed on any failure; a container gets only its own nodes, never `/dev/input` (section 15; `quiver_pad::rule`, test `podman::tests::pads_only_their_own_nodes`) |
 
 ## 5. Nothing is reported
 
@@ -695,8 +697,8 @@ while held lands both in the same frame, which a game that polls key state can m
 commands say so. The Wine test checks the three ways games read the keyboard: window messages
 (WM_KEYDOWN/UP), raw input (WM_INPUT) and polled state (GetAsyncKeyState) all saw the Right
 arrow in exactly the frames from the step after the press to the step after the release.
-DirectInput keyboards are built on the same input under Wine. XInput (gamepads) isn't fed by
-the lab. A game that reads input on a thread that isn't held, or pumps messages on another
+DirectInput keyboards are built on the same input under Wine. Gamepads are section 15's virtual
+pads (`quiver lab pad`), whose scripts step the clock themselves. A game that reads input on a thread that isn't held, or pumps messages on another
 thread than the one presenting (Unity's main thread, while its render thread presents), can
 see input before the next step, but its simulation still only gets time one frame per step.
 
@@ -1070,3 +1072,171 @@ Tests: `lab::sdk::tests::lab_channel_is_read_only_and_carries_stereo` (welcome w
 the word in the session dir and gone with its connection, a change kept in the instance,
 other instances' and the person's sessions refused), `modsdk::tests::lab_sessions_only_in_a_lab_registry`,
 `podman::tests::epic_names_go_to_the_eos_proxy` (the forward).
+
+## 15. Game controllers in an instance (2026-11-20)
+
+An agent can press pad buttons, move sticks and pull triggers in an instance, and see the game
+react: `quiver lab pad`. Each pad is a Linux input device laid out as a wired Xbox 360
+controller, made on the host with uinput, **visible only inside that instance's container**.
+Windows games find it through Wine's winebus (SDL), so XInput, DirectInput, raw input and
+Windows.Gaming.Input all see a controller; native Linux games find it through evdev, SDL or
+libudev. Code: `crates/quiver-pad` (the device, the rule's checks, scripts, the Windows probe),
+`crates/quiver-cli/src/lab/pad.rs` (the pad host, the commands, status), `podman::PadMounts`.
+
+```sh
+quiver lab create GAME --pads          # or: quiver lab edit N pads=1 (2 for player 2), then down/up
+quiver lab pad N press a               # press and let go (120 ms; --for 500ms, --for 12f)
+quiver lab pad N hold lb               # down until release (release with no button: all)
+quiver lab pad N stick left 0 1 --for 2s    # Y up, -1..1; without --for it stays
+quiver lab pad N trigger rt 1          # 0..1
+quiver lab pad N seq "a 100ms; wait 200ms; lstick=0,1 1s; +rt=1; x; neutral"   # or @FILE; --dry-run
+quiver lab pad N --pad 2 press start   # player 2
+quiver lab pad N status [--json]       # hidden?, state, rumble, who has it open, what the game sees
+```
+
+### 15.1 Keeping it from the host
+
+A uinput device is global to the kernel. Without care, Steam, the person's running game,
+hyprpad and the compositor would all see a phantom pad. That must never happen, so:
+
+- **The udev rule** (`contrib/lab/72-quiver-lab-pad.rules`, `quiver lab pad-rule` prints the
+  build's copy; installed by the system package to `/usr/lib/udev/rules.d`, with the group from
+  `contrib/lab/quiver-lab-pad.sysusers`). It matches every lab pad by name (`Quiver Lab Pad *`)
+  and phys (`quiver-lab/*`), on the input device and on its `event` and `js` nodes, and:
+  - removes the `uaccess` and `seat` tags. 70-uaccess tags every joystick, and 73-seat-late turns
+    the tag into an ACL for the session user, so the rule sits at 72, between them (the window
+    `/etc/udev/rules.d/72-hyprpad-puck.rules` uses);
+  - sets `LIBINPUT_IGNORE_DEVICE=1` and clears `ID_INPUT`/`ID_INPUT_JOYSTICK` and `ID_SEAT`;
+  - sets `OWNER root`, `GROUP quiver-lab-pad`, `MODE 0660` (final assignments).
+  The group is gid **105000**, in the user's subordinate gid range. Nobody is a member and no
+  host process runs with it. udev needs a group *name* it can resolve: a bare number is ignored
+  ("Unknown group"), hence the sysusers file.
+- **Why there is no window.** devtmpfs makes the node root 0600, and udev applies the rule
+  before it tells listeners (Steam's SDL, libinput, hyprpad) about the device.
+- **The container's gid.** Rootless podman maps the user's gid to 0 of its namespace and the
+  subordinate range after it, and `--userns=keep-id` then maps container gid G > 1000 to host
+  `100000 + G - 1` (subgid 100000:65536). So host 105000 is container gid **5001**
+  (`rule::container_gid`, measured: a file `podman unshare chown 0:5001` shows as 105000 on the
+  host and is readable in a keep-id container with `--group-add 5001`, by `podman exec`
+  processes too). The container gets `--group-add 5001`. Quiver reads the rule's group and
+  maps it, so another gid in the range works.
+- **Never without the rule** (`rule::plan`, before any device): the rule file is installed (the
+  one udev uses for the name: /etc, /run, /usr/lib) and is ours (`quiver-lab-pad rule v1`), its
+  group resolves, has no members, isn't one of the user's groups, and is inside the subgid
+  range. Otherwise `up` refuses with the install commands, and no device is made.
+- **The canary.** Before the first real pad, the pad host makes a device with the same name
+  pattern and phys (`…/canary`) but no keys, axes or rumble and a virtual bus id. It isn't a
+  joystick, so no rule grants it and nothing binds it. udev's database entry for it must show
+  that the rule ran (`E:QUIVER_LAB_PAD=1`), and its node must be `root:105000 0660` with no ACL.
+  Only then is a joystick made. So a rule that doesn't match never meets a real pad.
+- **Every node, after udev** (`rule::wait_hidden`): once udev's entry shows the rule ran, the node
+  must be root-owned, in the group, mode 0660, with no ACL and no current `uaccess` tag, and
+  **this process (the user) must fail to open it**. Any failure destroys every pad at once
+  (closing the fds) and `up` refuses. The pad host re-checks every 5 s and destroys the pads if a
+  node becomes openable or gets an ACL (a changed rule re-triggered).
+- **One container, its own nodes.** The container gets `--device /dev/input/eventN` (and `jsN`)
+  for its own pads at the same paths, never `/dev/input` (the person's real devices are ACL'd to
+  the same uid that keep-id maps in). Every lab pad is in the shared sysfs, but another
+  instance's has no node in this container, and a rootless container can't make one.
+
+### 15.2 The pad host
+
+`up` starts `quiver lab pad-host N` (detached, its own session; log `<instance>/pad/host.log`)
+**before** the container, and waits for `<instance>/pad/host.json`: the pads and their nodes,
+or why not. The pad host holds the uinput fds, so its pads exist exactly as long as it does:
+
+- it exits, destroying them, when `down` (or `rm`) tells it to, or when the container has been
+  gone for two checks 2 s apart (120 s if the container never appears);
+- if it crashes or is killed, the kernel destroys the pads with the fds;
+- at the next `up`, any lab pad whose instance's container isn't running has its pad host
+  stopped (`pad::sweep`, by phys and command line), and so does this instance's old one.
+
+It answers `<instance>/pad/host.sock` (`quiver_pad::host::Request`: get, apply changes to pad K,
+quit), writes each change as one evdev frame (only the codes that changed, then SYN_REPORT), and
+services force feedback: a game's rumble upload blocks until uinput's owner answers, so uploads
+and erases are acknowledged and plays recorded (`status` shows the last strength).
+
+The device is xpad's wired Xbox 360 layout (045e:028e, version 0x0114, bus USB): A B X Y LB RB
+Back Start Guide LS RS, both sticks ±32767 on ABS_X/Y/RX/RY (Y flipped as xpad does), triggers
+0..255 on ABS_Z/RZ, the d-pad as hat 0, FF_RUMBLE. SDL's mapping database knows it by that id.
+Names: `Quiver Lab Pad <instance>`, then `… P2` for the second. The container has no udevd, so
+the pad host writes a minimal `/run/udev` for it (`data/c13:<minor>` and `+input:inputN` with
+`ID_INPUT_JOYSTICK=1`, mounted read-only), for libudev users. At most four pads per instance.
+
+### 15.3 Timing and the virtual clock
+
+Without the virtual clock, durations are wall-clock sleeps. With it (`clock=virtual:HZ`, the run
+has a control page, §8.2), **durations are frames**: the command pauses the game if it runs (or
+uses the hold it's in), and for each step applies the change, waits `pad.settle_ms` (40 ms real)
+while the game is held, so evdev, SDL in winedevice, winebus and XInput's own thread all have it,
+then steps exactly `round(ms * HZ / 1000)` frames (at least 1), or `Nf`. At the end a game that
+was running is resumed; one that was held stays held (it sees the last change at its next step).
+`--real` uses the wall clock anyway. The game reads input at its own frame start, so a change
+applied while held at frame k is seen in frame k+1, the same in every run.
+
+Scripts (`quiver_pad::seq`): `a` (down for the step), `+a`/`-a` (stays), `lx=0.5`, `lstick=0,1`,
+`rt=1` (for the step, then back where it was), `+rt=1` (stays), `neutral`, `wait`, and one
+duration per step (`120ms`, `1.5s`, `12f`). A step's lasting changes go first; its momentary
+ones are undone at its end, restoring what was there. `--dry-run` prints the actions and the
+total in ms and frames.
+
+**hyprpad's grips.** hyprpad drives a Steam Controller, whose grips (L4, L5, R4, R5) it can map
+onto pad buttons per game (`pad_map` in `~/.config/hypr/hyprpad.lua`, e.g. AC Origins'
+`r4 = a, r5 = b, l4 = dpad_up, l5 = dpad_down`). `quiver lab edit N pad.grips=r4=a,r5=b,l4=up,l5=down`
+(or `--grips`) lets scripts say `r4`, as a hyprpad player would press it. The rest of a Steam
+Controller (trackpads, gyro, Steam Input layouts) isn't modelled.
+
+### 15.4 What the game sees
+
+`quiver lab pad N status` prints, per pad: its name and identity, the host and container nodes,
+the hidden check (done again now), the state, event frames sent, rumble from the game, and **which
+container processes have the node open** (from `/proc/<pid>/fd`; under Wine that's
+`winedevice.exe`, the winebus host; a native game shows itself). Then, while the game runs,
+**what a Windows game sees**: `quiver-pad-probe.exe` (`crates/quiver-pad/win/probe.c`, mingw,
+x64 and x86, embedded) runs under the instance's own Wine in the running game's wineserver
+session and reports XInput slots 0-3 (connected, subtype, state), DirectInput game controllers
+(name, VID/PID, axes, buttons, state), HID devices (usage page 1, usage 4/5) and raw input
+devices. It's a GUI-subsystem program that never shows a window (a console one would take
+gamescope's focus), and it refuses to run when the game's wineserver is gone (it would start a
+session of its own). `--no-probe` skips it; `--json` has everything.
+
+### 15.5 Tests
+
+- `cargo test -p quiver-pad`: the event frames for state changes (xpad's Y flip, the hat, only
+  what changed), XInput's view of a state, names, phys and their parsing, grip maps; the
+  uinput structs and ioctl numbers against the kernel's; sysfs nodes; the shipped rule (the tags
+  it removes, the matches, final assignments, its group and the sysusers file); the gid mapping
+  under keep-id (host 105000 → 5001, the edges, two ranges); group entries; node checks; the
+  rule's precedence; scripts (momentary vs lasting, restoring a held button and an axis, frames
+  at 62.5 Hz, errors, grips); the probe's JSON; the host protocol on the wire.
+- `cargo test -p quiver-core podman::tests::pads_only_their_own_nodes`: the device args, the
+  group, `/run/udev`, never `/dev/input` as a whole, nothing without pads.
+- `cargo test -p quiver-cli lab::pad`: commands to scripts, the udev database.
+- Opt-in, `crates/quiver-cli/tests/lab_pad.rs` (needs the rule): two hand-made DRM-free
+  instances of `crates/quiver-pad/tests/wine/pad_game.c` (a D3D11 window logging XInput slots 0
+  and 1 each frame and showing slot 0 as colour) with two pads and one. Pads hidden from the host
+  (the test process can't open them); the game sees two pads; the probe through XInput,
+  DirectInput, HID and raw input; winedevice has them open; buttons, sticks and triggers reach
+  the right slot and the screen; evdev and SDL3 in the container; each container has only its
+  own nodes; on the virtual clock a script lands on frames 0, 10, 15, 18, 24, the same in two
+  runs; a killed pad host's pads go at once; `down` removes them; a stale pad host is stopped by
+  the next `up`.
+
+### 15.6 Not covered
+
+- **Without the rule, no pads**: installing it is root's (a system package does it; a per-user
+  install prints the commands).
+- **Root processes on the host** can open any node (root bypasses the group). A root daemon
+  that grabs every joystick by udev (InputPlumber, xboxdrv, a root `antimicrox`) would see lab
+  pads; the rule clears `ID_INPUT_JOYSTICK` so udev-matching ones don't, but one that scans
+  `/dev/input` itself would. None runs on this machine (hyprpad's broker opens only the puck).
+- **Hotplug**: pads exist for the container's whole life (podman can't add a device to a
+  running container), so a game can't be shown a pad being plugged in or out.
+- **Not an Xbox One/Series pad**: no share button, no impulse triggers, no hidraw (uinput makes
+  no hidraw node, so SDL's and Wine's HIDAPI drivers and games reading raw HID reports of a real
+  pad don't apply). Windows.Gaming.Input wasn't probed (it's built on the same HID device in
+  Wine). Rumble is recorded, not felt.
+- **Steam Input**: a Steam Controller's trackpads, gyro and Steam's per-game layouts aren't
+  modelled; only hyprpad's grip map.
+- **Input on a thread the clock doesn't hold** sees changes during the settle, before the next
+  step; its simulation still only gets time one frame per step (§8.2).

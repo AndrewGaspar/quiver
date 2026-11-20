@@ -79,5 +79,6 @@ package() {
   cd quiver
   BINDIR=/usr/bin LIBDIR=/usr/lib/quiver DATADIR=/usr/share UNITDIR=/usr/lib/systemd/user \
     LICENSEDIR=/usr/share/licenses/quiver EXEC_START=/usr/bin/quiverd \
+    UDEVDIR=/usr/lib/udev/rules.d SYSUSERSDIR=/usr/lib/sysusers.d \
     packaging/layout.sh "${QUIVER_CARGO_TARGET_DIR:-$srcdir/target}" "$pkgdir"
 }

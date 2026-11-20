@@ -18,6 +18,8 @@
 #   UNITDIR     quiverd.service (systemd user unit)          (/usr/lib/systemd/user)
 #   LICENSEDIR  LICENSE and third-party licenses             (/usr/share/licenses/quiver)
 #   EXEC_START  the unit's ExecStart                         ($BINDIR/quiverd)
+#   UDEVDIR     72-quiver-lab-pad.rules (system packages only: hides lab pads from the host)
+#   SYSUSERSDIR quiver-lab-pad.conf (the group those pads' nodes get)  (unset: neither)
 #
 # quiverd finds the bridge at <its dir>/../lib/quiver/quiver-bridge.exe, so LIBDIR must be
 # $BINDIR/../lib/quiver (crates/quiver-core/src/launcher.rs, bridge_candidates).
@@ -96,6 +98,17 @@ install -d "$root$UNITDIR"
 sed -e "s|^ExecStart=.*|ExecStart=$EXEC_START|" \
     "$src/contrib/quiverd.service" >"$root$UNITDIR/quiverd.service"
 chmod 644 "$root$UNITDIR/quiverd.service"
+
+# quiver lab's virtual game controllers (design/LAB.md §15): the udev rule that keeps every lab
+# pad away from the host, and the group its nodes get. Root's to install, so only a system
+# package does (UDEVDIR, SYSUSERSDIR); a per-user install prints the commands
+# (`quiver lab doctor`). pacman's hooks run systemd-sysusers and reload udev.
+if [[ -n ${SYSUSERSDIR:-} ]]; then
+    install -Dm644 "$src/contrib/lab/quiver-lab-pad.sysusers" "$root$SYSUSERSDIR/quiver-lab-pad.conf"
+fi
+if [[ -n ${UDEVDIR:-} ]]; then
+    install -Dm644 "$src/contrib/lab/72-quiver-lab-pad.rules" "$root$UDEVDIR/72-quiver-lab-pad.rules"
+fi
 
 lic=$root$LICENSEDIR
 install -Dm644 "$src/LICENSE" "$lic/LICENSE"
