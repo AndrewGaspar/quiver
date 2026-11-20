@@ -357,6 +357,48 @@ impl PanelCtl {
         }
     }
 
+    // ---- For the quick menu and the overlay (`crate::quick`, `crate::overlay`) --------------
+
+    /// The session's `panel.input`, when the game has a Sight layer.
+    pub fn input_of(&self, session: &str) -> Option<Arc<PanelInput<Mapping>>> {
+        self.inputs.get(session).cloned()
+    }
+
+    /// Where `session`'s game can show something in its frames: its layer draws (and, for
+    /// `capture`, the input preload is in the game); else why not.
+    pub fn game_target(&self, session: &str, capture: bool) -> Result<crate::overlay::Target, String> {
+        let input = self.inputs.get(session).ok_or("no panel.input for this session (no Sight layer state yet)")?;
+        let now = quiver_perf::clock::mono_raw_ns();
+        let extent = if capture {
+            ingame::available(input, now)?
+        } else {
+            let l = input.layer();
+            if !l.can_show(now) {
+                return Err(if l.can_draw(now) { "the game's Sight layer is from before images shown without capture".into() } else { "the game's Sight layer can't draw on its swapchain".into() });
+            }
+            l.extent
+        };
+        let dir = self.layers.get(session).and_then(|l| l.image.parent().map(|d| d.to_path_buf())).ok_or("no session dir")?;
+        Ok(crate::overlay::Target { session: session.to_owned(), input: input.clone(), dir, extent, stereo: self.stereo.get(session).copied().unwrap_or_default(), monitor: None })
+    }
+
+    /// Asks the game to close (Hyprland closes its window: the game's own quit, which may
+    /// prompt); without Hyprland, quiverd stops it.
+    pub fn quit_game(&mut self, session: &str, game: Option<quiver_api::GameRef>) -> Result<(), String> {
+        if let Some(w) = self.hypr_game_window(session)
+            && let Some(h) = self.hypr()
+        {
+            return h.close(&w.address);
+        }
+        match game {
+            Some(game) => {
+                self.send(LinkReq::Stop { game });
+                Ok(())
+            }
+            None => Err("the game's window isn't known and the session isn't loaded".into()),
+        }
+    }
+
     /// The open panel's navigation state (tests, the demo).
     pub fn nav(&self, cx: &App) -> Option<Nav> {
         self.open.as_ref().map(|o| o.view.read(cx).nav.clone())
@@ -499,6 +541,8 @@ impl PanelCtl {
             PanelAction::Close => false,
             PanelAction::Open => true,
             PanelAction::Toggle => !self.is_open(),
+            // The quick menu's and the chip's (`crate::quick`, `crate::overlay`).
+            PanelAction::Quick | PanelAction::Chip => return,
         };
         if !open {
             self.close(cx);

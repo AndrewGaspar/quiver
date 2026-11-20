@@ -180,6 +180,10 @@ pub enum FromMod {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layout: Option<String>,
     },
+    /// A notice for the player (`quiver_notice`, design/SIGHT.md §16): a toast over the game,
+    /// maybe with buttons; a chosen button comes back as [`ToMod::NoticeAction`]. No protocol
+    /// bump: a quiverd from before ignores it as an unknown `t`. Rate-limited (a few a minute).
+    Notice(ModNotice),
     Bye,
     /// A message from a newer SDK: ignored.
     #[serde(other)]
@@ -188,6 +192,31 @@ pub enum FromMod {
 
 fn info_level() -> i32 {
     2
+}
+
+/// A mod's notice (`{"t":"notice", "id", "title", "body"?, "level"?, "buttons"?}`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ModNotice {
+    /// The mod's own id for it (`dlss4-ready`): a second notice with the same id replaces the
+    /// first, and a chosen button names it.
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// `info` (default), `success`, `warning`, `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// At most three: `{ "id": "keep_v3", "label": "Keep v3 for now" }`, the first filled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buttons: Vec<ModNoticeButton>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModNoticeButton {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// `changed` values: the text, and the typed value if the mod has one.
@@ -253,6 +282,8 @@ pub enum ToMod {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// The player chose `button` on the mod's notice `id` ([`FromMod::Notice`]).
+    NoticeAction { id: String, button: String },
     #[serde(other)]
     Unknown,
 }
@@ -359,6 +390,21 @@ mod tests {
         assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"bye"})).unwrap(), FromMod::Bye);
         assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"stereo","layout":"hsbs"})).unwrap(), FromMod::Stereo { layout: Some("hsbs".into()) });
         assert_eq!(serde_json::from_value::<FromMod>(json!({"t":"stereo"})).unwrap(), FromMod::Stereo { layout: None });
+    }
+
+    #[test]
+    fn notices_round_trip() {
+        let n: FromMod = serde_json::from_value(json!({"t":"notice","id":"dlss4","title":"DLSS v4 is ready","body":"Your DLSS profile picks it up next launch.",
+            "buttons":[{"id":"keep_v3","label":"Keep v3 for now"},{"id":"notes","label":"Notes"}],"future":1})).unwrap();
+        let FromMod::Notice(m) = &n else { panic!() };
+        assert_eq!((m.id.as_str(), m.buttons.len(), m.buttons[0].id.as_str(), m.level.as_deref()), ("dlss4", 2, "keep_v3", None));
+        let back: FromMod = serde_json::from_value(serde_json::to_value(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        let a = serde_json::to_value(ToMod::NoticeAction { id: "dlss4".into(), button: "notes".into() }).unwrap();
+        assert_eq!(a, json!({"t":"notice_action","id":"dlss4","button":"notes"}));
+        assert_eq!(serde_json::from_value::<ToMod>(a).unwrap(), ToMod::NoticeAction { id: "dlss4".into(), button: "notes".into() });
+        // A title is required.
+        assert!(serde_json::from_value::<FromMod>(json!({"t":"notice","id":"x"})).is_err());
     }
 
     #[test]

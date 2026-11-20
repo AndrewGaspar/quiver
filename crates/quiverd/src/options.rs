@@ -748,7 +748,6 @@ impl Daemon {
     /// A mod reported values over the SDK (`changed`): its own menu (`persist`, saved to the
     /// profile as `mod:<surface>`) or runtime state such as a hotkey flip (shown, not saved).
     /// Values are validated; one the mod says it runs with is recorded as fact.
-    #[allow(dead_code)]
     pub(crate) async fn options_from_mod(self: &Arc<Self>, session: &str, surface: &str, values: BTreeMap<String, String>, persist: bool) -> Result<OptionsChange> {
         let s = self.options.session(session).context("no such session")?;
         self.options.update(session, |l| l.sdk_seen = true);
@@ -772,6 +771,20 @@ impl Daemon {
             return Ok(OptionsChange { product_id: pid(rec_game(&s.record)), profile: s.record.profile, ..Default::default() });
         }
         self.options_set(&source, rec_game(&s.record), Some(s.record.profile.clone()), ops, Live::No, Some("Changed in the mod's own menu".into()), true, Some(session.to_owned())).await
+    }
+
+    /// A running session's surface (`surface`: the schema's surface id) as clients see it, and
+    /// `values` (as the mod's file would hold them) typed by its schema: what a mod's own
+    /// change is in words (design/SIGHT.md §16, the hotkey notice).
+    pub(crate) fn options_surface_values(&self, session: &str, surface: &str, values: &BTreeMap<String, String>) -> Option<(quiver_api::options::SurfaceState, BTreeMap<String, Value>)> {
+        let s = self.options.session(session)?;
+        let ctx = ctx_for(rec_game(&s.record), Some(&s.record.profile)).ok()?;
+        let surf = opt::surface(&ctx, surface).ok()?;
+        let rev = opt::current(&ctx.store, &ctx.profile_id).ok()?;
+        let run = self.run_info(&ctx, Some(&s));
+        let st = opt::state(&ctx, surf, &rev, &run, None);
+        let typed = values.iter().filter_map(|(id, text)| Some((id.clone(), surf.schema().options.get(id)?.parse_text(text).ok()?))).collect();
+        Some((st, typed))
     }
 
     /// The SDK said `bye` for a session (a clean exit).

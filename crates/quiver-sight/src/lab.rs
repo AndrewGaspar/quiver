@@ -297,6 +297,17 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                 }
                 LinkReq::Toggle => l.panel_toggle("pad"),
                 LinkReq::Subscribe { .. } | LinkReq::Unsubscribe => {}
+                // Sight's settings and notices are the person's quiverd's (design/SIGHT.md §16).
+                LinkReq::NoticeAct { id, button } => {
+                    let _ = l.refuse(format!("answer notice {id} with {button}"));
+                    let _ = l.tx.unbounded_send(Msg::NoticeAnswered(id));
+                }
+                LinkReq::SettingsSet { key, value } => {
+                    let _ = l.refuse(format!("Sight setting {key} = {value}"));
+                }
+                LinkReq::Pin { scope, pin, on } => {
+                    let _ = l.refuse(format!("{} {} in {scope}", if on { "pin" } else { "unpin" }, pin.id));
+                }
             }
         }
     })?;

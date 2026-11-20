@@ -139,6 +139,7 @@ async fn epic_launch_offers_the_mod_sdk() {
             LaunchEvent::Exited(c) => format!("exited {c:?}"),
             LaunchEvent::Detail(d) => format!("detail {}", d.join(" | ")),
             LaunchEvent::Pids(p) => format!("pids {p:?}"),
+            LaunchEvent::SavesUploaded(s) => format!("saves uploaded {s:?}"),
         };
         eprintln!("launch: {line}");
         events.lock().unwrap().push(line);

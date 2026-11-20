@@ -1,8 +1,9 @@
 //! quiver-sight's connection to quiverd, on its own tokio thread: attaches to every running
 //! session whose HUD is enabled (`HudAttach`), follows their `HudModel`s, turns achievement
-//! and option-outcome events of Quiver launches into toasts, passes panel commands on, does
-//! what the panel asks ([`LinkReq`]), and says when to quit (quiverd went away, or no session
-//! for a while). The GPUI side gets [`Msg`]s.
+//! and option-outcome events of Quiver launches, notices (design/SIGHT.md §16) and finished
+//! downloads into toasts, passes panel commands and Sight's settings on, does what the panel
+//! and the quick menu ask ([`LinkReq`]), and says when to quit (quiverd went away, or no
+//! session for a while). The GPUI side gets [`Msg`]s.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,7 +13,7 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
 use quiver_api::options::{OptionOp, OptionsChange, OptionsEvent};
 use quiver_api::perf::{HudModel, HudScope, PerfEvent, PerfRequest, PerfSessionInfo, PerfUpdate};
-use quiver_api::sight::{PanelCommand, PanelReport, SightRequest, SightStatus};
+use quiver_api::sight::{PanelCommand, PanelReport, QuickPin, SightNotice, SightRequest, SightSettings, SightStatus};
 use quiver_api::{Client, Event, GameRef, Request};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -45,6 +46,15 @@ pub enum Msg {
     /// Keyboard and mouse input the game's input preload forwarded to the panel drawn in the
     /// game (`panel::ingame`).
     GameInput { session: String, events: Vec<quiver_perf::panel::PanelEvent> },
+    // ---- design/SIGHT.md §16
+    /// A notice for the toast lane.
+    Notice(Box<SightNotice>),
+    /// A notice was answered (from here or elsewhere): its toast goes.
+    NoticeAnswered(String),
+    /// Sight's settings changed.
+    Settings(Box<SightSettings>),
+    /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
+    QuickPoll,
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.
@@ -79,6 +89,10 @@ pub enum LinkReq {
     Report(PanelReport),
     /// The pad's long-press chord: what `quiver sight toggle` does.
     Toggle,
+    // ---- design/SIGHT.md §16
+    NoticeAct { id: String, button: String },
+    SettingsSet { key: String, value: serde_json::Value },
+    Pin { scope: String, pin: QuickPin, on: bool },
 }
 
 /// After the last session ends, wait this long for another before quitting.
@@ -131,6 +145,8 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
     let mut perf_events = client.subscribe_perf().await?;
     let mut options = client.subscribe_options().await?;
     let mut known: HashMap<String, Known> = HashMap::new();
+    // Install jobs already done when we started, or toasted: never again.
+    let mut toasted: std::collections::HashSet<u64> = client.call::<quiver_api::Status>(Request::Status).await.map(|st| st.jobs).unwrap_or_default().into_iter().filter(|j| j.done).map(|j| j.id).collect();
     refresh(&client, &mut known, tx).await?;
     // Started for a panel command we missed (it went out before we subscribed).
     if let Ok(st) = client.call::<SightStatus>(Request::Sight(SightRequest::Status)).await
@@ -152,9 +168,29 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
                     // Quiver launches only: containers' and agents' bridges earn too. An
                     // Epic game's unlocks (`game`) are its session's.
                     let of = game.unwrap_or(GameRef::ubisoft(product_id));
-                    if known.values().any(|k| k.game == of)
-                        && let Some(t) = toasts::from_event(&e)
+                    if let Some((sid, _)) = known.iter().find(|(_, k)| k.game == of)
+                        && let Some(mut t) = toasts::from_event(&e)
                     {
+                        t.session = Some(sid.clone());
+                        let _ = tx.unbounded_send(Msg::Toast(t));
+                    }
+                }
+                // Notices for a running game (or any: the focused one shows it).
+                Some(Event::SightNotice(n)) => {
+                    if n.spec.session.as_ref().is_none_or(|s| known.contains_key(s)) && !known.is_empty() {
+                        let _ = tx.unbounded_send(Msg::Notice(Box::new(n)));
+                    }
+                }
+                Some(Event::SightNoticeAction { id, .. }) => {
+                    let _ = tx.unbounded_send(Msg::NoticeAnswered(id));
+                }
+                Some(Event::SightSettingsChanged(st)) => {
+                    let _ = tx.unbounded_send(Msg::Settings(Box::new(st)));
+                }
+                // A download or update finished while a game runs (each job once).
+                Some(Event::Job(j)) => {
+                    if j.done && !toasted.contains(&j.id) && let Some(t) = toasts::from_job(&j) {
+                        toasted.insert(j.id);
                         let _ = tx.unbounded_send(Msg::Toast(t));
                     }
                 }
@@ -275,6 +311,19 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                     tracing::info!("controller chord: {e:#}");
                 }
             }
+            LinkReq::NoticeAct { id, button } => {
+                if let Err(e) = client.call::<serde_json::Value>(Request::Sight(SightRequest::NoticeAct { id: id.clone(), button })).await {
+                    tracing::info!(%id, "answering the notice: {e:#}");
+                }
+            }
+            LinkReq::SettingsSet { key, value } => match client.call::<SightSettings>(Request::Sight(SightRequest::SettingsSet { key: key.clone(), value })).await {
+                Ok(st) => send(Msg::Settings(Box::new(st))),
+                Err(e) => tracing::info!(%key, "Sight setting: {e:#}"),
+            },
+            LinkReq::Pin { scope, pin, on } => match client.call::<SightSettings>(Request::Sight(SightRequest::Pin { scope, pin, on })).await {
+                Ok(st) => send(Msg::Settings(Box::new(st))),
+                Err(e) => send(Msg::Toast(crate::toasts::ToastData { kind: crate::toasts::ToastKind::Error, title: "Couldn't pin it".into(), body: Some(format!("{e:#}")), urgent: true, ..Default::default() })),
+            },
         }
     });
 }

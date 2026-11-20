@@ -51,6 +51,20 @@ pub const POLL_EVERY: Duration = Duration::from_millis(50);
 /// status block's flags. Set by the instance hooks, before any telemetry exists.
 pub static SURFACES: AtomicU32 = AtomicU32::new(0);
 
+/// The panel chord's key (F2) is held, as the Wayland keyboard saw it (the X11 side is read
+/// in [`run`]); with the press count, it goes into `panel.input` for the quick menu
+/// (design/SIGHT.md §16).
+pub static WL_PANEL_HELD: AtomicBool = AtomicBool::new(false);
+/// Panel presses counted (both sources).
+pub static PANEL_PRESSES: AtomicU32 = AtomicU32::new(0);
+/// The key thread runs (so `panel.input`'s chord word is live).
+static READING: AtomicBool = AtomicBool::new(false);
+
+/// Keys are read in this process (the chord word in `panel.input` follows the keyboard).
+pub fn reading() -> bool {
+    READING.load(Ordering::Relaxed)
+}
+
 pub fn note_surface(flag: u32) {
     if flag & (LAYER_WAYLAND_SURFACE | LAYER_X11_SURFACE) != 0 && SURFACES.fetch_or(flag, Ordering::Relaxed) & flag == 0 {
         log!("{} surface created", if flag == LAYER_WAYLAND_SURFACE { "Wayland" } else { "X11" });
@@ -200,6 +214,13 @@ impl Chords {
         out
     }
 
+    /// Whether `action`'s trigger key is down in `km` (whatever the modifiers now: a chord
+    /// pressed with Shift stays held while F2 is, so the quick menu can wait for its release;
+    /// design/SIGHT.md §16).
+    pub fn down(&self, km: &Keymap, action: Action) -> bool {
+        self.codes.bindings.iter().any(|&(c, _, a)| a == action && km.down(c))
+    }
+
     /// Records what's held in `km` without acting on it (keys already down when the window
     /// gains focus are no press).
     pub fn prime(&mut self, km: &Keymap) {
@@ -287,6 +308,11 @@ impl EvdevKeys {
             }
         }
         self.chords.prime(&self.km);
+    }
+
+    /// The trigger key of `action` is down.
+    pub fn held(&self, action: Action) -> bool {
+        self.chords.down(&self.km, action)
     }
 
     /// `wl_keyboard.leave`: no keys reach the window until the next `enter`.
@@ -457,6 +483,7 @@ fn open_x11() -> Result<(X11Keys, Chords), u32> {
 /// Polls X11 (when it's there) and services the Wayland keyboard (when the game has a
 /// Wayland surface) at the same cadence, only while the game presents.
 fn run(t: &'static Telemetry) {
+    READING.store(true, Ordering::Relaxed);
     let mut x11 = match open_x11() {
         Ok(x) => {
             t.set_keys_x11(KEYS_ACTIVE);
@@ -495,10 +522,15 @@ fn run(t: &'static Telemetry) {
         };
         // Wayland key events are each a step, so they count whenever they come (once the
         // keyboard is bound, also on a loading screen that doesn't present).
+        let mut panel_held = false;
         for a in crate::wayland::service(std::time::Instant::now(), presenting) {
             log!("keys: {a:?} (Wayland)");
+            if a == Action::Panel {
+                PANEL_PRESSES.fetch_add(1, Ordering::Relaxed);
+            }
             t.key_pressed(a);
         }
+        panel_held |= WL_PANEL_HELD.load(Ordering::Relaxed);
         t.set_focus(crate::focus::combine(crate::wayland::focused(), x11_front));
         if presenting {
             presents = p;
@@ -507,8 +539,12 @@ fn run(t: &'static Telemetry) {
                     Some(km) => {
                         if let Some(a) = chords.step(&km) {
                             log!("keys: {a:?} (X11)");
+                            if a == Action::Panel {
+                                PANEL_PRESSES.fetch_add(1, Ordering::Relaxed);
+                            }
                             t.key_pressed(a);
                         }
+                        panel_held |= chords.down(&km, Action::Panel);
                     }
                     None => {
                         log!("keys: the X connection broke; X11 polling off");
@@ -518,6 +554,9 @@ fn run(t: &'static Telemetry) {
                 }
             }
         }
+        // The chord held or not, for quiver-sight's quick menu (only polled while presenting:
+        // a game that stops presenting keeps the last word, and quiver-sight times out).
+        crate::panel::set_chord(panel_held, PANEL_PRESSES.load(Ordering::Relaxed), quiver_perf::clock::mono_raw_ns());
         // Surfaces come and go on the app's threads; follow their state either way.
         let s = crate::wayland::state();
         if s != wl_state {
@@ -580,6 +619,11 @@ mod tests {
         assert_eq!(got, [None, None, Some(Action::Panel), None, None, None, None, None, None, Some(Action::Panel)]);
         // F2 and F3 are separate keys: Shift+F2 then Shift+F3 while Shift stays down.
         assert_eq!(run(&mut c, &[&[], &[SHL, F2], &[SHL], &[SHL, F3]]), [None, Some(Action::Panel), None, Some(Action::Toggle)]);
+        // Held: while F2 is down, whatever Shift does (the quick menu waits for its release).
+        let mut c = chords();
+        c.step(&Keymap::with(&[SHL, F2]));
+        assert!(c.down(&Keymap::with(&[SHL, F2]), Action::Panel) && c.down(&Keymap::with(&[F2]), Action::Panel));
+        assert!(!c.down(&Keymap::with(&[SHL]), Action::Panel) && !c.down(&Keymap::with(&[SHL, F2]), Action::Toggle));
     }
 
     #[test]

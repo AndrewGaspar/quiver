@@ -342,33 +342,74 @@ pub fn vary(mut m: HudModel, variant: &str) -> HudModel {
 }
 
 pub fn sample_toasts() -> Vec<ToastData> {
+    use quiver_api::sight::NoticeButton;
     vec![
         ToastData {
             kind: ToastKind::Achievement,
             caption: "Achievement unlocked".into(),
-            title: "Mysteries of Egypt".into(),
-            body: Some("Find every tomb in the Giza necropolis.".into()),
-            image: None,
+            title: "Hidden Ones".into(),
+            body: Some("Complete the main quest \"The Hidden Ones\" · 31 of 70".into()),
             level: Level::Accent,
             duration: Duration::from_secs(6),
+            ..Default::default()
+        },
+        ToastData {
+            kind: ToastKind::ModHotkey,
+            caption: "DLSS".into(),
+            title: "Frame Generation off".into(),
+            body: Some("You pressed {key} · this session only".into()),
+            key: Some("F9".into()),
+            duration: Duration::from_secs(5),
+            ..Default::default()
+        },
+        ToastData {
+            kind: ToastKind::CloudSaved,
+            title: "Saved to the cloud".into(),
+            body: Some("Default saves · autosave 3".into()),
+            level: Level::Good,
+            duration: Duration::from_secs(5),
+            ..Default::default()
+        },
+        ToastData {
+            kind: ToastKind::Notice,
+            caption: "Agent · aco-dlss".into(),
+            title: "DLSS v4 is ready".into(),
+            body: Some("Your DLSS profile picks it up next launch.".into()),
+            duration: Duration::from_secs(12),
+            notice: Some("n-1".into()),
+            buttons: vec![NoticeButton { id: "keep_v3".into(), label: "Keep v3 for now".into(), primary: true }, NoticeButton { id: "notes".into(), label: "Notes".into(), primary: false }],
+            ..Default::default()
+        },
+    ]
+}
+
+/// The rest of the kinds (`--demo toasts --variant more`, the PNGs).
+pub fn more_toasts() -> Vec<ToastData> {
+    vec![
+        ToastData {
+            kind: ToastKind::Download,
+            caption: "Downloads".into(),
+            title: "Download finished".into(),
+            body: Some("Rabbids: Party of Legends is ready to play".into()),
+            level: Level::Good,
+            ..Default::default()
         },
         ToastData {
             kind: ToastKind::Options,
             caption: "Mod setting".into(),
             title: "Applied live".into(),
             body: Some("DLSS fg.enabled off → on".into()),
-            image: None,
             level: Level::Good,
-            duration: Duration::from_secs(4),
+            ..Default::default()
         },
         ToastData {
-            kind: ToastKind::Options,
-            caption: "Mod setting".into(),
-            title: "Saved · applies at swapchain creation".into(),
-            body: Some("DLSS fg.mode d3d11 → d3d12".into()),
-            image: None,
-            level: Level::Accent,
-            duration: Duration::from_secs(5),
+            kind: ToastKind::Error,
+            caption: "Downloads".into(),
+            title: "Assassin's Creed Origins didn't finish updating".into(),
+            body: Some("No space left on the install volume".into()),
+            level: Level::Bad,
+            urgent: true,
+            ..Default::default()
         },
     ]
 }

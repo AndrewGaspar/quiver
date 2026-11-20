@@ -552,6 +552,12 @@ impl PerfHub {
         }
     }
 
+    /// The session a request means: the one named, else the focused game, else the only one.
+    pub fn pick_session(&self, session: Option<&str>) -> Result<String> {
+        let st = self.lock();
+        Self::pick(&st, session, None).map(str::to_owned)
+    }
+
     pub fn product_running(&self, product_id: u32) -> bool {
         self.running(&GameRef::ubisoft(product_id))
     }

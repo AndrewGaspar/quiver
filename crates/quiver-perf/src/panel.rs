@@ -73,6 +73,10 @@ const OFF_LAYER_SEEN: usize = 200;
 const OFF_DRAWN: usize = 208;
 const OFF_DRAWN_EPOCH: usize = 216;
 const OFF_LAYER_EXTENT: usize = 224;
+// Appended (design/SIGHT.md §16; zero from layers before): the panel chord as the layer's key
+// reader sees it, and when that last changed.
+const OFF_LAYER_CHORD: usize = 232;
+const OFF_LAYER_CHORD_AT: usize = 240;
 // The ring's reservation counter (offset 256, its own cache line).
 const OFF_RESERVE: usize = 256;
 
@@ -80,6 +84,11 @@ const OFF_RESERVE: usize = 256;
 pub const PANEL_OPEN: u64 = 1;
 /// `state` bit: the layer draws the panel's cursor at `cursor`.
 pub const PANEL_CURSOR: u64 = 2;
+/// `state` bit (design/SIGHT.md §16): the layer draws `panel.image` over the game but input
+/// stays the game's (toasts, the status chip, the first-launch hint). Without [`PANEL_OPEN`]
+/// nothing is captured: a preload from before reads it as closed. Layers that draw it say
+/// [`PANEL_LAYER_CAN_SHOW`].
+pub const PANEL_SHOW: u64 = 4;
 
 /// `input_flags`: Wine's X11 event fetching is interposed (`XCheckIfEvent` was called).
 pub const INPUT_X11: u32 = 1;
@@ -94,6 +103,10 @@ pub const INPUT_CAPTURING: u32 = 16;
 
 /// `layer_flags`: the layer can draw the panel on the game's swapchain (`layer_extent`).
 pub const PANEL_LAYER_CAN_DRAW: u32 = 1;
+/// `layer_flags`: the layer draws a [`PANEL_SHOW`] image (no capture) too.
+pub const PANEL_LAYER_CAN_SHOW: u32 = 2;
+/// `layer_flags`: the layer reports the panel chord (Shift+F2) held or not ([`LayerChord`]).
+pub const PANEL_LAYER_CHORD: u32 = 4;
 
 /// `until` may be at most this far ahead; further is treated as no deadline at all (not
 /// capturing): a corrupt or hostile value can't pin input.
@@ -208,8 +221,14 @@ pub struct Control {
 }
 
 impl Control {
+    /// Open with input captured.
     pub fn open(&self) -> bool {
         self.state & PANEL_OPEN != 0
+    }
+
+    /// The layer draws the image: open, or shown without capture ([`PANEL_SHOW`]).
+    pub fn drawn(&self) -> bool {
+        self.state & (PANEL_OPEN | PANEL_SHOW) != 0
     }
 
     pub fn epoch(&self) -> u64 {
@@ -233,6 +252,25 @@ impl LayerInfo {
     pub fn can_draw(&self, now_ns: i64) -> bool {
         self.flags & PANEL_LAYER_CAN_DRAW != 0 && self.extent.0 > 0 && self.extent.1 > 0 && fresh(self.seen_ns, now_ns, PANEL_SEEN_FRESH_NS)
     }
+
+    /// It can draw, and draws an image shown without capture ([`PANEL_SHOW`]).
+    pub fn can_show(&self, now_ns: i64) -> bool {
+        self.can_draw(now_ns) && self.flags & PANEL_LAYER_CAN_SHOW != 0
+    }
+
+    /// It reports the panel chord ([`PanelInput::chord`]).
+    pub fn reports_chord(&self, now_ns: i64) -> bool {
+        self.flags & PANEL_LAYER_CHORD != 0 && fresh(self.seen_ns, now_ns, PANEL_SEEN_FRESH_NS)
+    }
+}
+
+/// The panel chord (Shift+F2) as the layer's key reader saw it at its last poll: held or not,
+/// how many presses it has counted, and when that last changed (CLOCK_MONOTONIC_RAW ns).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayerChord {
+    pub held: bool,
+    pub presses: u32,
+    pub at_ns: u64,
 }
 
 /// What the preload wrote.
@@ -354,6 +392,13 @@ impl<R: ShmRegion> PanelInput<R> {
         self.region.u64_at(OFF_UNTIL).store(until_ns.max(0) as u64, Ordering::Release);
     }
 
+    /// Shows the image as `epoch` without capturing input ([`PANEL_SHOW`]): the layer draws it
+    /// while its heartbeat is fresh.
+    pub fn show(&self, epoch: u64) {
+        self.region.u64_at(OFF_UNTIL).store(0, Ordering::Relaxed);
+        self.region.u64_at(OFF_STATE).store(epoch << 8 | PANEL_SHOW, Ordering::Release);
+    }
+
     /// Shows or hides the cursor of the open panel.
     pub fn set_cursor_shown(&self, shown: bool) {
         let s = self.region.u64_at(OFF_STATE);
@@ -410,6 +455,23 @@ impl<R: ShmRegion> PanelInput<R> {
         r.u32_at(OFF_LAYER_FLAGS).store(flags, Ordering::Relaxed);
         r.u64_at(OFF_LAYER_EXTENT).store(extent.0 as u64 | (extent.1 as u64) << 32, Ordering::Relaxed);
         r.u64_at(OFF_LAYER_SEEN).store(now_ns.max(0) as u64, Ordering::Release);
+    }
+
+    /// The layer's key reader saw the panel chord held (or not) at `now_ns`, `presses` presses
+    /// so far. Only a change moves `at`.
+    pub fn set_chord(&self, held: bool, presses: u32, now_ns: i64) {
+        let r = &self.region;
+        let v = held as u64 | (presses as u64) << 1;
+        if r.u64_at(OFF_LAYER_CHORD).load(Ordering::Relaxed) != v {
+            r.u64_at(OFF_LAYER_CHORD_AT).store(now_ns.max(0) as u64, Ordering::Relaxed);
+            r.u64_at(OFF_LAYER_CHORD).store(v, Ordering::Release);
+        }
+    }
+
+    pub fn chord(&self) -> LayerChord {
+        let r = &self.region;
+        let v = r.u64_at(OFF_LAYER_CHORD).load(Ordering::Acquire);
+        LayerChord { held: v & 1 != 0, presses: (v >> 1) as u32, at_ns: r.u64_at(OFF_LAYER_CHORD_AT).load(Ordering::Relaxed) }
     }
 
     /// The layer composited the open panel of `epoch` into a frame (per present: two stores).
@@ -693,6 +755,43 @@ mod tests {
         p.close();
         assert_eq!(p.capture(now + 3 * S), None);
         assert_eq!(p.control().epoch(), 7);
+    }
+
+    #[test]
+    fn shown_without_capture() {
+        let p = file();
+        let now = 100 * S;
+        p.show(9);
+        let c = p.control();
+        assert!(c.drawn() && !c.open(), "drawn, not open");
+        assert_eq!(c.epoch(), 9);
+        // Never captured, whatever the layer marks.
+        p.mark_drawn(9, now);
+        assert_eq!(p.capture(now), None);
+        assert_eq!(p.cursor(), None);
+        // Opening after it captures as before; closing ends both.
+        p.open(10, now, now + S, false);
+        assert!(p.control().drawn() && p.capture(now).is_some());
+        p.close();
+        assert!(!p.control().drawn());
+        // The layer says it can show such images.
+        p.set_layer(42, PANEL_LAYER_CAN_DRAW, (1920, 1080), now);
+        assert!(p.layer().can_draw(now) && !p.layer().can_show(now));
+        p.set_layer(42, PANEL_LAYER_CAN_DRAW | PANEL_LAYER_CAN_SHOW | PANEL_LAYER_CHORD, (1920, 1080), now);
+        assert!(p.layer().can_show(now) && p.layer().reports_chord(now));
+    }
+
+    #[test]
+    fn chord_word() {
+        let p = file();
+        assert_eq!(p.chord(), LayerChord::default(), "zero from layers before");
+        p.set_chord(true, 1, 5 * S);
+        assert_eq!(p.chord(), LayerChord { held: true, presses: 1, at_ns: 5 * S as u64 });
+        // No change: the time stays.
+        p.set_chord(true, 1, 6 * S);
+        assert_eq!(p.chord().at_ns, 5 * S as u64);
+        p.set_chord(false, 1, 7 * S);
+        assert_eq!(p.chord(), LayerChord { held: false, presses: 1, at_ns: 7 * S as u64 });
     }
 
     #[test]

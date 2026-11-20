@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use quiver_perf::hud::HudReader;
 use quiver_perf::layout::HUD_HEADER_BYTES;
-use quiver_perf::panel::{PANEL_IMAGE_FILE, PANEL_INPUT_FILE, PANEL_LAYER_CAN_DRAW, PanelInput, open_panel_image_reader, open_panel_input};
+use quiver_perf::panel::{PANEL_IMAGE_FILE, PANEL_INPUT_FILE, PANEL_LAYER_CAN_DRAW, PANEL_LAYER_CAN_SHOW, PANEL_LAYER_CHORD, PanelInput, open_panel_image_reader, open_panel_input};
 use quiver_perf::shm::Mapping;
 
 use crate::graph::Vertex;
@@ -49,15 +49,23 @@ pub struct Open {
     pub cursor: Option<(i32, i32)>,
 }
 
-/// Whether the panel is open (one atomic load when it isn't).
+/// Whether the panel is open, or an image is shown without capture (toasts, the quick
+/// menu's chip; design/SIGHT.md §16): one atomic load when neither.
 #[inline]
 pub fn open_now() -> Option<Open> {
     let p = input()?;
     let c = p.control();
-    if !c.open() {
+    if !c.drawn() {
         return None;
     }
     Some(Open { epoch: c.epoch(), cursor: p.cursor().map(|(xy, _)| xy) })
+}
+
+/// The key reader's word on the panel chord (held, presses), for quiver-sight's quick menu.
+pub fn set_chord(held: bool, presses: u32, now: i64) {
+    if let Some(p) = input() {
+        p.set_chord(held, presses, now);
+    }
 }
 
 /// The panel of `epoch` was composited into a frame.
@@ -80,10 +88,18 @@ pub fn tick(dir: &Path, now: i64) {
         }
     }
     let Some(p) = input() else { return };
-    let flags = if crate::draw_enabled() { CAN.load(Ordering::Relaxed) } else { 0 };
+    let mut flags = if crate::draw_enabled() { CAN.load(Ordering::Relaxed) } else { 0 };
+    // This layer draws images shown without capture, and reports the chord (when it reads
+    // keys at all).
+    if flags & PANEL_LAYER_CAN_DRAW != 0 {
+        flags |= PANEL_LAYER_CAN_SHOW;
+    }
+    if crate::keys::reading() {
+        flags |= PANEL_LAYER_CHORD;
+    }
     let e = EXTENT.load(Ordering::Relaxed);
     p.set_layer(std::process::id(), flags, (e as u32, (e >> 32) as u32), now);
-    refresh_image(&dir.join(PANEL_IMAGE_FILE), p.control().open());
+    refresh_image(&dir.join(PANEL_IMAGE_FILE), p.control().drawn());
 }
 
 /// Maps `panel.image` while the panel is open (again when quiver-sight replaces it), drops it

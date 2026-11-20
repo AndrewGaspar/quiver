@@ -93,6 +93,10 @@ pub trait ModOptionsSink: Send + Sync {
     fn changed(&self, m: &ModSdkConnection, values: &ChangedValues, persist: bool);
     fn connected(&self, _m: &ModSdkConnection) {}
     fn disconnected(&self, _m: &ModSdkConnection) {}
+    /// The mod posted a notice for the player (`{"t":"notice"}`, design/SIGHT.md §16), at most
+    /// one a second per connection; texts are as sent (the sink checks them). A chosen button
+    /// goes back through [`ModRegistry::notice_action`].
+    fn notice(&self, _m: &ModSdkConnection, _n: &wire::ModNotice) {}
 }
 
 /// A metric a mod declared, validated, under its full id.
@@ -242,6 +246,7 @@ struct Session {
     logs: Window,
     declares: Window,
     stereo: Window,
+    notices: Window,
     refused: u64,
 }
 
@@ -420,6 +425,13 @@ impl ModRegistry {
         Ok(n)
     }
 
+    /// Tells the connection `conn` that the player chose `button` on its notice `id`
+    /// (`{"t":"notice_action"}`). Returns whether it is still connected.
+    pub fn notice_action(&self, conn: u64, id: &str, button: &str) -> bool {
+        let conns = self.conns.lock().unwrap();
+        conns.get(&conn).is_some_and(|c| c.tx.try_send(ToMod::NoticeAction { id: id.to_owned(), button: button.to_owned() }).is_ok())
+    }
+
     /// Take mod channels on a listener of its own, as the broker would (tests, tools): each
     /// connection starts with a `BrokerRequest::ModChannel` line, answered `Ok`.
     pub async fn serve_listener(self: Arc<Self>, listener: tokio::net::TcpListener) -> Result<()> {
@@ -534,6 +546,7 @@ impl ModRegistry {
             logs: Window::new(10),
             declares: Window::new(4),
             stereo: Window::new(10),
+            notices: Window::new(1),
             refused: 0,
         };
         let result: Result<()> = async {
@@ -744,6 +757,20 @@ impl ModRegistry {
                         "mod set its stereo layout"
                     );
                     self.metrics_sink().stereo(&info);
+                }
+            }
+            FromMod::Notice(n) => {
+                if !s.notices.take() {
+                    self.refuse(s, "notices over the rate");
+                    return None;
+                }
+                if n.buttons.len() > 3 || n.title.len() > 1024 || n.body.as_ref().is_some_and(|b| b.len() > 4096) {
+                    self.refuse(s, "notice: too long, or more than three buttons");
+                    return None;
+                }
+                if let Some(info) = self.info(s.id) {
+                    tracing::info!(game = %info.game_ref(), surface = %info.surface, id = %n.id, "mod notice");
+                    self.options_sink().notice(&info, &n);
                 }
             }
             FromMod::Bye | FromMod::Unknown => {}
