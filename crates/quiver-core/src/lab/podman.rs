@@ -66,6 +66,9 @@ pub struct Host {
     /// For a `sight = true` instance: the host's Sight pieces and the instance's shared-memory
     /// root ([`super::sight`]).
     pub sight: Option<(super::sight::HostSight, PathBuf)>,
+    /// For an instance without Sight: the host's Sight layer libraries, mounted read-only for
+    /// the lab's GPU limit (design/LAB.md §15).
+    pub layer: Option<PathBuf>,
 }
 
 /// 32-bit NVIDIA driver libraries and NVIDIA's Wine folder on this host.
@@ -137,6 +140,8 @@ pub fn run_args(inst: &Inst, m: &Manifest, host: &Host) -> Vec<String> {
         for v in super::sight::mounts(h, shm) {
             a.extend(["-v".into(), v]);
         }
+    } else if let Some(d) = &host.layer {
+        a.extend(["-v".into(), mount(d, Path::new(super::sight::SIGHT_MOUNT), "ro")]);
     }
     let env: [(&str, String); 13] = [
         ("HOME", "/tmp/home".into()),
@@ -301,6 +306,11 @@ exe = "ACOrigins.exe"
         assert!(a.contains(&"/dev/shm/quiver-lab-1000/t1:/dev/shm/quiver-lab-1000/t1".to_owned()));
         // Still its own namespaces: no host pid, ipc or network namespace for Sight.
         assert!(!a.iter().any(|x| x.starts_with("--pid") || x.starts_with("--ipc") || x.contains("network=host")));
+        // Without Sight, the layer alone (the lab's GPU limit), read-only.
+        m.sight = false;
+        let a = run_args(&inst, &m, &Host { layer: Some("/h/sight".into()), ..Default::default() });
+        assert!(a.contains(&"/h/sight:/opt/quiver/sight:ro".to_owned()), "{a:?}");
+        assert!(!a.iter().any(|x| x.contains("/opt/quiver/bin") || x.contains("quiver-lab-1000")));
     }
 
     #[test]

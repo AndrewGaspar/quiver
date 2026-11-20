@@ -280,6 +280,19 @@ pub fn supervise(lab: Lab, name: &str) -> Result<()> {
         Err(e) => format!("; the mod SDK endpoint didn't start: {e:#}"),
     };
     sup.update(|_| Some(format!("supervisor {} started{eos_note}{mods_note}", std::process::id())));
+    // The person's lab limits on this container (design/LAB.md §15).
+    let (w_run, w_event) = (Arc::downgrade(&sup), Arc::downgrade(&sup));
+    super::limits::spawn(
+        sup.inst.clone(),
+        super::limits::Hooks {
+            run: Box::new(move || w_run.upgrade()?.state.lock().unwrap().run.as_ref().filter(|r| r.phase != Phase::Exited).map(|r| r.id)),
+            event: Box::new(move |run, what| {
+                if let Some(s) = w_event.upgrade() {
+                    s.event(run, &what);
+                }
+            }),
+        },
+    );
     {
         let sup = sup.clone();
         std::thread::spawn(move || watch(&sup));
@@ -428,6 +441,7 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let mut notes = kill_locked(sup, source, "killed")?["notes"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>();
     notes.extend(guard::enforce(&inst.prefix())?);
     let mod_dir = if no_mod { None } else { mod_dir.or(m.mod_dir.clone()) };
+    let virtual_clock = lab::vclock::effective(&m, clock).ok().flatten().is_some();
     // The virtual clock (lab::vclock): its DLL in the clone, its environment in `m` for this launch.
     notes.extend(lab::vclock::prepare(inst, &mut m, clock, mod_dir.as_deref())?);
     let copied = apply_mod(inst, &m, mod_dir.as_deref())?;
@@ -569,6 +583,16 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     for (k, v) in sight.as_ref().map(|s| s.env.clone()).unwrap_or_default() {
         env.retain(|(ek, _)| *ek != k);
         env.push((k, v));
+    }
+    // The lab limits' GPU page (design/LAB.md §15), and what's throttled now.
+    let (gpu_env, gpu_notes) = super::limits::prepare_launch(inst, &m, sight.is_some(), &run_dir, &run_mount);
+    notes.extend(gpu_notes);
+    for (k, v) in gpu_env {
+        env.retain(|(ek, _)| *ek != k);
+        env.push((k, v));
+    }
+    if let Some(n) = super::limits::throttle_note(inst, virtual_clock) {
+        notes.push(n);
     }
     let overrides: Vec<String> = m.dll_overrides.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let base = env.iter().find(|(k, _)| k == "WINEDLLOVERRIDES").map(|(_, v)| v.clone()).into_iter().chain((!overrides.is_empty()).then(|| overrides.join(";")));

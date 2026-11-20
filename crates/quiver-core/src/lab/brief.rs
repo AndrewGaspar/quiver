@@ -40,6 +40,23 @@ fn list(items: &[String], none: &str) -> String {
 
 /// The brief, as Markdown.
 /// How to test Sight in instance `i` (design/LAB.md §12).
+/// The brief's section on the person's lab limits (design/LAB.md §15).
+pub fn limits_section(i: &str) -> String {
+    format!(
+        "The person can limit what lab instances use (`quiver lab limits`): CPU cores, a CPU quota, memory, and a share of the \
+         GPU, always or only while one of their own games runs (by default a fifth of the GPU and 6 cores while they play). \
+         The limits are theirs: don't change them. They're enforced quietly on your instance's container (cgroup, CPU \
+         affinity, and the game's frames paced to the GPU share), so **wall-clock frame rates and timings in your \
+         instance can be throttled at any moment**, and `quiver lab launch`, `status`, `bench` and `gpu` say so \
+         (`THROTTLED: lab limits in force …`).\n\n\
+         Don't depend on having the GPU to yourself to get a correct answer. Use the fixed-step virtual clock \
+         (`quiver lab edit {i} clock=virtual:62.5`, or `quiver lab launch {i} --clock virtual:62.5`, then `quiver lab \
+         clock {i} pause|step K`): the game then sees exactly 1/62.5 s per frame however long frames really take, so what \
+         you test (behaviour, image quality, what frame k shows) is the same throttled or not. Treat wall-clock fps \
+         measured under a limit as a measurement of the limit; `quiver lab status {i}` shows what's in force.\n\n"
+    )
+}
+
 pub fn sight_section(i: &str) -> String {
     format!(
         "Off unless the instance has it: `quiver lab create … --sight`, or `quiver lab edit {i} sight=on` and then \
@@ -179,6 +196,9 @@ pub fn render(b: &BriefInput) -> String {
     }
     s.push('\n');
 
+    s.push_str("## Lab limits and the virtual clock\n\n");
+    s.push_str(&limits_section(i));
+
     s.push_str("## Sight in the instance (the HUD and the in-game panel)\n\n");
     s.push_str(&sight_section(i));
 
@@ -274,7 +294,8 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("quiver lab gpu [--for <i>] -- CMD…", "run a measurement with the GPU to itself: a lock, other instances throttled through their manifests' throttle lines"),
     ("quiver lab bench <i> --variant A=… --variant B=… [--rounds N --samples N --settle S --crop C --log-metric NAME=REGEX]", "A/B runs: live config variants, settle, N samples (sharpness, temporal noise, log numbers), aggregated, host state per variant"),
     ("quiver lab edit <i> clock=virtual:62.5 | clock=real", "the fixed-step virtual clock: every frame is exactly 1/62.5 s to the game (faster than real time when frames are cheap, repeatable when the machine is busy); `launch --clock …` for one launch"),
-    ("quiver lab host [--json]", "free memory, load, GPU, who uses it, who holds the GPU lock"),
+    ("quiver lab host [--json]", "free memory, load, GPU, who uses it, who holds the GPU lock, the lab limits in force"),
+    ("quiver lab limits", "the person's limits on lab instances (CPU, memory, GPU share; always / while they play) and what's enforced now; theirs to set, not yours"),
     ("quiver lab exec <i> -- CMD…", "a command in the instance's container with its display set"),
     ("quiver lab logs <i> [--run N]", "the run's folder: game.log, bridge.log, DXVK logs, your mod's log"),
     ("quiver lab job list|wait|show", "background jobs started with --bg"),
@@ -303,7 +324,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5"] {
+        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));

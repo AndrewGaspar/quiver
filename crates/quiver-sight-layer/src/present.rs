@@ -47,6 +47,8 @@ impl Plan {
 }
 
 pub unsafe extern "system" fn queue_present_khr(queue: vk::Queue, info: *const vk::PresentInfoKHR<'_>) -> vk::Result {
+    // The lab's GPU governor (labgpu.rs; `quiver lab` games only): hold the present back.
+    crate::labgpu::pace();
     let entry = mono_raw_ns();
     let Some(dev) = state::device_by_raw(vk::Handle::as_raw(queue)) else {
         // Not a queue of a device created through this layer: impossible in a valid chain.
