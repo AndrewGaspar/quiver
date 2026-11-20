@@ -311,6 +311,33 @@ pub mod rung {
     pub const DIALOG_FOCUS: u16 = 1000;
 }
 
+/// The app's ladder (quiver-app, through `quiver_ui::depth`; design/STEREO-UI.md §4), in the
+/// same thousandths as [`rung`]. Two kinds of number: *absolute* rungs a layer sits on
+/// whatever it is drawn over, and *lifts* added to the depth of the surface something is
+/// drawn on, so a button on a raised card pops from the card. Every lift is one step of 150
+/// (≈1 px of total disparity at 100% on a 1920 eye) except focus, which is two; resolved
+/// depths are clamped to [`ui::MAX`]. Total pixels at 100%, 1920 eye, in the comments.
+pub mod ui {
+    /// Backgrounds, hero art, the page itself: the window's plane (0 px).
+    pub const PLANE: u16 = 0;
+    /// The top bar and the controller hint bar (1 px).
+    pub const CHROME: u16 = 150;
+    /// Lift: a content surface (card, panel, list, tile grid) over what it is on (+1 px).
+    pub const SURFACE: u16 = 150;
+    /// Lift: a control (button, tab, chip, row, input, link…) over its surface (+1 px).
+    pub const CONTROL: u16 = 150;
+    /// Lift: a hovered control's extra (+1 px). Never more than [`FOCUS`].
+    pub const HOVER: u16 = 150;
+    /// Lift: a focused control's extra (keyboard or controller focus, +2 px).
+    pub const FOCUS: u16 = 300;
+    /// Menus, popovers, dialogs, the palette, toasts: above the whole page (4 px).
+    pub const OVERLAY: u16 = 600;
+    /// Tooltips (5 px).
+    pub const TOOLTIP: u16 = 750;
+    /// The ceiling (7 px): a focused control on a dialog, clamped from 1050.
+    pub const MAX: u16 = 1000;
+}
+
 /// HypXRland's depth geometry (05-configuration.md §8.7 and research/24 §8.1), shared so a
 /// rung means the same disparity in Sight, the app and the compositor's depth desktop:
 /// a rung of 1 rises `depth_scale` (0.12 m) out of a virtual screen 1.6 m wide at 1.5 m,
@@ -443,6 +470,31 @@ mod depth_tests {
         assert_eq!(disparity_px(1000, 200, 1920), 14);
         assert_eq!(disparity_px(1000, 500, 1920), 14, "clamped to 200%");
         assert_eq!(disparity_px(5000, 100, 1920), 7, "clamped to a rung of 1");
+    }
+
+    #[test]
+    fn the_apps_ladder() {
+        let px = |d: u16| disparity_px(d, 100, 1920);
+        // Absolute rungs.
+        assert_eq!(px(ui::PLANE), 0);
+        assert_eq!(px(ui::CHROME), 1);
+        assert_eq!(px(ui::OVERLAY), 4);
+        assert_eq!(px(ui::TOOLTIP), 5);
+        assert_eq!(px(ui::MAX), 7);
+        // The page: a card, a button on it, hovered, focused: 1, 2, 3, 4 px.
+        let card = ui::PLANE + ui::SURFACE;
+        let button = card + ui::CONTROL;
+        assert_eq!([card, button, button + ui::HOVER, button + ui::FOCUS].map(px), [1, 2, 3, 4]);
+        // A dialog: its buttons at 5 px, hovered 6, focused 7 (clamped at the ceiling).
+        let control = ui::OVERLAY + ui::CONTROL;
+        assert_eq!([control, control + ui::HOVER, (control + ui::FOCUS).min(ui::MAX)].map(px), [5, 6, 7]);
+        // Hover never rises more than focus, and every lift is at most two steps (≈2 px).
+        assert!(ui::HOVER <= ui::FOCUS);
+        for lift in [ui::SURFACE, ui::CONTROL, ui::HOVER, ui::FOCUS] {
+            assert!(disparity_px(lift, 100, 1920) <= 2);
+        }
+        // At 200% the nearest is 14 px (≈0.34° on an XReal), inside the 1° cap (≈31 px).
+        assert_eq!(disparity_px(ui::MAX, 200, 1920), 14);
     }
 
     #[test]

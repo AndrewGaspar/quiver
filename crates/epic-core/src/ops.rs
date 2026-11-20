@@ -326,6 +326,9 @@ impl Epic {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         status(if existing.is_some() { format!("Updating to {}…", build.manifest.meta.build_version) } else { "Downloading…".into() });
         let (report, used_delta) = self.write_build(&build, old.as_ref(), &dir, tags.as_deref(), progress).await?;
+        // Recording the install: quick, and not stopped by a cancel (DLC downloads after
+        // it are).
+        progress.finalizing.store(true, std::sync::atomic::Ordering::Relaxed);
         let m = &build.manifest;
         self.installs.save_manifest(app, &manifest::write(m, true))?;
         let prereq = (!m.meta.prereq_path.trim().is_empty()).then(|| Prereq {
@@ -380,6 +383,7 @@ impl Epic {
         if used_delta {
             notes.push(format!("updated with Epic's delta patch from {}", existing.as_ref().map_or("?", |i| i.version.as_str())));
         }
+        progress.finalizing.store(false, std::sync::atomic::Ordering::Relaxed);
         // DLC with content of its own goes into the game's folder.
         for d in t.dlc.iter().filter(|d| d.owned) {
             let Some(dlc_app) = d.app_name.clone() else { continue };

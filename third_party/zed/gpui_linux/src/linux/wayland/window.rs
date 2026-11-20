@@ -123,6 +123,11 @@ pub struct WaylandWindowState {
     /// Quiver: frames are packed side by side for two eyes (`stereo:sbs`): the buffer is
     /// twice the window's width and the viewport shows it at the window's size.
     stereo_sbs: bool,
+    /// Quiver: the `xdg_toplevel_tag_v1` tag the compositor last got (`None`: none yet).
+    /// While it differs from what `stereo_sbs` says, the right one is sent just before the
+    /// next buffer is presented: the first buffer of the new width and the tag that says how
+    /// to show it reach the compositor together, so no frame is shown split wrongly.
+    stereo_tag_sent: Option<&'static str>,
     input_handler: Option<PlatformInputHandler>,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
@@ -626,6 +631,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             stereo_sbs: false,
+            stereo_tag_sent: None,
             input_handler: None,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
@@ -2091,6 +2097,26 @@ impl PlatformWindow for WaylandWindow {
             return;
         }
 
+        // Quiver: the stereo tag goes out right before the buffer it describes: requests on
+        // the connection are ordered, so the compositor reads it before that commit.
+        // Nothing is sent to a window that never packed (`None` and mono agree).
+        let tag = if state.stereo_sbs {
+            "stereo:sbs"
+        } else {
+            "stereo:mono"
+        };
+        if state.stereo_tag_sent.is_some_and(|sent| sent != tag)
+            || (state.stereo_tag_sent.is_none() && state.stereo_sbs)
+        {
+            if let (Some(manager), Some(toplevel)) = (
+                state.globals.toplevel_tag_manager.as_ref(),
+                state.surface_state.toplevel(),
+            ) {
+                manager.set_toplevel_tag(toplevel, tag.into());
+            }
+            state.stereo_tag_sent = Some(tag);
+        }
+
         // Surface state changed during this GPUI tick is included in this presentation.
         state.redraw_requested = false;
         if state.pending_frame_callback.is_none() {
@@ -2116,8 +2142,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn set_stereo_side_by_side(&self, enabled: bool) -> bool {
         let mut state = self.borrow_mut();
-        // The viewport is what keeps a 2x-wide buffer at the window's size.
-        if state.viewport.is_none() {
+        // The viewport is what keeps a 2x-wide buffer at the window's size. Only a toplevel
+        // can say it's packed (`xdg-toplevel-tag-v1`), so popups and layer surfaces stay mono:
+        // a compositor would show a packed one whole, both eyes squeezed side by side.
+        if state.viewport.is_none() || state.surface_state.toplevel().is_none() {
             return false;
         }
         if state.stereo_sbs == enabled {
@@ -2132,14 +2160,13 @@ impl PlatformWindow for WaylandWindow {
         if let Some(renderer) = &mut state.renderer {
             renderer.update_drawable_size(device_size);
         }
-        // HypXRland's contract: exactly `stereo:sbs` / `stereo:mono` (05-configuration §8.6).
-        if let (Some(manager), Some(toplevel)) = (
-            state.globals.toplevel_tag_manager.as_ref(),
-            state.surface_state.toplevel(),
-        ) {
-            manager.set_toplevel_tag(toplevel, if enabled { "stereo:sbs" } else { "stereo:mono" }.into());
-        }
+        // HypXRland's contract: exactly `stereo:sbs` / `stereo:mono` (05-configuration §8.6),
+        // sent with the first buffer of the new width (see `draw`, `stereo_tag_sent`): turning
+        // on and off again before a frame went out sends nothing.
         state.redraw_requested = true;
+        drop(state);
+        // A frame now, so the tag and the new buffer go out without waiting for other work.
+        self.0.schedule_frame();
         true
     }
 

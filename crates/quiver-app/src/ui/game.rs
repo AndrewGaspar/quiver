@@ -18,6 +18,7 @@ mod storepage;
 mod stores;
 pub(crate) mod tweaks;
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px, relative};
 
 pub use page::{ExportAction, GamePage, LaunchDraft, Load, PlayAfter, checkbox, kv, settings_from_reply, toggle};
@@ -75,6 +76,8 @@ impl Quiver {
                             .top_0()
                             .bottom_0()
                             .flex()
+                            // Stereo: the drawer slides over the page as an overlay.
+                            .depth_overlay()
                             .shadow(vec![soft_shadow(rgba(0x000000, 0.6), 0., 40.)])
                             .child(self.render_side(th, id, w, cx)),
                     )
@@ -141,6 +144,8 @@ impl Quiver {
         }
         div()
             .id("side-rail")
+            // Stereo: the game list is a surface beside the page.
+            .depth_surface()
             .flex()
             .flex_col()
             .flex_none()
@@ -199,6 +204,8 @@ impl Quiver {
             .flex_none()
             .w(px(width))
             .min_h_0()
+            // Stereo: the game list is a surface beside the page.
+            .depth_surface()
             .bg(th.ink0)
             .border_r_1()
             .border_color(th.line1)
@@ -411,6 +418,8 @@ impl Quiver {
             head.push(self.render_slim_hero(th, &g, pane_w, cx).into_any_element());
         } else {
             head.push(self.render_hero(th, &g, pane_w, cx).into_any_element());
+            // Stereo: the hero's art is the plane; what's written over it (the action bar and
+            // the stats) is content, a step up, and the buttons pop from that.
             head.push(self.render_actionbar(th, &g, false, cx).into_any_element());
             head.push(self.render_stats(th, &g).into_any_element());
         }
@@ -459,7 +468,7 @@ impl Quiver {
         };
         if let Some(t) = title_element(&title, &g.entry.name, tb) {
             let top = if pb.narrow() { 64. } else { 28. };
-            hero_el = hero_el.child(div().absolute().left(px(pad)).top(px(top)).child(t));
+            hero_el = hero_el.child(div().absolute().left(px(pad)).top(px(top)).depth_surface().child(t));
         }
         let art_chip_el = self.render_art_chip(th, g, cx);
         hero_el.child(
@@ -467,6 +476,7 @@ impl Quiver {
                 .absolute()
                 .right(px(pad.min(24.)))
                 .top(px(if pb.narrow() { 14. } else { 20. }))
+                .depth_surface()
                 .flex()
                 .gap(px(6.))
                 .child(
@@ -562,6 +572,7 @@ impl Quiver {
                 gpui::anchored().anchor(gpui::Anchor::TopRight).offset(gpui::point(px(0.), px(36.))).snap_to_window_with_margin(px(8.)).child(
                     div()
                         .id("art-menu")
+                        .depth_overlay()
                         .occlude()
                         .w(px(300.))
                         .p(px(4.))
@@ -651,6 +662,7 @@ impl Quiver {
                     .justify_center()
                     .gap(px(12.))
                     .px(px(pad))
+                    .depth_surface()
                     .child(div().h(px(36.)).flex().items_center().overflow_hidden().child(title))
                     .child(bar),
             );
@@ -663,6 +675,8 @@ impl Quiver {
                 .items_center()
                 .gap(px(16.))
                 .px(px(28.))
+                // Stereo: the logo and the action bar are content over the art.
+                .depth_surface()
                 .child(title)
                 .child(div().flex_1())
                 .child(bar),
@@ -682,6 +696,8 @@ impl Quiver {
             .rounded(px(10.))
             .shadow(vec![soft_shadow(th.acc.opacity(0.28), 8., 30.)])
             .cursor_pointer()
+            // Stereo: the split button rises as one control, and with either half's focus.
+            .stereo_focused(f(ACTION_PRIMARY) || f(ACTION_OPTIONS))
             .child(main.id("act-play").on_click(cx.listener(|this, _, _, cx| this.click(Target::Action(ACTION_PRIMARY), cx))))
             .child(more.id("act-more").on_click(cx.listener(|this, _, _, cx| {
                 this.gp.default_menu = false;
@@ -763,7 +779,7 @@ impl Quiver {
                 .items_center()
                 .gap(px(10.))
                 .px(px(pad))
-                .when(!slim, |d| d.mt(px(-58.)))
+                .when(!slim, |d| d.mt(px(-58.)).depth_surface())
                 .child(play)
                 .children(steam_profile)
                 .child(pill(th, kind, Some(i), text).py(px(5.)))
@@ -892,6 +908,7 @@ impl Quiver {
                 .gap(px(10.))
                 .px(px(pad))
                 .mt(px(-58.))
+                .depth_surface()
                 .child(
                     div()
                         .flex()
@@ -924,6 +941,7 @@ impl Quiver {
             .gap(px(10.))
             .px(px(28.))
             .mt(px(-58.))
+            .depth_surface()
             .child(play)
             .children(profile_chip)
             .when(!g.steam_only(), |d| d.when_some(proton_chip, |d, p| d.child(chip(th, Some(Icon::Cpu), p, false).h(px(30.)))))
@@ -1022,6 +1040,7 @@ impl Quiver {
                 .px(px(pad))
                 .pt(px(14.))
                 .pb(px(16.))
+                .depth_surface()
                 .children(stats.into_iter().map(|(k, v)| {
                     div()
                         .flex()
@@ -1033,7 +1052,7 @@ impl Quiver {
                 }));
         }
         let sp = if pb >= Bp::Large { 26. } else { 16. };
-        div().flex().flex_none().px(px(28.)).pt(px(14.)).pb(px(16.)).children(stats.into_iter().enumerate().map(|(i, (k, v))| {
+        div().flex().flex_none().px(px(28.)).pt(px(14.)).pb(px(16.)).depth_surface().children(stats.into_iter().enumerate().map(|(i, (k, v))| {
             div()
                 .flex()
                 .flex_col()

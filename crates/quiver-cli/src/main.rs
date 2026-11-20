@@ -10,6 +10,7 @@ mod epic;
 mod epicgame;
 mod exports;
 mod mods;
+mod omarchy;
 mod perf;
 mod profiles;
 mod options;
@@ -89,6 +90,12 @@ enum Cmd {
         game: String,
         #[arg(long)]
         language: Option<String>,
+        /// When the install finishes, add it to Steam (staged while Steam runs).
+        #[arg(long)]
+        add_to_steam: bool,
+        /// When the install finishes, write a .desktop entry.
+        #[arg(long)]
+        desktop_entry: bool,
         #[arg(long)]
         detach: bool,
         /// Only show the download and install sizes, free space and languages.
@@ -103,6 +110,10 @@ enum Cmd {
         action: Option<downloads::QueueAction>,
         #[arg(long)]
         json: bool,
+        /// Don't start quiverd when it isn't running: fail with "quiverd is not running"
+        /// instead (for status bars that poll the queue, such as contrib/omarchy).
+        #[arg(long)]
+        no_start: bool,
     },
     /// Pause a game's download (resumable; it keeps its place in the queue).
     Pause { game: String },
@@ -361,6 +372,12 @@ enum Cmd {
     Epic {
         #[command(subcommand)]
         action: epic::EpicAction,
+    },
+    /// The Omarchy bar widget for the download queue (`quiver.downloads`): install-plugin,
+    /// uninstall-plugin, status. Never run by the installer; only when you ask.
+    Omarchy {
+        #[command(subcommand)]
+        action: omarchy::OmarchyAction,
     },
     /// Lab instances: disposable headless copies of an installed game in a container, with
     /// your real licence from quiverd, for agents developing mods (design/LAB.md):
@@ -705,9 +722,23 @@ async fn main() -> Result<()> {
     if let Cmd::Daemon { action } = cli.cmd {
         return daemon::run(&cli.source, action).await;
     }
-    let client = Client::connect(&cli.source).await?;
+    // The Omarchy bar plugin: files and Omarchy's own commands, no daemon.
+    if let Cmd::Omarchy { action } = cli.cmd {
+        return omarchy::run(action);
+    }
+    // A status bar polling the queue must not bring back a quiverd someone stopped.
+    let client = if matches!(cli.cmd, Cmd::Queue { no_start: true, .. }) {
+        Client::connect_running(&cli.source).await?
+    } else {
+        Client::connect(&cli.source).await?
+    };
     match cli.cmd {
-        Cmd::Dev { .. } | Cmd::SteamRun(_) | Cmd::Steam { action: exports::SteamAction::Restart { .. } } | Cmd::Daemon { .. } | Cmd::Lab { .. } => {
+        Cmd::Dev { .. }
+        | Cmd::SteamRun(_)
+        | Cmd::Steam { action: exports::SteamAction::Restart { .. } }
+        | Cmd::Daemon { .. }
+        | Cmd::Lab { .. }
+        | Cmd::Omarchy { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
@@ -860,7 +891,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Install { game, language, dry_run: true, json, .. } => downloads::dry_run(&client, &game, language, json).await?,
-        Cmd::Queue { action, json } => downloads::queue(&client, action, json).await?,
+        Cmd::Queue { action, json, .. } => downloads::queue(&client, action, json).await?,
         Cmd::Setup { show, json } => {
             if show || json {
                 setup::show(&client, json).await?
@@ -872,10 +903,11 @@ async fn main() -> Result<()> {
         Cmd::Resume { game } => downloads::resume(&client, &game).await?,
         Cmd::Update { game, preview, detach, json } => downloads::update(&client, &game, preview, detach, json).await?,
         Cmd::Verify { game, repair, detach, json } => downloads::verify(&client, &game, repair, detach, json).await?,
-        Cmd::Install { game, language, detach, .. } => {
+        Cmd::Install { game, language, detach, add_to_steam, desktop_entry, .. } => {
             let e = resolve_installable(&client, &game).await?;
             let events = client.subscribe().await?;
-            let id: u64 = client.call(Request::Install { game: e.game.into(), language }).await?;
+            let after = (add_to_steam || desktop_entry).then_some(quiver_api::downloads::AfterInstall { steam: add_to_steam, desktop: desktop_entry });
+            let id: u64 = client.call(Request::Install { game: e.game.into(), language, after }).await?;
             eprintln!("installing {} (job {id})", e.name);
             if !detach {
                 follow(&client, events, id).await?;
@@ -1170,6 +1202,27 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_now_and_after_parse() {
+        use downloads::{OnOff, QueueAction};
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).map(|c| c.cmd);
+        assert!(matches!(parse(&["queue", "now", "origins"]), Ok(Cmd::Queue { action: Some(QueueAction::Now { game }), .. }) if game == "origins"));
+        assert!(matches!(
+            parse(&["queue", "move", "origins", "now"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::Move { to: quiver_api::downloads::QueueMove::Now, .. }), .. })
+        ));
+        assert!(parse(&["queue", "move", "origins", "sideways"]).is_err());
+        assert!(matches!(
+            parse(&["queue", "after", "origins", "--steam", "on"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::After { steam: Some(OnOff::On), desktop: None, .. }), .. })
+        ));
+        assert!(matches!(
+            parse(&["queue", "after", "origins", "--desktop", "off", "--steam", "off"]),
+            Ok(Cmd::Queue { action: Some(QueueAction::After { steam: Some(OnOff::Off), desktop: Some(OnOff::Off), .. }), .. })
+        ));
+        assert!(matches!(parse(&["install", "origins", "--add-to-steam"]), Ok(Cmd::Install { add_to_steam: true, desktop_entry: false, .. })));
+    }
 
     fn entry(game: GameRef, name: &str) -> LibraryEntry {
         serde_json::from_value(serde_json::json!({
