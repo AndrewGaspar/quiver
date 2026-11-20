@@ -7,6 +7,7 @@ mod clock;
 mod create;
 mod hdr;
 mod jobs;
+mod limits;
 mod ops;
 mod sdk;
 mod sight;
@@ -282,10 +283,18 @@ pub enum LabAction {
     /// A/B runs: config variants applied live (or with a relaunch), settled, sampled N times,
     /// aggregated, host state recorded per variant.
     Bench(bench::BenchArgs),
-    /// Free memory, load, the GPU and who uses it, and who holds the lab's GPU lock.
+    /// Free memory, load, the GPU and who uses it, who holds the lab's GPU lock, and the lab
+    /// limits in force.
     Host {
         #[arg(long)]
         json: bool,
+    },
+    /// Your limits on lab instances (CPU cores and quota, memory, GPU share), `always` and
+    /// `while_playing` (one of your games runs): `show`, `set PROFILE KEY=VALUE…`, `reset`.
+    /// Enforced on every instance, never on your games (design/LAB.md §15).
+    Limits {
+        #[command(subcommand)]
+        action: Option<limits::LimitsAction>,
     },
     /// The run's folder (game.log, bridge.log, DXVK logs, your mod's log).
     Logs {
@@ -614,10 +623,13 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let (inst, m) = inst_of(&lab, &instance)?;
             let st = read_state(&inst);
             let hs = host::snapshot(&procs::scan(), &ops::containers());
+            let enforced = limits::status_of(&inst);
+            let vclock = limits::run_has_virtual_clock(&inst, st.run.as_ref().map(|r| r.id));
             if json {
                 let clock = st.run.as_ref().and_then(|r| lab::vclock::Report::read(&inst.run_dir(r.id)));
                 let control = clock::snapshot(&inst);
-                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock, "clock_control": control }));
+                let throttled = enforced.as_ref().and_then(|s| lab::limits::throttle_note(s, vclock));
+                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock, "clock_control": control, "limits": enforced, "throttled": throttled }));
             }
             println!("{} ({}, {}): container {}", inst.name, m.game, m.display, if st.container_up { "up" } else { "down" });
             match &st.run {
@@ -646,6 +658,19 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("  VIOLATION: {v}");
             }
             println!("  host: {}", hs.summary());
+            match &enforced {
+                Some(s) => {
+                    println!("  {}", s.line());
+                    for e in &s.errors {
+                        println!("    problem: {e}");
+                    }
+                    if let Some(n) = lab::limits::throttle_note(s, vclock) {
+                        println!("  {n}");
+                    }
+                }
+                None if st.container_up => println!("  lab limits: unknown (the supervisor isn't reporting; quiver lab limits)"),
+                None => {}
+            }
         }
         LabAction::Wait { instance, state, timeout, stable } => {
             let (inst, _) = inst_of(&lab, &instance)?;
@@ -805,12 +830,29 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let all = procs::scan();
             let hs = host::snapshot(&all, &ops::containers());
             let holder = std::fs::read_to_string(lab.gpu_lock().with_extension("holder")).ok();
+            let enforced: std::collections::BTreeMap<String, lab::limits::Status> = lab.list().into_iter().filter_map(|n| Some((n.clone(), limits::status_of(&lab.instance(&n))?))).collect();
             if json {
-                return print_json(&serde_json::json!({ "host": hs, "gpu_lock": holder }));
+                let (l, src, err) = lab::limits::LabLimits::load();
+                return print_json(&serde_json::json!({ "host": hs, "gpu_lock": holder, "limits": { "configured": l, "source": src, "error": err, "instances": enforced } }));
             }
             println!("{}", hs.summary());
             println!("gpu lock: {}", holder.as_deref().map(str::trim).unwrap_or("free"));
+            match enforced.iter().next() {
+                None => {
+                    let (l, _, _) = lab::limits::LabLimits::load();
+                    println!("lab limits: always {}; while playing {} (no instance up to enforce them; quiver lab limits)", l.always.describe(), l.while_playing.describe());
+                }
+                Some(_) => {
+                    for (n, s) in &enforced {
+                        println!("{n}: {}", s.line());
+                    }
+                    if enforced.values().any(|s| s.active()) {
+                        println!("wall-clock performance in limited instances is throttled; fixed-step virtual-clock results are unaffected");
+                    }
+                }
+            }
         }
+        LabAction::Limits { action } => limits::run(&lab, action.unwrap_or(limits::LimitsAction::Show { json: false })).await?,
         LabAction::Logs { instance, run, tail } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             let run = run.or(read_state(&inst).run.map(|r| r.id)).context("no runs yet")?;
@@ -1022,6 +1064,7 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         mods_port: Some(mods_port),
         ro_mounts: podman::host_ro_mounts(),
         sight: sight::up(&inst, &m)?,
+        layer: limits::up(&inst, &m),
     };
     std::fs::create_dir_all(inst.lab())?;
     std::fs::write(inst.dir.join("broker-port"), broker_port.map(|p| p.to_string()).unwrap_or_default())?;
@@ -1267,6 +1310,13 @@ fn gpu(lab: &Lab, me: Option<&str>, cmd: &[String]) -> Result<()> {
         hs
     };
     let before = log("start");
+    if let Some(n) = me.and_then(|i| {
+        let inst = lab.instance(i);
+        let run = read_state(&inst).run.map(|r| r.id);
+        limits::throttle_note(&inst, limits::run_has_virtual_clock(&inst, run))
+    }) {
+        eprintln!("gpu: {n}");
+    }
     if !before.contenders(&format!("lab:{}", me.unwrap_or(""))).is_empty() {
         eprintln!("gpu: still on the GPU: {}", before.contenders(&format!("lab:{}", me.unwrap_or(""))).iter().map(|u| format!("{} ({})", u.program, u.owner)).collect::<Vec<_>>().join(", "));
     }

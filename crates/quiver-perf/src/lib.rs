@@ -22,6 +22,7 @@ extern crate alloc;
 pub mod clock;
 mod error;
 pub mod hud;
+pub mod labgpu;
 pub mod layout;
 pub mod panel;
 pub mod record;

@@ -77,6 +77,10 @@ pub struct Config {
     /// uploads on its own; design/STORE-EPIC.md §9.12).
     #[serde(default = "yes")]
     pub epic_saves_background: bool,
+    /// `quiver lab` settings the person owns: the limits on lab instances
+    /// (`lab.limits`, design/LAB.md §15; `quiver lab limits`).
+    #[serde(default, skip_serializing_if = "crate::lab::limits::LabSettings::is_default")]
+    pub lab: crate::lab::limits::LabSettings,
 }
 
 fn yes() -> bool {
@@ -255,6 +259,7 @@ impl Config {
             first_run: None,
             steam_offers: true,
             epic_saves_background: true,
+            lab: Default::default(),
         };
         cfg.save()?;
         Ok(cfg)

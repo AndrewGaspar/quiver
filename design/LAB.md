@@ -35,6 +35,7 @@ quiver lab gpu [--for N] -- CMD… | bench N --variant A=… --variant B=… …
 quiver lab brief <game> | doctor | image build|status | job list|show|wait
 quiver lab sight N status [--json]                  (instances with sight = on, section 12)
 quiver lab hdr N [--json] | shot N --hdr [OUT]      (instances with display.hdr = on, section 13)
+quiver lab limits [show|set PROFILE KEY=VALUE…|reset] (the person's limits on instances, section 15)
 quiver lab … --bg      (any command, as a background job)
 ```
 
@@ -412,7 +413,7 @@ presence, achievements and cloud uploads. That contradicts section 5, so it isn'
 | `where`, `teleport`, `locations.txt` | `quiver lab call|where|teleport` over the lab channel |
 | `gpu-exclusive` | `quiver lab gpu [--for N] -- CMD` (a lock others queue on; other running instances throttled through their manifests' `throttle` lines and restored after; host state logged before and after to `gpu.log`) |
 | `bench`, `abtest` | `quiver lab bench`: variants `LABEL=assign;assign`, `--rounds` interleaved, `--samples` shots over `--crop` (Laplacian sharpness, temporal noise, mean level), `--log-metric NAME=REGEX` numbers from the log written meanwhile, host state per variant, `--relaunch --ready STATE` for settings that need a restart, `--gpu`; originals restored; `bench.json` and a table |
-| `userplaying.sh` | not built: sharing the machine between lab instances and the user's own games is the user's call (section 11) |
+| `userplaying.sh` | not built as a guard: sharing the machine is the user's call (section 11). The user can set limits instead, enforced quietly on instances only (section 15) |
 | `framediff.py`, `perframe.py`, `latency.py` | not built: they read Pharos's own captures. The image metrics (`lab::image`) cover frame differences over crops; a latency analysis needs a mod that logs camera changes per frame (Pharos does) |
 
 Long runs go in the background: `quiver lab … --bg` prints a job id; `quiver lab job wait ID`
@@ -797,7 +798,9 @@ misbehave.
 3. Decided: resource sharing between lab instances and the user's own games is the user's
    concern, not Quiver's. Quiver has no user-playing check: a launch never refuses, warns
    about or reports the user's games (`quiver lab host` lists GPU users as plain facts). The
-   GPU lock (`quiver lab gpu`) only coordinates lab runs with each other.
+   GPU lock (`quiver lab gpu`) only coordinates lab runs with each other. What the user can
+   do is set limits on the lab (section 15): theirs, enforced on instances only, never on
+   their games, and nothing is refused or warned about.
 
 ## 12. Sight in an instance (2026-11-19)
 
@@ -1070,3 +1073,181 @@ Tests: `lab::sdk::tests::lab_channel_is_read_only_and_carries_stereo` (welcome w
 the word in the session dir and gone with its connection, a change kept in the instance,
 other instances' and the person's sessions refused), `modsdk::tests::lab_sessions_only_in_a_lab_registry`,
 `podman::tests::epic_names_go_to_the_eos_proxy` (the forward).
+
+## 15. Lab limits (2026-11-20)
+
+The person can cap what lab instances use, so agents can keep working while they play:
+"lab may use 20% of the GPU and 6 cores while I'm playing". The limits are the person's
+(`config.json` → `lab.limits`, like the download settings), set with `quiver lab limits`,
+and enforced quietly on instances only. Quiver never stops, slows, warns about or touches the
+person's own games (section 11): nothing is refused, a limit only shapes the lab.
+
+```sh
+quiver lab limits                                   # the profiles, and what each running instance enforces now
+quiver lab limits set while_playing gpu=20 cpu=6    # the default
+quiver lab limits set always memory_max=24G cpu_quota=8
+quiver lab limits set always gpu=off                # KEY=off lifts one
+quiver lab limits reset [always|while_playing]
+```
+
+**Profiles.** `always`, and `while_playing`, which applies on top of `always` (the stricter
+value per field) while one of the person's own games runs: a session quiverd holds for Quiver's
+launcher (`launcher`) or a Steam launch through `quiver steam-run` (`steam`), as
+`Request::Sessions` reports them. Lab runs (`lab`) and other bridge sessions (`bridge`: a
+container such as a mod harness) aren't the person playing. The supervisor asks quiverd every
+3 s, only when `while_playing` has something in it; without quiverd it says "unknown" and only
+`always` applies. Defaults: `always` none; `while_playing` gpu 20%, cpu 6 cores.
+
+Each profile has `cpu` (whole cores), `cpu_quota` (CPUs), `memory_high`, `memory_max` and
+`gpu` (percent). Every instance's supervisor applies them to its own container within a few
+seconds of a change (a new setting, the person starting or stopping a game), and writes what
+it enforces to `<instance>/limits.json`.
+
+### 15.1 CPU and memory: the container's cgroup
+
+The person's systemd delegates `cpu memory pids` (not `cpuset`). Measured with podman 6.1.4
+and runc 1.5.2, rootless:
+
+- `podman run/update --cpuset-cpus` fail: `openat2 …/libpod-<id>.scope/cpuset.cpus: no such
+  file or directory`. **cpuset isn't available.**
+- `podman update --cpus N --memory M` work, but can't lift a limit again: `--cpus 0` and
+  `--memory 0` leave the old values, `--cpu-quota=-1` too, and `--memory -1` is refused.
+- The container's scope (`/sys/fs/cgroup/<State.CgroupPath>`) is the person's, so its
+  `cpu.max`, `memory.high` and `memory.max` can be written directly, both ways.
+- runc resets a container's init to every CPU whatever podman was started with, and every
+  `podman exec` (each launch, each tool) starts with every CPU too.
+
+So the supervisor (`lab/limits.rs`, `quiver_core::lab::limits`) enforces:
+
+- **cores** as **CPU affinity** of every thread in the container (`cgroup.procs`, then each
+  `/proc/<pid>/task`), re-applied every 2 s, plus a **quota of the same number of CPUs** in
+  `cpu.max` as the hard ceiling between passes (a game may set its own affinity, and exec'd
+  processes start on every CPU). Which cores: whole cores, both SMT threads, the slowest first
+  (ACPI CPPC `highest_perf`, else the max frequency), highest-numbered among equals. On the Ryzen
+  AI 9 HX 370 (4 Zen 5 cores at CPPC 196–208, 8 Zen 5c at 125), 6 cores are cpus
+  `6-11,18-23`: Zen 5c cores sharing one L3, leaving the person's game the four fast cores and
+  two compact ones. Measured: all 99 threads of a running AWR instance on `6-11,18-23`,
+  `cpu.max` `1200000 100000`.
+- **cpu_quota** in `cpu.max` (the smaller of it and the cores' implied quota).
+- **memory_high / memory_max** in `memory.high` / `memory.max`.
+
+Lifting a limit writes `max` back and puts every thread on every online CPU.
+
+### 15.2 The GPU
+
+No cgroup controller covers NVIDIA graphics, so the GPU share is enforced from inside the game
+and measured from outside:
+
+- **The page.** When any profile has a GPU share, every launch gets a `gpu.ctl` in its run
+  folder (`quiver_perf::labgpu`, 4 KiB of atomics) and `QUIVER_LAB_GPU` naming it. An instance
+  without Sight gets the Sight layer for it: `up` mounts the host's Sight libraries read-only
+  (`podman::Host::layer`, marker `<instance>/gpu-layer`) and the launch names the layer in
+  `VK_INSTANCE_LAYERS`. With no `QUIVER_PERF_DIR` the rest of the layer passes everything
+  through (no HUD, no ring, no capture). A container from before this needs `down`/`up`.
+- **Priority** (`quiver-sight-layer/src/labgpu.rs`). At `vkCreateDevice` the layer adds
+  `VkDeviceQueueGlobalPriorityCreateInfoKHR { LOW }` to each queue whose family offers LOW
+  (`VK_KHR_global_priority`, else `VK_EXT_global_priority`; the families' levels from
+  `VkQueueFamilyGlobalPriorityPropertiesKHR`), and enables the extension. If the driver refuses,
+  the app's own create info is used. What happened is in the page and in `quiver lab status`.
+  **NVIDIA 620 on the RTX 5070 Laptop offers only MEDIUM** in every queue family (the
+  extensions are there, and a LOW device is even created, but there's no level below the
+  default), so on this machine the priority does nothing and the layer says `priority: the
+  driver offers nothing below the default`. RADV (the Radeon 890M) offers LOW and MEDIUM, and
+  gets LOW (test `vulkan_labgpu`).
+- **The governor** (`limits::Governor`, in the supervisor, once a second). It measures the
+  instance's share with NVML's `nvmlDeviceGetProcessUtilization` (SM busy percent per host pid,
+  summed over the container's processes; `quiver_core::lab::nvml`) and holds it to its part of
+  the share by pacing presents: the layer waits in `vkQueuePresentKHR` until the page's interval
+  since the last present has passed, so the game's next frame waits too. The part is
+  `max(share / instances, share − others)`: other lab instances' use counts against the lab's
+  share, and an even split is guaranteed. Over its part, the cap drops to the frame rate that
+  would have used exactly that (use scales with frames); well under it, the cap rises by at
+  most 30% a tick and goes away when the game no longer reaches it. Never below 2 fps. NVML is
+  opened only while a run is up under a GPU share (it keeps the dGPU awake).
+- **What "percent" means.** Two things learned measuring it on driver 620:
+  - NVML keeps **one sample per process**, refreshed every 0.2–0.8 s, each over its own
+    period. Reading "samples since the last read" drops a process from every read where its
+    sample didn't change, which first gave a median of 0% for a game using 20%. So each read
+    takes every process's latest sample from the last 2 s.
+  - Utilization is time busy **at the current clock**. Held to a few frames on an otherwise
+    idle GPU, the GPU clocks down and each frame counts for more "percent", so the governor
+    chased its own tail down to 2 fps (first A/B run below: 20.6% busy at 6 fps). The share is
+    now taken at full clock: busy × SM clock ÷ max SM clock (`nvml::Reading::at_full_clock`).
+    When the person's game keeps the GPU busy, the clock is high and the two agree; on an idle
+    GPU the lab gets more frames for the same busy time, which costs no one anything.
+
+**Measured** (2026-11-20, Alan Wake Remastered in instance `lim-awr`, 1280x720 with gamescope
+at 240 Hz so it isn't held to 60, standing in its first gameplay scene; the share toggled
+off/20% every 90 s, A B A B; NVML per container once a second, the first 10 s of each phase
+dropped). The GPU was never idle: another agent's AWR instance (`awr-rt`, whose supervisor
+runs an older Quiver without limits) and a Pharos container (`aco-t1`, Origins) were rendering
+throughout, which is the case the limit is for.
+
+| phase | instance's GPU share (at full clock) | busy time | presents/s | governor's part |
+|---|---|---|---|---|
+| off | 49.9% (p90 80) | 56.6% | 43.0 | - |
+| 20% | 10.5% (p90 22) | 14.0% | 11.3 | 10% (awr-rt used ~54%) |
+| off | 48.7% (p90 85) | 60.8% | 49.4 | - |
+| 20% | 10.3% (p90 19) | 16.1% | 37.3 | 10-20% |
+
+- It holds: the instance went from ~50% to ~10% of the GPU, within its part. Its part was
+  10% because the other lab instance used more than the whole share (`max(share / 2,
+  share − others)`); that instance isn't governed (old supervisor), so the lab as a whole was
+  over 20%. **Only instances whose supervisor has this code are held.**
+- Per second it's loose: p90 19-22% against a part of 10-20%, single seconds up to ~50%
+  busy. NVML's samples are 0.2-0.8 s each and lag; the governor moves the cap at most 25% a
+  second, so a scene change takes a few seconds to settle.
+- Earlier runs, before the two fixes in "What percent means": reading only new samples gave a
+  median of 0% (the cap never engaged); busy time without the clock correction held the game
+  at 20.6% busy but drove it to 6 fps, with the GPU otherwise idle and clocked down.
+- What it costs the lab: 43-49 fps became 11-37 fps, so wall-clock numbers in a limited
+  instance are the limit's, as `quiver lab` says (15.3).
+- CPU, same run: all 99-128 threads of the instance on cpus `6-11,18-23`, `cpu.max` `1200000
+  100000`; with `while_playing` and nobody playing (quiverd's real answer, the Pharos
+  container's `bridge` session not counted) `max 100000` and every thread on `0-23` within a
+  tick.
+- The test `vulkan_labgpu` (RADV, the 890M): 60 presents take 0.24 s free and 1.26 s at a
+  20 ms interval (59 held), device at LOW. `driver_low_priority` prints each driver's levels.
+
+### 15.3 What agents are told
+
+Under a limit, wall-clock speed in an instance measures the limit. So:
+
+- `quiver lab launch` adds `THROTTLED: lab limits in force (…)`, and says that fixed-step
+  virtual-clock results are unaffected (with the clock on) or how to get them (without);
+- `quiver lab status` prints the enforcer's line (`lab limits: while playing: Alan Wake
+  Remastered is running → cpu 6 cores (cpus 6-11,18-23), gpu ≤20% (priority …, governor
+  holding 18% at ≤41 fps)`) and the same note; `--json` has `limits` and `throttled`;
+- `quiver lab bench` labels its table and `bench.json` (`"timing": "throttled (lab limits in
+  force, wall clock)"`, `"limits"`, `"virtual_clock"`) when a limit was in force without the
+  virtual clock; `quiver lab gpu --for N` prints the note before the measurement;
+- `quiver lab host` lists every instance's line; `quiver lab limits` shows the profiles, whether
+  the person is playing, and each instance;
+- the brief has a "Lab limits and the virtual clock" section, and the `quiver` skill says the
+  same: the limits are the person's, don't change them, and test on the virtual clock
+  (§8.1, §8.2), whose results don't depend on having the GPU.
+
+`QUIVER_LAB_LIMITS=<file.json>` reads and writes the limits there instead of `config.json`
+(tests), and `QUIVER_LAB_PRETEND_PLAYING=<titles>` in a supervisor's environment makes it act
+as if those games ran (it can only make `while_playing` apply, never lift a limit).
+
+### 15.4 What the platform can't enforce
+
+- **cpuset.** Not delegated; affinity is re-applied every 2 s and a thread can set its own in
+  between (the quota still holds). Enabling it would need `Delegate=cpuset` for the person's
+  `user@.service` (root), which Quiver doesn't do.
+- **A hard GPU share.** Nothing in the kernel or the NVIDIA driver caps a process's GPU time;
+  the governor paces presents. Work that doesn't present (loading screens, shader compiles,
+  compute) can't be paced, and the status says so when it sees GPU use without presents. The
+  measurement is NVML's SM busy share per process, sampled about every 1/6 s, so short spikes
+  pass, and a game whose use doesn't scale with frames (a fixed cost per second) isn't held.
+- **Priority on NVIDIA.** Offers no level below the default on this driver (above). Nothing in
+  a rootless container can raise the person's game's priority instead, and Quiver wouldn't
+  touch their game anyway.
+- **VRAM.** Nothing limits it. On this 8 GB GPU, other agents' instances filling it made the
+  driver fail channel allocations (`NVRM … NV_ERR_STATE_IN_USE` in the kernel log), so new
+  devices failed: gamescope's at `up`, a game's at launch ("Your GPU must support DX12").
+- **Non-Vulkan rendering.** The layer sees Vulkan only (DXVK, vkd3d-proton, native Vulkan);
+  WineD3D/OpenGL games aren't paced.
+- **Memory bandwidth, caches, PCIe, power.** Shared, unlimited. A lab at 20% of the GPU still
+  heats a laptop that's shared with the game.

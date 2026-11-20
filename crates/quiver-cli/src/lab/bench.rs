@@ -149,17 +149,29 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
         eprintln!("bench: couldn't restore the original values: {e:#}");
     }
     run?;
+    // Under a lab limit without the virtual clock, wall-clock numbers measure the limit.
+    let run_id = super::read_state(&inst).run.map(|r| r.id);
+    let vclock = super::limits::run_has_virtual_clock(&inst, run_id);
+    let throttled = super::limits::status_of(&inst).filter(|s| s.active()).map(|s| (s.effective.describe(), super::limits::throttle_note(&inst, vclock)));
+    let label = throttled.as_ref().filter(|_| !vclock).map(|_| quiver_core::lab::limits::THROTTLED_LABEL);
     let report = serde_json::json!({ "instance": inst.name, "game": m.game, "display": m.display, "variants": variants, "results": results,
-        "stats": results.iter().map(|r| (r.label.clone(), r.stats())).collect::<std::collections::BTreeMap<_, _>>() });
+        "stats": results.iter().map(|r| (r.label.clone(), r.stats())).collect::<std::collections::BTreeMap<_, _>>(),
+        "limits": throttled.as_ref().map(|(d, _)| d), "virtual_clock": vclock, "timing": label.unwrap_or(if vclock { "virtual clock (fixed step)" } else { "wall clock" }) });
     std::fs::write(out.join("bench.json"), serde_json::to_vec_pretty(&report)?).context("write bench.json")?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
+        if let Some(l) = label {
+            println!("[{l}] frame rates and timings below measure the lab limit, not the variants");
+        }
         print!("{}", table(&results));
         for r in &results {
             for n in &r.notes {
                 println!("{}: {n}", r.label);
             }
+        }
+        if let Some((_, Some(n))) = &throttled {
+            println!("{n}");
         }
         println!("{}", out.join("bench.json").display());
     }

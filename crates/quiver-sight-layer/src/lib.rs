@@ -61,6 +61,7 @@ pub mod formats;
 pub mod graph;
 mod hooks;
 pub mod keys;
+pub mod labgpu;
 pub mod latency;
 mod pipelines;
 pub mod panel;

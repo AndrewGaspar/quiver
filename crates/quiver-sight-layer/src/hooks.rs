@@ -124,8 +124,34 @@ pub unsafe extern "system" fn create_device(
         let set = if data_cb.is_null() { None } else { (*data_cb).u.set_device_loader_data };
         (gdpa, std::mem::transmute::<*const c_void, vk::PFN_vkCreateDevice>(create), set)
     };
-    // SAFETY: the app's arguments.
-    let r = unsafe { create(physical, ci, alloc, out) };
+    // The lab's GPU limit (labgpu.rs, `quiver lab` games only): every queue at low priority.
+    let lowered = match (&instance, crate::labgpu::wants_low()) {
+        // SAFETY: the app's create info; the instance that owns `physical`.
+        (Some(i), true) => guard("lab priority", || unsafe { crate::labgpu::lower(&i.fns, physical, ci) }),
+        _ => None,
+    };
+    // SAFETY: the app's arguments, or the same with low-priority queues. The loader's link
+    // advances once per call down the chain, so a retry puts it back first.
+    let link_next = unsafe { (*link_info).u.layer_info };
+    let r = match &lowered {
+        Some(Ok(l)) => {
+            let r = unsafe { create(physical, l.info(), alloc, out) };
+            if r == vk::Result::SUCCESS {
+                crate::labgpu::note(if l.app_chose { crate::labgpu::Priority::AppChose } else { crate::labgpu::Priority::Low });
+                r
+            } else {
+                log!("vkCreateDevice with low queue priority failed ({r:?}); again without it");
+                crate::labgpu::note(crate::labgpu::Priority::Refused);
+                unsafe { (*link_info).u.layer_info = link_next };
+                unsafe { create(physical, ci, alloc, out) }
+            }
+        }
+        Some(Err(p)) => {
+            crate::labgpu::note(*p);
+            unsafe { create(physical, ci, alloc, out) }
+        }
+        None => unsafe { create(physical, ci, alloc, out) },
+    };
     if r != vk::Result::SUCCESS {
         return r;
     }
