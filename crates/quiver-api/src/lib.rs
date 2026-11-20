@@ -550,10 +550,14 @@ pub enum Request {
         all_stores: bool,
     },
     /// Install a game, or update it if installed (any store that installs: Ubisoft, Epic).
+    /// `after`: what quiverd does when it finishes (kept on the queue item; a daemon from
+    /// before ignores it).
     Install {
         #[serde(flatten)]
         game: game::GameField,
         language: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<downloads::AfterInstall>,
     },
     /// Adopt an existing install (Lutris/Connect) by reflink-copying its manifest files.
     Import {
@@ -676,6 +680,24 @@ pub enum Request {
         #[serde(flatten)]
         game: game::GameField,
         to: downloads::QueueMove,
+    },
+    /// Make a game's queue item download now (`downloads::RunNow`): it goes to the top and,
+    /// when `max_active` downloads already run, the lowest-placed one stops at a safe point
+    /// and goes back to the queue right behind it, keeping its progress. Refused while
+    /// that download is verifying files, or while the game is being played.
+    QueueRunNow {
+        #[serde(flatten)]
+        game: game::GameField,
+    },
+    /// Change what quiverd does when a queued or running install finishes (the
+    /// `downloads::QueueEntry` comes back). Fields left out stay as they are.
+    QueueSetAfter {
+        #[serde(flatten)]
+        game: game::GameField,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steam: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desktop: Option<bool>,
     },
     /// Pause a game's download (it stops at a slice boundary and resumes where it was).
     QueuePause {
@@ -1588,15 +1610,33 @@ mod tests {
         assert!(matches!(r, Request::Playtime { game } if game == GameRef::ubisoft(1)));
         // Install, verify and the queue take any store's game; Ubisoft's still go out as
         // `product_id`, so a daemon from before reads them.
-        let v = serde_json::to_value(Request::Install { game: GameRef::ubisoft(3539).into(), language: None }).unwrap();
+        let v = serde_json::to_value(Request::Install { game: GameRef::ubisoft(3539).into(), language: None, after: None }).unwrap();
         assert_eq!(v, serde_json::json!({"method": "install", "params": {"product_id": 3539, "language": null}}));
+        // "When it finishes" rides on the install and the queue item; older peers leave it out.
+        let r: Request = serde_json::from_str(r#"{"method":"install","params":{"product_id":3539,"language":null}}"#).unwrap();
+        assert!(matches!(r, Request::Install { after: None, .. }));
+        let after = downloads::AfterInstall { steam: true, desktop: false };
+        let v = serde_json::to_value(Request::Install { game: GameRef::ubisoft(3539).into(), language: None, after: Some(after) }).unwrap();
+        assert_eq!(v["params"]["after"], serde_json::json!({"steam": true, "desktop": false}));
+        let r: Request = serde_json::from_str(r#"{"method":"queue_set_after","params":{"game":"epic:Kestrel","desktop":true}}"#).unwrap();
+        assert!(matches!(r, Request::QueueSetAfter { game, steam: None, desktop: Some(true) } if game == GameRef::new(StoreId::Epic, "Kestrel").unwrap()));
+        let v = serde_json::to_value(Request::QueueRunNow { game: GameRef::ubisoft(5595).into() }).unwrap();
+        assert_eq!(v, serde_json::json!({"method": "queue_run_now", "params": {"product_id": 5595}}));
+        let n: downloads::RunNow = serde_json::from_value(serde_json::json!({"outcome": "switching", "from": "epic:Kestrel", "from_name": "AW2"})).unwrap();
+        assert!(matches!(n, downloads::RunNow::Switching { .. }));
+        assert_eq!("now".parse::<downloads::QueueMove>(), Ok(downloads::QueueMove::Now));
         let epic = GameRef::new(StoreId::Epic, "Kestrel").unwrap();
         let v = serde_json::to_value(Request::QueuePause { game: epic.into() }).unwrap();
         assert_eq!(v, serde_json::json!({"method": "queue_pause", "params": {"game": "epic:Kestrel"}}));
         let r: Request = serde_json::from_str(r#"{"method":"verify","params":{"product_id":420,"repair":true}}"#).unwrap();
         assert!(matches!(r, Request::Verify { game, repair: true } if game == GameRef::ubisoft(420)));
-        let q: downloads::QueueEntry = serde_json::from_value(serde_json::json!({"product_id": 0, "game": "epic:Kestrel", "name": "AW", "kind": "install", "state": "queued", "source": "cli", "added": "2026-11-18T00:00:00Z"})).unwrap();
+        let mut q: downloads::QueueEntry = serde_json::from_value(serde_json::json!({"product_id": 0, "game": "epic:Kestrel", "name": "AW", "kind": "install", "state": "queued", "source": "cli", "added": "2026-11-18T00:00:00Z"})).unwrap();
         assert_eq!(q.game_ref(), epic);
+        assert!(q.after.is_empty());
+        assert!(serde_json::to_value(&q).unwrap().get("after").is_none(), "nothing ticked: left out");
+        q.after.desktop = true;
+        let back: downloads::QueueEntry = serde_json::from_value(serde_json::to_value(&q).unwrap()).unwrap();
+        assert_eq!(back.after, downloads::AfterInstall { steam: false, desktop: true });
         // Older clients ask for the library without `all_stores`, and get Ubisoft's.
         let r: Request = serde_json::from_str(r#"{"method":"library","params":{"refresh":false}}"#).unwrap();
         assert!(matches!(r, Request::Library { refresh: false, all_stores: false }));

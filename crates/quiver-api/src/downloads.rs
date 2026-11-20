@@ -40,6 +40,9 @@ pub enum QueueMove {
     Up,
     Down,
     Top,
+    /// To the top and running now: the same as `Request::QueueRunNow` (a running download
+    /// may be switched out for it).
+    Now,
 }
 
 impl std::str::FromStr for QueueMove {
@@ -49,9 +52,67 @@ impl std::str::FromStr for QueueMove {
             "up" => Ok(Self::Up),
             "down" => Ok(Self::Down),
             "top" => Ok(Self::Top),
-            _ => Err(format!("expected up, down or top, got '{s}'")),
+            "now" => Ok(Self::Now),
+            _ => Err(format!("expected up, down, top or now, got '{s}'")),
         }
     }
+}
+
+/// What `Request::QueueRunNow` did.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum RunNow {
+    /// A slot was free: it started.
+    Started,
+    /// It was downloading already.
+    AlreadyRunning,
+    /// The download that ran is stopping at a safe point (its finished slices and files are
+    /// kept) and goes back to the queue right behind this one, which starts once it stopped.
+    Switching { from: crate::GameRef, from_name: String },
+    /// A download is finishing (registering its install, or already stopping); this one
+    /// starts as soon as it's done.
+    Waiting { for_name: String },
+}
+
+impl RunNow {
+    /// In words for people, of the game `name`.
+    pub fn message(&self, name: &str) -> String {
+        match self {
+            Self::Started => format!("Downloading {name} now"),
+            Self::AlreadyRunning => format!("{name} is already downloading"),
+            Self::Switching { from_name, .. } => format!("Switching to {name}: {from_name} goes back to the queue, keeping its progress"),
+            Self::Waiting { for_name } => format!("{name} is next: it starts as soon as {for_name} finishes"),
+        }
+    }
+}
+
+/// "When it finishes": what quiverd does once an install completes (Ubisoft and Epic
+/// games). Kept on the queue item, so a restart of the app or of quiverd keeps it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AfterInstall {
+    /// Add a Steam shortcut (staged until Steam restarts while Steam runs; quiverd never
+    /// restarts Steam).
+    #[serde(default)]
+    pub steam: bool,
+    /// Write a .desktop entry.
+    #[serde(default)]
+    pub desktop: bool,
+}
+
+impl AfterInstall {
+    pub fn is_empty(&self) -> bool {
+        !self.steam && !self.desktop
+    }
+}
+
+/// How the lines an install's job carries about what [`AfterInstall`] did (in its
+/// `detail`) start, so front ends can tell them from the install's own notes.
+pub const AFTER_STEAM: &str = "Steam: ";
+pub const AFTER_DESKTOP: &str = ".desktop entry: ";
+
+/// Whether a job's detail line says what [`AfterInstall`] did.
+pub fn is_after_note(line: &str) -> bool {
+    line.starts_with(AFTER_STEAM) || line.starts_with(AFTER_DESKTOP)
 }
 
 /// One item in the download queue. The queue is in order: items start from the top,
@@ -94,6 +155,9 @@ pub struct QueueEntry {
     /// Slice downloads tried again so far (connection trouble, expired URLs).
     #[serde(default)]
     pub retries: u64,
+    /// What quiverd does when the install finishes (left out when nothing).
+    #[serde(default, skip_serializing_if = "AfterInstall::is_empty")]
+    pub after: AfterInstall,
 }
 
 impl QueueEntry {

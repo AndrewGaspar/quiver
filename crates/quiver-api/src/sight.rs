@@ -131,6 +131,10 @@ pub struct PanelReport {
     pub open: bool,
     #[serde(default)]
     pub section: PanelSection,
+    /// The section is docked: a column on the left with the game in full view, no blur and
+    /// no dim (design/SIGHT.md §9). Absent from a quiver-sight from before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub docked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

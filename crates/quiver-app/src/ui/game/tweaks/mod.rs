@@ -8,6 +8,7 @@
 
 pub mod logic;
 
+use quiver_ui::depth::DepthExt;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -1312,6 +1313,7 @@ impl Quiver {
         let inset = if game.is_some() { self.pane_bp().pad().min(24.) } else { 24. };
         let bar = div()
             .id("tweaks-pending")
+            .depth_overlay()
             .absolute()
             .left(px(inset))
             .right(px(inset))

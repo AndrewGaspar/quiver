@@ -2,6 +2,7 @@
 //! wrappers, environment, arguments, DLL overrides), the equivalent `quiver set`, and the
 //! revision history with per-revision diffs and restore.
 
+use quiver_ui::depth::DepthExt;
 use gpui::{AnyElement, Context, Entity, IntoElement, MouseDownEvent, ParentElement, SharedString, Styled, div, prelude::*, px};
 use quiver_api::{GameSettings, Revision, SettingOp};
 
@@ -145,6 +146,7 @@ impl Quiver {
                 gpui::anchored().offset(gpui::point(px(0.), px(30.))).snap_to_window_with_margin(px(8.)).child(
                     div()
                         .id(("dd-list", dd as usize))
+                        .depth_overlay()
                         .occlude()
                         .mt(px(4.))
                         .w(px(width.max(300.)))
@@ -476,6 +478,7 @@ impl Quiver {
         Some(
             div()
                 .id("launch-pending")
+                .depth_overlay()
                 .absolute()
                 .left(px(inset))
                 .right(px(if pb.two_columns() { 424. } else { inset }))

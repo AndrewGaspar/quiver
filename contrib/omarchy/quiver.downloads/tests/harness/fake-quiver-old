@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stand-in for a `quiver` from before --no-start (clap's answer).
+printf "error: unexpected argument '--no-start' found\n\nUsage: quiver queue --json\n\nFor more information, try '--help'.\n" >&2
+exit 2

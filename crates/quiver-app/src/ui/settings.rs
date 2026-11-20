@@ -2,6 +2,7 @@
 //! Automation and CLI, About. A section list on the left (Zone::Side), the section on the
 //! right; its buttons are the focusable body rows, in [`Quiver::settings_actions`] order.
 
+use quiver_ui::depth::DepthExt;
 use crate::model::Gid;
 use std::collections::BTreeMap;
 
@@ -40,6 +41,10 @@ pub enum SettingsAction {
     Tweak(usize),
     /// Accounts › Epic Games (`settings/epic.rs`).
     Epic(epic::EpicAction),
+    /// Display: "3D on stereo displays" (`stereo_ui.rs`).
+    Stereo(crate::stereo_ui::Setting),
+    /// Display: the 3D depth strength, percent.
+    StereoDepth(u32),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -58,6 +63,7 @@ pub fn section_icon(s: SettingsSection) -> Icon {
         SettingsSection::Tweaks => Icon::SlidersHorizontal,
         SettingsSection::Steam => Icon::Gamepad,
         SettingsSection::Appearance => Icon::Palette,
+        SettingsSection::Display => Icon::Monitor,
         SettingsSection::Automation => Icon::Bot,
         SettingsSection::About => Icon::Info,
     }
@@ -130,6 +136,10 @@ impl Quiver {
                 }
             }
             SettingsSection::Appearance => {}
+            SettingsSection::Display => {
+                v.extend([crate::stereo_ui::Setting::Auto, crate::stereo_ui::Setting::Off].map(SettingsAction::Stereo));
+                v.extend(crate::stereo_ui::STRENGTHS.map(SettingsAction::StereoDepth));
+            }
             SettingsSection::Automation => {
                 v.push(SettingsAction::Copy(quiver_api::socket_path().display().to_string()));
             }
@@ -163,6 +173,8 @@ impl Quiver {
             SettingsAction::Hud(f) => self.hud_cycle(quiver_api::perf::HudScopeRef::global(), f, cx),
             SettingsAction::Tweak(i) => self.tweaks_activate(None, i, cx),
             SettingsAction::Epic(a) => self.epic_action(a, cx),
+            SettingsAction::Stereo(s) => self.set_stereo_setting(s, cx),
+            SettingsAction::StereoDepth(p) => self.set_stereo_strength(p, cx),
         }
     }
 
@@ -226,6 +238,7 @@ impl Quiver {
             SettingsSection::Tweaks => self.settings_tweaks(th, cx),
             SettingsSection::Steam => self.settings_steam(th, &actions, cx),
             SettingsSection::Appearance => self.settings_appearance(th, cx),
+            SettingsSection::Display => self.settings_display(th, &actions, cx),
             SettingsSection::Automation => self.settings_automation(th, &actions, cx),
             SettingsSection::About => self.settings_about(th, &actions, cx),
         };
@@ -328,6 +341,7 @@ impl Quiver {
                 .bg(th.ink0)
                 .border_b_1()
                 .border_color(th.line1)
+                .depth_surface()
                 .child(display(20., BOLD, th.tx1).child("Settings"))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(rows))
                 .into_any_element();
@@ -341,6 +355,7 @@ impl Quiver {
             .px(px(10.))
             .pt(px(22.))
             .pb(px(16.))
+            .depth_surface()
             .bg(th.ink0)
             .border_r_1()
             .border_color(th.line1)
@@ -1241,6 +1256,86 @@ impl Quiver {
     // -----------------------------------------------------------------------------------------
     // Appearance
 
+    /// Display: 3D on stereo displays, and its depth (`stereo_ui.rs`, design/STEREO-UI.md).
+    fn settings_display(&mut self, th: &Theme, actions: &[SettingsAction], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::stereo_ui::{STRENGTHS, Setting};
+        let setting = self.stereo.prefs.stereo_ui;
+        let percent = self.stereo.prefs.stereo_depth;
+        // A segmented control whose segments are focusable settings actions.
+        let seg = |this: &Self, items: Vec<(SettingsAction, String, bool)>, cx: &mut Context<Self>| {
+            div().flex().flex_none().p(px(2.)).gap(px(2.)).rounded(px(8.)).bg(th.ink1).border_1().border_color(th.line2).children(
+                items.into_iter().map(|(a, label, on)| {
+                    let focused = this.action_focused(actions, &a);
+                    let id = actions.iter().position(|x| *x == a).unwrap_or(usize::MAX);
+                    div()
+                        .id(("display-seg", id))
+                        .px(px(12.))
+                        .py(px(5.))
+                        .rounded(px(6.))
+                        .text_size(px(12.5))
+                        .text_color(if on { th.tx1 } else { th.tx2 })
+                        .when(on, |d| d.bg(th.ink5).font_weight(MEDIUM))
+                        .when(!on, |d| d.hover(|s| s.bg(th.ink3)))
+                        .cursor_pointer()
+                        .focus_ring(focused, th, 6.)
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.nav.focus(&this.layout, Target::Body(id));
+                            this.run_settings_action(a.clone(), cx);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }),
+            )
+        };
+        let mode = seg(
+            self,
+            [Setting::Auto, Setting::Off].into_iter().map(|s| (SettingsAction::Stereo(s), s.label().to_owned(), s == setting)).collect(),
+            cx,
+        );
+        let strength = seg(
+            self,
+            STRENGTHS.into_iter().map(|p| (SettingsAction::StereoDepth(p), format!("{p}%"), p == percent)).collect(),
+            cx,
+        )
+        .when(setting == Setting::Off, |d| d.opacity(0.55));
+        let packed = self.stereo.packed;
+        let status = div()
+            .flex()
+            .items_start()
+            .gap(px(8.))
+            .py(px(10.))
+            .border_t_1()
+            .border_color(th.line1)
+            .text_size(px(12.))
+            .text_color(if packed { th.tx1 } else { th.tx3 })
+            .child(icon(Icon::Monitor, 14., if packed { th.acc_hi } else { th.tx3 }))
+            .child(div().flex_1().min_w_0().child(self.stereo_status()));
+        vec![
+            head_row(th, "Display", "How Quiver draws itself on the display it's on.", None),
+            group(
+                th,
+                "3D on stereo displays",
+                "XReal glasses in 3D mode, a HypXRland XR monitor",
+                vec![
+                    frow(
+                        th,
+                        "3D",
+                        Some("Auto draws each eye itself whenever the window is on a side-by-side stereo display: art at the back, cards a step up, controls a step more, focus and menus nearest. Flat everywhere else."),
+                        div().flex().child(mode).into_any_element(),
+                    ),
+                    frow(
+                        th,
+                        "Depth",
+                        Some("How far things float in front of the window. The same steps as Sight's depth in games."),
+                        div().flex().child(strength).into_any_element(),
+                    ),
+                    status.into_any_element(),
+                ],
+            ),
+        ]
+    }
+
     fn settings_appearance(&mut self, th: &Theme, _cx: &mut Context<Self>) -> Vec<AnyElement> {
         let builtin = th.name.as_ref() == "Quiver dark";
         let hyprpad = self.hyprpad_running();
@@ -1867,18 +1962,8 @@ fn path_field(th: &Theme, path: &str) -> Div {
         .child(mono(12., th.tx1).flex_1().min_w_0().truncate().child(path.to_owned()))
 }
 
-/// The Quiver mark (three stacked squares), at `size`.
-pub fn brand_mark(th: &Theme, size: f32) -> Div {
-    let s = size / 24.;
-    div()
-        .relative()
-        .size(px(size))
-        .flex_none()
-        .child(div().absolute().left(px(0.)).top(px(8. * s)).size(px(16. * s)).rounded(px(5. * s)).bg(th.mark1))
-        .child(div().absolute().left(px(4. * s)).top(px(4. * s)).size(px(16. * s)).rounded(px(5. * s)).bg(th.mark2))
-        .child(div().absolute().left(px(8. * s)).top(px(0.)).size(px(16. * s)).rounded(px(5. * s)).bg(gpui::linear_gradient(
-            135.,
-            gpui::linear_color_stop(th.acc_hi, 0.),
-            gpui::linear_color_stop(th.acc, 1.),
-        )))
+/// The Quiver mark ("Parallax": a Q whose tail is an arrow, drawn as a left/right pair), at
+/// `size`: the dark-ground artwork on dark themes, the light one on light themes.
+pub fn brand_mark(th: &Theme, size: f32) -> gpui::Img {
+    gpui::img(if th.dark { "brand/mark-dark.svg" } else { "brand/mark-light.svg" }).size(px(size)).flex_none()
 }

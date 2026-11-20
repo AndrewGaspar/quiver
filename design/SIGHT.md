@@ -1615,6 +1615,62 @@ A game that keeps its own cursor visible and confines the pointer shows it under
 Wayland repeats a key the game held when the panel opened until it's released. hyprpad's mode
 follows within its rescan interval.
 
+### The shell, docking and the Mods section (2026-11-19)
+
+Toward the SightMods / SightSession / docked mock-ups (`panel/view.rs`, `panel/hints.rs`,
+`panel/sections/`).
+
+- **Shell.** No side list: a tab row on top ("Sight", LB, Session · Mods · Tweaks · Performance ·
+  Achievements, RB; on the right the game, profile, clock and battery with "charging" /
+  "plugged in"), the section's body in cards, and the hint bar along the bottom. The rows have
+  focus from the start; B closes (in Mods it goes back to the surface list first).
+- **Hint API** (`panel/hints.rs`): a section adds its hints (`Hints::add([Glyph::X], "Reset to
+  default")`, a right-aligned `detail`) from one function that `PanelView::section_hints`
+  calls for it; the shell adds B, LB / RB and R3 after them unless the section has its own.
+- **Docked** (the docked proposal): Mods and Tweaks open as a 500 px column on the left with no
+  blur and no dim, so the game shows unobstructed beside it, the HUD included (unless it's
+  anchored on the left); Session, Performance and Achievements stay centred over the blurred
+  game. R3 (hyprpad types Tab; Tab on a keyboard) swaps them, remembered per section in
+  `sight.toml` (`[docked]`, only what differs from the default). The view tells the controller
+  (`Msg::PanelLayout`), which drops the layer's blur request while docked and asks again when
+  centred; `quiver sight status` says `layout: docked`. In the game the column is part of the
+  same `panel.image`, transparent around it; on a stereo frame each eye gets it, and the lifts
+  follow (the column is the card, the focused row inside it). Input capture is unchanged:
+  the panel has the keyboard, mouse and pad while it's open, docked or not.
+- **Change chip.** Every outcome quiverd reports for a change (Mods or Tweaks) shows a chip
+  at the top of the game area beside the column: "Crowd density 1.0× → 2.0× · live, 0.6 s
+  ago", "· next launch", "· at next area load", "· not applied: …", fading after 3.5 s. It
+  floats at the panel's rung, and gives way to a dialog (four lifts at most).
+- **Y: tap pins, hold compares.** Y released within 350 ms pins the focused row to the quick
+  menu (built separately; until then it says so). Held on a live option of a surface that
+  reaches the game, it flips the option to its value before this session's last change (or
+  its default) with `live: only` until Y is let go, then flips it back the same way; nothing
+  is saved. A release followed within 60 ms by a press is key repeat, not a new press. gilrs
+  pads (no hyprpad) only tap. Tweaks have no session-only set, so they don't compare.
+- **Mods** (SightMods): the profile's surfaces on the left (each mod's, the game's own
+  settings, runtimes such as DXVK) with where they take effect ("live · SDK connected", "ACO.ini
+  · next launch"), and the mods with none ("Skip intro videos has no options"). The picked
+  surface: its pages as tabs (LT / RT; hyprpad types Home / End), a preset picker, and its
+  option rows: label, badge (LIVE, NEXT AREA LOAD for an `at` moment, NEXT LAUNCH) and help on
+  the left, the control on the right (a slider with − / + for numbers with a range, ‹ › for
+  choices, a switch for toggles) with the result line under it ("Applied live · DLSS
+  confirmed it 0.6 s ago"). On the right: "DLSS right now" (the surface's `state` / `text` /
+  gauge metrics from the session's catalog, subscribed with the panel's metrics), "This
+  session" (the changes made in game; **Revert this session** is `OptionsRevertSession`;
+  **Session only** takes them out of the profile with `live: no` and sets them again with
+  `live: only`, and later changes go out `live: only` until it's turned off), and "Locked in
+  game" (options the mod marks dangerous: the app changes those). Saved changes that wait for
+  the next launch get a Restart bar with Undo (each back to where the session started). X
+  resets the focused option (`OptionOp::Reset`), and the hint bar shows its default and range.
+  Docked, the same stacks in the column.
+- **Tweaks**: "Saving to the DLSS profile", its pages and rows as in Mods, and the Restart bar.
+  (The scope picker of the docked mock isn't built: it saves at the running profile's scope.)
+- **Keys** (`state::panel_key`, `tools/hyprpad/quiver-sight.lua`): arrows, Enter, Escape as
+  before; LB / RB Page Up / Down (and Q / E, Shift+Tab); LT / RT Home / End (and `[` `]`); X
+  `x` (and Delete); Y `y` (timed on its key-up); R3 Tab. The snippet's old `h.bind("lstick_…")`
+  lines are gone: hyprpad's `h.bind` takes guide chords only, and they stopped the whole
+  config from loading.
+
 
 ---
 

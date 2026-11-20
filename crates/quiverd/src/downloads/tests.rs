@@ -95,6 +95,12 @@ struct TestHost {
     runs: AtomicUsize,
     /// What `pending_updates` answers.
     pending: Mutex<Vec<Pending>>,
+    /// `after_install` calls: the game and its choices.
+    afters: Mutex<Vec<(quiver_api::GameRef, AfterInstall)>>,
+    /// Products whose install, once downloaded, holds in its finalizing step until `release`.
+    hold: Mutex<HashSet<u32>>,
+    /// Lets held installs finish, and repairs (which only verify here) end their check.
+    release: Semaphore,
 }
 
 impl TestHost {
@@ -108,6 +114,9 @@ impl TestHost {
             root,
             runs: AtomicUsize::new(0),
             pending: Mutex::default(),
+            afters: Mutex::default(),
+            hold: Mutex::default(),
+            release: Semaphore::new(0),
         })
     }
     fn job(&self, id: Option<u64>) -> Job {
@@ -148,13 +157,38 @@ impl Host for TestHost {
             if !item.game_ref().is_ubisoft() {
                 return Ok(Outcome { status: format!("Updated {}", item.name), detail: Vec::new() });
             }
+            // A repair here only verifies, until released.
+            if item.kind == QueueKind::Repair {
+                phase(Phase::Verifying);
+                self.release.acquire().await.unwrap().forget();
+                return Ok(Outcome { status: "All files OK".into(), detail: Vec::new() });
+            }
             let plan = self.plans[&item.product_id].clone();
             let dest = self.root.join(item.product_id.to_string());
             let cdn = self.cdn.clone();
             phase(Phase::Status("Downloading…".into()));
             progress.total.store(plan.download_bytes, Ordering::Relaxed);
-            run_local(move || async move { install::install(&mut Src(cdn), &plan, &dest, false, &progress).await }).await?;
+            let p = progress.clone();
+            run_local(move || async move { install::install(&mut Src(cdn), &plan, &dest, false, &p).await }).await?;
+            if self.hold.lock().unwrap().contains(&item.product_id) {
+                // Registering the install: a cancel no longer stops it.
+                progress.finalizing.store(true, Ordering::Relaxed);
+                self.release.acquire().await.unwrap().forget();
+            }
             Ok(Outcome { status: "Installed".into(), detail: Vec::new() })
+        })
+    }
+    fn after_install(self: Arc<Self>, item: QueueEntry) -> BoxFut<Vec<String>> {
+        Box::pin(async move {
+            self.afters.lock().unwrap().push((item.game_ref(), item.after));
+            let mut out = Vec::new();
+            if item.after.desktop {
+                out.push(format!("{}created", quiver_api::downloads::AFTER_DESKTOP));
+            }
+            if item.after.steam {
+                out.push(format!("{}added", quiver_api::downloads::AFTER_STEAM));
+            }
+            out
         })
     }
 }
@@ -164,6 +198,19 @@ async fn until(what: &str, f: impl Fn() -> bool) {
         if f() {
             return;
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// [`until`], letting one slice through the CDN at each look: for waits where several
+/// downloads compete for the slices (one must stop, the others keep going slowly).
+async fn until_fed(cdn: &Cdn, what: &str, f: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if f() {
+            return;
+        }
+        cdn.gate.add_permits(1);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timed out waiting for {what}");
@@ -211,11 +258,11 @@ fn queue_order_pause_and_restart() {
         let d = Downloads::load(queue_file.clone(), DownloadSettings::default());
         d.start(&host);
         for (id, name) in [(A, "A"), (B, "B"), (C, "C")] {
-            d.enqueue(&host, "cli", id, name.into(), QueueKind::Install, None, None).unwrap();
+            d.enqueue(&host, "cli", id, name.into(), QueueKind::Install, None, None, None).unwrap();
         }
         // The same game again: the same job.
         let ja = d.get(A).unwrap().job_id;
-        assert_eq!(d.enqueue(&host, "gui", A, "A".into(), QueueKind::Install, None, None).unwrap(), ja.unwrap());
+        assert_eq!(d.enqueue(&host, "gui", A, "A".into(), QueueKind::Install, None, None, None).unwrap(), ja.unwrap());
         assert_eq!(order(&d), [(A, QueueState::Downloading), (B, QueueState::Queued), (C, QueueState::Queued)]);
         assert_eq!(host.job(d.get(C).unwrap().job_id).status, "Queued · #3");
 
@@ -306,11 +353,11 @@ fn concurrency_failures_and_removal() {
         d.start(&host);
         host.playing.lock().unwrap().insert(C);
         for id in [A, B, C] {
-            d.enqueue(&host, "cli", id, id.to_string(), QueueKind::Install, None, None).unwrap();
+            d.enqueue(&host, "cli", id, id.to_string(), QueueKind::Install, None, None, None).unwrap();
         }
         assert_eq!(order(&d), [(A, QueueState::Downloading), (B, QueueState::Downloading), (C, QueueState::Queued)]);
         // Repair of a queued game is refused while it is queued for install.
-        assert!(d.enqueue(&host, "cli", A, "A".into(), QueueKind::Repair, None, None).is_err());
+        assert!(d.enqueue(&host, "cli", A, "A".into(), QueueKind::Repair, None, None, None).is_err());
         assert!(d.ensure_idle(A).is_err());
         cdn.open();
         until("B failed, A done", || order(&d) == [(B, QueueState::Failed), (C, QueueState::Queued)]).await;
@@ -335,9 +382,9 @@ fn concurrency_failures_and_removal() {
         cdn.gate.forget_permits(1 << 30);
         std::fs::remove_dir_all(root.join(A.to_string())).unwrap();
         std::fs::remove_dir_all(root.join(B.to_string())).unwrap();
-        let ja = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None).unwrap();
-        let jb = d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None).unwrap();
-        let jc = d.enqueue(&host, "cli", C, "C".into(), QueueKind::Repair, None, None).unwrap();
+        let ja = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        let jb = d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
+        let jc = d.enqueue(&host, "cli", C, "C".into(), QueueKind::Repair, None, None, None).unwrap();
         d.remove(&host, "cli", C, false).unwrap();
         assert!(host.job(Some(jc)).done);
         d.remove(&host, "cli", A, false).unwrap();
@@ -371,8 +418,10 @@ fn bad_queue_file_is_ignored_and_states_restored() {
         total_bytes: 10,
         speed: 3,
         retries: 0,
+        after: AfterInstall::default(),
     };
     let saved = Saved {
+        running: None,
         items: vec![
             entry(1, QueueState::Verifying),
             entry(2, QueueState::Done),
@@ -405,7 +454,7 @@ fn retries_show_in_the_job() {
         let host = TestHost::new(HashMap::from([(A, plan)]), cdn.clone(), root.clone());
         let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
         d.start(&host);
-        let job = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None).unwrap();
+        let job = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
         until("retrying shown", || host.job(Some(job)).status.starts_with("Retrying…")).await;
         until("A done", || d.list().is_empty()).await;
         let j = host.job(Some(job));
@@ -464,7 +513,7 @@ fn auto_update_across_stores() {
         until("C removed", || d.get(C).is_none()).await;
         assert!(d.auto_update(&host).is_empty());
         // Queuing it by hand clears that.
-        d.enqueue(&host, "cli", C, "C".into(), QueueKind::Update, None, None).unwrap();
+        d.enqueue(&host, "cli", C, "C".into(), QueueKind::Update, None, None, None).unwrap();
         cdn.open();
         until("C updated", || d.list().is_empty()).await;
         assert!(files_ok(&root, C, &contents[&C]));
@@ -496,8 +545,8 @@ fn throughput_history() {
             d.sample(t0 + Duration::from_secs(n.get()), wall + chrono::Duration::seconds(n.get() as i64));
         };
         let received = || d.items.lock().unwrap().iter().find(|i| i.entry.product_id == A).and_then(|i| i.progress.as_ref().map(|p| p.received.load(Ordering::Relaxed)));
-        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None).unwrap();
-        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None).unwrap();
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
         assert!(d.throughput(None).is_empty(), "nothing sampled yet");
         tick(); // A runs, nothing in yet
         cdn.gate.add_permits(5);
@@ -527,5 +576,306 @@ fn throughput_history() {
         until("A done", || d.get(A).is_none()).await;
         tick();
         assert!(d.throughput(None).is_empty());
+    });
+}
+
+
+fn ids(d: &Downloads) -> Vec<u32> {
+    d.list().iter().map(|e| e.product_id).collect()
+}
+
+/// Plans, and each game's file contents, by product.
+type Fixtures = (HashMap<u32, Plan>, HashMap<u32, Vec<Vec<u8>>>, Arc<Cdn>);
+
+/// Plans for `ids`, `files` files of `slices` slices each, on one CDN (gate closed).
+fn setup(ids: &[u32], files: usize, slices: usize) -> Fixtures {
+    let mut cdn = Cdn::default();
+    let mut plans = HashMap::new();
+    let mut contents = HashMap::new();
+    for &id in ids {
+        let (p, c) = fixture(id, files, slices, &mut cdn);
+        plans.insert(id, p);
+        contents.insert(id, c);
+    }
+    (plans, contents, Arc::new(cdn))
+}
+
+fn slices(plan: &Plan) -> usize {
+    plan.files.iter().map(|f| f.slices.len()).sum()
+}
+
+/// "Download now" with one download at a time: the running one is switched out at a slice
+/// boundary, goes back to the queue right behind (queued, not paused, same job), keeps
+/// what it finished, and resumes from there once the new one is done.
+#[test]
+fn run_now_switches_the_running_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, contents, cdn) = setup(&[A, B, C], 2, 30);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        d.start(&host);
+        for id in [A, B, C] {
+            d.enqueue(&host, "cli", id, id.to_string(), QueueKind::Install, None, None, None).unwrap();
+        }
+        let ja = d.get(A).unwrap().job_id;
+        cdn.gate.add_permits(10);
+        until("A's first slices", || cdn.gets(A) >= 10).await;
+
+        // Already running: nothing to do.
+        assert_eq!(d.run_now(&host, "gui", A).unwrap(), RunNow::AlreadyRunning);
+        let r = d.run_now(&host, "gui", C).unwrap();
+        assert_eq!(r, RunNow::Switching { from: A.into(), from_name: A.to_string() });
+        assert_eq!(ids(&d), [C, A, B]);
+        assert!(host.job(ja).status.starts_with("Switching to"), "{}", host.job(ja).status);
+        cdn.gate.add_permits(30); // the slices in flight finish
+        until("C running", || state(&d, C) == Some(QueueState::Downloading)).await;
+        assert_eq!(order(&d), [(C, QueueState::Downloading), (A, QueueState::Queued), (B, QueueState::Queued)]);
+        let a = d.get(A).unwrap();
+        assert_eq!((a.position, a.job_id), (2, ja), "right behind, the same job");
+        assert!(!host.job(ja).done);
+        let (left, _) = install::remaining(&plans[&A], &root.join(A.to_string()));
+        assert!(left < plans[&A].download_bytes, "A's progress is on disk");
+        let gets_a = cdn.gets(A);
+
+        cdn.open();
+        until("all done", || d.list().is_empty()).await;
+        for id in [A, B, C] {
+            assert!(files_ok(&root, id, &contents[&id]), "{id}");
+        }
+        // A picked up where it stopped: every slice fetched once.
+        assert_eq!(cdn.gets(A), slices(&plans[&A]), "A re-fetched slices ({gets_a} before the switch)");
+        assert_eq!(host.job(ja).status, "Installed");
+        // `move … now` is the same request; a game not in the queue is refused.
+        assert!(d.run_now(&host, "gui", A).is_err());
+    });
+}
+
+/// Two at a time: the lower-placed running one makes way; a paused item can be started
+/// this way, and a free slot starts it at once without switching anything.
+#[test]
+fn run_now_with_two_at_a_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    const D: u32 = 104;
+    let (plans, contents, cdn) = setup(&[A, B, C, D], 1, 200);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings { max_active: 2, ..Default::default() });
+        d.start(&host);
+        for id in [A, B, C, D] {
+            d.enqueue(&host, "cli", id, id.to_string(), QueueKind::Install, None, None, None).unwrap();
+        }
+        d.pause(&host, "cli", D).unwrap();
+        assert_eq!(order(&d), [(A, QueueState::Downloading), (B, QueueState::Downloading), (C, QueueState::Queued), (D, QueueState::Paused)]);
+        let r = d.run_now(&host, "gui", D).unwrap();
+        assert_eq!(r, RunNow::Switching { from: B.into(), from_name: B.to_string() });
+        until_fed(&cdn, "D running", || state(&d, D) == Some(QueueState::Downloading)).await;
+        assert_eq!(order(&d), [(D, QueueState::Downloading), (A, QueueState::Downloading), (B, QueueState::Queued), (C, QueueState::Queued)]);
+
+        cdn.open();
+        until("all done", || d.list().is_empty()).await;
+        for id in [A, B, C, D] {
+            assert!(files_ok(&root, id, &contents[&id]), "{id}");
+        }
+
+        // A free slot: run_now just starts it (B paused while its game ran, so it didn't start).
+        cdn.gate.forget_permits(1 << 30);
+        for id in [A, B] {
+            std::fs::remove_dir_all(root.join(id.to_string())).unwrap();
+        }
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        host.playing.lock().unwrap().insert(B);
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
+        d.pause(&host, "cli", B).unwrap();
+        host.playing.lock().unwrap().clear();
+        assert_eq!(order(&d), [(A, QueueState::Downloading), (B, QueueState::Paused)]);
+        assert_eq!(d.run_now(&host, "gui", B).unwrap(), RunNow::Started);
+        assert_eq!(order(&d), [(B, QueueState::Downloading), (A, QueueState::Downloading)]);
+        cdn.open();
+        until("all done", || d.list().is_empty()).await;
+        for id in [A, B, C, D] {
+            assert!(files_ok(&root, id, &contents[&id]), "{id}");
+        }
+    });
+}
+
+/// Safe points: an install registering itself is left to finish (the new one waits for
+/// it, nothing is cancelled); a download verifying files is never switched out.
+#[test]
+fn run_now_waits_for_finalizing_and_refuses_mid_verify() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let (plans, contents, cdn) = setup(&[A, B, C], 1, 3);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        host.hold.lock().unwrap().insert(A);
+        let d = Downloads::load(tmp.path().join("queue.json"), DownloadSettings::default());
+        d.start(&host);
+        let ja = d.enqueue(&host, "cli", A, "A".into(), QueueKind::Install, None, None, None).unwrap();
+        d.enqueue(&host, "cli", B, "B".into(), QueueKind::Install, None, None, None).unwrap();
+        cdn.open();
+        let finalizing = || d.items.lock().unwrap().iter().any(|i| i.progress.as_ref().is_some_and(|p| p.finalizing.load(Ordering::Relaxed)));
+        until("A finalizing", finalizing).await;
+        assert_eq!(d.run_now(&host, "gui", B).unwrap(), RunNow::Waiting { for_name: "A".into() });
+        assert!(d.items.lock().unwrap().iter().all(|i| i.progress.as_ref().is_none_or(|p| !p.cancelled())), "A wasn't cancelled");
+        assert_eq!(order(&d), [(B, QueueState::Queued), (A, QueueState::Downloading)]);
+        host.release.add_permits(1);
+        until("A installed, B done", || d.list().is_empty()).await;
+        assert_eq!(host.job(Some(ja)).status, "Installed");
+        assert!(files_ok(&root, A, &contents[&A]) && files_ok(&root, B, &contents[&B]));
+
+        // A repair verifying files: refused, and nothing moved.
+        std::fs::create_dir_all(root.join(C.to_string())).unwrap();
+        d.enqueue(&host, "cli", A, "A".into(), QueueKind::Repair, None, None, None).unwrap();
+        until("A verifying", || state(&d, A) == Some(QueueState::Verifying)).await;
+        d.enqueue(&host, "cli", C, "C".into(), QueueKind::Install, None, None, None).unwrap();
+        let err = d.run_now(&host, "gui", C).unwrap_err();
+        assert!(format!("{err:#}").contains("verifying"), "{err:#}");
+        assert_eq!(order(&d), [(A, QueueState::Verifying), (C, QueueState::Queued)]);
+        // Nor while its game is being played.
+        host.playing.lock().unwrap().insert(C);
+        assert!(format!("{:#}", d.run_now(&host, "gui", C).unwrap_err()).contains("played"));
+        host.playing.lock().unwrap().clear();
+        host.release.add_permits(1);
+        until("all done", || d.list().is_empty()).await;
+    });
+}
+
+/// After a restart, what was running starts again before the queue's top: in the files
+/// of this quiverd (`running`) and of the one before (the items' saved states).
+#[test]
+fn restore_resumes_what_was_running_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let path = tmp.path().join("queue.json");
+    let (plans, _, cdn) = setup(&[A, B, C], 1, 5);
+    let entry = |id: u32, state| QueueEntry {
+        product_id: id,
+        game: None,
+        name: id.to_string(),
+        kind: QueueKind::Install,
+        state,
+        position: 0,
+        job_id: Some(1),
+        language: None,
+        account: None,
+        source: "gui".into(),
+        added: chrono::Utc::now(),
+        error: None,
+        done_bytes: 0,
+        total_bytes: 0,
+        speed: 0,
+        retries: 0,
+        after: AfterInstall::default(),
+    };
+    // A file from before `running`: B was downloading below A (moved to the top while B ran).
+    let old = serde_json::json!({ "items": [entry(A, QueueState::Queued), entry(B, QueueState::Downloading), entry(C, QueueState::Queued)] });
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(path.clone(), DownloadSettings::default());
+        d.start(&host);
+        assert_eq!(order(&d), [(A, QueueState::Queued), (B, QueueState::Downloading), (C, QueueState::Queued)]);
+        // Saved with `running` now; then switched to C: B is stopping, so not "running".
+        let saved: Saved = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.running, Some(vec![quiver_api::GameRef::ubisoft(B)]));
+        d.run_now(&host, "gui", C).unwrap();
+        let saved: Saved = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // (C is in it once B has stopped, which can be at once: B may not have fetched yet.)
+        assert!(!saved.running.unwrap().contains(&B.into()));
+    });
+    rt.shutdown_background();
+    cdn.gate.close();
+
+    // `running` names C and A, two at a time: those two start, B waits.
+    let saved = Saved { items: vec![entry(B, QueueState::Queued), entry(C, QueueState::Downloading), entry(A, QueueState::Downloading)], running: Some(vec![C.into(), A.into()]) };
+    // Each run its own file and folder: a shut-down run's tasks may still save theirs.
+    let (path, root) = (tmp.path().join("queue2.json"), tmp.path().join("lib2"));
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (plans, _, cdn) = setup(&[A, B, C], 1, 5);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(path.clone(), DownloadSettings { max_active: 2, ..Default::default() });
+        d.start(&host);
+        assert_eq!(order(&d), [(B, QueueState::Queued), (C, QueueState::Downloading), (A, QueueState::Downloading)]);
+    });
+    rt.shutdown_background();
+    cdn.gate.close();
+    let (plans, _, cdn) = setup(&[A, B, C], 1, 5);
+
+    // One at a time, though two ran: the first of them only. Then the queue's order again.
+    let (path, root) = (tmp.path().join("queue3.json"), tmp.path().join("lib3"));
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(path.clone(), DownloadSettings::default());
+        d.start(&host);
+        assert_eq!(order(&d), [(B, QueueState::Queued), (C, QueueState::Downloading), (A, QueueState::Queued)]);
+        cdn.gate.add_permits(slices(&plans[&C]));
+        until("C done, B next", || state(&d, C).is_none() && state(&d, B) == Some(QueueState::Downloading)).await;
+        assert_eq!(state(&d, A), Some(QueueState::Queued));
+    });
+    rt.shutdown_background();
+}
+
+/// "When it finishes": kept on the item across a quiverd restart, changeable while the
+/// install runs, done (with the choices as they are then) when it completes, and reported
+/// in the job's lines. Repairs and choices left empty do nothing.
+#[test]
+fn after_install_choices_live_in_the_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib");
+    let path = tmp.path().join("queue.json");
+    let (plans, _, cdn) = setup(&[A, B], 1, 5);
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(path.clone(), DownloadSettings::default());
+        d.start(&host);
+        // Their games run: nothing starts (so nothing of this run is left to save later).
+        host.playing.lock().unwrap().extend([A, B]);
+        d.enqueue(&host, "gui", A, "A".into(), QueueKind::Install, None, None, Some(AfterInstall { steam: true, desktop: true })).unwrap();
+        d.enqueue(&host, "gui", B, "B".into(), QueueKind::Install, None, None, Some(AfterInstall { steam: true, desktop: false })).unwrap();
+        assert_eq!(d.get(B).unwrap().after, AfterInstall { steam: true, desktop: false });
+        // Installing again with other choices changes them.
+        d.enqueue(&host, "gui", B, "B".into(), QueueKind::Install, None, None, Some(AfterInstall { steam: false, desktop: true })).unwrap();
+        assert_eq!(d.get(B).unwrap().after, AfterInstall { steam: false, desktop: true });
+        let saved: Saved = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.items.iter().map(|e| e.after).collect::<Vec<_>>(), [AfterInstall { steam: true, desktop: true }, AfterInstall { steam: false, desktop: true }]);
+        assert!(d.set_after(&host, "gui", C, Some(true), None).is_err(), "not in the queue");
+    });
+    rt.shutdown_background();
+    cdn.gate.close();
+    let (plans, contents, cdn) = setup(&[A, B], 1, 5);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let host = TestHost::new(plans.clone(), cdn.clone(), root.clone());
+        let d = Downloads::load(path.clone(), DownloadSettings::default());
+        assert_eq!(d.get(A).unwrap().after, AfterInstall { steam: true, desktop: true }, "kept across a restart");
+        d.start(&host);
+        until("A running", || state(&d, A) == Some(QueueState::Downloading)).await;
+        // Changed mid-install: what counts is the choice when it finishes.
+        let e = d.set_after(&host, "gui", A, None, Some(false)).unwrap();
+        assert_eq!(e.after, AfterInstall { steam: true, desktop: false });
+        let ja = d.get(A).unwrap().job_id;
+        let jb = d.get(B).unwrap().job_id;
+        d.set_after(&host, "gui", B, None, Some(false)).unwrap();
+        cdn.open();
+        until("all done", || d.list().is_empty()).await;
+        assert_eq!(*host.afters.lock().unwrap(), [(quiver_api::GameRef::ubisoft(A), AfterInstall { steam: true, desktop: false })], "B has nothing ticked");
+        let j = host.job(ja);
+        assert_eq!((j.status.as_str(), j.detail.clone()), ("Installed", vec!["Steam: added".to_owned()]));
+        assert!(j.detail.iter().all(|l| quiver_api::downloads::is_after_note(l)));
+        assert!(host.job(jb).detail.is_empty());
+        assert!(files_ok(&root, A, &contents[&A]) && files_ok(&root, B, &contents[&B]));
     });
 }

@@ -1,6 +1,7 @@
 //! Top bar: brand, Library · Downloads · Activity, now playing, search (opens the palette),
 //! daemon status, settings, accounts.
 
+use quiver_ui::depth::DepthExt;
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
 use super::responsive::{Bp, tip};
@@ -104,19 +105,7 @@ impl Quiver {
                 }))
         });
 
-        let mark = div()
-            .relative()
-            .size(px(24.))
-            .flex_none()
-            .child(div().absolute().left(px(0.)).top(px(8.)).size(px(16.)).rounded(px(5.)).bg(th.mark1))
-            .child(div().absolute().left(px(4.)).top(px(4.)).size(px(16.)).rounded(px(5.)).bg(th.mark2))
-            .child(
-                div().absolute().left(px(8.)).top(px(0.)).size(px(16.)).rounded(px(5.)).bg(gpui::linear_gradient(
-                    135.,
-                    gpui::linear_color_stop(th.acc_hi, 0.),
-                    gpui::linear_color_stop(th.acc, 1.),
-                )),
-            );
+        let mark = super::settings::brand_mark(th, 26.);
         let brand = div()
             .flex()
             .flex_none()
@@ -311,6 +300,6 @@ impl Quiver {
                     ),
             )
             .child(accounts);
-        div().flex().flex_col().flex_none().stereo_depth(crate::stereo_ui::depth::CHROME).child(bar).children(nav_row)
+        div().flex().flex_col().flex_none().depth_chrome().child(bar).children(nav_row)
     }
 }

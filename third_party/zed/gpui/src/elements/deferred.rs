@@ -30,7 +30,8 @@ impl Deferred {
 
 impl Element for Deferred {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// Quiver: the deferred draw's index, to give it this place's stereo depth at paint.
+    type PrepaintState = usize;
 
     fn id(&self) -> Option<crate::ElementId> {
         None
@@ -59,10 +60,12 @@ impl Element for Deferred {
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         _cx: &mut App,
-    ) {
+    ) -> usize {
         let child = self.child.take().unwrap();
         let element_offset = window.element_offset();
-        window.defer_draw(child, element_offset, self.priority, None)
+        let index = window.deferred_draw_index();
+        window.defer_draw(child, element_offset, self.priority, None);
+        index
     }
 
     fn paint(
@@ -71,10 +74,12 @@ impl Element for Deferred {
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        // Quiver: a menu deferred from inside a raised card is drawn at the card's depth.
+        window.capture_deferred_stereo_depth(*prepaint);
     }
 }
 

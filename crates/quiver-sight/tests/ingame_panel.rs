@@ -6,8 +6,9 @@
 //! - chooses the in-game presenter and opens the panel in `panel.input`;
 //! - publishes the panel's image into `panel.image` at the swapchain's extent, and only the
 //!   rows that changed afterwards;
-//! - takes forwarded keys (Page Down moves to the next section; Shift+F2 is ignored, the layer
-//!   toggles), and mouse motion into the cursor the layer draws;
+//! - takes forwarded keys (Page Up moves to the previous section; Shift+F2 is ignored, the
+//!   layer toggles; Tab docks the panel as a column with the game in full view beside it, and
+//!   centres it again), and mouse motion into the cursor the layer draws;
 //! - writes the hyprpad state file while open, closes `panel.input` and removes it on close;
 //! - opens on the desktop presenter's path instead when the preload isn't in the game.
 //!
@@ -140,28 +141,58 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     }
     let pump = |cx: &mut gpui::AsyncApp| {
         while let Ok(m) = rx.borrow_mut().try_recv() {
-            if let Msg::GameInput { session, events } = m {
-                cx.update(|cx| ctl.borrow_mut().game_input(&session, &events, cx));
+            match m {
+                Msg::GameInput { session, events } => cx.update(|cx| ctl.borrow_mut().game_input(&session, &events, cx)),
+                Msg::PanelLayout { docked, prefs } => cx.update(|cx| ctl.borrow_mut().layout(docked, prefs, cx)),
+                _ => {}
             }
         }
     };
     wait(100).await;
     pump(cx);
     check!(cx.update(|_| ctl.borrow().is_open()), "Shift+F2 from the game closed the panel (the layer's chord does that)");
-    // Page Down: the next section.
-    p.push(&PanelEvent::key(t, 109, true, 0, 0));
-    p.push(&PanelEvent::key(t, 109, false, 0, 0));
+    // Page Up: the previous section (Achievements, centred like Session).
+    p.push(&PanelEvent::key(t, 104, true, 0, 0));
+    p.push(&PanelEvent::key(t, 104, false, 0, 0));
     wait(100).await;
     pump(cx);
     let after = cx.update(|cx| ctl.borrow().nav(cx)).ok_or("no nav")?;
-    check!(after.section != before.section, "Page Down didn't move: {:?} → {:?}", before.section, after.section);
+    check!(after.section != before.section, "Page Up didn't move: {:?} → {:?}", before.section, after.section);
     // The next image says only some rows changed since the last.
     wait(300).await;
     let (next, rows) = reader.poll_since(EXTENT, &mut dst, published);
     check!(matches!(next, HudPoll::Image { .. }), "no image after the key: {next:?}");
     let (y0, y1) = rows.ok_or("the image after a key wasn't partial")?;
     check!(y1 - y0 < EXTENT.1, "every row changed ({y0}..{y1})");
-    eprintln!("after Page Down: rows {y0}..{y1} of {}", EXTENT.1);
+    eprintln!("after Page Up: rows {y0}..{y1} of {}", EXTENT.1);
+
+    // Tab (R3 through hyprpad): docked. A column on the left; the rest of the image is clear,
+    // so the game shows unobstructed (no dim, and no blur request).
+    let alpha = |dst: &[u8], stride: u32, x: u32, y: u32| dst[(y * stride + x * 4) as usize + 3];
+    p.push(&PanelEvent::key(t, 15, true, 0, 0));
+    p.push(&PanelEvent::key(t, 15, false, 0, 0));
+    wait(100).await;
+    pump(cx);
+    wait(300).await;
+    pump(cx);
+    let (img, _) = reader.poll_since(EXTENT, &mut dst, 0);
+    let HudPoll::Image { desc, .. } = img else { return Err(format!("no image after Tab: {img:?}")) };
+    let report = cx.update(|_| ctl.borrow().report().clone());
+    check!(report.docked && report.backdrop_detail.starts_with("docked"), "the report should say docked: {report:?}");
+    check!(alpha(&dst, desc.stride, 100, 400) > 200, "the dock should be drawn on the left");
+    check!(alpha(&dst, desc.stride, 1000, 400) == 0 && alpha(&dst, desc.stride, 1270, 790) == 0, "beside the dock the game should show (no dim)");
+    // Tab again: centred, the dim back over the whole frame.
+    p.push(&PanelEvent::key(t, 15, true, 0, 0));
+    p.push(&PanelEvent::key(t, 15, false, 0, 0));
+    wait(100).await;
+    pump(cx);
+    wait(300).await;
+    pump(cx);
+    let (img, _) = reader.poll_since(EXTENT, &mut dst, 0);
+    let HudPoll::Image { desc, published } = img else { return Err(format!("no image after the second Tab: {img:?}")) };
+    check!(!cx.update(|_| ctl.borrow().report().docked), "still docked after the second Tab");
+    check!(alpha(&dst, desc.stride, 1000, 400) > 0, "centred: the scrim covers the game again");
+    let _ = published;
 
     // The mouse: the cursor follows the pointer, in swapchain px, shown once the mouse moves.
     check!(p.cursor().is_none(), "a cursor before the mouse moved");
@@ -183,14 +214,14 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     let (img, _) = reader.poll_since(EXTENT, &mut dst, 0);
     let HudPoll::Image { desc, published } = img else { return Err(format!("no stereo image: {img:?}")) };
     check!(desc.lifts().len() == 1 && desc.lifts()[0].depth == rung::PANEL, "the card alone (nothing focused in an empty section): {:?}", desc.lifts());
-    // Left: the section list, its section focused.
-    p.push(&PanelEvent::key(t, 105, true, 0, 0));
-    p.push(&PanelEvent::key(t, 105, false, 0, 0));
+    // Page Down: back to Session, its Quit button focused.
+    p.push(&PanelEvent::key(t, 109, true, 0, 0));
+    p.push(&PanelEvent::key(t, 109, false, 0, 0));
     wait(100).await;
     pump(cx);
     wait(300).await;
     let (img, _) = reader.poll_since(EXTENT, &mut dst, published);
-    let HudPoll::Image { desc, .. } = img else { return Err(format!("no image after Left: {img:?}")) };
+    let HudPoll::Image { desc, published } = img else { return Err(format!("no image after Page Down: {img:?}")) };
     check!((desc.width, desc.height, desc.stereo) == (EXTENT.0 / 2, EXTENT.1, quiver_perf::stereo::STEREO_SBS), "stereo image {}x{} layout {}", desc.width, desc.height, desc.stereo);
     let lifts = desc.lifts().to_vec();
     eprintln!("stereo panel lifts: {lifts:?}");
@@ -198,7 +229,31 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     check!(lifts.len() == 2 && lifts[0].depth == rung::PANEL && lifts[1].depth == rung::FOCUS, "lifts {lifts:?}");
     let (card, focus) = (lifts[0], lifts[1]);
     check!(card.w as u32 > EXTENT.0 / 4 && card.h as u32 > EXTENT.1 / 2, "the card is the panel's bulk: {card:?}");
-    check!(focus.x >= card.x && focus.y >= card.y && focus.x + focus.w <= card.x + card.w && focus.h < 100, "the focused section is a small part of the card: {focus:?}");
+    check!(focus.x >= card.x && focus.y >= card.y && focus.x + focus.w <= card.x + card.w && focus.h < 100, "the focused button is a small part of the card: {focus:?}");
+
+    // Docked in stereo: each eye gets the column, and the lifts follow it (the card is the
+    // column now, the focused button inside it).
+    p.push(&PanelEvent::key(t, 15, true, 0, 0));
+    p.push(&PanelEvent::key(t, 15, false, 0, 0));
+    wait(100).await;
+    pump(cx);
+    wait(300).await;
+    pump(cx);
+    let (img, _) = reader.poll_since(EXTENT, &mut dst, published);
+    let HudPoll::Image { desc, .. } = img else { return Err(format!("no image after Tab in stereo: {img:?}")) };
+    let lifts = desc.lifts().to_vec();
+    eprintln!("stereo docked lifts: {lifts:?}");
+    if let Ok(p) = std::env::var("QUIVER_TEST_DUMP") {
+        let img = image::RgbaImage::from_fn(desc.width, desc.height, |x, y| {
+            let o = (y * desc.stride + x * 4) as usize;
+            image::Rgba([dst[o], dst[o + 1], dst[o + 2], dst[o + 3]])
+        });
+        let _ = img.save(p);
+    }
+    check!(desc.width == EXTENT.0 / 2 && lifts.len() == 2 && lifts[0].depth == rung::PANEL && lifts[1].depth == rung::FOCUS, "lifts {lifts:?}");
+    let (dock, focus) = (lifts[0], lifts[1]);
+    check!(dock.x < 30 && dock.w as u32 <= 500 + 2 && dock.h as u32 > EXTENT.1 / 2, "the column, laid out in the eye: {dock:?}");
+    check!(focus.x >= dock.x && focus.x + focus.w <= dock.x + dock.w, "the focused button inside the column: {focus:?}");
 
     // Close: panel.input closed, the state file gone.
     cx.update(|cx| ctl.borrow_mut().command(cmd(PanelAction::Close), None, cx));

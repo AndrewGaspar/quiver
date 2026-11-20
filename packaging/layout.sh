@@ -11,6 +11,7 @@
 #               sight/<arch>/libquiver_sight_layer.so,
 #               sight/<arch>/libquiver_sight_input.so         (/usr/lib/quiver)
 #               skills/quiver/SKILL.md (the agent skill: how agents use Quiver)
+#               omarchy/quiver.downloads/ (the Omarchy bar widget; `quiver omarchy install-plugin`)
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer and input preload (built for i686-unknown-linux-gnu)
@@ -81,6 +82,15 @@ install -Dm644 "$src/contrib/quiver.svg" "$root$DATADIR/icons/hicolor/scalable/a
 # The agent skill (Claude Code / Codex / ~/.agents): matches this build's CLI. A package can
 # link $LIBDIR/skills/quiver into a skills directory; tools/install-user.sh does it per user.
 install -Dm644 "$src/contrib/skills/quiver/SKILL.md" "$root$LIBDIR/skills/quiver/SKILL.md"
+
+# The Omarchy bar widget for the download queue (contrib/omarchy/quiver.downloads, tests
+# left out). Installed only as files: `quiver omarchy install-plugin` links it into
+# ~/.config/omarchy/plugins and puts it in the bar, when someone asks for it.
+omarchy_plugin=$src/contrib/omarchy/quiver.downloads
+for f in manifest.json Widget.qml Body.qml Ring.qml Service.qml Model.js "$omarchy_plugin"/i18n/*.json; do
+    f=${f#"$omarchy_plugin/"}
+    install -Dm644 "$omarchy_plugin/$f" "$root$LIBDIR/omarchy/quiver.downloads/$f"
+done
 
 install -d "$root$UNITDIR"
 sed -e "s|^ExecStart=.*|ExecStart=$EXEC_START|" \

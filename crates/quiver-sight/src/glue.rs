@@ -43,11 +43,12 @@ impl Sight {
 
     // ---- Settings ------------------------------------------------------------------------
 
-    pub(crate) fn settings_changed(&mut self, s: SightSettings) {
+    pub(crate) fn settings_changed(&mut self, s: SightSettings, cx: &mut App) {
         if s.toasts.dnd != self.settings.toasts.dnd {
             tracing::info!(dnd = s.toasts.dnd, "do not disturb");
         }
         self.settings = s;
+        self.panel_pins(cx);
     }
 
     // ---- Toasts --------------------------------------------------------------------------
@@ -172,10 +173,20 @@ impl Sight {
         if let Some(st) = d.session.ready().and_then(|v| v.started) {
             self.started.insert(session.to_owned(), st);
         }
+        // Kept for the quick menu, and what's pinned for the panel's Y.
+        self.quick_data.insert(session.to_owned(), (**d).clone());
         if self.quick.session.as_deref() == Some(session) {
-            self.quick_data.insert(session.to_owned(), (**d).clone());
             self.quick_tiles(cx);
         }
+        self.panel_pins(cx);
+    }
+
+    /// The open panel's game's pins, for Y (pin or unpin).
+    fn panel_pins(&mut self, cx: &mut App) {
+        let Some(s) = self.panel.session().map(str::to_owned) else { return };
+        let Some((game, profile)) = self.quick_data.get(&s).and_then(|d| d.session.ready()).map(|v| (v.game, v.profile().map(str::to_owned))) else { return };
+        let pins = self.settings.pins_for(&game, profile.as_deref());
+        self.panel.set_pinned(pins, cx);
     }
 
     // ---- Screenshots ---------------------------------------------------------------------
@@ -468,7 +479,7 @@ impl Sight {
                     st.value = value.clone();
                     quick::value_words(&st)
                 });
-                self.send_link(LinkReq::SetOption { view, op: OptionOp::Set { surface: surface.clone(), id: id.clone(), value }, key: (surface, id) });
+                self.send_link(LinkReq::SetOption { view, op: OptionOp::Set { surface: surface.clone(), id: id.clone(), value }, key: (surface, id), live: quiver_api::options::Live::IfRunning });
                 self.toast(said(format!("{} {}", t.label, words.unwrap_or_default().to_lowercase())), cx);
             }
             Act::SetTweak(id, value) => {

@@ -2501,6 +2501,69 @@ impl Interactivity {
         )
     }
 
+    /// Quiver: the depth this element paints at while the window packs stereo frames
+    /// ([`crate::resolve_stereo_depth`]), or `None` to stay at its parent's; and, for its
+    /// children, whether it's a pointer control without focus of its own (`None`: unchanged).
+    /// A control whose hover would change its depth gets the window redrawn when the hover
+    /// changes.
+    fn stereo_depth(
+        &self,
+        style: &Style,
+        hitbox: Option<&Hitbox>,
+        window: &mut Window,
+    ) -> (Option<f32>, Option<bool>) {
+        if !window.is_stereo_packed() {
+            return (None, None);
+        }
+        let request = crate::StereoRequest {
+            depth: style.stereo_depth,
+            lift: style.stereo_lift,
+            focused: style.stereo_focused,
+            control: style.stereo_control,
+        };
+        let pointer_control = matches!(
+            style.mouse_cursor,
+            Some(crate::CursorStyle::PointingHand | crate::CursorStyle::IBeam)
+        );
+        let focused = self
+            .tracked_focus_handle
+            .as_ref()
+            .is_some_and(|h| h.is_focused(window));
+        let state = crate::StereoState {
+            pointer_control,
+            hovered: self.hovered.unwrap_or(false),
+            focused,
+            in_control: window.stereo_in_control(),
+        };
+        let policy = window.stereo_policy();
+        let depth = crate::resolve_stereo_depth(window.stereo_depth(), request, state, &policy);
+        // Hover moves a control's depth: make sure a change of hover redraws, even for an
+        // element without a hover style of its own (GPUI only tracks hover for those).
+        let is_control = request
+            .control
+            .unwrap_or(pointer_control || request.focused.is_some());
+        if is_control
+            && policy.hover > 0.0
+            && self.hover_style.is_none()
+            && let Some(hitbox) = hitbox
+        {
+            let hitbox = hitbox.clone();
+            let was_hovered = state.hovered;
+            let current_view = window.current_view();
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != was_hovered {
+                    cx.notify(current_view);
+                }
+            });
+        }
+        let bare = if !is_control {
+            None
+        } else {
+            Some(pointer_control && request.focused.is_none())
+        };
+        (depth, bare)
+    }
+
     fn should_insert_hitbox(&self, style: &Style, window: &Window, cx: &App) -> bool {
         self.hitbox_behavior != HitboxBehavior::Normal
             || self.window_control.is_some()
@@ -2639,7 +2702,10 @@ impl Interactivity {
                     tab_group = self.tab_index;
                 }
 
-                window.with_stereo_depth(style.stereo_depth, |window| {
+                // Quiver: the element's stereo depth, resolved against the depth it's drawn on.
+                let (stereo_depth, bare_control) = self.stereo_depth(&style, hitbox, window);
+                window.with_stereo_control(bare_control, |window| {
+                window.with_stereo_scope(stereo_depth, Some(bounds), |window| {
                 window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
@@ -2730,6 +2796,7 @@ impl Interactivity {
                             );
                         });
                     });
+                });
                 });
                 });
 

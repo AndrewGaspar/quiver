@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stand-in for `quiver` while quiverd isn't running (what --no-start says then).
+echo "Error: quiverd is not running (No such file or directory (os error 2))" >&2
+exit 1

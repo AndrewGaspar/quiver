@@ -166,6 +166,7 @@ pub async fn install_game(
     install::set_target(&dest, &latest.hash)?;
     status(format!("Downloading {}…", human_bytes(p.download)));
     install::install(&mut latest.dl, &plan, &dest, latest.manifest.is_compressed.unwrap_or(false), progress).await?;
+    progress.finalizing.store(true, Ordering::Relaxed);
     std::fs::write(dest.join(INSTALLED), &latest.raw)?;
     let _ = std::fs::remove_file(cache_path(&latest.hash));
     let game = register(cfg, &mut latest.lib, product_id, &dest.canonicalize()?, language).await?;

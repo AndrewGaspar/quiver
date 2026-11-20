@@ -39,7 +39,9 @@
 //!   to the game's window (Hyprland `focuswindow`).
 
 pub mod data;
+pub mod hints;
 pub mod ingame;
+pub mod sections;
 pub mod state;
 pub mod view;
 
@@ -78,6 +80,27 @@ pub struct Settings {
     /// game sees those buttons too). Off by default.
     #[serde(default)]
     pub pad_chord: bool,
+    /// Sections docked (true) or centred (false) by R3, where that differs from their
+    /// default (design/SIGHT.md §9: Mods and Tweaks dock, the others centre).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub docked: std::collections::BTreeMap<String, bool>,
+}
+
+/// Writes the sections' layout into `sight.toml`, keeping whatever else is there (the CLI's
+/// `pad_chord`, keys from newer builds). Best effort.
+pub fn save_docked(docked: &std::collections::BTreeMap<String, bool>) {
+    let p = settings_path();
+    let mut t: toml::Table = std::fs::read_to_string(&p).ok().and_then(|s| s.parse().ok()).unwrap_or_default();
+    if docked.is_empty() {
+        t.remove("docked");
+    } else {
+        t.insert("docked".into(), toml::Value::Table(docked.iter().map(|(k, v)| (k.clone(), toml::Value::Boolean(*v))).collect()));
+    }
+    let tmp = p.with_extension("toml.tmp");
+    let r = p.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&tmp, t.to_string())).and_then(|_| std::fs::rename(&tmp, &p));
+    if let Err(e) = r {
+        tracing::debug!("couldn't write {}: {e}", p.display());
+    }
 }
 
 pub fn settings_path() -> std::path::PathBuf {
@@ -231,11 +254,20 @@ pub struct PanelCtl {
     game_blur: Option<GameBlur>,
     /// Each session's stereo layout, from its HUD model (design/SIGHT.md §15).
     stereo: HashMap<String, Stereo>,
+    /// The open panel's section is docked: no blur, no dim (design/SIGHT.md §9).
+    docked: bool,
+    /// Sections' layouts are saved to `sight.toml` (the real quiver-sight; not the demo, a
+    /// lab or tests).
+    pub persist: bool,
+    /// Each session's changes made in game, kept across opens of the panel.
+    logs: HashMap<String, sections::mods::SessionLog>,
 }
 
 impl PanelCtl {
     pub fn new(layer_shell: bool, link: Option<tokio::sync::mpsc::UnboundedSender<LinkReq>>, ui: Option<UnboundedSender<Msg>>) -> Self {
         let settings = load_settings();
+        let mut nav = Nav::default();
+        nav.dock = state::DockPrefs::from_map(&settings.docked);
         Self {
             open: None,
             link,
@@ -243,7 +275,7 @@ impl PanelCtl {
             hypr: None,
             hypr_tried: false,
             layer_shell,
-            nav: Nav::default(),
+            nav,
             report: PanelReport { pad_chord: settings.pad_chord, ..Default::default() },
             pad_started: false,
             pad_name: None,
@@ -254,6 +286,57 @@ impl PanelCtl {
             inputs: HashMap::new(),
             game_blur: None,
             stereo: HashMap::new(),
+            docked: false,
+            persist: false,
+            logs: HashMap::new(),
+        }
+    }
+
+    /// The view's layout changed (docked or centred): docked, the game is in full view (the
+    /// layer's blur request goes, the view draws no dim); centred, the backdrop comes back.
+    /// The sections' choices are saved.
+    pub fn layout(&mut self, docked: bool, prefs: std::collections::BTreeMap<String, bool>, cx: &mut App) {
+        if prefs != self.settings.docked {
+            self.settings.docked = prefs;
+            if self.persist {
+                save_docked(&self.settings.docked);
+            }
+        }
+        self.nav.dock = state::DockPrefs::from_map(&self.settings.docked);
+        if self.docked == docked {
+            return;
+        }
+        self.docked = docked;
+        self.report.docked = docked;
+        let Some(o) = &self.open else { return };
+        let session = o.session.clone();
+        let shown = o.window.is_some() || o.game.is_some();
+        if docked {
+            self.game_blur = None;
+            self.report.backdrop_detail = "docked: the game in full view (no blur, no dim)".into();
+        } else if shown {
+            let (backdrop, detail) = if self.in_game() { self.game_backdrop(&session) } else { self.pick_backdrop(&session) };
+            self.with_view(cx, |v, _| v.backdrop = backdrop);
+            self.report.backdrop = backdrop;
+            self.report.backdrop_detail = detail;
+        }
+        tracing::info!(docked, backdrop = self.report.backdrop.as_str(), "panel layout");
+        self.report_now();
+    }
+
+    /// The backdrop for the panel drawn in the game: the layer's blur when it can, else the
+    /// dim (no compositor blur reaches the game's frames).
+    fn game_backdrop(&mut self, session: &str) -> (Backdrop, String) {
+        self.game_blur = None;
+        match self.layers.get(session) {
+            Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
+                Ok(g) => {
+                    self.game_blur = Some(g);
+                    (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
+                }
+                Err(e) => (Backdrop::Dim, format!("asking the Sight layer to blur failed ({e:#}): plain dim")),
+            },
+            l => (Backdrop::Dim, format!("{}: plain dim", l.map_or("no Sight layer state".to_owned(), |l| format!("the Sight layer can't blur ({})", l.reason)))),
         }
     }
 
@@ -358,6 +441,11 @@ impl PanelCtl {
     }
 
     // ---- For the quick menu and the overlay (`crate::quick`, `crate::overlay`) --------------
+
+    /// What's pinned to the quick menu for the open panel's game and profile (Y toggles it).
+    pub fn set_pinned(&mut self, pins: Vec<quiver_api::sight::QuickPin>, cx: &mut App) {
+        self.with_view(cx, |v, _| v.pinned = pins);
+    }
 
     /// The session's `panel.input`, when the game has a Sight layer.
     pub fn input_of(&self, session: &str) -> Option<Arc<PanelInput<Mapping>>> {
@@ -577,6 +665,9 @@ impl PanelCtl {
     /// else the compositor's blur, else the dim. Starts the layer's request.
     fn pick_backdrop(&mut self, session: &str) -> (Backdrop, String) {
         self.game_blur = None;
+        if self.docked {
+            return (Backdrop::Dim, "docked: the game in full view (no blur, no dim)".to_owned());
+        }
         match self.layers.get(session) {
             Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
                 Ok(g) => {
@@ -634,12 +725,15 @@ impl PanelCtl {
         let wiring = Wiring { link: self.link.clone(), ui: self.ui.clone(), quit };
         let mut nav = self.nav.clone();
         nav.open(section);
+        self.docked = nav.docked();
         let footer = Footer { pad: self.pad_name.clone().unwrap_or_default(), pad_shared: self.pad_name.is_some() && !hyprpad_running() };
         let sid = session.to_owned();
+        let log = self.logs.remove(session).unwrap_or_default();
         // The view outlives its windows: hiding the panel drops the surface, not this.
         let view = cx.new(|cx| {
             let mut v = PanelView::new(sid, PanelData::default(), nav, Backdrop::Dim, wiring, cx);
             v.footer = footer;
+            v.log = log;
             v
         });
         let logical = mon.as_ref().map(|m| m.logical()).unwrap_or((1920.0, 1080.0));
@@ -660,6 +754,7 @@ impl PanelCtl {
         });
         self.report = PanelReport {
             open: true,
+            docked: self.docked,
             section: section.unwrap_or(self.nav.section),
             session: Some(session.to_owned()),
             monitor: mon.map(|m| m.name),
@@ -702,7 +797,7 @@ impl PanelCtl {
         }
         write_state(Some((session, if in_game { "game" } else { "desktop" })));
         self.send(LinkReq::Load { session: session.to_owned(), part: Part::All, view: None });
-        self.send(LinkReq::Subscribe { session: session.to_owned() });
+        self.send(LinkReq::Subscribe { session: session.to_owned(), extra: Vec::new() });
         Ok(())
     }
 
@@ -719,16 +814,11 @@ impl PanelCtl {
         let stereo = self.stereo.get(session).copied().filter(|s| s.fits(extent)).unwrap_or_default();
         let factor = ingame::factor(stereo.logical_extent(extent), o.monitor.is_some().then_some(o.logical));
         let view = o.view.clone();
-        self.game_blur = None;
-        let (backdrop, detail) = match self.layers.get(session) {
-            Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
-                Ok(g) => {
-                    self.game_blur = Some(g);
-                    (Backdrop::GameBlur, "the Sight layer blurs the game's frames".to_owned())
-                }
-                Err(e) => (Backdrop::Dim, format!("asking the Sight layer to blur failed ({e:#}): plain dim")),
-            },
-            l => (Backdrop::Dim, format!("{}: plain dim", l.map_or("no Sight layer state".to_owned(), |l| format!("the Sight layer can't blur ({})", l.reason)))),
+        let (backdrop, detail) = if self.docked {
+            self.game_blur = None;
+            (Backdrop::Dim, "docked: the game in full view (no blur, no dim)".to_owned())
+        } else {
+            self.game_backdrop(session)
         };
         view.update(cx, |v, cx| {
             v.backdrop = backdrop;
@@ -969,6 +1059,7 @@ impl PanelCtl {
         }
         self.nav = o.view.read(cx).nav.clone();
         self.nav.confirm = None;
+        self.logs.insert(o.session.clone(), o.view.read(cx).log.clone());
         self.send(LinkReq::Unsubscribe);
         // The layer fades the blur out over the game's next frames.
         self.game_blur = None;
@@ -999,6 +1090,7 @@ impl PanelCtl {
         if self.open.as_ref().is_some_and(|o| o.session == session) {
             self.close(cx);
         }
+        self.logs.remove(session);
     }
 
     fn with_view(&self, cx: &mut App, f: impl FnOnce(&mut PanelView, &mut gpui::Context<PanelView>)) {
@@ -1018,7 +1110,7 @@ impl PanelCtl {
     }
 
     pub fn done(&mut self, change: crate::link::Change, result: Result<Option<quiver_api::options::OptionsChange>, String>, cx: &mut App) {
-        self.with_view(cx, |v, _| v.done(change, result));
+        self.with_view(cx, |v, cx| v.done(change, result, cx));
     }
 
     pub fn metrics(&mut self, u: quiver_api::perf::PerfUpdate, cx: &mut App) {

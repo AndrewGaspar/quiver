@@ -10,6 +10,8 @@
 
 pub mod assets;
 pub mod components;
+/// Stereo depth: the ladder, the window's policy and the roles screens use (STEREO-UI.md).
+pub mod depth;
 /// Gamepads through gilrs (read-only), mapped to [`input::Input`]s.
 pub mod gamepad;
 pub mod input;

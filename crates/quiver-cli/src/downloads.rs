@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, SampleState, Throughput, UpdatePreview, VerifyReport};
+use quiver_api::downloads::{DownloadSettings, InstallPreview, QueueEntry, QueueMove, QueueState, RunNow, SampleState, Throughput, UpdatePreview, VerifyReport};
 use quiver_api::{Client, Request, StoreId};
 use quiver_core::install::human_bytes;
 
@@ -10,8 +10,21 @@ use crate::{follow, game_label, print_json, resolve_any, resolve_installable};
 
 #[derive(Subcommand)]
 pub enum QueueAction {
-    /// Move a game up, down or to the top of the queue.
+    /// Move a game up, down or to the top of the queue; `now` also starts it (as `queue now`).
     Move { game: String, to: QueueMove },
+    /// Download a game now: it goes to the top and, if the queue is busy, the running
+    /// download stops at a safe point and goes back to the queue behind it, keeping its
+    /// progress (a download verifying files isn't switched out).
+    Now { game: String },
+    /// What quiverd does when a queued install finishes: add it to Steam (staged while
+    /// Steam runs; Steam is never restarted) and write a .desktop entry.
+    After {
+        game: String,
+        #[arg(long)]
+        steam: Option<OnOff>,
+        #[arg(long)]
+        desktop: Option<OnOff>,
+    },
     /// Take a game out of the queue (its downloaded files stay; install again to resume).
     Remove { game: String },
     /// A queued game's throughput as quiverd sampled it: one sample a second, up to the
@@ -75,6 +88,12 @@ fn state_word(s: QueueState) -> &'static str {
         QueueState::Done => "done",
         QueueState::Failed => "failed",
     }
+}
+
+/// "add to Steam, create a .desktop entry", or `None` when nothing is ticked.
+fn after_words(e: &QueueEntry) -> Option<String> {
+    let w: Vec<&str> = [(e.after.steam, "add to Steam"), (e.after.desktop, "create a .desktop entry")].into_iter().filter(|x| x.0).map(|x| x.1).collect();
+    (!w.is_empty()).then(|| w.join(", "))
 }
 
 fn print_settings(s: &DownloadSettings) {
@@ -189,7 +208,18 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
                 if let Some(err) = &e.error {
                     println!("      {err}");
                 }
+                if let Some(a) = after_words(e) {
+                    println!("      when it finishes: {a}");
+                }
             }
+        }
+        Some(QueueAction::Move { game, to: QueueMove::Now }) | Some(QueueAction::Now { game }) => {
+            let e = resolve_installable(client, &game).await?;
+            let r: RunNow = client.call(Request::QueueRunNow { game: e.game.into() }).await?;
+            if json {
+                return print_json(&r);
+            }
+            println!("{}", r.message(&e.name));
         }
         Some(QueueAction::Move { game, to }) => {
             let e = resolve_installable(client, &game).await?;
@@ -197,6 +227,15 @@ pub async fn queue(client: &Client, action: Option<QueueAction>, json: bool) -> 
             for e in q {
                 println!("{:>2}  {:<11} {}", e.position, state_word(e.state), e.name);
             }
+        }
+        Some(QueueAction::After { game, steam, desktop }) => {
+            let e = resolve_installable(client, &game).await?;
+            let on = |o: Option<OnOff>| o.map(|o| matches!(o, OnOff::On));
+            let q: QueueEntry = client.call(Request::QueueSetAfter { game: e.game.into(), steam: on(steam), desktop: on(desktop) }).await?;
+            if json {
+                return print_json(&q);
+            }
+            println!("when {} finishes: {}", q.name, after_words(&q).unwrap_or_else(|| "nothing".into()));
         }
         Some(QueueAction::History { game, last, json: own_json }) => {
             let e = resolve_installable(client, &game).await?;
