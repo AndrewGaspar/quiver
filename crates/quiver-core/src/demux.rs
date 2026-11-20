@@ -20,13 +20,15 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::rustls;
 use quiver_proto::demux;
+
+use crate::retry::{Transient, transient};
 
 pub const DEFAULT_HOST: &str = "dmx.upc.ubisoft.com";
 /// Client version sent in `ClientVersionPush`; matches Connect's `version.txt`.
@@ -90,15 +92,16 @@ impl Demux {
         let config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        // No network, no DNS, a reset mid-handshake: all worth trying again later.
         let tcp = TcpStream::connect((host, 443))
             .await
-            .with_context(|| format!("connect to {host}:443"))?;
+            .map_err(|e| anyhow::Error::from(e).context(Transient(format!("connect to {host}:443"))))?;
         tcp.set_nodelay(true)?;
         let name = rustls::pki_types::ServerName::try_from(host.to_owned())?;
         let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(name, tcp)
             .await
-            .context("demux TLS handshake")?;
+            .map_err(|e| anyhow::Error::from(e).context(Transient("demux TLS handshake".into())))?;
         Self::over(tls, client_version, DEFAULT_TIMEOUT).await
     }
 
@@ -149,7 +152,13 @@ impl Demux {
     }
 
     /// Send a top-level request; `request_id` is filled in automatically.
+    ///
+    /// Failures of the socket (gone, closed while waiting, no answer in time) are
+    /// [`Transient`]: the caller can reconnect and try again.
     pub async fn request(&self, mut req: demux::Req) -> Result<demux::Rsp> {
+        if !self.is_alive() {
+            return Err(transient("the demux connection is gone"));
+        }
         let id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         req.request_id = id;
         let (tx, rx) = oneshot::channel();
@@ -157,16 +166,16 @@ impl Demux {
         let up = demux::Upstream { request: Some(req), push: None };
         if let Err(e) = self.write_frame(&up.encode_to_vec()).await {
             self.inner.pending.lock().unwrap().remove(&id);
-            return Err(e);
+            return Err(e.context(Transient(format!("sending demux request {id}"))));
         }
         match tokio::time::timeout(self.inner.timeout, rx).await {
             Ok(Ok(rsp)) => Ok(rsp),
-            Ok(Err(_)) => bail!("demux connection closed while waiting for request {id}"),
+            Ok(Err(_)) => Err(transient(format!("demux connection closed while waiting for request {id}"))),
             Err(_) => {
                 self.inner.pending.lock().unwrap().remove(&id);
                 // The demux server never returns errors; a malformed or unauthorized
                 // request simply goes unanswered.
-                bail!("demux request {id} timed out (server sends no errors; likely rejected)")
+                Err(transient(format!("demux request {id} timed out (server sends no errors; likely rejected)")))
             }
         }
     }
@@ -223,7 +232,7 @@ impl Demux {
             .await?;
         let open = rsp.open_connection_rsp.context("no open_connection_rsp")?;
         if !open.success {
-            bail!("demux refused to open {}", S::NAME);
+            return Err(transient(format!("demux refused to open {}", S::NAME)));
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let state = Arc::new(ConnState {
@@ -474,9 +483,10 @@ impl<S: Service> ServiceConnection<S> {
         self.demux.inner.latest.lock().unwrap().get(S::NAME) == Some(&self.state.serial)
     }
 
+    /// Like [`Demux::request`], a closed connection or a missing answer is [`Transient`].
     pub async fn request(&mut self, mut req: S::Req) -> Result<S::Rsp> {
         if !self.is_open() {
-            bail!("{} connection {} was closed by the server", S::NAME, self.id);
+            return Err(transient(format!("{} connection {} was closed by the server", S::NAME, self.id)));
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -490,13 +500,14 @@ impl<S: Service> ServiceConnection<S> {
                 data: Some(demux::DataMessage { connection_id: self.id, data }),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|e| e.context(Transient(format!("sending to {}", S::NAME))))?;
         let deadline = tokio::time::Instant::now() + self.demux.inner.timeout;
         loop {
             let frame = tokio::time::timeout_at(deadline, self.rx.recv())
                 .await
-                .map_err(|_| anyhow!("{} request {id} timed out (likely rejected)", S::NAME))?
-                .with_context(|| format!("{} connection closed", S::NAME))?;
+                .map_err(|_| transient(format!("{} request {id} timed out (likely rejected)", S::NAME)))?
+                .ok_or_else(|| transient(format!("{} connection {} was closed by the server", S::NAME, self.id)))?;
             let body = frame.get(4..).context("short service frame")?;
             let (rsp, push) = S::split(S::Down::decode(body)?);
             if let Some(push) = push {

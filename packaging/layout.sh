@@ -87,7 +87,7 @@ install -Dm644 "$src/contrib/skills/quiver/SKILL.md" "$root$LIBDIR/skills/quiver
 # left out). Installed only as files: `quiver omarchy install-plugin` links it into
 # ~/.config/omarchy/plugins and puts it in the bar, when someone asks for it.
 omarchy_plugin=$src/contrib/omarchy/quiver.downloads
-for f in manifest.json Widget.qml Body.qml Ring.qml Service.qml Model.js "$omarchy_plugin"/i18n/*.json; do
+for f in manifest.json Widget.qml Body.qml Ring.qml BrandRing.qml Service.qml Model.js "$omarchy_plugin"/i18n/*.json; do
     f=${f#"$omarchy_plugin/"}
     install -Dm644 "$omarchy_plugin/$f" "$root$LIBDIR/omarchy/quiver.downloads/$f"
 done

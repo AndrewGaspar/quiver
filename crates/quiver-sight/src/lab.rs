@@ -315,6 +315,11 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                     l.write_status();
                 }
                 LinkReq::Toggle => l.panel_toggle("pad"),
+                // The Performance section: read-only here like the rest (no quiverd to ask).
+                LinkReq::Perf { session, req } => {
+                    let reply = crate::panel::sections::performance::link::refused(&req, "not in a lab instance (no quiverd)".into());
+                    let _ = l.tx.unbounded_send(Msg::Perf { session, reply });
+                }
                 LinkReq::Subscribe { .. } | LinkReq::Unsubscribe => {}
             }
         }

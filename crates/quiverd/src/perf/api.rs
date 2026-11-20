@@ -53,10 +53,9 @@ impl Daemon {
             PerfRequest::HudKeybinds => json!(hub.keybinds()),
             PerfRequest::LaunchEnv { game, profile } => {
                 let game = *game;
-                let profile = match (profile, game.as_ubisoft()) {
-                    (Some(p), Some(product_id)) => Some(crate::mods::resolve_default(product_id, &p)?).filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case(quiver_api::mods::VANILLA)),
-                    (Some(_), None) => bail!("{game} has no mod profiles"),
-                    (None, _) => None,
+                let profile = match profile {
+                    Some(p) => profile_id(game, &p, crate::mods::installed)?,
+                    None => None,
                 };
                 // A dry run: the session dir a launch would get, without creating it.
                 let dir = super::shm_root().join(format!("quiver-{}", quiver_perf::session::current_uid())).join("s-example");
@@ -73,6 +72,18 @@ impl Daemon {
                 json!(plan)
             }
             PerfRequest::Summaries { game, limit } => json!(summaries(&game, limit)),
+            PerfRequest::FrameTimes { session, game, span_ms, buckets } => json!(hub.frame_times(session.as_deref(), game, span_ms, buckets)?),
+            PerfRequest::SaveLog { session, game, seconds } => {
+                let (saved, g) = hub.save_log(session.as_deref(), game, seconds)?;
+                self.log_activity_game(source, format!("performance log ({} frames): {}", saved.frames, saved.path.display()), Some(g));
+                json!(saved)
+            }
+            PerfRequest::HudPreview { session, layout } => json!(hub.preview(&session, &layout)?),
+            PerfRequest::HudLayoutSave { layout } => {
+                let info = super::layout::save(hub.hud.dir(), &layout).map_err(|e| anyhow::anyhow!(e))?;
+                self.log_activity_game(source, format!("HUD layout {} saved ({})", info.id, info.name), None);
+                json!(info)
+            }
             PerfRequest::DevSession { product_id, stop, sight } => {
                 if !matches!(source, "cli" | "dev" | "test") {
                     bail!("dev sessions are for the CLI and tests");
@@ -131,19 +142,8 @@ impl Daemon {
     }
 
     /// A scope with its profile name resolved to an id.
-    fn perf_scope(&self, mut scope: HudScopeRef) -> Result<HudScopeRef> {
-        if scope.profile.is_some() && scope.game.is_some_and(|g| !g.is_ubisoft()) {
-            bail!("{} has no mod profiles: set its HUD for the game", scope.game.unwrap());
-        }
-        if let (Some(p), Some(prof)) = (scope.product_id(), &scope.profile) {
-            let id = crate::mods::resolve_default(p, prof)?;
-            if id.is_empty() || id.eq_ignore_ascii_case(quiver_api::mods::VANILLA) {
-                scope.profile = None;
-            } else {
-                scope.profile = Some(id);
-            }
-        }
-        Ok(scope)
+    fn perf_scope(&self, scope: HudScopeRef) -> Result<HudScopeRef> {
+        resolve_scope(scope, crate::mods::installed)
     }
 
     /// The perf part of a launch: the session's registry and, when the launch gets the Sight
@@ -203,6 +203,44 @@ impl Daemon {
     }
 }
 
+/// A profile name or id of `game`, as the id its HUD settings are stored under (`None`:
+/// vanilla). Any store's game with profiles (Ubisoft, Epic, Steam: what mods see through
+/// `installed`, as Tweaks' scopes do); a game without them says so.
+fn profile_id(game: quiver_api::GameRef, name: &str, installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>) -> Result<Option<String>> {
+    profile_id_with(game, name, installed, crate::mods::resolve_default)
+}
+
+fn profile_id_with(
+    game: quiver_api::GameRef,
+    name: &str,
+    installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>,
+    resolve: impl Fn(quiver_api::GameRef, &str) -> Result<String>,
+) -> Result<Option<String>> {
+    let v = name.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case(quiver_api::mods::VANILLA) {
+        return Ok(None);
+    }
+    installed(game).with_context(|| format!("{game}: profile HUD settings need an installed game with profiles; set its HUD for the game"))?;
+    let id = resolve(game, v)?;
+    Ok(Some(id).filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(quiver_api::mods::VANILLA)))
+}
+
+/// [`Daemon::perf_scope`]: a profile needs a game; its name becomes its id.
+fn resolve_scope(scope: HudScopeRef, installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>) -> Result<HudScopeRef> {
+    resolve_scope_with(scope, installed, crate::mods::resolve_default)
+}
+
+fn resolve_scope_with(
+    mut scope: HudScopeRef,
+    installed: impl Fn(quiver_api::GameRef) -> Result<launcher::Game>,
+    resolve: impl Fn(quiver_api::GameRef, &str) -> Result<String>,
+) -> Result<HudScopeRef> {
+    let Some(prof) = scope.profile.clone() else { return Ok(scope) };
+    let game = scope.game.context("a profile scope needs a game")?;
+    scope.profile = profile_id_with(game, &prof, installed, resolve)?;
+    Ok(scope)
+}
+
 /// A game's recorded sessions that carry a perf summary, newest first.
 pub fn summaries(game: &quiver_api::GameRef, limit: usize) -> Vec<SessionSummary> {
     let path = quiver_core::paths::game_dir(game).join("playtime.jsonl");
@@ -223,4 +261,48 @@ pub fn summaries(game: &quiver_api::GameRef, limit: usize) -> Vec<SessionSummary
     out.reverse();
     out.truncate(limit.max(1));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quiver_api::GameRef;
+
+    /// Ubisoft 3539, Epic's Alan Wake Remastered and a Steam game are installed; Steam 1 isn't.
+    fn installed(g: GameRef) -> Result<launcher::Game> {
+        if g == GameRef::steam(1) {
+            bail!("not installed");
+        }
+        Ok(launcher::Game { product_id: 0, name: "x".into(), install_dir: "/games/x".into(), prefix: "/p".into(), exe: "x.exe".into(), args: None, language: None, game: Some(g) })
+    }
+
+    fn resolve(_: GameRef, v: &str) -> Result<String> {
+        match v {
+            "DLSS" | "p-dlss" => Ok("p-dlss".into()),
+            other => bail!("no profile {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_scopes_work_for_every_store_with_profiles() {
+        let epic = GameRef::parse_ref("epic:7315f614b0504081bcdceef138075c9c").unwrap();
+        for g in [GameRef::ubisoft(3539), epic, GameRef::steam(870780)] {
+            let s = resolve_scope_with(HudScopeRef { game: Some(g), profile: Some("DLSS".into()) }, installed, resolve).unwrap();
+            assert_eq!(s.profile.as_deref(), Some("p-dlss"), "{g}: a name becomes its id");
+            assert_eq!(s.game, Some(g));
+            // Vanilla is the game's own scope.
+            let v = resolve_scope_with(HudScopeRef { game: Some(g), profile: Some("vanilla".into()) }, installed, resolve).unwrap();
+            assert_eq!(v.profile, None, "{g}");
+        }
+        // No profile: as asked; a profile needs a game, an installed one, and to exist.
+        let plain = HudScopeRef::of(GameRef::steam(1));
+        assert_eq!(resolve_scope_with(plain.clone(), installed, resolve).unwrap(), plain);
+        assert!(resolve_scope_with(HudScopeRef { game: None, profile: Some("DLSS".into()) }, installed, resolve).is_err());
+        let e = resolve_scope_with(HudScopeRef { game: Some(GameRef::steam(1)), profile: Some("DLSS".into()) }, installed, resolve).unwrap_err();
+        assert!(format!("{e:#}").contains("installed game with profiles"), "{e:#}");
+        assert!(resolve_scope_with(HudScopeRef { game: Some(epic), profile: Some("Nope".into()) }, installed, resolve).is_err());
+        // The launch env's profile too.
+        assert_eq!(profile_id_with(epic, "DLSS", installed, resolve).unwrap().as_deref(), Some("p-dlss"));
+        assert_eq!(profile_id_with(epic, "", installed, resolve).unwrap(), None);
+    }
 }

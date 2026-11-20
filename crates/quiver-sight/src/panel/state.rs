@@ -209,6 +209,9 @@ pub enum Row {
     /// The key metrics, as tiles.
     Metrics,
     Achievement(usize),
+    /// The Performance section's body: its own controls and editor
+    /// (`sections::performance`), one row for the panel's navigation.
+    Performance,
     /// A surface's preset picker (surface key).
     Preset { surface: String },
     /// One of the Mods and Tweaks sections' buttons (Undo, Revert this session, Session only).
@@ -233,7 +236,7 @@ pub enum Act {
 
 impl Row {
     pub fn focusable(&self) -> bool {
-        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter)
+        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter | Row::Performance)
     }
 }
 
@@ -287,22 +290,10 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
         PanelSection::Mods => out = super::sections::mods::rows(d, &Nav::default(), &Default::default()),
         PanelSection::Tweaks => out = super::sections::mods::tweak_rows(d, &Nav::default(), &Default::default()),
         PanelSection::Performance => {
-            out.push(Row::Metrics);
             if let Some(r) = status(&d.hud, "the HUD") {
                 out.push(r);
             }
-            if let Some(h) = d.hud.ready() {
-                out.push(Row::Heading { title: "HUD".into(), detail: Some(if h.live() { "live".into() } else { "next launch".into() }) });
-                if !h.live() {
-                    let why = h.status.as_ref().and_then(|s| s.layer_off.clone()).map(|w| format!(" ({w})")).unwrap_or_default();
-                    out.push(Row::Note(format!("No Sight layer in this launch{why}: these settings apply when the game next starts.")));
-                    out.push(Row::Hud(HudRow::Enable));
-                } else {
-                    out.push(Row::Hud(HudRow::Shown));
-                }
-                out.extend([Row::Hud(HudRow::Preset), Row::Hud(HudRow::Position), Row::Hud(HudRow::Scale)]);
-                out.push(Row::Note("Shift+F3 shows or hides the HUD in game, Ctrl+Shift+F3 steps the preset.".into()));
-            }
+            out.push(Row::Performance);
         }
         // Its rows with the filter in `Nav` come from `sections::rows`.
         PanelSection::Achievements => out = super::sections::achievements::rows(d, Filter::All, now),
@@ -900,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn performance_rows_say_when_settings_apply() {
+    fn performance_is_one_row_with_its_own_controls() {
         let view = HudSettingsView {
             scope: Default::default(),
             set: Default::default(),
@@ -909,10 +900,11 @@ mod tests {
             anti_cheat: None,
         };
         let d = PanelData { hud: Load::Ready(HudState { status: None, settings: view }), ..Default::default() };
-        let r = rows(PanelSection::Performance, &d, Utc::now());
-        assert!(r.contains(&Row::Hud(HudRow::Enable)) && !r.contains(&Row::Hud(HudRow::Shown)));
-        assert!(r.contains(&Row::Heading { title: "HUD".into(), detail: Some("next launch".into()) }));
-        assert_eq!(r[0], Row::Metrics);
+        assert_eq!(rows(PanelSection::Performance, &d, Utc::now()), [Row::Performance]);
+        assert!(Row::Performance.focusable());
+        assert!(matches!(&rows(PanelSection::Performance, &PanelData::default(), Utc::now())[..], [Row::Note(_), Row::Performance]));
+        // Y reaches the section as Input::Menu (PanelView::key), X as PlayOptions.
+        assert_eq!(panel_key("y", false, false), Some(Key::Y));
     }
 
     #[test]

@@ -45,12 +45,16 @@ pub const GENERIC_ROLES: [&str; 11] = [
     "latency.frame",
 ];
 
-/// The latency split's stages: (role and canonical id, label, short label, help).
+/// The latency split's stages: (role and canonical id, label, short label, help). They add up
+/// to the game-to-render latency (`latency.render`): the `nvidia` producer fills them from the
+/// driver's Reflex timing reports (the layer's opt-in `vkGetLatencyTimingsNV` reads), a mod
+/// with Reflex markers of its own may too. Scan-out isn't in any report, so the last stage is
+/// the GPU's (it was `latency.split.out`, "present and scan-out", before anything filled it).
 pub const LATENCY_SPLIT: [(&str, &str, &str, &str); 4] = [
     ("latency.split.sim", "Latency: simulation", "SIM", "Simulation start to simulation end."),
-    ("latency.split.render", "Latency: render", "RENDER", "Render submit start to GPU render end."),
-    ("latency.split.queue", "Latency: queue", "QUEUE", "Time the frame waited in the driver's and the OS's queues."),
-    ("latency.split.out", "Latency: present and scan-out", "OUT", "Present start to the frame reaching the display."),
+    ("latency.split.render", "Latency: render submit", "RENDER", "Simulation end to the end of the frame's render submission on the CPU."),
+    ("latency.split.queue", "Latency: queue", "QUEUE", "Render submission's end to the GPU starting the frame: the driver's and the OS's queues."),
+    ("latency.split.gpu", "Latency: GPU", "GPU", "The GPU starting the frame to its last GPU work. Scan-out isn't measured."),
 ];
 
 /// Whether `producer` may fill generic roles: built-in producers only, not mods.
@@ -214,8 +218,8 @@ pub fn canonical() -> Vec<Canonical> {
         Source::Alias(ROLE_LATENCY_PC),
     );
     // The frame's latency split into stages (SIGHT-HUD §1.1's stacked bar), each a gauge in
-    // ms. Not generic roles: a mod with Reflex markers of its own may fill them; nothing
-    // built in does yet (the layer's opt-in timing reports are the likely source).
+    // ms. Not generic roles: the `nvidia` producer fills them from the layer's opt-in timing
+    // reports, and a mod with Reflex markers of its own may too.
     for (role, label, short, help) in LATENCY_SPLIT {
         alias(role, MetricKind::Gauge, Unit::Ms, label, Some(short), help, Source::Alias(role));
     }
@@ -270,6 +274,11 @@ pub fn system() -> Vec<MetricDescriptor> {
     let mut name = d("gpu.name", MetricKind::Text, Unit::None, "GPU", None, "The GPU the metrics are from.", );
     name.group = Some("GPU".into());
     v.push(name);
+    // Where the GPU numbers come from, for the Sight panel's tiles ("GPU · nvml").
+    let mut source = d("gpu.source", MetricKind::Text, Unit::None, "GPU sensors", None, "Where the GPU metrics are read: nvml (NVIDIA's library) or sysfs (the kernel driver's files).", );
+    source.group = Some("GPU".into());
+    source.visibility = Some(quiver_perf::descriptor::Visibility::Advanced);
+    v.push(source);
     let mut bat = d("bat.status", MetricKind::State, Unit::None, "Power source", None, "Battery or AC.", );
     bat.group = Some("Power".into());
     bat.values = vec![

@@ -37,6 +37,7 @@ use serde_json::Value;
 
 use super::hints::{Glyph, Hints};
 use super::sections::mods::{self, Chip, ChipWhen, Compare, SessionLog, TWEAKS};
+use super::sections::performance::{self as perf, PerfSection};
 use super::state::{ANCHORS, Act, Button, Effect, HudRow, Key, Load, Nav, PRESETS, PanelData, Row, Zone, adjustable, cycle, panel_key, step_scale, step_value};
 use crate::link::{Change, LinkReq, Loaded, Msg, Why};
 
@@ -200,6 +201,12 @@ pub struct PanelView {
     pub shot: Option<(String, Tone)>,
     /// The Achievements list's own scroll.
     pub ach_scroll: ScrollHandle,
+    /// The Performance section's own state (`sections::performance`).
+    pub perf: PerfSection,
+    /// Its layout editor's preview, a HUD view of the edited layout.
+    pub(crate) perf_preview: Option<perf::view::Preview>,
+    /// The section body's room in the last frame (logical px), for its layout.
+    pub(crate) room: perf::view::Room,
 }
 
 pub(crate) fn tone_color(th: &Theme, t: Tone) -> Hsla {
@@ -303,6 +310,9 @@ impl PanelView {
             marks: Rc::default(),
             shot: None,
             ach_scroll: ScrollHandle::new(),
+            perf: PerfSection::default(),
+            perf_preview: None,
+            room: perf::view::Room { w: 900.0, h: 500.0 },
         }
     }
 
@@ -390,6 +400,15 @@ impl PanelView {
 
     /// One input from the keyboard, the controller (gilrs, or hyprpad's keys) or a click.
     pub fn input(&mut self, i: Input, cx: &mut Context<Self>) {
+        // The Performance section's body has its own controls and editor.
+        if self.perf_has_input() {
+            let cap = self.cap_value();
+            if let perf::Outcome::Done(acts) = self.perf.input(i, &self.data, &cap) {
+                self.perf_acts(acts, cx);
+                cx.notify();
+                return;
+            }
+        }
         self.nav.pages.surfaces = self.data.options.ready().map_or(0, |l| l.len());
         let rows = self.rows();
         let e = {
@@ -410,6 +429,12 @@ impl PanelView {
             Key::Input(i) => self.input(i, cx),
             Key::Dock if !held => self.toggle_dock(cx),
             Key::Dock => {}
+            // Y saves the layout editor's preset (no A/B compare there).
+            Key::Y if self.perf_has_input() => {
+                if !held {
+                    self.input(Input::Menu, cx);
+                }
+            }
             Key::Y => self.y_pressed(held, cx),
         }
     }
@@ -722,6 +747,77 @@ impl PanelView {
         }
     }
 
+    // ---- The Performance section's glue (`sections::performance`) ---------------------------
+
+    /// The Performance section's body has the focus (its controls take the input first).
+    fn perf_has_input(&self) -> bool {
+        self.nav.section == PanelSection::Performance && self.nav.zone == Zone::Body && self.nav.confirm.is_none()
+    }
+
+    /// What the section's input asked for.
+    fn perf_acts(&mut self, acts: Vec<perf::Act>, cx: &mut Context<Self>) {
+        for a in acts {
+            match a {
+                perf::Act::Send(req) => self.send(LinkReq::Perf { session: self.session.clone(), req }),
+                perf::Act::SetTweak(id, v) => {
+                    let key = (TWEAKS.to_owned(), id);
+                    self.drafts.insert(key.clone(), v);
+                    self.saving.remove(&key);
+                    self.debounce(cx);
+                }
+                perf::Act::Note(t, tone) => self.hud_note = Some((t, tone)),
+            }
+        }
+    }
+
+    /// quiverd answered one of the section's requests.
+    pub fn perf_reply(&mut self, r: perf::Reply, _cx: &mut Context<Self>) {
+        let opening = self.perf.editor.is_none();
+        let (note, reload) = self.perf.reply(r, &self.data);
+        if let Some(n) = note {
+            self.flash = Some(n);
+        }
+        if reload {
+            self.send(LinkReq::Load { session: self.session.clone(), part: super::data::Part::Hud, view: self.data.session.ready().cloned() });
+        }
+        // The editor just opened (or took another preset): its preview and metrics now.
+        if let Some(e) = self.perf.editor.as_ref().filter(|e| opening || e.preview.is_none()) {
+            let reqs = [perf::Req::Preview(e.layout.clone()), perf::Req::Catalog];
+            for req in reqs {
+                self.send(LinkReq::Perf { session: self.session.clone(), req });
+            }
+        }
+    }
+
+    /// Once a second while the panel shows: the section's graph (and the editor's preview).
+    pub fn tick(&mut self, _cx: &mut Context<Self>) {
+        if self.nav.section == PanelSection::Performance {
+            for req in self.perf.refresh(&self.data) {
+                self.send(LinkReq::Perf { session: self.session.clone(), req });
+            }
+        }
+    }
+
+    /// A click on one of the section's controls focuses it.
+    pub(crate) fn perf_focus(&mut self, c: perf::Ctl, cx: &mut Context<Self>) {
+        if let Some(i) = self.perf.ctls(&self.data).iter().position(|x| *x == c) {
+            self.nav.zone = Zone::Body;
+            self.perf.focus = i;
+            cx.notify();
+        }
+    }
+
+    /// The frame-rate cap as asked (a draft) or as set.
+    pub(crate) fn cap_value(&self) -> Value {
+        let key = (TWEAKS.to_owned(), perf::CAP_TWEAK.to_owned());
+        self.drafts.get(&key).cloned().or_else(|| self.data.tweaks.ready().and_then(|t| t.options.get(perf::CAP_TWEAK)).map(|st| draft_value(st, None))).unwrap_or(Value::from(0))
+    }
+
+    /// What came of the last change of a tweak ("Saving…", or why it wasn't saved).
+    pub(crate) fn tweak_outcome(&self, id: &str) -> Option<(String, Tone)> {
+        self.saving.get(&(TWEAKS.to_owned(), id.to_owned())).cloned()
+    }
+
     fn debounce(&mut self, cx: &mut Context<Self>) {
         self.edit_gen += 1;
         let edit_gen = self.edit_gen;
@@ -988,6 +1084,11 @@ impl PanelView {
     pub fn section_hints(&self, h: &mut Hints) {
         match self.nav.section {
             PanelSection::Mods | PanelSection::Tweaks => super::sections::mods_view::hints(self, h),
+            PanelSection::Performance if self.nav.zone == Zone::Body => {
+                for (g, t) in self.perf.hints(&self.data) {
+                    h.add(g, t);
+                }
+            }
             PanelSection::Achievements => super::sections::achievements::hints(self, h),
             _ => self.default_hints(h),
         }
@@ -1377,7 +1478,7 @@ impl PanelView {
                 .into_any_element(),
             Row::Note(t) => div().py(px(4.)).text_size(px(13.)).text_color(th.tx3).child(t.clone()).into_any_element(),
             Row::Opt { .. } | Row::Tweak { .. } => self.option_row(th, i, row, focused, cx),
-            Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter => div().into_any_element(),
+            Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter | Row::Performance => div().into_any_element(),
             Row::Hud(h) => self.hud_row(th, i, *h, focused, cx),
             Row::Metrics => self.metrics(th),
             Row::Button(b) => {
@@ -1468,11 +1569,12 @@ impl PanelView {
         card(th).size_full().p(px(20.)).child(list).into_any_element()
     }
 
-    /// The section's body: Mods and Tweaks lay out their own; the others list their rows.
+    /// The section's body: each section lays out its own.
     fn section_body(&self, th: &Theme, docked: bool, cx: &mut Context<Self>) -> AnyElement {
         match self.nav.section {
             PanelSection::Mods => super::sections::mods_view::mods_body(self, th, docked, cx),
             PanelSection::Tweaks => super::sections::mods_view::tweaks_body(self, th, docked, cx),
+            PanelSection::Performance => perf::view::body(self, th, docked, cx),
             PanelSection::Session | PanelSection::Achievements => {
                 let rows = self.rows();
                 let f = self.nav.focused_row(&rows).filter(|_| self.nav.confirm.is_none());
@@ -1482,6 +1584,8 @@ impl PanelView {
                     super::sections::achievements::body(self, th, &rows, f, docked, cx)
                 }
             }
+            // Every section has its own layout now; a section added later lists its rows.
+            #[allow(unreachable_patterns)]
             _ => self.rows_body(th, docked, cx),
         }
     }
@@ -1642,6 +1746,14 @@ impl Render for PanelView {
         let vp = window.viewport_size();
         let (vw, vh) = (f32::from(vp.width), f32::from(vp.height));
         let docked = self.docked();
+        // The section body's room (approximate: the panel's padding, the tab row or the dock's
+        // header, the hint bar), for the Performance section's layout.
+        self.room = if docked {
+            perf::view::Room { w: DOCK_W.min(vw - 2.0 * DOCK_MARGIN) - 24.0, h: vh - 2.0 * DOCK_MARGIN - 64.0 - BAR_H - 16.0 }
+        } else {
+            perf::view::Room { w: (vw - 2.0 * (vw * SAFE).max(24.0)).min(MAX_W), h: vh - (vh * SAFE).max(20.0) - 20.0 - 44.0 - 20.0 - BAR_H }
+        };
+        perf::view::sync_preview(self, cx);
         let (scrim, _) = backdrop_colors(&th, self.backdrop);
         let confirm = self.confirm(&th, cx);
         let root = div()

@@ -4,12 +4,17 @@
 //! - `manifests/<HASH>.manifest` (also `.metadata`, `.licenses`)
 //! - `slices_v3/<c>/<SHA1>` where `<c>` is derived from the first two hex digits
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, bail};
 use quiver_proto::{download, download_service as ds};
 
 use crate::demux::{Demux, Download, ServiceConnection};
 use crate::install::SliceError;
 use crate::library::Library;
+use crate::online::Online;
+use crate::retry::{Transient, permanent, transient};
+use crate::stores::BoxFuture;
 
 const BASE32: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
 
@@ -39,60 +44,133 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 // bandwidth limit waits before a request, never between reads).
 const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How a [`Downloader`] gets a live demux socket again once its own is gone: the
+/// account's shared socket, reconnected by [`Online::demux`].
+pub type Reconnect = Arc<dyn Fn() -> BoxFuture<'static, Result<Demux>> + Send + Sync>;
+
+/// The download_service session: the socket it runs on, its connection (`None` once it
+/// failed: the next request opens a new one) and the ownership token it was opened with.
+struct Session {
+    demux: Demux,
+    conn: Option<ServiceConnection<Download>>,
+    token: String,
+}
+
 pub struct Downloader {
     /// Locked so slices can ask for fresh URLs while others download.
-    conn: tokio::sync::Mutex<ServiceConnection<Download>>,
+    session: tokio::sync::Mutex<Session>,
+    reconnect: Option<Reconnect>,
     pub product_id: u32,
     pub http: reqwest::Client,
 }
 
 impl Downloader {
+    /// A downloader on `demux` alone: once that socket is gone, URL requests fail
+    /// (transiently). See [`Downloader::open_online`].
     pub async fn open(demux: &Demux, lib: &mut Library, product_id: u32) -> Result<Self> {
-        let ownership_token = lib.ownership_token(product_id).await?;
-        let mut conn = demux.open::<Download>().await?;
-        let rsp = conn
-            .request(ds::Req {
-                initialize_req: Some(ds::InitializeReq { ownership_token, ..Default::default() }),
-                ..Default::default()
-            })
-            .await?;
-        if !rsp.initialize_rsp.is_some_and(|r| r.ok) {
-            bail!("download_service refused to initialize for product {product_id}");
-        }
+        Self::open_with(demux, lib, product_id, None).await
+    }
+
+    /// A downloader that follows the account's socket: when the server closes the
+    /// download_service connection, or the whole socket drops, the next URL request opens
+    /// a new connection (on the reconnected socket if need be) and initializes it again.
+    pub async fn open_online(online: &Arc<Online>, demux: &Demux, lib: &mut Library, product_id: u32) -> Result<Self> {
+        let o = online.clone();
+        let reconnect: Reconnect = Arc::new(move || {
+            let o = o.clone();
+            Box::pin(async move { o.demux().await })
+        });
+        Self::open_with(demux, lib, product_id, Some(reconnect)).await
+    }
+
+    /// [`Downloader::open`], reconnecting through `reconnect` when the socket is gone.
+    pub async fn open_with(demux: &Demux, lib: &mut Library, product_id: u32, reconnect: Option<Reconnect>) -> Result<Self> {
+        let token = lib.ownership_token(product_id).await?;
+        let Some(conn) = initialize(demux, &token).await? else {
+            return Err(permanent(format!("download_service refused to initialize for product {product_id}")));
+        };
         let http = reqwest::Client::builder()
             .user_agent("Massgate")
             .pool_max_idle_per_host(32)
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(STALL_TIMEOUT)
             .build()?;
-        Ok(Self { conn: tokio::sync::Mutex::new(conn), product_id, http })
+        let session = Session { demux: demux.clone(), conn: Some(conn), token };
+        Ok(Self { session: tokio::sync::Mutex::new(session), reconnect, product_id, http })
     }
 
     /// Signed URLs (one or more mirrors each) for relative CDN paths.
+    ///
+    /// A connection the server closed (or that stopped answering) is replaced on the next
+    /// request: a new `download_service` connection, initialized with the ownership token,
+    /// or a fresh token should the server refuse the old one. Failures that may pass are
+    /// [`Transient`] (the caller waits and asks again); a product the account doesn't own,
+    /// even with a fresh token, is permanent.
     pub async fn urls(&self, paths: &[String]) -> Result<Vec<Vec<String>>> {
-        let rsp = self
-            .conn
-            .lock()
-            .await
-            .request(ds::Req {
-                url_req: Some(ds::UrlReq {
-                    url_requests: vec![ds::url_req::Request {
-                        product_id: self.product_id,
-                        relative_file_path: paths.to_vec(),
-                    }],
-                }),
-                ..Default::default()
-            })
-            .await?;
-        let url_rsp = rsp.url_rsp.context("no url_rsp")?;
-        let resp = url_rsp.url_responses.into_iter().next().context("empty url_responses")?;
-        if resp.result != ds::url_rsp::Result::Success as i32 {
-            bail!("download_service URL request failed: result {}", resp.result);
+        let mut s = self.session.lock().await;
+        let mut renewed = false;
+        loop {
+            self.ensure_open(&mut s, renewed).await?;
+            let conn = s.conn.as_mut().expect("opened");
+            let rsp = match conn.request(url_req(self.product_id, paths)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::info!(connection = conn.id(), "download_service request failed ({e:#}); a new connection is opened for the next one");
+                    s.conn = None;
+                    return Err(e);
+                }
+            };
+            let url_rsp = rsp.url_rsp.context("no url_rsp")?;
+            let resp = url_rsp.url_responses.into_iter().next().context("empty url_responses")?;
+            if resp.result == ds::url_rsp::Result::NotOwned as i32 && !renewed {
+                // The session's ownership may have lapsed: once more with a fresh token.
+                tracing::info!(product = self.product_id, "download_service says not owned; renewing the ownership token");
+                renewed = true;
+                continue;
+            }
+            if resp.result != ds::url_rsp::Result::Success as i32 {
+                return Err(permanent(format!("download_service URL request failed: result {} (not owned)", resp.result)));
+            }
+            if resp.download_urls.len() != paths.len() {
+                bail!("asked for {} URLs, got {}", paths.len(), resp.download_urls.len());
+            }
+            return Ok(resp.download_urls.into_iter().map(|d| d.urls).collect());
         }
-        if resp.download_urls.len() != paths.len() {
-            bail!("asked for {} URLs, got {}", paths.len(), resp.download_urls.len());
+    }
+
+    /// Give `s` an open, initialized connection, reconnecting the socket if it is gone.
+    /// `fresh_token`: ask ownership_service for a new token first.
+    async fn ensure_open(&self, s: &mut Session, fresh_token: bool) -> Result<()> {
+        if !fresh_token && s.conn.as_ref().is_some_and(|c| c.is_open()) {
+            return Ok(());
         }
-        Ok(resp.download_urls.into_iter().map(|d| d.urls).collect())
+        s.conn = None;
+        if !s.demux.is_alive() {
+            let reconnect = self.reconnect.as_ref().ok_or_else(|| transient("the demux connection is gone"))?;
+            tracing::info!(product = self.product_id, "demux connection gone; reconnecting");
+            s.demux = reconnect().await.map_err(|e| e.context(Transient("reconnecting to Ubisoft".into())))?;
+        }
+        let mut fresh = fresh_token;
+        loop {
+            if fresh {
+                s.token = self.fresh_token(&s.demux).await?;
+            }
+            if let Some(conn) = initialize(&s.demux, &s.token).await? {
+                tracing::info!(product = self.product_id, connection = conn.id(), "download_service connection opened");
+                s.conn = Some(conn);
+                return Ok(());
+            }
+            if fresh {
+                return Err(permanent(format!("download_service refused to initialize for product {}", self.product_id)));
+            }
+            // The token may have expired: once more with a new one.
+            tracing::info!(product = self.product_id, "download_service refused the ownership token; asking for a new one");
+            fresh = true;
+        }
+    }
+
+    async fn fresh_token(&self, demux: &Demux) -> Result<String> {
+        Library::fetch(demux).await?.ownership_token(self.product_id).await
     }
 
     /// GET the first working mirror.
@@ -142,6 +220,26 @@ impl Downloader {
     }
 }
 
+/// Open a download_service connection and initialize it with an ownership token.
+/// `None`: the server refused the token.
+async fn initialize(demux: &Demux, token: &str) -> Result<Option<ServiceConnection<Download>>> {
+    let mut conn = demux.open::<Download>().await?;
+    let rsp = conn
+        .request(ds::Req {
+            initialize_req: Some(ds::InitializeReq { ownership_token: token.to_owned(), ..Default::default() }),
+            ..Default::default()
+        })
+        .await?;
+    Ok(rsp.initialize_rsp.is_some_and(|r| r.ok).then_some(conn))
+}
+
+fn url_req(product_id: u32, paths: &[String]) -> ds::Req {
+    ds::Req {
+        url_req: Some(ds::UrlReq { url_requests: vec![ds::url_req::Request { product_id, relative_file_path: paths.to_vec() }] }),
+        ..Default::default()
+    }
+}
+
 /// Connection trouble, timeouts and cut-off bodies are worth retrying.
 fn classify(e: reqwest::Error) -> SliceError {
     if e.is_timeout() || e.is_connect() || e.is_body() || e.is_request() || e.is_decode() {
@@ -160,3 +258,6 @@ impl crate::install::SliceSource for Downloader {
         self.fetch(mirrors).await
     }
 }
+
+#[cfg(test)]
+mod tests;

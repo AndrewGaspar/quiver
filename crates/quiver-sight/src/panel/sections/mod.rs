@@ -4,14 +4,16 @@
 //!
 //! - [`mods`]: the Mods and Tweaks sections (option surfaces, pages, presets, the session's
 //!   changes, the change chip, A/B compare).
+//! - [`performance`]: the Performance section and the HUD layout editor (its own model, input
+//!   and drawing behind one `Row::Performance`).
 //! - [`session`] and [`achievements`]: the Session and Achievements sections as cards (the
 //!   `SightSession` and `SightAchievements` mock-ups); [`prefs`]: the panel's own settings
 //!   they change (Do not disturb, On unlock, hidden achievements).
-//! - Performance still draws from `panel::state::rows`.
 
 pub mod achievements;
 pub mod mods;
 pub mod mods_view;
+pub mod performance;
 pub mod prefs;
 pub mod session;
 
