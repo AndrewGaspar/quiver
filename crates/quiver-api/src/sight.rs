@@ -686,6 +686,72 @@ mod tests {
     }
 
     #[test]
+    fn notices_on_the_wire() {
+        let spec = NoticeSpec {
+            title: "  DLSS v4 is ready\u{7} ".into(),
+            body: Some("x".repeat(300)),
+            buttons: vec![NoticeButton { id: "keep_v3".into(), label: "".into(), primary: true }],
+            ..Default::default()
+        };
+        let c = spec.checked().unwrap();
+        assert_eq!(c.title, "DLSS v4 is ready");
+        assert_eq!(c.body.as_ref().unwrap().chars().count(), NOTICE_MAX_BODY);
+        assert_eq!(c.buttons[0].label, "keep_v3", "an empty label is the id");
+        assert_eq!((c.secs(), c.urgent()), (NOTICE_ACTION_SECS, false));
+        assert!(NoticeSpec { title: "x".into(), buttons: vec![NoticeButton { id: "a b".into(), label: "x".into(), primary: false }], ..Default::default() }.checked().is_err());
+        assert!(NoticeSpec { title: "x".into(), level: NoticeLevel::Error, ..Default::default() }.urgent());
+        // Request and event round trips.
+        let r = crate::Request::Sight(SightRequest::Notify { notice: c.clone() });
+        let back: crate::Request = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+        assert!(matches!(back, crate::Request::Sight(SightRequest::Notify { notice }) if notice == c));
+        let n = SightNotice { id: "n-1".into(), from: "agent:x".into(), at: Utc::now(), spec: c };
+        let line = serde_json::to_string(&crate::Reply::Event(crate::Event::SightNotice(n.clone()))).unwrap();
+        let crate::Reply::Event(crate::Event::SightNotice(back)) = serde_json::from_str(&line).unwrap() else { panic!() };
+        assert_eq!(back, n);
+        let q: crate::Request = serde_json::from_value(serde_json::json!({"method": "sight", "params": {"op": "quick"}})).unwrap();
+        assert!(matches!(q, crate::Request::Sight(SightRequest::Quick { session: None })));
+    }
+
+    #[test]
+    fn settings_and_pins() {
+        let mut s = SightSettings::default();
+        assert!(!s.toasts.dnd && !s.status_chip.enabled && !s.hint.shown && s.achievements.on_unlock == OnUnlock::Toast, "the defaults");
+        s.set("toasts.dnd", &serde_json::json!("on")).unwrap();
+        s.set("achievements.on_unlock", &serde_json::json!("toast-screenshot")).unwrap();
+        s.set("status_chip.enabled", &serde_json::json!(true)).unwrap();
+        s.set("hint.shown", &serde_json::json!(true)).unwrap();
+        assert!(s.toasts.dnd && s.status_chip.enabled && s.hint.shown_at.is_some());
+        assert_eq!(s.get("achievements.on_unlock"), Some(serde_json::json!("toast_screenshot")));
+        assert!(s.set("toasts.dnd", &serde_json::json!("maybe")).is_err());
+        assert!(s.set("nope", &serde_json::json!(1)).is_err());
+        s.set("hint.shown", &serde_json::json!(false)).unwrap();
+        assert!(!s.hint.shown && s.hint.shown_at.is_none(), "reset");
+        // Pins: per profile, then the game's; no twice; at most MAX_PINS.
+        let g = crate::GameRef::ubisoft(3539);
+        let pin = |id: &str| QuickPin { kind: PinKind::Option, surface: "m1/aco-dlss".into(), id: id.into(), label: id.into() };
+        assert_eq!(pin_scope(&g, Some("vanilla")), "ubisoft:3539");
+        s.pin(&pin_scope(&g, Some("dlss")), pin("a"), true).unwrap();
+        s.pin(&pin_scope(&g, None), pin("b"), true).unwrap();
+        s.pin(&pin_scope(&g, None), pin("a"), true).unwrap();
+        let ids: Vec<String> = s.pins_for(&g, Some("dlss")).into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(s.pins_for(&g, None).len(), 2);
+        s.pin(&pin_scope(&g, Some("dlss")), pin("a"), false).unwrap();
+        assert!(!s.pins.contains_key("ubisoft:3539/dlss"), "an empty scope goes");
+        for i in 0..MAX_PINS {
+            let _ = s.pin("x", pin(&format!("p{i}")), true);
+        }
+        assert!(s.pin("x", pin("one-more"), true).is_err());
+        // TOML round trip, unknown keys kept.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sight.toml");
+        std::fs::write(&p, "other = 1\n").unwrap();
+        save_settings_at(&p, &s).unwrap();
+        assert_eq!(load_settings_at(&p), s);
+        assert!(std::fs::read_to_string(&p).unwrap().contains("other = 1"));
+    }
+
+    #[test]
     fn freshness() {
         let now = Utc::now();
         let c = PanelCommand { seq: 3, action: PanelAction::Toggle, session: None, section: None, monitor: None, by: "cli".into(), at: now };
