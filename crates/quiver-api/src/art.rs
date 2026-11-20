@@ -135,7 +135,8 @@ impl ArtOrigin {
 }
 
 /// An image to load.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ArtRef {
     /// A product-config file name on Ubisoft's asset CDN.
     Asset(String),

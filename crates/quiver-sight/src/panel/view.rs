@@ -127,6 +127,12 @@ impl DepthMarks {
 /// element) and a pixel of what's behind it, which a lift's moved-off strip is filled from.
 pub(crate) const MARK_PAD: f32 = 6.0;
 
+/// The focused part's depth marker, for the sections that draw their own rows
+/// (`sections::session`, `sections::achievements`).
+pub fn focus_mark(marks: &Rc<RefCell<DepthMarks>>) -> impl IntoElement {
+    mark(marks, Mark::Focus, MARK_PAD)
+}
+
 /// An invisible child covering its (relative) parent that records the parent's bounds, padded
 /// and clipped to the content mask, as part `m`.
 pub(crate) fn mark(marks: &Rc<RefCell<DepthMarks>>, m: Mark, pad: f32) -> impl IntoElement {
@@ -191,6 +197,10 @@ pub struct PanelView {
     subscribed: Vec<String>,
     /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
     pub marks: Rc<RefCell<DepthMarks>>,
+    /// What came of the last screenshot (the Session section shows it under the button).
+    pub shot: Option<(String, Tone)>,
+    /// The Achievements list's own scroll.
+    pub ach_scroll: ScrollHandle,
     /// The Performance section's own state (`sections::performance`).
     pub perf: PerfSection,
     /// Its layout editor's preview, a HUD view of the edited layout.
@@ -298,6 +308,8 @@ impl PanelView {
             told_docked: None,
             subscribed: Vec::new(),
             marks: Rc::default(),
+            shot: None,
+            ach_scroll: ScrollHandle::new(),
             perf: PerfSection::default(),
             perf_preview: None,
             room: perf::view::Room { w: 900.0, h: 500.0 },
@@ -369,11 +381,12 @@ impl PanelView {
         self.data.tweaks.ready().is_some_and(|t| t.key == key)
     }
 
-    fn can_adjust(&self, row: &Row) -> bool {
+    pub(crate) fn can_adjust(&self, row: &Row) -> bool {
         match row {
             Row::Opt { .. } | Row::Tweak { .. } => self.option_state(row).is_some_and(adjustable),
             Row::Hud(_) => self.data.hud.ready().is_some(),
             Row::Preset { .. } => self.surface_of(row).is_some_and(|s| !s.presets.is_empty()),
+            Row::Pref(_) | Row::AchFilter => true,
             _ => false,
         }
     }
@@ -437,8 +450,18 @@ impl PanelView {
     }
 
     fn scroll_to_focus(&self) {
-        if let Some(r) = self.nav.focused_row(&self.rows()) {
-            self.scroll.scroll_to_item(r);
+        let rows = self.rows();
+        if let Some(r) = self.nav.focused_row(&rows) {
+            match self.nav.section {
+                // Drawn as cards (`sections::session`); the Achievements list scrolls on its own.
+                PanelSection::Achievements => {
+                    if let Some(p) = super::sections::achievements::list_pos(&rows, r) {
+                        self.ach_scroll.scroll_to_item(p);
+                    }
+                }
+                PanelSection::Session => {}
+                _ => self.scroll.scroll_to_item(r),
+            }
         }
     }
 
@@ -460,6 +483,11 @@ impl PanelView {
         let key_n = match self.nav.section {
             PanelSection::Mods => mods::surface(&self.data, &self.nav).map(|s| (s.key.clone(), mods::pages(s).len())),
             PanelSection::Tweaks => self.data.tweaks.ready().map(|s| (s.key.clone(), mods::pages(s).len())),
+            // The list's filter (All, Unlocked, Locked, Recent).
+            PanelSection::Achievements => {
+                self.nav.ach_filter = self.nav.ach_filter.step(d);
+                return;
+            }
             _ => {
                 self.nav.step_section(d);
                 return;
@@ -476,6 +504,11 @@ impl PanelView {
     /// X: Mods and Tweaks put the focused option back to its default.
     fn x(&mut self, row: Option<Row>) {
         let Some(row) = row else { return };
+        // Achievements: X reveals the focused hidden one.
+        if let Row::Achievement(k) = row {
+            self.nav.revealed.insert(k);
+            return;
+        }
         if !matches!(self.nav.section, PanelSection::Mods | PanelSection::Tweaks) {
             return;
         }
@@ -669,6 +702,10 @@ impl PanelView {
                 }
                 None => self.flash = Some(("The session isn't loaded yet.".into(), Tone::Warn)),
             },
+            Button::Screenshot => {
+                self.send(LinkReq::Screenshot { session: self.session.clone() });
+                self.shot = Some(("Taking a screenshot…".into(), Tone::Muted));
+            }
         }
     }
 
@@ -699,6 +736,13 @@ impl PanelView {
                 self.debounce(cx);
             }
             Row::Hud(h) => self.adjust_hud(*h, dir),
+            Row::Pref(p) => {
+                super::sections::prefs::step(&mut self.data.prefs, *p, dir);
+                if let Err(e) = super::sections::prefs::save_to(&super::sections::prefs::path(), &self.data.prefs, *p) {
+                    self.flash = Some((format!("Couldn't save the setting: {e}"), Tone::Bad));
+                }
+            }
+            Row::AchFilter => self.nav.ach_filter = self.nav.ach_filter.step(dir),
             _ => {}
         }
     }
@@ -946,6 +990,13 @@ impl PanelView {
                 });
                 return;
             }
+            Change::Screenshot(path) => {
+                self.shot = Some(match result {
+                    Ok(_) => (format!("Saved {}", super::sections::session::home_relative(path)), Tone::Ok),
+                    Err(e) => (format!("No screenshot: {e}"), Tone::Bad),
+                });
+                return;
+            }
         };
         match (&change, &result) {
             (Change::Option(s, id), Err(e)) => {
@@ -1038,6 +1089,7 @@ impl PanelView {
                     h.add(g, t);
                 }
             }
+            PanelSection::Achievements => super::sections::achievements::hints(self, h),
             _ => self.default_hints(h),
         }
     }
@@ -1426,13 +1478,14 @@ impl PanelView {
                 .into_any_element(),
             Row::Note(t) => div().py(px(4.)).text_size(px(13.)).text_color(th.tx3).child(t.clone()).into_any_element(),
             Row::Opt { .. } | Row::Tweak { .. } => self.option_row(th, i, row, focused, cx),
-            Row::Preset { .. } | Row::Act(_) | Row::Performance => div().into_any_element(),
+            Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter | Row::Performance => div().into_any_element(),
             Row::Hud(h) => self.hud_row(th, i, *h, focused, cx),
             Row::Metrics => self.metrics(th),
             Row::Button(b) => {
                 let (label, help, col, ic) = match b {
                     Button::Quit => ("Quit game", "Asks the game to close, like its window's close button", th.tx1, Icon::LogOut),
                     Button::ForceQuit => ("Force quit", "Stops the game's processes at once; unsaved progress is lost", th.bad, Icon::CircleX),
+                    Button::Screenshot => ("Screenshot", "The game's next frame, saved under Pictures › Quiver", th.tx1, Icon::Image),
                 };
                 div()
                     .id(SharedString::from(format!("row-{i}")))
@@ -1516,12 +1569,23 @@ impl PanelView {
         card(th).size_full().p(px(20.)).child(list).into_any_element()
     }
 
-    /// The section's body: Mods and Tweaks lay out their own; the others list their rows.
+    /// The section's body: each section lays out its own.
     fn section_body(&self, th: &Theme, docked: bool, cx: &mut Context<Self>) -> AnyElement {
         match self.nav.section {
             PanelSection::Mods => super::sections::mods_view::mods_body(self, th, docked, cx),
             PanelSection::Tweaks => super::sections::mods_view::tweaks_body(self, th, docked, cx),
             PanelSection::Performance => perf::view::body(self, th, docked, cx),
+            PanelSection::Session | PanelSection::Achievements => {
+                let rows = self.rows();
+                let f = self.nav.focused_row(&rows).filter(|_| self.nav.confirm.is_none());
+                if self.nav.section == PanelSection::Session {
+                    super::sections::session::body(self, th, &rows, f, docked, cx)
+                } else {
+                    super::sections::achievements::body(self, th, &rows, f, docked, cx)
+                }
+            }
+            // Every section has its own layout now; a section added later lists its rows.
+            #[allow(unreachable_patterns)]
             _ => self.rows_body(th, docked, cx),
         }
     }
@@ -1566,6 +1630,7 @@ impl PanelView {
         let (title, body, yes) = match c.what {
             Button::Quit => (format!("Quit {game}?"), "Asks the game to close, as its window's close button does. The game may ask you first; anything unsaved may be lost.", "Quit"),
             Button::ForceQuit => (format!("Force quit {game}?"), "Stops the game's processes at once. Anything unsaved is lost.", "Force quit"),
+            Button::Screenshot => return None,
         };
         let btn = |id: &'static str, label: &'static str, on: bool, danger: bool, yes: bool| {
             div()

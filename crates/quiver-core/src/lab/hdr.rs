@@ -328,6 +328,21 @@ pub fn png16(raw: &[u8], format: u32, color_space: u32, width: u32, height: u32)
     image::ImageBuffer::from_raw(width, height, out).ok_or_else(|| anyhow::anyhow!("image size"))
 }
 
+/// A capture saved as a screenshot (the Sight panel's Screenshot): an 8-bit RGB PNG for an
+/// SDR swapchain, the 16-bit PQ PNG of [`png16`] for an HDR one. Returns whether it's HDR.
+pub fn save_png(raw: &[u8], meta: &CaptureMeta, path: &std::path::Path) -> Result<bool> {
+    let img = png16(raw, meta.format, meta.color_space, meta.width, meta.height)?;
+    let hdr = is_hdr_color_space(meta.color_space);
+    if hdr {
+        img.save_with_format(path, image::ImageFormat::Png)?;
+    } else {
+        let px: Vec<u8> = img.as_raw().iter().map(|v| (v / 257) as u8).collect();
+        let rgb = image::RgbImage::from_raw(meta.width, meta.height, px).ok_or_else(|| anyhow::anyhow!("image size"))?;
+        rgb.save_with_format(path, image::ImageFormat::Png)?;
+    }
+    Ok(hdr)
+}
+
 /// The Sight layer's capture sidecar (`capture-<n>.json`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CaptureMeta {

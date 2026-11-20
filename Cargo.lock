@@ -4885,6 +4885,7 @@ dependencies = [
  "quiver-core",
  "quiver-perf",
  "quiver-proto",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -20,6 +20,10 @@ use quiver_ui::input::Input;
 use quiver_ui::options::{allowed_keys, at_level, pad_next, step_number};
 use serde_json::Value;
 
+use super::sections::achievements::Filter;
+use super::sections::prefs::{Pref, Prefs};
+use super::sections::session::Extras;
+
 /// Something quiverd is asked for.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Load<T> {
@@ -113,6 +117,10 @@ pub struct Ach {
     pub hidden: bool,
     pub unlocked: bool,
     pub unlocked_at: Option<DateTime<Utc>>,
+    /// Icon URLs (unlocked, greyed); [`Achs::icons`] has them as files.
+    pub icon: Option<String>,
+    pub icon_gray: Option<String>,
+    pub progress: Option<quiver_api::stores::AchievementProgress>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -121,12 +129,19 @@ pub struct Achs {
     pub total: usize,
     /// Unlocked first (newest first), then locked.
     pub list: Vec<Ach>,
+    /// Who records the unlocks, and (Ubisoft) the report journal per achievement id.
+    pub reporting: Option<quiver_api::sight::session::Reporting>,
+    pub reports: BTreeMap<String, quiver_api::achievements::ReportState>,
+    /// Icon URL → file on this machine.
+    pub icons: BTreeMap<String, std::path::PathBuf>,
+    /// What quiverd couldn't read ("unlocks not read yet").
+    pub note: Option<String>,
 }
 
 impl Achs {
     pub fn sorted(mut list: Vec<Ach>) -> Achs {
         list.sort_by(|a, b| b.unlocked.cmp(&a.unlocked).then(b.unlocked_at.cmp(&a.unlocked_at)));
-        Achs { unlocked: list.iter().filter(|a| a.unlocked).count(), total: list.len(), list }
+        Achs { unlocked: list.iter().filter(|a| a.unlocked).count(), total: list.len(), list, ..Default::default() }
     }
 }
 
@@ -148,6 +163,10 @@ pub struct PanelData {
     /// §3.13), by surface key: (metric id, label), in the catalog's order. Their values are
     /// in [`Self::metrics`].
     pub readouts: BTreeMap<String, Vec<(String, String)>>,
+    /// The Session section's cards beyond the session (`sections::session`).
+    pub extras: Extras,
+    /// The panel's own settings (Do not disturb, On unlock, hidden achievements).
+    pub prefs: Prefs,
 }
 
 // ---- Rows -------------------------------------------------------------------------------------
@@ -166,6 +185,15 @@ pub enum HudRow {
 pub enum Button {
     Quit,
     ForceQuit,
+    /// The game's next frame as a PNG (no confirmation).
+    Screenshot,
+}
+
+impl Button {
+    /// Asks "are you sure?" first.
+    pub fn confirms(self) -> bool {
+        !matches!(self, Button::Screenshot)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +216,10 @@ pub enum Row {
     Preset { surface: String },
     /// One of the Mods and Tweaks sections' buttons (Undo, Revert this session, Session only).
     Act(Act),
+    /// One of the panel's own settings (`sections::prefs`).
+    Pref(Pref),
+    /// The Achievements list's filter (also LT / RT anywhere in the section).
+    AchFilter,
 }
 
 /// The Mods and Tweaks sections' buttons (design/SIGHT.md §9 "Mods section").
@@ -204,7 +236,7 @@ pub enum Act {
 
 impl Row {
     pub fn focusable(&self) -> bool {
-        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Preset { .. } | Row::Act(_) | Row::Performance)
+        matches!(self, Row::Opt { .. } | Row::Tweak { .. } | Row::Hud(_) | Row::Button(_) | Row::Achievement(_) | Row::Preset { .. } | Row::Act(_) | Row::Pref(_) | Row::AchFilter | Row::Performance)
     }
 }
 
@@ -237,11 +269,6 @@ pub fn adjustable(st: &OptionState) -> bool {
         }
 }
 
-fn hm(secs: u64) -> String {
-    let m = secs / 60;
-    if m >= 60 { format!("{} h {} m", m / 60, m % 60) } else { format!("{m} m") }
-}
-
 /// A note while `l` isn't ready ("Loading mod options…", why it failed).
 pub fn status<T>(l: &Load<T>, what: &str) -> Option<Row> {
     match l {
@@ -255,35 +282,9 @@ pub fn status<T>(l: &Load<T>, what: &str) -> Option<Row> {
 /// The rows of a section.
 pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row> {
     let mut out = Vec::new();
-    let fact = |l: &str, v: String| Row::Fact { label: l.into(), value: v };
     match section {
-        PanelSection::Session => {
-            if let Some(r) = status(&d.session, "the session") {
-                out.push(r);
-            }
-            if let Some(s) = d.session.ready() {
-                out.push(fact("Game", format!("{} · {}", s.name, s.copy)));
-                out.push(fact("Profile", s.profile_name.clone().unwrap_or_else(|| "Vanilla".into())));
-                if s.mods.is_empty() {
-                    out.push(fact("Mods", "none".into()));
-                }
-                for (i, m) in s.mods.iter().enumerate() {
-                    out.push(fact(if i == 0 { "Mods" } else { "" }, m.clone()));
-                }
-                out.push(fact("Settings", s.settings.clone().unwrap_or_else(|| "the game's own files".into())));
-                let this = s.started.map(|t| (now - t).num_seconds().max(0) as u64);
-                let mut play = this.map(|x| format!("This session {}", hm(x))).unwrap_or_else(|| "This session —".into());
-                if let Some(t) = s.total_secs {
-                    play.push_str(&format!("  ·  Total {}", hm(t + this.unwrap_or(0))));
-                }
-                out.push(fact("Play time", play));
-                if let Some(r) = s.reported {
-                    out.push(fact("Ubisoft", if r { "play time reported".into() } else { "play time not reported".into() }));
-                }
-            }
-            out.push(Row::Button(Button::Quit));
-            out.push(Row::Button(Button::ForceQuit));
-        }
+        // The Session section's cards (`sections::session`): its rows are the focusable ones.
+        PanelSection::Session => out = super::sections::session::rows(d),
         // Mods and Tweaks lay out by surface and page (`panel/sections/mods.rs`): their first
         // page here, for callers without the panel's navigation.
         PanelSection::Mods => out = super::sections::mods::rows(d, &Nav::default(), &Default::default()),
@@ -294,15 +295,8 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
             }
             out.push(Row::Performance);
         }
-        PanelSection::Achievements => {
-            if let Some(r) = status(&d.achievements, "achievements") {
-                out.push(r);
-            }
-            if let Some(a) = d.achievements.ready() {
-                out.push(Row::Heading { title: format!("{} / {} earned", a.unlocked, a.total), detail: None });
-                out.extend((0..a.list.len()).map(Row::Achievement));
-            }
-        }
+        // Its rows with the filter in `Nav` come from `sections::rows`.
+        PanelSection::Achievements => out = super::sections::achievements::rows(d, Filter::All, now),
     }
     out
 }
@@ -480,8 +474,10 @@ pub struct Nav {
     /// surface, [`Nav::body_key`]).
     body: BTreeMap<(usize, usize), usize>,
     pub confirm: Option<Confirm>,
-    /// Hidden achievements revealed with A.
+    /// Hidden achievements revealed with A (or X).
     pub revealed: BTreeSet<usize>,
+    /// The Achievements list's filter (LT / RT in that section).
+    pub ach_filter: Filter,
     pub dock: DockPrefs,
     pub pages: Pages,
 }
@@ -628,6 +624,7 @@ impl Nav {
                     self.zone = Zone::Body;
                     Effect::Moved
                 }
+                (Zone::Body, Some(Row::Button(b))) if !b.confirms() => Effect::Confirmed(*b),
                 (Zone::Body, Some(Row::Button(b))) => {
                     self.confirm = Some(Confirm { what: *b, yes: false });
                     Effect::Moved
@@ -738,25 +735,17 @@ mod tests {
 
     #[test]
     fn session_rows_and_buttons() {
-        let now = Utc::now();
-        let s = SessionView {
-            name: "Assassin's Creed Origins".into(),
-            copy: "Quiver install".into(),
-            profile_name: Some("DLSS".into()),
-            mods: vec!["DLSS v3 (current)".into(), "Skip intro".into()],
-            started: Some(now - chrono::Duration::minutes(72)),
-            total_secs: Some(3600 * 211),
-            reported: Some(true),
-            ..Default::default()
-        };
+        let s = SessionView { name: "Assassin's Creed Origins".into(), copy: "Quiver install".into(), ..Default::default() };
         let d = PanelData { session: Load::Ready(s), ..Default::default() };
-        let r = rows(PanelSection::Session, &d, now);
-        assert!(r.contains(&Row::Fact { label: "Play time".into(), value: "This session 1 h 12 m  ·  Total 212 h 12 m".into() }));
-        assert!(r.contains(&Row::Fact { label: "".into(), value: "Skip intro".into() }));
-        assert!(r.contains(&Row::Fact { label: "Settings".into(), value: "the game's own files".into() }));
-        assert_eq!(r.iter().filter(|r| r.focusable()).count(), 2, "Quit and Force quit");
+        let r = rows(PanelSection::Session, &d, Utc::now());
+        assert_eq!(r, [Row::Pref(Pref::Dnd), Row::Button(Button::Screenshot), Row::Button(Button::Quit), Row::Button(Button::ForceQuit)], "the cards draw the facts; the rows are what takes focus");
         // Quit is there even while the session is still loading.
-        assert!(rows(PanelSection::Session, &PanelData::default(), now).contains(&Row::Button(Button::ForceQuit)));
+        assert!(rows(PanelSection::Session, &PanelData::default(), Utc::now()).contains(&Row::Button(Button::ForceQuit)));
+        // A screenshot needs no confirmation.
+        let rows = vec![Row::Button(Button::Screenshot)];
+        let mut n = Nav::default();
+        assert_eq!(n.apply(Input::Activate, &rows, |_| false), Effect::Confirmed(Button::Screenshot));
+        assert_eq!(n.confirm, None);
     }
 
     #[test]

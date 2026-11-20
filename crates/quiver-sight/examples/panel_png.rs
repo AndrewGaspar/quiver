@@ -130,8 +130,9 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     // (section, docked, presses after opening on it, what else to set up, file name)
     let shots: Vec<(PanelSection, bool, Vec<Input>, Setup, &str)> = vec![
+        // The first quick toggle focused, as in the mock-up.
         (PanelSection::Session, false, vec![], Setup::None, "session"),
-        (PanelSection::Session, false, vec![Input::Down, Input::Activate, Input::Right], Setup::None, "session-force-quit"),
+        (PanelSection::Session, false, vec![Input::Down; 7].into_iter().chain([Input::Activate, Input::Right]).collect(), Setup::None, "session-force-quit"),
         (PanelSection::Mods, false, vec![], Setup::ModsWorld, "mods"),
         (PanelSection::Mods, true, vec![], Setup::ModsWorld, "mods-docked"),
         (PanelSection::Mods, true, vec![Input::Back, Input::Down], Setup::ModsWorld, "mods-docked-surfaces"),
@@ -145,6 +146,9 @@ fn main() {
         (PanelSection::Performance, false, vec![Input::Down, Input::Down, Input::Activate, Input::Right, Input::Activate, Input::Down, Input::Down], Setup::None, "performance-editor-moving"),
         (PanelSection::Performance, false, vec![Input::Down, Input::Down, Input::Activate, Input::Right, Input::Right, Input::Down, Input::Down], Setup::None, "performance-editor-settings"),
         (PanelSection::Achievements, false, vec![Input::Down, Input::Down, Input::Down], Setup::None, "achievements"),
+        // RT twice: Locked (progress bars), the hidden one focused.
+        (PanelSection::Achievements, false, vec![Input::NextTab, Input::NextTab, Input::Down, Input::Down, Input::Down, Input::Down, Input::Down], Setup::None, "achievements-locked"),
+        (PanelSection::Achievements, true, vec![Input::Down, Input::Down, Input::Down], Setup::None, "achievements-docked"),
     ];
     gpui_platform::headless().with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         quiver_ui::init(cx, theme::load(&theme::omarchy_state_dir()));

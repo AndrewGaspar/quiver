@@ -152,6 +152,7 @@ fn detail(f: &SteamFixture, hooked: bool) -> GameDetail {
                 unlocked,
                 icon: None,
                 icon_gray: None,
+                progress: None,
             }
         })
         .collect();

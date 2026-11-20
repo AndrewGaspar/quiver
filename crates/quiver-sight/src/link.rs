@@ -70,6 +70,8 @@ pub enum Change {
     Tweak(String),
     Hud,
     Stop,
+    /// A screenshot, and where it went (empty when it failed).
+    Screenshot(std::path::PathBuf),
     /// A batch from Mods (`tweaks` false) or Tweaks: Undo, X, a preset, Revert this session,
     /// Session only, an A/B compare.
     Ops { tweaks: bool, why: Why },
@@ -103,6 +105,8 @@ pub enum LinkReq {
     HudSet { view: SessionView, set: HudScope },
     HudToggle { session: String },
     Stop { game: GameRef },
+    /// The game's next frame as a PNG (`SightRequest::Screenshot`).
+    Screenshot { session: String },
     /// The panel's metrics, and `extra` ones (the mods' readouts).
     Subscribe { session: String, extra: Vec<String> },
     Unsubscribe,
@@ -189,6 +193,21 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
                     {
                         let _ = tx.unbounded_send(Msg::Toast(t));
                     }
+                    // "On unlock: toast and screenshot" (design/SIGHT.md §3.7: half a second
+                    // after, so the game's frame has the moment; the capture is the game's own
+                    // pixels, without the toast).
+                    if crate::panel::sections::prefs::load().on_unlock == crate::panel::sections::prefs::OnUnlock::ToastScreenshot
+                        && let Some(session) = known.iter().find(|(_, k)| k.game == of).map(|(s, _)| s.clone())
+                    {
+                        let c = client.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            match screenshot(&c, &session).await {
+                                Ok(s) => tracing::info!(path = %s.path.display(), "achievement screenshot"),
+                                Err(e) => tracing::info!("achievement screenshot: {e:#}"),
+                            }
+                        });
+                    }
                 }
                 Some(_) => {}
             },
@@ -253,6 +272,10 @@ async fn run_inner(tx: &UnboundedSender<Msg>, mut reqs: UnboundedReceiver<LinkRe
     }
 }
 
+async fn screenshot(client: &Client, session: &str) -> Result<quiver_api::sight::session::Screenshot> {
+    client.call(Request::Sight(SightRequest::Screenshot { session: Some(session.to_owned()) })).await
+}
+
 /// Runs a panel request in its own task, so the event loop never waits on it.
 fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64>>>, r: LinkReq) {
     let (client, tx, sub) = (client.clone(), tx.clone(), sub.clone());
@@ -289,6 +312,10 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
             LinkReq::HudSet { view, set } => send(done(Change::Hud, data::hud_set(&client, view.game, set).await.map(|_| None))),
             LinkReq::HudToggle { session } => send(done(Change::Hud, data::hud_toggle(&client, &session).await.map(|_| None))),
             LinkReq::Stop { game } => send(done(Change::Stop, data::stop(&client, game).await.map(|_| None))),
+            LinkReq::Screenshot { session } => match screenshot(&client, &session).await {
+                Ok(s) => send(Msg::Done { change: Change::Screenshot(s.path), result: Ok(None) }),
+                Err(e) => send(Msg::Done { change: Change::Screenshot(Default::default()), result: Err(format!("{e:#}")) }),
+            },
             LinkReq::Subscribe { session, extra } => {
                 let old = sub.lock().unwrap().take();
                 if let Some(s) = old {
