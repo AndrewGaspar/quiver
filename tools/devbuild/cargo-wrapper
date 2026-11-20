@@ -1,0 +1,28 @@
+#!/bin/bash
+# Quiver dev builds that several agents run at once (tools/devbuild/README.md):
+#  - one shared jobserver for every build (a FIFO with QUIVER_BUILD_TOKENS tokens), so all of
+#    them together never run more than that many compile jobs;
+#  - each build in its own scope under quiver-builds.slice (MemoryHigh/MemoryMax on the slice),
+#    so memory pressure slows builds, and systemd-oomd kills a build rather than the terminal.
+set -u
+real="${QUIVER_REAL_CARGO:-$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo}"
+here="$(dirname "$(readlink -f "$0")")"
+fifo="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/quiver-build-jobserver"
+tokens="${QUIVER_BUILD_TOKENS:-16}"
+# Plain `cargo --version` and friends don't need any of this.
+case "${1:-}" in --version|-V|version|--list|help|-h|--help) exec "$real" "$@";; esac
+if ! systemctl --user -q is-active quiver-build-jobserver.service 2>/dev/null || [ ! -p "$fifo" ]; then
+  systemctl --user stop quiver-build-jobserver.service 2>/dev/null
+  systemd-run --user --quiet --collect --unit=quiver-build-jobserver --slice=quiver-builds.slice \
+    "$here/jobserver-keeper" "$fifo" "$tokens" >/dev/null 2>&1
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -p "$fifo" ] && break; sleep 0.1; done
+  systemctl --user set-property --runtime quiver-builds.slice \
+    "MemoryHigh=${QUIVER_BUILD_MEMORY_HIGH:-18G}" "MemoryMax=${QUIVER_BUILD_MEMORY_MAX:-22G}" 2>/dev/null
+fi
+if [ -p "$fifo" ]; then
+  export CARGO_MAKEFLAGS="-j --jobserver-auth=fifo:$fifo" MAKEFLAGS="-j --jobserver-auth=fifo:$fifo"
+fi
+if command -v systemd-run >/dev/null && [ -z "${QUIVER_BUILD_NO_SCOPE:-}" ]; then
+  exec systemd-run --user --scope --quiet --collect --slice=quiver-builds.slice "$real" "$@"
+fi
+exec "$real" "$@"

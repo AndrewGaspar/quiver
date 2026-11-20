@@ -1,0 +1,7 @@
+#!/bin/bash
+# Holds the shared build jobserver: a FIFO filled with N tokens, kept open so it never hits EOF.
+fifo="$1"; n="${2:-16}"
+rm -f "$fifo"; mkfifo -m 600 "$fifo"
+exec 3<>"$fifo"
+head -c "$n" /dev/zero | tr '\0' '+' >&3
+exec sleep infinity
