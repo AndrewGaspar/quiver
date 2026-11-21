@@ -155,6 +155,63 @@ fn describe(e: &reqwest::Error) -> &'static str {
     }
 }
 
+/// The environment variable that points a scratch quiverd's Epic calls at a stand-in for
+/// Epic on this machine (`http://127.0.0.1:<port>`), for tests between scratch daemons.
+/// Anything but a loopback `http://` address is refused, so it can't send a real session
+/// anywhere else.
+pub const BASE_ENV: &str = "QUIVER_EPIC_BASE";
+
+/// [`BASE_ENV`]'s value, when it is a loopback URL.
+pub fn test_base() -> Option<String> {
+    let v = std::env::var(BASE_ENV).ok()?;
+    match loopback_base(&v) {
+        Some(b) => Some(b),
+        None => {
+            tracing::warn!("{BASE_ENV}={v:?} isn't a loopback http:// address; ignored");
+            None
+        }
+    }
+}
+
+fn loopback_base(v: &str) -> Option<String> {
+    let rest = v.strip_prefix("http://")?.trim_end_matches('/');
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    let ip = match rest.rsplit_once(':') {
+        Some((h, port)) if port.parse::<u16>().is_ok() => h,
+        _ => rest,
+    };
+    let ip = ip.trim_start_matches('[').trim_end_matches(']');
+    let loopback = ip == "localhost" || ip.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback());
+    loopback.then(|| format!("http://{rest}"))
+}
+
+/// Sends every request to `base` instead of the host in its URL, keeping the path and query
+/// (a stand-in for Epic's services, all on one port: [`BASE_ENV`]).
+pub struct Rebase {
+    base: String,
+    inner: std::sync::Arc<dyn Transport>,
+}
+
+impl Rebase {
+    pub fn new(base: String, inner: std::sync::Arc<dyn Transport>) -> Self {
+        Rebase { base, inner }
+    }
+
+    fn rebase(&self, url: &str) -> String {
+        let path = url.split_once("://").map_or(url, |(_, r)| r.find('/').map_or("/", |i| &r[i..]));
+        format!("{}{path}", self.base)
+    }
+}
+
+impl Transport for Rebase {
+    fn send(&self, mut req: Request) -> BoxFuture<'_, Result<Response>> {
+        req.url = self.rebase(&req.url);
+        self.inner.send(req)
+    }
+}
+
 /// A scripted transport for tests: answers in order, records what was asked.
 #[derive(Default)]
 pub struct Fake {
@@ -197,5 +254,30 @@ impl Transport for Fake {
             let i = q.iter().position(|(part, _)| req.url.contains(part.as_str())).with_context(|| format!("fake Epic: nothing scripted for {} {}", req.label, req.url))?;
             Ok(q.remove(i).unwrap().1)
         })
+    }
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    #[test]
+    fn only_loopback_bases() {
+        assert_eq!(loopback_base("http://127.0.0.1:8123").as_deref(), Some("http://127.0.0.1:8123"));
+        assert_eq!(loopback_base("http://localhost:9/").as_deref(), Some("http://localhost:9"));
+        assert_eq!(loopback_base("http://[::1]:9").as_deref(), Some("http://[::1]:9"));
+        for bad in ["https://127.0.0.1:1", "http://10.0.0.2:80", "http://epicgames.com", "http://127.0.0.1:1/x", "ftp://127.0.0.1", ""] {
+            assert_eq!(loopback_base(bad), None, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rebase_keeps_path_and_query() {
+        let fake = std::sync::Arc::new(Fake::new());
+        fake.reply("127.0.0.1:9/account/api/oauth/token", 200, "{}");
+        let t = Rebase::new("http://127.0.0.1:9".into(), fake.clone());
+        let url = format!("{}/account/api/oauth/token?x=1", crate::api::ACCOUNT_HOST);
+        t.send(Request::new("oauth token", Method::Post, url)).await.unwrap();
+        assert_eq!(fake.requests()[0].url, "http://127.0.0.1:9/account/api/oauth/token?x=1");
     }
 }

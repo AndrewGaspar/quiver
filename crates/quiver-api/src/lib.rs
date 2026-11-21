@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod accounts;
 pub mod achievements;
 pub mod art;
 pub mod client;
@@ -28,6 +29,7 @@ pub mod options;
 pub mod perf;
 pub mod remote;
 pub mod savestores;
+pub mod secret;
 pub mod setup;
 pub mod sight;
 pub mod steamlib;
@@ -534,9 +536,11 @@ pub struct ActivityEntry {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    /// Sign in, adding the account (the first one becomes the default).
-    Login { email: String, password: String },
-    Login2fa { code: String },
+    /// Sign in, adding the account (the first one becomes the default). The password and
+    /// the 2FA code are [`secret::Secret`]s: never printed. Over the remote tunnel they are
+    /// typed on the client and travel inside its pinned mutual TLS (design/REMOTE.md §6).
+    Login { email: String, password: secret::Secret<String> },
+    Login2fa { code: secret::Secret<String> },
     /// Sign one account out (`None`: the default). The next account becomes the default.
     /// `account` is a user id, username or unique user-id prefix.
     Logout {
@@ -1066,6 +1070,10 @@ pub enum Request {
         prefs: remote::StreamPrefs,
         caps: remote::ClientCaps,
     },
+    // ---- Accounts across machines (appended; design/REMOTE.md §6, see [`accounts`])
+    /// Which machines each account is signed in on and which one is playing, an Epic
+    /// session handed to another machine, and what paired machines tell each other.
+    Accounts(accounts::AccountsRequest),
 }
 
 fn yes() -> bool {
@@ -1308,6 +1316,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    // ---- appended: accounts across machines (design/REMOTE.md §6)
+    /// What a paired machine says it is signed in to or playing changed (it told this
+    /// machine, or an account here was handed to or from it): reload
+    /// `AccountsRequest::Presence`.
+    AccountsPresenceChanged,
 }
 
 impl From<options::OptionsEvent> for Event {

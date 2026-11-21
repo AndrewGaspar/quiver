@@ -2,7 +2,8 @@
 //! store-generic requests, from `epic_core::provider::EpicProvider`.
 //!
 //! Signing in and out are a person's actions: refused from every source but the app and
-//! the terminal (STORES.md §7, item 10: "Sign in, sign out … agents: Deny").
+//! the terminal, here or on a paired machine (STORES.md §7, item 10: "Sign in, sign out …
+//! agents: Deny"; `accounts::person_only`).
 //!
 //! Installs, updates, repairs and uninstalls of Epic games run here on the shared download
 //! queue (`downloads.rs` routes `epic:` items to [`run_queued`]); launches go through
@@ -26,12 +27,7 @@ use serde_json::{Value, json};
 use crate::Daemon;
 use crate::downloads::{Outcome, Phase, PhaseFn};
 
-fn person_only(source: &str, what: &str) -> Result<()> {
-    if !quiver_api::mods::is_human_source(source) {
-        bail!("only you can {what}, from the app or a terminal (this request came from '{source}')");
-    }
-    Ok(())
-}
+use crate::accounts::person_only;
 
 pub(crate) async fn handle(d: &Arc<Daemon>, source: &str, r: EpicRequest) -> Result<Value> {
     Ok(match r {
@@ -425,6 +421,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
         None => None,
     };
     // The mod SDK channel goes through quiverd's broker, as a Ubisoft launch's does.
+    let launch_account = material.account.clone();
     let store = StoreLaunch { args: material.args, env: Vec::new(), setup, broker: Some(d.broker.clone()) };
     let this = d.clone();
     tokio::spawn(async move {
@@ -472,7 +469,7 @@ pub(crate) async fn play(d: &Arc<Daemon>, source: &str, game: GameRef, profile: 
                 LaunchEvent::Running => {
                     let now = chrono::Utc::now();
                     *started.lock().unwrap() = Some(now);
-                    let l = crate::localsessions::Local { game, pid: 0, started: now, perf_session: Some(sid.clone()), settings_revision: rev, tweaks: tweak_revisions, mods: None, profile: local_profile.clone() };
+                    let l = crate::localsessions::Local { game, pid: 0, started: now, perf_session: Some(sid.clone()), settings_revision: rev, tweaks: tweak_revisions, mods: None, profile: local_profile.clone(), account: Some(launch_account.clone()) };
                     *local.lock().unwrap() = Some(ev.local.insert(l));
                     ev.update_job(id, |j| j.status = "Running".into());
                     ev.emit(Event::LibraryChanged);

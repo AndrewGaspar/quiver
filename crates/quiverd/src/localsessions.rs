@@ -39,6 +39,9 @@ pub struct Local {
     pub mods: Option<(String, crate::steammods::Prepared)>,
     /// The profile a launch Quiver made itself runs (Epic), when `mods` doesn't say.
     pub profile: Option<String>,
+    /// The store account playing, when Quiver knows it (the Epic account an Epic launch is
+    /// licensed to), for account presence across machines.
+    pub account: Option<String>,
 }
 
 impl Local {
@@ -57,6 +60,7 @@ impl Local {
             game: Some(self.game),
             profile: prepared.and_then(|p| p.profile.clone()).or_else(|| self.profile.clone()),
             options_revision: prepared.and_then(|p| p.options_revision),
+            account: self.account.clone().unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -179,7 +183,7 @@ impl crate::Daemon {
             },
             None => String::new(),
         };
-        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks, mods, profile: None };
+        let l = Local { game, pid, started: Utc::now(), perf_session, settings_revision, tweaks, mods, profile: None, account: None };
         let active = l.active();
         let id = self.local.insert(l);
         let name = self.game_name(game).await;
@@ -228,7 +232,7 @@ mod tests {
         let s = LocalSessions::default();
         assert!(s.list().is_empty());
         let control = GameRef::steam(870780);
-        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None, mods: None, profile: None });
+        let id = s.insert(Local { game: control, pid: 4242, started: Utc::now(), perf_session: Some("s-x".into()), settings_revision: 3, tweaks: None, mods: None, profile: None, account: None });
         let a = &s.list()[0];
         assert_eq!((a.product_id, a.game, a.game_ref(), a.steam_app_id), (0, Some(control), control, Some(870780)));
         assert_eq!((a.holders.as_slice(), a.session.as_deref(), a.pids.as_slice()), (&["steam".to_owned()][..], Some("s-x"), &[4242][..]));

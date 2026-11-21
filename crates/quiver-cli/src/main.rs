@@ -446,10 +446,10 @@ async fn login(client: &Client, email: Option<String>) -> Result<()> {
         None => dev::prompt("Email: ")?,
     };
     let password = rpassword::prompt_password("Password: ")?;
-    let mut result: LoginResult = client.call(Request::Login { email, password }).await?;
+    let mut result: LoginResult = client.call(Request::Login { email, password: password.into() }).await?;
     if let LoginResult::TwoFactorRequired = result {
         let code = dev::prompt("2FA code (authenticator app): ")?;
-        result = client.call(Request::Login2fa { code }).await?;
+        result = client.call(Request::Login2fa { code: code.into() }).await?;
     }
     let name = match result {
         LoginResult::SignedIn { name } => name,

@@ -519,7 +519,7 @@ mod tests {
         let hist: Vec<Revision> =
             serde_json::from_value(demo.handle(Request::SettingsHistory { game: 3539.into() }).unwrap()).unwrap();
         assert_eq!(hist[0].revision, 15);
-        assert!(demo.handle(Request::Login { email: "a".into(), password: "b".into() }).is_err());
+        assert!(demo.handle(Request::Login { email: "a".into(), password: quiver_api::secret::Secret::new("b".into()) }).is_err());
         // The install job advances on its own.
         let e = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
         assert!(matches!(e, Event::Job(j) if j.game.as_ubisoft() == Some(INSTALLING) && j.downloaded > 31_200_000_000));
