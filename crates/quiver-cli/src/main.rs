@@ -1,6 +1,8 @@
 //! `quiver`: command-line front end. Everything except `quiver dev …` goes through the `quiverd`
 //! daemon (started on demand), so the CLI, the GUI and agents share one runtime and one
 //! history of changes. Label automated callers with `--source agent` (or `QUIVER_SOURCE`).
+//! `--machine NAME` runs a command against a paired machine's quiverd instead
+//! (design/REMOTE.md §4; `quiver remote add` pairs one).
 
 mod achievements;
 mod daemon;
@@ -13,6 +15,7 @@ mod mods;
 mod omarchy;
 mod perf;
 mod profiles;
+mod remote;
 mod options;
 mod info;
 mod lab;
@@ -34,6 +37,10 @@ struct Cli {
     /// Who is making changes (recorded in settings history and the activity log).
     #[arg(long, global = true, env = "QUIVER_SOURCE", default_value = "cli")]
     source: String,
+    /// Run the command on a paired machine (its name or id; `quiver remote peers`) instead
+    /// of this one. Its quiverd records it as `remote:<this machine's name>`.
+    #[arg(long, global = true, env = "QUIVER_MACHINE")]
+    machine: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -261,6 +268,11 @@ enum Cmd {
     Sight {
         #[command(subcommand)]
         action: sight::SightAction,
+    },
+    /// Remote play: `quiver remote enable|disable|status|pair|add|peers|revoke|rename|wake|discover`.
+    Remote {
+        #[command(subcommand)]
+        action: remote::RemoteAction,
     },
     /// The daemon: status, holding off its restart onto a new build, stopping it.
     Daemon {
@@ -703,6 +715,20 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    if let Some(m) = &cli.machine {
+        let here_only = match &cli.cmd {
+            Cmd::Dev { .. } => Some("dev"),
+            Cmd::SteamRun(_) => Some("steam-run"),
+            Cmd::Lab { .. } => Some("lab"),
+            Cmd::Daemon { .. } => Some("daemon"),
+            Cmd::Omarchy { .. } => Some("omarchy"),
+            Cmd::Steam { action: exports::SteamAction::Restart { .. } } => Some("steam restart"),
+            _ => None,
+        };
+        if let Some(cmd) = here_only {
+            bail!("`quiver {cmd}` works on this machine only; run it on {m} itself (over SSH)");
+        }
+    }
     if let Cmd::Dev { cmd } = cli.cmd {
         return dev::run_dev(cmd).await;
     }
@@ -727,7 +753,9 @@ async fn main() -> Result<()> {
         return omarchy::run(action);
     }
     // A status bar polling the queue must not bring back a quiverd someone stopped.
-    let client = if matches!(cli.cmd, Cmd::Queue { no_start: true, .. }) {
+    let client = if let Some(m) = &cli.machine {
+        Client::machine_named(m, &cli.source).await?
+    } else if matches!(cli.cmd, Cmd::Queue { no_start: true, .. }) {
         Client::connect_running(&cli.source).await?
     } else {
         Client::connect(&cli.source).await?
@@ -742,6 +770,7 @@ async fn main() -> Result<()> {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
+        Cmd::Remote { action } => remote::run(&client, action).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
         Cmd::Epic { action } => epic::run(&client, action).await?,
         Cmd::Status => {
@@ -1202,6 +1231,23 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--machine` is global; a remote command's own machine argument stays its own.
+    #[test]
+    fn remote_and_machine_parse() {
+        use remote::RemoteAction;
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied()));
+        let c = parse(&["remote", "revoke", "laptop"]).unwrap();
+        assert!(c.machine.is_none() && matches!(c.cmd, Cmd::Remote { action: RemoteAction::Revoke { ref peer } } if peer == "laptop"));
+        let c = parse(&["--machine", "tower", "remote", "wake", "office"]).unwrap();
+        assert_eq!(c.machine.as_deref(), Some("tower"));
+        assert!(matches!(c.cmd, Cmd::Remote { action: RemoteAction::Wake { ref peer } } if peer == "office"));
+        let c = parse(&["library", "--machine", "tower"]).unwrap();
+        assert_eq!(c.machine.as_deref(), Some("tower"));
+        assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_) } }));
+        assert!(matches!(parse(&["remote", "rename", "Tower"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Rename { second: None, .. } }));
+        assert!(parse(&["remote", "add", "tower"]).is_err(), "needs the code");
+    }
 
     #[test]
     fn queue_now_and_after_parse() {

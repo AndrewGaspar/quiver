@@ -40,6 +40,8 @@ pub enum Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SettingsSection {
     Accounts,
+    /// This machine and the machines paired with it (`ui/machines.rs`, design/REMOTE.md §5).
+    Machines,
     Library,
     Compatibility,
     /// The performance HUD's defaults for every game (`ui/perf.rs`).
@@ -55,8 +57,9 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 11] = [
         SettingsSection::Accounts,
+        SettingsSection::Machines,
         SettingsSection::Library,
         SettingsSection::Compatibility,
         SettingsSection::Performance,
@@ -75,6 +78,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Accounts => "Accounts",
+            SettingsSection::Machines => "Machines",
             SettingsSection::Library => "Library and storage",
             SettingsSection::Compatibility => "Compatibility",
             SettingsSection::Performance => "Performance HUD",
@@ -204,6 +208,8 @@ pub enum Overlay {
     Palette { selected: usize },
     /// The menu for one game.
     Menu { game: Gid, selected: usize },
+    /// The machine switcher's menu (`ui/machines.rs`).
+    Machines { selected: usize },
 }
 
 /// What is focusable on screen right now, in display order. Built by the view.
@@ -222,7 +228,10 @@ pub struct Layout {
     /// Focusable rows in the page body.
     pub body: usize,
     pub palette_items: usize,
+    /// Entries in the open menu (a game's, or the machine switcher's).
     pub menu_items: usize,
+    /// The top bar has the machine switcher (left of the sections).
+    pub machines: bool,
 }
 
 /// The focused thing, for drawing the focus ring and for activation.
@@ -239,6 +248,8 @@ pub enum Target {
     SettingsNav(SettingsSection),
     PaletteItem(usize),
     MenuItem(usize),
+    /// The machine switcher in the top bar.
+    Machines,
 }
 
 /// What the app has to do after an input.
@@ -260,6 +271,8 @@ pub enum Effect {
     Palette(usize),
     /// Run menu entry `i` for this game (the menu has closed).
     Menu(Gid, usize),
+    /// Run the machine switcher's entry `i` (the menu has closed).
+    Machine(usize),
 }
 
 // Serializable so a relaunch can carry it over (`selfupdate.rs`).
@@ -277,6 +290,8 @@ pub struct Nav {
     grid: usize,
     action: usize,
     body: usize,
+    /// In the top bar, the machine switcher has focus (not a section).
+    on_machines: bool,
 }
 
 impl Default for Nav {
@@ -298,6 +313,7 @@ impl Nav {
             grid: 0,
             action: 0,
             body: 0,
+            on_machines: false,
         }
     }
 
@@ -314,11 +330,12 @@ impl Nav {
         if let Some(o) = self.overlay {
             return match o {
                 Overlay::Palette { selected } if l.palette_items > 0 => Some(Target::PaletteItem(selected)),
-                Overlay::Menu { selected, .. } if l.menu_items > 0 => Some(Target::MenuItem(selected)),
+                Overlay::Menu { selected, .. } | Overlay::Machines { selected } if l.menu_items > 0 => Some(Target::MenuItem(selected)),
                 _ => None,
             };
         }
         match self.zone {
+            Zone::TopBar if self.on_machines && l.machines => Some(Target::Machines),
             Zone::TopBar => Some(Target::Section(Section::ALL[self.top.min(2)])),
             Zone::Hero if l.hero_buttons > 0 => Some(Target::Hero(self.hero.min(l.hero_buttons - 1))),
             Zone::Grid => l.grid.get(self.grid.min(l.grid.len().saturating_sub(1))).map(|id| Target::Tile(*id)),
@@ -367,6 +384,7 @@ impl Nav {
     pub fn open_section(&mut self, s: Section) {
         self.overlay = None;
         self.top = s.index();
+        self.on_machines = false;
         self.page = Page::of(s);
         self.zone = self.main_zone_for(self.page, None);
         self.body = 0;
@@ -392,6 +410,11 @@ impl Nav {
             Target::Section(s) => {
                 self.zone = Zone::TopBar;
                 self.top = s.index();
+                self.on_machines = false;
+            }
+            Target::Machines => {
+                self.zone = Zone::TopBar;
+                self.on_machines = true;
             }
             Target::Hero(i) => {
                 self.zone = Zone::Hero;
@@ -433,7 +456,7 @@ impl Nav {
                 }
             }
             Target::MenuItem(i) => {
-                if let Some(Overlay::Menu { selected, .. }) = &mut self.overlay {
+                if let Some(Overlay::Menu { selected, .. } | Overlay::Machines { selected }) = &mut self.overlay {
                     *selected = i;
                 }
             }
@@ -446,6 +469,13 @@ impl Nav {
 
     pub fn open_menu(&mut self, game: Gid) {
         self.overlay = Some(Overlay::Menu { game, selected: 0 });
+    }
+
+    /// Open the machine switcher's menu (with the switcher focused, so closing returns there).
+    pub fn open_machines(&mut self) {
+        self.zone = Zone::TopBar;
+        self.on_machines = true;
+        self.overlay = Some(Overlay::Machines { selected: 0 });
     }
 
     pub fn close_overlay(&mut self) {
@@ -528,10 +558,10 @@ impl Nav {
     fn apply_overlay(&mut self, o: Overlay, input: Input, l: &Layout) -> Effect {
         let (n, sel) = match o {
             Overlay::Palette { selected } => (l.palette_items, selected),
-            Overlay::Menu { selected, .. } => (l.menu_items, selected),
+            Overlay::Menu { selected, .. } | Overlay::Machines { selected } => (l.menu_items, selected),
         };
         let set = |nav: &mut Nav, v: usize| match &mut nav.overlay {
-            Some(Overlay::Palette { selected }) | Some(Overlay::Menu { selected, .. }) => *selected = v,
+            Some(Overlay::Palette { selected }) | Some(Overlay::Menu { selected, .. }) | Some(Overlay::Machines { selected }) => *selected = v,
             None => {}
         };
         match input {
@@ -548,6 +578,7 @@ impl Nav {
                 match o {
                     Overlay::Palette { .. } => Effect::Palette(sel.min(n - 1)),
                     Overlay::Menu { game, .. } => Effect::Menu(game, sel.min(n - 1)),
+                    Overlay::Machines { .. } => Effect::Machine(sel.min(n - 1)),
                 }
             }
             Input::Back => {
@@ -640,16 +671,23 @@ impl Nav {
                     Effect::None
                 }
             }
+            Some(Target::Machines) => {
+                self.open_machines();
+                Effect::Moved
+            }
             Some(Target::PaletteItem(_)) | Some(Target::MenuItem(_)) => Effect::None,
         }
     }
 
     fn step(&mut self, dir: Input, l: &Layout) -> Effect {
         use Input::*;
-        let before = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings);
+        let before = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings, self.on_machines);
         match (self.page, self.zone, dir) {
-            // Top bar: a row of three; down enters the page.
+            // Top bar: the machine switcher (when there is one), then a row of three; down
+            // enters the page.
+            (_, Zone::TopBar, Left) if self.top == 0 && l.machines => self.on_machines = true,
             (_, Zone::TopBar, Left) => self.top = self.top.saturating_sub(1),
+            (_, Zone::TopBar, Right) if self.on_machines => self.on_machines = false,
             (_, Zone::TopBar, Right) => self.top = (self.top + 1).min(Section::ALL.len() - 1),
             (page, Zone::TopBar, Down) => {
                 let z = self.main_zone_for(page, Some(l));
@@ -780,7 +818,7 @@ impl Nav {
             // Zones that don't belong to the page (stale state): go to its main zone.
             (page, _, _) => self.zone = self.main_zone_for(page, Some(l)),
         }
-        let after = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings);
+        let after = (self.page, self.zone, self.top, self.hero, self.grid, self.action, self.body, self.tab, self.settings, self.on_machines);
         if before == after { Effect::None } else { Effect::Moved }
     }
 
@@ -797,6 +835,7 @@ impl Nav {
 
     /// Keep remembered indices inside the current layout, and the zone valid for the page.
     fn clamp(&mut self, l: &Layout) {
+        self.on_machines &= l.machines;
         self.hero = self.hero.min(l.hero_buttons.saturating_sub(1));
         self.grid = self.grid.min(l.grid.len().saturating_sub(1));
         self.action = self.action.min(l.actions.saturating_sub(1));
@@ -817,7 +856,7 @@ impl Nav {
             Some(Overlay::Palette { .. }) => l.palette_items,
             _ => l.menu_items,
         };
-        if let Some(Overlay::Palette { selected }) | Some(Overlay::Menu { selected, .. }) = &mut self.overlay {
+        if let Some(Overlay::Palette { selected }) | Some(Overlay::Menu { selected, .. }) | Some(Overlay::Machines { selected }) = &mut self.overlay {
             *selected = (*selected).min(n.saturating_sub(1));
         }
     }
@@ -838,7 +877,35 @@ mod tests {
             body: 4,
             palette_items: 6,
             menu_items: 4,
+            machines: false,
         }
+    }
+
+    /// The machine switcher sits left of the sections in the top bar, when there are
+    /// paired machines; its menu runs an entry like a game's menu does.
+    #[test]
+    fn machine_switcher_in_the_top_bar() {
+        let mut l = lib_layout();
+        let mut n = Nav::new();
+        n.zone = Zone::TopBar;
+        assert_eq!(n.apply(Left, &l), Effect::None, "no switcher without paired machines");
+        assert_eq!(n.focused(&l), Some(Target::Section(Section::Library)));
+        l.machines = true;
+        assert_eq!(n.apply(Left, &l), Effect::Moved);
+        assert_eq!(n.focused(&l), Some(Target::Machines));
+        assert_eq!(n.apply(Activate, &l), Effect::Moved);
+        assert_eq!(n.overlay, Some(Overlay::Machines { selected: 0 }));
+        assert_eq!(n.focused(&l), Some(Target::MenuItem(0)));
+        n.apply(Down, &l);
+        assert_eq!(n.apply(Activate, &l), Effect::Machine(1));
+        assert_eq!((n.overlay, n.focused(&l)), (None, Some(Target::Machines)), "back on the switcher");
+        assert_eq!(n.apply(Right, &l), Effect::Moved);
+        assert_eq!(n.focused(&l), Some(Target::Section(Section::Library)));
+        // The machines go away: focus can't stay on a switcher that isn't there.
+        n.apply(Left, &l);
+        l.machines = false;
+        n.apply(Down, &l);
+        assert_ne!(n.focused(&l), Some(Target::Machines));
     }
 
     fn run(nav: &mut Nav, l: &Layout, inputs: &[Input]) -> Effect {
@@ -1036,7 +1103,7 @@ mod tests {
         n.open_settings(SettingsSection::Accounts);
         assert_eq!(n.focused(&l), Some(Target::SettingsNav(SettingsSection::Accounts)));
         run(&mut n, &l, &[Down, Down]);
-        assert_eq!(n.settings, SettingsSection::Compatibility);
+        assert_eq!(n.settings, SettingsSection::Library);
         // Right (or A) enters the section's controls; Left and B come back.
         run(&mut n, &l, &[Right, Down]);
         assert_eq!(n.focused(&l), Some(Target::Body(1)));
@@ -1049,7 +1116,7 @@ mod tests {
         assert_eq!(n.zone, Zone::Side);
         // LT / RT switch sections; the first section's Up reaches the top bar.
         run(&mut n, &l, &[NextTab]);
-        assert_eq!(n.settings, SettingsSection::Performance);
+        assert_eq!(n.settings, SettingsSection::Compatibility);
         run(&mut n, &l, &[PrevTab, PrevTab, PrevTab, Up]);
         assert_eq!(n.zone, Zone::TopBar);
         run(&mut n, &l, &[Down]);

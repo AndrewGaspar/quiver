@@ -1,12 +1,14 @@
-//! Top bar: brand, Library · Downloads · Activity, now playing, search (opens the palette),
-//! daemon status, settings, accounts.
+//! Top bar: brand, the machine switcher (with paired machines), Library · Downloads ·
+//! Activity, now playing, search (opens the palette), daemon status, settings, accounts.
 
 use quiver_ui::depth::DepthExt;
-use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use quiver_api::remote::PeerState;
 
 use super::responsive::{Bp, tip};
 use super::{FocusExt, Icon, avatar, badge, glyph, icon, icon_button, kbd};
 use crate::app::{InputMode, Link, Quiver};
+use crate::machines::View;
 use crate::assets::DISPLAY_FONT;
 use crate::model::{initials, job_fraction};
 use crate::nav::{Input, Page, Section, SettingsSection, Target};
@@ -116,6 +118,7 @@ impl Quiver {
                 d.child(div().font_family(DISPLAY_FONT).font_weight(FontWeight::EXTRA_BOLD).text_size(px(16.)).child("Quiver"))
             });
 
+        let switcher = self.render_machine_switcher(th, bp < Bp::Medium, cx);
         let open_palette = cx.listener(|this, _, _, cx| this.input(Input::Palette, InputMode::Pointer, cx));
         let search = if bp >= Bp::Medium {
             let wide = self.ui.sessions.is_empty() && bp == Bp::Wide;
@@ -259,6 +262,7 @@ impl Quiver {
             .bg(th.ink0)
             .when(!two_rows, |d| d.border_b_1().border_color(th.line1))
             .child(brand)
+            .children(switcher)
             .when(!two_rows, |d| {
                 d.child(
                     div()
@@ -301,5 +305,71 @@ impl Quiver {
             )
             .child(accounts);
         div().flex().flex_col().flex_none().depth_chrome().child(bar).children(nav_row)
+    }
+
+    /// The machine switcher (design/REMOTE.md §5): which machines the app shows, a status
+    /// dot for each machine, and how many downloads run on them. Only with paired machines.
+    fn render_machine_switcher(&mut self, th: &Theme, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.mx.remotes.is_empty() {
+            return None;
+        }
+        let focused = self.focused(Target::Machines);
+        let (label, i) = match &self.mx.view {
+            View::All => ("All machines".to_owned(), Icon::LayoutGrid),
+            View::Here => (self.mx.here_name(), Icon::Laptop),
+            View::Machine(id) => (self.mx.remote(id).map(|r| r.name().to_owned()).unwrap_or_default(), Icon::Server),
+        };
+        let dot = |c| div().size(px(6.)).rounded_full().bg(c);
+        let dots = div().flex().items_center().gap(px(3.)).child(dot(th.ok)).children(self.mx.remotes.iter().map(|r| {
+            dot(match r.state() {
+                PeerState::Online => th.ok,
+                PeerState::Asleep => th.warn,
+                PeerState::Offline => th.tx4,
+            })
+        }));
+        let local_dl = self.games.iter().filter(|g| g.home.is_none() && g.installing().is_some()).count();
+        let downloading = local_dl * usize::from(!matches!(self.mx.view, View::Machine(_)))
+            + self.mx.remotes.iter().map(|r| r.downloads().filter(|e| e.state.is_active()).count()).sum::<usize>();
+        let tip_text = {
+            let mut parts = vec![format!("{} (this PC)", self.mx.here_name())];
+            parts.extend(self.mx.remotes.iter().map(|r| {
+                let a = r.activity();
+                let s = match r.state() {
+                    PeerState::Online => "online",
+                    PeerState::Asleep => "asleep",
+                    PeerState::Offline => "offline",
+                };
+                if a.is_empty() { format!("{}: {s}", r.name()) } else { format!("{}: {s}, {a}", r.name()) }
+            }));
+            parts.join(" · ")
+        };
+        Some(
+            div()
+                .id("machines")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(7.))
+                .h(px(32.))
+                .px(px(10.))
+                .rounded(px(8.))
+                .bg(th.ink2)
+                .border_1()
+                .border_color(th.line1)
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(th.tx1)
+                .cursor_pointer()
+                .hover(|s| s.border_color(th.line2))
+                .focus_ring(focused, th, 8.)
+                .tooltip(tip(th, tip_text))
+                .child(icon(i, 15., th.acc_hi))
+                .when(!compact, |d| d.child(div().whitespace_nowrap().child(label)))
+                .child(dots)
+                .when(downloading > 0, |d| d.child(badge(th, downloading.to_string(), true)))
+                .child(icon(Icon::ChevronDown, 13., th.tx3))
+                .on_click(cx.listener(|this, _, _, cx| this.click(Target::Machines, cx)))
+                .into_any_element(),
+        )
     }
 }

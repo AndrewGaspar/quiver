@@ -491,6 +491,8 @@ pub(crate) fn exec(plan: &Plan, fds: &[(&str, RawFd)], restarts: u32) -> std::io
 pub(crate) struct Inherited {
     pub unix: Option<std::os::unix::net::UnixListener>,
     pub broker: Option<std::net::TcpListener>,
+    /// Remote play's listener, while it was on (`remote`).
+    pub remote: Option<std::net::TcpListener>,
 }
 
 /// A descriptor that is a listening socket of `domain`.
@@ -520,13 +522,13 @@ pub(crate) fn take_inherited() -> Inherited {
         };
         let domain = match name {
             "unix" => libc::AF_UNIX,
-            "broker" => libc::AF_INET,
+            "broker" | "remote" => libc::AF_INET,
             _ => {
                 tracing::warn!("{LISTEN_FDS}: unknown socket '{name}'");
                 continue;
             }
         };
-        let ok = listening(fd, domain) || (name == "broker" && listening(fd, libc::AF_INET6));
+        let ok = listening(fd, domain) || (domain == libc::AF_INET && listening(fd, libc::AF_INET6));
         if !ok {
             tracing::warn!("{LISTEN_FDS}: fd {fd} ({name}) is not a listening socket");
             continue;
@@ -536,6 +538,7 @@ pub(crate) fn take_inherited() -> Inherited {
         // SAFETY: the previous build handed this descriptor over for us to own; checked above.
         match name {
             "unix" => out.unix = Some(unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) }),
+            "remote" => out.remote = Some(unsafe { std::net::TcpListener::from_raw_fd(fd) }),
             _ => out.broker = Some(unsafe { std::net::TcpListener::from_raw_fd(fd) }),
         }
     }

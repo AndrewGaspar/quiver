@@ -51,6 +51,15 @@ settings-appearance|settings=appearance||
 settings-display|settings=display,focus-body||
 settings-automation|settings=automation||
 settings-about|settings=about||
+settings-machines|settings=machines||
+settings-machines-add|settings=machines,add-machine||
+settings-machines-pair|settings=machines,remote-on,pair-code||
+machines-menu|machines-menu||
+machines-tower|machine=tower||
+machines-tower-game|machine=tower,machine-game=3539||
+machines-game-both|game=3539|key y|
+machines-game-remote|game=6100,stream=6100||
+machines-downloads|downloads||
 confirm|settings=accounts,confirm-signout||
 welcome|welcome||
 welcome-steam|welcome=steam||

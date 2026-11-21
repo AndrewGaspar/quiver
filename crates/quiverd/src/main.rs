@@ -1,7 +1,7 @@
 //! quiverd: the launcher's backend. Owns the Ubisoft session, the Denuvo broker, installed
 //! games, per-game settings (with history), install/launch jobs and an activity log.
-//! Front ends (`quiver`, the GUI, scripts and agents) talk to it over a Unix socket; see
-//! `quiver-api` for the protocol.
+//! Front ends (`quiver`, the GUI, scripts and agents) talk to it over a Unix socket, and
+//! paired machines over TLS when remote is on (`remote`); see `quiver-api` for the protocol.
 
 mod achievements;
 mod downloads;
@@ -14,6 +14,7 @@ mod lab;
 mod lifecycle;
 mod localsessions;
 mod options;
+mod remote;
 mod tweaks;
 mod savestores;
 mod setup;
@@ -36,7 +37,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use quiver_api::{
@@ -123,6 +124,8 @@ struct Daemon {
     pending_2fa_at: Mutex<Option<std::time::Instant>>,
     /// Sight's notices and settings (`notices`).
     sight: notices::SightState,
+    /// Remote play's control plane: the listener, pairing, peers (`remote`).
+    remote: remote::Remote,
 }
 
 /// A client connection's reply channel, and a signal once a `Reply::Closing` went out on it.
@@ -654,6 +657,18 @@ impl Daemon {
             r @ (Request::SaveStores { .. } | Request::SaveStoreEdit { .. } | Request::SaveStoreHistory { .. } | Request::SavesMerge { .. }) => {
                 savestores::handle(self, source, r).await?
             }
+            r @ (Request::RemoteStatus
+            | Request::RemoteEnable { .. }
+            | Request::RemoteDisable
+            | Request::RemotePairBegin
+            | Request::RemotePairEnd
+            | Request::RemotePairWith { .. }
+            | Request::RemotePeers
+            | Request::RemoteRevoke { .. }
+            | Request::RemoteRename { .. }
+            | Request::RemoteWake { .. }
+            | Request::RemoteDiscover { .. }
+            | Request::StartStream { .. }) => remote::handle(self, source, r).await?,
         })
     }
 
@@ -907,7 +922,9 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Sessions
         | Request::Activity { .. }
         | Request::Daemon(quiver_api::daemon::DaemonRequest::Status)
-        | Request::Sight(quiver_api::sight::SightRequest::Status) => None,
+        | Request::Sight(quiver_api::sight::SightRequest::Status)
+        | Request::RemoteStatus
+        | Request::RemotePeers => None,
         r => Some(
             serde_json::to_value(r)
                 .ok()
@@ -917,14 +934,31 @@ fn gated(req: &Request) -> Option<String> {
     }
 }
 
-async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
+/// Serve one client connection: the Unix socket's, or (with `remote`) a paired machine's
+/// over TLS. A remote client's requests are its peer's (`source: remote:<name>`, whatever
+/// it sent), the local-only ones are refused, and the connection closes when the peer is
+/// revoked or the listener turned off.
+async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daemon>, stream: S, remote: Option<remote::RemotePeer>) {
     let conn_id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
-    let (r, mut w) = stream.into_split();
+    let (r, mut w) = tokio::io::split(stream);
     let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
     let closing_written = Arc::new(tokio::sync::Notify::new());
     daemon.conns.lock().unwrap().insert(conn_id, (tx.clone(), closing_written.clone()));
+    // Local connections are never kicked; the sender lives as long as the connection (a
+    // dropped one would read as a kick).
+    let (_never, local_kick) = tokio::sync::watch::channel(false);
+    let mut kick = remote.as_ref().map(|p| p.kick.clone()).unwrap_or(local_kick);
+    let mut writer_kick = kick.clone();
     let writer = tokio::spawn(async move {
-        while let Some(reply) = rx.recv().await {
+        loop {
+            let reply = tokio::select! {
+                r = rx.recv() => match r {
+                    Some(r) => r,
+                    None => break,
+                },
+                // Revoked: stop writing, so the connection closes even while events flow.
+                _ = writer_kick.wait_for(|k| *k) => break,
+            };
             let closing = matches!(reply, Reply::Closing { .. });
             // Options and perf events go out as `Event`s (clients read the older forms too).
             let mut line = serde_json::to_vec(&reply.folded()).unwrap_or_default();
@@ -939,8 +973,15 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     });
     let mut lines = BufReader::new(r).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let env: Envelope = match serde_json::from_str(&line) {
+    loop {
+        let line = tokio::select! {
+            l = lines.next_line() => match l {
+                Ok(Some(l)) => l,
+                _ => break,
+            },
+            _ = kick.wait_for(|k| *k) => break,
+        };
+        let mut env: Envelope = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
                 let _ = tx.send(Reply::Err { id: 0, error: format!("bad request: {e}"), code: None });
@@ -994,6 +1035,14 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
                 }
             });
         }
+        if let Some(peer) = &remote {
+            env.source = peer.source();
+            if let Some(why) = quiver_api::remote::local_only(&env.request) {
+                let error = format!("not over the remote connection: {why}");
+                let _ = tx.send(Reply::Err { id: env.id, error, code: Some(quiver_api::remote::LOCAL_ONLY.into()) });
+                continue;
+            }
+        }
         // While restarting onto a new build, requests are refused (not run) with a code
         // that tells clients to send them again; the rest count as in flight until answered.
         let pass = match daemon.lifecycle.enter(gated(&env.request).as_deref()) {
@@ -1016,7 +1065,7 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: UnixStream) {
             };
             let reply = match result {
                 Ok(result) => Reply::Ok { id: env.id, result },
-                Err(e) => Reply::Err { id: env.id, error: format!("{e:#}"), code: None },
+                Err(e) => Reply::Err { id: env.id, error: format!("{e:#}"), code: remote::code_of(&e) },
             };
             let _ = tx.send(reply);
         });
@@ -1196,6 +1245,7 @@ async fn main() -> Result<()> {
         conns: Mutex::new(HashMap::new()),
         pending_2fa_at: Mutex::new(None),
         sight: notices::SightState::default(),
+        remote: remote::Remote::new(),
     });
     mod_sink.attach(&daemon);
     options::test_session(&daemon);
@@ -1204,6 +1254,7 @@ async fn main() -> Result<()> {
     achievements::start(&daemon);
     epicgame::start(&daemon);
     sightinfo::start(&daemon);
+    remote::start(&daemon, inherited.remote);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);
@@ -1214,7 +1265,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             r = listener.accept() => {
                 let (stream, _) = r?;
-                tokio::spawn(serve_conn(daemon.clone(), stream));
+                tokio::spawn(serve_conn(daemon.clone(), stream, None));
             }
             r = broker_listener.accept() => match r {
                 Ok((stream, peer)) => {
@@ -1241,7 +1292,10 @@ async fn main() -> Result<()> {
                 daemon.announce_restart(&plan).await;
                 use std::os::fd::AsRawFd;
                 tracing::info!("restarting onto {} ({})", plan.to.as_deref().unwrap_or("a new build"), plan.exe.display());
-                let fds = [("unix", listener.as_raw_fd()), ("broker", broker_listener.as_raw_fd())];
+                let mut fds = vec![("unix", listener.as_raw_fd()), ("broker", broker_listener.as_raw_fd())];
+                if let Some(fd) = daemon.remote.listener_fd() {
+                    fds.push(("remote", fd));
+                }
                 let err = lifecycle::exec(&plan, &fds, daemon.lifecycle.restarts);
                 // Only back here if the exec failed: carry on with this build.
                 tracing::error!("restarting onto {}: {err}", plan.exe.display());

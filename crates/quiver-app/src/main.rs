@@ -28,6 +28,7 @@ mod art;
 mod demo;
 mod gamepad;
 mod handoff;
+mod machines;
 mod model;
 mod nav;
 mod selfupdate;

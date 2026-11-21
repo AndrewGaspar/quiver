@@ -609,7 +609,9 @@ impl Quiver {
     fn render_tile(&mut self, th: &Theme, id: Gid, w: f32, cx: &mut Context<Self>) -> AnyElement {
         let Some(g) = self.game(id).cloned() else { return div().into_any_element() };
         let h = (w * TILE_RATIO).round();
-        let dim = !g.on_disk() && g.install_job().is_none();
+        // Installed on a paired machine counts as installed (it streams from there).
+        let dim = !g.on_disk() && g.install_job().is_none() && g.installed_elsewhere().next().is_none();
+        let on_machines = self.installed_on(&g);
         let art = self.art_for(&g, ArtSlot::Tile, if dim { Variant::TileDimmed } else { Variant::Tile }, cx);
         let focused = self.focused(Target::Tile(id));
         let label = short_name(&g.entry.name);
@@ -669,6 +671,17 @@ impl Quiver {
                     .gap(px(4.))
                     .children(badges.into_iter().map(|b| tag(th, TagKind::Plain, None, b)))
                     .when(custom, |d| d.child(tag(th, TagKind::Plain, Some(Icon::Image), ""))),
+            );
+        }
+        // Merged library: where it's installed ("Tower", "This PC + Tower").
+        if let Some((label, remote_only)) = on_machines.filter(|_| g.installing().is_none()) {
+            boxart = boxart.child(
+                div()
+                    .absolute()
+                    .left(px(8.))
+                    .bottom(px(8.))
+                    .flex()
+                    .child(tag(th, if remote_only { TagKind::Accent } else { TagKind::Plain }, Some(Icon::Server), label)),
             );
         }
         if let Some(f) = g.installing() {

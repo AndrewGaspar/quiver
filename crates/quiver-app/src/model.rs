@@ -104,11 +104,35 @@ pub struct GameRow {
     pub playtime: Option<Playtime>,
     pub settings: Option<GameSettings>,
     pub history: Option<Vec<Revision>>,
+    /// Its copies on paired machines, in the merged library (`ui/machines.rs`).
+    pub remote: Vec<RemoteCopy>,
+    /// The paired machine (id) whose library this row comes from: a game installed only
+    /// there, in the merged library, or every row while the app shows that machine. `None`:
+    /// this machine's.
+    pub home: Option<String>,
+}
+
+/// A game's copy on a paired machine (design/REMOTE.md §5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteCopy {
+    /// The machine's id and name.
+    pub machine: String,
+    pub name: String,
+    pub installed: bool,
+    pub running: bool,
+    pub update: bool,
+    /// Installing there, 0..1.
+    pub installing: Option<f32>,
 }
 
 impl GameRow {
     pub fn new(entry: LibraryEntry) -> Self {
-        Self { entry, job: None, playtime: None, settings: None, history: None }
+        Self { entry, job: None, playtime: None, settings: None, history: None, remote: Vec::new(), home: None }
+    }
+
+    /// Paired machines it is installed on.
+    pub fn installed_elsewhere(&self) -> impl Iterator<Item = &RemoteCopy> {
+        self.remote.iter().filter(|c| c.installed)
     }
 
     pub fn id(&self) -> Gid {

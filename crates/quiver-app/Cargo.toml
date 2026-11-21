@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 quiver-api.workspace = true
+quiver-remote.workspace = true
+quiver-stream-proto.workspace = true
 quiver-perf.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,5 +1,6 @@
-//! Async client for `quiverd`. Starts the daemon if it isn't running, and survives the
-//! daemon restarting:
+//! Async client for `quiverd`: this machine's, over its Unix socket (started if it isn't
+//! running), or a paired machine's over TLS ([`Client::machine`], design/REMOTE.md §4).
+//! Either way it survives the daemon restarting or the link dropping:
 //!
 //! - A request whose write fails never reached the daemon, so it is sent again once on a
 //!   new connection.
@@ -12,6 +13,12 @@
 //! - A subscription is renewed on every new connection. Subscribers see
 //!   [`Event::Disconnected`] when the daemon goes away and [`Event::Reconnected`] once
 //!   events flow again (anything that happened in between was missed; reload state).
+//!
+//! A remote client never starts anything: while the machine can't be reached its calls
+//! fail (after waiting out the same grace as a restart), and a subscription keeps
+//! reconnecting with backoff. Each reconnect reads the machine's address and key from
+//! `peers.json` again, so a revoked machine stops being reached and a moved one is found
+//! at its new address.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,9 +28,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{Envelope, Event, Reply, Request, socket_path};
@@ -33,6 +39,41 @@ struct Failure {
     error: String,
     code: Option<String>,
 }
+
+/// A request the daemon refused: its message, and its code when it gave one
+/// (`daemon::RESTARTING`, `remote::LOCAL_ONLY`, `remote::NOT_IMPLEMENTED`, …). Displays as
+/// the message, as errors from [`Client::call`] always have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallError {
+    pub error: String,
+    pub code: Option<String>,
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.error)
+    }
+}
+
+impl std::error::Error for CallError {}
+
+impl CallError {
+    /// The daemon's code for a failed call, if it refused it with one.
+    pub fn code_of(e: &anyhow::Error) -> Option<&str> {
+        e.chain().find_map(|c| c.downcast_ref::<CallError>()).and_then(|c| c.code.as_deref())
+    }
+}
+
+/// Where the daemon is.
+enum Transport {
+    /// This machine's, at a socket path.
+    Unix(PathBuf),
+    /// A paired machine's, with this machine's identity and peers in `dir`.
+    Remote { dir: PathBuf, machine: quiver_remote::Machine },
+}
+
+type Reader = Box<dyn AsyncRead + Send + Unpin>;
+type Writer = Box<dyn AsyncWrite + Send + Unpin>;
 
 impl Failure {
     fn restarting(&self) -> bool {
@@ -58,8 +99,8 @@ pub struct Client {
 }
 
 struct Shared {
-    path: PathBuf,
-    /// Start the daemon when nobody is listening (off in tests).
+    transport: Transport,
+    /// Start the daemon when nobody is listening (off in tests, never for a remote one).
     autostart: bool,
     source: String,
     next_id: AtomicU64,
@@ -75,7 +116,7 @@ struct Shared {
 
 /// One socket connection to the daemon.
 struct Conn {
-    writer: tokio::sync::Mutex<OwnedWriteHalf>,
+    writer: tokio::sync::Mutex<Writer>,
     pending: Pending,
     /// Flips to true once the socket closed (the reader saw EOF or a write failed).
     closed: watch::Sender<bool>,
@@ -131,9 +172,43 @@ impl Client {
         Self::connect_at(path, source, false).await
     }
 
+    /// Connect to a paired machine's quiverd over TLS, with this machine's identity and
+    /// peers (`<data>/remote`). Fails if it can't be reached now; afterwards it reconnects
+    /// as the module docs say. Requests arrive there as `remote:<this machine's name>`
+    /// whatever `source` says.
+    pub async fn machine(machine: &quiver_remote::Machine, source: &str) -> Result<Self> {
+        Self::machine_at(quiver_remote::remote_dir(), machine, source).await
+    }
+
+    /// [`Self::machine`] for the server peer `query` names (a name, id or unique id prefix).
+    pub async fn machine_named(query: &str, source: &str) -> Result<Self> {
+        let dir = quiver_remote::remote_dir();
+        let peers = quiver_remote::Peers::load(&dir)?;
+        let peer = peers.one(query, Some(quiver_remote::Role::Server))?;
+        let machine = peer.machine().with_context(|| format!("{} has no known address", peer.name))?;
+        Self::machine_at(dir, &machine, source).await
+    }
+
+    /// [`Self::machine`] with the identity and peers in `dir` (a scratch machine's, in tests).
+    pub async fn machine_at(dir: PathBuf, machine: &quiver_remote::Machine, source: &str) -> Result<Self> {
+        Self::open_with(Transport::Remote { dir, machine: machine.clone() }, source, false).await
+    }
+
+    /// The paired machine this client talks to, if it isn't this machine's daemon.
+    pub fn remote_machine(&self) -> Option<&quiver_remote::Machine> {
+        match &self.shared.transport {
+            Transport::Remote { machine, .. } => Some(machine),
+            Transport::Unix(_) => None,
+        }
+    }
+
     pub(crate) async fn connect_at(path: PathBuf, source: &str, autostart: bool) -> Result<Self> {
+        Self::open_with(Transport::Unix(path), source, autostart).await
+    }
+
+    async fn open_with(transport: Transport, source: &str, autostart: bool) -> Result<Self> {
         let shared = Arc::new(Shared {
-            path,
+            transport,
             autostart,
             source: source.to_owned(),
             next_id: AtomicU64::new(1),
@@ -156,16 +231,16 @@ impl Client {
         let value = loop {
             let (_conn, rx) = self.shared.send(&request).await?;
             match rx.await {
-                Err(_) => bail!("quiverd went away (restarted?) before answering '{what}'; it may have run, so check before retrying"),
+                Err(_) => bail!("{} went away (restarted?) before answering '{what}'; it may have run, so check before retrying", self.shared.label()),
                 Ok(Ok(v)) => break v,
                 Ok(Err(f)) if f.restarting() && Instant::now() < deadline => {
-                    tracing::debug!("quiverd is restarting; sending '{what}' again");
+                    tracing::debug!("{} is restarting; sending '{what}' again", self.shared.label());
                     tokio::time::sleep(RESTART_RETRY_EVERY).await;
                 }
-                Ok(Err(f)) => return Err(anyhow!(f.error)),
+                Ok(Err(f)) => return Err(CallError { error: f.error, code: f.code }.into()),
             }
         };
-        serde_json::from_value(value).context("unexpected reply from quiverd")
+        serde_json::from_value(value).with_context(|| format!("unexpected reply from {}", self.shared.label()))
     }
 
     /// Receive daemon events from now on, across daemon restarts (see the module docs).
@@ -201,6 +276,14 @@ impl Client {
 }
 
 impl Shared {
+    /// "quiverd", or "quiverd on Tower" for a remote one (for messages).
+    fn label(&self) -> String {
+        match &self.transport {
+            Transport::Unix(_) => "quiverd".into(),
+            Transport::Remote { machine, .. } => format!("quiverd on {}", machine.name),
+        }
+    }
+
     /// The open connection, reconnecting (and starting the daemon if needed) if it closed.
     async fn connection(&self) -> Result<Arc<Conn>> {
         let mut slot = self.conn.lock().await;
@@ -251,7 +334,7 @@ impl Shared {
             return Ok(conn);
         }
         let (conn, rx) = self.send(&Request::Subscribe).await?;
-        rx.await.map_err(|_| anyhow!("quiverd went away while subscribing"))?.map_err(|f| anyhow!(f.error))?;
+        rx.await.map_err(|_| anyhow!("{} went away while subscribing", self.label()))?.map_err(|f| anyhow!(f.error))?;
         conn.subscribed.store(true, Ordering::SeqCst);
         Ok(conn)
     }
@@ -289,7 +372,7 @@ async fn resubscribe_forever(shared: &Weak<Shared>, mut closed: watch::Receiver<
             let Some(s) = shared.upgrade() else { return };
             match s.subscribe_current().await {
                 Ok(c) => {
-                    tracing::info!("reconnected to quiverd");
+                    tracing::info!("reconnected to {}", s.label());
                     if !s.emit(Event::Reconnected) {
                         return;
                     }
@@ -297,7 +380,7 @@ async fn resubscribe_forever(shared: &Weak<Shared>, mut closed: watch::Receiver<
                     break;
                 }
                 Err(e) => {
-                    tracing::debug!("quiverd still unavailable: {e:#}");
+                    tracing::debug!("{} still unavailable: {e:#}", s.label());
                     if s.events.lock().unwrap().as_ref().is_none_or(|tx| tx.is_closed()) {
                         return;
                     }
@@ -309,10 +392,24 @@ async fn resubscribe_forever(shared: &Weak<Shared>, mut closed: watch::Receiver<
 }
 
 impl Shared {
+    /// Connect to the daemon: its socket, or the paired machine ([`open_remote`]).
+    async fn open(&self, grace: Duration) -> Result<Arc<Conn>> {
+        let (r, w): (Reader, Writer) = match &self.transport {
+            Transport::Unix(path) => {
+                let (r, w) = self.open_unix(path, grace).await?.into_split();
+                (Box::new(r), Box::new(w))
+            }
+            Transport::Remote { dir, machine } => {
+                let (r, w) = tokio::io::split(open_remote(dir, machine, grace).await?);
+                (Box::new(r), Box::new(w))
+            }
+        };
+        Ok(self.start_conn(r, w))
+    }
+
     /// Connect to the daemon's socket. If nobody is listening, wait up to `grace` for a
     /// restarting daemon to come up (so two daemons don't race for the socket), then start one.
-    async fn open(&self, grace: Duration) -> Result<Arc<Conn>> {
-        let path = &self.path;
+    async fn open_unix(&self, path: &std::path::Path, grace: Duration) -> Result<UnixStream> {
         let start = Instant::now();
         let stream = loop {
             match UnixStream::connect(path).await {
@@ -338,7 +435,11 @@ impl Shared {
                 }
             }
         };
-        let (r, w) = stream.into_split();
+        Ok(stream)
+    }
+
+    /// Read replies and events off a new connection.
+    fn start_conn(&self, r: Reader, w: Writer) -> Arc<Conn> {
         let conn = Arc::new(Conn {
             writer: tokio::sync::Mutex::new(w),
             pending: Mutex::default(),
@@ -401,7 +502,35 @@ impl Shared {
                 reader.close();
             }
         });
-        Ok(conn)
+        conn
+    }
+}
+
+/// Connect to a paired machine: its address and key read again from `dir`'s peers (so a
+/// revoked machine isn't reached and a moved one is), TLS with the key pinned, the API
+/// hello. Retries for up to `grace` while it can't be reached; a refusal (no longer
+/// paired there) fails at once.
+async fn open_remote(dir: &std::path::Path, given: &quiver_remote::Machine, grace: Duration) -> Result<quiver_remote::ApiStream> {
+    let start = Instant::now();
+    loop {
+        let attempt = async {
+            let me = quiver_remote::Identity::load(dir)?;
+            let peers = quiver_remote::Peers::load(dir)?;
+            let peer = peers
+                .by_pin(&given.pin, quiver_remote::Role::Server)
+                .with_context(|| format!("this machine isn't paired with {} any more", given.name))?;
+            let machine = peer.machine().unwrap_or_else(|| given.clone());
+            quiver_remote::connect(&me, &machine, quiver_remote::wire::Intent::Api).await.map(|(s, _)| s)
+        };
+        match attempt.await {
+            Ok(s) => return Ok(s),
+            Err(e) if quiver_remote::wire::refused_code(&e).is_some() => return Err(e),
+            Err(e) if start.elapsed() >= grace => return Err(e.context(format!("{} can't be reached", given.name))),
+            Err(e) => {
+                tracing::debug!("{} not reachable yet: {e:#}", given.name);
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
     }
 }
 

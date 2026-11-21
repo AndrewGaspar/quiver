@@ -21,6 +21,8 @@ impl Quiver {
                 let ctx = self.nav.focused_game(&self.layout).and_then(|id| self.game(id)).map(|g| short_name(&g.entry.name));
                 ("palette", ctx, self.palette_commands(), selected)
             }
+            // The machine switcher's menu (`machines.rs`).
+            Overlay::Machines { selected } => ("menu", Some("Machines".to_owned()), self.machine_commands(), selected),
             Overlay::Menu { game, selected } => {
                 let default_menu = self.gp.play_menu && self.gp.default_menu;
                 let ctx = self.game(game).map(|g| if default_menu { format!("{} · {}", g.entry.name, Quiver::default_for(game)) } else { g.entry.name.clone() });
@@ -30,7 +32,9 @@ impl Quiver {
         let palette = title == "palette";
         let pad = self.mode == InputMode::Pad;
         let width = self.dialog_width(if palette { 720. } else { 400. });
-        let left = ((self.viewport.0 - width) / 2.).max(16.);
+        // The switcher's menu hangs under it, by the logo.
+        let switcher = matches!(overlay, Overlay::Machines { .. });
+        let left = if switcher { 20f32.min((self.viewport.0 - width).max(0.)) } else { ((self.viewport.0 - width) / 2.).max(16.) };
         let items: Vec<AnyElement> = commands
             .iter()
             .enumerate()
@@ -90,7 +94,7 @@ impl Quiver {
             .id(title)
             .depth_overlay()
             .absolute()
-            .top(px(if palette { 92. } else { 132. }))
+            .top(px(if palette { 92. } else if switcher { 56. } else { 132. }))
             .left(px(left))
             .w(px(width))
             .flex()

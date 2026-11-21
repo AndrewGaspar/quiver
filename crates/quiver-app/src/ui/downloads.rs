@@ -75,6 +75,9 @@ pub enum Btn {
     Limit(u64),
     MaxActive(usize),
     AutoUpdate,
+    /// A paired machine's download (machine index, game): pause or resume it there.
+    RemotePause(usize, Gid),
+    RemoteResume(usize, Gid),
 }
 
 /// One focusable row of the page.
@@ -85,6 +88,8 @@ pub enum Row {
     Finish(Gid),
     Queued(Gid),
     Failed(Gid),
+    /// A paired machine's download, in its group (machine index, game).
+    Remote(usize, Gid),
     Recent(u64),
     Limit,
     MaxActive,
@@ -607,6 +612,20 @@ impl Quiver {
                     this.load_queue(cx);
                 });
             }
+            Btn::RemotePause(k, id) | Btn::RemoteResume(k, id) => {
+                let Some(r) = self.mx.remotes.get(k) else { return };
+                let (Some(source), machine, mname) = (r.source.clone(), r.peer.id.clone(), r.peer.name.clone()) else { return };
+                let pause = matches!(b, Btn::RemotePause(..));
+                let req = if pause { Request::QueuePause { game: id.0.into() } } else { Request::QueueResume { game: id.0.into() } };
+                let game = name(self, id);
+                self.call_on::<serde_json::Value, _>(source, req, cx, move |this, r, cx| match r {
+                    Ok(_) => {
+                        this.show_toast(format!("{} {game} on {mname}", if pause { "Pausing" } else { "Resuming" }), cx);
+                        this.machines_refresh_queue(&machine, cx);
+                    }
+                    Err(e) => this.show_error(&e, cx),
+                });
+            }
             Btn::ClearRecent => {
                 let ids: Vec<u64> = self.recent_jobs().iter().map(|j| j.id).collect();
                 self.dl.cleared.extend(ids);
@@ -694,6 +713,14 @@ impl Quiver {
         for e in &failed {
             let id = Gid(e.game_ref());
             rows.push((Row::Failed(id), vec![Btn::Retry(id), Btn::Remove(id)]));
+        }
+        // Each paired machine's queue, in its own group (the merged view).
+        for (k, r) in self.mx.remotes.iter().enumerate().filter(|(_, r)| self.mx.merged() && r.up()) {
+            for e in r.downloads() {
+                let id = Gid(e.game_ref());
+                let toggle = if e.state == QueueState::Paused { Btn::RemoteResume(k, id) } else { Btn::RemotePause(k, id) };
+                rows.push((Row::Remote(k, id), vec![toggle]));
+            }
         }
         for (i, j) in self.recent_jobs().iter().enumerate() {
             let mut b = vec![Btn::Open(Gid(j.game))];
@@ -825,6 +852,10 @@ impl Quiver {
         let queued = waiting.iter().filter(|e| e.state == QueueState::Queued).count();
         let paused = waiting.len() - queued;
         let mut sub = vec![format!("{} active", active.len())];
+        // The merged view: this PC's queue first, then each machine's group.
+        if self.mx.merged() {
+            sub.insert(0, format!("This PC ({})", self.mx.here_name()));
+        }
         if queued > 0 {
             sub.push(format!("{queued} queued"));
         }
@@ -987,6 +1018,13 @@ impl Quiver {
                 children.push(el);
             }
             children.push(div().h(px(20.)).into_any_element());
+        }
+
+        // Paired machines' downloads, a group each (the merged view).
+        if self.mx.merged() {
+            for k in 0..self.mx.remotes.len() {
+                children.extend(self.render_remote_downloads(th, k, &rows, &mut row_child, children.len(), cx));
+            }
         }
 
         // Recent.
@@ -1383,6 +1421,102 @@ impl Quiver {
             )
             .child(chart)
             .into_any_element()
+    }
+
+    /// One paired machine's downloads (design/REMOTE.md §5): its own queue, run there.
+    /// `at` is the index the first element gets among the page's children.
+    fn render_remote_downloads(
+        &mut self,
+        th: &Theme,
+        k: usize,
+        rows: &[(Row, Vec<Btn>)],
+        row_child: &mut [Option<usize>],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(r) = self.mx.remotes.get(k) else { return Vec::new() };
+        let (name, up, activity) = (r.peer.name.clone(), r.up(), r.activity());
+        let entries: Vec<QueueEntry> = r.downloads().cloned().collect();
+        let mut out = vec![
+            seg(th, true, entries.is_empty())
+                .flex_wrap()
+                .items_center()
+                .gap_x(px(10.))
+                .gap_y(px(4.))
+                .px(px(16.))
+                .py(px(12.))
+                .child(icon(Icon::Server, 15., th.acc_hi))
+                .child(div().text_size(px(13.5)).font_weight(SEMIBOLD).child(name.clone()))
+                .child(div().text_color(th.tx3).text_size(px(12.)).child(if !up {
+                    "not connected".to_owned()
+                } else if activity.is_empty() {
+                    "nothing downloading".to_owned()
+                } else {
+                    activity
+                }))
+                .child(div().flex_1())
+                .child(div().text_color(th.tx3).text_size(px(12.)).child(format!("its own queue · runs on {name}")))
+                .into_any_element(),
+        ];
+        let n = entries.len();
+        for (i, e) in entries.iter().enumerate() {
+            let id = Gid(e.game_ref());
+            let ri = rows.iter().position(|(x, _)| *x == Row::Remote(k, id)).unwrap_or(usize::MAX);
+            if let Some(slot) = row_child.get_mut(ri) {
+                *slot = Some(at + out.len());
+            }
+            let paused = e.state == QueueState::Paused;
+            let f = self.btn_focused(ri, 0, 1);
+            let frac = (e.total_bytes > 0).then(|| (e.done_bytes as f64 / e.total_bytes as f64) as f32);
+            let state = match e.state {
+                QueueState::Downloading => pill(th, PillKind::Accent, Some(Icon::Download), match frac {
+                    Some(f) => format!("Downloading · {:.0}%", (f * 100.).floor()),
+                    None => "Downloading".into(),
+                }),
+                QueueState::Verifying => pill(th, PillKind::Accent, Some(Icon::ShieldCheck), "Verifying"),
+                QueueState::Paused => pill(th, PillKind::Muted, Some(Icon::Pause), "Paused"),
+                QueueState::Failed => pill(th, PillKind::Bad, Some(Icon::TriangleAlert), "Failed"),
+                _ => pill(th, PillKind::Muted, None, format!("Queued · #{}", e.position)),
+            };
+            let mut what = vec![kind_word(e.kind).to_owned()];
+            if e.total_bytes > 0 {
+                what.push(format!("{} of {}", gb(e.done_bytes), gb(e.total_bytes)));
+            }
+            if e.speed > 0 && e.state.is_active() {
+                what.push(format!("{}/s", gb(e.speed)));
+            }
+            let b = if paused { Btn::RemoteResume(k, id) } else { Btn::RemotePause(k, id) };
+            let toggle = ibtn(("rq-pp", k * 100_000 + id.ix()), th, if paused { Icon::Play } else { Icon::Pause }, None, f)
+                .tooltip(super::responsive::tip(th, if paused { format!("Resume on {name}") } else { format!("Pause on {name}") }))
+                .on_click(cx.listener(move |this, _, _, cx| this.press(b, cx)));
+            let thumb = self.thumb(th, id, 34., 40., cx);
+            out.push(
+                seg(th, false, i + 1 == n)
+                    .items_center()
+                    .gap(px(14.))
+                    .px(px(16.))
+                    .py(px(10.))
+                    // Stereo: the row's control pops with its focus, as the local rows do.
+                    .stereo_focused(f)
+                    .child(thumb)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(4.))
+                            .child(div().font_weight(MEDIUM).truncate().child(e.name.clone()))
+                            .child(div().text_size(px(12.)).text_color(th.tx3).truncate().child(what.join(" · ")))
+                            .when_some(frac.filter(|_| e.state.is_active()), |d, f| d.child(progress(th, f, None, 4., None))),
+                    )
+                    .child(state)
+                    .when(e.state != QueueState::Failed, |d| d.child(toggle))
+                    .into_any_element(),
+            );
+        }
+        out.push(div().h(px(20.)).into_any_element());
+        out
     }
 
     fn thumb(&mut self, th: &Theme, id: Gid, w: f32, h: f32, cx: &mut Context<Self>) -> AnyElement {

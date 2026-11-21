@@ -21,6 +21,7 @@ use crate::nav::{Page, SettingsSection, Target, Zone};
 use crate::theme::{Theme, rgba};
 
 pub mod epic;
+pub mod machines;
 
 /// The repository, for About.
 const SOURCE_URL: &str = "https://github.com/AndrewGaspar/quiver";
@@ -45,6 +46,8 @@ pub enum SettingsAction {
     Stereo(crate::stereo_ui::Setting),
     /// Display: the 3D depth strength, percent.
     StereoDepth(u32),
+    /// Machines (`settings/machines.rs`).
+    Machine(machines::MachineAction),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -57,6 +60,7 @@ pub fn account_colors(i: usize) -> (Hsla, Hsla) {
 pub fn section_icon(s: SettingsSection) -> Icon {
     match s {
         SettingsSection::Accounts => Icon::Users,
+        SettingsSection::Machines => Icon::Server,
         SettingsSection::Library => Icon::HardDrive,
         SettingsSection::Compatibility => Icon::Cpu,
         SettingsSection::Performance => Icon::Activity,
@@ -99,6 +103,7 @@ impl Quiver {
                 }
                 v.extend(self.epic_actions());
             }
+            SettingsSection::Machines => v.extend(self.machines_actions()),
             SettingsSection::Library => v.extend([SettingsAction::Welcome, SettingsAction::Advanced]),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
             SettingsSection::Performance => {
@@ -175,6 +180,7 @@ impl Quiver {
             SettingsAction::Epic(a) => self.epic_action(a, cx),
             SettingsAction::Stereo(s) => self.set_stereo_setting(s, cx),
             SettingsAction::StereoDepth(p) => self.set_stereo_strength(p, cx),
+            SettingsAction::Machine(a) => self.machine_action(a, cx),
         }
     }
 
@@ -223,6 +229,7 @@ impl Quiver {
                 v.extend(self.settings_epic(th, &actions, cx));
                 v
             }
+            SettingsSection::Machines => self.settings_machines(th, &actions, cx),
             SettingsSection::Library => {
                 let mut v = self.settings_library(th, &actions, cx);
                 let f = self.action_focused(&actions, &SettingsAction::Welcome);
