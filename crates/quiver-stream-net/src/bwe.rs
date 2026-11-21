@@ -416,7 +416,8 @@ impl Default for LossBased {
             received: 0,
             window_start: None,
             baseline: 0.0,
-            fast: 0.0,
+            // Until the first window is measured, plan for a lossy path rather than none.
+            fast: 0.02,
             slow: 0.0,
             cap: None,
             last_cut: None,
