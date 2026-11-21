@@ -4847,8 +4847,8 @@ dependencies = [
 name = "quiver-stream-net"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "libc",
- "quinn-udp",
  "quiver-stream-proto",
  "reed-solomon-simd",
  "ring",

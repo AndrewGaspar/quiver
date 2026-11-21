@@ -95,8 +95,9 @@ fn lossy(loss: Loss) -> LinkParams {
 
 #[test]
 fn two_percent_random_loss_loses_no_frames() {
-    for (name, client) in [("FEC + NACK", ClientOpts::default()), ("FEC only", no_nacks())] {
-        let mut pair = SimPair::new(&keys(), host_opts(50_000), client, lossy(Loss::Random(0.02)), lossy(Loss::Random(0.02)), 1);
+    let fec_only = HostOpts { answer_nacks: false, ..host_opts(50_000) };
+    for (name, host, client) in [("FEC + NACK", host_opts(50_000), ClientOpts::default()), ("FEC only", fec_only, no_nacks())] {
+        let mut pair = SimPair::new(&keys(), host, client, lossy(Loss::Random(0.02)), lossy(Loss::Random(0.02)), 1);
         pair.connect();
         let end = pair.now + 10 * SEC;
         stream(&mut pair, 120, end, |_| {});

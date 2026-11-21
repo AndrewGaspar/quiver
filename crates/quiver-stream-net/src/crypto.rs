@@ -63,6 +63,23 @@ impl SessionKeys {
         out
     }
 
+    /// The 40-byte form as 80 hex digits, for passing between test processes.
+    pub fn to_hex(&self) -> String {
+        self.to_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.trim();
+        if hex.len() != 80 || !hex.is_ascii() {
+            return None;
+        }
+        let mut bytes = [0u8; 40];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(Self::from_bytes(&bytes))
+    }
+
     /// Fresh keys from the system's secure random source, for tests and tools. The control
     /// plane makes the real ones.
     pub fn random() -> Self {
@@ -323,6 +340,8 @@ mod tests {
     fn keys_round_trip_as_bytes_and_hide_in_debug() {
         let k = SessionKeys::random();
         assert_eq!(SessionKeys::from_bytes(&k.to_bytes()), k);
+        assert_eq!(SessionKeys::from_hex(&k.to_hex()), Some(k.clone()));
+        assert_eq!(SessionKeys::from_hex("zz"), None);
         assert!(!format!("{k:?}").contains("key:"));
     }
 

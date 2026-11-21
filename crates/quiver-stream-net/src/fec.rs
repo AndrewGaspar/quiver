@@ -38,6 +38,14 @@ impl FecPlanner {
         Self { loss_q: 0, target, max_ratio, min_parity, cache: HashMap::new() }
     }
 
+    /// The acceptable chance of losing a frame despite FEC.
+    pub fn set_target(&mut self, target: f64) {
+        if target != self.target {
+            self.target = target;
+            self.cache.clear();
+        }
+    }
+
     /// The loss rate to plan for (0.0..=1.0). The caller adds any safety margin.
     pub fn set_loss(&mut self, loss: f64) {
         let q = (loss.clamp(0.0, 0.5) * 400.0).ceil() as u32;

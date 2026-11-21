@@ -285,6 +285,13 @@ impl SyntheticEncoder {
         Self { fps, width, height, keyframe_every: None, seq: 0, last_key: 0, rng: Rng::new(seed), force_key: true }
     }
 
+    /// Starts numbering frames at `seq` (frame numbers never restart within a stream).
+    pub fn starting_at(mut self, seq: u64) -> Self {
+        self.seq = seq;
+        self.last_key = seq;
+        self
+    }
+
     pub fn interval_us(&self) -> Micros {
         1_000_000 / Micros::from(self.fps.max(1))
     }

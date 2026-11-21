@@ -454,7 +454,7 @@ impl LossBased {
     }
 
     fn update(&mut self, loss: f64, rate: f64, now: Micros) {
-        self.fast = 0.5 * self.fast + 0.5 * loss;
+        self.fast = 0.7 * self.fast + 0.3 * loss;
         self.slow = 0.95 * self.slow + 0.05 * loss;
         if loss < self.baseline {
             self.baseline = 0.5 * self.baseline + 0.5 * loss;

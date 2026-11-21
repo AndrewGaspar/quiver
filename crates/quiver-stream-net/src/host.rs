@@ -43,6 +43,10 @@ pub struct HostOpts {
     pub max_pacing_kbps: u32,
     /// The chance of losing a frame despite FEC that recovery is planned for.
     pub fec_frame_loss: f64,
+    /// The same, while the RTT is short enough for the client's NACKs to rescue a frame
+    /// (at most `nack_rtt_us`): FEC then only has to make NACKs rare.
+    pub fec_frame_loss_nack: f64,
+    pub nack_rtt_us: Micros,
     /// At most this share of recovery to data shards (tiny frames excepted).
     pub fec_max_ratio: f64,
     /// At least this many recovery shards a frame, even on a clean path.
@@ -75,6 +79,8 @@ impl Default for HostOpts {
             pacing_fraction: 0.3,
             max_pacing_kbps: 2_000_000,
             fec_frame_loss: 1e-4,
+            fec_frame_loss_nack: 2e-3,
+            nack_rtt_us: 5_000,
             fec_max_ratio: 0.5,
             fec_min_parity: 1,
             fec_loss_margin: 1.25,
@@ -243,6 +249,8 @@ impl HostCore {
             return Ok(());
         }
         self.observe_interval(frame.captured);
+        let nackable = self.opts.answer_nacks && self.clock.rtt().is_some_and(|r| r <= self.opts.nack_rtt_us);
+        self.video.planner.set_target(if nackable { self.opts.fec_frame_loss_nack } else { self.opts.fec_frame_loss });
         let loss = self.bwe.planning_loss();
         let planned = if loss > 0.0 { loss * self.opts.fec_loss_margin + 0.002 } else { 0.0 };
         self.video.planner.set_loss(planned);

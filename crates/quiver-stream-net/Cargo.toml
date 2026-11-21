@@ -14,5 +14,7 @@ libc.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ring = "0.17.14"
-quinn-udp = "0.5.16"
 reed-solomon-simd = "3.1"
+
+[dev-dependencies]
+clap.workspace = true
