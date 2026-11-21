@@ -67,6 +67,7 @@ fn plan(prefix: &Path, record: &Path, session: &str, game: GameRef) -> quiver_co
         saves_folder: String::new(),
         session: Some(session.to_owned()),
         game: Some(game),
+        stream: None,
     }
 }
 

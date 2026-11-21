@@ -79,7 +79,7 @@ fn root() -> PathBuf {
 impl Streams {
     pub fn list(&self) -> Vec<StreamSession> {
         let mut v: Vec<StreamSession> = self.entries.lock().unwrap().values().map(|e| e.rec.session.clone()).collect();
-        v.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        v.sort_by_key(|s| s.started_at);
         v
     }
 

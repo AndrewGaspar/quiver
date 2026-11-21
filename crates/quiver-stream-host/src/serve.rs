@@ -370,7 +370,9 @@ impl Serve {
                 Got::Frame(Some(f)) => {
                     if hello && let Err(e) = sess.send_video(f) {
                         tracing::warn!("serve: frame not sent: {e}");
-                        let _ = self.host.as_ref().map(|h| h.control_in.try_send(Control::Keyframe));
+                        if let Some(h) = self.host.as_ref() {
+                            let _ = h.control_in.try_send(Control::Keyframe);
+                        }
                     }
                 }
                 Got::Audio(Some(p)) => {

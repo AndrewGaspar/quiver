@@ -109,7 +109,8 @@ impl Quiver {
         let target = StreamTarget::Game { game: id.0.to_string(), profile: None };
         let fallback = crate::machines::window_caps(self.viewport);
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Step>();
-        let _ = on_tokio(async move {
+        // It reports through `tx`; its own result isn't needed.
+        drop(on_tokio(async move {
             let caps = tokio::task::spawn_blocking(probe_caps).await.ok().and_then(Result::ok).unwrap_or(fallback);
             let req = Request::StartStream { target: target.clone(), prefs: Default::default(), caps };
             let reply: StartStreamReply = match source.call(req).await {
@@ -123,7 +124,7 @@ impl Quiver {
             let t = tx.clone();
             let r = tokio::task::spawn_blocking(move || run_client(&reply, &target, |s| drop(t.unbounded_send(s)))).await;
             let _ = tx.unbounded_send(Step::Done(r.unwrap_or_else(|e| Err(e.to_string()))));
-        });
+        }));
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while let Some(step) = rx.next().await {
