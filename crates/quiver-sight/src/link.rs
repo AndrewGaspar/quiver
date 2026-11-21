@@ -54,15 +54,14 @@ pub enum Msg {
     /// Sight's settings changed.
     Settings(Box<SightSettings>),
     PinFailed { scope: String, reason: String },
-    /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
-    QuickPoll,
+    QuickAction { session: String, tile: crate::quick::Tile },
     Replay { session: String, action: crate::replay::Action },
     ReplayFeedback { session: String, result: Result<String, String> },
     /// quiverd's answer to the Performance section (`panel::sections::performance`).
     Perf { session: String, reply: crate::panel::sections::performance::Reply },
     /// The panel's layout changed (docked or centred, design/SIGHT.md §9): the backdrop
     /// follows (no blur or dim while docked), and the sections' choices are saved.
-    PanelLayout { docked: bool, prefs: std::collections::BTreeMap<String, bool> },
+    PanelLayout { section: quiver_api::sight::PanelSection, docked: bool, prefs: std::collections::BTreeMap<String, bool> },
 }
 
 // Sent boxed (`Msg::Loaded`): the variants' sizes don't matter.

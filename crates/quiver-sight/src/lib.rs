@@ -14,7 +14,7 @@
 //!   cloud, a mod's hotkey, agents' and mods' notes) and finished downloads, drawn in the game
 //!   where its layer can ([`overlay`], with the status chip and the first-launch hint), else
 //!   on the desktop; do-not-disturb holds all but errors (design/SIGHT.md §16);
-//! - shows the quick menu while the panel's chord is held ([`quick`]);
+//! - opens on the Quick tab for replay, screenshots and pins ([`quick`]);
 //! - shows the Sight panel over the game when summoned ([`panel`]: Shift+F2, a hyprpad
 //!   chord, `quiver sight toggle`), driven with the controller;
 //! - ties the panel and the desktop HUD to the game's window ([`front`], from the
@@ -101,12 +101,7 @@ pub struct Sight {
     /// Sessions whose game didn't show the overlay lately (toasts on the desktop meanwhile).
     overlay_failed: HashMap<String, Instant>,
     recorders: HashMap<String, replay::Recorder>,
-    quick: quick::Quick,
-    quick_shown: Option<glue::QuickShown>,
-    /// The panel command a press came with: a tap opens the panel with it.
-    quick_cmd: Option<PanelCommand>,
     quick_data: HashMap<String, panel::state::PanelData>,
-    quick_poll: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The last FPS and the start of each session (the chip).
     fps: HashMap<String, f64>,
     started: HashMap<String, chrono::DateTime<chrono::Utc>>,
@@ -136,11 +131,7 @@ impl Sight {
             overlay: Default::default(),
             overlay_failed: HashMap::new(),
             recorders: HashMap::new(),
-            quick: Default::default(),
-            quick_shown: None,
-            quick_cmd: None,
             quick_data: HashMap::new(),
-            quick_poll: None,
             fps: HashMap::new(),
             started: HashMap::new(),
             started_at: HashMap::new(),
@@ -151,7 +142,7 @@ impl Sight {
     /// A panel command (after the quick menu had its say): ties the game's toplevel, opens hidden
     /// if the game isn't in front.
     fn panel_command(&mut self, c: PanelCommand, cx: &mut App) {
-        let opening = c.action == PanelAction::Open || (c.action == PanelAction::Toggle && !self.panel.is_open());
+        let opening = matches!(c.action, PanelAction::Open | PanelAction::Quick) || (c.action == PanelAction::Toggle && !self.panel.is_open());
         let mut hidden = None;
         if opening
             && let Some(s) = c.session.clone()
@@ -176,9 +167,7 @@ impl Sight {
         let was_open = self.panel.is_open();
         let session = c.session.clone().or_else(|| self.panel.session().map(str::to_owned));
         self.panel.command(c, hidden, cx);
-        if let Some(s) = self.panel.session().map(str::to_owned) {
-            self.panel.set_replay(self.replay_state(&s), cx);
-        }
+        self.refresh_quick(cx);
         self.apply_front(cx);
         if was_open && !self.panel.is_open() {
             self.chip(session.as_deref(), false, cx);
@@ -282,6 +271,7 @@ impl Sight {
             Msg::Notice(n) => self.notice(*n, cx),
             Msg::NoticeAnswered(id) => {
                 self.toasts.dismiss_notice(&id, cx);
+                self.refresh_quick(cx);
                 self.sync_overlay(cx);
             }
             Msg::Settings(s) => self.settings_changed(*s, cx),
@@ -291,7 +281,7 @@ impl Sight {
             }
             Msg::Replay { session, action } => self.apply_replay(&session, action, cx),
             Msg::ReplayFeedback { session, result } => self.replay_feedback(&session, result, cx),
-            Msg::QuickPoll => self.quick_polled(cx),
+            Msg::QuickAction { session, tile } => self.quick_apply(&session, &tile, cx),
             Msg::Quit(why) => {
                 tracing::info!("quitting: {why}");
                 for (_, mut h) in self.huds.drain() {
@@ -314,11 +304,8 @@ impl Sight {
                 })
                 .detach();
             }
-            Msg::Panel(c) => {
-                if !self.quick_command(&c, cx) {
-                    self.panel_command(c, cx);
-                }
-            }
+            Msg::Panel(c) if c.action == PanelAction::Chip => self.chip(c.session.as_deref(), true, cx),
+            Msg::Panel(c) => self.panel_command(c, cx),
             Msg::Loaded { session, data } => {
                 self.data_seen(&session, &data, cx);
                 self.panel.loaded(&session, *data, cx)
@@ -345,13 +332,9 @@ impl Sight {
                 self.recheck = None;
                 self.apply_front(cx);
             }
-            Msg::GameInput { session, events } => {
-                if !self.quick_input(&session, &events, cx) {
-                    self.panel.game_input(&session, &events, cx)
-                }
-            }
+            Msg::GameInput { session, events } => self.panel.game_input(&session, &events, cx),
             Msg::Perf { session, reply } => self.panel.perf_reply(&session, reply, cx),
-            Msg::PanelLayout { docked, prefs } => self.panel.layout(docked, prefs, cx),
+            Msg::PanelLayout { section, docked, prefs } => self.panel.layout(section, docked, prefs, cx),
         }
     }
 
@@ -409,9 +392,8 @@ impl Sight {
         for h in self.huds.values_mut() {
             h.game.tick(cx);
         }
-        // Toast expiry, the overlay's heartbeat, the first-launch hint, the quick menu's image.
+        // Toast expiry, the overlay's heartbeat and the first-launch hint.
         self.tick_overlay(cx);
-        self.quick_renew();
         // The panel's clock and play time.
         if self.ticks.is_multiple_of(4) {
             self.poll_replays(cx);

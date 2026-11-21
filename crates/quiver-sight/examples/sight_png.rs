@@ -9,14 +9,17 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{App, AppContext, OffscreenWindowOptions, px, size};
 use quiver_api::sight::{PinKind, QuickPin};
 use quiver_sight::demo::{more_toasts, sample_panel, sample_toasts};
 use quiver_sight::overlay::{Chip, OverlayView};
 use quiver_sight::place::ToastCorner;
-use quiver_sight::quick::{Key, Quick, QuickView, tiles};
+use quiver_sight::panel::state::{Button, Confirm, Nav};
+use quiver_sight::panel::view::{PanelView, Wiring};
+use quiver_sight::quick::tiles;
+use quiver_sight::replay::State;
 use quiver_sight::toasts::ToastView;
 use quiver_ui::theme;
 
@@ -67,26 +70,25 @@ fn main() {
             let w = cx.open_offscreen_window(opts(400.0, 560.0), sink(&s), move |_, cx| cx.new(|_| ToastView::new(list))).unwrap();
             shots.push((name.into(), s, w.into()));
         }
-        // The quick menu, held, on the HUD tile, with a pin; then latched on Quit, A half held.
-        let data = sample_panel();
+        // The Quick tab with an active buffer, an actionable notice, and Quit's confirmation.
         let pins = vec![QuickPin { kind: PinKind::Option, surface: "m1/aco-dlss".into(), id: "world.npc_density".into(), label: "Crowd density".into() }];
         let notices = vec![sample_toasts().remove(3)];
-        for (name, latched_quit, with_notice) in [("quick", false, false), ("quick-notice", false, true), ("quick-quit", true, false)] {
-            let mut q = Quick::default();
-            q.set_tiles(tiles(&data, &pins, if with_notice { &notices } else { &[] }, if with_notice { quiver_sight::replay::State::External { pid: 4242, seconds: 60 } } else { quiver_sight::replay::State::Off }));
-            let t = Instant::now();
-            if latched_quit {
-                q.latch("s-1", t);
-                q.focus = q.tiles.len() - 1;
-                q.key(Key::Enter, true, t);
-            } else {
-                q.press("s-1", t);
-                q.chord(Some(true), t + quiver_sight::quick::HOLD);
-                q.focus = 1.min(q.tiles.len() - 1);
+        for (name, quit, with_notice) in [("quick", false, false), ("quick-notice", false, true), ("quick-quit", true, false)] {
+            let data = sample_panel();
+            let actions = tiles(&data, &pins, if with_notice { &notices } else { &[] }, State::Active(60));
+            let mut nav = Nav::default();
+            if quit {
+                nav.quick.select(actions.last().unwrap());
+                nav.confirm = Some(Confirm { what: Button::Quit, yes: false });
+            } else if let Some(tile) = actions.iter().find(|t| matches!(t.kind, quiver_sight::quick::TileKind::Notice { .. })) {
+                nav.quick.select(tile);
             }
-            let at = if latched_quit { t + Duration::from_millis(500) } else { t };
             let s: Rc<RefCell<Shot>> = Rc::default();
-            let w = cx.open_offscreen_window(opts(1440.0, 900.0), sink(&s), move |_, cx| cx.new(|cx| QuickView::from(&q, at, cx))).unwrap();
+            let w = cx.open_offscreen_window(opts(1440.0, 900.0), sink(&s), move |_, cx| cx.new(|cx| {
+                let mut view = PanelView::new("s-1".into(), data, nav, quiver_api::sight::Backdrop::Dim, Wiring::default(), cx);
+                view.quick_tiles = actions;
+                view
+            })).unwrap();
             shots.push((name.into(), s, w.into()));
         }
         // The overlay in the game: toasts, the chip, the hint.

@@ -278,7 +278,7 @@ impl PanelCtl {
     /// The view's layout changed (docked or centred): docked, the game is in full view (the
     /// layer's blur request goes, the view draws no dim); centred, the backdrop comes back.
     /// The sections' choices are saved.
-    pub fn layout(&mut self, docked: bool, prefs: std::collections::BTreeMap<String, bool>, cx: &mut App) {
+    pub fn layout(&mut self, section: PanelSection, docked: bool, prefs: std::collections::BTreeMap<String, bool>, cx: &mut App) {
         if prefs != self.settings.docked {
             self.settings.docked = prefs;
             // quiverd writes Sight's settings (one writer, design/SIGHT.md §16).
@@ -288,17 +288,26 @@ impl PanelCtl {
             }
         }
         self.nav.dock = state::DockPrefs::from_map(&self.settings.docked);
-        if self.docked == docked {
+        if self.open.is_none() || (self.docked == docked && self.report.section == section) {
             return;
         }
+        let clear_before = self.clear_backdrop();
+        self.report.section = section;
         self.docked = docked;
         self.report.docked = docked;
         let Some(o) = &self.open else { return };
         let session = o.session.clone();
         let shown = o.window.is_some() || o.game.is_some();
-        if docked {
+        if self.clear_backdrop() == clear_before {
+            if clear_before { self.report.backdrop_detail = self.clear_backdrop_detail().into(); }
+            self.report_now();
+            return;
+        }
+        if self.clear_backdrop() {
             self.game_blur = None;
-            self.report.backdrop_detail = "docked: the game in full view (no blur, no dim)".into();
+            if self.report.backdrop == Backdrop::Blur && let Some(h) = self.hypr() { h.blur_off(); }
+            self.report.backdrop = Backdrop::Dim;
+            self.report.backdrop_detail = self.clear_backdrop_detail().into();
         } else if shown {
             let (backdrop, detail) = if self.in_game() { self.game_backdrop(&session) } else { self.pick_backdrop(&session) };
             self.with_view(cx, |v, _| v.backdrop = backdrop);
@@ -441,8 +450,11 @@ impl PanelCtl {
         self.with_view(cx, |v, _| v.pinned = pins);
     }
 
-    pub fn set_replay(&self, state: crate::replay::State, cx: &mut App) {
-        self.with_view(cx, |v, _| v.replay = state);
+    pub fn set_quick(&self, tiles: Vec<crate::quick::Tile>, state: crate::replay::State, cx: &mut App) {
+        self.with_view(cx, |v, _| {
+            v.quick_tiles = tiles;
+            v.replay = state;
+        });
     }
 
     pub fn replay_feedback(&self, message: String, error: bool, cx: &mut App) {
@@ -646,12 +658,12 @@ impl PanelCtl {
         if c.seq > 0 {
             self.report.handled_seq = self.report.handled_seq.max(c.seq);
         }
+        let section = if c.action == PanelAction::Quick { Some(PanelSection::Quick) } else { c.section };
         let open = match c.action {
             PanelAction::Close => false,
-            PanelAction::Open => true,
+            PanelAction::Open | PanelAction::Quick => true,
             PanelAction::Toggle => !self.is_open(),
-            // The quick menu's and the chip's (`crate::quick`, `crate::overlay`).
-            PanelAction::Quick | PanelAction::Chip => return,
+            PanelAction::Chip => return,
         };
         if !open {
             self.close(cx);
@@ -665,7 +677,7 @@ impl PanelCtl {
         if let Some(o) = &self.open {
             // Already open: switch section (or session).
             if o.session == session {
-                if let Some(s) = c.section {
+                if let Some(s) = section {
                     o.view.update(cx, |v, cx| {
                         v.nav.select_section(s);
                         cx.notify();
@@ -675,19 +687,26 @@ impl PanelCtl {
             }
             self.close(cx);
         }
-        if let Err(e) = self.open(&session, c.section, c.monitor.as_deref(), show, cx) {
+        if let Err(e) = self.open(&session, section, c.monitor.as_deref(), show, cx) {
             tracing::warn!("panel: {e:#}");
             self.report.last_error = Some(format!("{e:#}"));
             self.report_now();
         }
     }
 
-    /// The backdrop: the Sight layer blurs the game's own frames when it can (any compositor);
-    /// else the compositor's blur, else the dim. Starts the layer's request.
+    fn clear_backdrop(&self) -> bool {
+        self.docked || self.report.section == PanelSection::Quick
+    }
+
+    fn clear_backdrop_detail(&self) -> &'static str {
+        if self.docked { "docked: game in full view" } else { "Quick: game in full view" }
+    }
+
+    /// Request the layer's blur when available, falling back to the compositor or a dim.
     fn pick_backdrop(&mut self, session: &str) -> (Backdrop, String) {
         self.game_blur = None;
-        if self.docked {
-            return (Backdrop::Dim, "docked: the game in full view (no blur, no dim)".to_owned());
+        if self.clear_backdrop() {
+            return (Backdrop::Dim, self.clear_backdrop_detail().to_owned());
         }
         match self.layers.get(session) {
             Some(l) if l.ready => match GameBlur::start(session, &l.image, self.stereo.get(session).copied().unwrap_or_default()) {
@@ -776,7 +795,7 @@ impl PanelCtl {
         self.report = PanelReport {
             open: true,
             docked: self.docked,
-            section: section.unwrap_or(self.nav.section),
+            section: section.unwrap_or_default(),
             session: Some(session.to_owned()),
             monitor: mon.map(|m| m.name),
             return_to,
@@ -835,9 +854,9 @@ impl PanelCtl {
         let stereo = self.stereo.get(session).copied().filter(|s| s.fits(extent)).unwrap_or_default();
         let factor = ingame::factor(stereo.logical_extent(extent), o.monitor.is_some().then_some(o.logical));
         let view = o.view.clone();
-        let (backdrop, detail) = if self.docked {
+        let (backdrop, detail) = if self.clear_backdrop() {
             self.game_blur = None;
-            (Backdrop::Dim, "docked: the game in full view (no blur, no dim)".to_owned())
+            (Backdrop::Dim, self.clear_backdrop_detail().to_owned())
         } else {
             self.game_backdrop(session)
         };

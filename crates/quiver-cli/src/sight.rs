@@ -13,7 +13,7 @@ pub const HYPRPAD_SNIPPET: &str = include_str!("../../../tools/hyprpad/quiver-si
 pub enum SightAction {
     /// Open the panel over the running game, or close it (Shift+F2 in game, Guide+Start).
     Toggle {
-        /// Open on this section: session, mods, tweaks, performance, achievements.
+        /// Open on this section: quick, session, mods, tweaks, performance, achievements.
         #[arg(long)]
         section: Option<String>,
         /// A running session (`s-…`); default: the focused game, else the only one.
@@ -47,8 +47,7 @@ pub enum SightAction {
     /// The controller fallback without hyprpad: Select+Start held 0.6 s opens the panel
     /// (`on`, `off`; no value: show). The game sees those buttons too. Off by default.
     PadChord { value: Option<String> },
-    /// The quick menu over the game, latched (A applies a tile, B closes). Holding Shift+F2 or
-    /// Guide+Start opens it held instead: releasing applies the focused tile.
+    /// Open the Quick tab. Choose with Left/Right, press A or Enter to run, or B to close.
     Quick {
         #[arg(long)]
         session: Option<String>,
@@ -136,7 +135,7 @@ fn level(s: &str) -> Result<NoticeLevel> {
 }
 
 fn section(s: Option<String>) -> Result<Option<PanelSection>> {
-    s.map(|s| PanelSection::parse(&s).ok_or_else(|| anyhow::anyhow!("unknown section {s:?}: session, mods, tweaks, performance, achievements"))).transpose()
+    s.map(|s| PanelSection::parse(&s).ok_or_else(|| anyhow::anyhow!("unknown section {s:?}: quick, session, mods, tweaks, performance, achievements"))).transpose()
 }
 
 pub async fn run(client: &Client, action: SightAction) -> Result<()> {
@@ -178,7 +177,7 @@ pub async fn run(client: &Client, action: SightAction) -> Result<()> {
                 println!("The panel on the controller needs a few lines in your hyprpad config:");
                 println!("  - a `quiver-sight` mode while the panel is up (the game's pad goes neutral),");
                 println!("  - the pad's buttons typed as keys into the panel in that mode,");
-                println!("  - Guide+Start: tapped, the panel; held, the quick menu (it holds Shift+F2 for you).");
+                println!("  - Guide+Start toggles Sight. It opens on Quick. Press A to run the selected action.");
                 println!("Quiver doesn't edit your config. Print the snippet with `quiver sight hyprpad --snippet`;");
                 println!("its comments say where it goes and which existing lines to change.");
             }

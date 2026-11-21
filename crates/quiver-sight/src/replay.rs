@@ -189,7 +189,7 @@ impl Drop for Recorder {
 
 /// Pin the target process before rechecking it. A stale tile cannot signal a
 /// process which later inherited the recorder's pid.
-pub fn save_external(pid: u32) -> Result<()> {
+pub fn save_external(pid: u32) -> Result<String> {
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as i32, 0) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("opening the external recorder");
@@ -200,11 +200,24 @@ pub fn save_external(pid: u32) -> Result<()> {
     if crate::quick::replay_args(&cmd).is_none() {
         bail!("the external replay buffer has stopped");
     }
+    let args: Vec<_> = cmd.split(|b| *b == 0).collect();
+    let path_arg = |name: &[u8]| -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let value = args.windows(2).find(|a| a[0] == name && !a[1].is_empty())?[1];
+        let path = Path::new(std::ffi::OsStr::from_bytes(value));
+        if path.is_absolute() { Some(path.to_owned()) } else { Some(std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?.join(path)) }
+    };
+    if let Some(socket) = path_arg(b"-ipc") {
+        return save(&socket).map(|p| format!("Saved {p}"));
+    }
     let result = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), libc::SIGUSR1, std::ptr::null::<libc::siginfo_t>(), 0) };
     if result < 0 {
         return Err(std::io::Error::last_os_error()).context("requesting a replay");
     }
-    Ok(())
+    Ok(match path_arg(b"-o") {
+        Some(dir) => format!("Replay save requested in {}", dir.display()),
+        None => "Replay save requested".to_owned(),
+    })
 }
 
 pub fn save(socket: &Path) -> Result<String> {

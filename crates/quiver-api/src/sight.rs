@@ -17,8 +17,10 @@ pub mod session;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelSection {
-    /// Game, profile, mod versions, play time, clock, battery, quit.
+    /// Replay, screenshots and pinned actions.
     #[default]
+    Quick,
+    /// Game, profile, mod versions, play time, clock, battery, quit.
     Session,
     /// Live mod options (MOD-CONFIG) of the running profile.
     Mods,
@@ -31,10 +33,11 @@ pub enum PanelSection {
 }
 
 impl PanelSection {
-    pub const ALL: [PanelSection; 5] = [PanelSection::Session, PanelSection::Mods, PanelSection::Tweaks, PanelSection::Performance, PanelSection::Achievements];
+    pub const ALL: [PanelSection; 6] = [PanelSection::Quick, PanelSection::Session, PanelSection::Mods, PanelSection::Tweaks, PanelSection::Performance, PanelSection::Achievements];
 
     pub fn label(self) -> &'static str {
         match self {
+            PanelSection::Quick => "Quick",
             PanelSection::Session => "Session",
             PanelSection::Mods => "Mods",
             PanelSection::Tweaks => "Tweaks",
@@ -47,10 +50,11 @@ impl PanelSection {
         Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
 
-    /// `session`, `mods` (also `options`), `tweaks`, `performance` (also `perf`, `hud`),
+    /// `quick`, `session`, `mods` (also `options`), `tweaks`, `performance` (also `perf`, `hud`),
     /// `achievements`.
     pub fn parse(s: &str) -> Option<PanelSection> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
+            "quick" => PanelSection::Quick,
             "session" | "home" => PanelSection::Session,
             "mods" | "options" | "mod" => PanelSection::Mods,
             "tweaks" => PanelSection::Tweaks,
@@ -64,16 +68,14 @@ impl PanelSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelAction {
-    /// Open if closed (on `section`, else where it was), close if open.
+    /// Open if closed (on `section`, else Quick), close if open.
     Toggle,
     /// Open (or switch to `section` when already open).
     Open,
     Close,
     // ---- appended (Sight quick menu, design/SIGHT.md §16). A quiver-sight from before skips
     // the command (an unknown variant).
-    /// The quick menu, latched: open until a tile is applied (A / Enter) or B / Escape.
-    /// (Holding Shift+F2, or Guide+Start through hyprpad, opens it held instead: releasing
-    /// applies the focused tile.)
+    /// Open the panel on Quick, including when another section is already open.
     Quick,
     /// Show the status chip for a few seconds ("Sight · 118 fps · 21:14 · 1 h 12 m").
     Chip,
@@ -240,7 +242,7 @@ pub enum SightRequest {
     /// `quiver-sight` only: what the panel shows now.
     Report { report: PanelReport },
     // ---- appended (design/SIGHT.md §16)
-    /// The quick menu over a game ([`PanelAction::Quick`]), latched.
+    /// Open the Quick tab in the panel ([`PanelAction::Quick`]).
     Quick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,

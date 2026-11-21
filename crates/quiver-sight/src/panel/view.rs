@@ -188,11 +188,11 @@ pub struct PanelView {
     hud_note: Option<(String, Tone)>,
     /// A line in the hint bar ("Quit sent", errors).
     pub(crate) flash: Option<(String, Tone)>,
-    wiring: Wiring,
+    pub(super) wiring: Wiring,
     pub focus: FocusHandle,
     pub(crate) scroll: ScrollHandle,
     /// The layout last told to the controller (docked).
-    told_docked: Option<bool>,
+    told_layout: Option<(PanelSection, bool)>,
     /// The readouts last subscribed to.
     subscribed: Vec<String>,
     /// The parts at their own depth in the last frame laid out ([`DepthMarks`]).
@@ -203,6 +203,7 @@ pub struct PanelView {
     /// What came of the last screenshot (the Session section shows it under the button).
     pub shot: Option<(String, Tone)>,
     pub replay: crate::replay::State,
+    pub quick_tiles: Vec<crate::quick::Tile>,
     pub replay_note: Option<(String, Tone)>,
     /// The Achievements list's own scroll.
     pub ach_scroll: ScrollHandle,
@@ -277,6 +278,7 @@ fn battery() -> Option<(u32, Power)> {
 
 pub(crate) fn section_icon(s: PanelSection) -> Icon {
     match s {
+        PanelSection::Quick => Icon::History,
         PanelSection::Session => Icon::Gamepad,
         PanelSection::Mods => Icon::Package,
         PanelSection::Tweaks => Icon::SlidersHorizontal,
@@ -287,6 +289,7 @@ pub(crate) fn section_icon(s: PanelSection) -> Icon {
 
 impl PanelView {
     pub fn new(session: String, data: PanelData, nav: Nav, backdrop: Backdrop, wiring: Wiring, cx: &mut Context<Self>) -> Self {
+        let quick_tiles = crate::quick::tiles(&data, &[], &[], crate::replay::State::Hidden);
         Self {
             session,
             data,
@@ -310,12 +313,13 @@ impl PanelView {
             wiring,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
-            told_docked: None,
+            told_layout: None,
             subscribed: Vec::new(),
             marks: Rc::default(),
             pinned: BTreeMap::new(),
             shot: None,
             replay: crate::replay::State::Hidden,
+            quick_tiles,
             replay_note: None,
             ach_scroll: ScrollHandle::new(),
             perf: PerfSection::default(),
@@ -411,6 +415,9 @@ impl PanelView {
 
     /// One input from the keyboard, the controller (gilrs, or hyprpad's keys) or a click.
     pub fn input(&mut self, i: Input, cx: &mut Context<Self>) {
+        if self.nav.section == PanelSection::Quick && self.nav.confirm.is_none() && self.quick_input(i, cx) {
+            return;
+        }
         // The Performance section's body has its own controls and editor.
         if self.perf_has_input() {
             let cap = self.cap_value();
@@ -437,6 +444,7 @@ impl PanelView {
     /// A key of the panel's own ([`Key`]): `held` is key repeat.
     pub fn key(&mut self, k: Key, held: bool, cx: &mut Context<Self>) {
         match k {
+            Key::Input(Input::Activate) if held && self.nav.section == PanelSection::Quick => {}
             Key::Input(i) => self.input(i, cx),
             Key::Dock if !held => self.toggle_dock(cx),
             Key::Dock => {}
@@ -1096,7 +1104,7 @@ impl PanelView {
     pub fn key_down(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         if k.key == "f2" && k.modifiers.shift {
-            self.close();
+            if !ev.is_held { self.close(); }
             return;
         }
         if let Some(key) = panel_key(&k.key, k.modifiers.shift, k.modifiers.control) {
@@ -1116,6 +1124,12 @@ impl PanelView {
     /// adds its own; the shell then adds B, LB / RB and R3 ([`Hints::finish`]).
     pub fn section_hints(&self, h: &mut Hints) {
         match self.nav.section {
+            PanelSection::Quick => {
+                h.add([Glyph::LeftRight], "Choose").add([Glyph::A], "Select");
+                if self.quick_tiles.get(self.nav.quick.focus(&self.quick_tiles)).is_some_and(|t| matches!(t.kind, crate::quick::TileKind::StartReplay { .. })) {
+                    h.add([Glyph::UpDown], "Buffer length");
+                }
+            }
             PanelSection::Mods | PanelSection::Tweaks => super::sections::mods_view::hints(self, h),
             PanelSection::Performance if self.nav.zone == Zone::Body => {
                 for (g, t) in self.perf.hints(&self.data) {
@@ -1220,7 +1234,8 @@ impl PanelView {
                     .when(on, |d| d.bg(th.acc.opacity(0.16)).border_b_2().border_color(th.acc))
                     .cursor_pointer()
                     .hover(|d| d.bg(th.ink3))
-                    .child(s.label())
+                    .when(self.room.w >= 760. || on, |d| d.child(s.label()))
+                    .when(self.room.w < 760. && !on, |d| d.child(icon(section_icon(s), 16., th.tx2)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.nav.select_section(s);
                         cx.notify();
@@ -1228,7 +1243,7 @@ impl PanelView {
             })))
             .child(pad("tab-rb", "RB", 1))
             .child(div().flex_1())
-            .child(self.status_line(th))
+            .when(self.room.w >= 920., |d| d.child(self.status_line(th)))
     }
 
     /// The docked column's header: the section, its icon tabs between LB and RB, "Docked R3".
@@ -1324,7 +1339,7 @@ impl PanelView {
             .when_some(note, |d, (t, tone)| d.child(div().text_color(tone_color(th, tone)).child(t)))
             .when_some(h.detail, |d, t| d.child(div().text_color(th.tx3).child(t)))
             .when(self.footer.pad_shared, |d| d.child(div().text_color(th.warn).child("The game sees the controller too (no hyprpad)")))
-            .child(div().text_color(th.tx3).child("Shift+F2 · Guide+Start"))
+            .when(self.room.w >= 820., |d| d.child(div().text_color(th.tx3).child("Shift+F2 · Toggle Sight")))
     }
 
     pub(crate) fn stepper(&self, th: &Theme, i: usize, text: String, on: Option<bool>, can: bool, cx: &mut Context<Self>) -> Div {
@@ -1616,6 +1631,7 @@ impl PanelView {
     /// The section's body: each section lays out its own.
     fn section_body(&self, th: &Theme, docked: bool, cx: &mut Context<Self>) -> AnyElement {
         match self.nav.section {
+            PanelSection::Quick => self.quick_body(th, docked, cx).into_any_element(),
             PanelSection::Mods => super::sections::mods_view::mods_body(self, th, docked, cx),
             PanelSection::Tweaks => super::sections::mods_view::tweaks_body(self, th, docked, cx),
             PanelSection::Performance => perf::view::body(self, th, docked, cx),
@@ -1732,12 +1748,13 @@ impl PanelView {
     /// saved).
     fn tell_layout(&mut self) {
         let docked = self.docked();
-        if self.told_docked == Some(docked) {
+        let layout = Some((self.nav.section, docked));
+        if self.told_layout == layout {
             return;
         }
-        self.told_docked = Some(docked);
+        self.told_layout = layout;
         if let Some(ui) = &self.wiring.ui {
-            let _ = ui.unbounded_send(Msg::PanelLayout { docked, prefs: self.nav.dock.to_map() });
+            let _ = ui.unbounded_send(Msg::PanelLayout { section: self.nav.section, docked, prefs: self.nav.dock.to_map() });
         }
     }
 }
@@ -1830,6 +1847,17 @@ impl Render for PanelView {
                 .child(div().flex_1().min_h_0().flex().flex_col().child(self.section_body(&th, true, cx)))
                 .child(self.hint_bar(&th, true, cx));
             return root.child(column).when_some(chip, |d, c| d.child(c)).when_some(confirm, |d, c| d.child(c));
+        }
+        if self.nav.section == PanelSection::Quick {
+            let pad = (vw * SAFE).max(16.);
+            return root.flex().flex_col().justify_end()
+                .child(div().flex().justify_center().px(px(pad)).pb(px(10.)).child(
+                    card(&th).w_full().max_w(px(MAX_W)).p(px(14.)).flex().flex_col().gap(px(12.))
+                        .child(mark(&self.marks, Mark::Card, 0.))
+                        .child(self.tab_row(&th, cx)).child(self.quick_body(&th, false, cx))
+                ))
+                .child(self.hint_bar(&th, false, cx))
+                .when_some(confirm, |d, c| d.child(c));
         }
         let pad_x = (vw * SAFE).max(24.0);
         let pad_y = (vh * SAFE).max(20.0);

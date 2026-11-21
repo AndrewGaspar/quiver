@@ -23,9 +23,7 @@
 --      game, or centre it). The keys go to the focused window: the game, whose input
 --      Quiver's preload hands to the panel while it's open (or the desktop panel's surface).
 --      Held buttons hold the key, so the panel's own key repeat applies, and Y's hold is seen.
---   3. Guide+Start: tapped, opens and closes the panel; held, the quick menu (Shift+F2 held,
---      which the Sight layer reads in the game). See "The chord" below:
---      Guide+Start is Guide+Menu, which your config may already use.
+--   3. Guide or Guide+Start toggles Sight. It opens on the Quick tab.
 --
 -- When it switches: hyprpad re-runs mode rules on compositor events (focus, layers) and on
 -- its periodic rescan (`process_rescan_ms`, 500 ms by default), which runs while a rule
@@ -88,58 +86,12 @@ end
 -- Add "quiver-sight" to the only_in lists of your h.cursor and h.scroll
 -- settings for right-trackpad pointing and left-trackpad scrolling.
 
--- 3. The chord: tap for the panel, HOLD for the quick menu (design/SIGHT.md §16).
+-- 3. Use one toggle binding in both your game mode and quiver-sight so the same
+-- button opens and closes Sight. Keep your existing binding if it already runs
+-- "quiver sight toggle". For example, if Guide+Start is free:
 --
--- A key on a guide chord is HELD for as long as the chord is (hyprpad presses it when the
--- chord is recognised and lets it go when either button lifts). So binding Guide+Start to
--- Shift+F2 makes it the keyboard's own gesture, which the Sight layer reads in the game:
---   * tap  (released within ~0.3 s): the panel opens or closes, as before;
---   * hold: the quick menu shows along the bottom of the game; D-pad Left / Right (under the
---     guide, bound below) choose a tile; releasing Guide+Start applies it. "Quit game" needs
---     A held a second after you let go (the menu stays up on it).
--- `quiver sight toggle` from a script (option b) can't hold, so it only ever opens the panel;
--- `quiver sight quick` opens the quick menu latched (A applies, B closes) from anywhere.
+-- h.bind("guide+menu", "Toggle Quiver Sight", h.exec "quiver sight toggle"):only_in("game", "quiver-sight")
 --
--- A guide chord has exactly ONE binding in hyprpad: binding it again replaces the earlier one
--- everywhere (and keeps the earlier guard). So pick one:
---
--- (a) Tap and hold, in games and over Sight (recommended where Guide+Start is free in games).
---     The key goes to the focused window, so keep it out of the desktop with the guard; if
---     your `h.bind("guide+menu", …)` opens the Omarchy menu, this replaces it (move the menu
---     to another chord, e.g. guide+view, or use (b)). Delete your own guide+menu line: a
---     later bind of the chord replaces this one's action (keeping this guard), and an
---     earlier one is replaced by it. Checked with `hyprpad bindings` (hyprpad of 2026-11):
---
--- h.bind("guide+menu", "Quiver Sight: tap panel, hold quick menu", h.key "shift+f2"):only_in("game", "quiver-sight")
---
---     and the quick menu's Left / Right while the guide is held (free in the stock config;
---     if you bound guide+dpad_left/right, those lines replace yours):
---
--- h.bind("guide+dpad_left",  "Quiver quick menu: previous", h.key "left"):only_in("game", "quiver-sight")
--- h.bind("guide+dpad_right", "Quiver quick menu: next",     h.key "right"):only_in("game", "quiver-sight")
---
---     (Name your game modes in :only_in: "game" here is the stock config's.)
---
--- (b) Tap only: Guide+Start for Quiver in games and over the panel, your existing action
---     elsewhere. Replace your `h.bind("guide+menu", ...)` line with one that runs a script
---     branching on the mode hyprpad passes in $HYPRPAD_MODE, e.g.
---     ~/.config/hypr/scripts/hyprpad-start.sh:
---
---         #!/bin/sh
---         case "$HYPRPAD_MODE" in
---           game|game-*|quiver-sight) exec quiver sight toggle ;;
---           *) exec omarchy-menu ;;
---         esac
---
---     and:  h.bind("guide+menu", "Omarchy menu / Quiver Sight in game", h.exec "~/.config/hypr/scripts/hyprpad-start.sh")
---
---     The quick menu is then the keyboard's (hold Shift+F2), or `quiver sight quick` on a
---     chord of its own, e.g.  h.bind("guide+view", "Quiver quick menu", h.exec "quiver sight quick")
---
--- (c) If nothing of yours uses Guide+Start and you want the tap alone, bind it directly:
---
--- h.bind("guide+start", "Quiver Sight", h.exec "quiver sight toggle")
---
--- Also: a bare Guide tap runs your guide-tap binding in this mode (the Steam pulse only
--- happens while forwarding). If that opens a launcher, add "quiver-sight" to its :not_in(...)
--- so a tap over the panel doesn't open it on top.
+-- Substitute the names of your game modes. If the chord already has a desktop
+-- action, route the existing binding by HYPRPAD_MODE. Hyprpad uses one binding
+-- per chord. In Sight, release Guide, choose with the D-pad, then press A.

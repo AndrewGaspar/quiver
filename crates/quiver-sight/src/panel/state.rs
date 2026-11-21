@@ -286,6 +286,7 @@ pub fn rows(section: PanelSection, d: &PanelData, now: DateTime<Utc>) -> Vec<Row
     let mut out = Vec::new();
     match section {
         // The Session section's cards (`sections::session`): its rows are the focusable ones.
+        PanelSection::Quick => {} // The action tiles have their own selection.
         PanelSection::Session => out = super::sections::session::rows(d),
         // Mods and Tweaks lay out by surface and page (`panel/sections/mods.rs`): their first
         // page here, for callers without the panel's navigation.
@@ -482,13 +483,12 @@ pub struct Nav {
     pub ach_filter: Filter,
     pub dock: DockPrefs,
     pub pages: Pages,
+    pub quick: crate::quick::Selection,
 }
 
 impl Nav {
     pub fn open(&mut self, section: Option<PanelSection>) {
-        if let Some(s) = section {
-            self.section = s;
-        }
+        self.section = section.unwrap_or(PanelSection::Quick);
         self.zone = Zone::Body;
         self.confirm = None;
     }
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(n.section, PanelSection::Achievements);
         assert_eq!(n.focused_row(&rows), Some(1), "Achievements starts at its top");
         assert_eq!(n.apply(Input::NextSection, &rows, adj), Effect::Moved);
-        assert_eq!((n.section, n.focused_row(&rows)), (PanelSection::Session, Some(4)));
+        assert_eq!((n.section, n.focused_row(&rows)), (PanelSection::Quick, Some(4)));
         // LT / RT are the section's tabs (a section without them steps sections: the view).
         assert_eq!(n.apply(Input::NextTab, &rows, adj), Effect::Tab(1));
         assert_eq!(n.apply(Input::PrevTab, &rows, adj), Effect::Tab(-1));

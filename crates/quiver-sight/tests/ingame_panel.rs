@@ -143,7 +143,7 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
         while let Ok(m) = rx.borrow_mut().try_recv() {
             match m {
                 Msg::GameInput { session, events } => cx.update(|cx| ctl.borrow_mut().game_input(&session, &events, cx)),
-                Msg::PanelLayout { docked, prefs } => cx.update(|cx| ctl.borrow_mut().layout(docked, prefs, cx)),
+                Msg::PanelLayout { section, docked, prefs } => cx.update(|cx| ctl.borrow_mut().layout(section, docked, prefs, cx)),
                 _ => {}
             }
         }
@@ -151,9 +151,11 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     wait(100).await;
     pump(cx);
     check!(cx.update(|_| ctl.borrow().is_open()), "Shift+F2 from the game closed the panel (the layer's chord does that)");
-    // Page Up: the previous section (Achievements, centred like Session).
-    p.push(&PanelEvent::key(t, 104, true, 0, 0));
-    p.push(&PanelEvent::key(t, 104, false, 0, 0));
+    // Page Up twice, through Quick to Achievements (centred like Session).
+    for _ in 0..2 {
+        p.push(&PanelEvent::key(t, 104, true, 0, 0));
+        p.push(&PanelEvent::key(t, 104, false, 0, 0));
+    }
     wait(100).await;
     pump(cx);
     let after = cx.update(|cx| ctl.borrow().nav(cx)).ok_or("no nav")?;
@@ -214,9 +216,11 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     let (img, _) = reader.poll_since(EXTENT, &mut dst, 0);
     let HudPoll::Image { desc, published } = img else { return Err(format!("no stereo image: {img:?}")) };
     check!(desc.lifts().len() == 1 && desc.lifts()[0].depth == rung::PANEL, "the card alone (nothing focused in an empty section): {:?}", desc.lifts());
-    // Page Down: back to Session, its Quit button focused.
-    p.push(&PanelEvent::key(t, 109, true, 0, 0));
-    p.push(&PanelEvent::key(t, 109, false, 0, 0));
+    // Page Down twice, through Quick and back to Session, its Quit button focused.
+    for _ in 0..2 {
+        p.push(&PanelEvent::key(t, 109, true, 0, 0));
+        p.push(&PanelEvent::key(t, 109, false, 0, 0));
+    }
     wait(100).await;
     pump(cx);
     wait(300).await;
@@ -259,5 +263,19 @@ async fn run(ctl: &Rc<RefCell<PanelCtl>>, rx: &Rc<RefCell<futures::channel::mpsc
     cx.update(|cx| ctl.borrow_mut().command(cmd(PanelAction::Close), None, cx));
     check!(!p.control().open(), "panel.input still open");
     check!(!state_path().exists(), "the state file is still there");
+    // Summoning from the game always lands on Quick, even after closing from Session.
+    // A live game keeps both producer heartbeats fresh between opens.
+    p.set_layer(me, PANEL_LAYER_CAN_DRAW, EXTENT, mono_raw_ns());
+    p.set_input(me, INPUT_X11, mono_raw_ns());
+    let toggle = PanelCommand { section: None, ..cmd(PanelAction::Toggle) };
+    cx.update(|cx| ctl.borrow_mut().command(toggle.clone(), None, cx));
+    let report = cx.update(|_| ctl.borrow().report().clone());
+    check!(report.open && report.section == PanelSection::Quick, "toggle didn't open Quick: {report:?}");
+    check!(!report.docked && report.backdrop_detail.contains("full view"), "compact Quick backdrop: {report:?}");
+    cx.update(|cx| ctl.borrow_mut().command(cmd(PanelAction::Open), None, cx));
+    cx.update(|cx| ctl.borrow_mut().command(cmd(PanelAction::Quick), None, cx));
+    check!(cx.update(|cx| ctl.borrow().nav(cx).unwrap().section) == PanelSection::Quick, "quick command didn't select the tab");
+    cx.update(|cx| ctl.borrow_mut().command(toggle, None, cx));
+    check!(!p.control().open(), "second toggle didn't return control to the game");
     Ok(())
 }

@@ -282,7 +282,7 @@ pub fn hint_toast() -> ToastData {
         kind: ToastKind::Hint,
         caption: "Sight".into(),
         title: "Open Sight: Shift+F2 or Guide+Start".into(),
-        body: Some("Hold them for the quick menu · shown on the first launch only".into()),
+        body: Some("Choose a Quick action, then press A or Enter".into()),
         level: Level::Accent,
         duration: Duration::from_secs(8),
         ..Default::default()

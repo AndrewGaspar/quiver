@@ -148,7 +148,7 @@ pub fn hint_bar(th: &Theme) -> gpui::Div {
         .child(glyph(th, "Guide", false))
         .child(sep("+"))
         .child(glyph(th, "Start", false))
-        .child(sep("· hold for the quick menu · shown on the first launch only"))
+        .child(sep("· choose a Quick action, then press A or Enter"))
 }
 
 impl Render for OverlayView {

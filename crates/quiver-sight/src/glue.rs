@@ -2,28 +2,18 @@
 //! into [`Sight`] (design/SIGHT.md §16). `lib.rs` routes messages here; the pieces are
 //! `toasts`, `overlay`, `quick`, `screenshot`.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext};
+use gpui::App;
 use quiver_api::options::OptionOp;
 use quiver_api::perf::{HudScope, Stat};
-use quiver_api::sight::{OnUnlock, PanelAction, PanelCommand, SightNotice, SightSettings};
-use quiver_perf::panel::{EV_KEY, PanelEvent};
+use quiver_api::sight::{OnUnlock, SightNotice, SightSettings};
 
 use crate::link::{Loaded, LinkReq, Msg};
-use crate::panel::ingame::{self, InGame};
 use crate::replay::{self, Recorder};
-use crate::quick::{self, Act, Effect, Key, QuickView, TileKind};
+use crate::quick::{self, Act, TileKind};
 use crate::toasts::{self, ToastData, ToastKind};
 use crate::{Sight, overlay};
-
-/// The quick menu drawn in the game.
-pub struct QuickShown {
-    game: InGame,
-    view: gpui::Entity<QuickView>,
-}
 
 impl Sight {
     pub(crate) fn send_link(&self, r: LinkReq) {
@@ -32,10 +22,10 @@ impl Sight {
         }
     }
 
-    /// The session something is for when it doesn't say: the quick menu's, the panel's, the
+    /// The session something is for when it doesn't say: the panel's, the
     /// overlay's, else the first with a HUD model.
     fn some_session(&self) -> Option<String> {
-        self.quick.session.clone().filter(|_| self.quick.active()).or_else(|| self.panel.session().map(str::to_owned)).or_else(|| self.overlay.session().map(str::to_owned)).or_else(|| {
+        self.panel.session().map(str::to_owned).or_else(|| self.overlay.session().map(str::to_owned)).or_else(|| {
             let mut v: Vec<&String> = self.huds.keys().collect();
             v.sort();
             v.first().map(|s| (*s).clone())
@@ -91,17 +81,15 @@ impl Sight {
         let target = self.overlay_target(t.session.as_deref());
         self.toasts.set_in_game(target.is_some(), cx);
         self.toasts.push(t, cx);
+        self.refresh_quick(cx);
         self.sync_overlay(cx);
     }
 
     /// Where the overlay can be drawn now: a session whose layer shows images without
-    /// capture, and that the panel or the quick menu doesn't hold.
+    /// capture, and that the panel doesn't hold.
     fn overlay_target(&self, session: Option<&str>) -> Option<overlay::Target> {
         let s = session.map(str::to_owned).or_else(|| self.toasts.session()).or_else(|| self.some_session())?;
         if self.panel.in_game() && self.panel.session() == Some(s.as_str()) {
-            return None;
-        }
-        if self.quick_shown.is_some() && self.quick.session.as_deref() == Some(s.as_str()) {
             return None;
         }
         if self.overlay_failed.get(&s).is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
@@ -134,7 +122,7 @@ impl Sight {
 
     /// Every tick: expiry, the image's heartbeat, the first-launch hint.
     pub(crate) fn tick_overlay(&mut self, cx: &mut App) {
-        self.toasts.tick(cx);
+        if self.toasts.tick(cx) { self.refresh_quick(cx); }
         self.overlay.renew();
         self.first_launch_hint(cx);
         self.sync_overlay(cx);
@@ -182,14 +170,22 @@ impl Sight {
     /// Session data came (for the panel or the quick menu): the quick menu's tiles, the chip's
     /// play time.
     pub(crate) fn data_seen(&mut self, session: &str, data: &Loaded, cx: &mut App) {
-        let Loaded::All(d) = data else { return };
-        if let Some(st) = d.session.ready().and_then(|v| v.started) {
-            self.started.insert(session.to_owned(), st);
-        }
-        // Kept for the quick menu, and what's pinned for the panel's Y.
-        self.quick_data.insert(session.to_owned(), (**d).clone());
-        if self.quick.session.as_deref() == Some(session) {
-            self.quick_tiles(cx);
+        match data {
+            Loaded::All(d) => {
+                if let Some(st) = d.session.ready().and_then(|v| v.started) {
+                    self.started.insert(session.to_owned(), st);
+                }
+                self.quick_data.insert(session.to_owned(), (**d).clone());
+            }
+            part => {
+                let Some(d) = self.quick_data.get_mut(session) else { return };
+                match part {
+                    Loaded::Options(options, _) => d.options = options.clone(),
+                    Loaded::Tweaks(tweaks) => d.tweaks = tweaks.clone(),
+                    Loaded::Hud(hud) => d.hud = hud.clone(),
+                    Loaded::All(_) => unreachable!(),
+                }
+            }
         }
         self.panel_pins(cx);
     }
@@ -203,6 +199,7 @@ impl Sight {
             self.settings.pins.get(&scope).map(|pins| (scope, pins.clone()))
         }).collect();
         self.panel.set_pinned(pins, cx);
+        self.refresh_quick(cx);
     }
 
     // ---- Screenshots ---------------------------------------------------------------------
@@ -215,244 +212,24 @@ impl Sight {
         self.send_link(LinkReq::Shot { session: session.to_owned(), after, monitor, game, say });
     }
 
-    // ---- The quick menu ------------------------------------------------------------------
-
-    /// A panel command the quick menu (or the chip) takes; false: the panel's.
-    pub(crate) fn quick_command(&mut self, c: &PanelCommand, cx: &mut App) -> bool {
-        match c.action {
-            PanelAction::Chip => {
-                self.chip(c.session.as_deref(), true, cx);
-                true
-            }
-            PanelAction::Quick => {
-                let Some(s) = c.session.clone() else { return true };
-                if self.quick.shown() {
-                    self.quick_close(cx);
-                    return true;
-                }
-                self.quick.latch(&s, Instant::now());
-                self.quick_load(&s);
-                self.quick_effect(Effect::Show, cx);
-                true
-            }
-            // Shift+F2 (or the chord through hyprpad) in the game: a tap or a hold.
-            PanelAction::Toggle if c.by == "keys" && !self.panel.is_open() => {
-                if self.quick.active() {
-                    // Pressed again while it's up (latched): close it; a bounce while waiting.
-                    if self.quick.shown() {
-                        self.quick_close(cx);
-                    }
-                    return true;
-                }
-                let Some(s) = c.session.clone() else { return false };
-                let now_ns = quiver_perf::clock::mono_raw_ns();
-                let Some(input) = self.panel.input_of(&s).filter(|p| p.layer().reports_chord(now_ns)) else { return false };
-                if let Err(why) = self.panel.game_target(&s, true) {
-                    tracing::info!(session = %s, %why, "no quick menu here: the panel");
-                    return false;
-                }
-                // When the press was, from the layer's word (else now).
-                let ch = input.chord();
-                let ago = (now_ns.max(0) as u64).saturating_sub(ch.at_ns);
-                let at = if ch.at_ns != 0 && ago < 2_000_000_000 { Instant::now() - Duration::from_nanos(ago) } else { Instant::now() };
-                self.quick.press(&s, at);
-                self.quick_cmd = Some(c.clone());
-                self.quick_load(&s);
-                self.quick_poll_start(cx);
-                true
-            }
-            _ => {
-                if self.quick.active() {
-                    self.quick_close(cx);
-                }
-                false
-            }
-        }
+    /// Rebuild the open panel's quick actions from current session data.
+    pub(crate) fn refresh_quick(&mut self, cx: &mut App) {
+        let Some(session) = self.panel.session().map(str::to_owned) else { return };
+        let fallback = Default::default();
+        let data = self.quick_data.get(&session).unwrap_or(&fallback);
+        let pins = data.session.ready().map(|v| self.settings.pins_for(&v.game, v.profile())).unwrap_or_default();
+        let replay = self.replay_state(&session);
+        let notices: Vec<_> = self.toasts.answerable().into_iter().filter(|n| n.session.as_deref().is_none_or(|s| s == session)).collect();
+        self.panel.set_quick(quick::tiles(data, &pins, &notices, replay), replay, cx);
     }
 
-    fn quick_load(&self, session: &str) {
-        self.send_link(LinkReq::Load { session: session.to_owned(), part: crate::panel::data::Part::All, view: None });
-    }
-
-    /// Polls the chord every `quick::POLL` while the menu waits or is up.
-    fn quick_poll_start(&mut self, cx: &mut App) {
-        if self.quick_poll.as_ref().is_some_and(|f| !f.load(Ordering::Relaxed)) {
-            return;
-        }
-        let Some(tx) = self.tx.clone() else { return };
-        let stop = Arc::new(AtomicBool::new(false));
-        self.quick_poll = Some(stop.clone());
-        cx.spawn(async move |cx| {
-            while !stop.load(Ordering::Relaxed) {
-                cx.background_executor().timer(quick::POLL).await;
-                if tx.unbounded_send(Msg::QuickPoll).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn quick_poll_stop(&mut self) {
-        if let Some(f) = self.quick_poll.take() {
-            f.store(true, Ordering::Relaxed);
-        }
-    }
-
-    pub(crate) fn quick_polled(&mut self, cx: &mut App) {
-        let now = Instant::now();
-        let held = self.quick.session.as_deref().and_then(|s| self.panel.input_of(s)).and_then(|p| {
-            let now_ns = quiver_perf::clock::mono_raw_ns();
-            p.layer().reports_chord(now_ns).then(|| p.chord().held)
-        });
-        let mut e = self.quick.chord(held, now);
-        if e == Effect::None {
-            e = self.quick.tick(now);
-        }
-        // Held for a minute, or the game stopped showing it: give the game its input back.
-        let shown_but_not_drawn = self.quick_shown.as_ref().is_some_and(|q| !q.game.confirmed && q.game.opened.elapsed() > ingame::CONFIRM_WITHIN);
-        let too_long = self.quick.phase == quick::Phase::Held && self.quick.since.is_some_and(|t| now.saturating_duration_since(t) > Duration::from_secs(60));
-        if e == Effect::None && (shown_but_not_drawn || too_long) {
-            tracing::info!(shown_but_not_drawn, too_long, "quick menu: closing");
-            self.quick.phase = quick::Phase::Closed;
-            e = Effect::Close;
-        }
-        if e == Effect::None && self.quick.enter_since.is_some() {
-            e = Effect::Redraw; // the Quit bar fills
-        }
-        self.quick_effect(e, cx);
-        if !self.quick.active() {
-            self.quick_poll_stop();
-        }
-    }
-
-    /// Forwarded game input while the quick menu holds it: the arrows, Enter, Escape.
-    pub(crate) fn quick_input(&mut self, session: &str, events: &[PanelEvent], cx: &mut App) -> bool {
-        if self.quick_shown.is_none() || self.quick.session.as_deref() != Some(session) {
-            return false;
-        }
-        let now = Instant::now();
-        for e in events.iter().filter(|e| e.kind == EV_KEY) {
-            if let Some(k) = Key::from_evdev(e.code) {
-                let eff = self.quick.key(k, e.down(), now);
-                self.quick_effect(eff, cx);
-            }
-        }
-        true
-    }
-
-    fn quick_tiles(&mut self, cx: &mut App) {
-        let Some(s) = self.quick.session.clone() else { return };
-        let data = self.quick_data.get(&s).cloned().unwrap_or_default();
-        let game = data.session.ready().map(|v| (v.game, v.profile().map(str::to_owned)));
-        let pins = game.map(|(g, p)| self.settings.pins_for(&g, p.as_deref())).unwrap_or_default();
-        let replay = self.replay_state(&s);
-        self.quick.set_tiles(quick::tiles(&data, &pins, &self.toasts.answerable(), replay));
-        self.quick_redraw(cx);
-    }
-
-    fn quick_redraw(&mut self, cx: &mut App) {
-        if let Some(q) = &self.quick_shown {
-            let (quick, now) = (&self.quick, Instant::now());
-            q.view.update(cx, |v, cx| {
-                v.set(quick, now);
-                cx.notify();
-            });
-        }
-    }
-
-    fn quick_close(&mut self, cx: &mut App) {
-        if self.quick.active() {
-            // Through Back: closes and remembers the focus.
-            let _ = self.quick.key(Key::Back, true, Instant::now());
-            self.quick.phase = quick::Phase::Closed;
-        }
-        self.quick_hide(cx);
-        self.quick_poll_stop();
-    }
-
-    fn quick_hide(&mut self, cx: &mut App) {
-        if let Some(q) = self.quick_shown.take() {
-            let session = q.game.session.clone();
-            q.game.close(cx);
-            if !self.panel.is_open() {
-                crate::panel::write_state(None);
-            }
-            tracing::info!(%session, "quick menu closed");
-        }
-    }
-
-    /// Draws it in the game (input captured: the arrows mustn't reach the game).
-    fn quick_show(&mut self, cx: &mut App) -> anyhow::Result<()> {
-        let Some(s) = self.quick.session.clone() else { anyhow::bail!("no session") };
-        let t = self.panel.game_target(&s, true).map_err(anyhow::Error::msg)?;
-        let Some(ui) = self.tx.clone() else { anyhow::bail!("no UI channel") };
-        self.quick_tiles(cx);
-        // It takes the image over from the overlay.
-        self.overlay.close(cx);
-        let (quick, now) = (&self.quick, Instant::now());
-        let view = cx.new(|cx| QuickView::from(quick, now, cx));
-        let stereo = if t.stereo.fits(t.extent) { t.stereo } else { Default::default() };
-        let factor = ingame::factor(stereo.logical_extent(t.extent), t.monitor);
-        let game = InGame::open(&s, t.input.clone(), &t.dir, t.extent, stereo, factor, view.clone(), ui, cx)?;
-        crate::panel::write_state(Some((&s, "game")));
-        tracing::info!(session = %s, tiles = self.quick.tiles.len(), latched = self.quick.phase == quick::Phase::Latched, "quick menu shown");
-        self.quick_shown = Some(QuickShown { game, view });
-        Ok(())
-    }
-
-    fn quick_effect(&mut self, e: Effect, cx: &mut App) {
-        let session = self.quick.session.clone();
-        match e {
-            Effect::None => {}
-            Effect::Redraw => self.quick_redraw(cx),
-            Effect::OpenPanel => {
-                self.quick_hide(cx);
-                if let Some(c) = self.quick_cmd.take() {
-                    self.panel_command(c, cx);
-                }
-            }
-            Effect::Show => {
-                if let Err(e) = self.quick_show(cx) {
-                    tracing::info!("quick menu: {e:#}; the panel instead");
-                    self.quick.phase = quick::Phase::Closed;
-                    self.quick_effect(Effect::OpenPanel, cx);
-                }
-            }
-            Effect::Apply(i) => {
-                let tile = self.quick.tiles.get(i).cloned();
-                self.quick_hide(cx);
-                if let (Some(s), Some(t)) = (session.as_deref(), tile) {
-                    self.quick_apply(s, &t, cx);
-                }
-                self.chip(session.as_deref(), false, cx);
-            }
-            Effect::Close => {
-                self.quick_hide(cx);
-                self.chip(session.as_deref(), false, cx);
-            }
-            Effect::Quit => {
-                self.quick_hide(cx);
-                if let Some(s) = session.as_deref() {
-                    let game = self.quick_data.get(s).and_then(|d| d.session.ready().map(|v| v.game));
-                    match self.panel.quit_game(s, game) {
-                        Ok(()) => tracing::info!(session = s, "quick menu: quit the game"),
-                        Err(e) => self.toast(ToastData { kind: ToastKind::Error, caption: "Quick menu".into(), title: "Couldn't quit the game".into(), body: Some(e), urgent: true, ..Default::default() }, cx),
-                    }
-                }
-            }
-        }
-        if !self.quick.active() {
-            self.quick_cmd = None;
-        }
-    }
-
-    fn quick_apply(&mut self, session: &str, t: &quick::Tile, cx: &mut App) {
-        let Some(data) = self.quick_data.get(session).cloned() else {
-            self.toast(ToastData { caption: "Quick menu".into(), title: format!("{}: not loaded yet", t.label), ..Default::default() }, cx);
-            return;
-        };
+    pub(crate) fn quick_apply(&mut self, session: &str, t: &quick::Tile, cx: &mut App) {
+        if self.panel.session() != Some(session) || !self.panel.nav(cx).is_some_and(|n| n.section == quiver_api::sight::PanelSection::Quick) { return; }
+        let data = self.quick_data.get(session).cloned().unwrap_or_default();
         let Some(act) = quick::act(t, &data) else { return };
+        self.panel.close(cx);
+        self.chip(Some(session), false, cx);
+        self.sync_overlay(cx);
         let view = data.session.ready().cloned();
         let said = |title: String| ToastData { kind: ToastKind::Options, caption: "Quick menu".into(), title, duration: Duration::from_secs(3), session: Some(session.to_owned()), ..Default::default() };
         tracing::info!(session, tile = %t.label, ?act, "quick menu: apply");
@@ -486,7 +263,6 @@ impl Sight {
             }
             Act::Screenshot => self.screenshot(session, Duration::from_millis(150), true),
             Act::Replay(action) => self.apply_replay(session, action, cx),
-            Act::Quit => {}
         }
         if matches!(t.kind, TileKind::Notice { .. }) {
             self.sync_overlay(cx);
@@ -505,10 +281,7 @@ impl Sight {
     }
 
     fn replay_changed(&mut self, session: &str, cx: &mut App) {
-        if self.panel.session() == Some(session) {
-            self.panel.set_replay(self.replay_state(session), cx);
-        }
-        if self.quick.shown() && self.quick.session.as_deref() == Some(session) { self.quick_tiles(cx); }
+        if self.panel.session() == Some(session) { self.refresh_quick(cx); }
     }
 
     pub(crate) fn apply_replay(&mut self, session: &str, action: replay::Action, cx: &mut App) {
@@ -534,21 +307,21 @@ impl Sight {
                 r.stop();
                 Ok("Stopping replay buffer…".into())
             }
-            replay::Action::Save => {
-                if let Some(r) = self.recorders.get(session).filter(|r| r.ready && !r.stopping()) {
-                    let socket = r.socket();
-                    let session = session.to_owned();
-                    let tx = self.tx.clone();
-                    cx.background_executor().spawn(async move {
-                        let result = replay::save(&socket);
-                        if let Some(tx) = tx { let _ = tx.unbounded_send(Msg::ReplayFeedback { session, result: result.map(|p| format!("Saved {p}")).map_err(|e| format!("{e:#}")) }); }
-                    }).detach();
-                    return;
-                }
-                Err(anyhow::anyhow!("the replay buffer is not ready"))
-            }
-            replay::Action::SaveExternal(pid) => {
-                replay::save_external(pid).map(|()| "Replay save requested".into())
+            replay::Action::Save | replay::Action::SaveExternal(_) => {
+                let socket = self.recorders.get(session).filter(|r| r.ready && !r.stopping()).map(Recorder::socket);
+                let session = session.to_owned();
+                let tx = self.tx.clone();
+                cx.background_executor().spawn(async move {
+                    let result = match action {
+                        replay::Action::SaveExternal(pid) => replay::save_external(pid),
+                        _ => socket.ok_or_else(|| anyhow::anyhow!("the replay buffer is not ready"))
+                            .and_then(|socket| replay::save(&socket)).map(|p| format!("Saved {p}")),
+                    };
+                    if let Some(tx) = tx {
+                        let _ = tx.unbounded_send(Msg::ReplayFeedback { session, result: result.map_err(|e| format!("{e:#}")) });
+                    }
+                }).detach();
+                return;
             }
         };
         self.replay_feedback(session, result.map_err(|e| format!("{e:#}")), cx);
@@ -585,18 +358,7 @@ impl Sight {
         }
     }
 
-    /// Every tick: the quick menu's capture deadline and image heartbeat.
-    pub(crate) fn quick_renew(&mut self) {
-        if let Some(q) = &mut self.quick_shown {
-            q.game.renew();
-        }
-    }
-
     pub(crate) fn quick_session_ended(&mut self, session: &str, cx: &mut App) {
-        if self.quick.session.as_deref() == Some(session) {
-            self.quick_close(cx);
-            self.quick.session = None;
-        }
         self.quick_data.remove(session);
         self.fps.remove(session);
         self.started.remove(session);

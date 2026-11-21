@@ -15,6 +15,7 @@ pub mod mods;
 pub mod mods_view;
 pub mod performance;
 pub mod prefs;
+mod quick;
 pub mod session;
 
 use chrono::{DateTime, Local, Utc};

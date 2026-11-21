@@ -20,7 +20,9 @@ use gpui::{App, AppContext as _, Entity, KeyUpEvent, Keystroke};
 use quiver_api::options::{LiveChannel, Live, OpOutcome, OptionOp, OptionsChange, Outcome};
 use quiver_api::sight::{Backdrop, PanelSection};
 use quiver_sight::demo::sample_panel;
-use quiver_sight::link::{Change, LinkReq, Why};
+use quiver_sight::link::{Change, LinkReq, Msg, Why};
+use quiver_sight::quick::{TileKind, tiles};
+use quiver_sight::replay::State as ReplayState;
 use quiver_sight::panel::hints::Glyph;
 use quiver_sight::panel::state::{Act, Key, Nav, Row};
 use quiver_sight::panel::view::{PanelView, Wiring};
@@ -100,6 +102,7 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     let exec = cx.background_executor().clone();
     let wait = |ms: u64| exec.timer(Duration::from_millis(ms));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LinkReq>();
+    let (ui, mut actions) = futures::channel::mpsc::unbounded();
     let view: Entity<PanelView> = cx.update(|cx| {
         cx.new(|cx| {
             let mut nav = Nav::default();
@@ -107,7 +110,7 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
             // DLSS's World page, Crowd density focused (2.0×, its default 1.0×).
             nav.pages.set_page(DLSS, 3);
             nav.set_focus_index(1);
-            PanelView::new("s-demo".into(), sample_panel(), nav, Backdrop::GameBlur, Wiring { link: Some(tx), ..Default::default() }, cx)
+            PanelView::new("s-demo".into(), sample_panel(), nav, Backdrop::GameBlur, Wiring { link: Some(tx), ui: Some(ui), ..Default::default() }, cx)
         })
     });
     let upd = |cx: &mut gpui::AsyncApp, f: &dyn Fn(&mut PanelView, &mut gpui::Context<PanelView>)| cx.update(|cx| view.update(cx, |v, cx| f(v, cx)));
@@ -218,6 +221,36 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     check!(cx.update(|cx| view.read(cx).nav.section == PanelSection::Session), "LB should switch sections");
     upd(cx, &|v, cx| v.input(Input::NextTab, cx));
     check!(cx.update(|cx| view.read(cx).nav.section == PanelSection::Session), "RT must stay in a section without pages");
+    upd(cx, &|v, cx| {
+        v.nav.open(None);
+        v.quick_tiles = tiles(&v.data, &[], &[], ReplayState::Off);
+        v.key(Key::Input(Input::Up), false, cx);
+        v.key(Key::Input(Input::Activate), false, cx);
+        v.key(Key::Input(Input::Activate), true, cx);
+        v.key_up(&KeyUpEvent { keystroke: Keystroke { key: "enter".into(), ..Default::default() } }, cx);
+    });
+    let mut received = Vec::new();
+    while let Ok(m) = actions.try_recv() {
+        if let Msg::QuickAction { tile, .. } = m { received.push(tile.kind); }
+    }
+    check!(received == [TileKind::StartReplay { seconds: 120 }], "one explicit activation starts the selected buffer length: {received:?}");
+    upd(cx, &|v, cx| {
+        v.quick_tiles = tiles(&v.data, &[], &[], ReplayState::Active(120));
+        v.input(Input::Right, cx);
+        v.input(Input::Left, cx);
+        v.input(Input::NextSection, cx);
+        v.nav.open(None);
+        v.input(Input::Activate, cx);
+    });
+    check!(matches!(actions.try_recv(), Ok(Msg::QuickAction { tile, .. }) if tile.kind == TileKind::SaveReplay), "reopening on replay and pressing A saves");
+    upd(cx, &|v, cx| {
+        for _ in 0..v.quick_tiles.len() { v.input(Input::Right, cx); }
+        v.input(Input::Activate, cx);
+    });
+    check!(cx.update(|cx| view.read(cx).nav.confirm.as_ref().is_some_and(|c| !c.yes)), "Quit opens on Cancel");
+    upd(cx, &|v, cx| v.input(Input::Back, cx));
+    check!(cx.update(|cx| view.read(cx).nav.confirm.is_none()), "B dismisses confirmation");
+    check!(actions.try_recv().is_err(), "cancel or release ran an action");
     let _ = Live::Only;
     Ok(())
 }

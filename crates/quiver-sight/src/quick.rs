@@ -1,54 +1,12 @@
-//! The quick menu (design/SIGHT.md §16; the mock-up's `SightQuick.dc.html`): a strip of tiles
-//! along the bottom of the game, over a gradient (no blur), held open while the chord is.
-//!
-//! **Opening.** Hold Shift+F2 (or Guide+Start, which hyprpad turns into Shift+F2 held:
-//! `tools/hyprpad/quiver-sight.lua`). The Sight layer counts the press as before (quiverd
-//! sends the panel toggle) and also says, in `panel.input`, whether the chord is still held
-//! (`quiver_perf::panel::LayerChord`, read here every [`POLL`]). Released within [`HOLD`]: a
-//! tap, the panel opens as it always did. Held past it: the quick menu shows. Left / Right (the
-//! D-pad, the arrows) choose; **releasing applies the focused tile** and closes. Escape or B
-//! closes without applying. `quiver sight quick` opens it latched (no hold): A or Enter applies.
-//! A layer from before (no chord word) or a game that can't draw it: the tap's behaviour, the
-//! panel.
-//!
-//! **Tiles** ([`tiles`]), left to right: the buttons of a notice that's up (an agent's "Keep v3
-//! for now"), frame generation (a mod's live `fg.enabled`), the HUD preset, the frame-rate cap
-//! (the `fps.cap` Tweak), pinned items (any option or Tweak pinned with "pin to quick menu",
-//! per game and profile: `SightSettings::pins_for`), screenshot, start or save a replay buffer, quit game. Quit needs A (Enter) held for
-//! [`QUIT_HOLD`]: releasing the chord on it latches the menu instead of quitting.
-//!
-//! **Drawing.** In the game, like the panel (`panel::ingame`): an off-screen GPUI window at the
-//! swapchain's logical size, published into `panel.image` with input captured (the arrows
-//! mustn't reach the game), in each eye on a stereo frame; the strip at the panel's rung and
-//! the focused tile at the focus rung (design/STEREO-UI.md §12). No desktop fallback: where
-//! the game can't draw it, the hold opens the panel.
-
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
-
-use gpui::{Bounds, Context, FocusHandle, IntoElement, ParentElement, Pixels, Render, Styled, Window, canvas, div, linear_color_stop, linear_gradient, px};
+//! Actions for the Quick tab, their focus across panel opens, and pinning from Mods and Tweaks.
 use quiver_api::options::{OptionState, OptionType, same_value};
 use quiver_api::sight::{PinKind, QuickPin};
-use quiver_perf::stereo::rung;
-use quiver_ui::assets::UI_FONT;
-use quiver_ui::components::{Icon, SEMIBOLD, glyph, icon, kbd};
-use quiver_ui::theme::Theme;
+use quiver_ui::components::Icon;
 use serde_json::Value;
 
-use crate::panel::ingame::{DepthParts, InGameView};
 use crate::panel::state::{PRESETS, PanelData, adjustable, shown_in_game, step_value};
 use crate::toasts::ToastData;
 use crate::replay::{self, State as ReplayState};
-
-/// A press held this long is a hold (the quick menu); released sooner, a tap (the panel).
-pub const HOLD: Duration = Duration::from_millis(280);
-/// A (Enter) held this long on "Quit game" quits.
-pub const QUIT_HOLD: Duration = Duration::from_millis(1000);
-/// No word from the layer on the chord for this long while waiting or held: give up.
-pub const STALE: Duration = Duration::from_millis(2500);
-/// How often the chord word is read while it matters.
-pub const POLL: Duration = Duration::from_millis(25);
 
 /// Frame-rate caps the tile steps through (`fps.cap`: 0 is "No cap", `vrr` the refresh rate
 /// less three).
@@ -157,6 +115,18 @@ fn pin_tile(d: &PanelData, p: &QuickPin) -> Option<Tile> {
 /// The tiles for a session, left to right (module docs).
 pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: ReplayState) -> Vec<Tile> {
     let mut out = Vec::new();
+    match replay {
+        ReplayState::Off => out.push(start_replay_tile(replay::DEFAULT_SECONDS)),
+        ReplayState::Active(seconds) => out.push(tile(TileKind::SaveReplay, format!("Save last {seconds} s"), "Replay", Some(true), Icon::History)),
+        ReplayState::External { pid, seconds } => out.push(tile(TileKind::Replay { pid }, format!("Save last {seconds} s"), "Replay", Some(true), Icon::History)),
+        _ => {}
+    }
+    out.push(tile(TileKind::Screenshot, "Screenshot", "Game only", None, Icon::Image));
+    for p in pins {
+        if let Some(t) = pin_tile(d, p) {
+            out.push(t);
+        }
+    }
     for n in notices {
         let Some(id) = &n.notice else { continue };
         for b in &n.buttons {
@@ -177,23 +147,12 @@ pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: Re
     if let Some(st) = d.tweaks.ready().and_then(|t| t.options.get("fps.cap")) {
         out.push(tile(TileKind::FpsCap, "Frame rate cap", cap_words(&st.value), None, Icon::Clock));
     }
-    for p in pins {
-        if let Some(t) = pin_tile(d, p) {
-            out.push(t);
-        }
-    }
-    out.push(tile(TileKind::Screenshot, "Screenshot", "Game only", None, Icon::Image));
     match replay {
-        ReplayState::Off => out.push(start_replay_tile(replay::DEFAULT_SECONDS)),
-        ReplayState::External { pid, seconds } => out.push(tile(TileKind::Replay { pid }, "Save replay", format!("Last {seconds} s"), None, Icon::History)),
+        ReplayState::Active(_) => out.push(tile(TileKind::StopReplay, "Stop buffer", "End capture", None, Icon::History)),
         ReplayState::Starting => out.push(tile(TileKind::StopReplay, "Cancel replay buffer", "Starting…", None, Icon::History)),
-        ReplayState::Active(seconds) => {
-            out.push(tile(TileKind::SaveReplay, "Save replay", format!("Last {seconds} s"), Some(true), Icon::History));
-            out.push(tile(TileKind::StopReplay, "Stop buffer", "End capture", None, Icon::History));
-        }
-        ReplayState::Hidden | ReplayState::Stopping => {}
+        _ => {}
     }
-    out.push(tile(TileKind::Quit, "Quit game", "Hold A", None, Icon::LogOut));
+    out.push(tile(TileKind::Quit, "Quit game", "Confirm…", None, Icon::LogOut));
     out
 }
 
@@ -215,7 +174,6 @@ pub enum Act {
     Notice { id: String, button: String },
     Screenshot,
     Replay(replay::Action),
-    Quit,
 }
 
 /// What applying `t` does with the session's data.
@@ -254,7 +212,7 @@ pub fn act(t: &Tile, d: &PanelData) -> Option<Act> {
         TileKind::StartReplay { seconds } => Act::Replay(replay::Action::Start(*seconds)),
         TileKind::SaveReplay => Act::Replay(replay::Action::Save),
         TileKind::StopReplay => Act::Replay(replay::Action::Stop),
-        TileKind::Quit => Act::Quit,
+        TileKind::Quit => return None, // The panel handles Quit in its confirmation dialog.
     })
 }
 
@@ -296,248 +254,39 @@ pub fn pin_row(d: &PanelData, row: &crate::panel::state::Row, pinned: &std::coll
     Ok(PinChange { scope, pin, on, said })
 }
 
-// ---- The state machine ---------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Phase {
-    #[default]
-    Closed,
-    /// The chord went down; a tap or a hold, not known yet (nothing shown).
-    Pending,
-    /// Shown while the chord is held: releasing applies.
-    Held,
-    /// Shown until a tile is applied or it's dismissed.
-    Latched,
+/// Stored with panel navigation. Track the action itself as pins, notices and
+/// capture state can change the tile order between two visits.
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    kind: Option<TileKind>,
+    seconds: Option<u32>,
 }
 
-/// What the controller does after an input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Effect {
-    None,
-    /// Redraw (the focus moved, it latched).
-    Redraw,
-    /// It was a tap: open the panel instead.
-    OpenPanel,
-    Show,
-    /// Apply the tile at this index, and close.
-    Apply(usize),
-    Close,
-    Quit,
-}
-
-/// The keys the menu reads (the game's arrows, Enter, Escape; hyprpad types the pad's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Up,
-    Down,
-    Left,
-    Right,
-    Enter,
-    Back,
-}
-
-impl Key {
-    /// From a Linux evdev key code (the input preload's events).
-    pub fn from_evdev(code: u32) -> Option<Key> {
-        Some(match code {
-            103 => Key::Up,
-            108 => Key::Down,
-            105 | 104 => Key::Left, // Left, Page Up (hyprpad types LB as Page Up)
-            106 | 109 => Key::Right,
-            28 | 96 | 57 => Key::Enter,
-            1 | 14 => Key::Back,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct Quick {
-    pub phase: Phase,
-    pub session: Option<String>,
-    /// When the chord went down.
-    pub since: Option<Instant>,
-    pub focus: usize,
-    pub tiles: Vec<Tile>,
-    /// Enter held since (for Quit).
-    pub enter_since: Option<Instant>,
-    /// When the layer last said anything about the chord.
-    pub last_word: Option<Instant>,
-    /// The kind focused when it last closed (focus comes back to it).
-    remember: Option<TileKind>,
-    replay_seconds: Option<u32>,
-}
-
-impl Quick {
-    pub fn active(&self) -> bool {
-        self.phase != Phase::Closed
+impl Selection {
+    pub fn focus(&self, tiles: &[Tile]) -> usize {
+        self.kind.as_ref().and_then(|k| tiles.iter().position(|t| same_kind(k, &t.kind))).unwrap_or(0)
     }
 
-    pub fn shown(&self) -> bool {
-        matches!(self.phase, Phase::Held | Phase::Latched)
+    pub fn select(&mut self, tile: &Tile) {
+        self.kind = Some(tile.kind.clone());
     }
 
-    /// The chord went down (Shift+F2 counted by the layer) at `at`.
-    pub fn press(&mut self, session: &str, at: Instant) {
-        self.phase = Phase::Pending;
-        self.session = Some(session.to_owned());
-        self.since = Some(at);
-        self.last_word = Some(at);
-        self.enter_since = None;
-    }
+    pub fn length(&self) -> u32 { self.seconds.unwrap_or(replay::DEFAULT_SECONDS) }
 
-    /// Opened with no hold (`quiver sight quick`).
-    pub fn latch(&mut self, session: &str, now: Instant) -> Effect {
-        self.press(session, now);
-        self.phase = Phase::Latched;
-        self.refocus();
-        Effect::Show
-    }
-
-    fn close(&mut self) {
-        self.remember = self.tiles.get(self.focus).map(|t| t.kind.clone());
-        self.phase = Phase::Closed;
-        self.since = None;
-        self.enter_since = None;
-    }
-
-    fn refocus(&mut self) {
-        let want = self.remember.as_ref().and_then(|k| self.tiles.iter().position(|t| same_kind(&t.kind, k)));
-        self.focus = want.unwrap_or(0).min(self.tiles.len().saturating_sub(1));
-    }
-
-    /// New tiles (data came in): focus stays on the same kind of tile.
-    pub fn set_tiles(&mut self, mut tiles: Vec<Tile>) {
-        if let Some(seconds) = self.replay_seconds
-            && let Some(tile) = tiles.iter_mut().find(|t| matches!(t.kind, TileKind::StartReplay { .. })) {
-            *tile = start_replay_tile(seconds);
-        }
-        let cur = self.tiles.get(self.focus).map(|t| t.kind.clone());
-        self.tiles = tiles;
-        match cur.and_then(|k| self.tiles.iter().position(|t| same_kind(&t.kind, &k))) {
-            Some(i) => self.focus = i,
-            None => self.refocus(),
-        }
-    }
-
-    pub fn focused(&self) -> Option<&Tile> {
-        self.tiles.get(self.focus)
-    }
-
-    /// The layer's word on the chord (`None`: it said nothing, or nothing fresh).
-    pub fn chord(&mut self, held: Option<bool>, now: Instant) -> Effect {
-        if held.is_some() {
-            self.last_word = Some(now);
-        }
-        let stale = self.last_word.is_none_or(|t| now.saturating_duration_since(t) > STALE);
-        match self.phase {
-            Phase::Pending => match held {
-                Some(false) => {
-                    self.close();
-                    Effect::OpenPanel
-                }
-                Some(true) if self.since.is_some_and(|s| now.saturating_duration_since(s) >= HOLD) => {
-                    self.phase = Phase::Held;
-                    self.refocus();
-                    Effect::Show
-                }
-                _ if stale => {
-                    self.close();
-                    Effect::OpenPanel
-                }
-                _ => Effect::None,
-            },
-            Phase::Held => match held {
-                Some(false) => {
-                    if matches!(self.focused().map(|t| &t.kind), Some(TileKind::Quit)) {
-                        // Quitting needs A held: released on it, the menu stays.
-                        self.phase = Phase::Latched;
-                        return Effect::Redraw;
-                    }
-                    let i = self.focus;
-                    self.close();
-                    if self.tiles.is_empty() { Effect::Close } else { Effect::Apply(i) }
-                }
-                _ if stale => {
-                    self.close();
-                    Effect::Close
-                }
-                _ => Effect::None,
-            },
-            Phase::Latched | Phase::Closed => Effect::None,
-        }
-    }
-
-    pub fn key(&mut self, k: Key, down: bool, now: Instant) -> Effect {
-        if !self.shown() {
-            return Effect::None;
-        }
-        match (k, down) {
-            (Key::Up | Key::Down, true) => {
-                let Some(Tile { kind: TileKind::StartReplay { seconds }, .. }) = self.focused() else { return Effect::None };
-                let choices = replay::LENGTHS;
-                let current = choices.iter().position(|s| s == seconds).unwrap_or(1);
-                let next = (current + if k == Key::Up { 1 } else { choices.len() - 1 }) % choices.len();
-                self.replay_seconds = Some(choices[next]);
-                self.tiles[self.focus] = start_replay_tile(choices[next]);
-                Effect::Redraw
-            }
-            (Key::Left, true) if self.focus > 0 => {
-                self.focus -= 1;
-                self.enter_since = None;
-                Effect::Redraw
-            }
-            (Key::Right, true) if self.focus + 1 < self.tiles.len() => {
-                self.focus += 1;
-                self.enter_since = None;
-                Effect::Redraw
-            }
-            (Key::Enter, true) => {
-                if matches!(self.focused().map(|t| &t.kind), Some(TileKind::Quit)) {
-                    self.enter_since.get_or_insert(now);
-                    return Effect::Redraw;
-                }
-                let i = self.focus;
-                self.close();
-                if self.tiles.is_empty() { Effect::Close } else { Effect::Apply(i) }
-            }
-            (Key::Enter, false) => {
-                self.enter_since = None;
-                Effect::Redraw
-            }
-            (Key::Back, true) => {
-                self.close();
-                Effect::Close
-            }
-            _ => Effect::None,
-        }
-    }
-
-    /// Time passing: Enter held long enough on Quit quits.
-    pub fn tick(&mut self, now: Instant) -> Effect {
-        if self.shown()
-            && matches!(self.focused().map(|t| &t.kind), Some(TileKind::Quit))
-            && self.enter_since.is_some_and(|t| now.saturating_duration_since(t) >= QUIT_HOLD)
-        {
-            self.close();
-            return Effect::Quit;
-        }
-        Effect::None
-    }
-
-    /// How far along holding A on Quit is (0..1), for the tile's bar.
-    pub fn quit_progress(&self, now: Instant) -> Option<f32> {
-        let t = self.enter_since?;
-        Some((now.saturating_duration_since(t).as_secs_f32() / QUIT_HOLD.as_secs_f32()).clamp(0.0, 1.0))
+    pub fn step_length(&mut self, up: bool) {
+        let choices = replay::LENGTHS;
+        let i = choices.iter().position(|s| *s == self.length()).unwrap_or(1);
+        self.seconds = Some(choices[(i + if up { 1 } else { choices.len() - 1 }) % choices.len()]);
     }
 }
 
 fn same_kind(a: &TileKind, b: &TileKind) -> bool {
+    use TileKind::*;
     match (a, b) {
-        (TileKind::SaveReplay, TileKind::StartReplay { .. }) | (TileKind::StartReplay { .. }, TileKind::SaveReplay) => true,
-        (TileKind::Pin(x), TileKind::Pin(y)) => x.same_item(y),
-        (TileKind::Notice { id: a, button: x }, TileKind::Notice { id: b, button: y }) => a == b && x == y,
-        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+        (StartReplay { .. } | SaveReplay | Replay { .. }, StartReplay { .. } | SaveReplay | Replay { .. }) => true,
+        (Pin(x), Pin(y)) => x.same_item(y),
+        (Notice { id: a, button: x }, Notice { id: b, button: y }) => a == b && x == y,
+        _ => a == b,
     }
 }
 
@@ -572,152 +321,6 @@ pub fn replay_args(cmdline: &[u8]) -> Option<u32> {
     }
     let i = args.iter().position(|a| *a == b"-r")?;
     std::str::from_utf8(args.get(i + 1)?).ok()?.parse().ok().filter(|s: &u32| *s > 0)
-}
-
-// ---- The view --------------------------------------------------------------------------------
-
-pub struct QuickView {
-    pub tiles: Vec<Tile>,
-    pub focus: usize,
-    pub latched: bool,
-    /// Holding A on Quit (0..1).
-    pub quit: Option<f32>,
-    pub focus_handle: FocusHandle,
-    parts: Rc<RefCell<Vec<(Bounds<Pixels>, u16)>>>,
-}
-
-impl QuickView {
-    pub fn new(cx: &mut Context<Self>) -> QuickView {
-        QuickView { tiles: Vec::new(), focus: 0, latched: false, quit: None, focus_handle: cx.focus_handle(), parts: Rc::default() }
-    }
-
-    pub fn from(q: &Quick, now: Instant, cx: &mut Context<Self>) -> QuickView {
-        let mut v = QuickView::new(cx);
-        v.set(q, now);
-        v
-    }
-
-    pub fn set(&mut self, q: &Quick, now: Instant) {
-        self.tiles = q.tiles.clone();
-        self.focus = q.focus;
-        self.latched = q.phase == Phase::Latched;
-        self.quit = q.quit_progress(now);
-    }
-}
-
-impl InGameView for QuickView {
-    fn depth_parts(&self) -> DepthParts {
-        let p = self.parts.clone();
-        Rc::new(move || p.borrow().clone())
-    }
-    fn focus_handle(&self) -> Option<FocusHandle> {
-        Some(self.focus_handle.clone())
-    }
-}
-
-/// Records its parent's bounds (padded) as a part at `depth`.
-fn part(parts: &Rc<RefCell<Vec<(Bounds<Pixels>, u16)>>>, depth: u16) -> impl IntoElement {
-    let parts = parts.clone();
-    canvas(
-        move |bounds, _, _| {
-            parts.borrow_mut().push((bounds.dilate(px(6.)), depth));
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-}
-
-fn hint(th: &Theme, parts: Vec<gpui::AnyElement>) -> gpui::Div {
-    div().flex().gap(px(8.)).items_center().children(parts).text_color(th.tx2)
-}
-
-impl Render for QuickView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let th = cx.global::<Theme>().clone();
-        self.parts.borrow_mut().clear();
-        let shade = th.ink0;
-        let visible = (((f32::from(window.viewport_size().width) - 32.) / 162.).floor() as usize).max(1);
-        let start = self.focus.saturating_sub(visible / 2).min(self.tiles.len().saturating_sub(visible));
-        let tiles = self.tiles.iter().enumerate().skip(start).take(visible).map(|(i, t)| {
-            let focused = i == self.focus;
-            let value_color = match t.on {
-                Some(true) => th.ok,
-                _ => th.tx3,
-            };
-            let mut d = div()
-                .relative()
-                .w(px(148.))
-                .h(px(128.))
-                .p(px(14.))
-                .rounded(px(16.))
-                .border_1()
-                .border_color(if focused { th.acc_hi } else { th.line2 })
-                .bg(th.ink1.opacity(0.9))
-                .flex()
-                .flex_col()
-                .justify_between()
-                .child(icon(t.icon, 24., th.acc_hi))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(div().text_size(px(14.)).font_weight(SEMIBOLD).text_color(th.tx1).line_clamp(2).child(t.label.clone()))
-                        .child(div().text_size(px(13.)).text_color(value_color).truncate().child(t.value.clone())),
-                );
-            if focused {
-                d = d.mb(px(8.)).shadow(vec![gpui::BoxShadow { color: th.acc_hi.opacity(0.4), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.), inset: false }]);
-                if let (TileKind::Quit, Some(p)) = (&t.kind, self.quit) {
-                    d = d.child(div().absolute().left(px(14.)).right(px(14.)).bottom(px(8.)).h(px(3.)).rounded(px(2.)).bg(th.ink4).child(div().h_full().rounded(px(2.)).bg(th.bad).w(gpui::relative(p))));
-                }
-                d = d.child(part(&self.parts, rung::FOCUS));
-            }
-            d
-        });
-        let apply = if self.latched {
-            hint(&th, vec![glyph(&th, "A", false).into_any_element(), div().child("Apply").into_any_element(), glyph(&th, "B", false).into_any_element(), div().child("Close").into_any_element()])
-        } else {
-            hint(&th, vec![div().child("Release").into_any_element(), glyph(&th, "Guide", false).into_any_element(), div().child("to apply").into_any_element()])
-        };
-        let bar = div()
-            .flex()
-            .gap(px(20.))
-            .items_center()
-            .px(px(16.))
-            .py(px(10.))
-            .rounded(px(12.))
-            .bg(th.ink0.opacity(0.72))
-            .text_size(px(13.))
-            .child(hint(&th, vec![glyph(&th, "◀ ▶", false).into_any_element(), div().child("Choose").into_any_element()]))
-            .child(apply)
-            .child(hint(&th, vec![glyph(&th, "Y", false).into_any_element(), div().child("in any Sight page pins an item here").into_any_element()]))
-            .child(div().flex().gap(px(6.)).items_center().text_color(th.tx3).child("Keyboard: hold").child(kbd(&th, "Shift")).child(kbd(&th, "F2")));
-        div().size_full().relative().font_family(UI_FONT).child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .h(gpui::relative(0.47))
-                .bg(linear_gradient(0., linear_color_stop(shade.opacity(0.85), 0.), linear_color_stop(shade.opacity(0.), 1.)))
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(64.))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(18.))
-                        .child(div().relative().flex().gap(px(14.)).items_end().children(tiles).child(part(&self.parts, rung::PANEL)))
-                        .child(bar),
-                ),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -759,7 +362,7 @@ mod tests {
     fn tiles_like_the_mock() {
         let t = tiles(&data(), &[pin()], &[], ReplayState::Off);
         let names: Vec<(&str, &str)> = t.iter().map(|t| (t.label.as_str(), t.value.as_str())).collect();
-        assert_eq!(names, [("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Crowd density", "2"), ("Screenshot", "Game only"), ("Start replay buffer", "▲ ▼  60 s"), ("Quit game", "Hold A")]);
+        assert_eq!(names, [("Start replay buffer", "▲ ▼  60 s"), ("Screenshot", "Game only"), ("Crowd density", "2"), ("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Quit game", "Confirm…")]);
         // A replay buffer and a notice's buttons; no frame generation without the option.
         let mut d = data();
         if let Load::Ready(v) = &mut d.options {
@@ -767,7 +370,7 @@ mod tests {
         }
         let n = ToastData { notice: Some("n-3".into()), title: "DLSS v4 is ready".into(), buttons: vec![NoticeButton { id: "keep_v3".into(), label: "Keep v3 for now".into(), primary: true }], ..Default::default() };
         let t = tiles(&d, &[], &[n], ReplayState::External { pid: 77, seconds: 60 });
-        assert_eq!(t[0].kind, TileKind::Notice { id: "n-3".into(), button: "keep_v3".into() });
+        assert_eq!(t[2].kind, TileKind::Notice { id: "n-3".into(), button: "keep_v3".into() });
         assert!(!t.iter().any(|t| matches!(t.kind, TileKind::FrameGen { .. })));
         assert!(t.iter().any(|t| t.kind == TileKind::Replay { pid: 77 }));
         // A pin that's gone from the profile has no tile.
@@ -776,16 +379,31 @@ mod tests {
     }
 
     #[test]
+    fn focus_follows_the_action_when_tiles_change() {
+        let mut focus = Selection::default();
+        let before = tiles(&data(), &[pin()], &[], ReplayState::Off);
+        let after = tiles(&data(), &[], &[], ReplayState::Active(120));
+        for kind in [TileKind::HudPreset, TileKind::Screenshot] {
+            focus.select(before.iter().find(|t| t.kind == kind).unwrap());
+            assert_eq!(after[focus.focus(&after)].kind, kind);
+        }
+        focus.select(&before[0]);
+        assert_eq!(after[focus.focus(&after)].kind, TileKind::SaveReplay);
+        focus.select(before.iter().find(|t| matches!(t.kind, TileKind::Pin(_))).unwrap());
+        assert_eq!(after[focus.focus(&after)].kind, TileKind::SaveReplay);
+    }
+
+    #[test]
     fn what_tiles_do() {
         let d = data();
         let t = tiles(&d, &[pin()], &[], ReplayState::Off);
-        assert_eq!(act(&t[0], &d), Some(Act::SetOption("m1/aco-dlss".into(), "fg.enabled".into(), json!(false))));
-        assert_eq!(act(&t[1], &d), Some(Act::HudPreset("standard".into())));
-        assert_eq!(act(&t[2], &d), Some(Act::SetTweak("fps.cap".into(), json!(144))));
-        assert_eq!(act(&t[3], &d), Some(Act::SetOption("m1/aco-dlss".into(), "world.npc_density".into(), json!(2.5))));
-        assert_eq!(act(&t[4], &d), Some(Act::Screenshot));
-        assert_eq!(act(&t[5], &d), Some(Act::Replay(replay::Action::Start(60))));
-        assert_eq!(act(&t[6], &d), Some(Act::Quit));
+        assert_eq!(act(&t[3], &d), Some(Act::SetOption("m1/aco-dlss".into(), "fg.enabled".into(), json!(false))));
+        assert_eq!(act(&t[4], &d), Some(Act::HudPreset("standard".into())));
+        assert_eq!(act(&t[5], &d), Some(Act::SetTweak("fps.cap".into(), json!(144))));
+        assert_eq!(act(&t[2], &d), Some(Act::SetOption("m1/aco-dlss".into(), "world.npc_density".into(), json!(2.5))));
+        assert_eq!(act(&t[1], &d), Some(Act::Screenshot));
+        assert_eq!(act(&t[0], &d), Some(Act::Replay(replay::Action::Start(60))));
+        assert_eq!(act(&t[6], &d), None, "Quit requires the panel confirmation");
     }
 
     #[test]
@@ -825,107 +443,6 @@ mod tests {
         assert_eq!(next_cap(&json!("vrr")), json!(0));
         assert_eq!(next_cap(&json!(100)), json!(120), "between two: the next one up");
         assert_eq!((cap_words(&json!(0)), cap_words(&json!(118.0)), cap_words(&json!("vrr"))), ("No cap".into(), "118 fps".into(), "Refresh − 3".into()));
-    }
-
-    fn quick() -> Quick {
-        let mut q = Quick::default();
-        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Off));
-        q
-    }
-
-    #[test]
-    fn choose_buffer_length_then_reopen_on_save() {
-        let mut q = quick();
-        let now = Instant::now();
-        q.latch("s", now);
-        q.focus = q.tiles.iter().position(|t| matches!(t.kind, TileKind::StartReplay { .. })).unwrap();
-        assert_eq!(q.key(Key::Down, true, now), Effect::Redraw);
-        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Off));
-        assert_eq!(act(q.focused().unwrap(), &data()), Some(Act::Replay(replay::Action::Start(30))));
-        q.key(Key::Enter, true, now);
-        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Active(30)));
-        q.latch("s", now);
-        assert_eq!(act(q.focused().unwrap(), &data()), Some(Act::Replay(replay::Action::Save)));
-    }
-
-    #[test]
-    fn a_tap_opens_the_panel() {
-        let mut q = quick();
-        let t = Instant::now();
-        q.press("s-1", t);
-        assert_eq!(q.chord(Some(true), t + Duration::from_millis(100)), Effect::None);
-        assert_eq!(q.chord(Some(false), t + Duration::from_millis(150)), Effect::OpenPanel);
-        assert!(!q.active());
-        // No word from the layer at all (an older one): the panel, after a while.
-        q.press("s-1", t);
-        assert_eq!(q.chord(None, t + Duration::from_millis(500)), Effect::None);
-        assert_eq!(q.chord(None, t + STALE + Duration::from_millis(1)), Effect::OpenPanel);
-    }
-
-    #[test]
-    fn hold_choose_release_applies() {
-        let mut q = quick();
-        let t = Instant::now();
-        q.press("s-1", t);
-        assert_eq!(q.chord(Some(true), t + HOLD), Effect::Show);
-        assert!(q.shown() && q.focus == 0);
-        assert_eq!(q.key(Key::Right, true, t + HOLD), Effect::Redraw);
-        assert_eq!(q.key(Key::Right, true, t + HOLD), Effect::Redraw);
-        assert_eq!(q.key(Key::Left, true, t + HOLD), Effect::Redraw);
-        assert_eq!(q.focused().unwrap().kind, TileKind::HudPreset);
-        assert_eq!(q.chord(Some(false), t + 2 * HOLD), Effect::Apply(1));
-        assert!(!q.active());
-        // Next time, focus comes back to the same tile.
-        q.press("s-1", t);
-        q.chord(Some(true), t + HOLD);
-        assert_eq!(q.focused().unwrap().kind, TileKind::HudPreset);
-        // Left at the first tile goes nowhere; Back closes without applying.
-        q.focus = 0;
-        assert_eq!(q.key(Key::Left, true, t), Effect::None);
-        assert_eq!(q.key(Key::Back, true, t), Effect::Close);
-    }
-
-    #[test]
-    fn quit_needs_a_held() {
-        let mut q = quick();
-        let t = Instant::now();
-        q.press("s-1", t);
-        q.chord(Some(true), t + HOLD);
-        q.focus = q.tiles.len() - 1;
-        // Released on Quit: latched, nothing quits.
-        assert_eq!(q.chord(Some(false), t + 2 * HOLD), Effect::Redraw);
-        assert_eq!(q.phase, Phase::Latched);
-        let a = t + Duration::from_secs(1);
-        assert_eq!(q.key(Key::Enter, true, a), Effect::Redraw);
-        assert_eq!(q.tick(a + QUIT_HOLD / 2), Effect::None);
-        assert!(q.quit_progress(a + QUIT_HOLD / 2).is_some_and(|p| (p - 0.5).abs() < 0.01));
-        // Let go early: nothing.
-        q.key(Key::Enter, false, a + QUIT_HOLD / 2);
-        assert_eq!(q.tick(a + QUIT_HOLD * 2), Effect::None);
-        q.key(Key::Enter, true, a + QUIT_HOLD * 2);
-        assert_eq!(q.tick(a + QUIT_HOLD * 3), Effect::Quit);
-        assert!(!q.active());
-    }
-
-    #[test]
-    fn latched_from_the_cli() {
-        let mut q = quick();
-        let t = Instant::now();
-        assert_eq!(q.latch("s-1", t), Effect::Show);
-        // The chord's word doesn't close a latched menu.
-        assert_eq!(q.chord(Some(false), t + HOLD), Effect::None);
-        q.key(Key::Right, true, t);
-        assert_eq!(q.key(Key::Enter, true, t), Effect::Apply(1));
-    }
-
-    #[test]
-    fn a_held_menu_without_word_closes() {
-        let mut q = quick();
-        let t = Instant::now();
-        q.press("s-1", t);
-        q.chord(Some(true), t + HOLD);
-        assert_eq!(q.chord(None, t + HOLD + Duration::from_millis(100)), Effect::None);
-        assert_eq!(q.chord(None, t + HOLD + STALE + Duration::from_millis(1)), Effect::Close);
     }
 
     #[test]
