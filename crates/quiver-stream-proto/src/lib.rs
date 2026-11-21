@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod input;
 pub mod media;
+pub mod pattern;
 
 pub use input::{InputEvent, MouseButton, PadButtons, PadKind, PadState};
 pub use media::{AudioCodec, AudioPacket, Chroma, ColorInfo, EncodedFrame, HdrMetadata, VideoCodec};
