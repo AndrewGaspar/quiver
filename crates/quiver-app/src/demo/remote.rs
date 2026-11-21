@@ -188,6 +188,7 @@ pub(super) fn tower_state() -> State {
             // Other stores' games stay on this PC only.
             e.installed = None;
             e.client = None;
+            e.steam = None;
             continue;
         };
         e.update_available = false;
@@ -243,6 +244,7 @@ mod tests {
         let lib: Vec<LibraryEntry> = serde_json::from_value(tower.handle(Request::Library { refresh: false, all_stores: true }).unwrap()).unwrap();
         let installed: Vec<u32> = lib.iter().filter(|e| e.on_disk()).filter_map(|e| e.ubisoft_id()).collect();
         assert!(installed.contains(&3539) && installed.contains(&INSTALLING) && installed.len() == 3, "{installed:?}");
+        assert_eq!(lib.iter().filter(|e| e.on_disk()).count(), 3, "nothing else is installed there");
         let q: Vec<QueueEntry> = serde_json::from_value(tower.handle(Request::Queue).unwrap()).unwrap();
         assert_eq!(q.len(), 1);
         assert!(q[0].state.is_active());
