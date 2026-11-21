@@ -6,9 +6,22 @@
 //! the cursor back. It speaks only [`quiver_stream_proto`] types: the transport
 //! (`quiver-stream-net`) and quiverd wire it up.
 
+pub mod audio;
+pub mod capture;
 pub mod cuda;
+pub mod display;
+pub mod host;
+pub mod input;
 pub mod nvenc;
+pub mod ogg;
+pub mod opus;
 pub mod pattern;
 pub mod recovery;
+pub mod sandbox;
+pub mod seat;
 pub mod stats;
+pub mod testwin;
+pub mod tone;
 pub mod video;
+
+pub use host::{Host, HostOptions, Target};

@@ -23,7 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 libloading = "0.8"
 pipewire = "0.10"
-x11rb = { version = "0.13", features = ["xtest", "xfixes", "allow-unsafe-code"] }
+x11rb = { version = "0.13", features = ["xtest", "xfixes", "xinput", "allow-unsafe-code"] }
 
 [dev-dependencies]
 tempfile.workspace = true
