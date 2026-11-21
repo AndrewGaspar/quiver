@@ -13,6 +13,17 @@
 //! itself never enters it. Exec drops the namespace capabilities (the uid isn't 0 inside),
 //! so the game runs with the same rights as before. The namespace goes away once its last
 //! process exits and the daemon drops the [`Namespace`].
+//!
+//! **A streamed launch's pad group** ([`Namespace::create_with`]): a stream's hidden pads
+//! (design/REMOTE.md) belong to a group no process of the person's has. The launch's
+//! namespace then maps that group too, which an unprivileged process can't write into its own
+//! `gid_map`: the holder stops after `unshare` and this process maps it from outside with
+//! `newuidmap`/`newgidmap` (the person's own ids, and the pad gid from their `/etc/subgid`
+//! range), as the stream host's own pad namespace does (`unshare --map-groups`). Every
+//! process that enters sets its supplementary groups to its own gid and the pad group, so the
+//! bridge, Proton, the wineserver, Wine's controller driver and the game can all open the pads,
+//! and nothing outside the launch can. A launch with a stream and no mods gets the namespace
+//! with nothing mounted.
 
 use std::ffi::{CString, OsStr};
 use std::fs::File;
@@ -108,6 +119,8 @@ fn cstr(s: impl AsRef<OsStr>) -> Result<CString> {
 pub struct Namespace {
     user: File,
     mnt: File,
+    /// The stream pad group mapped in, which every process entering gets.
+    pad_gid: Option<u32>,
 }
 
 impl Namespace {
@@ -122,6 +135,13 @@ impl Namespace {
         if specs.is_empty() {
             bail!("no overlay to mount");
         }
+        Self::create_with(specs, None)
+    }
+
+    /// As [`Self::create_many`] (`specs` may be empty), and with `pad_gid` (a stream's pad
+    /// group, inside the person's subgid range) mapped through newuidmap/newgidmap and given
+    /// to every process that enters (the module docs).
+    pub fn create_with(specs: &[OverlaySpec], pad_gid: Option<u32>) -> Result<Namespace> {
         for spec in specs {
             spec.check()?;
         }
@@ -141,6 +161,21 @@ impl Namespace {
         let options = options.join(" | ");
         let (mut err_r, err_w) = io::pipe()?;
         let err_fd = err_w.as_raw_fd();
+        // Without a pad group the holder writes its own maps; with one, the mapper does.
+        let maps: Vec<(&'static std::ffi::CStr, Vec<u8>, &'static [u8])> = if pad_gid.is_some() {
+            Vec::new()
+        } else {
+            vec![
+                (c"/proc/self/setgroups", b"deny".to_vec(), b"writing setgroups"),
+                (c"/proc/self/uid_map", uid_map.into_bytes(), b"writing uid_map"),
+                (c"/proc/self/gid_map", gid_map.into_bytes(), b"writing gid_map"),
+            ]
+        };
+        let mapper = match pad_gid {
+            Some(pad) => Some(Mapper::start(uid, gid, pad)?),
+            None => None,
+        };
+        let mapper_fds = mapper.as_ref().map(|m| (m.ready_w.as_raw_fd(), m.go_r.as_raw_fd(), m.go_w));
 
         // `cat` blocks on its stdin until we close it: just long enough to open its
         // namespace files.
@@ -157,11 +192,19 @@ impl Namespace {
                 if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
                     return fail(b"unshare(CLONE_NEWUSER|CLONE_NEWNS)");
                 }
-                for (path, content, step) in [
-                    (c"/proc/self/setgroups", &b"deny"[..], &b"writing setgroups"[..]),
-                    (c"/proc/self/uid_map", uid_map.as_bytes(), b"writing uid_map"),
-                    (c"/proc/self/gid_map", gid_map.as_bytes(), b"writing gid_map"),
-                ] {
+                if let Some((ready_w, go_r, go_w)) = mapper_fds {
+                    // Our pid to the mapper outside, then wait for its verdict.
+                    libc::close(go_w);
+                    let pid = libc::getpid().to_ne_bytes();
+                    if libc::write(ready_w, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
+                        return fail(b"handing the pid to newuidmap/newgidmap");
+                    }
+                    let mut ok = [1u8];
+                    if libc::read(go_r, ok.as_mut_ptr().cast(), 1) != 1 || ok[0] != 0 {
+                        return fail(b"mapping the ids with newuidmap/newgidmap");
+                    }
+                }
+                for (path, content, step) in &maps {
                     let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
                     if fd < 0 {
                         return fail(step);
@@ -213,6 +256,7 @@ impl Namespace {
         }
         let spawned = cmd.spawn();
         drop(err_w); // so the read below ends once the child has exec'd or exited
+        let mapped = mapper.map(Mapper::finish);
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {
@@ -220,6 +264,9 @@ impl Namespace {
                 let _ = err_r.read_to_string(&mut step);
                 if step.is_empty() {
                     return Err(e).context("starting the overlay namespace holder (cat)");
+                }
+                if let Some(Err(why)) = mapped {
+                    return Err(e).context(format!("the launch's namespace: {step} failed: {why}"));
                 }
                 return Err(e).context(format!("overlay namespace: {step} failed (options: {options})"));
             }
@@ -229,7 +276,12 @@ impl Namespace {
         let ns = (open("user"), open("mnt"));
         drop(child.stdin.take());
         let _ = child.wait();
-        Ok(Namespace { user: ns.0?, mnt: ns.1? })
+        Ok(Namespace { user: ns.0?, mnt: ns.1?, pad_gid })
+    }
+
+    /// The stream pad group the namespace has, if any.
+    pub fn pad_gid(&self) -> Option<u32> {
+        self.pad_gid
     }
 
     /// Make `cmd` run inside the namespace, starting in `cwd` as seen there (joining a
@@ -239,11 +291,20 @@ impl Namespace {
         let user: OwnedFd = self.user.try_clone()?.into();
         let mnt: OwnedFd = self.mnt.try_clone()?.into();
         let cwd = cwd.map(cstr).transpose()?;
+        // SAFETY: getgid can't fail.
+        let groups: Option<[libc::gid_t; 2]> = self.pad_gid.map(|p| [unsafe { libc::getgid() }, p]);
         // SAFETY: raw syscalls on descriptors and a string owned by the closure.
         unsafe {
             cmd.pre_exec(move || {
                 if libc::setns(user.as_raw_fd(), libc::CLONE_NEWUSER) != 0
                     || libc::setns(mnt.as_raw_fd(), libc::CLONE_NEWNS) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                // Joining gives the namespace's capabilities until exec: enough to take the
+                // pad group (the other supplementary groups aren't mapped in here).
+                if let Some(g) = &groups
+                    && libc::setgroups(g.len(), g.as_ptr()) != 0
                 {
                     return Err(io::Error::last_os_error());
                 }
@@ -260,7 +321,53 @@ impl Namespace {
 
     /// A second handle to the same namespace.
     pub fn try_clone(&self) -> Result<Namespace> {
-        Ok(Namespace { user: self.user.try_clone()?, mnt: self.mnt.try_clone()? })
+        Ok(Namespace { user: self.user.try_clone()?, mnt: self.mnt.try_clone()?, pad_gid: self.pad_gid })
+    }
+}
+
+/// Maps a holder's ids from outside: it waits for the holder's pid on `ready`, runs
+/// `newuidmap pid U U 1` and `newgidmap pid G G 1 P P 1`, and answers on `go` (0: mapped).
+struct Mapper {
+    ready_w: io::PipeWriter,
+    go_r: io::PipeReader,
+    /// The write end the thread answers on; the holder closes its copy.
+    go_w: libc::c_int,
+    thread: std::thread::JoinHandle<Result<(), String>>,
+}
+
+impl Mapper {
+    fn start(uid: u32, gid: u32, pad: u32) -> Result<Mapper> {
+        let (mut ready_r, ready_w) = io::pipe()?;
+        let (go_r, go_w) = io::pipe()?;
+        let go_fd = go_w.as_raw_fd();
+        let thread = std::thread::Builder::new().name("ns-mapper".into()).spawn(move || {
+            let mut go_w = go_w;
+            let mut pid = [0u8; 4];
+            // EOF: the holder ended before it got here (its own error says why).
+            if ready_r.read_exact(&mut pid).is_err() {
+                return Err("the holder ended first".to_owned());
+            }
+            let pid = i32::from_ne_bytes(pid).to_string();
+            let run = |tool: &str, args: Vec<String>| -> Result<(), String> {
+                let out = Command::new(tool).arg(&pid).args(&args).stdin(Stdio::null()).output().map_err(|e| format!("{tool}: {e}"))?;
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{tool} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
+                }
+            };
+            let r = run("newuidmap", [uid, uid, 1].map(|v| v.to_string()).to_vec()).and_then(|()| run("newgidmap", [gid, gid, 1, pad, pad, 1].map(|v| v.to_string()).to_vec()));
+            let _ = io::Write::write_all(&mut go_w, &[u8::from(r.is_err())]);
+            r
+        })?;
+        Ok(Mapper { ready_w, go_r, go_w: go_fd, thread })
+    }
+
+    /// After the holder was spawned (or failed to be): what the mapping came to.
+    fn finish(self) -> Result<(), String> {
+        drop(self.ready_w);
+        drop(self.go_r);
+        self.thread.join().unwrap_or_else(|_| Err("the mapper thread panicked".into()))
     }
 }
 
@@ -283,6 +390,68 @@ pub fn supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gid from this user's subordinate range (any works as a stand-in for the stream pad
+    /// group), when newgidmap can map one.
+    fn a_subgid() -> Option<u32> {
+        let user = std::env::var("USER").ok()?;
+        let line = std::fs::read_to_string("/etc/subgid").ok()?.lines().find(|l| l.split(':').next() == Some(user.as_str()))?.to_owned();
+        let start: u32 = line.split(':').nth(1)?.parse().ok()?;
+        (Path::new("/usr/bin/newgidmap").exists() && Path::new("/usr/bin/newuidmap").exists() && supported()).then_some(start + 7)
+    }
+
+    fn groups_inside(ns: &Namespace) -> (String, String) {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "id -G; cat /proc/self/gid_map | tr -s ' ' | tr '\\n' ';'"]);
+        ns.enter(&mut cmd, None).unwrap();
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut lines = text.lines();
+        (lines.next().unwrap_or_default().to_owned(), lines.next().unwrap_or_default().to_owned())
+    }
+
+    /// A streamed launch's namespace: the extra group mapped (newgidmap) and given to every
+    /// process that enters, with mods mounted or with nothing mounted.
+    #[test]
+    fn the_launch_namespace_gives_the_pad_group() {
+        let Some(pad) = a_subgid() else {
+            eprintln!("skip: no subgid range, newgidmap or user namespaces");
+            return;
+        };
+        // SAFETY: getgid can't fail.
+        let gid = unsafe { libc::getgid() };
+        let ns = Namespace::create_with(&[], Some(pad)).unwrap();
+        assert_eq!(ns.pad_gid(), Some(pad));
+        let (groups, map) = groups_inside(&ns);
+        assert_eq!(groups, format!("{gid} {pad}"), "gid_map: {map}");
+        assert!(map.contains(&format!("{pad} {pad} 1")), "{map}");
+
+        let t = tempfile::tempdir().unwrap();
+        let (target, top) = (t.path().join("game"), t.path().join("mod"));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&top).unwrap();
+        std::fs::write(top.join("from-the-mod"), "1").unwrap();
+        let spec = OverlaySpec { target: target.clone(), lower: vec![top], upper: t.path().join("up"), work: t.path().join("work"), shared: vec![] };
+        let ns = Namespace::create_with(std::slice::from_ref(&spec), Some(pad)).unwrap();
+        assert_eq!(groups_inside(&ns).0, format!("{gid} {pad}"));
+        let mut cmd = Command::new("cat");
+        cmd.arg(target.join("from-the-mod"));
+        ns.enter(&mut cmd, None).unwrap();
+        assert_eq!(cmd.output().unwrap().stdout, b"1", "the mod is mounted too");
+        assert!(!target.join("from-the-mod").exists(), "only inside");
+    }
+
+    /// A gid outside the person's range can't be mapped: creating fails (and says why), so
+    /// the launch can go on without it rather than hand out a group nobody has.
+    #[test]
+    fn an_unmappable_group_fails_clearly() {
+        if a_subgid().is_none() {
+            return;
+        }
+        let e = Namespace::create_with(&[], Some(1)).unwrap_err();
+        assert!(format!("{e:#}").contains("newgidmap"), "{e:#}");
+    }
 
     #[test]
     fn options_escape_separators() {

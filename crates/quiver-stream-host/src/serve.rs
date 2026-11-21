@@ -472,6 +472,7 @@ impl Serve {
                     break SessionEnd::Stop(reason);
                 }
                 Got::Cmd(Some(ServeIn::Status)) => self.events.send(&self.status()),
+                Got::Cmd(Some(ServeIn::PadsOff { reason })) => host.disable_pads(&reason),
                 Got::Cmd(Some(ServeIn::Start(_))) => {}
                 Got::Tick => {
                     if !host.alive() {
@@ -528,6 +529,11 @@ impl Serve {
                 },
                 Got::Cmd(Some(ServeIn::Stop { reason })) => return Ok(SessionEnd::Stop(reason)),
                 Got::Cmd(Some(ServeIn::Status)) => self.events.send(&self.status()),
+                Got::Cmd(Some(ServeIn::PadsOff { reason })) => {
+                    if let Some(h) = self.host.as_ref() {
+                        h.disable_pads(&reason);
+                    }
+                }
                 Got::Tick => {
                     if self.host.as_mut().is_some_and(|h| !h.alive()) {
                         return Ok(SessionEnd::TargetEnded("the program exited".into()));

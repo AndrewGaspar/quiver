@@ -330,13 +330,22 @@ pub(crate) async fn start(d: &Arc<Daemon>, source: &str, peer: Option<RemotePeer
             }
         };
         LAUNCH.lock().unwrap().remove(&game);
-        watch_game(d, &id, job);
+        watch_game(d, &id, job, game);
     }
     Ok(StartStreamReply { ticket, host_name })
 }
 
-/// The game's Play job ending ends its stream.
-fn watch_game(d: &Arc<Daemon>, id: &str, job: u64) {
+/// A streamed launch that couldn't give its processes the stream's pad group: the host
+/// removes the pads and tells the client, and the activity log says why.
+pub(crate) fn pad_problem(d: &Daemon, source: &str, game: GameRef) -> Option<String> {
+    let why = quiver_core::launcher::take_stream_pad_problem(game)?;
+    d.log_activity_game(source, format!("no pads in the stream of {game}: {why}"), Some(game));
+    Some(why)
+}
+
+/// The game's Play job ending ends its stream; a pad problem in its launch turns the
+/// stream's pads off.
+fn watch_game(d: &Arc<Daemon>, id: &str, job: u64, game: GameRef) {
     let (weak, id) = (Arc::downgrade(d), id.to_owned());
     tokio::spawn(async move {
         loop {
@@ -344,6 +353,11 @@ fn watch_game(d: &Arc<Daemon>, id: &str, job: u64) {
             let Some(d) = weak.upgrade() else { return };
             if !d.streams.entries.lock().unwrap().contains_key(&id) {
                 return;
+            }
+            if let Some(why) = pad_problem(&d, "system", game)
+                && let Some(e) = d.streams.entries.lock().unwrap().get(&id)
+            {
+                let _ = e.tx.send(ServeIn::PadsOff { reason: why });
             }
             let done = d.jobs.lock().unwrap().get(&job).is_none_or(|j| j.done);
             if done {
@@ -653,6 +667,10 @@ impl quiver_gamestream::StreamHost for MoonlightGames {
                         Some(c) => { let _ = host.control_in.send(c).await; }
                     },
                     _ = tick.tick() => {
+                        if let Some(why) = pad_problem(&d, &source, game) {
+                            tracing::warn!("moonlight: no pads in this stream: {why}");
+                            host.disable_pads(&why);
+                        }
                         if d.jobs.lock().unwrap().get(&job).is_none_or(|j| j.done) {
                             let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: "the game exited".into() }).await;
                             break;

@@ -95,6 +95,8 @@ pub struct Host {
     /// For a [`Target::Display`] stream: how to start the program into it.
     pub launch: Option<LaunchEnv>,
     stop: Arc<AtomicBool>,
+    /// Set by [`Host::disable_pads`]: the input thread removes the pads and says why.
+    pads_off: Arc<std::sync::Mutex<Option<String>>>,
     video: Option<std::thread::JoinHandle<Result<RunReport>>>,
     input_thread: Option<std::thread::JoinHandle<()>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -183,11 +185,11 @@ impl Host {
                     env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));
                     env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
                 }
-                let wrapper = match mode {
-                    PadMode::Hidden { gid } => crate::sandbox::wrap(&sandbox_exe(&opts)?, gid, &[]),
-                    _ => Vec::new(),
+                let (wrapper, pad_gid) = match mode {
+                    PadMode::Hidden { gid } => (crate::sandbox::wrap(&sandbox_exe(&opts)?, gid, &[]), Some(gid)),
+                    _ => (Vec::new(), None),
                 };
-                launch = Some(LaunchEnv { env, unset: vec!["WAYLAND_DISPLAY".into()], wrapper });
+                launch = Some(LaunchEnv { env, unset: vec!["WAYLAND_DISPLAY".into()], wrapper, pad_gid });
                 x = Some((display.x_display.clone(), display.pid()));
                 let capture = open_capture(&cuda, &display, Some(layer), &cfg.color)?;
                 parts.display = Some(display);
@@ -231,8 +233,9 @@ impl Host {
             Some((d, pid)) => Some(XInjector::connect(d, *pid)?),
             None => None,
         };
-        let (pm, ctx_i, stop_i) = (pad_mode.clone(), ctx.clone(), stop.clone());
-        let input_thread = std::thread::Builder::new().name("input".into()).spawn(move || input_thread(irx, injector, pads, pm, ctx_i, stop_i))?;
+        let pads_off: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+        let (pm, ctx_i, stop_i, off_i) = (pad_mode.clone(), ctx.clone(), stop.clone(), pads_off.clone());
+        let input_thread = std::thread::Builder::new().name("input".into()).spawn(move || input_thread(irx, injector, pads, pm, ctx_i, stop_i, off_i))?;
         let rt = tokio::runtime::Handle::current();
         let mut tasks = Vec::new();
         tasks.push(rt.spawn(async move {
@@ -271,6 +274,7 @@ impl Host {
             x_display: x.map(|(d, _)| d),
             launch,
             stop,
+            pads_off,
             video: Some(video),
             input_thread: Some(input_thread),
             tasks,
@@ -300,6 +304,12 @@ impl Host {
             r
         })
         .await?
+    }
+
+    /// The program can't open the stream's pads after all (its launch couldn't be given the
+    /// pad group): remove them, send a [`Control::Notice`] saying why, and make no more.
+    pub fn disable_pads(&self, reason: &str) {
+        *self.pads_off.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.to_owned());
     }
 
     /// The program's display is still up (always true for the test pattern).
@@ -396,9 +406,27 @@ fn prefs_to_video(p: &StreamPrefs, is_pattern: bool, color: &mut ColorInfo) -> V
     out
 }
 
-fn input_thread(rx: std_mpsc::Receiver<InputEvent>, mut x: Option<XInjector>, pads: Option<PadHost>, pad_mode: PadMode, control: mpsc::Sender<Control>, stop: Arc<AtomicBool>) {
+fn input_thread(
+    rx: std_mpsc::Receiver<InputEvent>,
+    mut x: Option<XInjector>,
+    mut pads: Option<PadHost>,
+    mut pad_mode: PadMode,
+    control: mpsc::Sender<Control>,
+    stop: Arc<AtomicBool>,
+    pads_off: Arc<std::sync::Mutex<Option<String>>>,
+) {
     let mut told_no_pads = false;
     while !stop.load(Ordering::Relaxed) {
+        if !matches!(pad_mode, PadMode::Off(_))
+            && let Some(why) = pads_off.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        {
+            // Dropping the pad host removes its devices.
+            pads = None;
+            tracing::warn!("pads off: {why}");
+            let _ = control.try_send(Control::Notice { text: format!("pads aren't available on this stream: {why}") });
+            told_no_pads = true;
+            pad_mode = PadMode::Off(why);
+        }
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(ev) => match &ev {
                 InputEvent::PadArrive { .. } | InputEvent::PadLeave { .. } | InputEvent::Pad { .. } | InputEvent::PadMotion { .. } => match &pads {
