@@ -6,7 +6,7 @@
 //! semaphore, as libav asks. A picture in memory (software, or NVDEC/VA-API copied down) is
 //! copied into a staging buffer and uploaded to plane images first.
 //!
-//! The pass writes one of three [`SLOTS`] (A2B10G10R10, the stream's size) and signals the
+//! The pass writes one of four [`SLOTS`] (A2B10G10R10, the stream's size) and signals the
 //! converter's timeline; the presenter's submit waits on that value. Converting at once,
 //! rather than when the presenter next draws, hands the decoder's image back after a pass of
 //! a fraction of a millisecond, so a presenter waiting for a vblank (FIFO) never holds up
@@ -25,7 +25,7 @@ use super::util::{self, Buffer, Image, PipelineDesc, barrier, spv};
 use crate::av::Picture;
 use crate::color::YuvParams;
 
-pub const SLOTS: usize = 3;
+pub const SLOTS: usize = 4;
 pub const PICTURE_FORMAT: vk::Format = vk::Format::A2B10G10R10_UNORM_PACK32;
 
 /// The presenter's timeline value of its last submit that read each slot, and the
@@ -101,9 +101,7 @@ fn plane_formats(f: vk::Format) -> Option<(Vec<vk::Format>, f32, u32)> {
         }
         F::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16
         | F::G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16
-        | F::G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16 => {
-            (vec![F::R10X6_UNORM_PACK16, F::R10X6G10X6_UNORM_2PACK16], 1023.0, 10)
-        }
+        | F::G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16 => (vec![F::R10X6_UNORM_PACK16, F::R10X6G10X6_UNORM_2PACK16], 1023.0, 10),
         F::G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16 | F::G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16 => {
             (vec![F::R12X4_UNORM_PACK16, F::R12X4G12X4_UNORM_2PACK16], 4095.0, 12)
         }
@@ -131,11 +129,12 @@ impl Converter {
             d.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(SLOTS as u32))
         }?;
         let set_layout = util::sampler_set_layout(&gpu, 3)?;
-        let ranges = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-            .size(std::mem::size_of::<ConvertPush>() as u32)];
+        let ranges =
+            [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::FRAGMENT).size(std::mem::size_of::<ConvertPush>() as u32)];
         let layouts = [set_layout];
-        let layout = unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&ranges), None) }?;
+        let layout = unsafe {
+            d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&ranges), None)
+        }?;
         let pipeline = util::pipeline(
             &gpu,
             &PipelineDesc {
@@ -185,7 +184,9 @@ impl Converter {
         if !self.wait_done(c, 1_000_000_000)? {
             bail!("a conversion didn't finish in 1 s");
         }
-        let Some((buf, r)) = self.slots[c.slot].readback.as_mut() else { return Ok(None) };
+        let Some((buf, r)) = self.slots[c.slot].readback.as_mut() else {
+            return Ok(None);
+        };
         let (w, h) = (c.extent.width, c.extent.height);
         let rw = r.width as usize;
         let px = buf.bytes();
@@ -250,18 +251,16 @@ impl Converter {
     pub fn convert(&mut self, pic: &mut Picture, hdr: bool, full_range: bool) -> Result<Converted> {
         let extent = vk::Extent2D { width: pic.width(), height: pic.height() };
         let s = self.take_slot(extent)?;
-        if pic.is_vulkan() {
-            self.convert_vulkan(s, pic, hdr, full_range)
-        } else {
-            self.convert_cpu(s, pic, hdr, full_range)
-        }
+        if pic.is_vulkan() { self.convert_vulkan(s, pic, hdr, full_range) } else { self.convert_cpu(s, pic, hdr, full_range) }
     }
 
     fn begin(&self, s: usize) -> Result<vk::CommandBuffer> {
         let cmd = self.slots[s].cmd;
         unsafe {
             self.gpu.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
-            self.gpu.device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            self.gpu
+                .device
+                .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
         }
         Ok(cmd)
     }
@@ -273,7 +272,11 @@ impl Converter {
         let to_attach = barrier(
             img.image,
             (vk::ImageLayout::UNDEFINED, vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::NONE),
-            (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
         );
         unsafe { d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&[to_attach])) };
         let att = [vk::RenderingAttachmentInfo::default()
@@ -285,7 +288,18 @@ impl Converter {
         unsafe {
             d.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&att));
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: img.extent.width as f32, height: img.extent.height as f32, min_depth: 0.0, max_depth: 1.0 }]);
+            d.cmd_set_viewport(
+                cmd,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: img.extent.width as f32,
+                    height: img.extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
             d.cmd_set_scissor(cmd, 0, &[area]);
         }
         // Three bindings always; a 2-plane picture repeats its CbCr view.
@@ -296,10 +310,16 @@ impl Converter {
             d.cmd_draw(cmd, 3, 1, 0, 0);
             d.cmd_end_rendering(cmd);
         }
-        let mut from = (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+        let mut from = (
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        );
         if let (true, Some((buf, r))) = (self.readback, self.slots[s].readback.as_ref()) {
             let to_src = (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
-            unsafe { d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&[barrier(img.image, from, to_src)])) };
+            unsafe {
+                d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&[barrier(img.image, from, to_src)]))
+            };
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
                 .image_extent(vk::Extent3D { width: r.width, height: r.height, depth: 1 });
@@ -314,7 +334,13 @@ impl Converter {
         unsafe { d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&[to_read])) };
     }
 
-    fn submit(&mut self, s: usize, cmd: vk::CommandBuffer, wait: Option<(vk::Semaphore, u64)>, extra_signal: Option<(vk::Semaphore, u64)>) -> Result<u64> {
+    fn submit(
+        &mut self,
+        s: usize,
+        cmd: vk::CommandBuffer,
+        wait: Option<(vk::Semaphore, u64)>,
+        extra_signal: Option<(vk::Semaphore, u64)>,
+    ) -> Result<u64> {
         unsafe { self.gpu.device.end_command_buffer(cmd) }?;
         self.value += 1;
         let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
@@ -322,7 +348,9 @@ impl Converter {
             .into_iter()
             .map(|(sem, v)| vk::SemaphoreSubmitInfo::default().semaphore(sem).value(v).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS))
             .collect();
-        let mut signals = vec![vk::SemaphoreSubmitInfo::default().semaphore(self.timeline).value(self.value).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+        let mut signals = vec![
+            vk::SemaphoreSubmitInfo::default().semaphore(self.timeline).value(self.value).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        ];
         if let Some((sem, v)) = extra_signal {
             signals.push(vk::SemaphoreSubmitInfo::default().semaphore(sem).value(v).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS));
         }
@@ -360,7 +388,9 @@ impl Converter {
                             .image(image)
                             .view_type(vk::ImageViewType::TYPE_2D)
                             .format(*f)
-                            .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(PLANE_ASPECTS[i]).level_count(1).layer_count(1))
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default().aspect_mask(PLANE_ASPECTS[i]).level_count(1).layer_count(1),
+                            )
                             .push_next(&mut usage);
                         v.push(unsafe { self.gpu.device.create_image_view(&ci, None) }?);
                     }
@@ -390,7 +420,9 @@ impl Converter {
                 .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
                 .src_queue_family_index(src_q)
                 .dst_queue_family_index(dst_q)
-                .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1));
+                .subresource_range(
+                    vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1),
+                );
             unsafe { self.gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&[b])) };
             self.record_pass(cmd, s, &views, &push);
             let sem: vk::Semaphore = vk::Handle::from_raw(info.semaphore);
@@ -410,7 +442,8 @@ impl Converter {
         let l = pic.layout();
         let (w, h) = (pic.width(), pic.height());
         let (cw, ch) = (w.div_ceil(1 << l.log2_chroma_w), h.div_ceil(1 << l.log2_chroma_h));
-        let (r1, r2) = if l.bytes == 2 { (vk::Format::R16_UNORM, vk::Format::R16G16_UNORM) } else { (vk::Format::R8_UNORM, vk::Format::R8G8_UNORM) };
+        let (r1, r2) =
+            if l.bytes == 2 { (vk::Format::R16_UNORM, vk::Format::R16G16_UNORM) } else { (vk::Format::R8_UNORM, vk::Format::R8G8_UNORM) };
         // (format, width, height, bytes per pixel) per plane.
         let planes: Vec<(vk::Format, u32, u32, u32)> = if l.planes == 2 {
             vec![(r1, w, h, l.bytes), (r2, cw, ch, 2 * l.bytes)]
@@ -431,7 +464,12 @@ impl Converter {
             let staging = Buffer::new(&gpu, total, vk::BufferUsageFlags::TRANSFER_SRC)?;
             let mut imgs = Vec::new();
             for p in &planes {
-                imgs.push(Image::new(&gpu, p.0, vk::Extent2D { width: p.1, height: p.2 }, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)?);
+                imgs.push(Image::new(
+                    &gpu,
+                    p.0,
+                    vk::Extent2D { width: p.1, height: p.2 },
+                    vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+                )?);
             }
             slot.upload = Some(Upload { key, staging, planes: imgs });
         }
@@ -481,7 +519,11 @@ impl Converter {
                 barrier(
                     i,
                     (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE),
-                    (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_SAMPLED_READ),
+                    (
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                        vk::AccessFlags2::SHADER_SAMPLED_READ,
+                    ),
                 )
             })
             .collect();

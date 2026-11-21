@@ -1,0 +1,3 @@
+# Wide lines, like the rest of the workspace (which has no rustfmt config of its own).
+max_width = 140
+use_small_heuristics = "Max"

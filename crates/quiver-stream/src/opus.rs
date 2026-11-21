@@ -66,9 +66,7 @@ impl Decoder {
     pub fn new(channels: u8) -> Result<Self> {
         let (streams, coupled, mapping) = layout(channels)?;
         let mut err = 0;
-        let raw = unsafe {
-            opus_multistream_decoder_create(RATE as i32, channels as c_int, streams, coupled, mapping.as_ptr(), &mut err)
-        };
+        let raw = unsafe { opus_multistream_decoder_create(RATE as i32, channels as c_int, streams, coupled, mapping.as_ptr(), &mut err) };
         match NonNull::new(raw) {
             Some(raw) if err == 0 => Ok(Self { raw, channels }),
             _ => bail!("opus decoder: error {err}"),
@@ -81,9 +79,7 @@ impl Decoder {
     pub fn decode(&mut self, packet: Option<&[u8]>, fec: bool, pcm: &mut [f32]) -> Result<usize> {
         let frame = pcm.len() / self.channels as usize;
         let (ptr, len) = packet.map_or((std::ptr::null(), 0), |p| (p.as_ptr(), p.len() as i32));
-        let n = unsafe {
-            opus_multistream_decode_float(self.raw.as_ptr(), ptr, len, pcm.as_mut_ptr(), frame as c_int, fec as c_int)
-        };
+        let n = unsafe { opus_multistream_decode_float(self.raw.as_ptr(), ptr, len, pcm.as_mut_ptr(), frame as c_int, fec as c_int) };
         if n < 0 {
             bail!("opus decode: error {n}");
         }
@@ -147,11 +143,13 @@ mod tests {
     use super::*;
 
     fn tone(frame: usize, n: usize, hz: f32) -> Vec<f32> {
-        (0..frame).flat_map(|i| {
-            let t = (n * frame + i) as f32 / RATE as f32;
-            let v = (t * hz * std::f32::consts::TAU).sin() * 0.5;
-            [v, v]
-        }).collect()
+        (0..frame)
+            .flat_map(|i| {
+                let t = (n * frame + i) as f32 / RATE as f32;
+                let v = (t * hz * std::f32::consts::TAU).sin() * 0.5;
+                [v, v]
+            })
+            .collect()
     }
 
     #[test]

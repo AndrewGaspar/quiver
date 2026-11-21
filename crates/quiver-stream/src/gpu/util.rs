@@ -29,7 +29,8 @@ impl Image {
         let image = unsafe { d.create_image(&info, None) }.context("vkCreateImage")?;
         let req = unsafe { d.get_image_memory_requirements(image) };
         let ty = gpu.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL).context("no device-local memory")?;
-        let memory = unsafe { d.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }?;
+        let memory =
+            unsafe { d.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }?;
         unsafe { d.bind_image_memory(image, memory, 0) }?;
         let view = unsafe {
             d.create_image_view(
@@ -73,7 +74,8 @@ impl Buffer {
             .memory_type(req.memory_type_bits, props | vk::MemoryPropertyFlags::HOST_CACHED)
             .or_else(|| gpu.memory_type(req.memory_type_bits, props))
             .context("no host-visible memory")?;
-        let memory = unsafe { d.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }?;
+        let memory =
+            unsafe { d.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }?;
         unsafe { d.bind_buffer_memory(buffer, memory, 0) }?;
         let ptr = unsafe { d.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }? as *mut u8;
         Ok(Self { buffer, memory, ptr, size })
@@ -218,7 +220,9 @@ pub fn linear_sampler(gpu: &Gpu) -> Result<vk::Sampler> {
 pub fn push_samplers(gpu: &Gpu, cmd: vk::CommandBuffer, layout: vk::PipelineLayout, sampler: vk::Sampler, views: &[vk::ImageView]) {
     let infos: Vec<[vk::DescriptorImageInfo; 1]> = views
         .iter()
-        .map(|&v| [vk::DescriptorImageInfo::default().sampler(sampler).image_view(v).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)])
+        .map(|&v| {
+            [vk::DescriptorImageInfo::default().sampler(sampler).image_view(v).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
+        })
         .collect();
     let writes: Vec<vk::WriteDescriptorSet> = infos
         .iter()

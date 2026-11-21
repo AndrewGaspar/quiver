@@ -20,7 +20,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ash = { version = "0.38", features = ["loaded"] }
-sdl3-sys = "0.7"
+sdl3-sys = { version = "0.7", features = ["use-ash-v0-38"] }
 crossbeam-channel = "0.5"
 # The overlay's glyphs and logo, rasterised once into an atlas at start.
 resvg = { version = "0.46", default-features = false }
@@ -29,3 +29,6 @@ ttf-parser = "0.25"
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"
+
+[dev-dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }

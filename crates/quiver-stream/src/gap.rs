@@ -59,11 +59,13 @@ impl GapTracker {
         Self::default()
     }
 
-    /// Start over, waiting for a keyframe (the decoder was recreated).
-    pub fn reset(&mut self, now: Instant) -> Vec<Control> {
+    /// Start over, waiting for a keyframe (the decoder was recreated). Nothing is asked for
+    /// yet: the host starts a stream (and a codec change) on a keyframe, and a frame that
+    /// isn't one asks ([`GapTracker::on_frame`]).
+    pub fn reset(&mut self, now: Instant) {
         self.started = false;
+        self.broken_through = None;
         self.broken_since = Some(now);
-        self.ask_keyframe(now).into_iter().collect()
     }
 
     fn mark_broken(&mut self, through: u64, now: Instant) {
@@ -252,8 +254,8 @@ mod tests {
         let t0 = Instant::now();
         let mut g = GapTracker::new();
         g.on_frame(key(0), t0);
-        assert_eq!(g.reset(t0), vec![Control::Keyframe]);
-        assert_eq!(g.on_frame(p(1, 1), t0).0, Verdict::Skip);
+        g.reset(t0);
+        assert_eq!(g.on_frame(p(1, 1), t0), (Verdict::Skip, vec![Control::Keyframe]));
         assert_eq!(g.on_frame(key(2), t0).0, Verdict::Decode);
     }
 }

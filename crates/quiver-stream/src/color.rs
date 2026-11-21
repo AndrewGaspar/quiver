@@ -1,6 +1,6 @@
 //! Y'CbCr to R'G'B': the matrix the conversion shader applies to stored samples.
 
-use crate::av::{AVCOL_RANGE_JPEG, AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT470BG, AVCOL_SPC_SMPTE170M, AVCOL_TRC_SMPTE2084, FrameColor};
+use crate::av::{AVCOL_RANGE_JPEG, AVCOL_SPC_BT470BG, AVCOL_SPC_BT2020_NCL, AVCOL_SPC_SMPTE170M, AVCOL_TRC_SMPTE2084, FrameColor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Matrix {
@@ -61,11 +61,8 @@ impl YuvParams {
         let kg = 1.0 - kr - kb;
         let s = (1u32 << self.depth.saturating_sub(8)) as f32;
         let max = ((1u64 << self.depth) - 1) as f32;
-        let (yo, ys, co, cs) = if self.full_range {
-            (0.0, max, (1u32 << (self.depth - 1)) as f32, max)
-        } else {
-            (16.0 * s, 219.0 * s, 128.0 * s, 224.0 * s)
-        };
+        let (yo, ys, co, cs) =
+            if self.full_range { (0.0, max, (1u32 << (self.depth - 1)) as f32, max) } else { (16.0 * s, 219.0 * s, 128.0 * s, 224.0 * s) };
         let k = self.code_scale;
         let a = 2.0 * (1.0 - kr);
         let d = 2.0 * (1.0 - kb);

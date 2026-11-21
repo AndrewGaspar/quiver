@@ -346,12 +346,7 @@ impl Picture {
         }
     }
     pub fn color(&self) -> FrameColor {
-        FrameColor {
-            range: self.raw.color_range,
-            space: self.raw.colorspace,
-            trc: self.raw.color_trc,
-            primaries: self.raw.color_primaries,
-        }
+        FrameColor { range: self.raw.color_range, space: self.raw.colorspace, trc: self.raw.color_trc, primaries: self.raw.color_primaries }
     }
 
     /// A CPU plane's rows: (bytes, stride, rows).

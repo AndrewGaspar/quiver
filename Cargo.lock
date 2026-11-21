@@ -4871,6 +4871,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
+ "x11rb",
 ]
 
 [[package]]
@@ -5606,6 +5607,7 @@ version = "0.7.3+SDL-3.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e68da4d2bcf29a81a1ea71ec27b93bb27151d649c2b186eb5988ad4dcb17d11"
 dependencies = [
+ "ash",
  "pkg-config",
  "vcpkg",
 ]

@@ -216,8 +216,7 @@ mod tests {
     /// Feed `n` packets 5 ms apart, each arriving `delay(seq)` after capture, pulling a frame
     /// every 5 ms; returns the pulls.
     fn run(jb: &mut JitterBuffer, n: u64, delay: impl Fn(u64) -> u64, skip: &[u64]) -> Vec<Pull> {
-        let mut arrivals: Vec<(u64, u64)> =
-            (0..n).filter(|s| !skip.contains(s)).map(|s| (s * 5_000 + delay(s), s)).collect();
+        let mut arrivals: Vec<(u64, u64)> = (0..n).filter(|s| !skip.contains(s)).map(|s| (s * 5_000 + delay(s), s)).collect();
         arrivals.sort();
         let mut out = Vec::new();
         let mut i = 0;

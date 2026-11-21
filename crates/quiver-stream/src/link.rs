@@ -19,7 +19,10 @@ use quiver_stream_proto::{AudioPacket, Control, EncodedFrame};
 pub enum VideoIn {
     Frame(EncodedFrame),
     /// Frames `first..=last` never arrived whole, even after FEC.
-    Lost { first: u64, last: u64 },
+    Lost {
+        first: u64,
+        last: u64,
+    },
 }
 
 /// Audio, in order.
@@ -37,7 +40,9 @@ pub enum ControlIn {
     /// [`quiver_stream_proto::ClientStats`] and the stats chip.
     Transport(TransportStats),
     /// The link is gone (the host ended the stream, or the network did).
-    Closed { reason: String },
+    Closed {
+        reason: String,
+    },
 }
 
 /// The transport's side of the stats, since the last report.
@@ -88,8 +93,5 @@ pub fn loopback() -> (StreamLink, HostEnd) {
     let (at, ar) = unbounded();
     let (ct, cr) = unbounded();
     let (ot, or) = unbounded();
-    (
-        StreamLink { video: vr, audio: ar, control: cr, out: ot },
-        HostEnd { video: vt, audio: at, control: ct, from_client: or },
-    )
+    (StreamLink { video: vr, audio: ar, control: cr, out: ot }, HostEnd { video: vt, audio: at, control: ct, from_client: or })
 }

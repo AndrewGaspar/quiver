@@ -63,7 +63,9 @@ pub fn decode(file: &Path, fps: f64, backend: Option<Backend>, max_frames: usize
     // The first frames include the decoder's set-up; leave them out of the numbers.
     const WARMUP: usize = 10;
     while n < max_frames {
-        let Some((data, _key)) = dmx.read()? else { break };
+        let Some((data, _key)) = dmx.read()? else {
+            break;
+        };
         let due = start + period * n as u32;
         if let Some(wait) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);

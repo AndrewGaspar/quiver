@@ -104,21 +104,20 @@ impl Gpu {
             layers.push(c"VK_LAYER_KHRONOS_validation".as_ptr());
         }
         let ptrs: Vec<*const c_char> = exts.iter().map(|e| e.as_ptr()).collect();
-        let app = vk::ApplicationInfo::default()
-            .application_name(c"quiver-stream")
-            .engine_name(c"quiver")
-            .api_version(vk::API_VERSION_1_3);
-        let info = vk::InstanceCreateInfo::default()
-            .application_info(&app)
-            .enabled_extension_names(&ptrs)
-            .enabled_layer_names(&layers);
+        let app = vk::ApplicationInfo::default().application_name(c"quiver-stream").engine_name(c"quiver").api_version(vk::API_VERSION_1_3);
+        let info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&ptrs).enabled_layer_names(&layers);
         let instance = unsafe { entry.create_instance(&info, None) }.context("vkCreateInstance")?;
         Ok((entry, instance, exts))
     }
 
     /// The device: the first GPU that can present to `surface` (any GPU without one),
     /// preferring a discrete one.
-    pub fn new(entry: ash::Entry, instance: ash::Instance, instance_extensions: Vec<CString>, surface: Option<vk::SurfaceKHR>) -> Result<Self> {
+    pub fn new(
+        entry: ash::Entry,
+        instance: ash::Instance,
+        instance_extensions: Vec<CString>,
+        surface: Option<vk::SurfaceKHR>,
+    ) -> Result<Self> {
         let surface_fn = surface.map(|_| ash::khr::surface::Instance::new(&entry, &instance));
         let mut candidates = Vec::new();
         for pd in unsafe { instance.enumerate_physical_devices() }? {
@@ -226,7 +225,12 @@ impl Gpu {
                         queue_infos.push((i as u32, count));
                     }
                     decode_families.push((i as u32, *ops));
-                    libav_families.push(QsVkQueueFamily { idx: i as i32, num: count as i32, flags: families[i].0.as_raw(), video_caps: ops.as_raw() });
+                    libav_families.push(QsVkQueueFamily {
+                        idx: i as i32,
+                        num: count as i32,
+                        flags: families[i].0.as_raw(),
+                        video_caps: ops.as_raw(),
+                    });
                 }
             }
         }
@@ -336,16 +340,13 @@ impl Gpu {
         let vq = ash::khr::video_queue::Instance::new(&self.entry, &self.instance);
         let query = |depth: vk::VideoComponentBitDepthFlagsKHR, chroma: vk::VideoChromaSubsamplingFlagsKHR| -> Option<vk::Extent2D> {
             let op;
-            let mut h264 = vk::VideoDecodeH264ProfileInfoKHR::default()
-                .picture_layout(vk::VideoDecodeH264PictureLayoutFlagsKHR::PROGRESSIVE);
+            let mut h264 =
+                vk::VideoDecodeH264ProfileInfoKHR::default().picture_layout(vk::VideoDecodeH264PictureLayoutFlagsKHR::PROGRESSIVE);
             let mut h265 = vk::VideoDecodeH265ProfileInfoKHR::default();
             let mut av1 = vk::VideoDecodeAV1ProfileInfoKHR::default();
             let ten = depth == vk::VideoComponentBitDepthFlagsKHR::TYPE_10;
             let c444 = chroma == vk::VideoChromaSubsamplingFlagsKHR::TYPE_444;
-            let mut profile = vk::VideoProfileInfoKHR::default()
-                .chroma_subsampling(chroma)
-                .luma_bit_depth(depth)
-                .chroma_bit_depth(depth);
+            let mut profile = vk::VideoProfileInfoKHR::default().chroma_subsampling(chroma).luma_bit_depth(depth).chroma_bit_depth(depth);
             let mut c_h264 = vk::VideoDecodeH264CapabilitiesKHR::default();
             let mut c_h265 = vk::VideoDecodeH265CapabilitiesKHR::default();
             let mut c_av1 = vk::VideoDecodeAV1CapabilitiesKHR::default();
@@ -377,7 +378,8 @@ impl Gpu {
                 }
                 quiver_stream_proto::VideoCodec::Av1 => {
                     op = vk::VideoCodecOperationFlagsKHR::DECODE_AV1;
-                    av1.std_profile = if c444 { StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH } else { StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN };
+                    av1.std_profile =
+                        if c444 { StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH } else { StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN };
                     profile = profile.push_next(&mut av1);
                     caps = caps.push_next(&mut c_av1);
                 }

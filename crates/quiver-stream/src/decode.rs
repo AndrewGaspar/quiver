@@ -110,7 +110,9 @@ impl VideoDecoder {
 
     /// Decode one access unit; returns the pictures it produced (one, with low delay).
     pub fn decode(&mut self, data: &[u8], pts: i64) -> Result<Vec<Picture>, i32> {
-        let Some(d) = self.dec.as_mut() else { return Err(-1) };
+        let Some(d) = self.dec.as_mut() else {
+            return Err(-1);
+        };
         d.send(data, pts)?;
         let mut out = Vec::new();
         while let Some(p) = d.receive()? {
@@ -131,11 +133,25 @@ impl VideoDecoder {
                 if c.yuv444 {
                     chroma.push(Chroma::Yuv444);
                 }
-                out.push(DecoderCaps { codec, hardware: true, max_width: c.max_width, max_height: c.max_height, ten_bit: c.ten_bit, chroma });
+                out.push(DecoderCaps {
+                    codec,
+                    hardware: true,
+                    max_width: c.max_width,
+                    max_height: c.max_height,
+                    ten_bit: c.ten_bit,
+                    chroma,
+                });
             } else if (cuda || vaapi) && Decoder::open(codec, None, 1).is_ok() {
                 // NVDEC/VA-API limits aren't queryable through libav; these are the common
                 // floor of current hardware.
-                out.push(DecoderCaps { codec, hardware: true, max_width: 4096, max_height: 4096, ten_bit: true, chroma: vec![Chroma::Yuv420] });
+                out.push(DecoderCaps {
+                    codec,
+                    hardware: true,
+                    max_width: 4096,
+                    max_height: 4096,
+                    ten_bit: true,
+                    chroma: vec![Chroma::Yuv420],
+                });
             } else if Decoder::open(codec, None, 1).is_ok() {
                 out.push(DecoderCaps {
                     codec,
