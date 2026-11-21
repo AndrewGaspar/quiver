@@ -14,6 +14,7 @@ use chrono::{DateTime, Duration as Span, Local, NaiveTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+pub mod accounts;
 pub mod detail;
 pub mod downloads;
 pub mod perf;
@@ -211,6 +212,7 @@ impl Demo {
         if let Request::Perf(p) = req {
             return perf::handle(self, &st, p);
         }
+        let req = match accounts::handle(self, req)? { Ok(v) => return Ok(v), Err(req) => req };
         let req = match remote::handle(self, &st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = stores::handle(self, &mut st, &req)? {
             return Ok(v);

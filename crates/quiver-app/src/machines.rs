@@ -362,6 +362,12 @@ impl Quiver {
             }
             Event::PeerOffline { .. } => self.machines_reload(cx),
             Event::PairingEnded { .. } => self.machines_pairing_ended(&e, cx),
+            // Presence comes from this machine's quiverd whichever machine is shown.
+            Event::AccountsPresenceChanged | Event::StoreAccountsChanged { .. } | Event::GameStarted { .. } | Event::GameStopped { .. }
+                if matches!(self.mx.view, View::Machine(_)) =>
+            {
+                self.load_presence(cx)
+            }
             _ => {}
         }
         if !matches!(self.mx.view, View::Machine(_)) {

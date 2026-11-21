@@ -481,6 +481,13 @@ impl Quiver {
             kvs = kvs.child(kv(th, "Owned by", txt(owners.join(", "))));
         }
         let (acct, over) = self.launch_account(id);
+        // Ubisoft keeps one live session per account: say when another machine has it.
+        let playing_on = if g.entry.game.is_ubisoft() {
+            self.presence_wanted(cx);
+            self.playing_elsewhere(quiver_api::StoreId::Ubisoft, &acct)
+        } else {
+            None
+        };
         kvs = kvs.child(kv(
             th,
             "Launch account",
@@ -499,6 +506,18 @@ impl Quiver {
                     cx.notify();
                 })),
         ));
+        if let Some(m) = playing_on {
+            kvs = kvs.child(kv(
+                th,
+                "Live session",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(icon(Icon::Server, 12., th.warn))
+                    .child(div().min_w_0().truncate().text_color(th.warn).child(format!("In use on {m} now"))),
+            ));
+        }
         if g.installed() {
             let export = |kind: ExportKind| -> AnyElement {
                 match self.gp.export(id, kind) {
