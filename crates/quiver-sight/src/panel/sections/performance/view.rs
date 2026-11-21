@@ -37,23 +37,29 @@ fn heading(th: &Theme, title: &str, src: Option<&str>) -> Div {
 
 /// One segmented control (`.seg`): its options, the chosen one in the accent.
 fn seg(th: &Theme, items: Vec<(String, bool)>, compact: bool) -> Div {
-    div().flex().gap(px(3.)).p(px(3.)).rounded(px(9.)).bg(th.tx1.opacity(0.05)).children(items.into_iter().map(move |(label, on)| {
-        div()
-            .flex_1()
-            .min_w(px(if compact { 34. } else { 30. }))
-            .h(px(if compact { 26. } else { 32. }))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(7.))
-            .text_size(px(if compact { 12. } else { 13. }))
-            .font_weight(SEMIBOLD)
-            .whitespace_nowrap()
-            .bg(if on { th.acc } else { th.ink2.opacity(0.0) })
-            .text_color(if on { th.acc_ink } else { th.tx2 })
-            .child(label)
-    }))
+    seg_bar(th).children(items.into_iter().map(|(label, on)| segment(th, label, on, compact)))
+}
+
+fn seg_bar(th: &Theme) -> Div {
+    div().flex().flex_wrap().gap(px(3.)).p(px(3.)).rounded(px(9.)).bg(th.tx1.opacity(0.05))
+}
+
+fn segment(th: &Theme, label: String, on: bool, compact: bool) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(if compact { 34. } else { 30. }))
+        .h(px(if compact { 26. } else { 32. }))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .text_size(px(if compact { 12. } else { 13. }))
+        .font_weight(SEMIBOLD)
+        .whitespace_nowrap()
+        .bg(if on { th.acc } else { th.ink2.opacity(0.0) })
+        .text_color(if on { th.acc_ink } else { th.tx2 })
+        .child(label)
 }
 
 /// Whether control `c` has the panel's focus.
@@ -257,23 +263,25 @@ fn cap_card(v: &PanelView, th: &Theme, cx: &mut Context<PanelView>) -> Div {
     let on = has_focus(v, Ctl::Cap);
     let body = match st {
         Some(_) => {
-            let items = cap_choices(&cur).iter().map(|c| (cap_label(c), quiver_api::options::same_value(c, &cur))).collect();
-            let s = target(v, th, seg(th, items, false), on, 10.).id("perf-cap").cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.perf_focus(Ctl::Cap, cx)));
+            let choices = cap_choices(&cur).into_iter().enumerate().map(|(i, value)| {
+                segment(th, cap_label(&value), quiver_api::options::same_value(&value, &cur), false)
+                    .id(("fps-cap", i)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                        this.perf_focus(Ctl::Cap, cx);
+                        this.perf_acts(vec![super::Act::SetTweak(CAP_TWEAK.into(), value.clone())], cx);
+                    }))
+            });
+            let s = target(v, th, seg_bar(th).children(choices), on, 10.);
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(s)
                 .child(div().text_size(px(13.)).text_color(th.tx2).child(cap_enforcer(st, &cur, super::metric(d, "nv.reflex.cap", Stat::Last))))
-                .when_some(v.tweak_outcome(CAP_TWEAK), |d, (t, tone)| d.child(note_line(th, format!("{} · {t}", d_scope(v)), tone)))
+                .when_some(v.cap_outcome(), |d, (t, tone)| d.child(note_line(th, t, tone)))
         }
         None => div().text_size(px(13.)).text_color(th.tx3).child("Quiver Tweaks aren't loaded for this game."),
     };
     card(th).flex_1().min_w(px(220.)).gap(px(10.)).child(heading(th, "Frame rate cap", Some("Quiver Tweaks"))).child(body)
-}
-
-fn d_scope(v: &PanelView) -> String {
-    format!("Saved to {}", v.data.tweak_scope_name)
 }
 
 /// The HUD: hidden or a preset, the layout editor, and where it's drawn.

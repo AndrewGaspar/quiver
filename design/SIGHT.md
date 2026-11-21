@@ -1368,16 +1368,16 @@ other than Hyprland, the exclusive fallback on a compositor that needs it, multi
 - One `Input` vocabulary for keyboard and pad, shared with the app (moved to `quiver-ui`):
   Up/Down move (side list or rows), Right/A enter the rows, Left/Right adjust a stepper or
   toggle (Left on a plain row goes back to the side list), A activates (cycles a value,
-  opens a confirmation, reveals a hidden achievement), B goes back then closes, LB/RB and
-  LT/RT switch sections (wrapping). Keys: arrows (and hjkl), Enter/Space, Escape/Backspace,
-  Tab/Shift+Tab, `[` `]`, Page Up/Down. Mouse: click sections, rows, ◀ ▶, dialog buttons.
+  opens a confirmation, reveals a hidden achievement), B goes back then closes, LB/RB switch
+  sections, LT/RT step through the current section’s pages or filters. Arrows (and hjkl),
+  Enter/Space, Escape/Backspace, Page Up/Down and Home/End provide the keyboard equivalents. Mouse: click sections, rows, ◀ ▶, dialog buttons.
 - **The controller, two paths.** Spike S6's question turned out to matter: in a hyprpad mode
   that doesn't forward, no evdev device carries the real pad (hyprpad reads the Steam
   Controller over a root-only hidraw node, grabs evdev pads like the Elite, and its virtual
   pad, which the game and gilrs see, goes neutral). So the panel takes the pad as **keys
   typed by hyprpad** in its `quiver-sight` mode (`tools/hyprpad/quiver-sight.lua`: D-pad and
-  stick flicks → arrows, A → Enter, B → Escape, X → Space, LB/RB/LT/RT → Page Up/Down; held
-  buttons hold keys, so key repeat works). gilrs still reads pads read-only (the app's
+  stick flicks → arrows, A → Enter, B → Escape, X → x, Y → y, LB/RB → Page Up/Down,
+  LT/RT → Home/End and R3 → Tab). gilrs still reads pads read-only (the app's
   `gamepad.rs`, now shared) for setups without hyprpad or pads hyprpad doesn't own; there the
   game sees the pad too, and the hint bar says so. The two never both deliver a press: in
   the `quiver-sight` mode gilrs sees only the neutral virtual pad.
@@ -1689,9 +1689,10 @@ Toward the SightMods / SightSession / docked mock-ups (`panel/view.rs`, `panel/h
   (The scope picker of the docked mock isn't built: it saves at the running profile's scope.)
 - **Keys** (`state::panel_key`, `tools/hyprpad/quiver-sight.lua`): arrows, Enter, Escape as
   before; LB / RB Page Up / Down (and Q / E, Shift+Tab); LT / RT Home / End (and `[` `]`); X
-  `x` (and Delete); Y `y` (timed on its key-up); R3 Tab. The snippet's old `h.bind("lstick_…")`
-  lines are gone: hyprpad's `h.bind` takes guide chords only, and they stopped the whole
-  config from loading.
+  `x` (and Delete); Y `y` (timed on its key-up); R3 Tab. On hyprpad builds with bare stick flicks, the left stick sends arrows
+  and repeats when `flick_repeat` is enabled. The right trackpad moves the pointer and its
+  click selects. The left trackpad scrolls when Sight is enabled in the cursor and scroll
+  mode lists in the user's config.
 
 ### Session and Achievements as cards (2026-11-19)
 

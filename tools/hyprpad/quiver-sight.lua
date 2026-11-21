@@ -15,7 +15,7 @@
 --      layer-shell surface, namespace exactly `quiver-sight`, matched as before. The mode
 --      doesn't forward, so the game's virtual pad goes neutral (held buttons released) while
 --      the panel is open, and comes back when it closes.
---   2. In that mode the pad types keys: D-pad: arrows · A: Enter · B: Escape · X: x (reset
+--   2. In that mode the pad types keys: D-pad and left stick: arrows · A: Enter · B: Escape · X: x (reset
 --      to default; Achievements: reveal) · Y: y (tap: pin to the quick menu; hold on a live
 --      option: compare its old and new value until you let go) · LB / RB: Page Up / Page Down
 --      (previous / next section) · LT / RT: Home / End (the section's tabs: Mods' and
@@ -74,8 +74,19 @@ local keys = {
 for button, key in pairs(keys) do
   h.button(button, "Quiver Sight: " .. key, h.key(key)):only_in("quiver-sight")
 end
--- (No stick flicks: hyprpad's h.bind takes guide chords only, and an `h.bind("lstick_left",
--- …)` line stops the whole config from loading. The D-pad moves.)
+h.button("rpad_click", "Quiver Sight: click", h.mouse "left"):only_in("quiver-sight")
+
+-- Current hyprpad supports bare stick flicks. A held flick repeats with
+-- h.sticks { flick_repeat = true }. If your config also binds a bare flick,
+-- hyprpad has one action per gesture: route that action by HYPRPAD_MODE.
+for _, dir in ipairs({ "up", "down", "left", "right" }) do
+  -- Older releases accept only Guide chords in h.bind.
+  local supported, binding = pcall(h.bind, "lstick_" .. dir, "Quiver Sight: " .. dir, h.key(dir))
+  if not supported then break end
+  binding:only_in("quiver-sight")
+end
+-- Add "quiver-sight" to the only_in lists of your h.cursor and h.scroll
+-- settings for right-trackpad pointing and left-trackpad scrolling.
 
 -- 3. The chord: tap for the panel, HOLD for the quick menu (design/SIGHT.md §16).
 --

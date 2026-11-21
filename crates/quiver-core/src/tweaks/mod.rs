@@ -485,7 +485,7 @@ pub type OpResult = (String, Option<Outcome>, Option<Value>, Option<Value>);
 /// The bound tweak values for a profile's surfaces (surface key → option → (source, value)):
 /// the default layer between mod config patches and the profile's own values (steer 8).
 pub fn bound_for(ctx: &Ctx) -> Result<Bound> {
-    let game = GameRef::ubisoft(ctx.store.product_id());
+    let game = ctx.store.game_ref();
     let scopes = Scopes::load(ctx.store.data_dir(), Some(&game), Some((&ctx.store, &ctx.profile_id)))?;
     let resolved = resolve(schema(), &scopes, ScopeKind::Profile);
     let values = effective(&resolved);

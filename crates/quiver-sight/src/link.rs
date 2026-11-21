@@ -53,6 +53,7 @@ pub enum Msg {
     NoticeAnswered(String),
     /// Sight's settings changed.
     Settings(Box<SightSettings>),
+    PinFailed { scope: String, reason: String },
     /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
     QuickPoll,
     /// quiverd's answer to the Performance section (`panel::sections::performance`).
@@ -407,9 +408,9 @@ fn handle(client: &Client, tx: &UnboundedSender<Msg>, sub: &Arc<Mutex<Option<u64
                 Ok(st) => send(Msg::Settings(Box::new(st))),
                 Err(e) => tracing::info!(%key, "Sight setting: {e:#}"),
             },
-            LinkReq::Pin { scope, pin, on } => match client.call::<SightSettings>(Request::Sight(SightRequest::Pin { scope, pin, on })).await {
+            LinkReq::Pin { scope, pin, on } => match client.call::<SightSettings>(Request::Sight(SightRequest::Pin { scope: scope.clone(), pin, on })).await {
                 Ok(st) => send(Msg::Settings(Box::new(st))),
-                Err(e) => send(Msg::Toast(crate::toasts::ToastData { kind: crate::toasts::ToastKind::Error, title: "Couldn't pin it".into(), body: Some(format!("{e:#}")), urgent: true, ..Default::default() })),
+                Err(e) => send(Msg::PinFailed { scope, reason: format!("{e:#}") }),
             },
         }
     });

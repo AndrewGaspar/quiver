@@ -240,7 +240,7 @@ fn the_cap_says_who_enforces_it() {
     let st = d.tweaks.ready().unwrap().options.get(CAP_TWEAK).unwrap();
     let reflex = PerfValue { value: Some(120.0), text: "120".into(), unit: "fps".into(), ..Default::default() };
     let s = cap_enforcer(Some(st), &json!(120), Some(&reflex));
-    assert!(s.starts_with("Set by DLSS (reflex.fps_limit)"), "{s}");
+    assert!(s.starts_with("Set by DLSS (reflex.fps_limit = 120)"), "{s}");
     assert!(s.contains("Reflex cap: 120 fps"), "{s}");
     assert!(cap_enforcer(Some(st), &json!(0), None).starts_with("No cap from Quiver"));
     let mut dxvk = st.clone();

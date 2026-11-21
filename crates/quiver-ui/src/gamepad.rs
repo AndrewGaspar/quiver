@@ -16,6 +16,10 @@ pub enum PadEvent {
     Input(Input),
     /// Right stick: scroll by this many pixels (positive = down).
     Scroll(f32),
+    /// Right stick click (Sight docks or centres the panel).
+    RightStickClick,
+    /// Release of the menu button (Sight distinguishes a tap from a hold).
+    MenuReleased,
     Connected(String),
     Disconnected,
     /// The long-press chord of [`PadOptions::chord`] was held long enough (once per hold).
@@ -347,6 +351,8 @@ pub fn spawn_with(opts: PadOptions, send: impl Fn(PadEvent) + Send + 'static) {
                                 if let Some(d) = dirs.dpad(d, true, now) {
                                     send(PadEvent::Input(d.input()));
                                 }
+                            } else if b == Button::RightThumb {
+                                send(PadEvent::RightStickClick);
                             } else if let Some(i) = map_button(b) {
                                 send(PadEvent::Input(i));
                             }
@@ -356,7 +362,11 @@ pub fn spawn_with(opts: PadOptions, send: impl Fn(PadEvent) + Send + 'static) {
                                 c.button(b, false, now);
                             }
                             if let Some(d) = dpad_dir(b) {
-                                dirs.dpad(d, false, now);
+                                if let Some(next) = dirs.dpad(d, false, now) {
+                                    send(PadEvent::Input(next.input()));
+                                }
+                            } else if b == Button::North {
+                                send(PadEvent::MenuReleased);
                             }
                         }
                         AxisChanged(axis, v, _) => match axis {

@@ -314,9 +314,9 @@ static void do_axis(struct wl_resource *r, void *p)
 {
     struct two *t = p;
     int v = wl_resource_get_version(r);
-    if (v >= 5) wl_pointer_send_axis_source(r, WL_POINTER_AXIS_SOURCE_WHEEL);
-    if (v >= 8) wl_pointer_send_axis_value120(r, WL_POINTER_AXIS_VERTICAL_SCROLL, t->a * 120);
-    else if (v >= 5) wl_pointer_send_axis_discrete(r, WL_POINTER_AXIS_VERTICAL_SCROLL, t->a);
+    if (v >= 5) wl_pointer_send_axis_source(r, t->b ? WL_POINTER_AXIS_SOURCE_FINGER : WL_POINTER_AXIS_SOURCE_WHEEL);
+    if (!t->b && v >= 8) wl_pointer_send_axis_value120(r, WL_POINTER_AXIS_VERTICAL_SCROLL, t->a * 120);
+    else if (!t->b && v >= 5) wl_pointer_send_axis_discrete(r, WL_POINTER_AXIS_VERTICAL_SCROLL, t->a);
     wl_pointer_send_axis(r, now_ms(), WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(t->a * 10));
     if (wl_resource_get_version(r) >= 5) wl_pointer_send_frame(r);
 }

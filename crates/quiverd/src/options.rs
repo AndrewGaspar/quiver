@@ -504,70 +504,7 @@ impl Daemon {
             let r = with_store_lock(move || opt::append(&store, &pid, values, raw, &src, sess, msg, ch)).await?;
             out.revision = r.revision;
         }
-        // Deliver live: per surface, the SDK if connected, else the file channel.
-        let mut delivered: BTreeMap<String, Result<LiveChannel, String>> = BTreeMap::new();
-        let mut sdk_rejects: BTreeMap<(String, String), Outcome> = BTreeMap::new();
-        if delivering && let Some(s) = &running {
-            let touched: Vec<String> = applied.outcomes.iter().filter(|o| o.2.is_none()).map(|o| o.0.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-            let saved = opt::current(&ctx.store, &ctx.profile_id)?;
-            for key in touched {
-                let Some(surf) = ctx.surfaces.iter().find(|x| x.key == key) else { continue };
-                let sdk = self.options.sdk().filter(|l| l.connected(&s.record.session, &surf.schema().surface));
-                if let Some(link) = sdk {
-                    let ev = opt::eval(&ctx, surf, &saved.values, &saved.raw, Some(&session_values));
-                    let vals: Vec<SdkValue> = applied
-                        .outcomes
-                        .iter()
-                        .filter(|o| o.0 == key && o.2.is_none())
-                        .filter_map(|o| ev.options.get(&o.1).map(|e| SdkValue { id: o.1.clone(), text: e.def.to_text(&e.effective()), json: e.effective() }))
-                        .collect();
-                    match link.push(&s.record.session, &surf.schema().surface, vals).await {
-                        SdkAck::Applied => {
-                            delivered.insert(key.clone(), Ok(LiveChannel::Sdk));
-                        }
-                        SdkAck::Rejected(why) => {
-                            delivered.insert(key.clone(), Ok(LiveChannel::Sdk));
-                            for (id, r) in why {
-                                sdk_rejects.insert((key.clone(), id), Outcome::Rejected { reason: format!("the mod refused it: {r} (saved; applies next launch)") });
-                            }
-                        }
-                        SdkAck::TimedOut => {
-                            for o in applied.outcomes.iter().filter(|o| o.0 == key && o.2.is_none()) {
-                                sdk_rejects.insert((key.clone(), o.1.clone()), Outcome::TimedOut);
-                            }
-                        }
-                        SdkAck::Gone => {
-                            delivered.insert(key.clone(), Err("the mod's SDK channel closed".into()));
-                        }
-                    }
-                    continue;
-                }
-                if !opt::has_live_file(surf) {
-                    continue;
-                }
-                let result = match (&s.root, s.pids.first()) {
-                    (Some(root), _) => opt::write_live_at(&ctx, surf, &saved.values, &saved.raw, Some(&session_values), root),
-                    (None, Some(&pid)) => opt::write_live(&ctx, surf, &saved.values, &saved.raw, Some(&session_values), pid),
-                    (None, None) => Err(anyhow::anyhow!("the game's process isn't known yet")),
-                };
-                match result {
-                    Ok(files) => {
-                        out.live.push(format!("{} is running ({}): rewrote {}", self.name_of(game), surf.title(), files.join(", ")));
-                        delivered.insert(key.clone(), Ok(LiveChannel::File));
-                    }
-                    Err(e) => {
-                        out.warnings.push(format!("live: {e:#}"));
-                        delivered.insert(key.clone(), Err(format!("rewriting the file in the running game failed: {e:#}; applies next launch")));
-                    }
-                }
-            }
-        }
-        let mut outcomes: Vec<OpOutcome> = opt::outcomes(&ctx, &applied, running.is_some() && live != Live::No, &delivered);
-        for o in outcomes.iter_mut() {
-            if let Some(x) = sdk_rejects.remove(&(o.surface.clone(), o.id.clone())) {
-                o.outcome = x;
-            }
-        }
+        let mut outcomes = self.deliver_options(&ctx, game, &applied, running.as_ref().filter(|_| delivering), &session_values, &mut out).await?;
         if live == Live::No && running.is_some() {
             for o in outcomes.iter_mut().filter(|o| matches!(o.outcome, Outcome::SavedRestart { .. })) {
                 let apply = ctx.surfaces.iter().find(|s| s.key == o.surface).and_then(|s| s.schema().options.get(&o.id)).map(|d| d.apply);
@@ -631,6 +568,130 @@ impl Daemon {
             );
         }
         Ok(out)
+    }
+
+    async fn deliver_options(&self, ctx: &Ctx, game: GameRef, applied: &opt::Applied, running: Option<&LiveSession>, session_values: &Values, out: &mut OptionsChange) -> Result<Vec<OpOutcome>> {
+        // Deliver live: per surface, the SDK if connected, else the file channel.
+        let mut delivered: BTreeMap<String, Result<LiveChannel, String>> = BTreeMap::new();
+        let mut sdk_rejects: BTreeMap<(String, String), Outcome> = BTreeMap::new();
+        if let Some(s) = running {
+            let touched: Vec<String> = applied.outcomes.iter().filter(|o| o.2.is_none()).map(|o| o.0.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            let saved = opt::current(&ctx.store, &ctx.profile_id)?;
+            for key in touched {
+                let Some(surf) = ctx.surfaces.iter().find(|x| x.key == key) else { continue };
+                let sdk = self.options.sdk().filter(|l| l.connected(&s.record.session, &surf.schema().surface));
+                if let Some(link) = sdk {
+                    let ev = opt::eval(ctx, surf, &saved.values, &saved.raw, Some(session_values));
+                    let vals: Vec<SdkValue> = applied
+                        .outcomes
+                        .iter()
+                        .filter(|o| o.0 == key && o.2.is_none())
+                        .filter_map(|o| ev.options.get(&o.1).map(|e| SdkValue { id: o.1.clone(), text: e.def.to_text(&e.effective()), json: e.effective() }))
+                        .collect();
+                    match link.push(&s.record.session, &surf.schema().surface, vals).await {
+                        SdkAck::Applied => {
+                            delivered.insert(key.clone(), Ok(LiveChannel::Sdk));
+                        }
+                        SdkAck::Rejected(why) => {
+                            delivered.insert(key.clone(), Ok(LiveChannel::Sdk));
+                            for (id, r) in why {
+                                sdk_rejects.insert((key.clone(), id), Outcome::Rejected { reason: format!("the mod refused it: {r} (saved; applies next launch)") });
+                            }
+                        }
+                        SdkAck::TimedOut => {
+                            for o in applied.outcomes.iter().filter(|o| o.0 == key && o.2.is_none()) {
+                                sdk_rejects.insert((key.clone(), o.1.clone()), Outcome::TimedOut);
+                            }
+                        }
+                        SdkAck::Gone => {
+                            delivered.insert(key.clone(), Err("the mod's SDK channel closed".into()));
+                        }
+                    }
+                    continue;
+                }
+                if !opt::has_live_file(surf) {
+                    continue;
+                }
+                let result = match (&s.root, s.pids.first()) {
+                    (Some(root), _) => opt::write_live_at(ctx, surf, &saved.values, &saved.raw, Some(session_values), root),
+                    (None, Some(&pid)) => opt::write_live(ctx, surf, &saved.values, &saved.raw, Some(session_values), pid),
+                    (None, None) => Err(anyhow::anyhow!("the game's process isn't known yet")),
+                };
+                match result {
+                    Ok(files) => {
+                        out.live.push(format!("{} is running ({}): rewrote {}", self.name_of(game), surf.title(), files.join(", ")));
+                        delivered.insert(key.clone(), Ok(LiveChannel::File));
+                    }
+                    Err(e) => {
+                        out.warnings.push(format!("live: {e:#}"));
+                        delivered.insert(key.clone(), Err(format!("rewriting the file in the running game failed: {e:#}; applies next launch")));
+                    }
+                }
+            }
+        }
+        let mut outcomes: Vec<OpOutcome> = opt::outcomes(ctx, applied, running.is_some(), &delivered);
+        for o in outcomes.iter_mut() {
+            if let Some(x) = sdk_rejects.remove(&(o.surface.clone(), o.id.clone())) {
+                o.outcome = x;
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Re-evaluate the saved cap in the running profile. Send the provider's
+    /// effective option through its normal channel without writing an option
+    /// revision or creating an override that would mask later tweak edits.
+    pub(super) async fn apply_session_cap(&self, scope: &quiver_api::tweaks::Scope, session: &str, i: usize, out: &mut OptionsChange) -> Result<()> {
+        use quiver_api::options::{Apply, ProvideMode};
+        use quiver_api::tweaks::{Prefer, Scope, ScopeKind};
+        use quiver_core::tweaks as tw;
+
+        let Some(s) = self.options.session(session) else { return Ok(()) };
+        let game = rec_game(&s.record);
+        if scope.game() != Some(game) || matches!(scope, Scope::Profile { profile, .. } if profile.as_deref() != Some(&s.record.profile)) {
+            return Ok(());
+        }
+        let ctx = ctx_for(game, Some(&s.record.profile))?;
+        let scopes = tw::Scopes::load(&quiver_core::launcher::data_dir(), Some(&game), Some((&ctx.store, &ctx.profile_id)))?;
+        if scopes.prefer(ScopeKind::Profile).get("fps.cap").is_some_and(|v| v.0 == Prefer::Quiver) {
+            return Ok(());
+        }
+        let Some(p) = tw::providers(&ctx).0.into_iter().find(|p| p.tweak == "fps.cap" && p.def.mode == ProvideMode::Bind) else { return Ok(()) };
+        let id = &p.def.option;
+        let Some(surf) = ctx.surfaces.iter().find(|surf| surf.key == p.surface && s.has.contains_key(&surf.key)) else { return Ok(()) };
+        let saved = opt::current(&ctx.store, &ctx.profile_id)?;
+        let ev = opt::eval(&ctx, surf, &saved.values, &saved.raw, Some(&s.session_values));
+        let Some(e) = ev.options.get(id).filter(|e| e.def.apply == Apply::Live) else { return Ok(()) };
+        if e.session.is_some() || matches!(e.stored, Some(Ok(_))) {
+            out.outcomes[i].outcome = Outcome::SavedPending { detail: format!("{}'s explicit {} setting takes precedence", p.title, id) };
+            return Ok(());
+        }
+        // An active binding is already normalized (including VRR). On Off
+        // the binding disappears and the mod resumes its underlying default.
+        if e.bound.is_none() && out.outcomes[i].after.as_ref().and_then(Value::as_f64) != Some(0.) {
+            return Ok(());
+        }
+        let sdk = self.options.sdk().is_some_and(|link| link.connected(session, &surf.schema().surface));
+        let live_file = e.binding.as_ref().is_some_and(|b| surf.files.iter().any(|f| f.id == b.file && f.live()));
+        if !sdk && !live_file {
+            out.outcomes[i].outcome = Outcome::SavedPending { detail: format!("{} has no live channel for {id}", p.title) };
+            return Ok(());
+        }
+        let value = e.effective();
+        let before = s.has.get(&surf.key).and_then(|m| m.get(id)).cloned();
+        let applied = opt::Applied {
+            outcomes: vec![(surf.key.clone(), id.clone(), None, before, Some(value.clone()))],
+            ..Default::default()
+        };
+        let outcomes = self.deliver_options(&ctx, game, &applied, Some(&s), &s.session_values, out).await?;
+        let result = outcomes.into_iter().next().expect("one provider option").outcome;
+        if matches!(result, Outcome::AppliedLive { .. }) {
+            self.options.update(session, |s| {
+                s.has.entry(surf.key.clone()).or_default().insert(id.clone(), value);
+            });
+        }
+        out.outcomes[i].outcome = result;
+        Ok(())
     }
 
     // -- launches ---------------------------------------------------------------------------

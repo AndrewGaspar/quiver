@@ -345,7 +345,7 @@ impl Quiver {
         self.tw.saving = true;
         self.tw.danger = None;
         let s = scope.clone();
-        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Set { scope, ops, message, confirmed: !dangers.is_empty() && confirmed }), cx, move |this, r, cx| {
+        self.call::<OptionsChange, _>(Request::Tweaks(TweaksRequest::Set { session: None, scope, ops, message, confirmed: !dangers.is_empty() && confirmed }), cx, move |this, r, cx| {
             this.tw.saving = false;
             if this.tw.scope.as_ref() != Some(&s) {
                 return;

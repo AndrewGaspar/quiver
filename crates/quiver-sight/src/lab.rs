@@ -336,7 +336,8 @@ pub fn start(args: LabArgs, tx: UnboundedSender<Msg>, mut req_rx: tokio::sync::m
                     let _ = l.refuse(format!("Sight setting {key} = {value}"));
                 }
                 LinkReq::Pin { scope, pin, on } => {
-                    let _ = l.refuse(format!("{} {} in {scope}", if on { "pin" } else { "unpin" }, pin.id));
+                    let reason = l.refuse(format!("{} {} in {scope}", if on { "pin" } else { "unpin" }, pin.id));
+                    let _ = l.tx.unbounded_send(Msg::PinFailed { scope, reason });
                 }
             }
         }

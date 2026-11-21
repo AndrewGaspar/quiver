@@ -254,7 +254,7 @@ pub struct PinChange {
 
 /// Y on `row`: an option or a Tweak (adjustable here) is pinned to the running profile's quick
 /// menu (else the game's), or unpinned when it's in `pinned` already.
-pub fn pin_row(d: &PanelData, row: &crate::panel::state::Row, pinned: &[QuickPin]) -> Result<PinChange, String> {
+pub fn pin_row(d: &PanelData, row: &crate::panel::state::Row, pinned: &std::collections::BTreeMap<String, Vec<QuickPin>>) -> Result<PinChange, String> {
     use crate::panel::state::Row;
     let Some(view) = d.session.ready() else { return Err("Not loaded yet".into()) };
     let (pin, st) = match row {
@@ -268,8 +268,13 @@ pub fn pin_row(d: &PanelData, row: &crate::panel::state::Row, pinned: &[QuickPin
     }
     let label = st.def.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| pin.id.clone());
     let pin = QuickPin { label: label.clone(), ..pin };
-    let on = !pinned.iter().any(|p| p.same_item(&pin));
-    let scope = quiver_api::sight::pin_scope(&view.game, view.profile());
+    let profile_scope = quiver_api::sight::pin_scope(&view.game, view.profile());
+    let game_scope = quiver_api::sight::pin_scope(&view.game, None);
+    let owner = [&profile_scope, &game_scope].into_iter().find(|scope| {
+        pinned.get(*scope).is_some_and(|pins| pins.iter().any(|p| p.same_item(&pin)))
+    });
+    let on = owner.is_none();
+    let scope = owner.unwrap_or(&profile_scope).clone();
     let said = if on { format!("{label} pinned to the quick menu") } else { format!("{label} unpinned from the quick menu") };
     Ok(PinChange { scope, pin, on, said })
 }
@@ -748,19 +753,26 @@ mod tests {
         use crate::panel::state::{Row, SessionView};
         let mut d = data();
         let row = Row::Opt { surface: "m1/aco-dlss".into(), id: "world.npc_density".into() };
-        assert!(pin_row(&d, &row, &[]).is_err(), "not loaded");
+        assert!(pin_row(&d, &row, &Default::default()).is_err(), "not loaded");
         d.session = Load::Ready(SessionView { game: quiver_api::GameRef::ubisoft(3539), profile_id: Some("dlss".into()), ..Default::default() });
-        let p = pin_row(&d, &row, &[]).unwrap();
+        let p = pin_row(&d, &row, &Default::default()).unwrap();
         assert_eq!((p.scope.as_str(), p.on, p.pin.label.as_str()), ("ubisoft:3539/dlss", true, "Crowd density"));
         // Pinned already: Y unpins.
-        let p2 = pin_row(&d, &row, &[p.pin.clone()]).unwrap();
+        let mut pins = std::collections::BTreeMap::from([(p.scope.clone(), vec![p.pin.clone()])]);
+        let p2 = pin_row(&d, &row, &pins).unwrap();
         assert!(!p2.on && p2.said.contains("unpinned"));
+        // A game pin seen through a profile must be removed from its owning scope.
+        pins.clear();
+        pins.insert("ubisoft:3539".into(), vec![p.pin.clone()]);
+        let inherited = pin_row(&d, &row, &pins).unwrap();
+        assert!(!inherited.on);
+        assert_eq!(inherited.scope, "ubisoft:3539");
         // A Tweak, at the game's scope under vanilla.
         d.session = Load::Ready(SessionView { game: quiver_api::GameRef::ubisoft(3539), profile_id: Some("vanilla".into()), ..Default::default() });
-        let t = pin_row(&d, &Row::Tweak { id: "fps.cap".into() }, &[]).unwrap();
+        let t = pin_row(&d, &Row::Tweak { id: "fps.cap".into() }, &Default::default()).unwrap();
         assert_eq!((t.scope.as_str(), t.pin.kind), ("ubisoft:3539", PinKind::Tweak));
         // Not an option: refused.
-        assert!(pin_row(&d, &Row::Note("x".into()), &[]).is_err());
+        assert!(pin_row(&d, &Row::Note("x".into()), &Default::default()).is_err());
         // Pinned, its tile shows in the quick menu.
         let tiles = tiles(&d, &[t.pin], &[], None);
         assert!(tiles.iter().any(|x| matches!(&x.kind, TileKind::Pin(p) if p.id == "fps.cap")));

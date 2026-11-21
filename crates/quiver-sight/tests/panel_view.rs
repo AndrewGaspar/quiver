@@ -116,7 +116,7 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     // The hints for the focused live option.
     let hints = cx.update(|cx| view.read(cx).hints());
     check!(cx.update(|cx| view.read(cx).docked()), "Mods opens docked");
-    check!(hints.label_of(Glyph::Y) == Some("Hold: compare with 1.0 ×"), "Y's hint: {:?}", hints.label_of(Glyph::Y));
+    check!(hints.label_of(Glyph::Y) == Some("Pin · hold: compare with 1.0 ×"), "Y's hint: {:?}", hints.label_of(Glyph::Y));
     check!(hints.label_of(Glyph::X) == Some("Reset") && hints.label_of(Glyph::R3) == Some("Centre"), "{hints:?}");
     check!(hints.detail.as_deref() == Some("Default 1.0 × · range 1.0–5.0 ×"), "detail {:?}", hints.detail);
 
@@ -141,6 +141,7 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     wait(150).await;
     let sent = drain(&mut rx);
     check!(sent.len() == 1 && sent[0].starts_with("pin ") && sent[0].ends_with("world.npc_density on=true"), "a tap: {sent:?}");
+    check!(cx.update(|cx| view.read(cx).hints().label_of(Glyph::Y).is_some_and(|h| h.starts_with("Unpin"))), "Y should show the saved pin");
     upd(cx, &|v, cx| v.key(Key::Y, false, cx));
     wait(50).await;
     upd(cx, &|v, cx| v.key_up(&y_up, cx));
@@ -213,6 +214,10 @@ async fn run(cx: &mut gpui::AsyncApp) -> Result<(), String> {
     check!(cx.update(|cx| view.read(cx).docked()), "Tweaks docks on its own");
     upd(cx, &|v, cx| v.input(Input::PrevSection, cx));
     check!(!cx.update(|cx| view.read(cx).docked()), "Mods stays centred");
+    upd(cx, &|v, cx| v.input(Input::PrevSection, cx));
+    check!(cx.update(|cx| view.read(cx).nav.section == PanelSection::Session), "LB should switch sections");
+    upd(cx, &|v, cx| v.input(Input::NextTab, cx));
+    check!(cx.update(|cx| view.read(cx).nav.section == PanelSection::Session), "RT must stay in a section without pages");
     let _ = Live::Only;
     Ok(())
 }

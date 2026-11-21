@@ -276,6 +276,10 @@ impl Sight {
                 self.sync_overlay(cx);
             }
             Msg::Settings(s) => self.settings_changed(*s, cx),
+            Msg::PinFailed { scope, reason } => {
+                self.panel_pins(cx);
+                self.panel.pin_failed(&scope, reason, cx);
+            }
             Msg::QuickPoll => self.quick_polled(cx),
             Msg::Quit(why) => {
                 tracing::info!("quitting: {why}");

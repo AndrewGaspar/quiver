@@ -36,6 +36,8 @@ struct Live {
 #[derive(Default)]
 pub struct Tweaks {
     sessions: Mutex<HashMap<String, Live>>,
+    /// Keep successive cap saves and their live deliveries in the same order.
+    cap_edits: tokio::sync::Mutex<()>,
 }
 
 impl Tweaks {
@@ -179,7 +181,21 @@ impl Daemon {
                     .await?
                 )
             }
-            TweaksRequest::Set { scope, ops, message, confirmed } => json!(self.tweaks_set(&src, scope, Change::Ops(ops), message, confirmed).await?),
+            TweaksRequest::Set { scope, ops, message, confirmed, session } => {
+                let _guard = if session.is_some() { Some(self.tweaks.cap_edits.lock().await) } else { None };
+                let mut out = self.tweaks_set(&src, scope.clone(), Change::Ops(ops), message, confirmed).await?;
+                if let Some(session) = session
+                    && let Some(i) = out.outcomes.iter().rposition(|o| o.id == "fps.cap" && matches!(o.outcome, Outcome::SavedRestart { .. } | Outcome::Unchanged))
+                {
+                    if let Err(e) = self.apply_session_cap(&scope, &session, i, &mut out).await {
+                        out.outcomes[i].outcome = Outcome::SavedPending { detail: format!("live cap delivery failed: {e:#}") };
+                    }
+                    if !out.outcomes.iter().any(|o| matches!(o.outcome, Outcome::SavedRestart { .. })) {
+                        out.warnings.retain(|w| !w.starts_with("tweaks apply at the next launch"));
+                    }
+                }
+                json!(out)
+            }
             TweaksRequest::Prefer { scope, id, prefer, message } => json!(self.tweaks_set(&src, scope, Change::Prefer(id, prefer), message, false).await?),
             // A restore puts back values that were set (and confirmed) before.
             TweaksRequest::Restore { scope, revision } => json!(self.tweaks_set(&src, scope, Change::Restore(revision), None, true).await?),

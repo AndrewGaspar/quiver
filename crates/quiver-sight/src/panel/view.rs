@@ -199,7 +199,7 @@ pub struct PanelView {
     pub marks: Rc<RefCell<DepthMarks>>,
     /// What's pinned to the quick menu for this game and profile (Y toggles a row's pin;
     /// `crate::quick::pin_row`).
-    pub pinned: Vec<quiver_api::sight::QuickPin>,
+    pub pinned: BTreeMap<String, Vec<quiver_api::sight::QuickPin>>,
     /// What came of the last screenshot (the Session section shows it under the button).
     pub shot: Option<(String, Tone)>,
     /// The Achievements list's own scroll.
@@ -311,7 +311,7 @@ impl PanelView {
             told_docked: None,
             subscribed: Vec::new(),
             marks: Rc::default(),
-            pinned: Vec::new(),
+            pinned: BTreeMap::new(),
             shot: None,
             ach_scroll: ScrollHandle::new(),
             perf: PerfSection::default(),
@@ -482,7 +482,7 @@ impl PanelView {
         }
     }
 
-    /// LT / RT: Mods' and Tweaks' pages; elsewhere, the sections.
+    /// LT / RT stay within the current section.
     fn tab(&mut self, d: i32) {
         let key_n = match self.nav.section {
             PanelSection::Mods => mods::surface(&self.data, &self.nav).map(|s| (s.key.clone(), mods::pages(s).len())),
@@ -492,10 +492,7 @@ impl PanelView {
                 self.nav.ach_filter = self.nav.ach_filter.step(d);
                 return;
             }
-            _ => {
-                self.nav.step_section(d);
-                return;
-            }
+            _ => return,
         };
         if let Some((key, n)) = key_n
             && self.nav.pages.step(&key, n, d)
@@ -545,10 +542,11 @@ impl PanelView {
             Ok(p) => {
                 self.flash = Some((p.said.clone(), Tone::Ok));
                 // Shown at once; quiverd's answer (the settings) confirms it.
+                let pins = self.pinned.entry(p.scope.clone()).or_default();
                 if p.on {
-                    self.pinned.push(p.pin.clone());
+                    pins.push(p.pin.clone());
                 } else {
-                    self.pinned.retain(|x| !x.same_item(&p.pin));
+                    pins.retain(|x| !x.same_item(&p.pin));
                 }
                 self.send(LinkReq::Pin { scope: p.scope, pin: p.pin, on: p.on });
             }
@@ -615,7 +613,7 @@ impl PanelView {
         .detach();
     }
 
-    fn y_released(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn y_released(&mut self, cx: &mut Context<Self>) {
         let Some(y) = self.y_down.take() else { return };
         self.y_up = Some((y, Instant::now()));
         cx.spawn(async move |this, cx| {
@@ -773,7 +771,7 @@ impl PanelView {
     }
 
     /// What the section's input asked for.
-    fn perf_acts(&mut self, acts: Vec<perf::Act>, cx: &mut Context<Self>) {
+    pub(crate) fn perf_acts(&mut self, acts: Vec<perf::Act>, cx: &mut Context<Self>) {
         for a in acts {
             match a {
                 perf::Act::Send(req) => self.send(LinkReq::Perf { session: self.session.clone(), req }),
@@ -831,9 +829,10 @@ impl PanelView {
         self.drafts.get(&key).cloned().or_else(|| self.data.tweaks.ready().and_then(|t| t.options.get(perf::CAP_TWEAK)).map(|st| draft_value(st, None))).unwrap_or(Value::from(0))
     }
 
-    /// What came of the last change of a tweak ("Saving…", or why it wasn't saved).
-    pub(crate) fn tweak_outcome(&self, id: &str) -> Option<(String, Tone)> {
-        self.saving.get(&(TWEAKS.to_owned(), id.to_owned())).cloned()
+    /// Pending save or the last delivery of the Performance cap.
+    pub(crate) fn cap_outcome(&self) -> Option<(String, Tone)> {
+        self.saving.get(&(TWEAKS.to_owned(), perf::CAP_TWEAK.to_owned())).cloned()
+            .or_else(|| self.perf.cap_result.as_ref().map(quiver_ui::options::outcome_text))
     }
 
     fn debounce(&mut self, cx: &mut Context<Self>) {
@@ -982,6 +981,9 @@ impl PanelView {
         let now = Instant::now();
         let mut chip = None;
         for o in &c.outcomes {
+            if tweaks && o.id == perf::CAP_TWEAK {
+                self.perf.cap_result = Some(o.outcome.clone());
+            }
             let Some((label, def)) = self.def_of(tweaks, &o.surface, &o.id) else { continue };
             if let Some(ch) = self.log.record(tweaks, &label, &def, o, session_only, now) {
                 chip = Some(ch);
@@ -1271,9 +1273,18 @@ impl PanelView {
     }
 
     /// The hint bar: the hints, then the flash or the focused thing's detail, then the chord.
-    fn hint_bar(&self, th: &Theme, docked: bool) -> Div {
+    fn hint_bar(&self, th: &Theme, docked: bool, cx: &mut Context<Self>) -> Div {
         let h = self.hints();
-        let items = h.items.iter().map(|x| div().flex().items_center().gap(px(7.)).children(x.glyphs.iter().map(|g| glyph(th, g.label(), false))).child(x.label.clone()));
+        let items = h.items.iter().enumerate().map(|(i, hint)| {
+            let item = div().flex().items_center().gap(px(7.)).children(hint.glyphs.iter().map(|g| glyph(th, g.label(), false))).child(hint.label.clone());
+            match hint.glyphs.as_slice() {
+                [Glyph::R3] => item.id("hint-dock").cursor_pointer().on_click(cx.listener(|v, _, _, cx| v.toggle_dock(cx))).into_any_element(),
+                [Glyph::Y] if matches!(self.nav.section, PanelSection::Mods | PanelSection::Tweaks) => item
+                    .id(("hint-pin", i)).cursor_pointer()
+                    .on_click(cx.listener(|v, _, _, cx| v.input(Input::Menu, cx))).into_any_element(),
+                _ => item.into_any_element(),
+            }
+        });
         let note = self.flash.clone().or(self.hud_note.clone().filter(|_| self.nav.section == PanelSection::Performance));
         let bar = div().flex().flex_wrap().items_center().text_color(th.tx2).children(items);
         if docked {
@@ -1802,7 +1813,7 @@ impl Render for PanelView {
                 .child(mark(&self.marks, Mark::Card, 0.))
                 .child(self.dock_header(&th, cx))
                 .child(div().flex_1().min_h_0().flex().flex_col().child(self.section_body(&th, true, cx)))
-                .child(self.hint_bar(&th, true));
+                .child(self.hint_bar(&th, true, cx));
             return root.child(column).when_some(chip, |d, c| d.child(c)).when_some(confirm, |d, c| d.child(c));
         }
         let pad_x = (vw * SAFE).max(24.0);
@@ -1825,7 +1836,7 @@ impl Render for PanelView {
                         .child(div().flex_1().min_h_0().flex().flex_col().child(self.section_body(&th, false, cx))),
                 ),
             )
-            .child(self.hint_bar(&th, false))
+            .child(self.hint_bar(&th, false, cx))
             .when_some(confirm, |d, c| d.child(c))
     }
 }

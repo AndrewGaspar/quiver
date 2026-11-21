@@ -194,10 +194,13 @@ impl Sight {
     }
 
     /// The open panel's game's pins, for Y (pin or unpin).
-    fn panel_pins(&mut self, cx: &mut App) {
+    pub(crate) fn panel_pins(&mut self, cx: &mut App) {
         let Some(s) = self.panel.session().map(str::to_owned) else { return };
         let Some((game, profile)) = self.quick_data.get(&s).and_then(|d| d.session.ready()).map(|v| (v.game, v.profile().map(str::to_owned))) else { return };
-        let pins = self.settings.pins_for(&game, profile.as_deref());
+        let pins = [None, profile.as_deref()].into_iter().filter_map(|p| {
+            let scope = quiver_api::sight::pin_scope(&game, p);
+            self.settings.pins.get(&scope).map(|pins| (scope, pins.clone()))
+        }).collect();
         self.panel.set_pinned(pins, cx);
     }
 

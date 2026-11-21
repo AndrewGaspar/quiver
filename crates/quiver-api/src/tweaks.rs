@@ -538,6 +538,9 @@ pub enum TweaksRequest {
     Set {
         #[serde(default)]
         scope: Scope,
+        /// Apply a bound frame cap to this running session when its provider supports live changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
         ops: Vec<OptionOp>,
         #[serde(default)]
         message: Option<String>,

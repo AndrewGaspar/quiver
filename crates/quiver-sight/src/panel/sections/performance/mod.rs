@@ -437,6 +437,8 @@ pub enum Outcome {
 #[derive(Debug, Clone, Default)]
 pub struct PerfSection {
     pub data: PerfData,
+    /// Last cap delivery, including releases back to the starting value.
+    pub cap_result: Option<quiver_api::options::Outcome>,
     /// The focused control (an index into [`PerfSection::ctls`]).
     pub focus: usize,
     pub editor: Option<Editor>,
@@ -471,7 +473,7 @@ pub fn cap_enforcer(st: Option<&OptionState>, value: &Value, reflex_cap: Option<
     let mut out = Vec::new();
     let off = value.as_f64() == Some(0.0);
     match st.and_then(|s| s.tweak.as_ref()).and_then(|t| t.planned.as_ref()) {
-        _ if off => out.push("No cap from Quiver: the game paces itself.".to_owned()),
+        _ if off => out.push("No cap from Quiver.".to_owned()),
         Some(Planned::Apply { mech, writes, .. }) => {
             let who = match mech.as_str() {
                 "dxvk" => "DXVK's frame limiter".to_owned(),
@@ -481,7 +483,10 @@ pub fn cap_enforcer(st: Option<&OptionState>, value: &Value, reflex_cap: Option<
             };
             out.push(format!("Set by {who}, from the next launch."));
         }
-        Some(Planned::Provided { by, option, .. }) => out.push(format!("Set by {by} ({option}), so Quiver's limiters stay off."),),
+        Some(Planned::Provided { by, option, value: provider_value, .. }) => {
+            let setting = provider_value.as_ref().map(|v| format!("{option} = {}", scalar_text(v))).unwrap_or_else(|| option.clone());
+            out.push(format!("Set by {by} ({setting}), so Quiver's limiters stay off."));
+        }
         Some(Planned::Superseded { by }) => out.push(format!("Your own launch setting wins: {by}.")),
         Some(Planned::Blocked { reason }) => out.push(format!("Not applied: {reason}.")),
         Some(Planned::Unavailable { reason }) => out.push(format!("Not available: {reason}.")),

@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(gs.options["sync.max_latency"].tweak.as_ref().unwrap().overridden_by, Some(ScopeKind::Profile));
 
         // Set, prefer and restore are revisions of the scope.
-        let set = |scope: Scope, ops| -> OptionsChange { serde_json::from_value(ask(TweaksRequest::Set { scope, ops, message: None, confirmed: false }).unwrap()).unwrap() };
+        let set = |scope: Scope, ops| -> OptionsChange { serde_json::from_value(ask(TweaksRequest::Set { session: None, scope, ops, message: None, confirmed: false }).unwrap()).unwrap() };
         let c = set(Scope::Game { game: origins }, vec![OptionOp::Set { surface: "quiver".into(), id: "tex.anisotropy".into(), value: json!("8") }]);
         assert_eq!(c.revision, 2);
         assert!(matches!(c.outcomes[0].outcome, Outcome::SavedRestart { running: false }));

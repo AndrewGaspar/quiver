@@ -456,7 +456,7 @@ pub async fn run(client: &Client, json: bool, action: Option<TweaksAction>) -> R
                 bail!("give id=value");
             }
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { session: None, scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }
@@ -474,7 +474,7 @@ pub async fn run(client: &Client, json: bool, action: Option<TweaksAction>) -> R
                 bail!("which tweaks? (or --all)");
             }
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
-            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { session: None, scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }
@@ -485,7 +485,7 @@ pub async fn run(client: &Client, json: bool, action: Option<TweaksAction>) -> R
             let id = rest.first().context("which preset?")?.clone();
             let (scope, _) = scope_of(client, game, global || game.is_none(), profile).await?;
             let ops = vec![OptionOp::Preset { surface: "quiver".into(), id }];
-            let c = change(client, |confirmed| TweaksRequest::Set { scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
+            let c = change(client, |confirmed| TweaksRequest::Set { session: None, scope: scope.clone(), ops: ops.clone(), message: message.clone(), confirmed }, yes).await?;
             if json {
                 return json_out(&c);
             }

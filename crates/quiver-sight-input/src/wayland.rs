@@ -6,7 +6,7 @@
 //! arrives through listeners it registers with `wl_keyboard_add_listener`,
 //! `wl_pointer_add_listener` and `zwp_relative_pointer_v1_add_listener`, inline wrappers of
 //! **`wl_proxy_add_listener`**, which it imports from libwayland-client. Its handlers turn
-//! `key`, `button`, `motion`, `axis_discrete` and `relative_motion` into
+//! `key`, `button`, `motion`, `axis` and `relative_motion` into
 //! `NtUserSendHardwareInput`; `enter`/`leave` track focus (`leave` releases every key);
 //! `modifiers` only updates its xkb state.
 //!
@@ -137,15 +137,12 @@ fn forward(i: Iface, opcode: u32, args: &[Arg], input: Input) {
             }
             // motion(time, sx, sy): surface coordinates; the panel uses the deltas.
             (Iface::Pointer, 2, _) => PanelEvent { t, kind: quiver_perf::panel::EV_POINTER, flags: EVF_WAYLAND, code: 0, a: (fx(args[1]) * 256.0) as i32, b: (fx(args[2]) * 256.0 ) as i32 },
-            // axis_discrete(axis, discrete): 0 vertical, 1 horizontal.
-            (Iface::Pointer, 8, _) => {
-                let n = args[1].i as f64;
-                if args[0].u == 0 { PanelEvent::scroll(t, 0.0, n) } else { PanelEvent::scroll(t, n, 0.0) }
-            }
-            // axis_value120(axis, value120).
-            (Iface::Pointer, 9, _) => {
-                let n = args[1].i as f64 / 120.0;
-                if args[0].u == 0 { PanelEvent::scroll(t, 0.0, n) } else { PanelEvent::scroll(t, n, 0.0) }
+            // axis(time, axis, fixed distance) also covers finger and virtual
+            // pointers. Wheel detents carry this event alongside value120 or
+            // discrete: consume the continuous value once for all three.
+            (Iface::Pointer, 4, _) => {
+                let steps = fx(args[2]) / 10.0;
+                if args[1].u == 0 { PanelEvent::scroll(t, 0.0, steps) } else { PanelEvent::scroll(t, steps, 0.0) }
             }
             // relative_motion(utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel).
             (Iface::Relative, 0, _) => PanelEvent::motion(t, fx(args[2]), fx(args[3])),

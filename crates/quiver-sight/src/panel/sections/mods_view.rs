@@ -56,12 +56,15 @@ pub fn hints(v: &PanelView, h: &mut Hints) {
                 if adjustable(st) {
                     h.add([Glyph::LeftRight], if docked { "Change" } else { "Adjust" });
                 }
-                let compare = v.compare_target(r).map(|t| short_value(&st.def, &t));
-                match (compare, docked) {
-                    (Some(t), true) => h.add([Glyph::Y], format!("Hold: compare with {t}")),
-                    (Some(t), false) => h.add([Glyph::Y], format!("Pin · hold: compare with {t}")),
-                    (None, _) => h.add([Glyph::Y], "Pin to quick menu"),
-                };
+                if let Ok(pin) = crate::quick::pin_row(&v.data, r, &v.pinned) {
+                    let action = if pin.on { "Pin" } else { "Unpin" };
+                    let label = match v.compare_target(r) {
+                        Some(t) => format!("{action} · hold: compare with {}", short_value(&st.def, &t)),
+                        None if pin.on => "Pin to quick menu".into(),
+                        None => "Unpin from quick menu".into(),
+                    };
+                    h.add([Glyph::Y], label);
+                }
                 if v.surface_of(r).and_then(|s| mods::reset_op(&s.key, "", st)).is_some() {
                     h.add([Glyph::X], if docked { "Reset" } else { "Reset to default" });
                 }
@@ -186,21 +189,23 @@ fn control(th: &Theme, i: usize, st: &OptionState, val: &Value, docked: bool, cx
                 .relative()
                 .child(div().absolute().left_0().top_0().h(px(6.)).rounded(px(3.)).bg(th.acc).w(relative(f)))
                 .child(div().absolute().top(px(-6.)).left(relative(f)).ml(px(-9.)).size(px(18.)).rounded(px(9.)).bg(th.tx1).border(px(3.)).border_color(th.acc));
-            div()
+            let arrows = div()
                 .flex()
                 .items_center()
-                .gap(px(10.))
+                .gap(px(12.))
                 .child(arrow(th, format!("dec-{i}"), "−", i, -1, arr, cx))
-                .child(track)
-                .child(arrow(th, format!("inc-{i}"), "+", i, 1, arr, cx))
-                .child(div().min_w(px(if docked { 44. } else { 64. })).flex().justify_end().text_size(px(15.)).font_weight(SEMIBOLD).text_color(if changed { th.tx1 } else { th.tx2 }).child(text))
+                .child(track.min_w(px(48.)))
+                .child(arrow(th, format!("inc-{i}"), "+", i, 1, arr, cx));
+            div().flex().flex_col().gap(px(4.))
+                .child(div().text_size(px(15.)).font_weight(SEMIBOLD).text_color(if changed { th.tx1 } else { th.tx2 }).child(text))
+                .child(arrows)
         }
         _ => div()
             .flex()
             .items_center()
             .gap(px(10.))
             .child(arrow(th, format!("prev-{i}"), "‹", i, -1, arr, cx))
-            .child(div().flex_1().flex().justify_center().text_size(px(15.)).font_weight(SEMIBOLD).text_color(if changed { th.tx1 } else { th.tx2 }).child(text))
+            .child(div().flex_1().min_w_0().text_center().text_size(px(15.)).font_weight(SEMIBOLD).text_color(if changed { th.tx1 } else { th.tx2 }).child(text))
             .child(arrow(th, format!("next-{i}"), "›", i, 1, arr, cx)),
     }
 }
@@ -223,12 +228,14 @@ fn option_row(v: &PanelView, th: &Theme, i: usize, row: &Row, focused: bool, doc
         .items_center()
         .gap(px(8.))
         .min_w_0()
-        .child(div().text_size(px(15.)).font_weight(SEMIBOLD).text_color(th.tx1).truncate().child(st.def.label_or(&key.1).to_owned()))
+        .flex_wrap()
+        .child(div().text_size(px(15.)).font_weight(SEMIBOLD).text_color(th.tx1).child(st.def.label_or(&key.1).to_owned()))
         .child(pill(th, tone_pill(tone), None, badge));
-    let help = st.def.help.clone().map(|h| div().text_size(px(if docked { 12.5 } else { 13. })).text_color(th.tx2).line_clamp(2).child(h));
+    let help = st.def.help.clone().map(|h| div().text_size(px(if docked { 12.5 } else { 13. })).text_color(th.tx2).child(h));
     let line_el = line.map(|(t, tone)| div().text_size(px(12.)).font_weight(SEMIBOLD).text_color(tone_color(th, tone)).child(t));
     let shell = div()
         .id(SharedString::from(format!("row-{i}")))
+        .flex_none()
         .relative()
         .rounded(px(10.))
         .border_1()
@@ -250,8 +257,9 @@ fn option_row(v: &PanelView, th: &Theme, i: usize, row: &Row, focused: bool, doc
             .gap(px(6.))
             .px(px(14.))
             .py(px(12.))
-            .child(div().flex().items_center().gap(px(10.)).child(div().flex_1().min_w_0().child(label)).child(div().w(px(210.)).flex_none().child(ctl)))
+            .child(label)
             .when_some(help, |d, h| d.child(h))
+            .child(ctl)
             .when_some(line_el, |d, l| d.child(l))
             .into_any_element();
     }
@@ -318,6 +326,7 @@ fn preset_picker(v: &PanelView, th: &Theme, i: usize, s: &SurfaceState, focused:
     let label = pick.and_then(|p| s.presets.get(p)).map(|p| p.label.clone()).unwrap_or_else(|| "Custom".into());
     div()
         .id(SharedString::from(format!("row-{i}")))
+        .flex_none()
         .relative()
         .flex()
         .items_center()

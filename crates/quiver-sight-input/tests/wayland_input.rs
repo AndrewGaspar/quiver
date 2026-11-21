@@ -162,6 +162,7 @@ fn wayland_capture_and_release() {
     comp.send(&format!("button {BTN_LEFT} 1"));
     comp.send(&format!("button {BTN_LEFT} 0"));
     comp.send("axis 2");
+    comp.send("axis 3 1"); // Finger scrolling has no wheel detents.
     comp.key(KEY_C, true); // held across the close
     std::thread::sleep(SETTLE);
     // Wine repeats W itself (client-side key repeat): the game holds it, as it should until
@@ -175,7 +176,7 @@ fn wayland_capture_and_release() {
     assert!(ev.iter().all(|e| e.flags & EVF_WAYLAND != 0 || e.kind == EV_SCROLL));
     assert!(ev.iter().any(|e| e.kind == EV_BUTTON && e.code == BTN_LEFT && e.down()));
     assert!(ev.iter().any(|e| e.kind == EV_POINTER && e.xy() == (310.0, 255.0)), "{ev:?}");
-    assert!(ev.iter().any(|e| e.kind == EV_SCROLL && e.xy().1 == 2.0), "{ev:?}");
+    assert_eq!(ev.iter().filter(|e| e.kind == EV_SCROLL).map(|e| e.xy().1).collect::<Vec<_>>(), [2.0, 3.0]);
     // W's release goes to the game.
     let m = probe.lines.len();
     comp.key(KEY_W, false);

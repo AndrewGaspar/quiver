@@ -461,6 +461,45 @@ impl Translate {
     }
 }
 
+/// Wayland clients normally generate repeats themselves. The preload captures
+/// arrows before Wine can repeat them, and an offscreen window has no seat.
+#[derive(Default)]
+struct ArrowRepeat {
+    held: Vec<u32>,
+    next: Option<Instant>,
+}
+
+impl ArrowRepeat {
+    fn forward(&mut self, event: PanelEvent, now: Instant, batch: &mut Vec<PanelEvent>) {
+        if event.kind == EV_RESET {
+            *self = Self::default();
+        }
+        if event.kind == EV_KEY && event.flags & EVF_WAYLAND != 0 && matches!(event.code, 103 | 105 | 106 | 108) {
+            if event.down() && (event.flags & EVF_REPEAT != 0 || self.held.contains(&event.code)) {
+                return;
+            }
+            let last = self.held.last().copied();
+            self.held.retain(|&c| c != event.code);
+            if event.down() {
+                self.held.push(event.code);
+            }
+            if self.held.last().copied() != last {
+                self.next = self.held.last().map(|_| now + quiver_ui::gamepad::DELAY);
+            }
+        }
+        batch.push(event);
+    }
+
+    fn poll(&mut self, now: Instant, batch: &mut Vec<PanelEvent>) {
+        if self.next.is_some_and(|t| now >= t) && let Some(&code) = self.held.last() {
+            let mut event = PanelEvent::key(mono_raw_ns(), code, true, 0, 0);
+            event.flags |= EVF_WAYLAND | EVF_REPEAT;
+            batch.push(event);
+            self.next = Some(now + quiver_ui::gamepad::INTERVAL);
+        }
+    }
+}
+
 /// A view drawn in the game: the panel (input captured), or an image shown over the game
 /// that takes none (`capture` false: toasts, the status chip, the first-launch hint).
 pub struct InGame {
@@ -545,9 +584,16 @@ impl InGame {
                 input.open(epoch, now, now + PANEL_HOLD_NS as i64, false);
                 let (inp, st, s) = (input.clone(), stop.clone(), session.to_owned());
                 std::thread::Builder::new().name("quiver-sight-input".into()).spawn(move || {
+                    let mut repeat = ArrowRepeat::default();
                     while !st.load(Ordering::Relaxed) {
                         let mut batch = Vec::new();
-                        reader.poll(&inp, |e| batch.push(e));
+                        let now = Instant::now();
+                        let lost = reader.lost;
+                        reader.poll(&inp, |e| repeat.forward(e, now, &mut batch));
+                        if lost != reader.lost {
+                            repeat = ArrowRepeat::default();
+                        }
+                        repeat.poll(now, &mut batch);
                         if !batch.is_empty() && ui.unbounded_send(Msg::GameInput { session: s.clone(), events: batch }).is_err() {
                             break;
                         }
@@ -636,6 +682,31 @@ mod tests {
 
     fn key(code: u32, down: bool) -> PanelEvent {
         PanelEvent::key(0, code, down, 0, 0)
+    }
+
+    #[test]
+    fn captured_wayland_arrows_repeat_until_release_or_focus_loss() {
+        let mut r = ArrowRepeat::default();
+        let start = Instant::now();
+        let due = start + quiver_ui::gamepad::DELAY;
+        let mut batch = Vec::new();
+        let mut arrow = key(106, true);
+        arrow.flags |= EVF_WAYLAND;
+        r.forward(arrow, start, &mut batch);
+        r.poll(start, &mut batch);
+        assert_eq!(batch.len(), 1);
+        r.poll(due, &mut batch);
+        assert_eq!(batch.len(), 2);
+        assert_ne!(batch[1].flags & EVF_REPEAT, 0);
+        r.forward(batch[1], due, &mut batch);
+        assert_eq!(batch.len(), 2, "native repeat does not duplicate our repeat");
+        for end in [PanelEvent { flags: EVF_WAYLAND, ..key(106, false) }, PanelEvent { kind: EV_RESET, ..Default::default() }] {
+            r.forward(arrow, start, &mut batch);
+            r.forward(end, due, &mut batch);
+            batch.clear();
+            r.poll(due + Duration::from_secs(1), &mut batch);
+            assert!(batch.is_empty());
+        }
     }
 
     #[test]

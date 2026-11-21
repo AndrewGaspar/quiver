@@ -115,13 +115,13 @@ async fn tweaks_end_to_end() {
     let game = GameRef::ubisoft(3539);
 
     // Global: agents act like the person (no Ask, no confirmation); the change records who.
-    let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { scope: Scope::Global, ops: vec![set("fps.cap", json!(160)), set("tex.anisotropy", json!("16"))], message: Some("everywhere".into()), confirmed: false }).await.unwrap();
+    let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { session: None, scope: Scope::Global, ops: vec![set("fps.cap", json!(160)), set("tex.anisotropy", json!("16"))], message: Some("everywhere".into()), confirmed: false }).await.unwrap();
     assert_eq!(c.revision, 1, "{c:?}");
     assert!(c.changes[0].starts_with("Global: fps.cap"), "{:?}", c.changes);
     let h: Vec<OptionsRevision> = tweaks(&cli, TweaksRequest::History { scope: Scope::Global }).await.unwrap();
     assert_eq!(h[0].source, "tweak-agent");
     // Game scope: Allow for agents; bad values rejected per op.
-    let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { scope: Scope::Game { game }, ops: vec![set("sync.vsync", json!("off")), set("sync.vsync", json!("maybe"))], message: None, confirmed: false }).await.unwrap();
+    let c: OptionsChange = tweaks(&agent, TweaksRequest::Set { session: None, scope: Scope::Game { game }, ops: vec![set("sync.vsync", json!("off")), set("sync.vsync", json!("maybe"))], message: None, confirmed: false }).await.unwrap();
     assert_eq!(c.revision, 1);
     assert!(matches!(&c.outcomes[1].outcome, quiver_api::options::Outcome::Rejected { .. }));
 
@@ -178,7 +178,7 @@ async fn tweaks_end_to_end() {
     assert_eq!(st.options["fps.cap"].value, json!(0));
     assert!(st.schema_note.contains("Quiver catalog"));
     // Presets, at the game scope.
-    let c: OptionsChange = tweaks(&cli, TweaksRequest::Set { scope: Scope::Game { game }, ops: vec![OptionOp::Preset { surface: "quiver".into(), id: "competitive".into() }], message: None, confirmed: false }).await.unwrap();
+    let c: OptionsChange = tweaks(&cli, TweaksRequest::Set { session: None, scope: Scope::Game { game }, ops: vec![OptionOp::Preset { surface: "quiver".into(), id: "competitive".into() }], message: None, confirmed: false }).await.unwrap();
     assert!(c.changes.iter().any(|l| l.contains("preset Competitive")), "{:?}", c.changes);
     // No sessions yet.
     let s: Vec<Value> = tweaks(&cli, TweaksRequest::Sessions { game, limit: None }).await.unwrap();

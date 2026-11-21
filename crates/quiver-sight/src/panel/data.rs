@@ -204,7 +204,7 @@ pub async fn set_options(client: &Client, s: &SessionView, ops: Vec<OptionOp>, l
 
 pub async fn set_tweaks(client: &Client, s: &SessionView, ops: Vec<OptionOp>) -> Result<OptionsChange> {
     let (scope, _) = tweak_scope(s);
-    client.call(Request::Tweaks(TweaksRequest::Set { scope, ops, message: Some("in game (Sight)".into()), confirmed: false })).await
+    client.call(Request::Tweaks(TweaksRequest::Set { session: Some(s.session.clone()), scope, ops, message: Some("in game (Sight)".into()), confirmed: false })).await
 }
 
 /// "Revert this session": quiverd puts back the values the session launched with, live

@@ -12,7 +12,7 @@ use quiver_api::mods::ModsRequest;
 use quiver_api::options::{Live, LiveChannel, OptionOp, OptionsChange, OptionsEvent, OptionsRequest, OptionsRevision, Outcome, SessionDetail, SurfaceState};
 use quiver_api::{Client, Request};
 
-const INI: &str = "; aco-dlss configuration\n[upscaler]\nenabled=1\n; DLSS render preset\npreset=M\n[fg]\nmode=d3d12\nenabled=1\ntoggle_key=F9\npresent_thread=1\n[world]\nnpc_density=1\nnpc_distance=1\n";
+const INI: &str = "; aco-dlss configuration\n[upscaler]\nenabled=1\n; DLSS render preset\npreset=M\n[fg]\nmode=d3d12\nenabled=1\ntoggle_key=F9\npresent_thread=1\n[world]\nnpc_density=1\nnpc_distance=1\n[reflex]\nfps_limit=0\n";
 
 /// The scratch daemon, stopped when dropped (also when a test fails).
 struct Daemon(Child);
@@ -253,6 +253,19 @@ async fn options_end_to_end() {
     assert!(c.revision > before);
     let text = std::fs::read_to_string(e.install().join("aco_dlss.ini")).unwrap();
     assert!(text.contains("npc_density=4\n") && text.contains("npc_distance=1\n") && text.contains("mode=d3d12\n"), "{text}");
+    // Performance's cap uses the running mod's reload file, including turning
+    // it off. An application without a session keeps the next-launch semantics.
+    let session = list[0].live.session.clone().unwrap();
+    for cap in [60, 30, 0] {
+        let c: OptionsChange = cli.call(Request::Tweaks(quiver_api::tweaks::TweaksRequest::Set {
+            scope: quiver_api::tweaks::Scope::Profile { game: 3539.into(), profile: Some(records[0].profile.clone()) },
+            session: Some(session.clone()), ops: vec![set("quiver", "fps.cap", json!(cap))],
+            message: None, confirmed: false,
+        })).await.unwrap();
+        assert!(matches!(c.outcomes[0].outcome, Outcome::AppliedLive { channel: LiveChannel::File, .. }), "{c:?}");
+        let text = std::fs::read_to_string(e.install().join("aco_dlss.ini")).unwrap();
+        assert!(text.contains(&format!("fps_limit={cap}\n")), "{text}");
+    }
     // Actions need the SDK.
     let err = options::<Value>(&cli, OptionsRequest::Invoke { game: 3539.into(), surface: "DLSS".into(), action: "fg.toggle".into(), arg: None, session: None }).await.unwrap_err().to_string();
     assert!(err.contains("SDK"), "{err}");

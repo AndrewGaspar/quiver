@@ -437,8 +437,19 @@ impl PanelCtl {
     }
 
     /// What's pinned to the quick menu for the open panel's game and profile (Y toggles it).
-    pub fn set_pinned(&mut self, pins: Vec<quiver_api::sight::QuickPin>, cx: &mut App) {
+    pub fn set_pinned(&mut self, pins: std::collections::BTreeMap<String, Vec<quiver_api::sight::QuickPin>>, cx: &mut App) {
         self.with_view(cx, |v, _| v.pinned = pins);
+    }
+
+    pub fn pin_failed(&self, scope: &str, reason: String, cx: &mut App) {
+        self.with_view(cx, |v, _| {
+            if let Some(s) = v.data.session.ready() {
+                let matches = [None, s.profile()].into_iter().any(|profile| quiver_api::sight::pin_scope(&s.game, profile) == scope);
+                if matches {
+                    v.flash = Some((format!("Quick menu update failed: {reason}"), quiver_ui::options::Tone::Bad));
+                }
+            }
+        });
     }
 
     /// The session's `panel.input`, when the game has a Sight layer.
@@ -1124,8 +1135,11 @@ impl PanelCtl {
         match e {
             // Only on screen: a hidden panel's input isn't grabbed (the pad is the game's or
             // the desktop's again).
+            PadEvent::RightStickClick if self.is_shown() => self.with_view(cx, |v, cx| v.toggle_dock(cx)),
+            PadEvent::Input(Input::Menu) if self.is_shown() => self.with_view(cx, |v, cx| v.key(state::Key::Y, false, cx)),
+            PadEvent::MenuReleased if self.is_shown() => self.with_view(cx, |v, cx| v.y_released(cx)),
             PadEvent::Input(i) if self.is_shown() => self.with_view(cx, |v, cx| v.input(i, cx)),
-            PadEvent::Scroll(_) | PadEvent::Input(_) => {}
+            PadEvent::Scroll(_) | PadEvent::Input(_) | PadEvent::RightStickClick | PadEvent::MenuReleased => {}
             PadEvent::Chord => {
                 tracing::info!("controller chord: toggling the panel");
                 if self.is_open() {
