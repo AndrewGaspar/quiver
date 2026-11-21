@@ -42,7 +42,12 @@ pub fn start_background(lab: &Lab) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let log = std::fs::File::create(dir.join("out.log"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.args(["lab", "job", "run", &id, "--"]).args(&args).env("QUIVER_LAB_ROOT", &lab.root).stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    // The job runs detached (its own session, no parents to look at): who started it goes along.
+    let owner = quiver_core::lab::owner::Owner::current("cli", None);
+    cmd.args(["lab", "job", "run", &id, "--"])
+        .args(&args)
+        .env("QUIVER_LAB_ROOT", &lab.root)
+        .env(quiver_core::lab::owner::OWNER_HANDOFF, owner.handoff()).stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();

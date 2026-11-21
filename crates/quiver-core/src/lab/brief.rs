@@ -190,7 +190,8 @@ pub fn render(b: &BriefInput) -> String {
     }
     s.push_str(&format!(
         "```sh\n\
-         quiver lab up {i}                       # boot the container (headless gamescope display)\n\
+         quiver lab list                         # every instance, up or down, and its owner: leave others' alone\n\
+         quiver lab up {i}                       # boot the container (headless gamescope display); records you as its owner\n\
          quiver lab launch {i} --wait frame      # kill everything, fresh licence, start the game, wait for a frame\n\
          quiver lab status {i}                   # readiness, pids, the mod's state, host load\n\
          quiver lab shot {i}                     # full-resolution screenshot (path printed)\n\
@@ -297,6 +298,7 @@ fn eos_note(sdk: bool, i: &str) -> String {
 
 /// The rules every brief carries.
 pub const RULES: &[&str] = &[
+    "Instances are shared with other sessions (Claude, Codex, the person). Before taking down, killing or relaunching an instance you didn't start, check its owner in `quiver lab list` (or `quiver lab status <i>`) and ask that session or the person; a `(gone)` owner is a hint it's abandoned, not permission. `quiver lab up` records you as the owner (`--owner NAME` or `QUIVER_LAB_OWNER` to name yourself).",
     "Never sign in to any store, and never run a store's client (Ubisoft Connect, the Epic launcher, Steam) in an instance. The lab gets the licence from quiverd per launch; Connect is disabled in every instance and a Connect process kills the run.",
     "Never read credential or token files (Connect's `ConnectSecureStorage.dat`, keyrings, `~/.config/*/credentials`).",
     "Never touch the user's real prefix or install (`quiver lab` never mounts them). Copy saves in as fixtures (`quiver lab fixture`), never link them.",
@@ -312,7 +314,7 @@ pub const RULES: &[&str] = &[
 
 /// The tool menu (`<i>`: the instance).
 pub const TOOLS: &[(&str, &str)] = &[
-    ("quiver lab status <i> [--json]", "readiness ladder (process, window, frame, mod state), pids, run id, host state"),
+    ("quiver lab status <i> [--json]", "readiness ladder (process, window, frame, mod state), pids, run id, host state, the instance's and each run's owner (alive or gone)"),
     ("quiver lab wait <i> STATE [--timeout S] [--stable]", "wait for process|window|frame|exited or a mod state; --stable also waits until consecutive frames stop changing"),
     ("quiver lab shot <i> [FILE] [--settle S] [--crop C]", "screenshot from the instance's display (full resolution)"),
     ("quiver lab key <i> KEY… [--hold MS]", "press keys (xdotool names: Return, Escape, w, shift+Tab)"),
@@ -358,7 +360,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1"] {
+        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1", "check its owner in `quiver lab list`"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));

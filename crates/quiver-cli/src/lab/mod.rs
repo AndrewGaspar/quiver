@@ -22,6 +22,7 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use quiver_api::Client;
 use quiver_core::lab::manifest::{Display, layer_versions};
+use quiver_core::lab::owner::Owner;
 use quiver_core::lab::ready::{State, Want};
 use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, facts, host, podman, procs, teleport};
 
@@ -80,7 +81,8 @@ pub enum LabAction {
         #[arg(long, num_args = 0..=1, default_missing_value = "1", default_value_t = 0)]
         pads: u8,
     },
-    /// Instances, with their game, display and state.
+    /// Instances, with their game, display, state and owner (who launched the current run, else
+    /// who brought it up).
     List {
         #[arg(long)]
         json: bool,
@@ -102,10 +104,24 @@ pub enum LabAction {
         #[arg(required = true)]
         changes: Vec<String>,
     },
-    /// Boot the instance's container (gamescope headless) and its supervisor.
-    Up { instance: String },
-    /// Stop the instance's container (the game with it).
+    /// Boot the instance's container (gamescope headless) and its supervisor. Records you as
+    /// its owner (`quiver lab list`): your agent session, found from this process's parents.
+    Up {
+        instance: String,
+        /// Name the owner yourself (default: `QUIVER_LAB_OWNER`, else your session).
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Stop the instance's container (the game with it). Before taking down an instance you
+    /// didn't start, check its owner in `quiver lab list` and ask that session or the person.
     Down { instance: String },
+    /// Who `up` and `launch` would record as the owner from here, and how it was found.
+    Whoami {
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete an instance (its clones and runs; fixtures and the gold copy stay).
     Rm { instance: String },
     /// Start the game: kills every Wine process in the instance, puts the mod in, gets a
@@ -131,6 +147,9 @@ pub enum LabAction {
         wait: Option<String>,
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+        /// Name the run's owner yourself (default: `QUIVER_LAB_OWNER`, else your session).
+        #[arg(long)]
+        owner: Option<String>,
     },
     /// Stop the game and every Wine process in the instance.
     Kill { instance: String },
@@ -440,6 +459,39 @@ fn read_state(inst: &Inst) -> State {
     std::fs::read(inst.state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+/// The instance's state as it really is: `state.json`, checked against podman. The file is the
+/// supervisor's, and one that stopped (`down` stops it first) left it as it last was.
+fn live_state(inst: &Inst) -> State {
+    let mut st = read_state(inst);
+    st.reconcile(ops::running_id(&inst.container()).is_some(), chrono::Utc::now());
+    st
+}
+
+/// `state.json` while a supervisor keeps it; checked against podman when none does (cheap
+/// enough for a wait loop: podman is asked only then).
+fn current_state(inst: &Inst) -> State {
+    if sup::alive(inst) { read_state(inst) } else { live_state(inst) }
+}
+
+/// Who uses the instance now: the current run's owner while it runs, else who brought it up.
+fn owner_now(inst: &Inst, st: &State) -> Option<Owner> {
+    st.run.as_ref().filter(|r| r.phase != quiver_core::lab::ready::Phase::Exited).and_then(|r| r.owner.clone()).or_else(|| inst.owner())
+}
+
+/// An owner and whether it's alive, for `--json`.
+fn owner_json(o: Option<&Owner>) -> serde_json::Value {
+    o.map(|o| o.report(Path::new("/proc"))).unwrap_or(serde_json::Value::Null)
+}
+
+/// `codex:pharos-xreal`, with `(gone)` when its process isn't running any more.
+fn owner_cell(o: Option<&Owner>) -> String {
+    match o {
+        None => "-".into(),
+        Some(o) if o.alive(Path::new("/proc")) == Some(false) => format!("{} (gone)", o.name()),
+        Some(o) => o.name(),
+    }
+}
+
 fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
@@ -449,7 +501,7 @@ fn print_json(v: &impl serde::Serialize) -> Result<()> {
 fn wait_for(inst: &Inst, want: &Want, run: Option<u32>, timeout: Duration) -> Result<State> {
     let deadline = Instant::now() + timeout;
     loop {
-        let st = read_state(inst);
+        let st = current_state(inst);
         match quiver_core::lab::ready::reached(&st, want, run) {
             Some(true) => return Ok(st),
             Some(false) => {
@@ -578,10 +630,12 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 .filter_map(|n| {
                     let i = lab.instance(&n);
                     let m = i.load().ok()?;
-                    let st = read_state(&i);
-                    let up = ops::running_id(&i.container()).is_some();
-                    Some(serde_json::json!({ "name": n, "game": m.game, "title": m.title, "display": m.display.to_string(), "up": up,
-                        "phase": st.run.as_ref().map(|r| r.phase.as_str()), "run": st.run.as_ref().map(|r| r.id) }))
+                    let st = live_state(&i);
+                    let owner = owner_now(&i, &st);
+                    Some(serde_json::json!({ "name": n, "game": m.game, "title": m.title, "display": m.display.to_string(), "up": st.container_up,
+                        "phase": st.run.as_ref().map(|r| r.phase.as_str()), "run": st.run.as_ref().map(|r| r.id),
+                        "owner": owner_json(owner.as_ref()), "owner_cell": owner_cell(owner.as_ref()),
+                        "instance_owner": owner_json(i.owner().as_ref()) }))
                 })
                 .collect();
             if json {
@@ -592,20 +646,21 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             for r in rows {
                 println!(
-                    "{:<16} {:<22} {:<14} {:<5} {}",
+                    "{:<16} {:<22} {:<14} {:<5} {:<14} {}",
                     r["name"].as_str().unwrap_or(""),
                     r["game"].as_str().unwrap_or(""),
                     r["display"].as_str().unwrap_or(""),
                     if r["up"].as_bool() == Some(true) { "up" } else { "down" },
-                    r["phase"].as_str().map(|p| format!("r{} {p}", r["run"])).unwrap_or_default()
+                    r["phase"].as_str().map(|p| format!("r{} {p}", r["run"])).unwrap_or_default(),
+                    r["owner_cell"].as_str().unwrap_or("-"),
                 );
             }
         }
         LabAction::Show { instance, json } => {
             let (inst, m) = inst_of(&lab, &instance)?;
-            let st = read_state(&inst);
+            let st = live_state(&inst);
             if json {
-                return print_json(&serde_json::json!({ "manifest": m, "state": st, "dir": inst.dir }));
+                return print_json(&serde_json::json!({ "manifest": m, "state": st, "dir": inst.dir, "owner": owner_json(inst.owner().as_ref()) }));
             }
             println!("{}", std::fs::read_to_string(inst.manifest_path())?);
             println!("# folder: {}\n# state:\n{}", inst.dir.display(), serde_json::to_string_pretty(&st)?);
@@ -624,18 +679,21 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                 println!("the clock changes at the next launch; its display refresh (uncapped: 1000 Hz) at the next `quiver lab down {0}; quiver lab up {0}`", inst.name);
             }
         }
-        LabAction::Up { instance } => up(&lab, &instance)?,
+        LabAction::Up { instance, owner } => up(&lab, &instance, Owner::current(source, owner.as_deref()))?,
+        LabAction::Whoami { owner, json } => {
+            let o = Owner::current(source, owner.as_deref());
+            if json {
+                return print_json(&o.report(Path::new("/proc")));
+            }
+            println!("{} ({})", o.name(), o.details(Path::new("/proc")));
+        }
         LabAction::Down { instance } => {
             let (inst, _) = inst_of(&lab, &instance)?;
-            let _ = sup::request(&lab, &inst, &SupRequest::Kill { source: source.into() });
-            let _ = std::os::unix::net::UnixStream::connect(inst.socket()).and_then(|mut c| {
-                use std::io::Write;
-                c.write_all(b"{\"op\":\"quit\"}\n")
-            });
-            let _ = ops::podman_cmd(&["rm".into(), "-f".into(), "-t".into(), "5".into(), inst.container()]).output();
-            sight::down(&inst);
-            // Its pads go with the container (the pad host would see it gone in 4 s).
-            pad::stop(&inst);
+            let me = Owner::current(source, None);
+            if let Some(o) = owner_now(&inst, &live_state(&inst)).filter(|o| o.name() != me.name()) {
+                eprintln!("note: {} was {}'s ({})", inst.name, o.name(), o.details(Path::new("/proc")));
+            }
+            down(&lab, &inst, source);
             println!("{} is down", inst.name);
         }
         LabAction::Rm { instance } => {
@@ -648,13 +706,14 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             std::fs::remove_dir_all(&inst.dir).with_context(|| format!("remove {}", inst.dir.display()))?;
             println!("removed {}", inst.name);
         }
-        LabAction::Launch { instance, mod_dir, no_mod, args, clock, wait, timeout } => {
+        LabAction::Launch { instance, mod_dir, no_mod, args, clock, wait, timeout, owner } => {
             let (inst, _) = inst_of(&lab, &instance)?;
             let mod_dir = mod_dir.map(|d| d.canonicalize().with_context(|| format!("{} not found", d.display()))).transpose()?;
             if let Some(c) = &clock {
                 lab::vclock::parse_spec(c)?;
             }
-            let r = sup::request(&lab, &inst, &SupRequest::Launch { source: source.into(), mod_dir, no_mod, args, clock })?;
+            let owner = Some(Box::new(Owner::current(source, owner.as_deref())));
+            let r = sup::request(&lab, &inst, &SupRequest::Launch { source: source.into(), mod_dir, no_mod, args, clock, owner })?;
             for n in r["notes"].as_array().into_iter().flatten() {
                 println!("  {}", n.as_str().unwrap_or_default());
             }
@@ -677,21 +736,33 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
         }
         LabAction::Status { instance, json } => {
             let (inst, m) = inst_of(&lab, &instance)?;
-            let st = read_state(&inst);
+            // podman's word, not only the supervisor's file: after `down` that file still said
+            // "up" (the supervisor stops before the container and never wrote it again).
+            let st = live_state(&inst);
             let hs = host::snapshot(&procs::scan(), &ops::containers());
+            let owner = inst.owner();
+            let runs = run_owners(&inst, 6);
             let enforced = limits::status_of(&inst);
             let vclock = limits::run_has_virtual_clock(&inst, st.run.as_ref().map(|r| r.id));
             if json {
                 let clock = st.run.as_ref().and_then(|r| lab::vclock::Report::read(&inst.run_dir(r.id)));
                 let control = clock::snapshot(&inst);
                 let throttled = enforced.as_ref().and_then(|s| lab::limits::throttle_note(s, vclock));
-                return print_json(&serde_json::json!({ "state": st, "host": hs, "display": m.display, "clock": clock, "clock_control": control, "limits": enforced, "throttled": throttled }));
+                let runs: Vec<serde_json::Value> = runs.iter().map(|(id, o)| serde_json::json!({ "run": id, "owner": owner_json(o.as_ref()) })).collect();
+                return print_json(&serde_json::json!({ "state": st, "owner": owner_json(owner.as_ref()), "runs": runs, "host": hs, "display": m.display, "clock": clock, "clock_control": control, "limits": enforced, "throttled": throttled }));
             }
             println!("{} ({}, {}): container {}", inst.name, m.game, m.display, if st.container_up { "up" } else { "down" });
+            match &owner {
+                Some(o) => println!("  owner: {} ({})", o.name(), o.details(Path::new("/proc"))),
+                None => println!("  owner: not recorded (brought up before owners were)"),
+            }
             match &st.run {
                 None => println!("  no run yet"),
                 Some(r) => {
                     println!("  run r{} ({}): {}", r.id, r.session, r.phase.as_str());
+                    if let Some(o) = &r.owner {
+                        println!("    by {} ({})", o.name(), o.details(Path::new("/proc")));
+                    }
                     for (p, t) in &r.reached {
                         println!("    {:<9} +{:.1}s", p.as_str(), (*t - r.started).num_milliseconds() as f64 / 1000.0);
                     }
@@ -709,6 +780,11 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
                         println!("    now: {} (quiver lab clock {} status)", clock::describe(&s), inst.name);
                     }
                 }
+            }
+            let earlier: Vec<String> =
+                runs.iter().filter(|(id, _)| st.run.as_ref().is_none_or(|r| r.id != *id)).map(|(id, o)| format!("r{id} {}", owner_cell(o.as_ref()))).collect();
+            if !earlier.is_empty() {
+                println!("  earlier runs: {}", earlier.join(", "));
             }
             for v in &st.violations {
                 println!("  VIOLATION: {v}");
@@ -1112,11 +1188,56 @@ fn edit(m: &mut Manifest, change: &str) -> Result<()> {
     Ok(())
 }
 
-fn up(lab: &Lab, name: &str) -> Result<()> {
+/// The owners of the instance's last `n` runs (from their folders), oldest first.
+fn run_owners(inst: &Inst, n: usize) -> Vec<(u32, Option<Owner>)> {
+    let mut ids: Vec<u32> = std::fs::read_dir(inst.runs())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix('r')?.parse().ok())
+        .collect();
+    ids.sort_unstable();
+    ids.into_iter().rev().take(n).rev().map(|id| (id, inst.run_owner(id))).collect()
+}
+
+/// Take the instance down: the game, the supervisor, the container, Sight, the pads; then
+/// `state.json` says so (the supervisor, stopped first, can't).
+fn down(lab: &Lab, inst: &Inst, source: &str) {
+    let _ = sup::request(lab, inst, &SupRequest::Kill { source: source.into() });
+    // Waits (a few seconds at most) until it has stopped, so it can't write after us.
+    let _ = sup::quit(inst);
+    let _ = ops::podman_cmd(&["rm".into(), "-f".into(), "-t".into(), "5".into(), inst.container()]).output();
+    mark_down(inst, ops::running_id(&inst.container()).is_some());
+    sight::down(inst);
+    // Its pads go with the container (the pad host would see it gone in 4 s).
+    pad::stop(inst);
+}
+
+/// Write what `down` left into `state.json` (`running`: podman still lists the container).
+fn mark_down(inst: &Inst, running: bool) {
+    if !inst.state_path().exists() {
+        return;
+    }
+    let mut st = read_state(inst);
+    let before = st.clone();
+    st.reconcile(running, chrono::Utc::now());
+    if st != before {
+        st.seq += 1;
+        st.updated = Some(chrono::Utc::now());
+        if let Ok(b) = serde_json::to_vec_pretty(&st) {
+            let _ = lab::write_atomic(&inst.state_path(), &b);
+        }
+    }
+}
+
+fn up(lab: &Lab, name: &str, owner: Owner) -> Result<()> {
     let (inst, m) = inst_of(lab, name)?;
     if ops::running_id(&inst.container()).is_some() {
         let _ = sup::request(lab, &inst, &SupRequest::Ping)?;
-        println!("{name} is already up");
+        match inst.owner() {
+            Some(o) if o.name() != owner.name() => println!("{name} is already up, brought up by {} ({})", o.name(), o.details(Path::new("/proc"))),
+            _ => println!("{name} is already up"),
+        }
         return Ok(());
     }
     if !ops::podman_cmd(&["image".into(), "exists".into(), m.runtime.image.clone()]).status()?.success() {
@@ -1164,6 +1285,10 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         pad::stop(&inst);
         return Err(e);
     }
+    // Whose it is now (`quiver lab list`), before anything else can see it up.
+    if let Err(e) = owner.write(&inst.owner_path()) {
+        eprintln!("  couldn't record the owner: {e:#}");
+    }
     let deadline = Instant::now() + Duration::from_secs(15);
     let display = loop {
         if let Some(d) = ops::display(&inst) {
@@ -1186,7 +1311,7 @@ fn up(lab: &Lab, name: &str) -> Result<()> {
         sup::spawn(lab, &inst)?;
     }
     let _ = sup::request(lab, &inst, &SupRequest::Ping)?;
-    println!("{name} is up: display {display} at {} (gamescope headless); next: quiver lab launch {name} --wait frame", m.display);
+    println!("{name} is up (owner {}): display {display} at {} (gamescope headless); next: quiver lab launch {name} --wait frame", owner.name(), m.display);
     Ok(())
 }
 
@@ -1620,5 +1745,62 @@ mod tests {
         assert_eq!(default_name("Assassin's Creed® Origins"), "assassins-creed-orig");
         assert!(lab::check_name(&default_name("Assassin's Creed® Origins")).is_ok());
         assert_eq!(default_name("™"), "game");
+    }
+
+    /// `quiver lab down origins` said "origins is down" and podman listed nothing, but
+    /// `status` still said "container up": the supervisor is stopped before the container and
+    /// left `state.json` as it last was. `down` now writes the state, and readers check podman.
+    #[test]
+    fn status_after_down_is_down() {
+        use quiver_core::lab::ready::{Phase, Run};
+        let t = tempfile::tempdir().unwrap();
+        let inst = Lab::new(t.path().into()).instance("origins");
+        std::fs::create_dir_all(&inst.dir).unwrap();
+        let mut r = Run::new(4, "lab-origins-r4".into(), chrono::Utc::now());
+        r.reach(Phase::Frame, chrono::Utc::now());
+        let left = State { instance: "origins".into(), seq: 9, container_up: true, display: Some(":10".into()), supervisor_pid: Some(77), run: Some(r), ..Default::default() };
+        std::fs::write(inst.state_path(), serde_json::to_vec(&left).unwrap()).unwrap();
+        // Podman still lists it (rm failed): the file stays as it is.
+        mark_down(&inst, true);
+        assert_eq!(read_state(&inst), left);
+        mark_down(&inst, false);
+        let st = read_state(&inst);
+        assert!(!st.container_up && st.supervisor_pid.is_none() && st.seq == 10, "{st:?}");
+        assert_eq!(st.run.as_ref().unwrap().phase, Phase::Exited);
+        // `quiver lab wait` gives up instead of waiting out its timeout.
+        assert_eq!(quiver_core::lab::ready::reached(&st, &Want::parse("frame"), Some(5)), Some(false));
+        // An instance never brought up has no state to write.
+        let fresh = Lab::new(t.path().into()).instance("t2");
+        mark_down(&fresh, false);
+        assert!(!fresh.state_path().exists());
+    }
+
+    #[test]
+    fn owners_in_the_table_and_runs() {
+        let t = tempfile::tempdir().unwrap();
+        let inst = Lab::new(t.path().into()).instance("origins");
+        assert_eq!(owner_cell(None), "-");
+        let o: Owner = serde_json::from_str(r#"{"agent":"codex","session":"pharos-xreal","pid":4294967295,"pid_start":1,"at":"2026-11-21T14:30:00Z"}"#).unwrap();
+        assert_eq!(owner_cell(Some(&o)), "codex:pharos-xreal (gone)");
+        // Runs keep theirs in their folders; the latest few, oldest first.
+        for id in [1u32, 2, 10] {
+            std::fs::create_dir_all(inst.run_dir(id)).unwrap();
+        }
+        o.write(&inst.run_dir(10).join(lab::owner::FILE)).unwrap();
+        let runs = run_owners(&inst, 2);
+        assert_eq!(runs.iter().map(|(id, o)| (*id, o.is_some())).collect::<Vec<_>>(), [(2, false), (10, true)]);
+        // The current run's owner while it runs, else the instance's.
+        std::fs::create_dir_all(&inst.dir).unwrap();
+        let up = Owner { session: Some("quiver".into()), agent: "claude".into(), ..o.clone() };
+        up.write(&inst.owner_path()).unwrap();
+        let mut r = quiver_core::lab::ready::Run::new(10, "lab-origins-r10".into(), chrono::Utc::now());
+        r.owner = Some(o.clone());
+        let mut st = State { container_up: true, run: Some(r), ..Default::default() };
+        assert_eq!(owner_now(&inst, &st).map(|o| o.name()).as_deref(), Some("codex:pharos-xreal"));
+        st.run.as_mut().unwrap().reach(quiver_core::lab::ready::Phase::Exited, chrono::Utc::now());
+        assert_eq!(owner_now(&inst, &st).map(|o| o.name()).as_deref(), Some("claude:quiver"));
+        // Round trip through state.json.
+        std::fs::write(inst.state_path(), serde_json::to_vec(&st).unwrap()).unwrap();
+        assert_eq!(read_state(&inst).run.unwrap().owner, Some(o));
     }
 }

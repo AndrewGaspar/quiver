@@ -25,6 +25,7 @@ use chrono::Utc;
 use quiver_api::lab::LaunchMaterial;
 use quiver_api::{Request, StoreId};
 use quiver_core::lab::manifest::Licence;
+use quiver_core::lab::owner::Owner;
 use quiver_core::lab::ready::{Exit, Phase, Run, State};
 use quiver_core::lab::{self, Inst, Lab, Manifest, configset, eos, eosproxy, guard, host, podman, procs, wincert};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,9 @@ pub enum SupRequest {
         /// The clock for this launch (`real`, `virtual:<Hz>`), instead of the manifest's.
         #[serde(default)]
         clock: Option<String>,
+        /// Who asked (design/LAB.md "Owners"): recorded on the run.
+        #[serde(default)]
+        owner: Option<Box<Owner>>,
     },
     Kill {
         source: String,
@@ -310,7 +314,10 @@ pub fn supervise(lab: Lab, name: &str) -> Result<()> {
         std::thread::spawn(move || {
             let quit = serve(&sup, conn);
             if quit {
-                sup.update(|_| Some("supervisor stopping".into()));
+                sup.update(|st| {
+                    st.supervisor_pid = None;
+                    Some("supervisor stopping".into())
+                });
                 let _ = std::fs::remove_file(sup.inst.socket());
                 std::process::exit(0);
             }
@@ -337,7 +344,7 @@ fn serve(sup: &Sup, conn: UnixStream) -> bool {
     let result = match req {
         SupRequest::Ping => Ok(json!({ "pid": std::process::id() })),
         SupRequest::Quit => Ok(Value::Null),
-        SupRequest::Launch { source, mod_dir, no_mod, args, clock } => launch(sup, &source, mod_dir, no_mod, &args, clock.as_deref()),
+        SupRequest::Launch { source, mod_dir, no_mod, args, clock, owner } => launch(sup, &source, mod_dir, no_mod, &args, clock.as_deref(), owner.map(|o| *o)),
         SupRequest::Kill { source } => kill(sup, &source, "killed"),
     };
     reply(&conn, result);
@@ -434,7 +441,7 @@ pub fn apply_mod(inst: &Inst, m: &Manifest, mod_dir: Option<&Path>) -> Result<Ve
     Ok(copied)
 }
 
-fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra: &[String], clock: Option<&str>) -> Result<Value> {
+fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra: &[String], clock: Option<&str>, owner: Option<Owner>) -> Result<Value> {
     let _busy = sup.busy.lock().unwrap();
     let inst = &sup.inst;
     let mut m = inst.load()?;
@@ -473,6 +480,10 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let run = next_run(inst);
     let run_dir = inst.run_dir(run);
     std::fs::create_dir_all(&run_dir)?;
+    // Whose run it is, kept with it (state.json holds only the current run).
+    if let Some(o) = &owner {
+        let _ = o.write(&run_dir.join(lab::owner::FILE));
+    }
     let session = quiver_api::lab::session_id(&inst.name, run);
     let run_win = format!(r"{}\runs\r{run}", lab::LAB_WIN);
     *sup.eos_run.lock().unwrap() = eos_plan.is_some().then_some(run);
@@ -618,10 +629,12 @@ fn launch(sup: &Sup, source: &str, mod_dir: Option<PathBuf>, no_mod: bool, extra
     let started = Utc::now();
     let mut r = Run::new(run, session.clone(), started);
     r.notes = notes.clone();
+    let by = owner.as_ref().map(|o| o.name()).unwrap_or_else(|| source.to_owned());
+    r.owner = owner;
     sup.update(|st| {
         st.container_up = true;
         st.run = Some(r);
-        Some(format!("launch r{run} by {source} ({})", m.licence.describe()))
+        Some(format!("launch r{run} by {by} ({})", m.licence.describe()))
     });
     // The run's quiver-sight first: it waits for the layer's ring.
     if let Some(s) = &sight
@@ -953,7 +966,14 @@ mod tests {
     #[test]
     fn requests_round_trip() {
         let r: SupRequest = serde_json::from_str(r#"{"op":"launch","source":"agent"}"#).unwrap();
-        assert!(matches!(r, SupRequest::Launch { no_mod: false, .. }));
+        assert!(matches!(r, SupRequest::Launch { no_mod: false, owner: None, .. }));
+        // The owner goes over the socket whole.
+        let o: Owner = serde_json::from_str(r#"{"agent":"codex","session":"pharos-xreal","session_id":"01a1fe7c-a581-7cc0-8726-e1ca42a83389","source":"agent:codex","at":"2026-11-21T14:30:00Z"}"#).unwrap();
+        let req = SupRequest::Launch { source: "agent:codex".into(), mod_dir: None, no_mod: false, args: vec![], clock: None, owner: Some(Box::new(o.clone())) };
+        match serde_json::from_slice::<SupRequest>(&serde_json::to_vec(&req).unwrap()).unwrap() {
+            SupRequest::Launch { owner: Some(back), .. } => assert_eq!((back.name(), *back), ("codex:pharos-xreal/agent:codex".to_owned(), o)),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(next_run(&Lab::new("/nonexistent".into()).instance("x")), 1);
     }
 }
