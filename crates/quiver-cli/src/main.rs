@@ -1232,6 +1232,23 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// `--machine` is global; a remote command's own machine argument stays its own.
+    #[test]
+    fn remote_and_machine_parse() {
+        use remote::RemoteAction;
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied()));
+        let c = parse(&["remote", "revoke", "laptop"]).unwrap();
+        assert!(c.machine.is_none() && matches!(c.cmd, Cmd::Remote { action: RemoteAction::Revoke { ref peer } } if peer == "laptop"));
+        let c = parse(&["--machine", "tower", "remote", "wake", "office"]).unwrap();
+        assert_eq!(c.machine.as_deref(), Some("tower"));
+        assert!(matches!(c.cmd, Cmd::Remote { action: RemoteAction::Wake { ref peer } } if peer == "office"));
+        let c = parse(&["library", "--machine", "tower"]).unwrap();
+        assert_eq!(c.machine.as_deref(), Some("tower"));
+        assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_) } }));
+        assert!(matches!(parse(&["remote", "rename", "Tower"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Rename { second: None, .. } }));
+        assert!(parse(&["remote", "add", "tower"]).is_err(), "needs the code");
+    }
+
     #[test]
     fn queue_now_and_after_parse() {
         use downloads::{OnOff, QueueAction};

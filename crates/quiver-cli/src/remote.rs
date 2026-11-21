@@ -40,14 +40,20 @@ pub enum RemoteAction {
         json: bool,
     },
     /// Forget a paired machine (name, id or id prefix); its connections drop at once.
-    Revoke { machine: String },
+    Revoke {
+        #[arg(value_name = "MACHINE")]
+        peer: String,
+    },
     /// `rename NAME`: rename this machine. `rename MACHINE NAME`: rename a paired one here.
     Rename {
         first: String,
         second: Option<String>,
     },
     /// Wake a paired machine with Wake-on-LAN (its MAC is learned when pairing on a LAN).
-    Wake { machine: String },
+    Wake {
+        #[arg(value_name = "MACHINE")]
+        peer: String,
+    },
     /// Quiver machines on the LAN (mDNS).
     Discover {
         /// Seconds to listen.
@@ -132,8 +138,8 @@ pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
             }
             print_peers(&peers);
         }
-        RemoteAction::Revoke { machine } => {
-            let gone: Vec<PeerInfo> = client.call(Request::RemoteRevoke { id: machine }).await?;
+        RemoteAction::Revoke { peer } => {
+            let gone: Vec<PeerInfo> = client.call(Request::RemoteRevoke { id: peer }).await?;
             if let Some(p) = gone.first() {
                 println!("revoked {} ({})", p.name, p.id);
             }
@@ -148,9 +154,9 @@ pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
                 println!("{first} is now {name} here");
             }
         },
-        RemoteAction::Wake { machine } => {
-            let () = client.call(Request::RemoteWake { id: machine.clone() }).await?;
-            println!("sent a wake-up to {machine}");
+        RemoteAction::Wake { peer } => {
+            let () = client.call(Request::RemoteWake { id: peer.clone() }).await?;
+            println!("sent a wake-up to {peer}");
         }
         RemoteAction::Discover { wait, json } => {
             let found: Vec<Discovered> = client.call(Request::RemoteDiscover { wait_ms: Some(wait.saturating_mul(1000)) }).await?;
