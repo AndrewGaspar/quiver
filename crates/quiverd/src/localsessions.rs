@@ -61,7 +61,6 @@ impl Local {
             profile: prepared.and_then(|p| p.profile.clone()).or_else(|| self.profile.clone()),
             options_revision: prepared.and_then(|p| p.options_revision),
             account: self.account.clone().unwrap_or_default(),
-            ..Default::default()
         }
     }
 }
