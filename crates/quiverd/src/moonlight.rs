@@ -83,9 +83,14 @@ pub(crate) fn stream_host_for(daemon: &Arc<Daemon>) -> Arc<dyn StreamHost> {
     Arc::new(crate::streams::MoonlightGames::new(daemon, run.join("quiver").join("moonlight-streams")))
 }
 
-/// Moonlight lists a "Test pattern" app first. Off now that games stream; the key still
+/// Moonlight lists a "Test pattern" app first. Off now that games stream, unless
+/// `QUIVER_MOONLIGHT_TEST_PATTERN=1` (scratch daemons and the end-to-end test); the key still
 /// streams the test pattern for a client that remembers it.
 pub(crate) const LIST_TEST_PATTERN: bool = false;
+
+fn list_test_pattern() -> bool {
+    LIST_TEST_PATTERN || std::env::var("QUIVER_MOONLIGHT_TEST_PATTERN").is_ok_and(|v| v == "1")
+}
 pub(crate) const TEST_PATTERN_KEY: &str = "quiver:test-pattern";
 
 // --- the library Moonlight lists ------------------------------------------------------------
@@ -100,7 +105,10 @@ pub(crate) struct Library {
 
 impl Library {
     async fn refresh(&self, daemon: &Arc<Daemon>) {
-        let entries = match daemon.library(false).await {
+        // Every store's games that Quiver itself launches (Ubisoft, and Epic games it
+        // installed): a stream runs them in its own display. Steam's start through Steam, on
+        // the desktop, so they aren't offered.
+        let entries = match daemon.library_all(false).await {
             Ok(e) => e,
             Err(e) => {
                 tracing::info!("moonlight: no games to list: {e:#}");
@@ -109,14 +117,16 @@ impl Library {
         };
         let mut apps: Vec<(App, Vec<quiver_api::art::ArtRef>)> = entries
             .iter()
-            .filter(|e| e.on_disk())
+            .filter(|e| e.on_disk() && e.game.store != quiver_api::StoreId::Steam && (e.installed.is_some() || crate::epic::is_installed(daemon, e.game)))
             .map(|e| {
                 let art = quiver_api::art::candidates(e, quiver_api::art::ArtSlot::Tile, Default::default()).into_iter().map(|(_, r)| r).collect();
                 (App { key: e.game.key(), title: e.name.clone(), hdr: false }, art)
             })
             .collect();
+        // A scratch daemon's test programs (`QUIVER_TEST_GAMES`).
+        apps.extend(crate::testgames::all().into_iter().filter_map(|g| Some((App { key: g.game?.key(), title: g.name, hdr: false }, Vec::new()))));
         apps.sort_by_key(|a| a.0.title.to_lowercase());
-        if LIST_TEST_PATTERN {
+        if list_test_pattern() {
             apps.insert(0, (App { key: TEST_PATTERN_KEY.into(), title: "Test pattern".into(), hdr: false }, Vec::new()));
         }
         *self.apps.lock().unwrap() = apps;

@@ -163,7 +163,8 @@ fn host_exe() -> PathBuf {
     {
         return dir.join("quiver-stream-host");
     }
-    "quiver-stream-host".into()
+    let on_path = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join("quiver-stream-host")).find(|p| p.is_file()));
+    on_path.unwrap_or_else(|| "quiver-stream-host".into())
 }
 
 /// Whether to run hosts in a scope of their own: `systemd-run` exists and the user's
@@ -572,7 +573,15 @@ impl quiver_gamestream::StreamHost for MoonlightGames {
             return self.pattern.start(req, ends);
         }
         let game = GameRef::parse(&req.app.key).map_err(|e| anyhow::anyhow!("{}: {e}", req.app.key))?;
+        if game.store == StoreId::Steam && crate::testgames::find(game).is_none() {
+            bail!("{game}: Steam games start through Steam, on the desktop, not in a stream's display");
+        }
         let d = self.daemon.upgrade().context("quiverd is stopping")?;
+        // It runs the display's placeholder and the pad namespace: never quiverd's own binary.
+        let exe = host_exe();
+        if !exe.is_absolute() {
+            bail!("quiver-stream-host isn't installed beside quiverd or on PATH (tools/install-user.sh installs it)");
+        }
         let session = format!("moonlight-{:08x}", rand_u32());
         let opts = quiver_stream_host::host::HostOptions {
             target: quiver_stream_host::host::Target::Display,
@@ -584,7 +593,7 @@ impl quiver_gamestream::StreamHost for MoonlightGames {
             headless_server: false,
             max_frames: None,
             force_sandbox_gid: None,
-            exe: Some(host_exe()).filter(|p| p.is_absolute()),
+            exe: Some(exe),
             constant_bitrate_audio: req.audio.constant_bitrate,
         };
         let source = format!("moonlight:{}", req.client_name);
@@ -600,9 +609,18 @@ impl quiver_gamestream::StreamHost for MoonlightGames {
                 }
             };
             let Some(launch) = host.launch.clone() else { return };
-            LAUNCH.lock().unwrap().insert(game, launch);
-            let job = d.play(&source, game, None).await;
-            LAUNCH.lock().unwrap().remove(&game);
+            // A resume right after the last stream ended finds the game still stopping (its
+            // display went with that stream): wait for it, up to 20 s.
+            let mut job = Err(anyhow::anyhow!("not started"));
+            for _ in 0..40 {
+                LAUNCH.lock().unwrap().insert(game, launch.clone());
+                job = d.play(&source, game, None).await;
+                LAUNCH.lock().unwrap().remove(&game);
+                match &job {
+                    Err(e) if format!("{e:#}").contains("already running") => tokio::time::sleep(Duration::from_millis(500)).await,
+                    _ => break,
+                }
+            }
             let job = match job {
                 Ok(j) => j,
                 Err(e) => {

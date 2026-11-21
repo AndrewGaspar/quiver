@@ -7,7 +7,9 @@
 #
 # With GS_QUIVERD=path/to/quiverd and GS_CLI=path/to/quiver instead, the server is a scratch
 # quiverd (its own HOME and XDG dirs under GS_STATE/daemon): the CLI turns Moonlight on and
-# enters the PIN, and the app streamed is quiverd's "Test pattern".
+# enters the PIN, and the app streamed is quiverd's "Test pattern", or GS_APP (a game: with
+# GS_DAEMON_ENV="QUIVER_TEST_GAMES=… QUIVER_STREAM_HOST_BIN=…", a scratch test program
+# launched into the stream's display as quiverd launches games).
 #
 # Steps: pair (PIN 4321), list, reach the server over IPv6, stream at --packet-size 1392 (what
 # Moonlight uses for a host it thinks is local: too big for a 1280 MTU, so the server must
@@ -58,20 +60,20 @@ if [ -n "${GS_QUIVERD:-}" ]; then
     mkdir -p "$D/data/quiver/remote" "$DRUN"
     chmod 700 "$DRUN"
     echo '{"accounts":[]}' > "$D/data/quiver/accounts.json"
-    printf '{"library":"%s/lib","prefixes":"%s/pfx","proton":"%s/proton","sdk_source":"%s/sdk","save_backups":"%s/backups","report_playtime":false,"steam_offers":false}' "$D" "$D" "$D" "$D" "$D" > "$D/data/quiver/config.json"
+    printf '{"library":"%s/lib","prefixes":"%s/pfx","proton":"%s","sdk_source":"%s/sdk","save_backups":"%s/backups","report_playtime":false,"steam_offers":false}' "$D" "$D" "${GS_PROTON:-$D/proton}" "$D" "$D" > "$D/data/quiver/config.json"
     echo '{"name":"tower"}' > "$D/data/quiver/remote/machine.json"
     daemon_env() {
         env -i PATH=/usr/bin:/bin HOME="$D/home" XDG_DATA_HOME="$D/data" XDG_CONFIG_HOME="$D/config" XDG_STATE_HOME="$D/state" \
             XDG_CACHE_HOME="$D/cache" XDG_RUNTIME_DIR="$DRUN" QUIVER_SHM_ROOT="$GS_STATE/shm" QUIVER_BROKER=127.0.0.1:0 \
-            QUIVER_AUTO_RESTART=0 QUIVER_REMOTE_MDNS=0 RUST_LOG=${RUST_LOG:-info} "$@"
+            QUIVER_AUTO_RESTART=0 QUIVER_REMOTE_MDNS=0 QUIVER_MOONLIGHT_TEST_PATTERN=1 RUST_LOG=${RUST_LOG:-info} ${GS_DAEMON_ENV:-} "$@"
     }
     daemon_env "$GS_QUIVERD" > "$SLOG" 2>&1 &
     SPID=$!
     for _ in $(seq 300); do [ -S "$DRUN/quiver/quiverd.sock" ] && break; sleep 0.1; done
     daemon_env "$GS_CLI" remote moonlight enable --bind 127.0.0.1 --bind ::1 > "$GS_STATE/enable.log" 2>&1 || { echo "STEP enable failed"; cat "$GS_STATE/enable.log"; exit 92; }
     grep -q 'listening on' "$GS_STATE/enable.log" || { echo "STEP server failed"; cat "$GS_STATE/enable.log"; tail -20 "$SLOG"; exit 92; }
-    APP="Test pattern"
-    LISTED="Test pattern"
+    APP=${GS_APP:-Test pattern}
+    LISTED=${GS_APP:-Test pattern}
 else
     # shellcheck disable=SC2086
     QUIVER_SHM_ROOT=$GS_STATE/shm RUST_LOG=${RUST_LOG:-info} "$GS_SERVER" --state "$GS_STATE/server" --bind 127.0.0.1 --bind ::1 \

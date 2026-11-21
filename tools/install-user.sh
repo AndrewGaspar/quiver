@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build Quiver from this checkout and install it into your home directory (no root):
 #
-#   ~/.local/bin/{quiver,quiverd,quiver-app,quiver-sight,quiver-webview,ubi}  (ubi: the CLI's pre-Quiver name;
+#   ~/.local/bin/{quiver,quiverd,quiver-app,quiver-sight,quiver-webview,quiver-stream-host,quiver-stream,ubi}  (ubi: the CLI's pre-Quiver name;
 #                                             quiver-webview: the Epic sign-in window, needs webkit2gtk-4.1 at run time)
 #   ~/.local/lib/quiver/quiver-bridge.exe, and ubi-bridge.exe (a copy under its pre-rename name)
 #   ~/.local/lib/quiver/sight/{x86_64,i686}/libquiver_sight_layer.so  (the Sight Vulkan layer)
