@@ -1359,6 +1359,11 @@ mod tests {
 
     #[test]
     fn queue_now_and_after_parse() {
+        // As above: a debug build's clap parse outgrows a test thread's 2 MB stack.
+        std::thread::Builder::new().stack_size(16 << 20).spawn(queue_now_and_after_parse_on_a_big_stack).unwrap().join().unwrap();
+    }
+
+    fn queue_now_and_after_parse_on_a_big_stack() {
         use downloads::{OnOff, QueueAction};
         let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).map(|c| c.cmd);
         assert!(matches!(parse(&["queue", "now", "origins"]), Ok(Cmd::Queue { action: Some(QueueAction::Now { game }), .. }) if game == "origins"));
@@ -1376,6 +1381,10 @@ mod tests {
             Ok(Cmd::Queue { action: Some(QueueAction::After { steam: Some(OnOff::Off), desktop: Some(OnOff::Off), .. }), .. })
         ));
         assert!(matches!(parse(&["install", "origins", "--add-to-steam"]), Ok(Cmd::Install { add_to_steam: true, desktop_entry: false, .. })));
+        assert!(matches!(
+            parse(&["playing", "--follow", "--no-start", "--recent", "3"]),
+            Ok(Cmd::Playing { follow: true, no_start: true, recent: 3, json: false })
+        ));
     }
 
     fn entry(game: GameRef, name: &str) -> LibraryEntry {
