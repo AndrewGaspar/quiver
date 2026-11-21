@@ -3,20 +3,22 @@
 //!
 //! A GameStream stream becomes a [`HostOptions`]: the negotiated codec, size, rate, colour,
 //! bitrate and audio go into its [`StreamConfig`]; reference frame invalidation when
-//! Moonlight decodes with it, keyframes otherwise. Then the channels are pumped both ways:
-//! frames, audio and host controls to the client; input (stamped here) and loss reports to
-//! the host. When either side goes, the host is stopped.
+//! Moonlight decodes with it, keyframes otherwise. The host is kept across sessions
+//! ([`crate::keep`]): a client leaving leaves it running for `keep` (10 minutes), a resume
+//! attaches the next session to it, and Quit app or the program's end stops it.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use quiver_stream_host::host::{Host, HostOptions, Target};
 use quiver_stream_host::recovery::Recovery;
-use quiver_stream_proto::input::Stamped;
-use quiver_stream_proto::{AudioCodec, ColorInfo, Control, HdrMetadata, StreamConfig, now_micros};
+use quiver_stream_proto::{AudioCodec, ColorInfo, HdrMetadata, StreamConfig, now_micros};
+use tokio::sync::{mpsc, watch};
 
 use crate::host::{App, HostEnds, StreamHost, StreamRequest};
+use crate::keep::{HostChannels, Hooks, Slot};
 
 /// Decides what a stream of `app` shows: the game's command, or the test pattern.
 pub type TargetFor = dyn Fn(&App) -> Result<Target> + Send + Sync;
@@ -31,7 +33,48 @@ pub struct StreamHostAdapter {
     pub preset: u8,
     /// `quiver-stream-host`, for the pad namespace (None: this executable).
     pub exe: Option<PathBuf>,
-    current: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// How long a host is kept after its client goes.
+    pub keep: Duration,
+    slot: Slot,
+}
+
+/// The host's channels, for a [`crate::keep::Kept`] (the `Host` keeps closed stand-ins);
+/// `bitrate` is the sender of the receiver the host was started with.
+pub fn take_channels(host: &mut Host, bitrate: watch::Sender<u32>) -> HostChannels {
+    fn closed<T>() -> mpsc::Receiver<T> {
+        mpsc::channel(1).1
+    }
+    HostChannels {
+        frames: std::mem::replace(&mut host.frames, closed()),
+        audio: std::mem::replace(&mut host.audio, closed()),
+        control_out: std::mem::replace(&mut host.control_out, closed()),
+        input: host.input.clone(),
+        control_in: host.control_in.clone(),
+        bitrate,
+    }
+}
+
+/// Hooks for a plain host: the program's end ends it, and stopping stops the host.
+pub fn host_hooks(host: Arc<Mutex<Option<Host>>>) -> Hooks {
+    let h = host.clone();
+    Hooks {
+        tick: Box::new(move || {
+            let mut g = h.lock().unwrap_or_else(|e| e.into_inner());
+            g.as_mut().is_some_and(|h| !h.alive()).then(|| "the program exited".to_owned())
+        }),
+        stop: Box::new(move |_, _| {
+            Box::pin(async move {
+                let h = host.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(h) = h {
+                    match h.stop().await {
+                        Ok(r) => tracing::info!(?r, "stream host stopped"),
+                        Err(e) => tracing::warn!("stream host stop: {e:#}"),
+                    }
+                }
+            })
+        }),
+        events: None,
+    }
 }
 
 /// HDR10 mastering metadata for when the game hasn't said: BT.2020 primaries, D65, 1000 nits.
@@ -48,7 +91,7 @@ pub fn default_hdr() -> HdrMetadata {
 
 impl StreamHostAdapter {
     pub fn new(dir: impl Into<PathBuf>, target: impl Fn(&App) -> Result<Target> + Send + Sync + 'static) -> Self {
-        Self { target: Box::new(target), dir: dir.into(), headless_server: false, preset: 1, exe: None, current: Mutex::new(None) }
+        Self { target: Box::new(target), dir: dir.into(), headless_server: false, preset: 1, exe: None, keep: crate::keep::KEEP, slot: Slot::default() }
     }
 
     /// The host's settings for a GameStream request.
@@ -85,53 +128,20 @@ impl StreamHost for StreamHostAdapter {
             exe: self.exe.clone(),
             constant_bitrate_audio: req.audio.constant_bitrate,
         };
-        let task = tokio::spawn(async move {
-            let HostEnds { video, audio, mut input, mut control_in, control_out, trigger_rumble: _, bitrate_kbps } = ends;
-            let mut host = match Host::start(opts, bitrate_kbps).await {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!("the stream host didn't start: {e:#}");
-                    let _ = control_out.send(Control::Bye { reason: format!("the host didn't start: {e:#}") }).await;
-                    return;
-                }
-            };
-            let mut seq = 0u64;
-            loop {
-                tokio::select! {
-                    f = host.frames.recv() => match f {
-                        Some(f) => if video.send(f).await.is_err() { break },
-                        None => break,
-                    },
-                    Some(a) = host.audio.recv() => { let _ = audio.try_send(a); }
-                    Some(c) = host.control_out.recv() => { let _ = control_out.try_send(c); }
-                    e = input.recv() => match e {
-                        Some(event) => {
-                            seq += 1;
-                            let _ = host.input.send(Stamped { seq, at: now_micros(), event }).await;
-                        }
-                        None => break,
-                    },
-                    c = control_in.recv() => match c {
-                        Some(Control::Bye { .. }) | None => break,
-                        Some(c) => { let _ = host.control_in.send(c).await; }
-                    },
-                }
-            }
-            match host.stop().await {
-                Ok(r) => tracing::info!(?r, "stream host stopped"),
-                Err(e) => tracing::warn!("stream host stop: {e:#}"),
-            }
-        });
-        if let Some(old) = self.current.lock().unwrap_or_else(|e| e.into_inner()).replace(task) {
-            old.abort();
-        }
-        Ok(())
+        self.slot.start(req, ends, self.keep, move |req| async move {
+            let (bitrate, rx) = watch::channel(req.video.bitrate_kbps);
+            let mut host = Host::start(opts, rx).await?;
+            let chans = take_channels(&mut host, bitrate);
+            Ok((chans, host_hooks(Arc::new(Mutex::new(Some(host))))))
+        })
     }
 
-    fn quit(&self, _app_key: &str) {
-        if let Some(t) = self.current.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            t.abort();
-        }
+    fn quit(&self, app_key: &str) {
+        self.slot.quit(app_key, "the client quit the app");
+    }
+
+    fn running(&self) -> Option<String> {
+        self.slot.running()
     }
 }
 

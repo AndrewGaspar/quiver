@@ -65,6 +65,7 @@ pub mod host;
 mod http;
 pub mod identity;
 pub mod input;
+pub mod keep;
 pub mod nvhttp;
 pub mod pairing;
 pub mod rtsp;

@@ -627,6 +627,7 @@ impl Quiver {
         if let Some((k, s)) = self.stream_session(g) {
             let name = self.mx.remotes[k].name();
             return Some(match s.state {
+                StreamState::Kept if !s.client.is_quiver() => (format!("Kept for Moonlight on {name}"), Icon::Cast),
                 StreamState::Kept => (format!("Resume on {name}"), Icon::Cast),
                 StreamState::Starting | StreamState::Streaming => (format!("Streaming from {name}"), Icon::Cast),
             });

@@ -752,7 +752,9 @@ impl Source for LayerCapture {
                 }
             }
             if self.layer_active() {
-                continue;
+                // The layer's last frame was under a second ago and nothing new came: a still
+                // picture (a paused game presents nothing).
+                return Ok(Next::Idle);
             }
             // PipeWire, until the layer's frames come (again).
             if !self.pw_on {
@@ -772,6 +774,7 @@ impl Source for LayerCapture {
                     self.times.lock().unwrap().pipewire_frames += 1;
                     return Ok(Next::Frame { captured });
                 }
+                Next::Idle => return Ok(Next::Idle),
                 Next::Stopped => return Ok(Next::Stopped),
             }
         }

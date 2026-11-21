@@ -168,7 +168,8 @@ impl Source for PwCapture {
                     }
                     match self.rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(r) => break r,
-                        Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                        // A still picture: let the video thread look at its requests.
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => return Ok(Next::Idle),
                         Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                             if let Some(e) = self.failed.lock().unwrap().clone() {
                                 bail!("capture: {e}");

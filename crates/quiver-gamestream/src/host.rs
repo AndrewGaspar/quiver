@@ -63,16 +63,26 @@ pub trait ClientStore: Send + Sync + 'static {
     }
 }
 
-/// The streaming host behind the server: quiverd spawns `quiver-stream-host` for the app and
-/// wires its channels to [`HostEnds`].
+/// The streaming host behind the server: quiverd runs the app in a stream host and wires its
+/// channels to [`HostEnds`].
+///
+/// As GameStream hosts do, a running app outlives its sessions: the client going (its input
+/// closing, a `Bye` on `control_in`) is a disconnect, and the app is kept for a resume
+/// ([`crate::keep::Kept`] does this for an embedder). Only [`StreamHost::quit`] (Moonlight's
+/// Quit app) or the app ending ends it.
 pub trait StreamHost: Send + Sync + 'static {
-    /// Starts streaming `req.app` (launching it if it isn't running). Called when the
-    /// client's RTSP handshake finishes, so every setting is known. The stream ends when
-    /// `ends.input` closes (the client left) or the host drops `ends.video` (the game or
-    /// host stopped). A `/resume` after a disconnect calls this again for the same app.
+    /// Starts streaming `req.app`: launching it, or, when it is running (kept after a
+    /// disconnect, or streaming to a session this replaces), attaching this session to it
+    /// with the new launch's keys. Called when the client's RTSP handshake finishes, so every
+    /// setting is known. The session ends when `ends.input` closes (the client left) or the
+    /// host drops `ends.video` (the app or the host stopped).
     fn start(&self, req: StreamRequest, ends: HostEnds) -> Result<()>;
     /// The client asked to quit the app (`/cancel`, Moonlight's "Quit app").
     fn quit(&self, app_key: &str);
+    /// The app running now (streaming, or kept for a resume), by key. `/serverinfo` reports
+    /// it as the current game, so Moonlight offers Resume and Quit for it, and asks to quit
+    /// it before launching another.
+    fn running(&self) -> Option<String>;
 }
 
 /// The host's ends of a stream's channels.

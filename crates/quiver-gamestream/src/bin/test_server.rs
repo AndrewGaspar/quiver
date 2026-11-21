@@ -99,6 +99,8 @@ struct Replay {
     fps: u32,
     stats: Arc<Stats>,
     current: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The app "running" (as a GameStream host keeps it) from its launch until Quit app.
+    running: Mutex<Option<String>>,
 }
 
 impl StreamHost for Replay {
@@ -107,6 +109,7 @@ impl StreamHost for Replay {
             "STREAM {} {}x{}@{} {:?} {} kbps audio {}ch/{}ms hdr={}",
             req.app.title, req.video.width, req.video.height, req.video.fps, req.video.codec, req.video.bitrate_kbps, req.audio.opus.channels, req.audio.packet_ms, req.video.hdr
         );
+        *self.running.lock().unwrap() = Some(req.app.key.clone());
         let frames = self.frames.clone();
         let audio = self.audio.clone();
         let fps = self.fps;
@@ -166,9 +169,14 @@ impl StreamHost for Replay {
 
     fn quit(&self, app_key: &str) {
         eprintln!("QUIT {app_key}");
+        self.running.lock().unwrap().take();
         if let Some(t) = self.current.lock().unwrap().take() {
             t.abort();
         }
+    }
+
+    fn running(&self) -> Option<String> {
+        self.running.lock().unwrap().clone()
     }
 }
 
@@ -334,7 +342,7 @@ async fn main() -> Result<()> {
     config.reference_frame_invalidation = false;
     config.test_video_loss_percent = args.loss;
     let stats = Arc::new(Stats::default());
-    let replay = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None) });
+    let replay = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None), running: Mutex::new(None) });
     let clients = Arc::new(FileClientStore::new(args.state.join("moonlight-clients.json")));
     let host: Arc<dyn StreamHost> = if args.host_pattern {
         host_pattern(&args.state, &mut config)?

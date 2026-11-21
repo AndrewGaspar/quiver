@@ -80,7 +80,9 @@ impl Moonlight {
 /// the host's headless display with the launch Play does ([`crate::streams::MoonlightGames`]).
 pub(crate) fn stream_host_for(daemon: &Arc<Daemon>) -> Arc<dyn StreamHost> {
     let run = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    Arc::new(crate::streams::MoonlightGames::new(daemon, run.join("quiver").join("moonlight-streams")))
+    let games = Arc::new(crate::streams::MoonlightGames::new(daemon, run.join("quiver").join("moonlight-streams")));
+    *daemon.streams.moonlight_games.lock().unwrap() = Arc::downgrade(&games);
+    games
 }
 
 /// Moonlight lists a "Test pattern" app first. Off now that games stream, unless

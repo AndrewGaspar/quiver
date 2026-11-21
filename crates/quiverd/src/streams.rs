@@ -8,7 +8,7 @@
 //!   ([`quiver_stream_proto::serve`]). Every `StartStream` gets fresh keys
 //!   ([`StreamTicket::new`]).
 //! - **One stream per target.** A target already streaming to another machine is refused.
-//!   One whose client left (kept for [`KEEP_SECS`]) resumes: the host gets new keys and
+//!   One whose client left (kept for `remote.keep_secs`, 10 minutes) resumes: the host gets new keys and
 //!   starts a new session, the game untouched. The same machine asking again takes its own
 //!   stream over.
 //! - **Games** run in the host's virtual display ([`ServeTarget::Display`]): once it is
@@ -30,9 +30,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use quiver_api::remote::{self, ClientCaps, LaunchEnv, StartStreamReply, StreamPrefs, StreamSession, StreamState, StreamTarget, StreamTicket};
+use quiver_api::remote::{self, ClientCaps, LaunchEnv, StartStreamReply, StreamClient, StreamPrefs, StreamSession, StreamState, StreamTarget, StreamTicket};
 use quiver_api::{Event, GameRef, StoreId};
-use quiver_stream_proto::serve::{KEEP_SECS, ServeIn, ServeOut, ServeSpec, ServeState, ServeTarget};
+use quiver_stream_proto::serve::{ServeIn, ServeOut, ServeSpec, ServeState, ServeTarget};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -69,6 +69,10 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct Streams {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Moonlight's stream, streaming or kept ([`MoonlightGames`]).
+    moonlight: Mutex<Option<StreamSession>>,
+    /// The Moonlight server's host, for `StopStream`.
+    pub moonlight_games: Mutex<std::sync::Weak<MoonlightGames>>,
 }
 
 /// The streams' folder.
@@ -79,6 +83,7 @@ fn root() -> PathBuf {
 impl Streams {
     pub fn list(&self) -> Vec<StreamSession> {
         let mut v: Vec<StreamSession> = self.entries.lock().unwrap().values().map(|e| e.rec.session.clone()).collect();
+        v.extend(self.moonlight.lock().unwrap().clone());
         v.sort_by_key(|s| s.started_at);
         v
     }
@@ -198,6 +203,11 @@ fn host_argv(id: &str, scope: bool) -> Vec<String> {
 /// `Request::StartStream`.
 pub(crate) async fn start(d: &Arc<Daemon>, source: &str, peer: Option<RemotePeer>, target: StreamTarget, prefs: StreamPrefs, caps: ClientCaps) -> Result<StartStreamReply> {
     let p = plan(d, &target).await?;
+    // One stream per game across both front ends: Moonlight's is in quiverd, so it can't be
+    // moved to this transport.
+    if let Some(m) = d.streams.moonlight.lock().unwrap().as_ref().filter(|m| p.game.is_some_and(|g| m.game.as_deref() == Some(g.to_string().as_str()))) {
+        bail!("{} is {}: resume it from Moonlight, or quit it there (Quit app) or with quiver stream --stop {}", m.title, m.describe(), m.game.as_deref().unwrap_or_default());
+    }
     let who = peer_name(peer.as_ref());
     let ip = reach_ip(peer.as_ref());
     let host_name = d.remote.machine_name();
@@ -248,7 +258,7 @@ pub(crate) async fn start(d: &Arc<Daemon>, source: &str, peer: Option<RemotePeer
         session: id.clone(),
         dir: dir.clone(),
         listen: None,
-        keep_secs: KEEP_SECS,
+        keep_secs: d.cfg.remote.keep_secs(),
         connect_secs: 60,
         headless_server: false,
         transport: None,
@@ -296,6 +306,7 @@ pub(crate) async fn start(d: &Arc<Daemon>, source: &str, peer: Option<RemotePeer
         kept_until: None,
         port,
         pid,
+        client: StreamClient::Quiver,
     };
     let (tx, rx) = mpsc::unbounded_channel::<ServeIn>();
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -393,6 +404,16 @@ pub(crate) async fn stop_request(d: &Arc<Daemon>, source: &str, id: &str) -> Res
         let entries = d.streams.entries.lock().unwrap();
         entries.values().find(|e| e.rec.session.id == id || e.rec.session.game.as_deref() == Some(id)).map(|e| (e.rec.session.id.clone(), e.rec.session.title.clone(), e.rec.session.game.clone()))
     };
+    let moonlight = d.streams.moonlight.lock().unwrap().clone().filter(|m| m.id == id || m.game.as_deref() == Some(id));
+    if found.is_none()
+        && let Some(m) = moonlight
+    {
+        let games = d.streams.moonlight_games.lock().unwrap().upgrade();
+        let Some(games) = games else { bail!("the Moonlight server is off") };
+        games.stop(m.game.as_deref().unwrap_or_default(), "stopped on the server");
+        d.log_activity(source, format!("stopped streaming {} (Moonlight)", m.title), None);
+        return Ok(());
+    }
     let Some((sid, title, game)) = found else { bail!("no stream {id}") };
     stop(d, &sid, "stopped on the server");
     if let Some(g) = game.as_deref().and_then(|s| GameRef::parse(s).ok()) {
@@ -564,21 +585,43 @@ pub(crate) fn readopt(d: &Arc<Daemon>) {
 /// `StartStream` runs one. The host's headless display comes up in quiverd (GameStream speaks
 /// its own transport, so the host runs in-process, as `quiver-gamestream`'s adapter runs it),
 /// then the game is launched into it as `Play` launches it, with the display's
-/// [`LaunchEnv`]. The game ending ends the stream; Moonlight's Quit app, or the stream
-/// ending, stops the game (its display is gone). The test pattern's key streams the test
-/// pattern.
+/// [`LaunchEnv`]. The test pattern's key streams the test pattern.
+///
+/// **Kept across sessions** ([`quiver_gamestream::keep`]), with the native streams' policy:
+/// the client going (Moonlight backgrounded, the network dropped) leaves the game and its
+/// display, sink and pads running for `remote.keep_secs` (10 minutes); `/resume` or `/launch`
+/// of it attaches the next session with its new keys; Quit app, `quiver stream --stop`, the
+/// keep window ending or the game exiting end it (and the game with its display).
+///
+/// **One stream per game across both front ends.** A game Quiver's own client streams (or
+/// keeps) is refused here, and one Moonlight keeps is refused to `StartStream`, each saying
+/// where to resume it: the hosts differ (in quiverd for Moonlight, a `serve` process for
+/// Quiver's transport), so a session can't move between them.
 pub(crate) struct MoonlightGames {
     daemon: std::sync::Weak<Daemon>,
     pattern: quiver_gamestream::stream_host::StreamHostAdapter,
     dir: PathBuf,
-    current: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    slot: quiver_gamestream::keep::Slot,
 }
 
 impl MoonlightGames {
     pub fn new(d: &Arc<Daemon>, dir: PathBuf) -> MoonlightGames {
-        let pattern = quiver_gamestream::stream_host::StreamHostAdapter::new(dir.clone(), |_app: &quiver_gamestream::host::App| Ok(quiver_stream_host::host::Target::TestPattern { motion: true }));
-        MoonlightGames { daemon: Arc::downgrade(d), pattern, dir, current: Mutex::new(None) }
+        let mut pattern = quiver_gamestream::stream_host::StreamHostAdapter::new(dir.clone(), |_app: &quiver_gamestream::host::App| Ok(quiver_stream_host::host::Target::TestPattern { motion: true }));
+        pattern.keep = Duration::from_secs(d.cfg.remote.keep_secs());
+        MoonlightGames { daemon: Arc::downgrade(d), pattern, dir, slot: Default::default() }
     }
+}
+
+/// Moonlight's stream in `Request::Streams` (at most one), kept up to date from its keeper's
+/// events.
+fn moonlight_session(d: &Daemon, f: impl FnOnce(&mut Option<StreamSession>)) {
+    f(&mut d.streams.moonlight.lock().unwrap());
+    d.emit(Event::StreamsChanged);
+}
+
+/// A native stream of this target's key (`game:<ref>`), if any: (title, how it stands).
+fn native_stream_of(d: &Daemon, key: &str) -> Option<StreamSession> {
+    d.streams.entries.lock().unwrap().values().find(|e| e.rec.key == key).map(|e| e.rec.session.clone())
 }
 
 impl quiver_gamestream::StreamHost for MoonlightGames {
@@ -591,114 +634,183 @@ impl quiver_gamestream::StreamHost for MoonlightGames {
             bail!("{game}: Steam games start through Steam, on the desktop, not in a stream's display");
         }
         let d = self.daemon.upgrade().context("quiverd is stopping")?;
+        if let Some(s) = native_stream_of(&d, &format!("game:{game}")) {
+            bail!("{} is {} through Quiver's own client: resume it there, or stop it (quiver stream --stop {game})", s.title, s.describe());
+        }
         // It runs the display's placeholder and the pad namespace: never quiverd's own binary.
         let exe = host_exe();
         if !exe.is_absolute() {
             bail!("quiver-stream-host isn't installed beside quiverd or on PATH (tools/install-user.sh installs it)");
         }
-        let session = format!("moonlight-{:08x}", rand_u32());
-        let opts = quiver_stream_host::host::HostOptions {
-            target: quiver_stream_host::host::Target::Display,
-            config: quiver_gamestream::stream_host::StreamHostAdapter::config_for(&req),
-            dir: self.dir.join(&session),
-            session,
-            preset: 1,
-            recovery: if req.video.reference_frame_invalidation { quiver_stream_host::recovery::Recovery::RefInvalidation } else { quiver_stream_host::recovery::Recovery::Keyframe },
-            headless_server: false,
-            max_frames: None,
-            force_sandbox_gid: None,
-            exe: Some(exe),
-            constant_bitrate_audio: req.audio.constant_bitrate,
-        };
-        let source = format!("moonlight:{}", req.client_name);
-        let title = req.app.title.clone();
-        let task = tokio::spawn(async move {
-            let quiver_gamestream::host::HostEnds { video, audio, mut input, mut control_in, control_out, trigger_rumble: _, bitrate_kbps } = ends;
-            let mut host = match quiver_stream_host::Host::start(opts, bitrate_kbps).await {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!("moonlight: {title}'s display didn't start: {e:#}");
-                    let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: format!("the host didn't start: {e:#}") }).await;
-                    return;
-                }
-            };
-            let Some(launch) = host.launch.clone() else { return };
-            // A resume right after the last stream ended finds the game still stopping (its
-            // display went with that stream): wait for it, up to 20 s.
-            let mut job = Err(anyhow::anyhow!("not started"));
-            for _ in 0..40 {
-                LAUNCH.lock().unwrap().insert(game, launch.clone());
-                job = d.play(&source, game, None).await;
-                LAUNCH.lock().unwrap().remove(&game);
-                match &job {
-                    Err(e) if format!("{e:#}").contains("already running") => tokio::time::sleep(Duration::from_millis(500)).await,
-                    _ => break,
-                }
-            }
-            let job = match job {
-                Ok(j) => j,
-                Err(e) => {
-                    tracing::warn!("moonlight: {title} didn't start: {e:#}");
-                    let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: format!("{title} didn't start: {e:#}") }).await;
-                    let _ = host.stop().await;
-                    return;
-                }
-            };
-            d.log_activity_game(&source, format!("streaming {title} to Moonlight ({})", req.client_name), Some(game));
-            let mut seq = 0u64;
-            let mut tick = tokio::time::interval(Duration::from_secs(2));
-            loop {
-                tokio::select! {
-                    f = host.frames.recv() => match f {
-                        Some(f) => if video.send(f).await.is_err() { break },
-                        None => break,
-                    },
-                    Some(a) = host.audio.recv() => { let _ = audio.try_send(a); }
-                    Some(c) = host.control_out.recv() => { let _ = control_out.try_send(c); }
-                    e = input.recv() => match e {
-                        Some(event) => {
-                            seq += 1;
-                            let _ = host.input.send(quiver_stream_proto::input::Stamped { seq, at: quiver_stream_proto::now_micros(), event }).await;
-                        }
-                        None => break,
-                    },
-                    c = control_in.recv() => match c {
-                        Some(quiver_stream_proto::Control::Bye { .. }) | None => break,
-                        Some(c) => { let _ = host.control_in.send(c).await; }
-                    },
-                    _ = tick.tick() => {
-                        if let Some(why) = pad_problem(&d, &source, game) {
-                            tracing::warn!("moonlight: no pads in this stream: {why}");
-                            host.disable_pads(&why);
-                        }
-                        if d.jobs.lock().unwrap().get(&job).is_none_or(|j| j.done) {
-                            let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: "the game exited".into() }).await;
-                            break;
-                        }
-                    }
-                }
-            }
-            // The display goes with the stream, so the game does too.
-            stop_game(&d, &source, game).await;
-            let _ = host.stop().await;
-        });
-        if let Some((_, old)) = self.current.lock().unwrap().replace((req.app.key.clone(), task)) {
-            old.abort();
-        }
-        Ok(())
+        let keep = Duration::from_secs(d.cfg.remote.keep_secs());
+        let dir = self.dir.clone();
+        self.slot.start(req, ends, keep, move |req| launch_for_moonlight(d, game, req, dir, exe, keep))
     }
 
     fn quit(&self, app_key: &str) {
         if app_key == crate::moonlight::TEST_PATTERN_KEY {
             return self.pattern.quit(app_key);
         }
-        if let Some((_, t)) = self.current.lock().unwrap().take() {
-            t.abort();
+        self.slot.quit(app_key, "the client quit the app");
+    }
+
+    fn running(&self) -> Option<String> {
+        self.slot.running().or_else(|| self.pattern.running())
+    }
+}
+
+impl MoonlightGames {
+    /// `StopStream` of Moonlight's stream (by its id or game): ends it as Quit app does.
+    pub fn stop(&self, key: &str, reason: &str) {
+        self.slot.quit(key, reason);
+    }
+}
+
+/// The game's display, the game launched into it, and the keeper's hooks: the game exiting
+/// ends the stream, a launch's pad problem turns the pads off, and the end stops the game
+/// (its display goes) and the host.
+async fn launch_for_moonlight(
+    d: Arc<Daemon>,
+    game: GameRef,
+    req: quiver_gamestream::host::StreamRequest,
+    dir: PathBuf,
+    exe: PathBuf,
+    keep: Duration,
+) -> Result<quiver_gamestream::keep::Started> {
+    use quiver_gamestream::keep::{Hooks, KeptEvent};
+    let session = format!("moonlight-{:08x}", rand_u32());
+    let source = format!("moonlight:{}", req.client_name);
+    let title = req.app.title.clone();
+    moonlight_session(&d, |s| {
+        *s = Some(StreamSession {
+            id: session.clone(),
+            target: StreamTarget::Game { game: game.to_string(), profile: None },
+            title: title.clone(),
+            game: Some(game.to_string()),
+            peer: req.client_name.clone(),
+            state: StreamState::Starting,
+            started_at: Utc::now(),
+            kept_until: None,
+            port: 0,
+            pid: std::process::id(),
+            client: StreamClient::Moonlight,
+        })
+    });
+    let clear = |d: &Daemon| moonlight_session(d, |s| *s = None);
+    let opts = quiver_stream_host::host::HostOptions {
+        target: quiver_stream_host::host::Target::Display,
+        config: quiver_gamestream::stream_host::StreamHostAdapter::config_for(&req),
+        dir: dir.join(&session),
+        session: session.clone(),
+        preset: 1,
+        recovery: if req.video.reference_frame_invalidation { quiver_stream_host::recovery::Recovery::RefInvalidation } else { quiver_stream_host::recovery::Recovery::Keyframe },
+        headless_server: false,
+        max_frames: None,
+        force_sandbox_gid: None,
+        exe: Some(exe),
+        constant_bitrate_audio: req.audio.constant_bitrate,
+    };
+    let (bitrate, rx) = tokio::sync::watch::channel(req.video.bitrate_kbps);
+    let mut host = match quiver_stream_host::Host::start(opts, rx).await {
+        Ok(h) => h,
+        Err(e) => {
+            clear(&d);
+            return Err(e.context(format!("{title}'s display didn't start")));
         }
-        if let (Some(d), Ok(g)) = (self.daemon.upgrade(), GameRef::parse(app_key)) {
-            tokio::spawn(async move { stop_game(&d, "moonlight", g).await });
+    };
+    let Some(launch) = host.launch.clone() else {
+        clear(&d);
+        bail!("the stream's display gave no launch environment");
+    };
+    // A launch right after the last stream ended may find the game still stopping: wait for
+    // it, up to 20 s.
+    let mut job = Err(anyhow::anyhow!("not started"));
+    for _ in 0..40 {
+        LAUNCH.lock().unwrap().insert(game, launch.clone());
+        job = d.play(&source, game, None).await;
+        LAUNCH.lock().unwrap().remove(&game);
+        match &job {
+            Err(e) if format!("{e:#}").contains("already running") => tokio::time::sleep(Duration::from_millis(500)).await,
+            _ => break,
         }
     }
+    let job = match job {
+        Ok(j) => j,
+        Err(e) => {
+            let _ = host.stop().await;
+            clear(&d);
+            return Err(e.context(format!("{title} didn't start")));
+        }
+    };
+    d.log_activity_game(&source, format!("streaming {title} to Moonlight ({})", req.client_name), Some(game));
+    let chans = quiver_gamestream::stream_host::take_channels(&mut host, bitrate);
+    let host = Arc::new(Mutex::new(Some(host)));
+
+    let (events_tx, mut events) = mpsc::unbounded_channel::<KeptEvent>();
+    {
+        let (weak, title, source) = (Arc::downgrade(&d), title.clone(), source.clone());
+        tokio::spawn(async move {
+            while let Some(e) = events.recv().await {
+                let Some(d) = weak.upgrade() else { return };
+                match e {
+                    KeptEvent::Attached { client, resumed } => {
+                        if resumed {
+                            d.log_activity_game(&format!("moonlight:{client}"), format!("moonlight: resumed {title} on {client} (the same game, still running)"), Some(game));
+                        }
+                        moonlight_session(&d, |s| {
+                            if let Some(s) = s {
+                                s.state = StreamState::Streaming;
+                                s.kept_until = None;
+                                s.peer = client;
+                            }
+                        });
+                    }
+                    KeptEvent::Detached { reason, keep } => {
+                        d.log_activity_game(&source, format!("moonlight: {title} is kept for {} min for a resume from Moonlight ({reason})", keep.as_secs().div_ceil(60)), Some(game));
+                        moonlight_session(&d, |s| {
+                            if let Some(s) = s {
+                                s.state = StreamState::Kept;
+                                s.kept_until = Some(Utc::now() + chrono::Duration::seconds(keep.as_secs() as i64));
+                            }
+                        });
+                    }
+                    KeptEvent::Ended { .. } => {}
+                }
+            }
+        });
+    }
+    let (h, dd, src) = (host.clone(), d.clone(), source.clone());
+    let tick = Box::new(move || {
+        if let Some(why) = pad_problem(&dd, &src, game) {
+            tracing::warn!("moonlight: no pads in this stream: {why}");
+            if let Some(h) = h.lock().unwrap().as_ref() {
+                h.disable_pads(&why);
+            }
+        }
+        if dd.jobs.lock().unwrap().get(&job).is_none_or(|j| j.done) {
+            return Some("the game exited".to_owned());
+        }
+        let mut g = h.lock().unwrap();
+        g.as_mut().is_some_and(|h| !h.alive()).then(|| "the stream's display ended".to_owned())
+    });
+    let (dd, title2) = (d.clone(), title.clone());
+    let stop = Box::new(move |reason: String, quit: bool| -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            // The display goes with the stream, so the game does too.
+            if reason != "the game exited" {
+                stop_game(&dd, &source, game).await;
+            }
+            let h = host.lock().unwrap().take();
+            if let Some(h) = h {
+                let _ = h.stop().await;
+            }
+            let how = if quit { "quit" } else { "ended" };
+            dd.log_activity_game(&source, format!("moonlight: {title2} {how}: {reason}"), Some(game));
+            moonlight_session(&dd, |s| *s = None);
+        })
+    });
+    let _ = keep;
+    Ok((chans, Hooks { tick, stop, events: Some(events_tx) }))
 }
 
 #[cfg(test)]

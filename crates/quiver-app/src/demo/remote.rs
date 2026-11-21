@@ -108,6 +108,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: Request) -> Result<std::resul
             kept_until: Some(Utc::now() + Span::minutes(7)),
             port: 47998,
             pid: 4242,
+            client: Default::default(),
         });
         return Ok(Ok(json!(kept.into_iter().collect::<Vec<_>>())));
     }
