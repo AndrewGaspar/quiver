@@ -699,6 +699,80 @@ fn checks(p: &Profile, v: &Verification) -> Vec<Check> {
     out
 }
 
+/// A light echo probe that runs for a whole `run`: the path's own round trip over time,
+/// independent of what the workloads report.
+pub struct PathProbe {
+    stop: Arc<AtomicBool>,
+    echo: Option<Echo>,
+    sender: Option<std::thread::JoinHandle<u64>>,
+    reader: Option<std::thread::JoinHandle<Vec<(u64, f64)>>>,
+}
+
+/// What a [`PathProbe`] saw: (CLOCK_MONOTONIC µs at send, round trip ms) per answered packet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PathSamples {
+    pub sent: u64,
+    pub samples: Vec<(u64, f64)>,
+}
+
+impl PathProbe {
+    pub fn start(lab: &Lab, port: u16, pps: u32) -> Result<PathProbe> {
+        let echo = Echo::start(lab, port)?;
+        let sock = lab.udp(Ns::Client, SocketAddr::new("0.0.0.0".parse().unwrap(), 0))?;
+        sock.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let rx = sock.try_clone()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let to = SocketAddr::new(SERVER_V4.into(), port);
+        let s1 = stop.clone();
+        let interval = Duration::from_secs_f64(1.0 / pps.max(1) as f64);
+        let sender = std::thread::spawn(move || {
+            let mut pkt = [0u8; 64];
+            pkt[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+            let mut seq: u32 = 0;
+            while !s1.load(Ordering::Relaxed) {
+                pkt[4..8].copy_from_slice(&seq.to_le_bytes());
+                pkt[8..16].copy_from_slice(&now_micros().to_le_bytes());
+                let _ = sock.send_to(&pkt, to);
+                seq += 1;
+                std::thread::sleep(interval);
+            }
+            seq as u64
+        });
+        let s2 = stop.clone();
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 64];
+            // Keep reading a little after the stop, for the last answers in flight.
+            let mut until: Option<Instant> = None;
+            loop {
+                if s2.load(Ordering::Relaxed) && until.is_none() {
+                    until = Some(Instant::now() + Duration::from_millis(500));
+                }
+                if until.is_some_and(|u| Instant::now() >= u) {
+                    break;
+                }
+                let Ok((n, _)) = rx.recv_from(&mut buf) else { continue };
+                let now = now_micros();
+                if let Some((_, sent)) = parse_probe(&buf[..n]) {
+                    out.push((sent, now.saturating_sub(sent) as f64 / 1000.0));
+                }
+            }
+            out
+        });
+        Ok(PathProbe { stop, echo: Some(echo), sender: Some(sender), reader: Some(reader) })
+    }
+
+    pub fn stop(mut self) -> PathSamples {
+        self.stop.store(true, Ordering::Relaxed);
+        let sent = self.sender.take().unwrap().join().unwrap_or(0);
+        let samples = self.reader.take().unwrap().join().unwrap_or_default();
+        if let Some(e) = self.echo.take() {
+            e.finish(sent);
+        }
+        PathSamples { sent, samples }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

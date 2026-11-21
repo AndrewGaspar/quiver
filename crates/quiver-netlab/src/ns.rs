@@ -454,8 +454,9 @@ impl Lab {
     /// Prepares `cmd` to run in an endpoint's network namespace as the person's own uid and
     /// gid (see the module docs), in its own process group, killed if this thread exits.
     /// `own_group: false` keeps the caller's process group, for an interactive shell that
-    /// needs the terminal.
-    pub fn workload_command(&self, side: Side, cmd: &mut Command, own_group: bool) {
+    /// needs the terminal. `dup: Some((fd, at))` puts `fd` at `at` last, after the namespace
+    /// fds (which may sit at low numbers) have been used.
+    pub fn workload_command(&self, side: Side, cmd: &mut Command, own_group: bool, dup: Option<(RawFd, RawFd)>) {
         let user = self.user.as_raw_fd();
         let net = self.netns_fd(side.ns());
         let uid_map = format!("{} 0 1\n", self.uid).into_bytes();
@@ -477,6 +478,9 @@ impl Lab {
                 if own_group {
                     check(libc::setpgid(0, 0))?;
                 }
+                if let Some((fd, at)) = dup {
+                    check(libc::dup2(fd, at))?;
+                }
                 Ok(())
             });
         }
@@ -484,8 +488,13 @@ impl Lab {
 
     /// Spawns a workload (see [`Lab::workload_command`]) and remembers its process group, so
     /// dropping the lab kills it and its children.
-    pub fn spawn(&self, side: Side, mut cmd: Command) -> Result<Child> {
-        self.workload_command(side, &mut cmd, true);
+    pub fn spawn(&self, side: Side, cmd: Command) -> Result<Child> {
+        self.spawn_with_fd(side, cmd, None)
+    }
+
+    /// [`Lab::spawn`], with `fd` given to the workload as fd `at`.
+    pub fn spawn_with_fd(&self, side: Side, mut cmd: Command, dup: Option<(RawFd, RawFd)>) -> Result<Child> {
+        self.workload_command(side, &mut cmd, true, dup);
         let child = cmd.spawn().with_context(|| format!("spawning {:?} in the {} namespace", cmd, side.name()))?;
         self.groups.lock().unwrap().push(child.id() as i32);
         Ok(child)

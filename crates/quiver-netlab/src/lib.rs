@@ -12,18 +12,18 @@
 //! [`link::Shaper`], and either spawn processes on a side ([`Lab::spawn`]) or make sockets
 //! there for threads in their own process ([`Lab::udp`], [`Lab::tcp_listen`]).
 
-// pub mod fake;
-// pub mod flood;
+pub mod fake;
+pub mod flood;
 pub mod link;
-// pub mod matrix;
+pub mod matrix;
 pub mod ns;
 pub mod probe;
 pub mod profile;
-// pub mod report;
-// pub mod run;
+pub mod report;
+pub mod run;
 pub mod scenario;
 pub mod shape;
-// pub mod stats;
+pub mod stats;
 
 pub use link::Shaper;
 pub use ns::{Dir, Lab, Ns, Side, Unavailable};
