@@ -15,7 +15,8 @@
 # shared with every other X server in that namespace, so every display with a lock file in
 # the real /tmp is locked inside too (as are :0-:9), and the display the command gets is
 # checked against the real /tmp's sockets before anything runs.
-# STDIN_FILE=path feeds that file to the command's stdin (a stream ticket for `connect`).
+# STDIN_FILE=path feeds that file to the command's stdin (a stream ticket for `connect`); - passes
+# this script's own stdin through.
 #
 # ACTIONS is a ';'-separated script run once the command has started:
 #   sleep S | shot NAME (gamescope screenshot to $OUT/NAME.png) | key A+B+C (X keysyms or
@@ -65,7 +66,7 @@ net=(--unshare-net)
 # The stdin file and the stats file live outside the private /tmp.
 binds=()
 for f in "$STDIN_FILE" "${QUIVER_NETLAB_STATS:-}"; do
-    [ -n "$f" ] && [ "$f" != /dev/null ] && [ -e "$f" ] && binds+=(--bind "$f" "$f")
+    [ -n "$f" ] && [ "$f" != /dev/null ] && [ "$f" != - ] && [ -e "$f" ] && binds+=(--bind "$f" "$f")
 done
 
 inner=$(cat <<'EOS'
@@ -76,7 +77,9 @@ exec gamescope --backend headless -W "$NW" -H "$NH" -w "$NW" -h "$NH" -r "$NR" $
   case "$DISPLAY" in :[0-9]|:[0-9].*) echo "refusing display $DISPLAY" >&2; exit 1;; esac
   for t in $TAKEN; do [ "$DISPLAY" = ":$t" ] && { echo "refusing display $DISPLAY: the host has it" >&2; exit 1; }; done
   echo "display $DISPLAY" >&2
-  "$@" < "$STDIN_FILE" > "$OUT/stdout.log" 2> "$OUT/stderr.log" &
+  if [ "$STDIN_FILE" = - ]; then "$@" > "$OUT/stdout.log" 2> "$OUT/stderr.log" &
+  else "$@" < "$STDIN_FILE" > "$OUT/stdout.log" 2> "$OUT/stderr.log" &
+  fi
   pid=$!
   shot() {
     rm -f /tmp/gamescope.png

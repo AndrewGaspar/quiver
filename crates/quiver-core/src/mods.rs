@@ -91,6 +91,10 @@ pub struct Plan {
     /// The game being launched (`QUIVER_GAME`, e.g. `epic:Hornbill`, for the game and
     /// anything outside that wants to know a window is a Quiver game), set by the daemon.
     pub game: Option<quiver_api::GameRef>,
+    /// Streamed (design/REMOTE.md): the launch goes into the stream host's virtual display,
+    /// with its sink and pad namespace ([`crate::launcher::stream_wrappers`]), set by the
+    /// daemon.
+    pub stream: Option<quiver_api::remote::LaunchEnv>,
 }
 
 impl Plan {
@@ -2162,7 +2166,7 @@ impl ModStore {
             resolved: st.resolved,
         };
         let saves_folder = saves.folder.trim_start_matches("savegames/<user>/").to_owned();
-        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder, session: None, game: None })
+        Ok(Plan { api, overlays, patches, view, record: self.record_path(), saves_folder, session: None, game: None, stream: None })
     }
 
     /// Make older data explicit: every live profile without a save store gets one (see

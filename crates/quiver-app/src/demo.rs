@@ -230,6 +230,7 @@ impl Demo {
                 proton_default: Some("GE-Proton10-26".into()),
                 broker: String::new(),
                 accounts: vec![quiver_api::Account { user_id: "demo".into(), name: "demo".into(), default: true }],
+                streams: Vec::new(),
             }),
             Request::Library { .. } => json!(st.entries),
             Request::Playtime { game } => json!(game.as_ubisoft().and_then(|id| st.playtime.get(&id)).cloned().unwrap_or_default()),

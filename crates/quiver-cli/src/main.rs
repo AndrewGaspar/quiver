@@ -23,6 +23,7 @@ mod savestores;
 mod setup;
 mod sight;
 mod steamrun;
+mod stream;
 mod tweaks;
 
 use std::io::Write;
@@ -269,6 +270,9 @@ enum Cmd {
         #[command(subcommand)]
         action: sight::SightAction,
     },
+    /// Stream a game (or the test pattern) from a paired machine (`--machine`), as the app's
+    /// Stream button does; `--list` and `--stop ID` manage a machine's streams.
+    Stream(stream::StreamArgs),
     /// Remote play: `quiver remote enable|disable|status|pair|add|peers|revoke|rename|wake|discover`.
     Remote {
         #[command(subcommand)]
@@ -771,6 +775,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
         Cmd::Remote { action } => remote::run(&client, action).await?,
+        Cmd::Stream(a) => stream::run(&client, a).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
         Cmd::Epic { action } => epic::run(&client, action).await?,
         Cmd::Status => {
@@ -795,6 +800,9 @@ async fn main() -> Result<()> {
             }
             for j in s.jobs.iter().filter(|j| !j.done) {
                 println!("job {} {:?} {}: {}", j.id, j.kind, j.name, j.status);
+            }
+            for st in &s.streams {
+                println!("stream {} {}: {}", st.id, st.title, st.describe());
             }
         }
         Cmd::Login { email } | Cmd::Account { action: AccountAction::Add { email } } => login(&client, email).await?,

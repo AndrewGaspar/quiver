@@ -15,6 +15,8 @@ mod lifecycle;
 mod localsessions;
 mod options;
 mod remote;
+mod streams;
+mod testgames;
 mod tweaks;
 mod savestores;
 mod setup;
@@ -126,6 +128,8 @@ struct Daemon {
     sight: notices::SightState,
     /// Remote play's control plane: the listener, pairing, peers (`remote`).
     remote: remote::Remote,
+    /// The streams this machine serves (`streams`).
+    streams: streams::Streams,
 }
 
 /// A client connection's reply channel, and a signal once a `Reply::Closing` went out on it.
@@ -375,6 +379,7 @@ impl Daemon {
                     proton_default: self.cfg.proton.file_name().map(|n| n.to_string_lossy().into_owned()),
                     broker: self.broker.clone(),
                     accounts,
+                    streams: self.streams.list(),
                 })
             }
             Request::Login { email, password } => {
@@ -477,6 +482,11 @@ impl Daemon {
                     JobKind::Import => bail!("imports can't be cancelled"),
                 }
                 self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), job.game.as_ubisoft());
+                Value::Null
+            }
+            Request::Stop { game } if testgames::find(game.0).is_some() => {
+                let g = testgames::find(game.0).context("test game")?;
+                launcher::stop(&self.cfg, &g).await?;
                 Value::Null
             }
             Request::Stop { game } if epic::is_installed(self, game.0) => {
@@ -667,8 +677,13 @@ impl Daemon {
             | Request::RemoteRevoke { .. }
             | Request::RemoteRename { .. }
             | Request::RemoteWake { .. }
-            | Request::RemoteDiscover { .. }
-            | Request::StartStream { .. }) => remote::handle(self, source, r).await?,
+            | Request::RemoteDiscover { .. }) => remote::handle(self, source, r).await?,
+            Request::StartStream { target, prefs, caps } => json!(streams::start(self, source, None, target, prefs, caps).await?),
+            Request::Streams => json!(self.streams.list()),
+            Request::StopStream { id } => {
+                streams::stop_request(self, source, &id).await?;
+                Value::Null
+            }
         })
     }
 
@@ -924,7 +939,8 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Daemon(quiver_api::daemon::DaemonRequest::Status)
         | Request::Sight(quiver_api::sight::SightRequest::Status)
         | Request::RemoteStatus
-        | Request::RemotePeers => None,
+        | Request::RemotePeers
+        | Request::Streams => None,
         r => Some(
             serde_json::to_value(r)
                 .ok()
@@ -1054,6 +1070,7 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
         };
         let daemon = daemon.clone();
         let tx = tx.clone();
+        let remote_peer = remote.clone();
         tokio::spawn(async move {
             let _pass = pass;
             let result = match env.request {
@@ -1061,6 +1078,10 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
                 Request::Perf(req) => daemon.handle_perf(&env.source, Some(perf::ConnCtx { id: conn_id, tx: tx.clone() }), req).await,
                 // So do holds without a time limit.
                 Request::Daemon(req) => daemon.handle_daemon(&env.source, Some(conn_id), req),
+                // A stream's ticket names the address this connection came in on.
+                Request::StartStream { target, prefs, caps } => {
+                    streams::start(&daemon, &env.source, remote_peer, target, prefs, caps).await.map(|r| serde_json::json!(r))
+                }
                 req => daemon.handle(&env.source, req).await,
             };
             let reply = match result {
@@ -1246,6 +1267,7 @@ async fn main() -> Result<()> {
         pending_2fa_at: Mutex::new(None),
         sight: notices::SightState::default(),
         remote: remote::Remote::new(),
+        streams: streams::Streams::default(),
     });
     mod_sink.attach(&daemon);
     options::test_session(&daemon);
@@ -1255,6 +1277,7 @@ async fn main() -> Result<()> {
     epicgame::start(&daemon);
     sightinfo::start(&daemon);
     remote::start(&daemon, inherited.remote);
+    streams::readopt(&daemon);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);

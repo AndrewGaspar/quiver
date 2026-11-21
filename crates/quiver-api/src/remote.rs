@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub use quiver_remote::discovery::Discovered;
 pub use quiver_remote::{Machine, Role, StreamTicket};
+pub use quiver_stream_proto::serve::LaunchEnv;
 pub use quiver_stream_proto::{ClientCaps, StreamPrefs, StreamTarget};
 
 use crate::Request;
@@ -37,7 +38,14 @@ pub struct RemoteSettings {
     /// What it binds (`host:port`); `None`: [`quiver_remote::DEFAULT_LISTEN`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    /// The first UDP port streams' media use (one per stream, counting up); `None`:
+    /// [`STREAM_PORT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_port: Option<u16>,
 }
+
+/// The first media port (design/REMOTE.md §3).
+pub const STREAM_PORT: u16 = 47998;
 
 impl RemoteSettings {
     pub fn is_default(&self) -> bool {
@@ -129,6 +137,55 @@ pub struct PeerInfo {
     pub connections: usize,
 }
 
+/// Where a stream stands (`Request::Streams`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamState {
+    /// The host is up and waiting for the client (or the game is starting).
+    Starting,
+    /// A client is connected.
+    Streaming,
+    /// The client left; the game keeps running until `kept_until`, and a `StartStream` for
+    /// the same target resumes it.
+    Kept,
+}
+
+/// One stream this machine serves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamSession {
+    pub id: String,
+    pub target: StreamTarget,
+    /// What it shows, for people ("Alan Wake Remastered", "Test pattern").
+    pub title: String,
+    /// The game ref, for a game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+    /// The machine it streams (or last streamed) to: the paired peer's name, or `This PC`.
+    pub peer: String,
+    pub state: StreamState,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_until: Option<DateTime<Utc>>,
+    /// The media's UDP port.
+    pub port: u16,
+    /// The host process.
+    pub pid: u32,
+}
+
+impl StreamSession {
+    /// "streaming to Laptop", "kept for Laptop until 14:05", "starting for Laptop".
+    pub fn describe(&self) -> String {
+        match self.state {
+            StreamState::Starting => format!("starting for {}", self.peer),
+            StreamState::Streaming => format!("streaming to {}", self.peer),
+            StreamState::Kept => match self.kept_until {
+                Some(t) => format!("kept for {} until {}", self.peer, t.with_timezone(&chrono::Local).format("%H:%M")),
+                None => format!("kept for {}", self.peer),
+            },
+        }
+    }
+}
+
 /// `Request::StartStream`: where to send the media, and who is serving it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartStreamReply {
@@ -202,6 +259,10 @@ mod tests {
         let p: PeerInfo = serde_json::from_str(r#"{"id":"ab","name":"T","role":"server","paired_at":"2026-11-21T00:00:00Z"}"#).unwrap();
         assert_eq!((p.state, p.connections), (PeerState::Offline, 0));
         assert!(RemoteSettings::default().is_default());
+        let r: Request = serde_json::from_str(r#"{"method":"stop_stream","params":{"id":"s1"}}"#).unwrap();
+        assert!(matches!(r, Request::StopStream { .. }));
+        let e: crate::Event = serde_json::from_str(r#"{"type":"streams_changed"}"#).unwrap();
+        assert!(matches!(e, crate::Event::StreamsChanged));
         assert_eq!(RemoteSettings::default().listen(), "0.0.0.0:47990");
     }
 

@@ -554,6 +554,44 @@ pub fn win_path(p: &Path) -> String {
 /// belongs to a game Quiver started, whatever its window class.
 pub const ENV_GAME: &str = "QUIVER_GAME";
 
+/// A streamed launch's command prefix: the stream's pad namespace (when its pads are hidden),
+/// so every Wine process of the launch can open them. Not with mounts (mods): the launch's
+/// own namespace is entered first, and the pad group can't be mapped inside it, so such a
+/// stream goes without pads.
+pub fn stream_wrappers(plan: &crate::mods::Plan) -> Vec<String> {
+    match &plan.stream {
+        Some(s) if plan.overlays.is_empty() => s.wrapper.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// A streamed launch's environment on `cmd`: the stream's display and sink in, the desktop's
+/// Wayland display out.
+fn stream_env(cmd: &mut Command, plan: &crate::mods::Plan) {
+    if let Some(s) = &plan.stream {
+        for k in &s.unset {
+            cmd.env_remove(k);
+        }
+        for (k, v) in &s.env {
+            cmd.env(k, v);
+        }
+    }
+}
+
+/// What a launch reports about its stream, for the job's detail.
+fn stream_note(plan: &crate::mods::Plan) -> Option<String> {
+    let s = plan.stream.as_ref()?;
+    let display = s.env.iter().find(|(k, _)| k == "DISPLAY").map(|(_, v)| v.as_str()).unwrap_or("?");
+    let pads = if s.wrapper.is_empty() {
+        "no pads"
+    } else if plan.overlays.is_empty() {
+        "pads in its namespace"
+    } else {
+        "no pads (mods mount their own namespace)"
+    };
+    Some(format!("streamed: display {display}, {pads}"))
+}
+
 struct Proton<'a> {
     cfg: &'a Config,
     prefix: &'a Path,
@@ -849,7 +887,12 @@ pub async fn play(
     install_prefix_bridge(&game.prefix, &bridge_exe)?;
     let bridge_log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&bridge_log);
-    let mut bridge = proton.command(&[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    let stream_wrap = stream_wrappers(plan);
+    if let Some(n) = stream_note(plan) {
+        events(LaunchEvent::Detail(vec![n]));
+    }
+    let mut bridge = proton.wrapped(&stream_wrap, &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    stream_env(&mut bridge, plan);
     if let Some(ns) = &ns {
         // First into the namespace: its wineserver must start in there.
         ns.enter(bridge.as_std_mut(), None)?;
@@ -883,7 +926,9 @@ pub async fn play(
     let extra: Vec<String> = game.args.as_deref().map(|a| a.split_whitespace().map(str::to_owned).collect()).unwrap_or_default();
     args.extend(extra.iter().map(String::as_str));
     args.extend(settings.args.iter().map(String::as_str));
-    let mut cmd = proton.wrapped(&settings.wrappers, &args);
+    let wrappers: Vec<String> = stream_wrappers(plan).into_iter().chain(settings.wrappers.iter().cloned()).collect();
+    let mut cmd = proton.wrapped(&wrappers, &args);
+    stream_env(&mut cmd, plan);
     for (k, v) in &settings.env {
         cmd.env(k, v);
     }
@@ -1004,7 +1049,8 @@ async fn start_mods_bridge(cfg: &Config, proton: &Proton<'_>, game: &Game, plan:
     crate::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
     let log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&log);
-    let mut cmd = proton.command(&[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    let mut cmd = proton.wrapped(&stream_wrappers(plan), &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    stream_env(&mut cmd, plan);
     if let Some(ns) = ns {
         ns.enter(cmd.as_std_mut(), None)?;
     }
@@ -1143,6 +1189,9 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     };
 
     events(LaunchEvent::Status("Starting…".into()));
+    if let Some(n) = stream_note(plan) {
+        events(LaunchEvent::Detail(vec![n]));
+    }
     // The mod SDK channel (design/MOD-CONFIG.md): a mods-only bridge serves the game's pipe.
     // Never in the way of the launch: without it the game starts without the SDK.
     let mut mods_bridge = match &store.broker {
@@ -1167,7 +1216,9 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     args.extend(extra.iter().map(String::as_str));
     args.extend(store.args.iter().map(String::as_str));
     args.extend(settings.args.iter().map(String::as_str));
-    let mut cmd = proton.wrapped(&settings.wrappers, &args);
+    let wrappers: Vec<String> = stream_wrappers(plan).into_iter().chain(settings.wrappers.iter().cloned()).collect();
+    let mut cmd = proton.wrapped(&wrappers, &args);
+    stream_env(&mut cmd, plan);
     for (k, v) in store.env.iter().map(|(k, v)| (k, v)).chain(&settings.env) {
         cmd.env(k, v);
     }

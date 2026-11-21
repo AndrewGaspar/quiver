@@ -138,6 +138,10 @@ impl Daemon {
     /// `Request::Play`, routed by store. A delegated launch (the store's client plays it)
     /// gets a finished Play job and an activity line here, the same for every store.
     pub(crate) async fn play(self: &Arc<Self>, source: &str, game: GameRef, profile: Option<String>) -> Result<u64> {
+        // A scratch daemon's test program (`QUIVER_TEST_GAMES`).
+        if let Some(g) = crate::testgames::find(game) {
+            return crate::testgames::play(self, source, g, profile).await;
+        }
         // An Epic game Quiver installed: Quiver plays it (mods and profiles apply).
         if crate::epic::is_installed(self, game) {
             return crate::epic::play(self, source, game, profile).await;

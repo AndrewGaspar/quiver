@@ -5208,6 +5208,7 @@ dependencies = [
  "quiver-perf",
  "quiver-proto",
  "quiver-remote",
+ "quiver-stream-proto",
  "reqwest",
  "serde",
  "serde_json",

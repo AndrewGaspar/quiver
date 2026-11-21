@@ -393,6 +393,9 @@ pub struct Status {
     /// Every signed-in account, in sign-in order.
     #[serde(default)]
     pub accounts: Vec<Account>,
+    /// The streams this machine serves (remote play), running or kept for a resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<remote::StreamSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1058,14 +1061,20 @@ pub enum Request {
         wait_ms: Option<u64>,
     },
     /// Start streaming `target` to the client that asks (`remote::StartStreamReply`: the
-    /// stream host's address and keys, and this machine's name). Not implemented yet: refused
-    /// with `remote::NOT_IMPLEMENTED`.
+    /// stream host's address and fresh keys, and this machine's name). A target with a kept
+    /// session (its client left less than 10 minutes ago) resumes with new keys; one
+    /// streaming to another machine is refused. `LabInstance` and `Desktop` answer
+    /// `remote::NOT_IMPLEMENTED`.
     StartStream {
         target: remote::StreamTarget,
         #[serde(default)]
         prefs: remote::StreamPrefs,
         caps: remote::ClientCaps,
     },
+    /// The streams this machine serves (`Vec<remote::StreamSession>`).
+    Streams,
+    /// End a stream (its id, or a game ref it streams), and the game it runs.
+    StopStream { id: String },
 }
 
 fn yes() -> bool {
@@ -1299,6 +1308,9 @@ pub enum Event {
     /// Paired machines or the listener changed (paired, revoked, renamed, enabled,
     /// disabled): reload `Request::RemoteStatus`.
     RemoteChanged,
+    /// A stream started, connected, was left (kept for a resume), resumed or ended: reload
+    /// `Request::Streams`.
+    StreamsChanged,
     /// The pairing window closed: `outcome` is `paired` (with the new peer's `id` and
     /// `name`), `expired`, `failed` (three wrong codes) or `cancelled`.
     PairingEnded {

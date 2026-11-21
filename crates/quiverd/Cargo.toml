@@ -14,6 +14,7 @@ path = "src/main.rs"
 quiver-core.workspace = true
 quiver-api.workspace = true
 quiver-remote.workspace = true
+quiver-stream-proto.workspace = true
 epic-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
