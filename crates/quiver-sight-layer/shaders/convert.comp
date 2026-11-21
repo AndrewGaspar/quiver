@@ -1,0 +1,166 @@
+#version 450
+// The stream capture's conversion (src/stream.rs): the presented swapchain image to the
+// encoder's input, YUV with every plane stacked at one pitch, written as 32-bit words.
+//
+// Each invocation writes whole words: NV12 4x2 pixels, P010 2x2, YUV444 4x1, YUV444P16 2x1.
+// Chroma for 4:2:0 is the mean of the 2x2 block (centre sited).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, std430) writeonly buffer Out { uint words[]; };
+
+layout(push_constant) uniform P {
+    uvec2 size;     // the picture (even), cropped from the image
+    uvec2 in_size;  // the swapchain image
+    uint pitch;     // bytes per row (a multiple of 4)
+    uint base;      // the slot's first word
+    uint mode;      // 0 NV12, 1 P010, 2 YUV444, 3 YUV444P16
+    uint flags;     // bits 0-1 input, bit 2 HDR out, bit 3 full range
+} p;
+
+const uint IN_GAMMA = 0u;   // SDR values as stored (UNORM views of sRGB-encoded images)
+const uint IN_LINEAR = 1u;  // an _SRGB view: the sampler decoded to linear
+const uint IN_PQ = 2u;      // HDR10: PQ-encoded BT.2020
+const uint IN_SCRGB = 3u;   // scRGB: linear BT.709, 1.0 = 80 nits
+
+const float M1 = 0.1593017578125;
+const float M2 = 78.84375;
+const float C1 = 0.8359375;
+const float C2 = 18.8515625;
+const float C3 = 18.6875;
+const float SDR_WHITE = 203.0; // nits (BT.2408)
+
+vec3 srgb_encode(vec3 l) {
+    l = clamp(l, 0.0, 1.0);
+    return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l));
+}
+
+vec3 srgb_decode(vec3 e) {
+    return mix(e / 12.92, pow((e + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), e));
+}
+
+// Linear, 1.0 = 10000 nits.
+vec3 pq_decode(vec3 e) {
+    vec3 ep = pow(clamp(e, 0.0, 1.0), vec3(1.0 / M2));
+    return pow(max(ep - C1, 0.0) / (C2 - C3 * ep), vec3(1.0 / M1));
+}
+
+vec3 pq_encode(vec3 l) {
+    vec3 lp = pow(clamp(l, 0.0, 1.0), vec3(M1));
+    return pow((C1 + C2 * lp) / (1.0 + C3 * lp), vec3(M2));
+}
+
+// Column-major: these are the rows of BT.2087's matrices, transposed.
+const mat3 BT709_TO_2020 = mat3(0.6274040, 0.0690970, 0.0163916, 0.3292820, 0.9195400, 0.0880132, 0.0433136, 0.0113612, 0.8955950);
+const mat3 BT2020_TO_709 = mat3(1.6604910, -0.1245505, -0.0181508, -0.5876411, 1.1328999, -0.1005789, -0.0728499, -0.0083494, 1.1187297);
+
+// The pixel as R'G'B' in the output's transfer and primaries.
+vec3 fetch(uint x, uint y) {
+    ivec2 at = ivec2(min(uvec2(x, y), p.in_size - 1u));
+    vec3 c = texelFetch(src, at, 0).rgb;
+    uint kind = p.flags & 3u;
+    bool hdr = (p.flags & 4u) != 0u;
+    if (hdr) {
+        if (kind == IN_PQ) return c;
+        if (kind == IN_SCRGB) return pq_encode(BT709_TO_2020 * max(c, 0.0) * (80.0 / 10000.0));
+        vec3 l = kind == IN_LINEAR ? c : srgb_decode(c);
+        return pq_encode(BT709_TO_2020 * l * (SDR_WHITE / 10000.0));
+    }
+    if (kind == IN_GAMMA) return clamp(c, 0.0, 1.0);
+    if (kind == IN_LINEAR) return srgb_encode(c);
+    if (kind == IN_PQ) return srgb_encode(BT2020_TO_709 * pq_decode(c) * (10000.0 / SDR_WHITE));
+    return srgb_encode(c);
+}
+
+// Y in [0, 1], Cb and Cr in [-0.5, 0.5].
+vec3 yuv(vec3 c) {
+    bool hdr = (p.flags & 4u) != 0u;
+    float kr = hdr ? 0.2627 : 0.2126;
+    float kb = hdr ? 0.0593 : 0.0722;
+    float y = kr * c.r + (1.0 - kr - kb) * c.g + kb * c.b;
+    return vec3(y, (c.b - y) / (2.0 * (1.0 - kb)), (c.r - y) / (2.0 * (1.0 - kr)));
+}
+
+// Quantised samples, `bits` deep.
+uint qy(float y, float bits) {
+    float top = exp2(bits) - 1.0;
+    bool full = (p.flags & 8u) != 0u;
+    float v = full ? y * top : (16.0 + 219.0 * y) * exp2(bits - 8.0);
+    return uint(clamp(round(v), 0.0, top));
+}
+
+uint qc(float c, float bits) {
+    float top = exp2(bits) - 1.0;
+    bool full = (p.flags & 8u) != 0u;
+    float v = full ? (c + 0.5) * top : (128.0 + 224.0 * c) * exp2(bits - 8.0);
+    return uint(clamp(round(v), 0.0, top));
+}
+
+void put(uint row, uint byte_x, uint w) {
+    words[p.base + (row * p.pitch + byte_x) / 4u] = w;
+}
+
+void main() {
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+    uint h = p.size.y;
+    if (p.mode == 0u || p.mode == 1u) {
+        bool ten = p.mode == 1u;
+        uint n = ten ? 2u : 4u;  // pixels across
+        uint x0 = gx * n;
+        uint y0 = gy * 2u;
+        if (x0 >= p.size.x || y0 >= h) return;
+        uint row0 = 0u, row1 = 0u, uv = 0u;
+        vec3 sum = vec3(0.0);
+        for (uint i = 0u; i < n; i++) {
+            vec3 a = fetch(x0 + i, y0);
+            vec3 b = fetch(x0 + i, y0 + 1u);
+            vec3 ya = yuv(a), yb = yuv(b);
+            sum += a + b;
+            if (ten) {
+                row0 |= (qy(ya.x, 10.0) << 6u) << (16u * i);
+                row1 |= (qy(yb.x, 10.0) << 6u) << (16u * i);
+            } else {
+                row0 |= qy(ya.x, 8.0) << (8u * i);
+                row1 |= qy(yb.x, 8.0) << (8u * i);
+            }
+            if ((i & 1u) == 1u) {
+                vec3 c = yuv(sum * 0.25);
+                sum = vec3(0.0);
+                uint k = i >> 1u;  // the chroma pair
+                if (ten) {
+                    uv = (qc(c.y, 10.0) << 6u) | ((qc(c.z, 10.0) << 6u) << 16u);
+                } else {
+                    uv |= (qc(c.y, 8.0) | (qc(c.z, 8.0) << 8u)) << (16u * k);
+                }
+            }
+        }
+        uint bx = ten ? x0 * 2u : x0;
+        put(y0, bx, row0);
+        put(y0 + 1u, bx, row1);
+        put(h + y0 / 2u, bx, uv);
+    } else {
+        bool ten = p.mode == 3u;
+        uint n = ten ? 2u : 4u;
+        uint x0 = gx * n;
+        uint y = gy;
+        if (x0 >= p.size.x || y >= h) return;
+        uint wy = 0u, wu = 0u, wv = 0u;
+        for (uint i = 0u; i < n; i++) {
+            vec3 c = yuv(fetch(x0 + i, y));
+            if (ten) {
+                wy |= (qy(c.x, 10.0) << 6u) << (16u * i);
+                wu |= (qc(c.y, 10.0) << 6u) << (16u * i);
+                wv |= (qc(c.z, 10.0) << 6u) << (16u * i);
+            } else {
+                wy |= qy(c.x, 8.0) << (8u * i);
+                wu |= qc(c.y, 8.0) << (8u * i);
+                wv |= qc(c.z, 8.0) << (8u * i);
+            }
+        }
+        uint bx = ten ? x0 * 2u : x0;
+        put(y, bx, wy);
+        put(h + y, bx, wu);
+        put(2u * h + y, bx, wv);
+    }
+}

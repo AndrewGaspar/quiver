@@ -67,6 +67,7 @@ mod pipelines;
 pub mod panel;
 mod present;
 mod state;
+pub mod stream;
 mod telemetry;
 pub mod wayland;
 
