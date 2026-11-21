@@ -59,6 +59,11 @@ pub trait Source: Send {
     fn resize(&mut self, _width: u32, _height: u32, _refresh_mhz: u32) {}
     /// A new colour setup (bit depth, chroma, HDR) for sources that draw their own frames.
     fn recolor(&mut self, _color: &ColorInfo) {}
+    /// The colour the frames come in, when the source decides it (the layer's capture of an
+    /// HDR game); `None` is the stream's own. A change comes with [`Next::Changed`].
+    fn color(&self) -> Option<ColorInfo> {
+        None
+    }
 }
 
 /// The test pattern, paced at the display's rate.
@@ -152,16 +157,16 @@ pub struct RunReport {
     pub bytes: u64,
 }
 
-/// The session settings for a source's picture.
-fn session(base: &EncoderConfig, width: u32, height: u32, format: InputFormat) -> EncoderConfig {
-    EncoderConfig { width, height, input: format, ..base.clone() }
+/// The session settings for a source's picture (and its colour, when the source says).
+fn session(base: &EncoderConfig, width: u32, height: u32, format: InputFormat, color: Option<ColorInfo>) -> EncoderConfig {
+    EncoderConfig { width, height, input: format, color: color.unwrap_or_else(|| base.color.clone()), ..base.clone() }
 }
 
 /// Run until stopped, the source ends, or the frame channel closes.
 pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig, mut announce: StreamConfig, io: VideoIo) -> Result<RunReport> {
     let _ctx = cuda.push()?;
     let (w, h, f) = source.format();
-    let mut enc = Encoder::new(cuda.clone(), session(&base, w, h, f)).context("start the encoder")?;
+    let mut enc = Encoder::new(cuda.clone(), session(&base, w, h, f, source.color())).context("start the encoder")?;
     let configure = |enc: &Encoder, announce: &mut StreamConfig| {
         let c = enc.config();
         announce.codec = c.codec;
@@ -222,7 +227,7 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
             let (w, h, f) = source.format();
             base.bitrate_kbps = enc.config().bitrate_kbps;
             drop(enc);
-            enc = Encoder::new(cuda.clone(), session(&base, w, h, f)).context("restart the encoder")?;
+            enc = Encoder::new(cuda.clone(), session(&base, w, h, f, source.color())).context("restart the encoder")?;
             configure(&enc, &mut announce);
         }
         match source.next(&cuda, enc.surface(), seq, &io.stop)? {
@@ -230,7 +235,7 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
             Next::Changed { width, height, format } => {
                 base.bitrate_kbps = enc.config().bitrate_kbps;
                 drop(enc);
-                enc = Encoder::new(cuda.clone(), session(&base, width, height, format)).context("restart the encoder for a new picture size")?;
+                enc = Encoder::new(cuda.clone(), session(&base, width, height, format, source.color())).context("restart the encoder for a new picture size")?;
                 configure(&enc, &mut announce);
             }
             Next::Frame { captured } => {
