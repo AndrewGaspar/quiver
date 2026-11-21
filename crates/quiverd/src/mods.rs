@@ -47,6 +47,10 @@ pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
 /// Steam game (Steam's install folder, and Steam's prefix for a Proton game; see
 /// [`crate::steammods::mod_game`]).
 pub(crate) fn installed(game: GameRef) -> Result<launcher::Game> {
+    // A scratch daemon's test program (`QUIVER_TEST_GAMES`) takes mods as an install does.
+    if let Some(g) = crate::testgames::find(game) {
+        return Ok(g);
+    }
     if let Some(app) = game.as_steam() {
         return crate::steammods::mod_game(app);
     }

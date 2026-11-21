@@ -4,10 +4,11 @@
 //! profile, mods, `LaunchEnv`), a client on the real transport sending a pad, and the
 //! program reading the pad's events:
 //!
-//! 1. without mods: the program has the stream pad group, opens the pad and reads it;
-//! 2. **with a mod profile** (overlays: the launch's own namespace, as the person's Pharos
-//!    profile has): the same. This is what failed: the launch's namespace mapped only the
-//!    person's own uid and gid, so the game couldn't open the pad the host made;
+//! 1. **with a mod profile** (overlays: the launch's own namespace, as the person's Pharos
+//!    profile has): the program sees the mod, has the stream pad group, opens the pad and
+//!    reads it. This is what failed: the launch's namespace mapped only the person's own uid
+//!    and gid, so the game couldn't open the pad the host made;
+//! 2. without mods: the same;
 //! 3. every process of the launch has the group (quiverd's audit, and a stand-in for Wine's
 //!    own processes that the program's "Proton" leaves running).
 //!
@@ -49,9 +50,39 @@ subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL)
 os.execvp("sh", ["sh", exe] + args[1:])
 "#;
 
+/// "wineserver": `-k` ends the prefix's processes (everything "Proton" started for it), `-w`
+/// waits for them, as the real one does.
+const FAKE_WINESERVER: &str = r#"#!/usr/bin/env python3
+import os, signal, sys, time
+pfx = os.path.realpath(os.environ["WINEPREFIX"])
+def mine():
+    out = []
+    for p in os.listdir("/proc"):
+        if not p.isdigit() or int(p) == os.getpid():
+            continue
+        try:
+            env = open(f"/proc/{p}/environ", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if any(e.startswith(b"STEAM_COMPAT_DATA_PATH=") and os.path.realpath(e.split(b"=", 1)[1].decode()) == pfx for e in env):
+            out.append(int(p))
+    return out
+if "-k" in sys.argv:
+    for p in mine():
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
+for _ in range(100):
+    if not mine():
+        break
+    time.sleep(0.1)
+"#;
+
 /// The game: wait for the stream pad, open it, log what it read.
 const PROBE: &str = r#"
 log="$1"; echo "groups $(id -G)" >> "$log"
+[ -e "$(dirname "$0")/from-the-mod.txt" ] && echo "mod mounted" >> "$log"
 for i in $(seq 400); do
   for n in /sys/class/input/event*; do
     case "$(cat $n/device/name 2>/dev/null)" in
@@ -113,7 +144,19 @@ async fn stream_and_press(q: &Client, root: &Path, profile: Option<&str>) -> (St
     let display = DisplayCaps { width: 1280, height: 720, refresh_mhz: 60_000, hdr: false, vrr: false, stereo_sbs: false, scale: 1.0 };
     let caps = ClientCaps { decoders: vec![], display, audio_channels: 2, pads: vec![PadKind::Xbox], microphone: false };
     let target = StreamTarget::Game { game: GAME.into(), profile: profile.map(str::to_owned) };
-    let reply: StartStreamReply = q.call(Request::StartStream { target: target.clone(), prefs: StreamPrefs::default(), caps: caps.clone() }).await.expect("start the stream");
+    // The last launch may still be winding down (its job ends after the prefix is shut).
+    let t = Instant::now();
+    let reply: StartStreamReply = loop {
+        match q.call(Request::StartStream { target: target.clone(), prefs: StreamPrefs::default(), caps: caps.clone() }).await {
+            Ok(r) => break r,
+            // (or the GPU is short of memory for a moment: the person's game may hold most of it)
+            Err(e) if (format!("{e:#}").contains("already running") || format!("{e:#}").contains("out of memory")) && t.elapsed() < Duration::from_secs(40) => {
+                eprintln!("retrying: {e:#}");
+                tokio::time::sleep(Duration::from_secs(2)).await
+            }
+            Err(e) => panic!("start the stream: {e:#}"),
+        }
+    };
     let keys = SessionKeys::new(reply.ticket.session_id, reply.ticket.key);
     let client = ClientSession::connect(reply.ticket.addr, keys, ClientOpts::default()).await.expect("connect");
     client.send_control(Control::Hello { version: PROTOCOL_VERSION, caps, prefs: StreamPrefs::default(), target }).unwrap();
@@ -138,7 +181,7 @@ async fn stream_and_press(q: &Client, root: &Path, profile: Option<&str>) -> (St
         if pad_sent && start.elapsed().as_millis() % 400 < 120 {
             presses += 1;
             let b = if presses.is_multiple_of(2) { PadButtons::A } else { 0 };
-            client.send_input(InputEvent::Pad { slot: 0, state: PadState { buttons: PadButtons(b), lx: (presses * 1000) as i16, ..Default::default() } }).unwrap();
+            let _ = client.send_input(InputEvent::Pad { slot: 0, state: PadState { buttons: PadButtons(b), lx: (presses * 1000) as i16, ..Default::default() } });
         }
         if std::fs::read_to_string(&log).is_ok_and(|l| l.contains(" bytes") || l.contains("refused") || l.contains("no pad")) {
             break;
@@ -181,11 +224,13 @@ async fn a_streamed_game_opens_its_pads_with_and_without_mods() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("stream-pads");
+    // (overlayfs leaves its work folder mode 0)
+    let _ = Command::new("chmod").args(["-R", "u+rwx"]).arg(&root).status();
     let _ = std::fs::remove_dir_all(&root);
     let d = |n: &str| root.join(n);
     let proton = d("proton");
     executable(&proton.join("proton"), FAKE_PROTON);
-    executable(&proton.join("files/bin/wineserver"), "#!/bin/sh\nexit 0\n");
+    executable(&proton.join("files/bin/wineserver"), FAKE_WINESERVER);
     executable(&d("game/install/padprobe.exe"), PROBE);
     std::fs::create_dir_all(d("game/prefix")).unwrap();
     let games = json!([{
@@ -225,8 +270,8 @@ async fn a_streamed_game_opens_its_pads_with_and_without_mods() {
         .env("QUIVER_STREAM_HOST_BIN", &host_bin)
         .env("QUIVER_TEST_GAMES", d("games.json"))
         .env("RUST_LOG", "quiverd=info,quiver_core=info,quiver_stream_host=debug")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(d("quiverd.log")).unwrap())
+        .stdout(std::fs::File::create(d("quiverd.log")).unwrap())
+        .stderr(std::fs::OpenOptions::new().append(true).open(d("quiverd.log")).unwrap())
         .spawn()
         .unwrap();
     let _daemon = Daemon(child, run.clone());
@@ -237,13 +282,8 @@ async fn a_streamed_game_opens_its_pads_with_and_without_mods() {
     }
     let q = Client::connect_running_at(sock.clone(), "cli").await.unwrap();
 
-    // 1. No mods.
-    let (got, notices) = stream_and_press(&q, &root, None).await;
-    assert!(got.split_whitespace().any(|g| g == gid.to_string()), "the game has the pad group: {got}");
-    assert!(got.contains("opened /dev/input/event") && got.contains("read 192 bytes"), "{got}");
-    assert!(!notices.iter().any(|n| n.contains("pad")), "{notices:?}");
-
-    // 2. A mod profile: the launch's own namespace (an overlay on the install folder).
+    // 1. A mod profile: the launch's own namespace (an overlay on the install folder), as
+    // the person's Pharos profile has. This is the case that had no pads.
     let layer = d("mod-layer");
     write(&layer.join("from-the-mod.txt"), "1");
     let _: serde_json::Value = q
@@ -263,13 +303,20 @@ async fn a_streamed_game_opens_its_pads_with_and_without_mods() {
         .await
         .expect("make a profile");
     let (got, notices) = stream_and_press(&q, &root, Some("Modded")).await;
-    let log = std::fs::read_to_string(d("quiverd.log")).unwrap_or_default();
-    assert!(log.contains("mounting overlays") || std::fs::read_to_string(d("game/prefix/fake-proton.log")).is_ok(), "{log}");
+    assert!(got.contains("mod mounted"), "the mod's overlay is what the game sees: {got}");
     assert!(got.split_whitespace().any(|g| g == gid.to_string()), "the modded launch has the pad group: {got}");
     assert!(got.contains("opened /dev/input/event") && got.contains("read 192 bytes"), "the modded launch reads its pad: {got}");
     assert!(!notices.iter().any(|n| n.contains("pad")), "{notices:?}");
 
+    // 2. No mods.
+    let (got, notices) = stream_and_press(&q, &root, None).await;
+    assert!(!got.contains("mod mounted"), "{got}");
+    assert!(got.split_whitespace().any(|g| g == gid.to_string()), "the game has the pad group: {got}");
+    assert!(got.contains("opened /dev/input/event") && got.contains("read 192 bytes"), "{got}");
+    assert!(!notices.iter().any(|n| n.contains("pad")), "{notices:?}");
+
     // 3. Both launches' processes all had the group (the audit, 8 s in).
+    let log = std::fs::read_to_string(d("quiverd.log")).unwrap_or_default();
     assert_eq!(log.matches("every process of the launch has the pad group").count(), 2, "{log}");
     assert!(!log.contains("stream pads:") || !log.contains("outside the stream's pad group"), "{log}");
     let _ = std::fs::remove_dir_all(&run);
