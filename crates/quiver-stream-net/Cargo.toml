@@ -1,0 +1,18 @@
+[package]
+name = "quiver-stream-net"
+description = "Quiver remote play's media transport: UDP, AEAD, FEC, pacing, bandwidth estimation (design/REMOTE.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quiver-stream-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ring = "0.17.14"
+quinn-udp = "0.5.16"
+reed-solomon-simd = "3.1"
