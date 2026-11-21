@@ -229,6 +229,7 @@ impl Quiver {
             this.mx.here = Some(r.map_err(|e| err_text(&e)));
             this.machines_set_peers(peers, cx);
         });
+        self.moonlight_reload(cx);
     }
 
     fn machines_set_peers(&mut self, peers: Vec<PeerInfo>, cx: &mut Context<Self>) {
@@ -379,6 +380,13 @@ impl Quiver {
             }
             Event::PeerOffline { .. } => self.machines_reload(cx),
             Event::PairingEnded { .. } => self.machines_pairing_ended(&e, cx),
+            // Presence comes from this machine's quiverd whichever machine is shown.
+            Event::AccountsPresenceChanged | Event::StoreAccountsChanged { .. } | Event::GameStarted { .. } | Event::GameStopped { .. }
+                if matches!(self.mx.view, View::Machine(_)) =>
+            {
+                self.load_presence(cx)
+            }
+            Event::MoonlightPairingRequested { .. } | Event::MoonlightPaired { .. } | Event::MoonlightChanged => self.moonlight_event(&e, cx),
             _ => {}
         }
         if !matches!(self.mx.view, View::Machine(_)) {

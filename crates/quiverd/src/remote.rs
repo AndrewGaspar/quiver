@@ -62,7 +62,8 @@ pub(crate) fn code_of(e: &anyhow::Error) -> Option<String> {
     e.chain().find_map(|c| c.downcast_ref::<Coded>()).map(|c| c.code.to_owned())
 }
 
-/// A paired client on a connection: requests are its, as `remote:<name>`.
+/// A paired client on a connection: requests are its, as `remote:<name>`
+/// (`remote::remote_source_as`).
 #[derive(Clone)]
 pub(crate) struct RemotePeer {
     pub name: String,
@@ -70,12 +71,6 @@ pub(crate) struct RemotePeer {
     pub local: Option<std::net::IpAddr>,
     /// Flips to true when the connection must close (revoked, listener off).
     pub kick: watch::Receiver<bool>,
-}
-
-impl RemotePeer {
-    pub fn source(&self) -> String {
-        remote::remote_source(&self.name)
-    }
 }
 
 struct LiveConn {
@@ -133,8 +128,23 @@ impl Remote {
         }
     }
 
+    /// Paired machines (both roles), as peers.json lists them.
+    pub(crate) fn peers(&self) -> Vec<Peer> {
+        self.peers.lock().unwrap().list().to_vec()
+    }
+
+    /// The paired machine `query` names (name, id or unique id prefix), of `role` if given.
+    pub(crate) fn peer(&self, query: &str, role: Option<Role>) -> Result<Peer> {
+        self.peers.lock().unwrap().one(query, role).cloned()
+    }
+
+    /// `<data>/remote`: this machine's identity and peers.
+    pub(crate) fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
     /// This machine's identity, made the first time it is needed.
-    fn identity(&self) -> Result<Arc<Identity>> {
+    pub(crate) fn identity(&self) -> Result<Arc<Identity>> {
         let mut slot = self.identity.lock().unwrap();
         if let Some(i) = slot.as_ref() {
             return Ok(i.clone());

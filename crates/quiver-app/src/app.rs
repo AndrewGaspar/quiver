@@ -685,11 +685,11 @@ impl Quiver {
         form.busy = true;
         form.error = None;
         let req = if form.needs_code {
-            Request::Login2fa { code: form.code.read(cx).text().trim().to_owned() }
+            Request::Login2fa { code: form.code.read(cx).text().trim().to_owned().into() }
         } else {
             Request::Login {
                 email: form.email.read(cx).text().trim().to_owned(),
-                password: form.password.read(cx).text().to_owned(),
+                password: form.password.read(cx).text().to_owned().into(),
             }
         };
         self.call::<LoginResult, _>(req, cx, |this, result, cx| {

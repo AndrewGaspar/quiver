@@ -272,6 +272,7 @@ impl Serve {
             max_frames: None,
             force_sandbox_gid: None,
             exe: None,
+            constant_bitrate_audio: false,
         };
         let host = Host::start(opts, self.bitrate.subscribe()).await?;
         tracing::info!("serve: target up (pads {:?}{})", host.pad_mode, host.x_display.as_deref().map(|d| format!(", display {d}")).unwrap_or_default());

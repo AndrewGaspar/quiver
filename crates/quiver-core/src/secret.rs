@@ -1,79 +1,117 @@
-//! A value that must never be printed (design/STORES.md §3.2): tokens, codes, session blobs.
+//! [`Secret`] lives in `quiver-api`, so requests that carry a password or a one-shot code can
+//! hold one; the store crates use it from here as before.
 //!
-//! [`Secret`] redacts itself in `Debug` and `Display`, so a struct holding one can derive
-//! `Debug` and still be logged. Serde passes the value through unchanged, because the only
-//! place a secret is serialized is its keyring entry.
+//! [`use_scratch_store_from_env`] is for scratch daemons in tests: with
+//! [`SCRATCH_ENV`] set, every keyring entry (Ubisoft's `session:<userId>`, Epic's
+//! `epic:<account id>`) goes to a 0600 file in that directory instead of the desktop's
+//! Secret Service, so a test daemon can never read or write the person's real keyring, and
+//! the test can check what each daemon stored.
 
-use std::fmt;
+use std::any::Any;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+pub use quiver_api::secret::Secret;
 
-#[derive(Clone, Default, PartialEq, Eq)]
-pub struct Secret<T>(T);
+/// The environment variable naming a scratch daemon's secrets directory.
+pub const SCRATCH_ENV: &str = "QUIVER_SCRATCH_SECRETS";
 
-impl<T> Secret<T> {
-    pub fn new(value: T) -> Self {
-        Secret(value)
+/// With [`SCRATCH_ENV`] set (to an absolute path), send every keyring entry of this
+/// process to files there. Returns the directory when it did. Call it first thing, before
+/// any entry is opened.
+pub fn use_scratch_store_from_env() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os(SCRATCH_ENV)?);
+    if !dir.is_absolute() {
+        tracing::warn!("{SCRATCH_ENV} must be an absolute path; ignored");
+        return None;
+    }
+    keyring::set_default_credential_builder(Box::new(ScratchStore { dir: dir.clone() }));
+    tracing::warn!("secrets: a scratch store in {} ({SCRATCH_ENV}), not the keyring", dir.display());
+    Some(dir)
+}
+
+/// The file a scratch store keeps `service`/`entry` in (for tests that check it).
+pub fn scratch_file(dir: &Path, service: &str, entry: &str) -> PathBuf {
+    dir.join(format!("{}.secret", hex::encode(format!("{service}\0{entry}"))))
+}
+
+struct ScratchStore {
+    dir: PathBuf,
+}
+
+impl keyring::credential::CredentialBuilderApi for ScratchStore {
+    fn build(&self, _target: Option<&str>, service: &str, user: &str) -> keyring::Result<Box<keyring::credential::Credential>> {
+        Ok(Box::new(ScratchEntry { dir: self.dir.clone(), path: scratch_file(&self.dir, service, user) }))
     }
 
-    /// The value itself. Call sites are where a secret leaves Quiver (an HTTP header, a
-    /// keyring write), so they are easy to find.
-    pub fn expose(&self) -> &T {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
-impl<T> From<T> for Secret<T> {
-    fn from(v: T) -> Self {
-        Secret(v)
-    }
+#[derive(Debug)]
+struct ScratchEntry {
+    dir: PathBuf,
+    path: PathBuf,
 }
 
-impl<T> fmt::Debug for Secret<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
-    }
+fn failed(e: std::io::Error) -> keyring::Error {
+    keyring::Error::PlatformFailure(Box::new(e))
 }
 
-impl<T> fmt::Display for Secret<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
+impl keyring::credential::CredentialApi for ScratchEntry {
+    fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.dir).map_err(failed)?;
+        std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
+        let tmp = self.path.with_extension("tmp");
+        let mut f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&tmp).map_err(failed)?;
+        f.write_all(secret).map_err(failed)?;
+        std::fs::rename(&tmp, &self.path).map_err(failed)
     }
-}
 
-impl<T: Serialize> Serialize for Secret<T> {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(s)
+    fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+        match std::fs::read(&self.path) {
+            Ok(v) => Ok(v),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(keyring::Error::NoEntry),
+            Err(e) => Err(failed(e)),
+        }
     }
-}
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Secret<T> {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        T::deserialize(d).map(Secret)
+    fn delete_credential(&self) -> keyring::Result<()> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(keyring::Error::NoEntry),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyring::credential::CredentialBuilderApi;
 
     #[test]
-    fn redacted_when_printed_kept_when_serialized() {
-        #[derive(Debug, Serialize, Deserialize)]
-        struct Tokens {
-            account: String,
-            refresh: Secret<String>,
-        }
-        let t = Tokens { account: "a1".into(), refresh: Secret::new("eg1~abc".into()) };
-        let dbg = format!("{t:?} {}", t.refresh);
-        assert!(!dbg.contains("eg1~abc") && dbg.contains("<redacted>"), "{dbg}");
-        let json = serde_json::to_string(&t).unwrap();
-        assert_eq!(json, r#"{"account":"a1","refresh":"eg1~abc"}"#);
-        let back: Tokens = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.refresh.expose(), "eg1~abc");
+    fn scratch_entries_are_private_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("secrets");
+        let store = ScratchStore { dir: dir.clone() };
+        let e = store.build(None, "quiver", "epic:abc").unwrap();
+        assert!(matches!(e.get_password(), Err(keyring::Error::NoEntry)));
+        e.set_password("{\"refresh_token\":\"x\"}").unwrap();
+        assert_eq!(e.get_password().unwrap(), "{\"refresh_token\":\"x\"}");
+        let f = scratch_file(&dir, "quiver", "epic:abc");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        // Another entry is another file.
+        assert!(matches!(store.build(None, "quiver", "epic:abd").unwrap().get_password(), Err(keyring::Error::NoEntry)));
+        e.delete_credential().unwrap();
+        assert!(matches!(e.delete_credential(), Err(keyring::Error::NoEntry)));
+        assert!(!f.exists());
     }
 }

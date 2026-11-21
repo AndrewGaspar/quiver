@@ -184,6 +184,7 @@ fn handle_with(demo: &Demo, st: &mut State, g: &mut Global, req: &Request) -> Re
         }
         Request::ProtonList => json!(["GE-Proton9-27", "GE-Proton10-25", "GE-Proton10-26"]),
         Request::Login { email, password } => {
+            let password = password.expose();
             if !email.contains('@') {
                 bail!("Enter the email address of your Ubisoft account");
             }
@@ -197,6 +198,7 @@ fn handle_with(demo: &Demo, st: &mut State, g: &mut Global, req: &Request) -> Re
             json!(LoginResult::TwoFactorRequired)
         }
         Request::Login2fa { code } => {
+            let code = code.expose();
             let email = g.pending_2fa.clone().ok_or_else(|| anyhow!("no sign-in waiting for a 2FA code"))?;
             if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
                 bail!("Codes are 6 digits");
@@ -270,12 +272,12 @@ mod tests {
         assert!(lib.iter().any(|e| e.owned_by == [FAMILY]));
         // Sign in a third account with 2FA, then sign it out.
         let r: LoginResult = serde_json::from_value(
-            demo.handle(Request::Login { email: "tester@example.com".into(), password: "pw".into() }).unwrap(),
+            demo.handle(Request::Login { email: "tester@example.com".into(), password: quiver_api::secret::Secret::new("pw".into()) }).unwrap(),
         )
         .unwrap();
         assert!(matches!(r, LoginResult::TwoFactorRequired));
-        assert!(demo.handle(Request::Login2fa { code: "000000".into() }).is_err());
-        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "123456".into() }).unwrap()).unwrap();
+        assert!(demo.handle(Request::Login2fa { code: quiver_api::secret::Secret::new("000000".into()) }).is_err());
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: quiver_api::secret::Secret::new("123456".into()) }).unwrap()).unwrap();
         assert!(matches!(r, LoginResult::SignedIn { ref name } if name == "tester"));
         demo.handle(Request::Logout { account: Some("tester".into()) }).unwrap();
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
@@ -299,9 +301,9 @@ mod tests {
         let stores: Vec<quiver_api::stores::StoreInfo> = serde_json::from_value(demo.handle(Request::Stores).unwrap()).unwrap();
         assert_eq!(stores[0].account, quiver_api::stores::AccountState::NeedsSignIn);
 
-        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login { email: "player@example.com".into(), password: "pw".into() }).unwrap()).unwrap();
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login { email: "player@example.com".into(), password: quiver_api::secret::Secret::new("pw".into()) }).unwrap()).unwrap();
         assert!(matches!(r, LoginResult::TwoFactorRequired));
-        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "123456".into() }).unwrap()).unwrap();
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: quiver_api::secret::Secret::new("123456".into()) }).unwrap()).unwrap();
         assert!(matches!(r, LoginResult::SignedIn { ref name } if name == "player"));
         let status: Status = serde_json::from_value(demo.handle(Request::Status).unwrap()).unwrap();
         assert_eq!(status.signed_in.as_deref(), Some("player"));

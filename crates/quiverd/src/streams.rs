@@ -543,6 +543,128 @@ pub(crate) fn readopt(d: &Arc<Daemon>) {
     }
 }
 
+// --- Moonlight ---------------------------------------------------------------------------------
+
+/// What a Moonlight launch streams (`moonlight::stream_host_for`): a game the way
+/// `StartStream` runs one. The host's headless display comes up in quiverd (GameStream speaks
+/// its own transport, so the host runs in-process, as `quiver-gamestream`'s adapter runs it),
+/// then the game is launched into it as `Play` launches it, with the display's
+/// [`LaunchEnv`]. The game ending ends the stream; Moonlight's Quit app, or the stream
+/// ending, stops the game (its display is gone). The test pattern's key streams the test
+/// pattern.
+pub(crate) struct MoonlightGames {
+    daemon: std::sync::Weak<Daemon>,
+    pattern: quiver_gamestream::stream_host::StreamHostAdapter,
+    dir: PathBuf,
+    current: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+}
+
+impl MoonlightGames {
+    pub fn new(d: &Arc<Daemon>, dir: PathBuf) -> MoonlightGames {
+        let pattern = quiver_gamestream::stream_host::StreamHostAdapter::new(dir.clone(), |_app: &quiver_gamestream::host::App| Ok(quiver_stream_host::host::Target::TestPattern { motion: true }));
+        MoonlightGames { daemon: Arc::downgrade(d), pattern, dir, current: Mutex::new(None) }
+    }
+}
+
+impl quiver_gamestream::StreamHost for MoonlightGames {
+    fn start(&self, req: quiver_gamestream::host::StreamRequest, ends: quiver_gamestream::host::HostEnds) -> Result<()> {
+        if req.app.key == crate::moonlight::TEST_PATTERN_KEY {
+            return self.pattern.start(req, ends);
+        }
+        let game = GameRef::parse(&req.app.key).map_err(|e| anyhow::anyhow!("{}: {e}", req.app.key))?;
+        let d = self.daemon.upgrade().context("quiverd is stopping")?;
+        let session = format!("moonlight-{:08x}", rand_u32());
+        let opts = quiver_stream_host::host::HostOptions {
+            target: quiver_stream_host::host::Target::Display,
+            config: quiver_gamestream::stream_host::StreamHostAdapter::config_for(&req),
+            dir: self.dir.join(&session),
+            session,
+            preset: 1,
+            recovery: if req.video.reference_frame_invalidation { quiver_stream_host::recovery::Recovery::RefInvalidation } else { quiver_stream_host::recovery::Recovery::Keyframe },
+            headless_server: false,
+            max_frames: None,
+            force_sandbox_gid: None,
+            exe: Some(host_exe()).filter(|p| p.is_absolute()),
+            constant_bitrate_audio: req.audio.constant_bitrate,
+        };
+        let source = format!("moonlight:{}", req.client_name);
+        let title = req.app.title.clone();
+        let task = tokio::spawn(async move {
+            let quiver_gamestream::host::HostEnds { video, audio, mut input, mut control_in, control_out, trigger_rumble: _, bitrate_kbps } = ends;
+            let mut host = match quiver_stream_host::Host::start(opts, bitrate_kbps).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!("moonlight: {title}'s display didn't start: {e:#}");
+                    let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: format!("the host didn't start: {e:#}") }).await;
+                    return;
+                }
+            };
+            let Some(launch) = host.launch.clone() else { return };
+            LAUNCH.lock().unwrap().insert(game, launch);
+            let job = d.play(&source, game, None).await;
+            LAUNCH.lock().unwrap().remove(&game);
+            let job = match job {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!("moonlight: {title} didn't start: {e:#}");
+                    let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: format!("{title} didn't start: {e:#}") }).await;
+                    let _ = host.stop().await;
+                    return;
+                }
+            };
+            d.log_activity_game(&source, format!("streaming {title} to Moonlight ({})", req.client_name), Some(game));
+            let mut seq = 0u64;
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tokio::select! {
+                    f = host.frames.recv() => match f {
+                        Some(f) => if video.send(f).await.is_err() { break },
+                        None => break,
+                    },
+                    Some(a) = host.audio.recv() => { let _ = audio.try_send(a); }
+                    Some(c) = host.control_out.recv() => { let _ = control_out.try_send(c); }
+                    e = input.recv() => match e {
+                        Some(event) => {
+                            seq += 1;
+                            let _ = host.input.send(quiver_stream_proto::input::Stamped { seq, at: quiver_stream_proto::now_micros(), event }).await;
+                        }
+                        None => break,
+                    },
+                    c = control_in.recv() => match c {
+                        Some(quiver_stream_proto::Control::Bye { .. }) | None => break,
+                        Some(c) => { let _ = host.control_in.send(c).await; }
+                    },
+                    _ = tick.tick() => {
+                        if d.jobs.lock().unwrap().get(&job).is_none_or(|j| j.done) {
+                            let _ = control_out.send(quiver_stream_proto::Control::Bye { reason: "the game exited".into() }).await;
+                            break;
+                        }
+                    }
+                }
+            }
+            // The display goes with the stream, so the game does too.
+            stop_game(&d, &source, game).await;
+            let _ = host.stop().await;
+        });
+        if let Some((_, old)) = self.current.lock().unwrap().replace((req.app.key.clone(), task)) {
+            old.abort();
+        }
+        Ok(())
+    }
+
+    fn quit(&self, app_key: &str) {
+        if app_key == crate::moonlight::TEST_PATTERN_KEY {
+            return self.pattern.quit(app_key);
+        }
+        if let Some((_, t)) = self.current.lock().unwrap().take() {
+            t.abort();
+        }
+        if let (Some(d), Ok(g)) = (self.daemon.upgrade(), GameRef::parse(app_key)) {
+            tokio::spawn(async move { stop_game(&d, "moonlight", g).await });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

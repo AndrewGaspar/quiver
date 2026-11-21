@@ -2,6 +2,7 @@
 //! name and id, never its library.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -20,7 +21,20 @@ pub struct Discovered {
     pub addrs: Vec<String>,
 }
 
-/// This machine on the LAN while the advert lives; withdrawn when dropped.
+/// The process's one mDNS responder, shared by every advert (`_quiver._tcp`, Moonlight's
+/// `_nvstream._tcp`), made on first use.
+fn responder() -> Result<ServiceDaemon> {
+    static SHARED: OnceLock<Mutex<Option<ServiceDaemon>>> = OnceLock::new();
+    let mut slot = SHARED.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = slot.as_ref() {
+        return Ok(d.clone());
+    }
+    let d = ServiceDaemon::new().context("starting mDNS")?;
+    *slot = Some(d.clone());
+    Ok(d)
+}
+
+/// A service on the LAN while the advert lives; withdrawn when dropped.
 pub struct Advert {
     mdns: ServiceDaemon,
     fullname: String,
@@ -29,11 +43,21 @@ pub struct Advert {
 impl Advert {
     /// Advertise `name` and `id` with the listener's `port`.
     pub fn start(name: &str, id: &str, port: u16) -> Result<Advert> {
-        let mdns = ServiceDaemon::new().context("starting mDNS")?;
         let host = format!("quiver-{id}.local.");
         let props: HashMap<String, String> =
             [("id".to_owned(), id.to_owned()), ("name".to_owned(), name.to_owned()), ("v".to_owned(), crate::wire::VERSION.to_string())].into();
-        let info = ServiceInfo::new(SERVICE, &instance_name(name, id), &host, (), port, props)?.enable_addr_auto();
+        Advert::service(SERVICE, &instance_name(name, id), &host, port, props, &[])
+    }
+
+    /// Advertise any service type (`_nvstream._tcp.local.`) as `instance` on `host`
+    /// (`name.local.`), with this machine's addresses on `interfaces` (names; empty: every
+    /// interface).
+    pub fn service(ty: &str, instance: &str, host: &str, port: u16, props: HashMap<String, String>, interfaces: &[String]) -> Result<Advert> {
+        let mdns = responder()?;
+        let mut info = ServiceInfo::new(ty, instance, host, (), port, props)?.enable_addr_auto();
+        if !interfaces.is_empty() {
+            info.set_interfaces(interfaces.iter().map(|n| mdns_sd::IfKind::Name(n.clone())).collect());
+        }
         let fullname = info.get_fullname().to_owned();
         mdns.register(info).context("advertising on mDNS")?;
         Ok(Advert { mdns, fullname })
@@ -43,8 +67,37 @@ impl Advert {
 impl Drop for Advert {
     fn drop(&mut self) {
         let _ = self.mdns.unregister(&self.fullname);
-        let _ = self.mdns.shutdown();
     }
+}
+
+/// One instance of a service type seen on the LAN ([`browse_service`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The instance's full name (`Tower._nvstream._tcp.local.`).
+    pub fullname: String,
+    pub port: u16,
+    pub addrs: Vec<std::net::IpAddr>,
+}
+
+/// Instances of service type `ty` on the LAN, listening for `wait`. Blocks.
+pub fn browse_service(ty: &str, wait: Duration) -> Result<Vec<Found>> {
+    let mdns = ServiceDaemon::new().context("starting mDNS")?;
+    let rx = mdns.browse(ty)?;
+    let end = Instant::now() + wait;
+    let mut found: Vec<Found> = Vec::new();
+    while let Some(left) = end.checked_duration_since(Instant::now()) {
+        let Ok(event) = rx.recv_timeout(left) else { break };
+        if let ServiceEvent::ServiceResolved(s) = event {
+            let mut addrs: Vec<std::net::IpAddr> = s.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
+            addrs.sort();
+            let f = Found { fullname: s.get_fullname().to_owned(), port: s.port, addrs };
+            found.retain(|o| o.fullname != f.fullname);
+            found.push(f);
+        }
+    }
+    let _ = mdns.stop_browse(ty);
+    let _ = mdns.shutdown();
+    Ok(found)
 }
 
 /// The instance name: the machine's name, then its id (names can repeat on a LAN).

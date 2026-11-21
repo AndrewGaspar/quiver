@@ -875,10 +875,10 @@ mod tests {
 
         // What `submit_login` sends.
         let r: LoginResult =
-            serde_json::from_value(demo.handle(Request::Login { email: "me@example.com".into(), password: "pw".into() }).unwrap()).unwrap();
+            serde_json::from_value(demo.handle(Request::Login { email: "me@example.com".into(), password: quiver_api::secret::Secret::new("pw".into()) }).unwrap()).unwrap();
         assert!(matches!(r, LoginResult::TwoFactorRequired));
         assert_eq!(UbisoftCard::of(Some(&status(&demo))), Some(UbisoftCard::EnterCode), "a form left at the code: the card says so");
-        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: "246810".into() }).unwrap()).unwrap();
+        let r: LoginResult = serde_json::from_value(demo.handle(Request::Login2fa { code: quiver_api::secret::Secret::new("246810".into()) }).unwrap()).unwrap();
         assert!(matches!(r, LoginResult::SignedIn { .. }));
 
         assert_eq!(UbisoftCard::of(Some(&status(&demo))), None);

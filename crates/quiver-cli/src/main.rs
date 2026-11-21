@@ -15,6 +15,7 @@ mod mods;
 mod omarchy;
 mod perf;
 mod profiles;
+mod moonlight;
 mod remote;
 mod options;
 mod info;
@@ -431,11 +432,38 @@ enum AccountAction {
     },
     /// Sign an account out (same as `quiver logout`).
     Remove { account: String },
+    /// Every account on this machine and its paired machines (Ubisoft, Epic): where each
+    /// is signed in, and which machine is playing on it.
+    Machines {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
+}
+
+fn print_presence(p: &quiver_api::accounts::Presence) {
+    if p.accounts.is_empty() {
+        println!("no accounts signed in on any machine (quiver login, quiver epic login)");
+    }
+    for a in &p.accounts {
+        println!("{} {} ({})", a.store.label(), a.name, a.account_id);
+        for m in &a.machines {
+            let here = if m.here { " (this machine)" } else { "" };
+            let state = match (&m.playing, m.state) {
+                (Some(g), _) => format!("playing {} since {}", g.name, g.started.with_timezone(&chrono::Local).format("%H:%M")),
+                (None, quiver_api::stores::AccountState::SignedIn) => "signed in".into(),
+                (None, _) => "needs signing in again".into(),
+            };
+            println!("    {}{here}: {state}{}", m.machine, if m.default { ", default" } else { "" });
+        }
+    }
+    for m in p.machines.iter().filter(|m| !m.reached) {
+        println!("({} not reached: {})", m.machine, m.error.as_deref().unwrap_or("?"));
+    }
 }
 
 fn print_accounts(accounts: &[Account]) {
@@ -450,10 +478,10 @@ async fn login(client: &Client, email: Option<String>) -> Result<()> {
         None => dev::prompt("Email: ")?,
     };
     let password = rpassword::prompt_password("Password: ")?;
-    let mut result: LoginResult = client.call(Request::Login { email, password }).await?;
+    let mut result: LoginResult = client.call(Request::Login { email, password: password.into() }).await?;
     if let LoginResult::TwoFactorRequired = result {
         let code = dev::prompt("2FA code (authenticator app): ")?;
-        result = client.call(Request::Login2fa { code }).await?;
+        result = client.call(Request::Login2fa { code: code.into() }).await?;
     }
     let name = match result {
         LoginResult::SignedIn { name } => name,
@@ -817,6 +845,13 @@ async fn main() -> Result<()> {
                 println!("no accounts signed in (quiver login)");
             }
             print_accounts(&s.accounts);
+        }
+        Cmd::Account { action: AccountAction::Machines { json } } => {
+            let p: quiver_api::accounts::Presence = client.call(Request::Accounts(quiver_api::accounts::AccountsRequest::Presence { wait_ms: None })).await?;
+            if json {
+                return print_json(&p);
+            }
+            print_presence(&p);
         }
         Cmd::Account { action: AccountAction::Default { account } } => {
             let () = client.call(Request::AccountDefault { account }).await?;
@@ -1254,7 +1289,21 @@ mod tests {
         assert_eq!(c.machine.as_deref(), Some("tower"));
         assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_) } }));
         assert!(matches!(parse(&["remote", "rename", "Tower"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Rename { second: None, .. } }));
+        use moonlight::MoonlightAction as M;
+        assert!(matches!(
+            parse(&["remote", "moonlight", "enable", "--bind", "tailscale0", "--codec", "hevc"]).unwrap().cmd,
+            Cmd::Remote { action: RemoteAction::Moonlight { action: M::Enable { ref bind, ref codec, everywhere: false, no_mdns: false, mdns: false } } } if bind == &["tailscale0"] && codec == &["hevc"]
+        ));
+        assert!(matches!(parse(&["remote", "moonlight", "pin", "1234"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Pin { ref pin } } } if pin == "1234"));
+        assert!(matches!(parse(&["remote", "moonlight", "unpair", "roth"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Unpair { .. } } }));
+        assert!(parse(&["remote", "moonlight", "enable", "--bind", "x", "--everywhere"]).is_err());
         assert!(parse(&["remote", "add", "tower"]).is_err(), "needs the code");
+        let c = parse(&["--machine", "tower", "epic", "add-to", "laptop", "--account", "Me"]).unwrap();
+        assert_eq!(c.machine.as_deref(), Some("tower"));
+        assert!(matches!(c.cmd, Cmd::Epic { action: epic::EpicAction::AddTo { ref peer, account: Some(_) } } if peer == "laptop"));
+        assert!(matches!(parse(&["epic", "add-from", "tower"]).unwrap().cmd, Cmd::Epic { action: epic::EpicAction::AddFrom { .. } }));
+        assert!(matches!(parse(&["--machine", "tower", "login"]).unwrap().cmd, Cmd::Login { .. }));
+        assert!(matches!(parse(&["account", "machines", "--json"]).unwrap().cmd, Cmd::Account { action: AccountAction::Machines { json: true } }));
     }
 
     #[test]

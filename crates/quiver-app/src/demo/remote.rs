@@ -18,7 +18,7 @@ use super::{Demo, FIXTURES, INSTALLING, QUEUED, State, game_for};
 /// The demo machines' ids.
 pub const TOWER: &str = "7f3a9c2e51d04b86";
 pub const OFFICE: &str = "c41e08b7a2f95d13";
-const LAPTOP: &str = "2b8e5d0c9a7f6431";
+pub const LAPTOP: &str = "2b8e5d0c9a7f6431";
 /// Tower's own download.
 const TOWER_JOB: u64 = 7;
 

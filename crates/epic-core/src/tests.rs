@@ -597,3 +597,39 @@ async fn extras_download_next_to_their_game() {
     assert!(e.to_string().contains("has no extra Nope"), "{e}");
     assert!(r.fake.unused().is_empty(), "{:?}", r.fake.unused());
 }
+
+/// Handing a session to another machine (design/REMOTE.md §6): machine A mints an exchange
+/// code from its session; machine B redeems it for a session of its own, and A's is as it
+/// was.
+#[tokio::test]
+async fn handover_gives_the_other_machine_its_own_session() {
+    let a = rig();
+    a.login("eg1~A", "rt-A", ID, "Player One").await;
+    let before = a.stored(ID).unwrap();
+    a.fake.reply("/oauth/exchange", 200, r#"{"expiresInSeconds":300,"code":"5f1e2d3c4b5a69788796a5b4c3d2e1f0","creatingClientId":"x"}"#);
+    let (acct, code) = a.epic.handover_code(None).await.unwrap();
+    assert_eq!(acct.account_id, ID);
+    assert!(!format!("{code:?}").contains("5f1e"), "the code is never printed");
+    let ex = a.fake.requests().into_iter().find(|r| r.label == "exchange code").unwrap();
+    assert!(ex.headers.iter().any(|(k, v)| k == "Authorization" && v == "bearer eg1~A"), "minted from A's session");
+    assert_eq!(a.stored(ID).unwrap().refresh_token.expose(), before.refresh_token.expose(), "A's session is unchanged");
+
+    let b = rig();
+    b.fake.reply("/oauth/token", 200, &token("eg1~B", "rt-B", ID, "Player One", 8 * 3600));
+    b.fake.reply(&format!("/public/account/{ID}/externalAuths"), 200, "[]");
+    b.fake.reply(&format!("/public/account/{ID}"), 200, &format!(r#"{{"id":"{ID}","displayName":"Player One"}}"#));
+    let got = b.epic.login_exchange(&code).await.unwrap();
+    assert_eq!((got.account_id.as_str(), got.default), (ID, true));
+    let form = b.fake.requests()[0].form.clone().unwrap();
+    assert!(form.contains(&("grant_type".into(), "exchange_code".into())));
+    assert!(form.contains(&("exchange_code".into(), "5f1e2d3c4b5a69788796a5b4c3d2e1f0".into())));
+    assert_eq!(b.stored(ID).unwrap().refresh_token.expose(), "rt-B", "B's own chain");
+
+    // A refused code says so, and adds nothing.
+    let c = rig();
+    c.fake.reply("/oauth/token", 400, include_str!("../tests/fixtures/error_code_not_found.json"));
+    let e = c.epic.login_exchange(&Secret::new("00000000000000000000000000000000".into())).await.unwrap_err();
+    assert!(e.to_string().contains("hand-over code"), "{e}");
+    assert!(c.epic.accounts().unwrap().is_empty());
+    assert!(c.epic.login_exchange(&Secret::new("not a code!".into())).await.is_err());
+}

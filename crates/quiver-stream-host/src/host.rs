@@ -77,6 +77,9 @@ pub struct HostOptions {
     /// The `quiver-stream-host` binary, which runs the inside of the pad namespace
     /// ([`crate::sandbox`]). None is this process's own executable.
     pub exe: Option<PathBuf>,
+    /// Encode audio at a constant bitrate, for GameStream (Moonlight's audio FEC needs
+    /// equal-sized packets). Its packet length is `config.audio_frame_ms`.
+    pub constant_bitrate_audio: bool,
 }
 
 pub struct Host {
@@ -145,7 +148,7 @@ impl Host {
         let mut launch = None;
         let source: Box<dyn Source> = match &opts.target {
             Target::TestPattern { motion } => {
-                parts._tone = Some(crate::tone::start(cfg.audio_channels, atx.clone(), stop.clone(), cfg.refresh_mhz)?);
+                parts._tone = Some(crate::tone::start(cfg.audio_channels, cfg.audio_frame_ms, opts.constant_bitrate_audio, atx.clone(), stop.clone(), cfg.refresh_mhz)?);
                 Box::new(PatternSource::new(cfg.width, cfg.height, cfg.refresh_mhz, cfg.color.clone(), *motion))
             }
             Target::Command { argv, env } => {
@@ -306,7 +309,7 @@ fn sandbox_exe(opts: &HostOptions) -> Result<PathBuf> {
 /// program is gamescope's child); without, the namespace is left to whoever starts the
 /// program ([`LaunchEnv::wrapper`]).
 fn start_display(opts: &HostOptions, cfg: &StreamConfig, argv: Vec<String>, mut env: Vec<(String, String)>, wrap: bool, atx: mpsc::Sender<AudioPacket>) -> Result<(Display, Audio, PadMode)> {
-    let audio = Audio::start(AudioSpec { id: opts.session.clone(), channels: cfg.audio_channels, frame_ms_x10: cfg.audio_frame_ms as u32 * 10, bitrate: if cfg.audio_channels > 2 { 256_000 } else { 128_000 } }, atx)?;
+    let audio = Audio::start(AudioSpec { id: opts.session.clone(), channels: cfg.audio_channels, frame_ms_x10: cfg.audio_frame_ms as u32 * 10, bitrate: if cfg.audio_channels > 2 { 256_000 } else { 128_000 }, constant_bitrate: opts.constant_bitrate_audio }, atx)?;
     env.extend(audio.child_env());
     if cfg.color.hdr.is_some() {
         env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));

@@ -46,6 +46,8 @@ pub struct AudioSpec {
     /// Frame length in tenths of a millisecond (50 = 5 ms).
     pub frame_ms_x10: u32,
     pub bitrate: i32,
+    /// Constant bitrate (GameStream's audio FEC needs equal-sized packets).
+    pub constant_bitrate: bool,
 }
 
 impl AudioSpec {
@@ -197,6 +199,7 @@ fn audio_thread(spec: AudioSpec, packets: mpsc::Sender<AudioPacket>, quit: pw::c
 
     let channels = spec.channels.clamp(1, 8);
     let mut enc = opus::Encoder::new(channels, spec.frame_ms_x10, spec.bitrate)?;
+    enc.set_constant_bitrate(spec.constant_bitrate);
     let channels = enc.channels as usize;
     let mut framer = Framer::new(channels, enc.frame);
     let stream = pw::stream::StreamBox::new(
@@ -284,7 +287,7 @@ mod tests {
 
     #[test]
     fn the_sink_is_never_the_default_and_never_lingers() {
-        let spec = AudioSpec { id: "abc".into(), channels: 6, frame_ms_x10: 50, bitrate: 256_000 };
+        let spec = AudioSpec { id: "abc".into(), channels: 6, frame_ms_x10: 50, bitrate: 256_000, constant_bitrate: false };
         let p = sink_props(&spec);
         assert_eq!(p.get("node.name"), Some("quiver-stream-abc"));
         assert_eq!(p.get("object.linger"), Some("false"));
