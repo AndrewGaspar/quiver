@@ -16,6 +16,7 @@
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg
+#                                             and hicolor/<n>x<n>/apps/quiver.png (16-512)
 #   ~/.config/systemd/user/{quiverd.service,quiver.slice}  (installed, not enabled; the user
 #                                             manager is reloaded when they change)
 #   ~/.local/share/doc/quiver/                (licenses)
@@ -320,6 +321,11 @@ link_skill
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$datadir/applications" >/dev/null 2>&1 || true
+fi
+# An icon cache is only refreshed where one already exists (GTK and Qt ignore a stale one, and
+# reading the directory without a cache is what they do by default).
+if [[ -f $datadir/icons/hicolor/icon-theme.cache ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q "$datadir/icons/hicolor" >/dev/null 2>&1 || true
 fi
 # The user manager reads changed unit files only on a reload, and quiverd (and clients
 # starting it) go by what it has loaded: reload whenever ours changed, enabled or not.
