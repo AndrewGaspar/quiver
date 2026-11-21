@@ -22,6 +22,8 @@ use crate::theme::{Theme, rgba};
 
 pub mod epic;
 pub mod machines;
+pub mod presence;
+pub mod moonlight;
 
 /// The repository, for About.
 const SOURCE_URL: &str = "https://github.com/AndrewGaspar/quiver";
@@ -48,6 +50,10 @@ pub enum SettingsAction {
     StereoDepth(u32),
     /// Machines (`settings/machines.rs`).
     Machine(machines::MachineAction),
+    /// Accounts across machines (`settings/presence.rs`).
+    Presence(presence::PresenceAction),
+    /// Machines › Moonlight clients (`settings/moonlight.rs`).
+    Moonlight(moonlight::MoonlightAction),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -103,7 +109,10 @@ impl Quiver {
                 }
                 v.extend(self.epic_actions());
             }
-            SettingsSection::Machines => v.extend(self.machines_actions()),
+            SettingsSection::Machines => {
+                v.extend(self.machines_actions());
+                v.extend(self.moonlight_actions());
+            }
             SettingsSection::Library => v.extend([SettingsAction::Welcome, SettingsAction::Advanced]),
             SettingsSection::Compatibility => v.push(SettingsAction::Cmd(GlobalCmd::RescanProtons)),
             SettingsSection::Performance => {
@@ -181,6 +190,8 @@ impl Quiver {
             SettingsAction::Stereo(s) => self.set_stereo_setting(s, cx),
             SettingsAction::StereoDepth(p) => self.set_stereo_strength(p, cx),
             SettingsAction::Machine(a) => self.machine_action(a, cx),
+            SettingsAction::Presence(a) => self.presence_action(a, cx),
+            SettingsAction::Moonlight(a) => self.moonlight_action(a, cx),
         }
     }
 
@@ -225,11 +236,16 @@ impl Quiver {
         let actions = self.settings_actions();
         let body = match section {
             SettingsSection::Accounts => {
+                self.presence_wanted(cx);
                 let mut v = self.settings_accounts(th, &actions, cx);
                 v.extend(self.settings_epic(th, &actions, cx));
                 v
             }
-            SettingsSection::Machines => self.settings_machines(th, &actions, cx),
+            SettingsSection::Machines => {
+                let mut v = self.settings_machines(th, &actions, cx);
+                v.extend(self.settings_moonlight(th, &actions, cx));
+                v
+            }
             SettingsSection::Library => {
                 let mut v = self.settings_library(th, &actions, cx);
                 let f = self.action_focused(&actions, &SettingsAction::Welcome);
@@ -389,17 +405,29 @@ impl Quiver {
     fn settings_accounts(&mut self, th: &Theme, actions: &[SettingsAction], cx: &mut Context<Self>) -> Vec<AnyElement> {
         let accounts = self.status.as_ref().map(|s| s.accounts.clone()).unwrap_or_default();
         let default_id = accounts.iter().find(|a| a.default).map(|a| a.user_id.clone());
+        // A paired machine shown: these are its accounts, signed in from here.
+        let elsewhere = self.accounts_elsewhere();
+        let (sub, sign_in) = match &elsewhere {
+            Some(m) => (
+                format!("{m}'s accounts. Signing in here signs {m} in: you type the password and code on this PC, and the session stays on {m}."),
+                if accounts.is_empty() { format!("Sign in on {m}") } else { format!("Add account on {m}") },
+            ),
+            None => (
+                "Games from every signed-in account show up in one library.".to_owned(),
+                if accounts.is_empty() { "Sign in to Ubisoft".to_owned() } else { "Add account".to_owned() },
+            ),
+        };
         let mut out = vec![head_row(
             th,
             "Accounts",
-            "Games from every signed-in account show up in one library.",
+            &sub,
             Some(self.action_button(
                 th,
                 actions,
                 SettingsAction::Cmd(GlobalCmd::AddAccount),
                 if accounts.is_empty() { Kind::Primary } else { Kind::Secondary },
                 Some(Icon::Plus),
-                if accounts.is_empty() { "Sign in to Ubisoft" } else { "Add account" },
+                sign_in,
                 cx,
             )),
         )];
@@ -434,6 +462,7 @@ impl Quiver {
             } else {
                 (th.tx4, "Signed in · connects when one of its games starts".to_owned())
             };
+            let presence = self.presence_line(quiver_api::StoreId::Ubisoft, &a.user_id);
             let mut buttons = div().flex().flex_none().items_center().gap(px(6.));
             if !a.default {
                 buttons = buttons.child(self.action_button(
@@ -500,7 +529,8 @@ impl Quiver {
                                     .text_size(px(12.))
                                     .child(div().size(px(7.)).rounded_full().bg(dot))
                                     .child(div().flex_1().min_w_0().text_color(th.tx2).child(status)),
-                            ),
+                            )
+                            .when_some(presence, |d, (text, playing)| d.child(div().mt(px(2.)).child(presence::presence_text(th, text, playing)))),
                     )
                     .child(buttons)
                     .into_any_element(),

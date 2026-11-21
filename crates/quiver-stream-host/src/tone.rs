@@ -32,8 +32,17 @@ pub fn frame_at(t: Micros, frame: usize, channels: usize) -> Vec<f32> {
     out
 }
 
-pub fn start(channels: u8, packets: mpsc::Sender<AudioPacket>, stop: Arc<AtomicBool>, _refresh_mhz: u32) -> Result<std::thread::JoinHandle<()>> {
-    let mut enc = opus::Encoder::new(channels, 50, if channels > 2 { 256_000 } else { 128_000 })?;
+/// `frame_ms`: each packet's length (5 or 10 ms); `constant_bitrate`: equal-sized packets.
+pub fn start(
+    channels: u8,
+    frame_ms: u8,
+    constant_bitrate: bool,
+    packets: mpsc::Sender<AudioPacket>,
+    stop: Arc<AtomicBool>,
+    _refresh_mhz: u32,
+) -> Result<std::thread::JoinHandle<()>> {
+    let mut enc = opus::Encoder::new(channels, u32::from(frame_ms.max(1)) * 10, if channels > 2 { 256_000 } else { 128_000 })?;
+    enc.set_constant_bitrate(constant_bitrate);
     Ok(std::thread::Builder::new().name("tone".into()).spawn(move || {
         let frame_us = (enc.frame as u64 * 1_000_000) / opus::RATE as u64;
         // Frames start on 5 ms boundaries of the clock, so bursts start exactly on the second.

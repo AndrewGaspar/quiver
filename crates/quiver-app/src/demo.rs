@@ -14,9 +14,11 @@ use chrono::{DateTime, Duration as Span, Local, NaiveTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+pub mod accounts;
 pub mod detail;
 pub mod downloads;
 pub mod perf;
+pub mod moonlight;
 pub mod remote;
 pub mod stores;
 
@@ -211,7 +213,9 @@ impl Demo {
         if let Request::Perf(p) = req {
             return perf::handle(self, &st, p);
         }
+        let req = match accounts::handle(self, req)? { Ok(v) => return Ok(v), Err(req) => req };
         let req = match remote::handle(self, &st, req)? { Ok(v) => return Ok(v), Err(req) => req };
+        let req = match moonlight::handle(self, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = stores::handle(self, &mut st, &req)? {
             return Ok(v);
         }
@@ -519,7 +523,7 @@ mod tests {
         let hist: Vec<Revision> =
             serde_json::from_value(demo.handle(Request::SettingsHistory { game: 3539.into() }).unwrap()).unwrap();
         assert_eq!(hist[0].revision, 15);
-        assert!(demo.handle(Request::Login { email: "a".into(), password: "b".into() }).is_err());
+        assert!(demo.handle(Request::Login { email: "a".into(), password: quiver_api::secret::Secret::new("b".into()) }).is_err());
         // The install job advances on its own.
         let e = tokio::time::timeout(Duration::from_secs(2), events.recv()).await.unwrap().unwrap();
         assert!(matches!(e, Event::Job(j) if j.game.as_ubisoft() == Some(INSTALLING) && j.downloaded > 31_200_000_000));

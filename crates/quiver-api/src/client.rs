@@ -175,7 +175,8 @@ impl Client {
     /// Connect to a paired machine's quiverd over TLS, with this machine's identity and
     /// peers (`<data>/remote`). Fails if it can't be reached now; afterwards it reconnects
     /// as the module docs say. Requests arrive there as `remote:<this machine's name>`
-    /// whatever `source` says.
+    /// when `source` is the person (`cli`, `gui`), else as
+    /// `remote:<this machine's name>/<source>` (`remote::remote_source_as`).
     pub async fn machine(machine: &quiver_remote::Machine, source: &str) -> Result<Self> {
         Self::machine_at(quiver_remote::remote_dir(), machine, source).await
     }

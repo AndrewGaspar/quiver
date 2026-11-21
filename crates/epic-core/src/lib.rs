@@ -136,10 +136,16 @@ impl Epic {
         }
     }
 
-    /// The real thing: HTTPS with the configured user agent, sessions in the keyring.
+    /// The real thing: HTTPS with the configured user agent, sessions in the keyring. A
+    /// scratch daemon in a test can point every call at a loopback stand-in for Epic
+    /// ([`http::BASE_ENV`]).
     pub fn open(data_dir: &Path) -> Result<Self> {
         let (config, _) = ClientConfig::load(data_dir);
-        let transport = Arc::new(http::Reqwest::new(&config.user_agent)?);
+        let mut transport: Arc<dyn http::Transport> = Arc::new(http::Reqwest::new(&config.user_agent)?);
+        if let Some(base) = http::test_base() {
+            tracing::warn!("Epic: every call goes to {base} ({}), not to Epic", http::BASE_ENV);
+            transport = Arc::new(http::Rebase::new(base, transport));
+        }
         Ok(Self::with_config(data_dir, config, transport, Arc::new(secrets::Keyring)))
     }
 
@@ -166,6 +172,39 @@ impl Epic {
     pub async fn login(&self, pasted: &str) -> Result<EpicAccount> {
         let code = auth::parse_code(pasted)?;
         let t = self.api.token(Grant::AuthorizationCode(&code)).await.map_err(explain_login)?;
+        self.add_session(t).await
+    }
+
+    /// A one-time code another machine redeems for its own session of `account`
+    /// ([`Epic::login_exchange`]; design/REMOTE.md §6): Epic's exchange code, minted from
+    /// this machine's session as Epic's own launcher does to hand a session over. This
+    /// machine's session is unchanged. Returns the account and the code.
+    pub async fn handover_code(&self, account: Option<&str>) -> Result<(EpicAccount, Secret<String>)> {
+        let index = self.index()?;
+        let entry = index.resolve(account)?.clone();
+        let a = index.list().into_iter().find(|a| a.account_id == entry.account_id).context("account")?;
+        let token = self.access_token(&entry.account_id).await?;
+        let code = self.api.exchange_code(token.expose()).await.context("ask Epic for a code to hand the session over")?;
+        Ok((a, code))
+    }
+
+    /// Redeem another machine's hand-over code for this machine's own session, and add the
+    /// account (as a sign-in does). Its refresh-token chain is independent of the other
+    /// machine's.
+    pub async fn login_exchange(&self, code: &Secret<String>) -> Result<EpicAccount> {
+        let code = code.expose().trim();
+        anyhow::ensure!(!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric()), "that isn't an Epic exchange code");
+        let t = self.api.token(Grant::ExchangeCode(code)).await.map_err(|e| match e.downcast_ref::<EpicError>() {
+            Some(x) if x.is_corrective_action() => anyhow::anyhow!("{x}"),
+            Some(x) if x.is_invalid_grant() => anyhow::anyhow!("Epic didn't accept the hand-over code (it works once, for a few minutes): try again"),
+            _ => e.context("redeem the Epic hand-over code"),
+        })?;
+        self.add_session(t).await
+    }
+
+    /// Store a new session and add (or refresh) its account: the session is in the keyring
+    /// before the account is listed.
+    async fn add_session(&self, t: api::TokenResponse) -> Result<EpicAccount> {
         let tokens = Tokens::from_response(&t, Utc::now())?;
         let access = tokens.access_token.expose().clone();
         let id = tokens.account_id.clone();

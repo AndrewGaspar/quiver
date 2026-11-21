@@ -2,8 +2,9 @@
 //! pairing, paired machines, and starting a stream.
 //!
 //! A paired client reaches quiverd over TLS (`quiver-remote`), and the protocol is the
-//! same as on the socket. Its requests carry `source: remote:<peer name>` whatever it
-//! sent, and a few are refused over the tunnel with [`LOCAL_ONLY`] ([`local_only`]).
+//! same as on the socket. Its requests carry `source: remote:<peer name>` when its client
+//! is the person, and `remote:<peer name>/<what it said>` otherwise ([`remote_source_as`]);
+//! a few are refused over the tunnel with [`LOCAL_ONLY`] ([`local_only`]).
 //! [`crate::Client::machine`] connects to a paired machine.
 
 use chrono::{DateTime, Utc};
@@ -27,6 +28,32 @@ pub fn remote_source(peer: &str) -> String {
     format!("remote:{peer}")
 }
 
+/// The `source` quiverd records for a request from `peer` whose client said it was
+/// `declared`: `remote:<peer>` for the person (the app, the terminal, Sight), and
+/// `remote:<peer>/<declared>` for anything else (`remote:laptop/agent`), so an agent's
+/// requests stay an agent's on the other machine too. Like a local `source`, the label is
+/// the client's word: it keeps honest automation out of the person's gates.
+pub fn remote_source_as(peer: &str, declared: &str) -> String {
+    if crate::mods::is_human_source(declared) || declared.is_empty() {
+        remote_source(peer)
+    } else {
+        format!("remote:{peer}/{declared}")
+    }
+}
+
+/// The person at a front end: here (`cli`, `gui`, `sight`), or on a paired machine
+/// (`remote:<peer>`, see [`remote_source_as`]). The gates that protect store accounts
+/// (sign-in, sign-out, handing a session to another machine) use this; agents, here or
+/// remote, are refused.
+pub fn is_person(source: &str) -> bool {
+    crate::mods::is_human_source(source) || source.strip_prefix("remote:").is_some_and(|peer| !peer.is_empty() && !peer.contains('/'))
+}
+
+/// A request that came over the remote tunnel (from the person or not).
+pub fn is_remote(source: &str) -> bool {
+    source.starts_with("remote:")
+}
+
 /// `remote` in config.json.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSettings {
@@ -37,6 +64,9 @@ pub struct RemoteSettings {
     /// What it binds (`host:port`); `None`: [`quiver_remote::DEFAULT_LISTEN`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    /// The Moonlight (GameStream) server, which has its own switch.
+    #[serde(default, skip_serializing_if = "crate::moonlight::MoonlightSettings::is_default")]
+    pub moonlight: crate::moonlight::MoonlightSettings,
 }
 
 impl RemoteSettings {
@@ -203,6 +233,16 @@ mod tests {
         assert_eq!((p.state, p.connections), (PeerState::Offline, 0));
         assert!(RemoteSettings::default().is_default());
         assert_eq!(RemoteSettings::default().listen(), "0.0.0.0:47990");
+    }
+
+    #[test]
+    fn remote_sources_keep_agents_apart() {
+        assert_eq!(remote_source_as("laptop", "cli"), "remote:laptop");
+        assert_eq!(remote_source_as("laptop", "gui"), "remote:laptop");
+        assert_eq!(remote_source_as("laptop", "agent"), "remote:laptop/agent");
+        assert!(is_person("cli") && is_person("gui") && is_person("remote:laptop"));
+        assert!(!is_person("agent") && !is_person("remote:laptop/agent") && !is_person("remote:") && !is_person("mcp"));
+        assert!(is_remote("remote:laptop/agent") && !is_remote("cli"));
     }
 
     #[test]

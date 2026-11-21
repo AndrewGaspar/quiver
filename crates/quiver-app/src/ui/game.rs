@@ -1051,7 +1051,14 @@ impl Quiver {
                     }
                 }),
             ),
-            ("Account", format!("{account} · {}", if override_ { "this game" } else { "default" })),
+            (
+                "Account",
+                match self.playing_elsewhere(quiver_api::StoreId::Ubisoft, &account).filter(|_| g.entry.game.is_ubisoft()) {
+                    // One live session per account (Ubisoft): it's in use on another machine.
+                    Some(m) => format!("{account} · playing on {m}"),
+                    None => format!("{account} · {}", if override_ { "this game" } else { "default" }),
+                },
+            ),
         ] };
         let n = stats.len();
         let pb = self.pane_bp();

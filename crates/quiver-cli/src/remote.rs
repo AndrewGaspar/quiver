@@ -54,6 +54,12 @@ pub enum RemoteAction {
         #[arg(value_name = "MACHINE")]
         peer: String,
     },
+    /// Moonlight clients (TVs, phones, other PCs): the GameStream server, its PIN pairing and
+    /// its paired clients. Off by default.
+    Moonlight {
+        #[command(subcommand)]
+        action: crate::moonlight::MoonlightAction,
+    },
     /// Quiver machines on the LAN (mDNS).
     Discover {
         /// Seconds to listen.
@@ -158,6 +164,7 @@ pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
             let () = client.call(Request::RemoteWake { id: peer.clone() }).await?;
             println!("sent a wake-up to {peer}");
         }
+        RemoteAction::Moonlight { action } => crate::moonlight::run(client, action).await?,
         RemoteAction::Discover { wait, json } => {
             let found: Vec<Discovered> = client.call(Request::RemoteDiscover { wait_ms: Some(wait.saturating_mul(1000)) }).await?;
             if json {

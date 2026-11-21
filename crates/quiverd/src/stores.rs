@@ -85,6 +85,11 @@ impl StoreProvider for Ubisoft {
                 return Ok(Launched::Job(steamlib::play(d, source, &e).await?));
             }
             let online = d.account_for(product_id, None).await?;
+            // One live session per account: not while a paired machine plays on it.
+            if let Some(id) = online.user_id().map(str::to_owned).or_else(|| quiver_core::store::default_account().ok().flatten()) {
+                let name = quiver_core::store::resolve(&id).map(|a| a.name).unwrap_or_else(|_| id.clone());
+                crate::accounts::refuse_if_playing_elsewhere(d, quiver_api::StoreId::Ubisoft, &id, &name).await?;
+            }
             Ok(Launched::Job(d.start_play(source, product_id, profile, online)?))
         })
     }

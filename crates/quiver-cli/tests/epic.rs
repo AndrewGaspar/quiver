@@ -45,6 +45,11 @@ impl Env {
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("QUIVER_TEST_SESSION")
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+            // Never Quiver's sign-in window on the person's desktop (it would open Epic's
+            // real page): no helper and no display, so `epic login` falls back to pasting.
+            .env("QUIVER_WEBVIEW", self.dir("no-webview"))
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .env("PATH", format!("{}:{}", self.dir("bin").display(), std::env::var("PATH").unwrap_or_default()));
     }
 

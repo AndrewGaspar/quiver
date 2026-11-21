@@ -61,6 +61,8 @@ pub struct MachinesSettings {
     /// The code shown here while this machine's pairing window is open.
     pub code: Option<PairCode>,
     pub confirm_revoke: Option<String>,
+    /// Machines › Moonlight clients (`settings/moonlight.rs`).
+    pub moonlight: super::moonlight::MoonlightUi,
 
 }
 

@@ -351,6 +351,10 @@ pub enum Grant<'a> {
     /// The code from Epic's sign-in page.
     AuthorizationCode(&'a str),
     RefreshToken(&'a str),
+    /// A one-time exchange code minted from another session of the same account (another
+    /// machine's, handing it over: design/REMOTE.md §6). Redeeming it starts a refresh-token
+    /// chain of its own.
+    ExchangeCode(&'a str),
 }
 
 /// `Windows` builds, `Live` label: what EGL installs.
@@ -394,6 +398,7 @@ impl Api {
         let form: Vec<(&str, &str)> = match grant {
             Grant::AuthorizationCode(code) => vec![("grant_type", "authorization_code"), ("code", code), ("token_type", "eg1")],
             Grant::RefreshToken(t) => vec![("grant_type", "refresh_token"), ("refresh_token", t), ("token_type", "eg1")],
+            Grant::ExchangeCode(c) => vec![("grant_type", "exchange_code"), ("exchange_code", c), ("token_type", "eg1")],
         };
         let basic = basic_auth(&self.config.client_id, &self.config.client_secret);
         let req = Request::new("oauth token", Method::Post, format!("{ACCOUNT_HOST}/account/api/oauth/token")).header("Authorization", basic).form(&form);
@@ -476,7 +481,8 @@ impl Api {
         Err(last.unwrap_or_else(|| anyhow::anyhow!("no manifest location")).context(format!("download the manifest of {}", build.app_name)))
     }
 
-    /// A one-time exchange code for a game to sign in with (`-AUTH_PASSWORD`).
+    /// A one-time exchange code: for a game to sign in with (`-AUTH_PASSWORD`), or for
+    /// another machine to redeem ([`Grant::ExchangeCode`]).
     pub async fn exchange_code(&self, access_token: &str) -> Result<Secret<String>> {
         let r: ExchangeReply = self.json(Request::new("exchange code", Method::Get, format!("{ACCOUNT_HOST}/account/api/oauth/exchange")).bearer(access_token)).await?;
         anyhow::ensure!(!r.code.is_empty(), "Epic's exchange-code reply had no code");

@@ -152,7 +152,7 @@ async fn run(a: Args) -> Result<()> {
     let session = format!("cli-{}", std::process::id());
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("quiver-stream").join(&session);
     let max_frames = a.frames.or(a.seconds.map(|s| (s * a.fps).round() as u64));
-    let opts = HostOptions { target, config: config.clone(), session, dir: dir.clone(), preset: a.preset, recovery, headless_server: a.headless_server, max_frames, force_sandbox_gid: None, exe: None };
+    let opts = HostOptions { target, config: config.clone(), session, dir: dir.clone(), preset: a.preset, recovery, headless_server: a.headless_server, max_frames, force_sandbox_gid: None, exe: None, constant_bitrate_audio: false };
     let (_bitrate_tx, bitrate_rx) = tokio::sync::watch::channel(a.bitrate);
     let mut host = Host::start(opts, bitrate_rx).await?;
     eprintln!("pads: {:?}{}", host.pad_mode, host.x_display.as_deref().map(|d| format!(", display {d}")).unwrap_or_default());

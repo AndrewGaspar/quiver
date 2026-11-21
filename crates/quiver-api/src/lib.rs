@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod accounts;
 pub mod achievements;
 pub mod art;
 pub mod client;
@@ -23,11 +24,13 @@ pub mod exports;
 pub mod game;
 pub mod mods;
 pub mod info;
+pub mod moonlight;
 pub mod lab;
 pub mod options;
 pub mod perf;
 pub mod remote;
 pub mod savestores;
+pub mod secret;
 pub mod setup;
 pub mod sight;
 pub mod steamlib;
@@ -534,9 +537,11 @@ pub struct ActivityEntry {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    /// Sign in, adding the account (the first one becomes the default).
-    Login { email: String, password: String },
-    Login2fa { code: String },
+    /// Sign in, adding the account (the first one becomes the default). The password and
+    /// the 2FA code are [`secret::Secret`]s: never printed. Over the remote tunnel they are
+    /// typed on the client and travel inside its pinned mutual TLS (design/REMOTE.md §6).
+    Login { email: String, password: secret::Secret<String> },
+    Login2fa { code: secret::Secret<String> },
     /// Sign one account out (`None`: the default). The next account becomes the default.
     /// `account` is a user id, username or unique user-id prefix.
     Logout {
@@ -1066,6 +1071,35 @@ pub enum Request {
         prefs: remote::StreamPrefs,
         caps: remote::ClientCaps,
     },
+    // ---- Accounts across machines (appended; design/REMOTE.md §6, see [`accounts`])
+    /// Which machines each account is signed in on and which one is playing, an Epic
+    /// session handed to another machine, and what paired machines tell each other.
+    Accounts(accounts::AccountsRequest),
+    // ---- Moonlight compatibility (appended; design/REMOTE.md phase 1b, see [`moonlight`])
+    /// The GameStream server's state, pending pairing and paired clients
+    /// (`moonlight::MoonlightStatus`).
+    MoonlightStatus,
+    /// Turn it on (and remember it), optionally changing what it listens on (addresses or
+    /// interface names such as `tailscale0`; empty: every address) and the codecs offered.
+    /// Returns `moonlight::MoonlightStatus`.
+    MoonlightEnable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codecs: Option<Vec<String>>,
+        /// Advertise it on the LAN over mDNS (default on).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mdns: Option<bool>,
+    },
+    /// Turn it off (and remember it); a stream ends.
+    MoonlightDisable,
+    /// The PIN the waiting Moonlight client shows. Answers once it is paired
+    /// (`moonlight::MoonlightClient`), or with why not.
+    MoonlightPin { pin: String },
+    /// Paired Moonlight clients (`Vec<moonlight::MoonlightClient>`).
+    MoonlightClients,
+    /// Forget a Moonlight client (fingerprint or a prefix of it, or its name); its stream ends.
+    MoonlightUnpair { fingerprint: String },
 }
 
 fn yes() -> bool {
@@ -1299,6 +1333,14 @@ pub enum Event {
     /// Paired machines or the listener changed (paired, revoked, renamed, enabled,
     /// disabled): reload `Request::RemoteStatus`.
     RemoteChanged,
+    /// A Moonlight client asked to pair and waits for the PIN it shows
+    /// (`Request::MoonlightPin`).
+    MoonlightPairingRequested { device_name: String, address: String },
+    /// A Moonlight client was paired.
+    MoonlightPaired { name: String, fingerprint: String },
+    /// The Moonlight server changed (on, off, a pairing, a client unpaired, a stream started
+    /// or ended): reload `Request::MoonlightStatus`.
+    MoonlightChanged,
     /// The pairing window closed: `outcome` is `paired` (with the new peer's `id` and
     /// `name`), `expired`, `failed` (three wrong codes) or `cancelled`.
     PairingEnded {
@@ -1308,6 +1350,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    // ---- appended: accounts across machines (design/REMOTE.md §6)
+    /// What a paired machine says it is signed in to or playing changed (it told this
+    /// machine, or an account here was handed to or from it): reload
+    /// `AccountsRequest::Presence`.
+    AccountsPresenceChanged,
 }
 
 impl From<options::OptionsEvent> for Event {

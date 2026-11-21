@@ -34,6 +34,25 @@ pub enum EpicAction {
         /// Display name, account id or id prefix.
         account: Option<String>,
     },
+    /// Give a paired machine its own Epic session from this machine's: Epic's one-time
+    /// exchange code, minted here and redeemed there (its sessions then rotate on their
+    /// own). With --machine, "here" is that machine.
+    AddTo {
+        /// The paired machine to sign in (name or id).
+        #[arg(value_name = "MACHINE")]
+        peer: String,
+        /// Display name, account id or id prefix (default: the default account).
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Take an Epic session from a paired machine that is signed in, for this machine.
+    AddFrom {
+        /// The paired machine signed in to Epic (name or id).
+        #[arg(value_name = "MACHINE")]
+        peer: String,
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Epic accounts in Quiver (* marks the default).
     Accounts {
         #[arg(long)]
@@ -169,6 +188,14 @@ fn paste_flow(start: &LoginStart, open: bool) -> Result<String> {
     read_pasted()
 }
 
+async fn handover(client: &Client, account: Option<String>, from: Option<String>, to: Option<String>) -> Result<()> {
+    use quiver_api::accounts::{AccountsRequest, HandoverResult};
+    let req = Request::Accounts(AccountsRequest::Handover { store: quiver_api::StoreId::Epic, account, from, to });
+    let r: HandoverResult = client.call(req).await?;
+    println!("{} now has its own Epic session for {} (from {}); signing out on one machine leaves the other signed in", r.to, r.name, r.from);
+    Ok(())
+}
+
 pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
     match action {
         EpicAction::Login { code, paste, open } => {
@@ -188,6 +215,8 @@ pub async fn run(client: &Client, action: EpicAction) -> Result<()> {
             println!("Signed in to Epic as {}{}{linked}", a.display_name, if a.default { " (default account)" } else { "" });
             println!("Your Epic games: quiver library --store epic");
         }
+        EpicAction::AddTo { peer, account } => handover(client, account, None, Some(peer)).await?,
+        EpicAction::AddFrom { peer, account } => handover(client, account, Some(peer), None).await?,
         EpicAction::Logout { account } => {
             let a: EpicAccount = client.call(epic(EpicRequest::Logout { account })).await?;
             println!("Signed {} out of Epic in Quiver", a.display_name);
