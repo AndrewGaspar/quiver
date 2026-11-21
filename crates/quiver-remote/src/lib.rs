@@ -12,7 +12,7 @@
 //! - [`ticket`]: tickets for starting a stream.
 //!
 //! quiverd serves the listener (off by default); `quiver-api`'s `Client` connects with
-//! [`connect_api`], and the quiverd protocol then runs over the TLS connection unchanged.
+//! [`connect`], and the quiverd protocol then runs over the TLS connection unchanged.
 
 use std::path::{Path, PathBuf};
 

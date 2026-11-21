@@ -81,6 +81,10 @@ pub struct Config {
     /// (`lab.limits`, design/LAB.md §15; `quiver lab limits`).
     #[serde(default, skip_serializing_if = "crate::lab::limits::LabSettings::is_default")]
     pub lab: crate::lab::limits::LabSettings,
+    /// Remote play's listener (`remote.enabled`, `remote.listen`; design/REMOTE.md §3). Off
+    /// by default; `quiver remote enable` turns it on.
+    #[serde(default, skip_serializing_if = "quiver_api::remote::RemoteSettings::is_default")]
+    pub remote: quiver_api::remote::RemoteSettings,
 }
 
 fn yes() -> bool {
@@ -260,6 +264,7 @@ impl Config {
             steam_offers: true,
             epic_saves_background: true,
             lab: Default::default(),
+            remote: Default::default(),
         };
         cfg.save()?;
         Ok(cfg)

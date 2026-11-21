@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 quiver-core.workspace = true
 quiver-api.workspace = true
+quiver-remote.workspace = true
 epic-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

@@ -1,7 +1,7 @@
 //! The `quiverd` daemon's protocol and a client for it.
 //!
-//! Transport: a Unix socket at `$XDG_RUNTIME_DIR/quiver/quiverd.sock`, one JSON
-//! object per line. Requests carry an `id`, the caller's `source` (gui/cli/agent/…, kept
+//! Transport: a Unix socket at `$XDG_RUNTIME_DIR/quiver/quiverd.sock`, or a paired
+//! machine's TLS connection ([`remote`], [`Client::machine`]); one JSON object per line. Requests carry an `id`, the caller's `source` (gui/cli/agent/…, kept
 //! in the settings history and activity log) and a typed [`Request`]. The daemon answers
 //! each with a [`Reply`]; after [`Request::Subscribe`] the connection also receives
 //! [`Event`]s.
@@ -26,13 +26,14 @@ pub mod info;
 pub mod lab;
 pub mod options;
 pub mod perf;
+pub mod remote;
 pub mod savestores;
 pub mod setup;
 pub mod sight;
 pub mod steamlib;
 pub mod tweaks;
 pub mod stores;
-pub use client::Client;
+pub use client::{CallError, Client};
 pub use game::{GameId, GameRef, StoreId};
 pub use mods::{ModsRequest, Profile};
 
@@ -1017,6 +1018,54 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<String>,
     },
+    // ---- Remote play's control plane (appended; design/REMOTE.md §3–§5, see [`remote`])
+    /// This machine's remote state: name, id, the listener, pairing, peers
+    /// (`remote::RemoteStatus`).
+    RemoteStatus,
+    /// Turn the listener on (and remember it): `listen` (`host:port`) or what was set
+    /// before, else `0.0.0.0:47990`. Returns `remote::RemoteStatus`.
+    RemoteEnable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<String>,
+    },
+    /// Turn the listener off (and remember it); remote connections drop.
+    RemoteDisable,
+    /// Open a pairing window: a 6-digit code for 2 minutes, closed by 3 wrong tries or one
+    /// pairing (`remote::PairCode`). `Event::PairingEnded` says how it ended. Opening one
+    /// again replaces the code.
+    RemotePairBegin,
+    /// Close the pairing window early.
+    RemotePairEnd,
+    /// Pair with the machine at `addr` (`host[:port]`) using the code it shows; it becomes a
+    /// server peer of this machine (`remote::PeerInfo`). Local only.
+    RemotePairWith { addr: String, code: String },
+    /// Paired machines with whether each is reachable (`Vec<remote::PeerInfo>`).
+    RemotePeers,
+    /// Forget a paired machine (id, unique id prefix or name); its connections drop at once.
+    RemoteRevoke { id: String },
+    /// Rename this machine (`id` `None`), or a paired one here (a local label).
+    RemoteRename {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+    },
+    /// Send Wake-on-LAN to a paired machine whose MAC is known.
+    RemoteWake { id: String },
+    /// Quiver machines on the LAN (mDNS), listening for `wait_ms` (default 1500, at most
+    /// 10000). `Vec<remote::Discovered>`.
+    RemoteDiscover {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u64>,
+    },
+    /// Start streaming `target` to the client that asks (`remote::StartStreamReply`: the
+    /// stream host's address and keys, and this machine's name). Not implemented yet: refused
+    /// with `remote::NOT_IMPLEMENTED`.
+    StartStream {
+        target: remote::StreamTarget,
+        #[serde(default)]
+        prefs: remote::StreamPrefs,
+        caps: remote::ClientCaps,
+    },
 }
 
 fn yes() -> bool {
@@ -1241,6 +1290,24 @@ pub enum Event {
     },
     /// Sight's settings changed (`SightRequest::SettingsSet`, `Pin`).
     SightSettingsChanged(sight::SightSettings),
+    // ---- appended: remote play (design/REMOTE.md §3, §5)
+    /// A paired machine became reachable: a client connected, or a server answered.
+    PeerOnline { id: String, name: String },
+    /// A paired machine stopped being reachable: a client's last connection closed, or a
+    /// server stopped answering.
+    PeerOffline { id: String, name: String },
+    /// Paired machines or the listener changed (paired, revoked, renamed, enabled,
+    /// disabled): reload `Request::RemoteStatus`.
+    RemoteChanged,
+    /// The pairing window closed: `outcome` is `paired` (with the new peer's `id` and
+    /// `name`), `expired`, `failed` (three wrong codes) or `cancelled`.
+    PairingEnded {
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 impl From<options::OptionsEvent> for Event {

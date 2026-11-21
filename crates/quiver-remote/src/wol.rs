@@ -70,12 +70,33 @@ pub fn local_mac(local: Option<IpAddr>) -> Option<String> {
 
 /// The interface name that has address `ip`.
 fn interface_of(ip: IpAddr) -> Option<String> {
-    let mut out = None;
+    interfaces().into_iter().find(|(_, a)| *a == ip).map(|(n, _)| n)
+}
+
+/// This machine's addresses other than loopback and link-local, IPv4 first: what
+/// `quiver remote pair` suggests typing on the other machine.
+pub fn local_ips() -> Vec<IpAddr> {
+    let mut ips: Vec<IpAddr> = interfaces()
+        .into_iter()
+        .map(|(_, a)| a)
+        .filter(|a| match a {
+            IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local(),
+            IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unicast_link_local(),
+        })
+        .collect();
+    ips.sort_by_key(|ip| (!ip.is_ipv4(), *ip));
+    ips.dedup();
+    ips
+}
+
+/// Every interface address: (interface name, address).
+fn interfaces() -> Vec<(String, IpAddr)> {
+    let mut out = Vec::new();
     // SAFETY: getifaddrs/freeifaddrs as documented; every pointer is checked before use.
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut list) != 0 {
-            return None;
+            return out;
         }
         let mut cur = list;
         while !cur.is_null() {
@@ -93,9 +114,8 @@ fn interface_of(ip: IpAddr) -> Option<String> {
                     }
                     _ => None,
                 };
-                if addr == Some(ip) {
-                    out = Some(std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned());
-                    break;
+                if let Some(a) = addr {
+                    out.push((std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned(), a));
                 }
             }
             cur = ifa.ifa_next;

@@ -86,6 +86,11 @@ impl Peers {
         Ok(Peers { path, list })
     }
 
+    /// No peers, saving to `dir`.
+    pub fn empty(dir: &Path) -> Peers {
+        Peers { path: dir.join("peers.json"), list: Vec::new() }
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             crate::identity::create_private_dir(dir)?;
