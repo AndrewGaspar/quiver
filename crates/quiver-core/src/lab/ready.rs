@@ -108,6 +108,9 @@ pub struct Run {
     /// What the launch did (mod files, profile, licence), for the record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Who launched it (design/LAB.md "Owners"); also in the run's folder (`owner.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<super::owner::Owner>,
 }
 
 impl Run {
@@ -123,6 +126,7 @@ impl Run {
             pids: Vec::new(),
             exit: None,
             notes: Vec::new(),
+            owner: None,
         }
     }
 
@@ -169,6 +173,31 @@ pub struct State {
     /// Every safety check that fired (a Connect process, a credential file), newest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violations: Vec<String>,
+}
+
+impl State {
+    /// The container is gone: nothing runs in it and nothing supervises it. A run still going
+    /// ends `container stopped`.
+    pub fn container_gone(&mut self, now: DateTime<Utc>) {
+        self.container_up = false;
+        self.display = None;
+        self.supervisor_pid = None;
+        if let Some(r) = self.run.as_mut().filter(|r| r.phase != Phase::Exited) {
+            r.reach(Phase::Exited, now);
+            r.exit = Some(Exit { at: now, how: "container stopped".into(), detail: String::new() });
+        }
+    }
+
+    /// A `state.json` read back, brought in line with what podman says (`running`). The file
+    /// is the supervisor's, and a supervisor that has stopped (`quiver lab down` stops it
+    /// before the container) left it as it last was.
+    pub fn reconcile(&mut self, running: bool, now: DateTime<Utc>) {
+        if running {
+            self.container_up = true;
+        } else if self.container_up || self.supervisor_pid.is_some() || self.run.as_ref().is_some_and(|r| r.phase != Phase::Exited) {
+            self.container_gone(now);
+        }
+    }
 }
 
 /// What `quiver lab wait` waits for.
@@ -267,5 +296,27 @@ mod tests {
         st.container_up = false;
         st.run = None;
         assert_eq!(reached(&st, &Want::parse("process"), None), Some(false));
+    }
+
+    #[test]
+    fn a_stale_state_follows_podman() {
+        // What a supervisor left when `down` stopped it: the container up, a run at frame.
+        let mut r = Run::new(4, "lab-origins-r4".into(), t(0));
+        r.reach(Phase::Frame, t(9));
+        let stale = State { instance: "origins".into(), container_up: true, display: Some(":10".into()), supervisor_pid: Some(77), run: Some(r), ..Default::default() };
+        let mut st = stale.clone();
+        st.reconcile(true, t(20));
+        assert_eq!(st, stale, "podman agrees: nothing changes");
+        st.reconcile(false, t(20));
+        assert!(!st.container_up && st.display.is_none() && st.supervisor_pid.is_none());
+        let run = st.run.as_ref().unwrap();
+        assert_eq!((run.phase, run.exit.as_ref().map(|e| e.how.as_str())), (Phase::Exited, Some("container stopped")));
+        assert_eq!(reached(&st, &Want::parse("in-world"), None), Some(false), "nothing to wait for");
+        // A run that had ended keeps how it ended.
+        let mut st = stale.clone();
+        st.run.as_mut().unwrap().reach(Phase::Exited, t(10));
+        st.run.as_mut().unwrap().exit = Some(Exit { at: t(10), how: "killed".into(), detail: "by cli".into() });
+        st.reconcile(false, t(20));
+        assert_eq!(st.run.unwrap().exit.unwrap().how, "killed");
     }
 }

@@ -71,6 +71,7 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
         std::process::exit(st.code().unwrap_or(1));
     }
     let (inst, m) = inst_of(lab, &a.instance)?;
+    let owner = quiver_core::lab::owner::Owner::current(source, None);
     let variants: Vec<Variant> = a.variants.iter().map(|v| Variant::parse(v)).collect::<Result<_>>()?;
     let metrics: Vec<LogMetric> = a.log_metrics.iter().map(|v| LogMetric::parse(v)).collect::<Result<_>>()?;
     let crop_spec = a.crop.as_deref().map(Crop::parse).transpose()?;
@@ -96,7 +97,7 @@ pub fn run(lab: &Lab, source: &str, a: BenchArgs) -> Result<()> {
             eprintln!("bench: round {round}, variant {}", v.label);
             if a.relaunch {
                 configset::apply(&inst, &m, &v.assigns).map(|done| remember(&mut originals, &done))?;
-                let r = sup::request(lab, &inst, &sup::SupRequest::Launch { source: source.into(), mod_dir: None, no_mod: false, args: Vec::new(), clock: None })?;
+                let r = sup::request(lab, &inst, &sup::SupRequest::Launch { source: source.into(), mod_dir: None, no_mod: false, args: Vec::new(), clock: None, owner: Some(Box::new(owner.clone())) })?;
                 let id = r["run"].as_u64().map(|x| x as u32);
                 super::wait_for(&inst, &Want::parse(&a.ready), id, Duration::from_secs(600))?;
                 // A `run:` log is the new run's.

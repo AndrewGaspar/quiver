@@ -24,7 +24,7 @@ accounts, saves, play time or achievements.
 
 ```
 quiver lab create <game> [--name N] [--display 2560x1600@165[+hdr]] [--proton P] [--mod DIR] [--graphics G] [--sight] [--hdr]
-quiver lab up N | down N | rm N | list | show N | edit N key=value…
+quiver lab up N [--owner NAME] | down N | rm N | list | show N | edit N key=value… | whoami   (owners: section 18)
 quiver lab launch N [--mod DIR] [--clock virtual:HZ|real] [--wait frame]     quiver lab kill N
 quiver lab status N | wait N STATE [--stable]       quiver lab logs N [--tail 40]
 quiver lab shot N [--settle S] [--crop C] [--metrics]
@@ -1598,3 +1598,67 @@ lab` and reported these, most important first. Each is fixed and tested where it
    `--timeout` everywhere, options after arguments, `--` for the rest (§6).
 6. **`!!! OUTSIDE …:443` on every Ubisoft run**: only runs the EOS proxy watches get it (§3.1).
 7. **No fixture import**: `quiver lab fixture import` (§8).
+
+## 18. Owners (2026-11-21)
+
+Several sessions (Claude Code, Codex, muse, the person in a terminal) share one lab. quiverd once
+needed a restart while the instance `origins` held it; the main session asked the Claude
+session `pharos` to take it down, and pharos did, but it was a **Codex** thread's
+(`pharos-xreal`), and nothing said so. Now every instance and every run records who started it.
+
+**Before taking down (or killing, or relaunching) an instance you didn't start, check its owner
+in `quiver lab list` and ask that session or the person.** A `(gone)` owner (its process has
+exited) is a strong hint that the instance is abandoned.
+
+**What's recorded** (`quiver_core::lab::owner`): `<instance>/owner.json`, written by `quiver
+lab up`, and each run's owner, written by the supervisor from the `launch` request into
+`state.json`'s run and `lab/runs/r<N>/owner.json` (runs come from different sessions, and
+`state.json` holds only the current one). An owner is the host `agent` (`claude`, `codex`,
+`muse`, `tmux`, `kitty`, `terminal`, `unknown`), its `session` name and/or `session_id`, the
+host's `pid` with its start time (so a reused pid doesn't pass for it), its `tty`, the
+`--source` label when it isn't the default `cli`, an explicit `label`, and when.
+
+**How it's found**: `quiver`'s ancestry in `/proc`, nearest agent host first, then the terminal.
+Only argv and a fixed list of this process's own environment keys are read (`owner::ENV_KEYS`:
+ids and labels; another process's `environ` is never opened, and nothing secret is recorded).
+
+| Host | What identifies it |
+|---|---|
+| Claude Code | a `claude` ancestor; its `--resume <name>` is the session name (`--resume` alone or a uuid: no name, the id from `CLAUDE_CODE_SESSION_ID` stands in). Detached: `CLAUDE_PID`, `CLAUDECODE=1`. |
+| Codex | commands run under one shared `codex app-server … --managed-daemon` serving every Codex TUI, so the TUI above it is whichever session started the daemon (here the `pharos` thread, for `pharos-xreal`'s commands). The thread is `CODEX_THREAD_ID`, else a TUI's `codex resume <id>` when the command runs right under it; its name is the last `thread_name` for it in `$CODEX_HOME/session_index.jsonl`. The TUI's pid is recorded only if one was resumed on that thread. |
+| muse | a `muse resume <id>` ancestor (the id; muse keeps names in a database Quiver doesn't read). |
+| terminal | `TMUX_PANE` (the pane's shell is the pid), a kitty window (`KITTY_WINDOW_ID`), else the outermost process on a tty. |
+
+`quiver lab up --owner NAME`, `launch --owner NAME` or `QUIVER_LAB_OWNER=NAME` name it outright.
+A `--bg` job hands the foreground's owner to its detached process (`QUIVER_LAB_OWNER_DETECTED`).
+`quiver lab whoami [--json]` prints what would be recorded from here.
+
+**Shown as** `codex:pharos-xreal`, `claude:pharos/agent:pharos-lab` (session, then the
+`--source`), `tmux:%3`, `terminal`:
+
+- `quiver lab list`: an owner column (the current run's owner while it runs, else who brought
+  the instance up), `(gone)` when its process has exited; `--json` has `owner` (with `name` and
+  `alive`) and `instance_owner`.
+- `quiver lab status N`: the instance's owner and the current run's (`by …`), each with its
+  pid and whether it's alive, its tty and when; the earlier runs' owners. `--json`: `owner`,
+  `state.run.owner`, `runs`.
+- `quiver lab up` on an instance that's already up says whose it is; `down` notes it when it
+  isn't yours.
+- quiverd's `quiver daemon status`: a lab instance's play session is "waiting on: Assassin's
+  Creed® Origins (lab origins, codex:pharos-xreal)", from the lab folder (the instances running
+  that game, their runs' owners).
+
+**Status after `down`.** `quiver lab status` printed "container up" after `down` said "origins is
+down" and podman listed nothing: `down` stops the supervisor before the container, the
+supervisor's quit changed nothing in its state so it never rewrote `state.json`, and its watch
+loop (which notices a stopped container) was gone with it; `status` printed the file. Now `down`
+waits for the supervisor to stop, removes the container, and writes the state itself
+(`container_up: false`, a run still going ends `container stopped`); `status`, `list` and
+`show` check the file against podman (`State::reconcile`), and `wait` does whenever no
+supervisor holds the instance, so it fails at once instead of waiting out its timeout.
+
+Tests: `lab::owner` (ancestry over fake `/proc` trees for each host, including the shared Codex
+app-server; pid reuse; the environment allowlist; `owner.json` and the running-instances word),
+`lab::ready` (`a_stale_state_follows_podman`), the CLI's `status_after_down_is_down` and
+`owners_in_the_table_and_runs`, the supervisor request's round trip, and quiverd's
+`lab_holders_name_the_instance_and_its_owner`.

@@ -36,6 +36,7 @@ pub mod procs;
 pub mod ready;
 pub mod hdr;
 pub mod nvml;
+pub mod owner;
 pub mod sight;
 pub mod teleport;
 pub mod vclock;
@@ -178,6 +179,17 @@ impl Inst {
     pub fn current_run(&self) -> Option<u32> {
         let st: ready::State = serde_json::from_slice(&std::fs::read(self.state_path()).ok()?).ok()?;
         st.run.map(|r| r.id)
+    }
+    /// Who brought it up last ([`owner::FILE`]).
+    pub fn owner_path(&self) -> PathBuf {
+        self.dir.join(owner::FILE)
+    }
+    pub fn owner(&self) -> Option<owner::Owner> {
+        owner::Owner::read(&self.owner_path())
+    }
+    /// Who launched run `run` (in its folder).
+    pub fn run_owner(&self, run: u32) -> Option<owner::Owner> {
+        owner::Owner::read(&self.run_dir(run).join(owner::FILE))
     }
     pub fn events_path(&self) -> PathBuf {
         self.dir.join("events.jsonl")

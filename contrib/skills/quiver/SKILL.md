@@ -69,7 +69,8 @@ Start here. `brief` prints everything a new agent needs for that game: store, ex
 quiver lab doctor                          # what's missing (podman, CDI, image, reflinks, bridge, EOS proxy)
 quiver lab brief GAME                      # the onboarding brief for that game
 quiver lab create GAME --name NAME --display 1920x1080@60
-quiver lab up NAME
+quiver lab list                            # instances and their owners (codex:pharos-xreal, claude:pharos)
+quiver lab up NAME                         # records you as the owner (--owner NAME / QUIVER_LAB_OWNER to name yourself)
 quiver lab launch NAME [--mod DIR] --wait frame
 quiver lab shot NAME [--settle S] [--metrics]; quiver lab key NAME …; quiver lab mouse NAME DX DY
 quiver lab set NAME FILE:[section]key=value --wait   # live config edit, waits for the reload line
@@ -79,6 +80,8 @@ quiver lab edit NAME clock=virtual:62.5    # fixed-step virtual clock (clock=rea
 quiver lab clock NAME pause|step [K]|resume|status   # with the clock on: hold the game, let exactly K frames through
 quiver lab key NAME --down Right; quiver lab key NAME --up Right   # keys held across steps
 ```
+
+**Instances are shared.** Other sessions (Claude, Codex, muse, the person) run instances in the same lab. Before taking down, killing or relaunching an instance you didn't start, check its owner in `quiver lab list` (or `quiver lab status NAME`, which says whether the owner's process is still alive) and ask that session or the person. A `(gone)` owner is a hint the instance is abandoned, not permission. `quiver lab whoami` shows what you'd be recorded as.
 
 Pause and frame stepping (virtual clock on): `quiver lab clock NAME pause` holds the game at the end of the frame in flight (that frame stays on screen; game time stops however long you take, and never times out unless you pass `--auto-resume SECS`); `quiver lab clock NAME step 12` lets exactly 12 more frames through, each exactly 1/rate s, and holds again, printing the frame number and virtual time; `resume` runs free. Each waits for the hold, so `quiver lab clock NAME step 12 && quiver lab shot NAME` shoots that frame (`shot --hdr` works while held too). Input sent while held is read when the game next steps: to hold a key over frames, `quiver lab key NAME --down Right`, `step 12`, `quiver lab key NAME --up Right`, `step 1`; a plain `key` while held puts the press and release in one frame. `quiver lab logs NAME` lists the pauses and steps.
 
