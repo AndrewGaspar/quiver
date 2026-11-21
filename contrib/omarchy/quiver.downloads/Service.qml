@@ -1,8 +1,18 @@
-// Quiver's download queue for the whole shell: one instance, however many
-// bars there are. The bar widget (Widget.qml) only draws what this holds.
+// Quiver for the whole shell: the download queue, what is being played and the
+// recently played games. One instance, however many bars there are; the bar
+// widget (Widget.qml) only draws what this holds.
 //
 // ## Where the data comes from
 //
+// Playing and recent games: `quiver playing --follow --json --no-start`, one
+// long-running process that prints a snapshot line whenever quiverd says
+// something changed (a game started or stopped, a stream, the library), so
+// nothing polls for it. It keeps running across quiverd restarts (saying
+// "connected": false meanwhile); when it ends (quiverd wasn't running, an old
+// quiver without `playing`) it is started again after 5 s, backing off to a
+// minute. Running time is counted here from the start time.
+//
+// The queue:
 // `quiver queue --json --no-start`, one at a time, never overlapping: every
 // 2 s while something downloads or verifies, every 15 s while the queue sits
 // still, and backing off from 5 s to once a minute while quiverd is down (or
@@ -145,8 +155,81 @@ Item {
     }
   }
 
-  // Off in the render harness, which feeds the queue in itself.
+  // Off in the render harness, which feeds the queue (and what is playing) in itself.
   property bool polling: true
+  property bool following: true
+
+  // --- now playing, recent games ---------------------------------------------------
+
+  // The follow's last snapshot (Model.parsePlaying).
+  property var playing: []
+  property var recent: []
+  // The follow is running and quiverd is there.
+  property bool followConnected: false
+  property int followDowns: 0
+  readonly property bool isPlaying: root.playing.length > 0
+  // Now, a minute at a time while a game runs (running times are in minutes).
+  property double now: Date.now()
+  Timer {
+    interval: 15000
+    repeat: true
+    running: root.isPlaying
+    onTriggered: root.now = Date.now()
+  }
+  onIsPlayingChanged: root.now = Date.now()
+
+  function handlePlaying(line) {
+    var parsed = Model.parsePlaying(String(line || ""))
+    if (!parsed) return
+    root.followDowns = 0
+    root.followConnected = parsed.connected
+    root.playing = parsed.connected ? parsed.playing : []
+    // While quiverd is away the follow keeps the last recent games; so does this.
+    if (parsed.connected || parsed.recent.length > 0) root.recent = parsed.recent
+    root.now = Date.now()
+  }
+
+  Process {
+    id: follow
+    command: [root.quiver, "playing", "--follow", "--json", "--no-start", "--recent", "6"]
+    environment: ({ QUIVER_SOURCE: "omarchy-bar" })
+    stdout: SplitParser { onRead: function (line) { root.handlePlaying(line) } }
+    stderr: StdioCollector { id: followErr; waitForEnd: true }
+    property bool started: false
+    onStarted: started = true
+    onRunningChanged: if (!running && !started) root.followEnded("unavailable")
+    onExited: function (exitCode) {
+      root.followEnded(Model.pollFailure(exitCode, followErr.text))
+    }
+  }
+
+  function followEnded(kind) {
+    root.followConnected = false
+    root.playing = []
+    root.followDowns += 1
+    if (!root.following) return
+    followRetry.interval = Model.followRetry(kind, root.followDowns)
+    followRetry.restart()
+  }
+
+  Timer {
+    id: followRetry
+    onTriggered: root.startFollow()
+  }
+
+  function startFollow() {
+    if (follow.running || !root.following) return
+    follow.started = false
+    follow.running = true
+  }
+
+  // A new CLI path: follow with that one.
+  onQuiverChanged: if (follow.running) {
+    follow.running = false
+  } else if (root.following && root.followDowns > 0) {
+    followRetry.interval = 0
+    followRetry.restart()
+  }
 
   // Belt and braces: whatever happened, polling never stops for good.
   Timer {
@@ -182,7 +265,10 @@ Item {
     nextPoll.restart()
   }
 
-  Component.onCompleted: if (root.polling) root.pollNow()
+  Component.onCompleted: {
+    if (root.polling) root.pollNow()
+    root.startFollow()
+  }
 
   // --- actions -----------------------------------------------------------------
 
@@ -239,13 +325,44 @@ Item {
     else if (root.canResumeAll) resumeAll()
   }
 
-  // Quiver on its Downloads page: Hyprland focuses an open Quiver window (and
-  // runs nothing when there is none), and `quiver-app --page downloads` turns
-  // the open app to Downloads, or starts one there.
-  function openApp() {
+  // Quiver on a page (downloads, library): Hyprland focuses an open Quiver
+  // window (and runs nothing when there is none), and `quiver-app --page P`
+  // turns the open app to it, or starts one there.
+  function openApp(page) {
+    var p = page === "library" || page === "activity" ? page : "downloads"
     Quickshell.execDetached(["omarchy-launch-or-focus", "^quiver$", "true"])
-    Quickshell.execDetached(["uwsm-app", "--", root.quiverApp, "--page", "downloads"])
+    Quickshell.execDetached(["uwsm-app", "--", root.quiverApp, "--page", p])
   }
+
+  function playingFor(ref) {
+    for (var i = 0; i < root.playing.length; i++) if (root.playing[i].ref === ref) return root.playing[i]
+    return null
+  }
+  function recentFor(ref) {
+    for (var i = 0; i < root.recent.length; i++) if (root.recent[i].ref === ref) return root.recent[i]
+    return null
+  }
+
+  // Play a recent game as the app's Play does (its default profile), without
+  // following it: quiverd runs it.
+  function play(ref) {
+    var g = root.recentFor(ref)
+    if (g && Model.playRef(g.ref) !== "") enqueue([["play", g.ref, "--detach"]])
+  }
+  function stop(ref) {
+    var g = root.playingFor(ref)
+    if (g && Model.playRef(g.ref) !== "") enqueue([["stop", g.ref]])
+  }
+  // The in-game Sight panel over that game (or the only one).
+  function sight(ref) {
+    var g = root.playingFor(ref)
+    if (!g) return
+    enqueue([g.session !== "" ? ["sight", "toggle", "--session", g.session] : ["sight", "toggle"]])
+  }
+
+  // The panel is open (set by the bar widget): action errors show there, and
+  // as a notification otherwise.
+  property bool panelOpen: false
 
   Process {
     id: action
@@ -268,6 +385,8 @@ Item {
         var why = Model.cleanText(actionErr.text, Model.MAX_ERROR).replace(/^Error:\s*/, "")
         root.lastError = strings.t("error.action").arg(action.verb).arg(why !== "" ? why : String(exitCode))
         clearError.restart()
+        if (!root.panelOpen) Quickshell.execDetached(["notify-send", "--app-name=Quiver", "--icon=quiver",
+          "--urgency=normal", strings.t("notify.actionFailed"), Model.escapeMarkup(root.lastError)])
         // Don't run the rest of a bulk action blind after a failure.
         root.pending = []
       }
@@ -314,9 +433,18 @@ Item {
         stalled: s.stalledCount
       })
     }
+    function playing(): string {
+      return JSON.stringify({
+        connected: root.followConnected,
+        playing: root.playing.map(function (g) {
+          return { ref: g.ref, name: g.name, started: g.started, profile: g.profile, stream: g.stream }
+        }),
+        recent: root.recent.map(function (g) { return { ref: g.ref, name: g.name } })
+      })
+    }
     function refresh(): void { root.refresh() }
     function pauseAll(): void { root.pauseAll() }
     function resumeAll(): void { root.resumeAll() }
-    function open(): void { root.openApp() }
+    function open(): void { root.openApp("downloads") }
   }
 }

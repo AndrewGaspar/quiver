@@ -336,4 +336,81 @@ test("pause all: waiting items first, then active; resume all: paused only", () 
   eq(M.resumeTargets(q), ["7"])
 })
 
+// ---- now playing, recent games -------------------------------------------------------------------
+
+// A line as `quiver playing --json` prints it.
+const playingLine = (extra = {}) => JSON.stringify({
+  connected: true,
+  playing: [{
+    ref: "3539", name: "Assassin's Creed Origins", short: "AC Origins", started: "2026-11-21T19:00:00Z",
+    profile: "Pharos", via: ["launcher"], session: "s-pzfkk4bl2v",
+    stream: { peer: "roth", client: "moonlight", state: "streaming" },
+    icon: "/home/u/.local/share/quiver/icons/3095113d1c9698957e4fb4e2ce087e0d.png",
+  }],
+  recent: [
+    { ref: "420", name: "Far Cry 4", short: "Far Cry 4", last_played: "2026-11-21T18:46:01.9Z" },
+    { ref: "epic:dc9d2e595d0e4650b35d659f90d41059", name: "Alan Wake 2", short: "Alan Wake 2", last_played: "2026-11-20T10:00:00Z" },
+  ],
+  ...extra,
+})
+
+test("playing: a snapshot parses, with refs, sessions and streams checked", () => {
+  const p = M.parsePlaying(playingLine())
+  assert.equal(p.connected, true)
+  assert.equal(p.playing.length, 1)
+  const g = p.playing[0]
+  eq([g.ref, g.short, g.profile, g.session, g.stream.peer, g.stream.client, g.stream.state],
+    ["3539", "AC Origins", "Pharos", "s-pzfkk4bl2v", "roth", "moonlight", "streaming"])
+  assert.equal(g.started, Date.parse("2026-11-21T19:00:00Z"))
+  eq(p.recent.map((r) => r.ref), ["420", "epic:dc9d2e595d0e4650b35d659f90d41059"])
+  assert.equal(p.recent[1].icon, "")
+  assert.equal(M.parsePlaying(playingLine({ connected: false })).connected, false)
+})
+
+test("playing: bad refs, sessions, paths and markup never get through", () => {
+  const p = M.parsePlaying(JSON.stringify({
+    connected: true,
+    playing: [
+      { ref: "3539; rm -rf ~", name: "x", started: "2026-11-21T19:00:00Z" },
+      { ref: "epic:abc", name: "<img src=x onerror=alert(1)>‮", short: "", session: "s-$(id)", via: ["launcher", "Bad Holder", 3],
+        stream: { peer: "", client: "x" }, icon: "relative.png", started: "nonsense" },
+    ],
+    recent: [
+      { ref: "epic:abc", name: "dupe of playing" },
+      { ref: "0", name: "zero" },
+      { ref: "steam:620", name: "Portal 2", icon: "/x/../etc/passwd.png" },
+      { ref: "steam:440", name: "TF2", icon: "/home/u/.cache/quiver/art/a.jpg" },
+    ],
+  }))
+  eq(p.playing.map((g) => g.ref), ["epic:abc"])
+  const g = p.playing[0]
+  assert.equal(g.name, "<img src=x onerror=alert(1)>")
+  assert.equal(g.short, g.name)
+  eq([g.session, g.via, g.stream, g.icon, g.started], ["", ["launcher"], null, "", 0])
+  eq(p.recent.map((r) => [r.ref, r.icon]), [["steam:620", ""], ["steam:440", "/home/u/.cache/quiver/art/a.jpg"]])
+  for (const bad of ["", "[]", "nope", "null", "{\"playing\": 3}"]) {
+    const v = M.parsePlaying(bad)
+    assert.ok(v === null || (v.playing.length === 0 && v.recent.length === 0), bad)
+  }
+})
+
+test("playing: collections are capped", () => {
+  const many = Array.from({ length: 50 }, (_, i) => ({ ref: String(i + 1), name: `g${i}` }))
+  const p = M.parsePlaying(JSON.stringify({ playing: many, recent: many }))
+  assert.equal(p.playing.length, M.MAX_PLAYING)
+  assert.equal(p.recent.length, M.MAX_RECENT)
+  assert.equal(p.recent[0].ref, String(M.MAX_PLAYING + 1))
+})
+
+test("ago and follow retry", () => {
+  const now = Date.parse("2026-11-21T20:00:00Z")
+  eq(M.agoParts(now - 30e3, now), { kind: "now", n: 0 })
+  eq(M.agoParts(now - 5 * 60e3, now), { kind: "m", n: 5 })
+  eq(M.agoParts(now - 3 * 3600e3, now), { kind: "h", n: 3 })
+  eq(M.agoParts(now - 50 * 3600e3, now), { kind: "d", n: 2 })
+  eq(M.agoParts(0, now), { kind: "now", n: 0 })
+  eq([1, 2, 3, 4, 9].map((d) => M.followRetry("down", d)), [5000, 15000, 30000, 60000, 60000])
+  assert.equal(M.followRetry("unavailable", 1), 60000)
+})
+
 console.log(`ok - ${n} model tests`)

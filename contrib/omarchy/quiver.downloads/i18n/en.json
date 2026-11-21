@@ -1,5 +1,4 @@
 {
-  "title": "Downloads",
   "state.downloading": "Downloading",
   "state.verifying": "Verifying",
   "state.queued": "Queued",
@@ -30,7 +29,7 @@
     "other": "%1 retries"
   },
   "stalled.detail": "No data for a while; quiverd keeps retrying",
-  "section.active": "Now",
+  "section.active": "Downloading",
   "section.next": "Up next",
   "section.more": {
     "one": "and %1 more",
@@ -50,11 +49,37 @@
   "action.confirmRemove": "Click again to remove",
   "action.open": "Open Quiver",
   "action.working": "Working…",
-  "hint.keys": "Enter pause/resume · x remove · p all · o open Quiver",
+  "hint.keys": "Enter play/pause · 1-6 play a recent game · s Sight · x remove · p all · o open Quiver",
   "down.detail": "The widget looks again as soon as quiverd is back; it never starts it.",
   "unavailable.detail": "This quiver can't answer the widget (quiver queue --json --no-start). Update Quiver.",
   "error.action": "quiver %1 failed: %2",
   "notify.finished": "Download finished",
   "notify.failed": "Download failed",
-  "tooltip.idle": "Quiver: nothing downloading"
+  "tooltip.idle": "Quiver: nothing playing or downloading",
+  "section.playing": "Now playing",
+  "section.recent": "Recent games",
+  "meta.playing": "Playing %1",
+  "running.hm": "%1 h %2 min",
+  "running.m": "%1 min",
+  "running.lt1m": "Just started",
+  "profile": "Profile %1",
+  "stream.streaming": "Streaming to %1 (%2)",
+  "stream.starting": "Starting a stream to %1 (%2)",
+  "stream.kept": "Kept for a resume from %1 (%2)",
+  "ago.now": "Just now",
+  "ago.m": "%1 min ago",
+  "ago.h": "%1 h ago",
+  "ago.yesterday": "Yesterday",
+  "ago.d": {
+    "one": "%1 day ago",
+    "other": "%1 days ago"
+  },
+  "action.sight": "Sight",
+  "action.sightTip": "Quiver's panel over the game (Shift+F2 in game)",
+  "action.openGame": "Open in Quiver",
+  "action.stop": "Stop",
+  "action.confirmStop": "Stop the game?",
+  "action.playKey": "Enter to play",
+  "tooltip.playing": "Now playing: %1",
+  "notify.actionFailed": "Quiver couldn't do that"
 }

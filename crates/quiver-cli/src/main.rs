@@ -408,8 +408,8 @@ enum Cmd {
         #[command(subcommand)]
         action: epic::EpicAction,
     },
-    /// The Omarchy bar widget for the download queue (`quiver.downloads`): install-plugin,
-    /// uninstall-plugin, status. Never run by the installer; only when you ask.
+    /// The Omarchy bar widget (`quiver.downloads`: now playing, recent games, the download
+    /// queue): install-plugin, uninstall-plugin, status. Never run by the installer; only when you ask.
     Omarchy {
         #[command(subcommand)]
         action: omarchy::OmarchyAction,

@@ -9,12 +9,15 @@ import QtQuick.Shapes
 // small corner badge, so they read without colour too:
 //   pause  paused          bang   failed          check  verifying
 //   (stalled: the ring is dashed; waiting: the whole mark dims via the bar button)
+// `plain` draws the mark itself, its ring whole: Quiver in the bar with no queue (and the
+// panel's hero then).
 Item {
   id: root
 
   property real fraction: 0
   property color color: "white"
   property bool broken: false
+  property bool plain: false
   // "", "pause", "bang" or "check".
   property string badge: ""
   // 0..1: how strongly the unfilled part of the ring shows.
@@ -25,7 +28,8 @@ Item {
   // The ring runs clockwise from straight down (90°) round to the gap's edge (16°): 286°.
   readonly property real arcStart: 90
   readonly property real arcSweep: 286
-  readonly property real done: Math.max(0, Math.min(1, fraction))
+  readonly property real done: root.plain ? 1 : Math.max(0, Math.min(1, fraction))
+  readonly property bool dashed: root.broken && !root.plain
 
   width: 16
   height: 16
@@ -50,7 +54,7 @@ Item {
       strokeWidth: 14 * root.u
       fillColor: "transparent"
       capStyle: ShapePath.RoundCap
-      strokeStyle: root.broken ? ShapePath.DashLine : ShapePath.SolidLine
+      strokeStyle: root.dashed ? ShapePath.DashLine : ShapePath.SolidLine
       dashPattern: [0.9, 0.9]
       PathAngleArc {
         centerX: 50 * root.u; centerY: 52 * root.u
@@ -60,7 +64,7 @@ Item {
     }
     // Progress along it.
     ShapePath {
-      strokeColor: root.broken ? "transparent" : root.color
+      strokeColor: root.dashed ? "transparent" : root.color
       strokeWidth: 14 * root.u
       fillColor: "transparent"
       capStyle: ShapePath.RoundCap

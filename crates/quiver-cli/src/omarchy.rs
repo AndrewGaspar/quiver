@@ -1,5 +1,5 @@
-//! `quiver omarchy …`: Quiver's Omarchy shell plugin, `quiver.downloads` (the download
-//! queue in the Omarchy bar; source in contrib/omarchy/quiver.downloads).
+//! `quiver omarchy …`: Quiver's Omarchy shell plugin, `quiver.downloads` (Quiver in the
+//! Omarchy bar: now playing, recent games, the download queue; source in contrib/omarchy/quiver.downloads).
 //!
 //! The install (tools/install-user.sh, packaging/layout.sh) puts the plugin at
 //! `<libdir>/omarchy/quiver.downloads`. Omarchy's shell only finds plugins at the top level
