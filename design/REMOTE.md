@@ -175,6 +175,10 @@ The play-time and achievement reporters run where the game runs.
 
 ## 8. Testing on one machine
 
+The person's call (2026-11-21): test purely on this laptop for now. Network conditions come from
+`quiver-netlab`: two rootless network namespaces joined by a veth, shaped with the kernel's
+netem and tbf. No root is needed, and the real network is never touched.
+
 This laptop is both ends: a scratch quiverd (with `QUIVER_SHM_ROOT`, a scratch data dir and a
 non-default port) acts as the server, and the client runs on the desktop. Tests use
 headless gamescope (never X displays :0–:9), the test-pattern target, and the net simulator
@@ -184,8 +188,6 @@ the person's games, and the lab limits apply to streams of lab instances too.
 
 ## 9. Not decided (the person's call)
 
-- Whether the first server is this laptop (for development) or a real box. The GPU vendor
-  decides how soon VAAPI matters.
 - Whether Moonlight compatibility (phase 4) is worth doing early, so a TV or phone can connect
   before a Quiver client exists for them.
 - Reachability: are the LAN and Tailscale enough, or is NAT traversal or a relay wanted?
