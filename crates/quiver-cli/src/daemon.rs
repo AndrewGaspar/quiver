@@ -135,6 +135,14 @@ fn print_status(s: &DaemonStatus) {
     if let Some(exe) = &s.exe {
         println!("binary: {exe}");
     }
+    match (&s.unit, s.in_unit) {
+        (Some(u), true) => println!("unit: {u}"),
+        (Some(u), false) => println!("runs outside quiverd.service (in {u})"),
+        (None, _) => {}
+    }
+    if let Some(r) = &s.relocation {
+        println!("  {r}");
+    }
     let busy = if s.waiting_on.is_empty() { "idle".to_owned() } else { format!("busy: {}", s.waiting_on.join(", ")) };
     match (&s.update, s.auto_restart) {
         _ if s.restarting => println!("restarting onto the new build now"),

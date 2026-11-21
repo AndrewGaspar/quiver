@@ -1310,7 +1310,10 @@ mod tests {
         assert!(matches!(c.cmd, Cmd::Remote { action: RemoteAction::Wake { ref peer } } if peer == "office"));
         let c = parse(&["library", "--machine", "tower"]).unwrap();
         assert_eq!(c.machine.as_deref(), Some("tower"));
-        assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_) } }));
+        assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_), at_boot: false } }));
+        assert!(matches!(parse(&["remote", "enable", "--at-boot"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: None, at_boot: true } }));
+        assert!(matches!(parse(&["remote", "boot", "off"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Boot { ref state, json: false } } if state == "off"));
+        assert!(parse(&["remote", "boot", "maybe"]).is_err());
         assert!(matches!(parse(&["remote", "rename", "Tower"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Rename { second: None, .. } }));
         use moonlight::MoonlightAction as M;
         assert!(matches!(

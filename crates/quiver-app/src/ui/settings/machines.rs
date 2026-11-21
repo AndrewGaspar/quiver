@@ -3,7 +3,8 @@
 //! found on the LAN) and its code, and the paired machines: rename, revoke, wake, show.
 //!
 //! Every action is this machine's quiverd's (`Remote*` requests), so the CLI does the same:
-//! `quiver remote status|enable|disable|pair|add|peers|rename|revoke|wake|discover`.
+//! `quiver remote status|enable|disable|boot|pair|add|peers|rename|revoke|wake|discover`.
+//! "Start at boot" is `quiver remote boot on|off` (design/SERVICE.md).
 
 use gpui::{AnyElement, Context, Entity, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use quiver_api::Request;
@@ -22,6 +23,8 @@ use crate::{err_text, model::ago};
 pub enum MachineAction {
     /// Turn remote on or off on this machine.
     Remote,
+    /// Start this machine's quiverd at boot, or not.
+    Boot,
     /// Rename this machine (`None`) or a paired one (its id): opens the field.
     Rename(Option<String>),
     RenameSave,
@@ -89,6 +92,9 @@ impl Quiver {
             _ => v.push(MachineAction::Rename(None)),
         }
         v.push(MachineAction::Remote);
+        if self.here_status().is_some_and(|s| s.boot.as_ref().is_some_and(|b| b.installed)) {
+            v.push(MachineAction::Boot);
+        }
         if listening {
             v.push(if ms.code.is_some() { MachineAction::PairHereEnd } else { MachineAction::PairHere });
         }
@@ -138,6 +144,21 @@ impl Quiver {
                     Ok(_) => {
                         this.show_toast(if on { "Remote is off: nothing listens" } else { "Remote is on: paired machines can reach this one" }, cx);
                         this.mx.settings.code = None;
+                        this.machines_reload(cx);
+                    }
+                    Err(e) => this.show_error(&e, cx),
+                });
+            }
+            MachineAction::Boot => {
+                let on = self.here_status().and_then(|s| s.boot.as_ref()).is_some_and(|b| b.enabled);
+                self.local_call::<quiver_api::service::BootStatus, _>(Request::RemoteBoot { enabled: !on }, cx, move |this, r, cx| match r {
+                    Ok(b) => {
+                        let msg = match (&b.linger_command, on) {
+                            (_, true) => "quiverd no longer starts at boot".to_owned(),
+                            (Some(cmd), false) => format!("quiverd starts when you sign in. To start it at boot, run: {cmd}"),
+                            (None, false) => "quiverd starts at boot, before anyone signs in".to_owned(),
+                        };
+                        this.show_toast(msg, cx);
                         this.machines_reload(cx);
                     }
                     Err(e) => this.show_error(&e, cx),
@@ -355,6 +376,45 @@ impl Quiver {
                 this.machine_action(MachineAction::Remote, cx);
                 cx.notify();
             }));
+        let boot_row = s.boot.clone().filter(|b| b.installed).map(|b| {
+            let focused = self.action_focused(actions, &SettingsAction::Machine(MachineAction::Boot));
+            let ix = actions.iter().position(|a| *a == SettingsAction::Machine(MachineAction::Boot)).unwrap_or(usize::MAX);
+            let words = match (b.enabled, b.linger, &b.linger_command) {
+                (true, true, _) => "quiverd starts with the machine, before anyone signs in, so other machines can reach it after a reboot.".to_owned(),
+                (true, false, Some(cmd)) => format!("quiverd starts when you sign in. To start it before anyone signs in, run {cmd}"),
+                (true, false, None) => "quiverd starts when you sign in (lingering is off, so not before).".to_owned(),
+                (false, _, _) => "quiverd starts when Quiver first needs it. Turn this on for a machine other machines stream from.".to_owned(),
+            };
+            div()
+                .id("mx-boot")
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(12.))
+                .px(px(16.))
+                .py(px(12.))
+                .border_t_1()
+                .border_color(th.line1)
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(6.))
+                        .py(px(4.))
+                        .rounded(px(8.))
+                        .focus_ring(focused, th, 8.)
+                        .child(crate::ui::game::toggle(th, b.enabled))
+                        .child(div().font_weight(MEDIUM).child("Start at boot")),
+                )
+                .child(div().flex_1().min_w(px(200.)).text_size(px(12.)).text_color(th.tx3).child(words))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.nav.focus(&this.layout, crate::nav::Target::Body(ix));
+                    this.machine_action(MachineAction::Boot, cx);
+                    cx.notify();
+                }))
+        });
         let name_line = if let Some(input) = rename_input {
             div()
                 .flex()
@@ -447,6 +507,7 @@ impl Quiver {
                     ),
             )
             .child(toggle_row)
+            .children(boot_row)
             .children(pairing)
             .into_any_element()
     }

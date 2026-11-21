@@ -5,6 +5,7 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use quiver_api::remote::{Discovered, PairCode, PeerInfo, PeerState, RemoteStatus, Role};
+use quiver_api::service::BootStatus;
 use quiver_api::{Client, Event, Request};
 
 use crate::print_json;
@@ -22,6 +23,18 @@ pub enum RemoteAction {
         /// Tailscale/WireGuard address; don't port-forward it).
         #[arg(long)]
         listen: Option<String>,
+        /// Also start quiverd at boot, before anyone signs in (a headless server): enables
+        /// quiverd.service and turns lingering on (`quiver remote boot off` undoes it).
+        #[arg(long)]
+        at_boot: bool,
+    },
+    /// Start quiverd at boot (`on`: enable quiverd.service and turn lingering on) or not
+    /// (`off`: disable the unit; lingering is left as it is).
+    Boot {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Turn the listener off; remote connections drop.
     Disable,
@@ -95,6 +108,20 @@ fn print_peers(peers: &[PeerInfo]) {
     }
 }
 
+/// "starts at boot: …", and what the person has to do.
+fn print_boot(b: &BootStatus) {
+    println!("starts at boot: {}", b.describe());
+    if let Some(cmd) = &b.linger_command {
+        println!("  lingering needs root here; to start quiverd before anyone signs in, run:");
+        println!("    {cmd}");
+    } else if b.enabled && !b.linger {
+        println!("  lingering is off: quiverd starts when you sign in, not at boot");
+    }
+    if let Some(n) = &b.note {
+        println!("  {n}");
+    }
+}
+
 fn spaced(code: &str) -> String {
     if code.len() == 6 { format!("{} {}", &code[..3], &code[3..]) } else { code.to_owned() }
 }
@@ -116,13 +143,28 @@ pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
             if let Some(p) = &s.pairing {
                 println!("pairing: open until {} ({} tries left)", p.expires_at.with_timezone(&chrono::Local).format("%H:%M:%S"), p.tries_left);
             }
+            match &s.boot {
+                Some(b) => println!("starts at boot: {}", b.describe()),
+                None => println!("starts at boot: unknown (no systemd user manager, or quiverd from before it)"),
+            }
             println!();
             print_peers(&s.peers);
         }
-        RemoteAction::Enable { listen } => {
+        RemoteAction::Enable { listen, at_boot } => {
             let s: RemoteStatus = client.call(Request::RemoteEnable { listen }).await?;
             println!("remote: on, listening on {}", s.listening.as_deref().unwrap_or(&s.listen));
+            if at_boot {
+                let b: BootStatus = client.call(Request::RemoteBoot { enabled: true }).await?;
+                print_boot(&b);
+            }
             println!("pair another machine with `quiver remote pair` here");
+        }
+        RemoteAction::Boot { state, json } => {
+            let b: BootStatus = client.call(Request::RemoteBoot { enabled: state == "on" }).await?;
+            if json {
+                return print_json(&b);
+            }
+            print_boot(&b);
         }
         RemoteAction::Disable => {
             let () = client.call(Request::RemoteDisable).await?;
