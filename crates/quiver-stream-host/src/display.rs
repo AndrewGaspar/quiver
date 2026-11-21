@@ -163,6 +163,9 @@ impl Display {
         // Headless: nothing of the desktop's. (gamescope would connect to the person's
         // compositor when it finds WAYLAND_DISPLAY, and fails without one in its runtime dir.)
         cmd.env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
+        // Nor an inherited QUIVER_SIGHT, which would load the Sight layer into gamescope itself;
+        // a program that wants Sight gets it from the spec's own environment.
+        cmd.env_remove("QUIVER_SIGHT");
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }

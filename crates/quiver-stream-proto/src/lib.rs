@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod capture;
 pub mod input;
 pub mod media;
 pub mod serve;

@@ -146,27 +146,39 @@ impl Host {
         let mut pad_mode = PadMode::Off("the test pattern has no program to give pads to".into());
         let mut x = None;
         let mut launch = None;
+        let mut layer_capture = false;
         let source: Box<dyn Source> = match &opts.target {
             Target::TestPattern { motion } => {
                 parts._tone = Some(crate::tone::start(cfg.audio_channels, cfg.audio_frame_ms, opts.constant_bitrate_audio, atx.clone(), stop.clone(), cfg.refresh_mhz)?);
                 Box::new(PatternSource::new(cfg.width, cfg.height, cfg.refresh_mhz, cfg.color.clone(), *motion))
             }
             Target::Command { argv, env } => {
-                let (display, audio, mode) = start_display(&opts, &cfg, argv.clone(), env.clone(), true, atx.clone())?;
+                // The Sight layer's capture, falling back to PipeWire (layer_capture.rs): its
+                // socket goes to the program through gamescope's environment.
+                let layer = if crate::layer_capture::wanted(env) { Some(layer_server(&opts)?) } else { None };
+                let mut env = env.clone();
+                env.extend(layer.as_ref().map(|l| l.env()));
+                let (display, audio, mode) = start_display(&opts, &cfg, argv.clone(), env, true, atx.clone())?;
                 pad_mode = mode;
                 x = Some((display.x_display.clone(), display.pid()));
-                let capture = open_capture(&cuda, &display)?;
+                layer_capture = layer.is_some();
+                let capture = open_capture(&cuda, &display, layer, &cfg.color)?;
                 parts.display = Some(display);
                 parts._audio = Some(audio);
                 capture
             }
             Target::Display => {
+                // The layer's socket goes only to the program started into the display
+                // (`launch`), never into gamescope's own environment.
+                let layer = layer_server(&opts)?;
                 let placeholder = vec![sandbox_exe(&opts)?.display().to_string(), "--placeholder".into()];
                 let (display, audio, mode) = start_display(&opts, &cfg, placeholder, Vec::new(), false, atx.clone())?;
                 pad_mode = mode.clone();
                 let mut env = audio.child_env();
                 env.push(("DISPLAY".into(), display.x_display.clone()));
                 env.push(("GAMESCOPE_WAYLAND_DISPLAY".into(), display.wayland_display.clone()));
+                env.push(layer.env());
+                layer_capture = true;
                 if cfg.color.hdr.is_some() {
                     env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));
                     env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
@@ -177,7 +189,7 @@ impl Host {
                 };
                 launch = Some(LaunchEnv { env, unset: vec!["WAYLAND_DISPLAY".into()], wrapper });
                 x = Some((display.x_display.clone(), display.pid()));
-                let capture = open_capture(&cuda, &display)?;
+                let capture = open_capture(&cuda, &display, Some(layer), &cfg.color)?;
                 parts.display = Some(display);
                 parts._audio = Some(audio);
                 capture
@@ -185,8 +197,8 @@ impl Host {
         };
         let mut cfg_v = cfg.clone();
         if !matches!(opts.target, Target::TestPattern { .. }) {
-            // gamescope's screencast is 8-bit SDR.
-            if cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8 {
+            // gamescope's screencast is 8-bit SDR; the layer's capture sets its own colour.
+            if !layer_capture && (cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8) {
                 let _ = ctx.try_send(Control::Notice { text: "HDR and 10-bit aren't available from gamescope's screencast yet: streaming 8-bit SDR".into() });
             }
             cfg_v.color.bit_depth = 8;
@@ -328,11 +340,20 @@ fn start_display(opts: &HostOptions, cfg: &StreamConfig, argv: Vec<String>, mut 
     Ok((display, audio, pad_mode))
 }
 
+/// The layer capture's socket, in the stream's folder.
+fn layer_server(opts: &HostOptions) -> Result<crate::layer_capture::LayerServer> {
+    std::fs::create_dir_all(&opts.dir).with_context(|| format!("create {}", opts.dir.display()))?;
+    crate::layer_capture::LayerServer::bind(&opts.dir)
+}
+
 /// Capture of the virtual display: the one place the host picks how frames reach the
-/// encoder (today gamescope's PipeWire screencast).
-fn open_capture(cuda: &Arc<Cuda>, display: &Display) -> Result<Box<dyn Source>> {
-    let capture = PwCapture::start(cuda.clone(), display.node_id, Want::Bgrx, Duration::from_secs(15))?;
-    Ok(Box::new(capture))
+/// encoder. The Sight layer's when the program has it (`layer`), gamescope's PipeWire
+/// screencast until its frames come and otherwise.
+fn open_capture(cuda: &Arc<Cuda>, display: &Display, layer: Option<crate::layer_capture::LayerServer>, color: &ColorInfo) -> Result<Box<dyn Source>> {
+    Ok(match layer {
+        Some(l) => Box::new(crate::layer_capture::LayerCapture::start(cuda.clone(), l, display.node_id, color, Duration::from_secs(15))?),
+        None => Box::new(PwCapture::start(cuda.clone(), display.node_id, Want::Bgrx, Duration::from_secs(15))?),
+    })
 }
 
 impl Drop for Host {

@@ -56,7 +56,9 @@ pub unsafe extern "system" fn queue_present_khr(queue: vk::Queue, info: *const v
     };
     let next = dev.swapchain_fn.queue_present_khr;
     let tel = telemetry::get();
-    if tel.is_none() || info.is_null() {
+    // A stream's host is connected (stream.rs): one relaxed load when none is.
+    let streaming = crate::stream::live();
+    if (tel.is_none() && !streaming) || info.is_null() {
         // SAFETY: the app's arguments, passed down unchanged.
         return unsafe { next(queue, info) };
     }
@@ -64,6 +66,11 @@ pub unsafe extern "system" fn queue_present_khr(queue: vk::Queue, info: *const v
     let pi = unsafe { &*info };
     let mut plan = Plan::new();
     guard("present", || unsafe { prepare(&dev, queue, pi, entry, &mut plan) });
+    if streaming {
+        let (presented, t0) = (quiver_stream_proto::now_micros(), mono_raw_ns());
+        guard("stream capture", || unsafe { stream_capture(&dev, queue, pi, presented, &mut plan) });
+        crate::stream::CPU.add((mono_raw_ns() - t0).max(0) as u64);
+    }
 
     let mut patched;
     let to_driver = if plan.semaphore[0] != vk::Semaphore::null() {
@@ -198,6 +205,44 @@ unsafe fn prepare(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_
         set(hud_off, LAYER_HUD_OFF);
         if drawing {
             t.drawn.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The stream capture of the target swapchain's image (stream.rs), after the compositor's
+/// work so the HUD and the panel are in it: its submit waits on what the present would have,
+/// and the present then waits on its semaphore alone.
+unsafe fn stream_capture(dev: &DeviceData, queue: vk::Queue, pi: &vk::PresentInfoKHR<'_>, presented: u64, plan: &mut Plan) {
+    let Some(i) = plan.target else { return };
+    let Some(sc) = plan.swapchains[i].clone() else { return };
+    let Some(family) = dev.queue_family(queue) else { return };
+    if dev.lost.load(Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: the app's arrays (checked non-null in prepare, which set the target).
+    let index = unsafe { *pi.p_image_indices.add(i) };
+    let ours = plan.semaphore;
+    let waits = if ours[0] != vk::Semaphore::null() {
+        &ours[..]
+    } else if pi.p_wait_semaphores.is_null() {
+        &[][..]
+    } else {
+        // SAFETY: the app's wait semaphores, wait_semaphore_count of them.
+        unsafe { std::slice::from_raw_parts(pi.p_wait_semaphores, pi.wait_semaphore_count as usize) }
+    };
+    let mut s = lock(&sc);
+    let id = s.id;
+    let Some(c) = s.stream.as_mut().filter(|c| !c.failed) else { return };
+    // SAFETY: inside the app's present on `queue`.
+    match unsafe { c.frame(dev, queue, family, index, waits, plan.present_ids[i], presented) } {
+        Ok(Some(sem)) => plan.semaphore[0] = sem,
+        Ok(None) => {}
+        Err(e) => {
+            log!("stream capture off on swapchain {id}: {e:?}");
+            c.failed = true;
+            if e == vk::Result::ERROR_DEVICE_LOST {
+                dev.lost.store(true, Ordering::Relaxed);
+            }
         }
     }
 }

@@ -75,12 +75,18 @@ pub struct CaptureTimes {
 pub struct PwCapture {
     staging: Arc<Staging>,
     rx: std_mpsc::Receiver<Ready>,
-    quit: pw::channel::Sender<()>,
+    cmds: pw::channel::Sender<PwCmd>,
     thread: Option<std::thread::JoinHandle<Result<()>>>,
     current: Option<(u32, u32, InputFormat)>,
     held: Option<Ready>,
     pub times: Arc<Mutex<CaptureTimes>>,
     failed: Arc<Mutex<Option<String>>>,
+}
+
+/// What the PipeWire thread is told.
+enum PwCmd {
+    Quit,
+    Active(bool),
 }
 
 /// What to ask gamescope for.
@@ -97,7 +103,7 @@ impl PwCapture {
             slots: (0..SLOTS).map(|_| Mutex::new(Slot { buf: None, generation: 0, width: 0, height: 0, format: InputFormat::Nv12 })).collect(),
         });
         let (tx, rx) = std_mpsc::channel();
-        let (quit_tx, quit_rx) = pw::channel::channel::<()>();
+        let (quit_tx, quit_rx) = pw::channel::channel::<PwCmd>();
         let times = Arc::new(Mutex::new(CaptureTimes::default()));
         let failed = Arc::new(Mutex::new(None));
         let (st, fl) = (staging.clone(), failed.clone());
@@ -108,7 +114,7 @@ impl PwCapture {
             }
             r
         })?;
-        let mut c = PwCapture { staging, rx, quit: quit_tx, thread: Some(thread), current: None, held: None, times, failed };
+        let mut c = PwCapture { staging, rx, cmds: quit_tx, thread: Some(thread), current: None, held: None, times, failed };
         match c.rx.recv_timeout(timeout) {
             Ok(r) => {
                 c.current = Some((r.width, r.height, r.format));
@@ -123,8 +129,18 @@ impl PwCapture {
         }
     }
 
+    /// Pause (or resume) the stream without leaving it: gamescope sends nothing while it's
+    /// paused. Leaving and joining again instead is what headless gamescope 3.16 sometimes
+    /// doesn't survive (it crashed in the NVIDIA driver about half a second after a consumer
+    /// disconnected mid-stream). Frames from before a pause are dropped.
+    pub fn set_active(&mut self, active: bool) {
+        let _ = self.cmds.send(PwCmd::Active(active));
+        self.held = None;
+        while self.rx.try_recv().is_ok() {}
+    }
+
     pub fn stop(&mut self) {
-        let _ = self.quit.send(());
+        let _ = self.cmds.send(PwCmd::Quit);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -262,16 +278,14 @@ struct PwState {
     pinned: Vec<(usize, usize)>,
 }
 
-fn pw_thread(cuda: Arc<Cuda>, node: u32, want: Want, staging: Arc<Staging>, tx: std_mpsc::Sender<Ready>, quit: pw::channel::Receiver<()>) -> Result<()> {
+fn pw_thread(cuda: Arc<Cuda>, node: u32, want: Want, staging: Arc<Staging>, tx: std_mpsc::Sender<Ready>, cmds: pw::channel::Receiver<PwCmd>) -> Result<()> {
     let _ctx = cuda.push()?;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("PipeWire main loop")?;
     let context = pw::context::ContextRc::new(&mainloop, None).context("PipeWire context")?;
     let core = context.connect_rc(None).context("connect to PipeWire")?;
-    let ml = mainloop.clone();
-    let _quit = quit.attach(mainloop.loop_(), move |_| ml.quit());
-    let stream = pw::stream::StreamBox::new(
-        &core,
+    let stream = pw::stream::StreamRc::new(
+        core.clone(),
         "quiver-stream-capture",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Video",
@@ -350,6 +364,15 @@ fn pw_thread(cuda: Arc<Cuda>, node: u32, want: Want, staging: Arc<Staging>, tx: 
             }
         })
         .register()?;
+    let (ml, st) = (mainloop.clone(), stream.downgrade());
+    let _cmds = cmds.attach(mainloop.loop_(), move |c| match c {
+        PwCmd::Quit => ml.quit(),
+        PwCmd::Active(on) => {
+            if let Some(s) = st.upgrade() {
+                let _ = s.set_active(on);
+            }
+        }
+    });
     let fmt = format_pod(want)?;
     let mut params = [Pod::from_bytes(&fmt).context("format pod")?];
     stream.connect(spa::utils::Direction::Input, Some(node), pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS, &mut params).context("connect the capture stream")?;

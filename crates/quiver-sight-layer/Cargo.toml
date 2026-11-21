@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # No loader: the layer gets every function pointer from the next layer in the chain.
 ash = { version = "0.38", default-features = false, features = ["std", "debug"] }
 quiver-perf = { path = "../quiver-perf", default-features = false, features = ["std"] }
+quiver-stream-proto.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

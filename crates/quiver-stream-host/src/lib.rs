@@ -14,7 +14,7 @@
 //! | NVENC, CUDA | [`nvenc`], [`cuda`], [`recovery`] |
 //! | the encode thread | [`video`] |
 //! | headless gamescope | [`display`] |
-//! | PipeWire capture | [`capture`] |
+//! | PipeWire capture; capture in the Sight layer | [`capture`], [`layer_capture`] |
 //! | the stream's sink, Opus | [`audio`], [`opus`], [`ogg`] |
 //! | keyboard, mouse, cursor; pads | [`input`] |
 //! | who is seated; the pad namespace and rule | [`seat`], [`sandbox`] |
@@ -44,21 +44,46 @@
 //! | 1280×720 @ 60 | 28.9 ms | 0.37 ms | 0.52 ms |
 //! | 2560×1440 @ 120 | 13.1 ms | 1.11 ms | 1.47 ms |
 //!
-//! ## Capturing in the Sight layer instead
+//! ## Capturing in the Sight layer
 //!
-//! Not built; evaluated. gamescope's screencast costs about 1.6 refreshes between the program
-//! presenting and the frame reaching capture (its composite, then the PipeWire buffer on a
-//! later paint), plus a GPU-to-system-memory copy in gamescope and the upload here. The Sight
-//! layer (`crates/quiver-sight-layer`) already copies the presented swapchain image in the
-//! game's own `vkQueuePresentKHR` (LAB.md §13's captures). Copying instead into memory exported
-//! as an opaque fd (one `vkCmdCopyImage` in the present's submit, about 0.1 ms at 1440p),
-//! signalling an exported semaphore, and handing both to the host once, lets CUDA import it
-//! (`cuImportExternalMemory`) with no system-memory round trip, at present time rather than
-//! gamescope's next paint. That would cut the capture stage from ~13 ms + 1.1 ms to well under
-//! a millisecond at 120 Hz, and it sees the game's HDR10 or scRGB swapchain (gamescope's
-//! screencast is 8-bit SDR only). Its costs: Vulkan games only (DXVK and vkd3d-proton games
-//! are; OpenGL ones aren't), no gamescope overlays in the picture (the cursor is sent
-//! separately anyway), and the layer must be in every streamed game. Worth building next.
+//! gamescope's screencast costs one to two refreshes between the program presenting and the
+//! frame reaching capture (its composite, then the PipeWire buffer on a later paint), plus a
+//! GPU-to-system-memory copy in gamescope and the upload here, and it is 8-bit SDR. So a
+//! command target captures in the game instead when the Sight layer is in it
+//! ([`layer_capture`]; the layer's side is `quiver-sight-layer`'s `stream` module): at the
+//! game's `vkQueuePresentKHR` one compute pass converts the presented image straight to the
+//! encoder's input (NV12 or P010, YUV444 when asked) in GPU memory shared with CUDA, and the
+//! host waits on the slot's timeline value and copies it into the encoder's input. HDR10 and
+//! scRGB games stream as HDR10 (P010, PQ, BT.2020, with the game's `vkSetHdrMetadataEXT`
+//! metadata). Programs without the layer, and the time before the layer's first frame, use the
+//! screencast. The costs: Vulkan games only (DXVK and vkd3d-proton games are; OpenGL ones
+//! aren't), no gamescope overlays in the picture (the cursor is sent separately anyway), and
+//! the layer must be in the streamed game.
+//!
+//! Measured with a Vulkan program in headless gamescope (`tests/live_layer.rs`: `MAILBOX` at
+//! the display's rate, stamping the moment it drew each frame; HEVC, preset P1), against the
+//! same program over PipeWire, p50 / p99, with another GPU workload on the machine:
+//!
+//! | | program draws → capture | capture → encode start | encode | program draws → encoded |
+//! |---|---|---|---|---|
+//! | 1440p120 SDR, PipeWire | 4.6 / 97 ms | 1.14 / 4.0 ms | 1.47 ms | 8.0 / 103 ms |
+//! | 1440p120 SDR, layer | 0.18 / 0.28 ms | 0.28 / 2.4 ms | 1.47 ms | 2.0 / 5.0 ms |
+//! | 1440p120 HDR, PipeWire (SDR) | 6.3 / 60 ms | 1.23 / 2.5 ms | 1.49 ms | 9.1 / 64 ms |
+//! | 1440p120 HDR, layer (HDR10) | 0.25 / 0.55 ms | 0.33 / 1.9 ms | 1.66 ms | 2.3 / 4.5 ms |
+//! | 2160p60 SDR, PipeWire | 25.8 / 30 ms | 2.65 / 3.8 ms | 3.44 ms | 32.1 / 38.7 ms |
+//! | 2160p60 SDR, layer | 0.35 / 0.44 ms | 0.46 / 2.6 ms | 3.37 ms | 4.2 / 7.0 ms |
+//! | 2160p60 HDR, PipeWire (SDR) | 15.1 / 22 ms | 2.90 / 6.7 ms | 3.43 ms | 21.9 / 32.4 ms |
+//! | 2160p60 HDR, layer (HDR10) | 0.27 / 0.44 ms | 0.60 / 2.7 ms | 3.33 ms | 4.3 / 7.3 ms |
+//!
+//! "Capture" is the game's present for the layer (so its "capture → encode start" includes the
+//! game's own GPU work, the conversion and the wait here) and the dequeue for PipeWire. Its
+//! p95 of about 2 ms is that GPU work finishing late, not the conversion (below) or CUDA's
+//! wait (queueing the wait later changed nothing): most likely time-slicing against the other
+//! GPU workload that was running (about 2 ms is NVIDIA's timeslice). The layer
+//! itself adds, per captured present, 35–45 µs of CPU (p50; the first present of a ring makes
+//! it, a few ms once) and 55 µs (1440p NV12), 65 µs (1440p P010), 110 µs (2160p NV12) or
+//! 145 µs (2160p P010) of GPU. With no stream it adds nothing measurable: one relaxed load per
+//! present.
 
 pub mod audio;
 pub mod capture;
@@ -66,6 +91,7 @@ pub mod cuda;
 pub mod display;
 pub mod host;
 pub mod input;
+pub mod layer_capture;
 pub mod nvenc;
 pub mod ogg;
 pub mod opus;

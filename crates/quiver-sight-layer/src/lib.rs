@@ -22,6 +22,10 @@
 //! - **watches Reflex** (`VK_NV_low_latency2`, [`latency`]): the sleep mode and frame cap the
 //!   app sets, its latency markers and sleeps, so the status block carries the Reflex mode,
 //!   PC latency and the frame-generation multiplier the layer can see;
+//! - **captures for remote play** ([`stream`], design/REMOTE.md §2.1) while a stream names its
+//!   socket (`QUIVER_STREAM_CAPTURE_SOCKET`, only `quiver-stream-host` sets it): the presented
+//!   image, HUD and panel included, converted at present time to the encoder's YUV in GPU
+//!   memory the stream host imports into CUDA; without the variable nothing of it runs;
 //! - **reads the HUD's keys** (Shift+F3, Ctrl+Shift+F3) by polling X11's keymap on its own
 //!   connection ([`keys`]) and, for Wayland-native windows, from a `wl_keyboard` of its own
 //!   on the game's `wl_display` ([`wayland`]), and counts presses in the status block for
@@ -48,7 +52,9 @@
 //! first one disables drawing for the process; telemetry and pass-through stay); every
 //! failure disables drawing and is reported in the status block's `draw_error`; the present
 //! path doesn't allocate, block, sleep or make syscalls beyond the Vulkan calls it needs, and
-//! its work is bounded; everything read from shared memory is validated (quiver-perf).
+//! its work is bounded (a stream's capture adds an `fstat` and a non-blocking `sendmsg` per
+//! captured present, and makes its ring once); everything read from shared memory is
+//! validated (quiver-perf).
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -67,6 +73,7 @@ mod pipelines;
 pub mod panel;
 mod present;
 mod state;
+pub mod stream;
 mod telemetry;
 pub mod wayland;
 

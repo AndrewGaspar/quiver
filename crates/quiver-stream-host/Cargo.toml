@@ -27,4 +27,7 @@ pipewire = "0.10"
 x11rb = { version = "0.13", features = ["xtest", "xfixes", "xinput", "allow-unsafe-code"] }
 
 [dev-dependencies]
+# tests/live_layer.rs: the layer library from this build, and a Vulkan program to capture.
+quiver-sight-layer = { path = "../quiver-sight-layer" }
+ash = { version = "0.38", features = ["loaded"] }
 tempfile.workspace = true
