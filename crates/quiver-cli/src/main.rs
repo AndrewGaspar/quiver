@@ -14,6 +14,7 @@ mod exports;
 mod mods;
 mod omarchy;
 mod perf;
+mod playing;
 mod profiles;
 mod moonlight;
 mod remote;
@@ -252,6 +253,23 @@ enum Cmd {
     Sessions {
         #[arg(long)]
         json: bool,
+    },
+    /// What is being played right now (and the stream it goes out on) and the recently
+    /// played games. `--follow` prints a new snapshot whenever it changes (from quiverd's
+    /// events, no polling): for status bars, such as contrib/omarchy's widget.
+    Playing {
+        #[arg(long)]
+        json: bool,
+        /// Keep running and print a snapshot (one JSON line) each time it changes.
+        #[arg(long)]
+        follow: bool,
+        /// How many recently played games to list (at most 20).
+        #[arg(long, default_value_t = 6)]
+        recent: usize,
+        /// Don't start quiverd when it isn't running: fail with "quiverd is not running"
+        /// instead (status bars).
+        #[arg(long)]
+        no_start: bool,
     },
     /// Print daemon events as they happen.
     Watch,
@@ -810,7 +828,7 @@ async fn main() -> Result<()> {
     // A status bar polling the queue must not bring back a quiverd someone stopped.
     let client = if let Some(m) = &cli.machine {
         Client::machine_named(m, &cli.source).await?
-    } else if matches!(cli.cmd, Cmd::Queue { no_start: true, .. }) {
+    } else if matches!(cli.cmd, Cmd::Queue { no_start: true, .. } | Cmd::Playing { no_start: true, .. }) {
         Client::connect_running(&cli.source).await?
     } else {
         Client::connect(&cli.source).await?
@@ -1252,6 +1270,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Playing { json, follow, recent, .. } => playing::run(&client, json || follow, follow, recent).await?,
         Cmd::Watch => {
             let mut events = client.subscribe().await?;
             while let Some(e) = events.recv().await {

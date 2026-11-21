@@ -99,6 +99,29 @@ pub async fn export_icon(icons: &Path, art_dir: &Path, art: &Art) -> Result<Opti
     Ok(Some(png))
 }
 
+/// The icon [`export_icon`] made for `art`, if it is on this machine already: no download,
+/// no conversion (status bars listing games, `quiver playing`). Same names as there.
+pub fn cached_icon(icons: &Path, art: &Art) -> Option<PathBuf> {
+    let stem = |f: &str| Path::new(f).file_stem().map(|s| s.to_string_lossy().into_owned());
+    let named = |name: String| Some(icons.join(name)).filter(|p| p.is_file());
+    match pick(art, ArtSlot::Icon) {
+        Some(ArtRef::Asset(file)) => {
+            check_name(&file).ok()?;
+            named(format!("{}.png", stem(&file)?)).or_else(|| file.to_ascii_lowercase().ends_with(".png").then(|| named(file)).flatten())
+        }
+        Some(ArtRef::Url(url)) => named(format!("{}-square.png", url_stem(&url))),
+        Some(ArtRef::File(_)) => None,
+        None => match pick(art, ArtSlot::Tile)? {
+            ArtRef::Asset(file) => {
+                check_name(&file).ok()?;
+                named(format!("{}-icon.png", stem(&file)?))
+            }
+            ArtRef::Url(url) => named(format!("{}-icon.png", url_stem(&url))),
+            ArtRef::File(_) => None,
+        },
+    }
+}
+
 /// The image scaled to fit a `size`×`size` transparent square, centred, as PNG.
 pub fn square_png(bytes: &[u8], size: u32) -> Result<Vec<u8>> {
     let img = image::load_from_memory(bytes)?;
@@ -236,14 +259,18 @@ pub(crate) mod tests {
         let (icons, art_dir) = (dir.path().join("icons"), dir.path().join("art"));
         std::fs::create_dir_all(&art_dir).unwrap();
         assert_eq!(export_icon(&icons, &art_dir, &Art::default()).await.unwrap(), None);
+        assert_eq!(cached_icon(&icons, &Art::default()), None);
         let url = "https://cdn1.epicgames.com/x/tall";
         std::fs::write(art_dir.join(format!("{}.png", url_stem(url))), fixture_png(60, 90)).unwrap();
         // A cached URL is used without fetching.
         assert_eq!(fetch_url(&art_dir, url).await.unwrap(), art_dir.join(format!("{}.png", url_stem(url))));
         assert!(fetch_url(&art_dir, "http://x/y.png").await.is_err());
         let art = Art { epic: quiver_api::art::SpaceArt { tile: Some(url.into()), ..Default::default() }, ..Default::default() };
+        // Not made yet: nothing cached.
+        assert_eq!(cached_icon(&icons, &art), None);
         let icon = export_icon(&icons, &art_dir, &art).await.unwrap().unwrap();
         assert_eq!(icon, icons.join(format!("{}-icon.png", url_stem(url))));
+        assert_eq!(cached_icon(&icons, &art), Some(icon.clone()));
         let img = image::open(&icon).unwrap().to_rgba8();
         assert_eq!(img.dimensions(), (256, 256));
         // Fitted, not stretched: transparent at the sides, the art in the middle.
@@ -253,7 +280,12 @@ pub(crate) mod tests {
         let name = "48edec3d91f23947b02be534159b74d1.ico";
         std::fs::write(icons.join(name), fixture_ico()).unwrap();
         let art = Art { icon: Some(name.into()), ..art };
+        assert_eq!(cached_icon(&icons, &art), None, "the .ico isn't converted yet");
         assert_eq!(export_icon(&icons, &art_dir, &art).await.unwrap(), Some(icons.join("48edec3d91f23947b02be534159b74d1.png")));
+        assert_eq!(cached_icon(&icons, &art), Some(icons.join("48edec3d91f23947b02be534159b74d1.png")));
+        // Names are checked before they become paths.
+        let art = Art { icon: Some("../../etc/passwd.png".into()), ..Default::default() };
+        assert_eq!(cached_icon(&icons, &art), None);
     }
 
     #[test]

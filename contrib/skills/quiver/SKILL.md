@@ -22,7 +22,7 @@ Most commands also take a title, e.g. `quiver play "Alan Wake Remastered"`. `qui
 
 | Want | Command |
 |---|---|
-| What's running, signed in, queued | `quiver status`, `quiver sessions`, `quiver queue` |
+| What's running, signed in, queued; recently played | `quiver status`, `quiver sessions`, `quiver queue`, `quiver playing` |
 | Install / update / verify / uninstall | `quiver install GAME [--add-to-steam] [--desktop-entry]`, `quiver update GAME [--preview]`, `quiver verify GAME [--repair]`, `quiver uninstall GAME` |
 | Download queue order | `quiver queue move GAME up/down/top`, `quiver queue now GAME` (switches the running download for it; that one keeps its progress), `quiver queue after GAME --steam on --desktop on` (done by quiverd when the install finishes) |
 | Launch / stop | `quiver play GAME [--profile P] [--detach]`, `quiver stop GAME` |
