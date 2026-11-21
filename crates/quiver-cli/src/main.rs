@@ -740,8 +740,31 @@ fn print_settings(v: &serde_json::Value) {
     }
 }
 
+/// Exit quietly when a reader such as `head` closes stdout, as other command-line tools do,
+/// instead of panicking with "failed printing to stdout: Broken pipe".
+///
+/// SIGPIPE stays ignored (Rust's default) rather than being restored: a write to quiverd's
+/// socket while it restarts must fail with EPIPE so the client can reconnect, not kill the
+/// process. So only the panic `println!` raises for a closed stdout is turned into an exit.
+fn quiet_on_closed_stdout() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.starts_with("failed printing to stdout") && msg.contains("Broken pipe") {
+            std::process::exit(141); // 128 + SIGPIPE, what a shell reports for a piped tool
+        }
+        default(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    quiet_on_closed_stdout();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
