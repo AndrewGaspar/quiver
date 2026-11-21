@@ -458,7 +458,7 @@ fn control_loop(
     done: &AtomicBool,
     info_path: &std::path::Path,
 ) -> Result<()> {
-    let mut wander = WanderState::new(start, 1);
+    let mut wander = WanderState::new(1);
     while !done.load(Ordering::Relaxed) {
         wander.tick(&mut shaper)?;
         match listener.accept() {

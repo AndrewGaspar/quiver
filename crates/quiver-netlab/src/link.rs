@@ -70,7 +70,7 @@ pub struct WanderState {
 }
 
 impl WanderState {
-    pub fn new(_p: &Profile, seed: u64) -> Self {
+    pub fn new(seed: u64) -> Self {
         WanderState { rng: fastrand::Rng::with_seed(seed), next: [None, None] }
     }
 

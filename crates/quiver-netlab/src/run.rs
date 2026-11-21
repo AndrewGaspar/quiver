@@ -197,7 +197,7 @@ pub fn run(lab: &Lab, spec: &RunSpec, stop: &AtomicBool) -> Result<Report> {
         None => None,
     };
 
-    let mut wander = WanderState::new(&spec.scenario.base, 0x5eed);
+    let mut wander = WanderState::new(0x5eed);
     let mut floods: HashMap<usize, (Flood, FloodRecord)> = HashMap::new();
     let mut next_step = 1;
     let mut next_sample = t0;

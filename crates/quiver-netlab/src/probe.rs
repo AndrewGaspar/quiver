@@ -552,7 +552,7 @@ fn with_wander<T>(shaper: &mut Shaper, p: &Profile, f: impl FnOnce() -> T) -> Re
     let rates = Mutex::new([vec![p.to_client.rate_mbit], vec![p.to_server.rate_mbit]]);
     let out = std::thread::scope(|s| {
         let wander = s.spawn(|| -> Result<()> {
-            let mut st = WanderState::new(p, 11);
+            let mut st = WanderState::new(11);
             while !stop.load(Ordering::Relaxed) {
                 for (dir, rate) in st.tick(shaper)? {
                     rates.lock().unwrap()[if dir == Dir::ToClient { 0 } else { 1 }].push(rate);

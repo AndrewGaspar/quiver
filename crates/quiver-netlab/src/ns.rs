@@ -40,7 +40,6 @@
 //! so nothing inside has a route to the outside world, and the host's interfaces, routes and
 //! qdiscs are never touched.
 
-use std::ffi::CString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -779,9 +778,4 @@ pub fn control_request(path: &str, request: &str) -> Result<String> {
         return Err(anyhow!("{err}"));
     }
     Ok(reply)
-}
-
-/// A `CString` for an env value or argument; NULs become spaces.
-pub fn cstring(s: &str) -> CString {
-    CString::new(s.replace('\0', " ")).unwrap()
 }
