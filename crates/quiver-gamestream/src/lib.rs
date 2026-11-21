@@ -187,6 +187,9 @@ pub struct ServerConfig {
     pub av_encryption: AvEncryption,
     /// How long a pairing request waits for its PIN.
     pub pin_timeout: Duration,
+    /// For tests: drop this share of video packets (percent) at random, to exercise FEC
+    /// with a real client. Always 0 in use.
+    pub test_video_loss_percent: u8,
 }
 
 impl ServerConfig {
@@ -202,6 +205,7 @@ impl ServerConfig {
             native_touch: false,
             av_encryption: AvEncryption::OutsideLan,
             pin_timeout: Duration::from_secs(120),
+            test_video_loss_percent: 0,
         }
     }
 }

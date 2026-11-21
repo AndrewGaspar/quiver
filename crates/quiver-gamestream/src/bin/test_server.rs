@@ -46,6 +46,12 @@ struct Args {
     /// Submit this PIN to the first pairing request.
     #[arg(long)]
     pin: Option<String>,
+    /// Drop this percentage of video packets, to test FEC.
+    #[arg(long, default_value_t = 0)]
+    loss: u8,
+    /// Offer HEVC Main10 (HDR) too; the file should then be Main10.
+    #[arg(long)]
+    hdr: bool,
     /// Stop after this many seconds.
     #[arg(long)]
     exit_after: Option<u64>,
@@ -292,13 +298,14 @@ async fn main() -> Result<()> {
     config.codecs = quiver_gamestream::Codecs {
         h264: codec == VideoCodec::H264,
         hevc: codec == VideoCodec::Hevc,
-        hevc_main10: false,
+        hevc_main10: codec == VideoCodec::Hevc && args.hdr,
         av1: codec == VideoCodec::Av1,
         av1_main10: false,
         yuv444: false,
     };
     // The replay can't invalidate references; it jumps to the next keyframe instead.
     config.reference_frame_invalidation = false;
+    config.test_video_loss_percent = args.loss;
     let stats = Arc::new(Stats::default());
     let host = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None) });
     let clients = Arc::new(FileClientStore::new(args.state.join("moonlight-clients.json")));

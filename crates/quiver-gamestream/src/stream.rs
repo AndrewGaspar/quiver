@@ -425,6 +425,9 @@ impl Session {
         let mut first_capture: Option<u64> = None;
         let mut sent_keyframe = false;
         let mut connected = false;
+        let loss = u32::from(c.test_video_loss_percent);
+        let mut rng: u32 = 0x9E37_79B9 ^ l.connect_data;
+        let mut dropped = 0u64;
         let connect_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         tracing::info!(
             codec = ?self.video.codec, w = self.video.width, h = self.video.height, fps = self.video.fps, kbps = self.video.bitrate_kbps,
@@ -514,6 +517,10 @@ impl Session {
                     sent_frames.push_back((vp.next_frame_index(), f.seq));
                     match vp.packetize(&f.data, ftype, latency, rtp_ts) {
                         Ok(packets) => for p in packets {
+                            if loss > 0 {
+                                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                                if rng % 100 < loss { dropped += 1; continue; }
+                            }
                             if let Err(e) = self.sockets.video.send_to(&p, to).await { tracing::debug!("video send: {e}"); break; }
                         },
                         Err(e) => tracing::warn!("frame {} not sent: {e:#}", f.seq),
@@ -541,6 +548,9 @@ impl Session {
             }
         };
 
+        if dropped > 0 {
+            tracing::info!(dropped, "video packets dropped for the loss test");
+        }
         if connected {
             send(&mut cipher, to_client::TERMINATION, &control::termination(control::TERMINATION_GRACEFUL));
             enet.disconnect();
