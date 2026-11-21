@@ -103,14 +103,18 @@ fn connect_default() -> u64 {
 }
 
 /// How to start a program into a [`ServeTarget::Display`] stream: the environment to add
-/// (the X display, the stream's sink), what to remove, and the command every process of it
-/// must run under (`wrapper… program…`) so it can open the stream's hidden pads (the pad
-/// namespace; empty when pads aren't hidden).
+/// (the X display, the stream's sink), what to remove, and how every process of it gets the
+/// stream's hidden pads: `pad_gid`, the pad group, which a launcher maps into the launch's
+/// own user namespace (with newgidmap) and gives every process; or, for a single command,
+/// `wrapper` (`wrapper… program…`: the host's pad namespace). Both empty when pads aren't
+/// hidden.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchEnv {
     pub env: Vec<(String, String)>,
     pub unset: Vec<String>,
     pub wrapper: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad_gid: Option<u32>,
 }
 
 /// quiverd → host.
@@ -126,6 +130,9 @@ pub enum ServeIn {
     Stop { reason: String },
     /// Answer with [`ServeOut::Status`].
     Status,
+    /// The program can't open the stream's pads (its launch couldn't be given the pad
+    /// group): remove them and tell the client, rather than leave pads nobody can read.
+    PadsOff { reason: String },
 }
 
 /// Where a stream stands, for [`ServeOut::Status`].

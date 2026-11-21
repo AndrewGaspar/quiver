@@ -522,6 +522,24 @@ pub(crate) mod tests {
         assert_eq!(d.pad_slots(), [0]);
     }
 
+    /// Moonlight on iOS (its on-screen controller) sends controller state with no arrival
+    /// packet: the first packet whose `activeGamepadMask` has its slot's bit makes the pad,
+    /// as GFE and Sunshine do, on any slot.
+    #[test]
+    fn a_pad_appears_from_its_first_state_without_an_arrival() {
+        let mut d = InputDecoder::new();
+        // Nothing yet for a slot whose bit is clear.
+        assert!(one(&mut d, &controller(2, 0b01, 0x1000, 0, [0; 4])).is_empty());
+        assert!(d.pad_slots().is_empty());
+        let ev = one(&mut d, &controller(2, 0b100, 0x1000, 0, [0; 4]));
+        assert_eq!(ev[0], InputEvent::PadArrive { slot: 2, kind: PadKind::Xbox });
+        assert!(matches!(ev[1], InputEvent::Pad { slot: 2, state } if state.buttons.0 == PadButtons::A));
+        // Only once.
+        let ev = one(&mut d, &controller(2, 0b100, 0, 0, [0; 4]));
+        assert!(matches!(ev[..], [InputEvent::Pad { slot: 2, .. }]), "{ev:?}");
+        assert_eq!(d.pad_slots(), [2]);
+    }
+
     #[test]
     fn touch_and_pen() {
         let mut d = InputDecoder::new();

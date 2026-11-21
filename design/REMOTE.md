@@ -443,9 +443,15 @@ resumed from the client with new keys, same host pid.
 **Games.** `StreamTarget::Game` runs the host's headless gamescope with a placeholder
 (`Target::Display`), then `Play` exactly as today (launch plan, profile, bridge, Sight,
 tweaks) with the host's `LaunchEnv` in the plan: its `DISPLAY`, its sink, the Sight layer's
-capture socket, and the pad namespace's wrapper around the bridge and the game (not with
-mounts: the pad group can't be mapped inside the launch's own namespace, so a modded stream
-has no pads). Tested with a Wine test program registered in a scratch daemon
+capture socket, and the stream's pad group (`pad_gid`). The launch then runs every process
+(bridge, Proton, wineserver, Wine's controller driver, the game) in one user namespace of its
+own, with mods mounted if the profile has them and the pad group mapped in with
+newuidmap/newgidmap and given to each process (`overlay::Namespace::create_with`). A
+pad group that can't be mapped, a wineserver of the prefix left outside, or a process found
+without the group 8 s in turns the stream's pads off with a notice and an activity line,
+never a pad nobody can open. (Until 2026-11-21 a modded launch's namespace mapped only the
+person's own ids, so a Moonlight stream of Origins with its Pharos profile had a pad the
+game couldn't open; `quiverd/tests/stream_pads.rs` covers both.) Tested with a Wine test program registered in a scratch daemon
 (`QUIVER_TEST_GAMES`), launched through `play_store_game` as an Epic game is: keys and clicks
 reached it, and Quit game from the stream menu stopped it. Not tested with a store game (the
 person's call). Moonlight launches go through the same display and launch

@@ -247,8 +247,18 @@ async fn pair_serve_revoke_and_reconnect() {
     assert_eq!((rs.enabled, rs.listening.as_deref()), (true, Some(addr.as_str())));
 
     // The laptop's own quiverd sees tower as reachable.
-    let peers: Vec<PeerInfo> = laptop.call(Request::RemotePeers).await.unwrap();
-    assert_eq!(peers.iter().find(|p| p.role == Role::Server).map(|p| p.state), Some(PeerState::Online));
+    // Its peer check runs on its own clock and may have caught tower mid-restart, so allow it
+    // until the next check (every 20 s) to see tower again.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers: Vec<PeerInfo> = laptop.call(Request::RemotePeers).await.unwrap();
+        let state = peers.iter().find(|p| p.role == Role::Server).map(|p| p.state);
+        if state == Some(PeerState::Online) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "laptop never saw tower online again: {state:?}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     // Turning remote off drops the connection and stops listening.
     let tower = tower_m.client().await;

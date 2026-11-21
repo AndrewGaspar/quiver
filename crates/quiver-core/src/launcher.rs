@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
 use crate::playsession::PlaySessions;
+use quiver_api::GameRef;
 use crate::online::Online;
 use crate::cloudsave::CloudSaves;
 use crate::library::{Library, ProductConfig};
@@ -554,15 +555,140 @@ pub fn win_path(p: &Path) -> String {
 /// belongs to a game Quiver started, whatever its window class.
 pub const ENV_GAME: &str = "QUIVER_GAME";
 
-/// A streamed launch's command prefix: the stream's pad namespace (when its pads are hidden),
-/// so every Wine process of the launch can open them. Not with mounts (mods): the launch's
-/// own namespace is entered first, and the pad group can't be mapped inside it, so such a
-/// stream goes without pads.
+/// A streamed launch's command prefix, for a stream host that gives only a wrapper (no
+/// `pad_gid`) and a launch without mods. A host that names its pad group gets the launch's
+/// own namespace instead ([`launch_namespace`]), mods or not.
 pub fn stream_wrappers(plan: &crate::mods::Plan) -> Vec<String> {
     match &plan.stream {
-        Some(s) if plan.overlays.is_empty() => s.wrapper.clone(),
+        Some(s) if s.pad_gid.is_none() && plan.overlays.is_empty() => s.wrapper.clone(),
         _ => Vec::new(),
     }
+}
+
+/// The stream pad group a streamed launch must give its processes, if its pads are hidden.
+pub fn stream_pad_gid(plan: &crate::mods::Plan) -> Option<u32> {
+    plan.stream.as_ref().and_then(|s| s.pad_gid)
+}
+
+/// Why a streamed game can't open its stream's pads, by game, for quiverd to take
+/// ([`take_stream_pad_problem`]) and pass to the stream host (which then removes the pads and
+/// says so, rather than leave pads nobody can read).
+static STREAM_PAD_PROBLEMS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<GameRef, String>>> = std::sync::LazyLock::new(Default::default);
+
+fn stream_pad_problem(plan: &crate::mods::Plan, game: GameRef, why: String) {
+    if stream_pad_gid(plan).is_none() {
+        return;
+    }
+    tracing::warn!(%game, "stream pads: {why}");
+    STREAM_PAD_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).insert(game, why);
+}
+
+/// A streamed launch's pad problem, once (see [`STREAM_PAD_PROBLEMS`]).
+pub fn take_stream_pad_problem(game: GameRef) -> Option<String> {
+    STREAM_PAD_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).remove(&game)
+}
+
+/// The launch's own user + mount namespace, which every process of it enters: with the
+/// plan's mods mounted, and for a stream whose pads are hidden, with the pad group mapped and
+/// given to every process ([`crate::overlay::Namespace::create_with`]). None for a plain
+/// launch. If the pad group can't be mapped (no newgidmap, no subgid range), the launch goes
+/// on without it and the problem is reported ([`take_stream_pad_problem`]).
+fn launch_namespace(plan: &crate::mods::Plan, game: GameRef) -> Result<Option<crate::overlay::Namespace>> {
+    for o in &plan.overlays {
+        // A profile's own prefix folder may not exist yet (the game hasn't run).
+        std::fs::create_dir_all(&o.target)?;
+    }
+    let Some(pad) = stream_pad_gid(plan) else {
+        return if plan.overlays.is_empty() { Ok(None) } else { Ok(Some(crate::overlay::Namespace::create_many(&plan.overlays)?)) };
+    };
+    match crate::overlay::Namespace::create_with(&plan.overlays, Some(pad)) {
+        Ok(ns) => Ok(Some(ns)),
+        Err(e) => {
+            stream_pad_problem(plan, game, format!("the game's processes couldn't be given the stream pad group {pad}: {e:#}"));
+            if plan.overlays.is_empty() { Ok(None) } else { Ok(Some(crate::overlay::Namespace::create_many(&plan.overlays)?)) }
+        }
+    }
+}
+
+/// A wineserver for `prefix` still running (after the launch's `wineserver -k -w`): the
+/// launch's Wine processes would join it, and Wine's controller driver would stay in its
+/// namespace, outside the stream's pad group.
+fn stray_wineserver(prefix: &Path) -> Option<u32> {
+    let want = format!("WINEPREFIX={}", prefix.display());
+    std::fs::read_dir("/proc").into_iter().flatten().filter_map(|e| e.ok()).find_map(|e| {
+        let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        if comm.trim() != "wineserver" || in_container(pid) {
+            return None;
+        }
+        let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+        env.split(|&b| b == 0).any(|kv| kv == want.as_bytes() || kv == format!("{want}/pfx").as_bytes()).then_some(pid)
+    })
+}
+
+/// Before a streamed launch with pads: no wineserver of the prefix may be left outside the
+/// launch's namespace.
+fn check_stray_wineserver(plan: &crate::mods::Plan, game: GameRef, prefix: &Path) {
+    if stream_pad_gid(plan).is_none() {
+        return;
+    }
+    if let Some(pid) = stray_wineserver(prefix) {
+        let comm = |p: u32| std::fs::read_to_string(format!("/proc/{p}/cmdline")).unwrap_or_default().replace('\0', " ");
+        stream_pad_problem(
+            plan,
+            game,
+            format!(
+                "a wineserver for this prefix (pid {pid}: {}) is still running outside the stream's namespace, so Wine's controller \
+                 driver runs outside it and can't open the stream's pads; quit what else uses the prefix and start the stream again",
+                comm(pid).trim()
+            ),
+        );
+    }
+}
+
+/// The processes of `prefix` that lack the stream pad group `pad`: (pid, name). Every one of
+/// a streamed launch should have it (the bridge, upc and uplay_r1, Proton's steam.exe, the
+/// wineserver, Wine's services and controller driver, the game).
+pub fn prefix_processes_without_group(prefix: &Path, pad: u32) -> Vec<(u32, String)> {
+    let want = format!("WINEPREFIX={}", prefix.display());
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+            if in_container(pid) {
+                return None;
+            }
+            let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+            if !env.split(|&b| b == 0).any(|kv| kv.starts_with(want.as_bytes())) {
+                return None;
+            }
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+            let has = status.lines().find_map(|l| l.strip_prefix("Groups:")).is_some_and(|g| g.split_whitespace().any(|v| v == pad.to_string()));
+            let name = status.lines().find_map(|l| l.strip_prefix("Name:")).unwrap_or("?").trim().to_owned();
+            (!has).then_some((pid, name))
+        })
+        .collect()
+}
+
+/// A while after a streamed launch with pads started: every process of its prefix has the
+/// pad group, or the problem is reported (by name and pid).
+fn audit_stream_pads(plan: &crate::mods::Plan, game: GameRef, prefix: &Path) {
+    let Some(pad) = stream_pad_gid(plan) else { return };
+    let prefix = prefix.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let outside = prefix_processes_without_group(&prefix, pad);
+        if outside.is_empty() {
+            tracing::info!(%game, "stream pads: every process of the launch has the pad group");
+            return;
+        }
+        let list: Vec<String> = outside.iter().map(|(p, n)| format!("{n} ({p})")).collect();
+        let why = format!("{} of the game's processes run outside the stream's pad group and can't open its pads: {}", outside.len(), list.join(", "));
+        tracing::warn!(%game, "stream pads: {why}");
+        STREAM_PAD_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).insert(game, why);
+    });
 }
 
 /// A streamed launch's environment on `cmd`: the stream's display and sink in, the desktop's
@@ -579,15 +705,15 @@ fn stream_env(cmd: &mut Command, plan: &crate::mods::Plan) {
 }
 
 /// What a launch reports about its stream, for the job's detail.
-fn stream_note(plan: &crate::mods::Plan) -> Option<String> {
+fn stream_note(plan: &crate::mods::Plan, ns: Option<&crate::overlay::Namespace>) -> Option<String> {
     let s = plan.stream.as_ref()?;
     let display = s.env.iter().find(|(k, _)| k == "DISPLAY").map(|(_, v)| v.as_str()).unwrap_or("?");
-    let pads = if s.wrapper.is_empty() {
-        "no pads"
-    } else if plan.overlays.is_empty() {
-        "pads in its namespace"
-    } else {
-        "no pads (mods mount their own namespace)"
+    let pads = match (s.pad_gid, ns.and_then(|n| n.pad_gid())) {
+        (Some(_), Some(_)) => "pads (every process has the pad group)",
+        (Some(_), None) => "no pads (the pad group couldn't be mapped in)",
+        (None, _) if s.wrapper.is_empty() => "no pads",
+        (None, _) if plan.overlays.is_empty() => "pads in its namespace",
+        (None, _) => "no pads (mods mount their own namespace)",
     };
     Some(format!("streamed: display {display}, {pads}"))
 }
@@ -874,25 +1000,21 @@ pub async fn play(
             events(LaunchEvent::Detail(vec![format!("config patches not applied: {e:#}")]));
         }
     }
-    let ns = if plan.overlays.is_empty() {
-        None
-    } else {
+    let game_ref = plan.game.unwrap_or_else(|| game.game_ref());
+    if !plan.overlays.is_empty() {
         let what = profile.map_or_else(|| "fixes".to_owned(), |p| p.name.clone());
         events(LaunchEvent::Status(format!("Mounting mods ({what})…")));
-        for o in &plan.overlays {
-            // A profile's own prefix folder may not exist yet (the game hasn't run).
-            std::fs::create_dir_all(&o.target)?;
-        }
         tracing::info!(profile = ?profile.map(|p| &p.id), mounts = ?plan.api.mounts, "mounting overlays");
-        Some(crate::overlay::Namespace::create_many(&plan.overlays)?)
-    };
+    }
+    check_stray_wineserver(plan, game_ref, &game.prefix);
+    let ns = launch_namespace(plan, game_ref)?;
 
     events(LaunchEvent::Status("Starting…".into()));
     install_prefix_bridge(&game.prefix, &bridge_exe)?;
     let bridge_log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&bridge_log);
     let stream_wrap = stream_wrappers(plan);
-    if let Some(n) = stream_note(plan) {
+    if let Some(n) = stream_note(plan, ns.as_ref()) {
         events(LaunchEvent::Detail(vec![n]));
     }
     let mut bridge = proton.wrapped(&crate::scope::wrap("bridge", &plan.game.unwrap_or_else(|| game.game_ref()).to_string(), stream_wrap.clone()), &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
@@ -964,6 +1086,7 @@ pub async fn play(
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(run_dir.join("game.log"))?);
     let mut child = cmd.spawn()?;
+    audit_stream_pads(plan, game_ref, &game.prefix);
     // Don't wait on `proton run`: its steam.exe wrapper waits for every process in the
     // prefix, including the bridge, so it never returns while the bridge is up. Watch the
     // game's own processes instead.
@@ -1182,19 +1305,16 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
         Ok(_) => {}
         Err(e) => events(LaunchEvent::Detail(vec![format!("config patches not applied: {e:#}")])),
     }
-    let ns = if plan.overlays.is_empty() {
-        None
-    } else {
+    let game_ref = plan.game.unwrap_or_else(|| game.game_ref());
+    if !plan.overlays.is_empty() {
         let what = profile.map_or_else(|| "fixes".to_owned(), |p| p.name.clone());
         events(LaunchEvent::Status(format!("Mounting mods ({what})…")));
-        for o in &plan.overlays {
-            std::fs::create_dir_all(&o.target)?;
-        }
-        Some(crate::overlay::Namespace::create_many(&plan.overlays)?)
-    };
+    }
+    check_stray_wineserver(plan, game_ref, &game.prefix);
+    let ns = launch_namespace(plan, game_ref)?;
 
     events(LaunchEvent::Status("Starting…".into()));
-    if let Some(n) = stream_note(plan) {
+    if let Some(n) = stream_note(plan, ns.as_ref()) {
         events(LaunchEvent::Detail(vec![n]));
     }
     // The mod SDK channel (design/MOD-CONFIG.md): a mods-only bridge serves the game's pipe.
@@ -1251,6 +1371,7 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     }
     cmd.current_dir(workdir).stdout(Stdio::null()).stderr(std::fs::File::create(run_dir.join("game.log"))?).kill_on_drop(true);
     let mut child = cmd.spawn()?;
+    audit_stream_pads(plan, game_ref, &game.prefix);
     let started = wait_for_game_start(&proton, &mut child).await;
     if !started {
         let _ = child.start_kill();

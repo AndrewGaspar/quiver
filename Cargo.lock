@@ -5320,6 +5320,7 @@ dependencies = [
  "quiver-proto",
  "quiver-remote",
  "quiver-stream-host",
+ "quiver-stream-net",
  "quiver-stream-proto",
  "reqwest",
  "ring",

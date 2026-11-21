@@ -92,8 +92,8 @@ pub struct Plan {
     /// anything outside that wants to know a window is a Quiver game), set by the daemon.
     pub game: Option<quiver_api::GameRef>,
     /// Streamed (design/REMOTE.md): the launch goes into the stream host's virtual display,
-    /// with its sink and pad namespace ([`crate::launcher::stream_wrappers`]), set by the
-    /// daemon.
+    /// with its sink and the stream's pad group (the launch's namespace maps it:
+    /// `launcher::launch_namespace`), set by the daemon.
     pub stream: Option<quiver_api::remote::LaunchEnv>,
 }
 
