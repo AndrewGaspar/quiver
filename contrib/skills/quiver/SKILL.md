@@ -39,7 +39,7 @@ Most commands also take a title, e.g. `quiver play "Alan Wake Remastered"`. `qui
 | Who changed what | `quiver activity`; settings changes are versioned (`quiver history`) |
 | Daemon | `quiver daemon status`; it restarts itself onto a new build once no game needs it. It runs as the systemd user unit `quiverd.service` (in `quiver.slice`; games get their own scopes there). Never `systemctl --user stop/restart` it or change lingering yourself: `quiver remote boot on` or `off` is the person's switch for starting at boot |
 
-Logs: `journalctl --user -u quiverd` for the unit (`~/.local/share/quiver/quiverd.log` for a quiverd started outside it). A launch's game log is in its prefix, under `quiver-run/game.log`. Read these; don't edit anything under `~/.local/share/quiver` by hand.
+Logs: `~/.local/share/quiver/quiverd.log`, which quiverd writes itself however it runs (as the unit, `journalctl --user -u quiverd` has the same lines). A launch's game log is in its prefix, under `quiver-run/game.log`. Read these; don't edit anything under `~/.local/share/quiver` by hand.
 
 A game Quiver launched has `QUIVER_GAME=<ref>` and `QUIVER_SESSION=<id>` in its environment. Read `/proc/<pid>/environ` to tell whether a window belongs to a Quiver game.
 

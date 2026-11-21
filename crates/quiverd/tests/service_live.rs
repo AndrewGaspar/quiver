@@ -38,7 +38,7 @@ struct Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
-        let _ = Command::new("systemctl").args(["--user", "stop", &self.unit]).status();
+        let _ = Command::new("systemctl").args(["--user", "stop", &self.unit]).stderr(std::process::Stdio::null()).status();
         let _ = Command::new("systemctl").args(["--user", "reset-failed", &self.unit]).stderr(std::process::Stdio::null()).status();
         if let Some(c) = self.legacy.as_mut() {
             let _ = c.kill();
@@ -218,6 +218,53 @@ async fn moves_into_the_unit_and_restarts_there() {
     assert!(s.in_unit);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(e.show(), (unit_pid, "active".to_owned()), "{}", e.log());
+
+    // quiverd.log has every process's lines, each once: the legacy daemon's, the unit's
+    // (whose stdout, the journal's stand-in here, has them too), and the new build's.
+    let log = std::fs::read_to_string(e.dir("data/quiver/quiverd.log")).unwrap_or_default();
+    let count = |n: &str| log.lines().filter(|l| l.contains(n)).count();
+    assert_eq!(count(" listening on "), 3, "legacy, the unit, the restart:\n{log}");
+    assert_eq!(count("took over the sockets of quiverd"), 1, "{log}");
+    assert_eq!(count("restarted onto this build"), 1, "{log}");
+    assert_eq!(count("quiverd is already running"), 1, "{log}");
+    let unit_out = std::fs::read_to_string(e.dir("unit.log")).unwrap_or_default();
+    assert!(unit_out.contains("took over the sockets of quiverd"), "the unit's stdout still carries the lines: {unit_out}");
+}
+
+/// A scratch daemon started through the scope path (`systemd-run --user --scope`, as a
+/// client starts anyone's but the person's own daemon) writes quiverd.log, and runs in
+/// quiver.slice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "talks to the systemd user manager (a transient scope); run with --ignored"]
+async fn scope_path_writes_the_log() {
+    let e = setup();
+    e.install_build("1.0.0");
+    let vars: Vec<(String, String)> = e.vars().into_iter().filter(|(k, _)| k != "QUIVER_TEST_UNIT").collect();
+    let sd = quiver_api::service::Systemd::from_env();
+    if !sd.can_scope() {
+        eprintln!("no systemd-run scope here; skipped");
+        return;
+    }
+    let how = quiver_api::service::start_with(&sd, false, &e.dir("bin/quiverd"), Some(&vars)).unwrap();
+    assert_eq!(how, quiver_api::service::Autostart::Scope);
+    let t = Instant::now();
+    while std::os::unix::net::UnixStream::connect(e.sock()).is_err() {
+        assert!(t.elapsed() < Duration::from_secs(20), "quiverd didn't start in its scope");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let cli = Client::connect_running_at(e.sock(), "test").await.unwrap();
+    let s = status(&cli).await;
+    let cg = std::fs::read_to_string(format!("/proc/{}/cgroup", s.pid)).unwrap();
+    assert!(cg.contains("/quiver.slice/run-"), "in a scope under quiver.slice: {cg}");
+    let _ = cli.call::<serde_json::Value>(Request::Shutdown).await;
+    let t = Instant::now();
+    while Path::new(&format!("/proc/{}", s.pid)).exists() {
+        assert!(t.elapsed() < Duration::from_secs(10), "quiverd didn't stop");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let log = std::fs::read_to_string(e.dir("data/quiver/quiverd.log")).unwrap_or_default();
+    assert_eq!(log.lines().filter(|l| l.contains(" listening on ")).count(), 1, "{log}");
+    assert!(log.contains("shutdown requested by test"), "{log}");
 }
 
 /// A launch's process in its own scope under quiver.slice (only where this test runs

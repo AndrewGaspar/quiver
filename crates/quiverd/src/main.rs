@@ -13,6 +13,7 @@ mod perf;
 mod info;
 mod lab;
 mod lifecycle;
+mod log;
 mod localsessions;
 mod options;
 mod moonlight;
@@ -1120,6 +1121,16 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    log::install_panic_hook();
+    let r = run().await;
+    // Into the log file too: stderr may go nowhere (a daemon a client started).
+    if let Err(e) = &r {
+        tracing::error!("quiverd exiting: {e:#}");
+    }
+    r
+}
+
+async fn run() -> Result<()> {
     // No options: any argument is for a person, so never start the daemon for one.
     if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
@@ -1133,13 +1144,8 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info,epic_core=info".into()),
-        )
-        // Plain text into the journal or a log file; colours only on a terminal.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .init();
+    // stdout (the journal under the unit) and <data>/quiverd.log, which quiverd writes itself.
+    log::init("quiverd=info,quiver_core=info,epic_core=info");
     // A scratch daemon's secrets go to files (tests), never the person's keyring.
     quiver_core::secret::use_scratch_store_from_env();
     // After a restart onto a new build: the previous build's listening sockets.
@@ -1170,7 +1176,7 @@ async fn main() -> Result<()> {
             if UnixStream::connect(&path).await.is_ok() {
                 // Not a failure (the unit neither fails nor restarts on it): a daemon
                 // outside the unit moves in by itself once idle.
-                eprintln!("quiverd is already running ({})", path.display());
+                tracing::info!("quiverd is already running ({}); exiting", path.display());
                 std::process::exit(quiver_api::service::EXIT_ALREADY_RUNNING);
             }
             let dir = path.parent().context("socket path")?;

@@ -791,7 +791,7 @@ impl Quiver {
                 "",
                 vec![
                     frow(th, "State", Some("Accounts, settings history, activity log, save backups"), path_field(th, &data).into_any_element()),
-                    frow(th, "Daemon log", None, path_field(th, &tilde(&quiver_api::client::daemon_log())).into_any_element()),
+                    frow(th, "Daemon log", Some("quiverd writes it however it runs; as the systemd unit, journalctl --user -u quiverd has it too"), path_field(th, &tilde(&quiver_api::client::daemon_log())).into_any_element()),
                     frow(th, "Art cache", Some("Ubisoft art, downloaded once"), path_field(th, &tilde(&crate::art::default_cache_dir())).into_any_element()),
                     frow(
                         th,

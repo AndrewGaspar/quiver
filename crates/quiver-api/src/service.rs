@@ -328,16 +328,19 @@ fn run(mut c: Command, what: &str) -> Result<()> {
 }
 
 /// Start the daemon for `socket` (nobody listens there): see the module docs. `exe` is the
-/// quiverd to run, `log` where a scope or a child's output goes. Returns how.
-pub fn start_daemon(sd: &Systemd, socket: &Path, exe: &Path, log: &Path) -> Result<Autostart> {
+/// quiverd to run. Returns how. quiverd writes its own log (`<data>/quiverd.log`), so
+/// nothing here redirects its output.
+pub fn start_daemon(sd: &Systemd, socket: &Path, exe: &Path) -> Result<Autostart> {
     let default = socket == crate::socket_path() && default_instance().is_ok();
-    start_with(sd, default, exe, log)
+    start_with(sd, default, exe, None)
 }
 
-/// [`start_daemon`] once it is known whether the daemon is the person's default one.
-fn start_with(sd: &Systemd, default: bool, exe: &Path, log: &Path) -> Result<Autostart> {
+/// [`start_daemon`] once it is known whether the daemon is the person's default one. `env`:
+/// the daemon's whole environment instead of this process's (tests start scratch daemons
+/// through the scope and plain-child paths this way; never the unit or transient ones).
+pub fn start_with(sd: &Systemd, default: bool, exe: &Path, env: Option<&[(String, String)]>) -> Result<Autostart> {
     let unit = sd.unit_state(UNIT);
-    let how = choose(default, unit.as_ref(), sd.can_scope());
+    let how = choose(default && env.is_none(), unit.as_ref(), sd.can_scope());
     tracing::debug!(?how, default, ?unit, "starting quiverd");
     match how {
         Autostart::Unit => match sd.systemctl("start", &[], UNIT) {
@@ -358,31 +361,35 @@ fn start_with(sd: &Systemd, default: bool, exe: &Path, log: &Path) -> Result<Aut
         }
         Autostart::Scope | Autostart::Spawn => {}
     }
-    spawn(sd, exe, log)
+    spawn(sd, exe, env)
 }
 
 /// Start `exe` in the background in a scope of its own under [`SLICE`] when systemd can,
-/// else as a plain child in its own process group. Output goes to `log`.
-fn spawn(sd: &Systemd, exe: &Path, log: &Path) -> Result<Autostart> {
+/// else as a plain child in its own process group; with this process's environment, or
+/// `env`. Its output goes nowhere: it writes its own log.
+fn spawn(sd: &Systemd, exe: &Path, env: Option<&[(String, String)]>) -> Result<Autostart> {
     use std::os::unix::process::CommandExt;
-    if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
-    let ours = std::env::var("XDG_RUNTIME_DIR").ok();
+    let ours = match env {
+        Some(e) => e.iter().find(|(k, _)| k == "XDG_RUNTIME_DIR").map(|(_, v)| v.clone()),
+        None => std::env::var("XDG_RUNTIME_DIR").ok(),
+    };
     let real = real_runtime_dir();
     let restore = ours.as_deref().filter(|r| Path::new(r) != real);
     let scope = if sd.can_scope() && sd.unit_state(UNIT).is_some() { sd.scope_argv(None, restore) } else { None };
     let how = if scope.is_some() { Autostart::Scope } else { Autostart::Spawn };
     let mut cmd = match &scope {
-        Some(a) => {
-            let mut c = Command::new(&a[0]);
-            c.args(&a[1..]).arg(exe).env("XDG_RUNTIME_DIR", &real);
-            c
-        }
+        Some(a) => Command::new(&a[0]),
         None => Command::new(exe),
     };
-    cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
+    if let Some(e) = env {
+        cmd.env_clear().envs(e.iter().map(|(k, v)| (k, v)));
+    }
+    if let Some(a) = &scope {
+        // systemd-run reaches the manager through the real runtime folder; quiverd gets
+        // its own back (`--setenv`).
+        cmd.args(&a[1..]).arg(exe).env("XDG_RUNTIME_DIR", &real);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.process_group(0); // survive the client's terminal closing (and its Ctrl-C)
     match cmd.spawn() {
         Ok(mut child) => {
@@ -581,7 +588,7 @@ mod tests {
         let scratch = dir.path().join("run/quiver/quiverd.sock");
         let exe = dir.path().join("quiverd");
         fake(dir.path(), "quiverd", &format!("echo \"quiverd ran\" >> {}", log.display()));
-        let how = start_daemon(&sd, &scratch, &exe, &dir.path().join("quiverd.log")).unwrap();
+        let how = start_daemon(&sd, &scratch, &exe).unwrap();
         let want = if sd.can_scope() { Autostart::Scope } else { Autostart::Spawn };
         assert_eq!(how, want);
         // The background child logs once it ran.
@@ -613,13 +620,13 @@ mod tests {
 
         let (dir, log) = fake_systemd("loaded", true);
         let sd = Systemd::with_path(dir.path());
-        assert_eq!(start_with(&sd, true, exe, &dir.path().join("q.log")).unwrap(), Autostart::Unit);
+        assert_eq!(start_with(&sd, true, exe, None).unwrap(), Autostart::Unit);
         let c = calls(&log);
         assert!(c.contains("systemctl --user start -- quiverd.service") && !c.contains("systemd-run"), "{c}");
 
         let (dir, log) = fake_systemd("not-found", true);
         let sd = Systemd::with_path(dir.path());
-        assert_eq!(start_with(&sd, true, exe, &dir.path().join("q.log")).unwrap(), Autostart::Transient);
+        assert_eq!(start_with(&sd, true, exe, None).unwrap(), Autostart::Transient);
         let c = calls(&log);
         assert!(c.contains("systemd-run --user --unit=quiverd --slice=quiver.slice") && c.contains("-- /h/.local/bin/quiverd"), "{c}");
         assert!(!c.contains("systemctl --user start"), "{c}");
@@ -627,7 +634,7 @@ mod tests {
         if sd.can_scope() {
             let (dir, log) = fake_systemd("loaded", false);
             let sd = Systemd::with_path(dir.path());
-            assert_eq!(start_with(&sd, true, exe, &dir.path().join("q.log")).unwrap(), Autostart::Scope);
+            assert_eq!(start_with(&sd, true, exe, None).unwrap(), Autostart::Scope);
             wait_for(&log, "systemd-run --user --scope");
             assert!(calls(&log).contains("systemctl --user start -- quiverd.service"));
         }

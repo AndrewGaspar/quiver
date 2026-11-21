@@ -434,8 +434,12 @@ impl Shared {
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
+                    // quiverd writes its log itself however it started; a unit's also has
+                    // what it printed before it could (the journal).
                     let see = match how {
-                        crate::service::Autostart::Unit | crate::service::Autostart::Transient => "journalctl --user -u quiverd".to_owned(),
+                        crate::service::Autostart::Unit | crate::service::Autostart::Transient => {
+                            format!("{} (and journalctl --user -u quiverd)", daemon_log().display())
+                        }
                         _ => daemon_log().display().to_string(),
                     };
                     break stream.ok_or_else(|| anyhow!("quiverd did not start ({last:?}); see {see}"))?;
@@ -557,7 +561,7 @@ fn start_daemon(socket: &std::path::Path) -> Result<crate::service::Autostart> {
         .and_then(|p| p.parent().map(|d| d.join("quiverd")))
         .filter(|p| p.is_file())
         .unwrap_or_else(|| PathBuf::from("quiverd"));
-    crate::service::start_daemon(&crate::service::Systemd::from_env(), socket, &exe, &daemon_log())
+    crate::service::start_daemon(&crate::service::Systemd::from_env(), socket, &exe)
 }
 
 #[cfg(test)]

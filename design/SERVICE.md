@@ -30,8 +30,13 @@ so the pid systemd knows stays the main pid. The default `NotifyAccess=main` hol
 is no watchdog. The new build sends `READY=1` again, which does nothing. The live test checks
 that `MainPID` is unchanged and the unit stays `active`.
 
-**Logs** go to the journal: `journalctl --user -u quiverd`. A quiverd started outside the
-unit (a scope or a plain child, §2) still writes `~/.local/share/quiver/quiverd.log`.
+**Logs.** quiverd writes `<data>/quiverd.log` (`~/.local/share/quiver/quiverd.log`) itself,
+however it started (`log.rs`): a tracing layer appends to it, in the same format as before and
+with no colour codes. Lines also go to stdout, which is the journal under the unit
+(`journalctl --user -u quiverd`), unless stdout already is that file (an older client
+redirected it), so no line is written twice. Panics are appended by a panic hook, and an error
+that ends `main` is logged too. Clients no longer redirect a daemon's output. The file isn't
+rotated (it never was). Settings → Storage still points at it and mentions the journal.
 
 ## 2. Starting it (`quiver_api::service::start_daemon`)
 
@@ -165,4 +170,10 @@ started by the old build stays in the kitty scope it started in.
   The fix belongs in `moonlight.rs` (another agent's file).
 - `quiver-builds.slice` (agent builds, `tools/devbuild`) is a child of `quiver.slice` by
   systemd's dash rule, so builds and games share the parent slice. Neither is under oomd.
-- Settings shows the daemon log path; under the unit, the log is the journal.
+- `quiverd/tests/daemon_log.rs`: a plain child writes the log, each line once and without
+  colour codes; an old client's stdout/stderr redirect into the file doesn't double lines;
+  "already running" (exit 75) is logged. `log::tests` checks that a panic lands in the file.
+  The live tests check the scope path writes it, and that through the move into the unit and
+  a restart there every process's lines appear once (the unit's stdout carries them too).
+  The transient-service path runs the same code as the unit and isn't run live: it would
+  need the real `quiverd.service` name.
