@@ -215,7 +215,7 @@ async fn others(d: &Arc<Daemon>, wait: Duration) -> (Vec<MachineAccounts>, Vec<M
                 id: p.id.clone(),
                 here: false,
                 reached: false,
-                error: Some(if other.is_some() { "hasn't reported in the last minute".into() } else { "hasn't reported its accounts".into() }),
+                error: Some(if other.is_some() { "hasn't reported in the last minute".into() } else { "hasn't reported any accounts".into() }),
                 at: other.map(|(_, m)| m.at),
             }),
         }
@@ -312,9 +312,9 @@ async fn handover(d: &Arc<Daemon>, source: &str, store: StoreId, account: Option
     Ok(HandoverResult { store, account_id: got.account_id, name: got.name, from: from_name, to: to_name })
 }
 
-/// Tell every paired server what this machine is signed in to and playing: at start, when
-/// it changes, and every `ANNOUNCE_EVERY` while a game runs (so a server's view expires
-/// when this machine goes away).
+/// Tell every paired server what this machine is signed in to and playing: once it has an
+/// account, whenever that changes, and every `ANNOUNCE_EVERY` while a game runs (so a
+/// server's view expires when this machine goes away).
 pub(crate) fn announcer(daemon: &Arc<Daemon>) {
     let weak = Arc::downgrade(daemon);
     let mut events = daemon.events.subscribe();
@@ -328,7 +328,8 @@ pub(crate) fn announcer(daemon: &Arc<Daemon>) {
                 {
                     let playing = m.accounts.iter().any(|a| a.playing.is_some());
                     let due = match &last {
-                        None => true,
+                        // Nothing to say yet: a machine with no accounts doesn't connect.
+                        None => !m.accounts.is_empty(),
                         Some((accounts, at)) => *accounts != m.accounts || (playing && at.elapsed() >= api::ANNOUNCE_EVERY),
                     };
                     if due {

@@ -191,11 +191,12 @@ async fn pair_serve_revoke_and_reconnect() {
     let peers: Vec<PeerInfo> = tower.call(Request::RemotePeers).await.unwrap();
     assert_eq!((peers[0].state, peers[0].connections), (PeerState::Online, 1));
 
-    // Its requests are the laptop's, whatever source it sent.
+    // Its requests are the laptop's, keeping the label a non-person client gave itself
+    // (`remote::remote_source_as`; REMOTE.md §6.1).
     let _: Value = remote.call(Request::DownloadSettings { max_active: Some(2), bandwidth_limit: None, auto_update: None }).await.unwrap();
     let activity: Vec<ActivityEntry> = tower.call(Request::Activity { limit: 20 }).await.unwrap();
     let line = activity.iter().find(|a| a.action.starts_with("download settings")).expect("logged");
-    assert_eq!(line.source, "remote:laptop");
+    assert_eq!(line.source, "remote:laptop/agent");
 
     // Local-only requests are refused over the tunnel, with a code; stubs say what they are.
     let e = remote.call::<Value>(Request::Shutdown).await.unwrap_err();
