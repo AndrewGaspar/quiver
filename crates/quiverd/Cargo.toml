@@ -44,3 +44,5 @@ flate2.workspace = true
 # tests/moonlight.rs: Moonlight's side of pairing.
 ring = "0.17"
 sha2 = "0.10"
+# tests/stream_pads.rs: a client on the real transport.
+quiver-stream-net.workspace = true
