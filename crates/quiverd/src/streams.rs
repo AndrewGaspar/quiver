@@ -112,7 +112,10 @@ async fn plan(d: &Arc<Daemon>, target: &StreamTarget) -> Result<Plan> {
             if g.store == StoreId::Steam && crate::testgames::find(g).is_none() {
                 bail!("{g}: Steam games start through Steam, which a stream can't put in its display yet (design/REMOTE.md §6: Steam on headless)");
             }
-            let title = d.game_name(g).await;
+            let title = match crate::testgames::find(g) {
+                Some(t) => t.name,
+                None => d.game_name(g).await,
+            };
             Plan { key: format!("game:{g}"), serve: ServeTarget::Display, title, game: Some(g), profile: profile.clone() }
         }
         StreamTarget::LabInstance { .. } => {

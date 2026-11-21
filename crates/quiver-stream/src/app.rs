@@ -100,6 +100,10 @@ struct App {
     sbs: bool,
     quit: Option<String>,
     cursor: *mut sdl::SDL_Cursor,
+    /// Where the pointer was when the menu first saw it: hovering picks rows only once it
+    /// has moved from there (leaving relative mode warps it, which isn't the person
+    /// pointing at a row).
+    menu_pointer: Option<(f32, f32)>,
 }
 
 impl App {
@@ -165,6 +169,7 @@ impl App {
         let stats = self.overlay().stats;
         let mut m = Menu::new(self.prefs.clone(), self.capture_mouse, stats);
         m.selected = select;
+        self.menu_pointer = None;
         let mut o = self.overlay();
         o.menu = Some(m);
         o.uncaptured_hint = false;
@@ -568,8 +573,16 @@ impl App {
             }
             SDL_EVENT_MOUSE_MOTION => {
                 let m = unsafe { ev.motion };
+                let moved = match self.menu_pointer {
+                    None => {
+                        self.menu_pointer = Some((m.x, m.y));
+                        false
+                    }
+                    Some((x, y)) => (m.x - x).abs() + (m.y - y).abs() > 3.0,
+                };
                 if self.overlay().menu.is_some() {
-                    if let Some(i) = self.menu_hit(m.x, m.y) {
+                    if !moved {
+                    } else if let Some(i) = self.menu_hit(m.x, m.y) {
                         if let Some(menu) = self.overlay().menu.as_mut() {
                             menu.hover(i);
                         }
@@ -792,6 +805,7 @@ fn with_window(window: *mut sdl::SDL_Window, link: StreamLink, opts: Options) ->
         sbs: opts.sbs,
         quit: None,
         cursor: std::ptr::null_mut(),
+        menu_pointer: None,
     };
     app.overlay().uncaptured_hint = true;
 
