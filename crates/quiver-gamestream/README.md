@@ -50,3 +50,10 @@ QUIVER_E2E_MOONLIGHT=1 cargo test -p quiver-gamestream --features stream-host --
 
 The second streams `quiver-stream-host`'s NVENC test pattern instead of an encoded file.
 `tests/moonlight-e2e.sh` says how the run is kept away from the desktop session.
+
+Verified against moonlight-qt 6.2.0 on this machine: pairing, the app list, HEVC, H.264 and
+AV1 streams with audio, `/resume` and `/quit`, IPv4 and IPv6, a 1280-byte MTU on both of
+Moonlight's packet-size paths, and FEC recovering 3% random video loss with no unrecoverable
+frames. Moonlight 6.2.0 itself fails about 1 pairing in 17 with "Incorrect PIN": it copies
+the salted PIN's hash as a C string, so a zero byte in its first 16 bytes truncates its key
+(fixed in later moonlight-qt). Trying again draws a new salt.

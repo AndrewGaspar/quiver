@@ -2,7 +2,7 @@
 # The end-to-end test's driver: the scratch GameStream server and the real Moonlight client
 # (inside a headless gamescope), together in a private namespace.
 #
-#   GS_SERVER=path/to/quiver-gamestream-test GS_STATE=dir [GS_SERVER_ARGS=...] [GS_MTU=1280] \
+#   GS_SERVER=path/to/quiver-gamestream-test GS_STATE=dir [GS_SERVER_ARGS=...] [GS_STREAM_ARGS=...] [GS_MTU=1280] \
 #       moonlight-e2e.sh
 #
 # Steps: pair (PIN 4321), list, reach the server over IPv6, stream at --packet-size 1392 (what
@@ -110,7 +110,7 @@ shot() { # NAME
 stream() { # NAME HOST ARGS...
     local name=$1 host=$2
     shift 2
-    start_moonlight "$GS_STATE/$name.log" stream "$host" "Quiver Test Pattern" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed "$@"
+    start_moonlight "$GS_STATE/$name.log" stream "$host" "Quiver Test Pattern" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed ${GS_STREAM_ARGS:-} "$@"
     local t=0
     while [ $t -lt "$GS_STREAM_SECS" ]; do
         sleep 2.5
@@ -122,10 +122,18 @@ stream() { # NAME HOST ARGS...
     echo "STEP streamed $name"
 }
 
+# Moonlight 6.2 makes its pairing key from the salted PIN's hash with a C-string copy, so
+# when the hash has a zero byte in its first 16 (about 1 salt in 17) its key is wrong and it
+# reports "Incorrect PIN" (fixed in later moonlight-qt). A retry draws a new salt.
 paired() { grep -q '^PAIRED' "$SLOG"; }
-start_moonlight "$GS_STATE/pair.log" pair 127.0.0.1 --pin 4321
-wait_for 60 paired && echo "STEP paired"
-stop_moonlight
+settled() { paired || [ "$(grep -c '^PAIR FAILED' "$SLOG")" -ge "$attempt" ]; }
+for attempt in 1 2 3; do
+    start_moonlight "$GS_STATE/pair-$attempt.log" pair 127.0.0.1 --pin 4321
+    wait_for 60 settled
+    stop_moonlight
+    paired && break
+done
+paired && echo "STEP paired"
 
 start_moonlight "$GS_STATE/list.log" list 127.0.0.1
 listed() { grep -q 'Second Title' "$GS_STATE/list.log"; }
