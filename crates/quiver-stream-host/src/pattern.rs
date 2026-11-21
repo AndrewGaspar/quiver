@@ -12,6 +12,11 @@
 //! The bars and texture are drawn once, kept in CUDA memory, and copied into the encoder's
 //! input each frame; only the band is drawn on the CPU and uploaded. In HDR the bars are at SDR
 //! levels and one patch is at 1000 nits.
+//!
+//! `QUIVER_STREAM_PATTERN_NOISE=F` (0 < F ≤ 0.5, for network tests) also fills the bottom F of
+//! the picture's luma with fresh noise every frame. Noise doesn't compress, so the encoder
+//! spends all the bitrate it is given, as a busy game scene does, and the transport's bitrate
+//! controller is exercised instead of idling at a few Mbit/s.
 
 use anyhow::Result;
 use quiver_stream_proto::stamp::{self, Stamp};
@@ -191,6 +196,10 @@ pub struct Pattern {
     background: Option<DeviceBuf>,
     pub motion: bool,
     step: u32,
+    /// Rows (from the bottom) refilled with noise each frame, and the noise's state.
+    noise_rows: u32,
+    noise: Vec<u8>,
+    noise_seed: u64,
     gray: Yuv,
     white: Yuv,
     black: Yuv,
@@ -208,7 +217,10 @@ impl Pattern {
         let white = color_of([1.0, 1.0, 1.0], &color, 203.0);
         let black = color_of([0.0, 0.0, 0.0], &color, 203.0);
         draw_background(&mut canvas, band, &color);
-        Pattern { width, height, format, color, band, canvas, background: None, motion, step: 4, gray, white, black }
+        let frac = std::env::var("QUIVER_STREAM_PATTERN_NOISE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0).clamp(0.0, 0.5);
+        let noise_rows = ((height as f64 * frac) as u32) & !1;
+        let noise = vec![0u8; noise_rows as usize * width as usize * format.bytes_per_pixel().min(2)];
+        Pattern { width, height, format, color, band, canvas, background: None, motion, step: 4, noise_rows, noise, noise_seed: 0x2545_f491_4f6c_dd1d, gray, white, black }
     }
 
     pub fn color(&self) -> &ColorInfo {
@@ -268,6 +280,21 @@ impl Pattern {
         } else if surface.tag != 1 {
             unsafe { cuda.copy_dtod(bg.ptr, bg.pitch, surface.row(0), surface.pitch(), row_bytes, rows)? };
             surface.tag = 1;
+        }
+        if self.noise_rows > 0 {
+            // Fresh luma noise in the bottom rows (xorshift64*, 8 bytes at a time).
+            let mut s = self.noise_seed;
+            for c in self.noise.chunks_mut(8) {
+                s ^= s >> 12;
+                s ^= s << 25;
+                s ^= s >> 27;
+                let v = s.wrapping_mul(0x2545_f491_4f6c_dd1d).to_le_bytes();
+                c.copy_from_slice(&v[..c.len()]);
+            }
+            self.noise_seed = s;
+            let y0 = (self.height - self.noise_rows) as usize;
+            unsafe { cuda.copy_htod(self.noise.as_ptr(), row_bytes, surface.row(y0), surface.pitch(), row_bytes, self.noise_rows as usize)? };
+            surface.tag = 0;
         }
         self.draw_band(seq, captured);
         for (first, n) in self.canvas.plane_rows(0, self.band) {
