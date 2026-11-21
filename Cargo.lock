@@ -4844,6 +4844,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-stream-proto"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quiver-ui"
 version = "0.1.0"
 dependencies = [
