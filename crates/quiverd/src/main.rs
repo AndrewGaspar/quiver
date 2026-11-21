@@ -20,6 +20,7 @@ mod remote;
 mod streams;
 mod testgames;
 mod tweaks;
+mod unit;
 mod savestores;
 mod setup;
 mod steamgames;
@@ -700,6 +701,7 @@ impl Daemon {
             | Request::MoonlightPin { .. }
             | Request::MoonlightClients
             | Request::MoonlightUnpair { .. }) => moonlight::handle(self, source, r).await?,
+            Request::RemoteBoot { enabled } => self.handle_boot(source, enabled).await?,
         })
     }
 
@@ -1135,26 +1137,41 @@ async fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info,epic_core=info".into()),
         )
+        // Plain text into the journal or a log file; colours only on a terminal.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     // A scratch daemon's secrets go to files (tests), never the person's keyring.
     quiver_core::secret::use_scratch_store_from_env();
     // After a restart onto a new build: the previous build's listening sockets.
-    let inherited = lifecycle::take_inherited();
-    let lifecycle = lifecycle::Lifecycle::from_env();
+    let mut inherited = lifecycle::take_inherited();
+    let in_unit = unit::in_unit();
+    unit::take_notify_socket(in_unit);
     let path = quiver_api::socket_path();
+    // Started as the unit while a daemon outside it hands over its sockets (unit.rs).
+    let moved = if inherited.is_empty() && in_unit { unit::take(&unit::handover_path(&path), unit::OLD_EXITS_WITHIN) } else { None };
+    if let Some(t) = &moved {
+        tracing::info!("took over the sockets of quiverd {} (pid {}), which ran outside {}", t.from, t.pid, quiver_api::service::unit_name());
+        inherited = lifecycle::inherited_from(t.fds.clone());
+    }
+    let lifecycle = lifecycle::Lifecycle::from_env(in_unit, moved.as_ref().map(|t| t.from.as_str()));
     let listener = match inherited.unix {
         Some(l) => {
             l.set_nonblocking(true)?;
-            tracing::info!(
-                "quiverd {} restarted onto this build (was {})",
-                lifecycle::build(),
-                lifecycle.restarted_from.as_deref().unwrap_or("?")
-            );
+            if moved.is_none() {
+                tracing::info!(
+                    "quiverd {} restarted onto this build (was {})",
+                    lifecycle::build(),
+                    lifecycle.restarted_from.as_deref().unwrap_or("?")
+                );
+            }
             UnixListener::from_std(l)?
         }
         None => {
             if UnixStream::connect(&path).await.is_ok() {
-                bail!("quiverd is already running ({})", path.display());
+                // Not a failure (the unit neither fails nor restarts on it): a daemon
+                // outside the unit moves in by itself once idle.
+                eprintln!("quiverd is already running ({})", path.display());
+                std::process::exit(quiver_api::service::EXIT_ALREADY_RUNNING);
             }
             let dir = path.parent().context("socket path")?;
             std::fs::create_dir_all(dir)?;
@@ -1305,6 +1322,24 @@ async fn main() -> Result<()> {
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);
     tracing::info!("quiverd {} listening on {} (broker {})", lifecycle::build(), path.display(), daemon.broker);
+    unit::notify("READY=1");
+    if let Some(t) = &moved {
+        let was = quiver_api::service::cgroup_of(t.pid).map(|c| format!(" (it ran in {})", c.rsplit('/').next().unwrap_or(&c))).unwrap_or_default();
+        daemon.log_activity("system", format!("quiverd moved into {}{was}", quiver_api::service::unit_name()), None);
+    }
+    // Outside the unit (started from a terminal before it was installed): move in once idle.
+    if !daemon.lifecycle.in_unit {
+        let auto = daemon.lifecycle.settings.auto;
+        let decided = tokio::task::spawn_blocking(move || {
+            let sd = quiver_api::service::Systemd::from_env();
+            unit::relocation_target(false, auto, quiver_api::service::default_instance(), quiver_api::service::test_unit(), |u| sd.unit_state(u))
+        })
+        .await?;
+        match decided {
+            Ok(u) => daemon.lifecycle.want_relocation(u),
+            Err(why) => tracing::debug!("staying outside the unit: {why}"),
+        }
+    }
     // Clients and bridges are accepted here, so while a restart is being decided and
     // carried out nobody is (they wait in the backlog for whichever build serves next).
     loop {
@@ -1337,11 +1372,46 @@ async fn main() -> Result<()> {
                 };
                 daemon.announce_restart(&plan).await;
                 use std::os::fd::AsRawFd;
-                tracing::info!("restarting onto {} ({})", plan.to.as_deref().unwrap_or("a new build"), plan.exe.display());
                 let mut fds = vec![("unix", listener.as_raw_fd()), ("broker", broker_listener.as_raw_fd())];
                 if let Some(fd) = daemon.remote.listener_fd() {
                     fds.push(("remote", fd));
                 }
+                if let Some(unit_name) = plan.relocate.clone() {
+                    // Hand the sockets to the unit's process and exit; nothing is accepted
+                    // meanwhile (connections wait in the backlog for it).
+                    tracing::info!("moving into {unit_name}");
+                    let fds: Vec<(String, std::os::fd::RawFd)> = fds.iter().map(|(n, fd)| ((*n).to_owned(), *fd)).collect();
+                    let handover = unit::handover_path(&path);
+                    let u = unit_name.clone();
+                    let r = tokio::task::spawn_blocking(move || {
+                        let named: Vec<(&str, std::os::fd::RawFd)> = fds.iter().map(|(n, fd)| (n.as_str(), *fd)).collect();
+                        let sd = quiver_api::service::Systemd::from_env();
+                        unit::give(
+                            &handover,
+                            &named,
+                            &lifecycle::build(),
+                            || sd.systemctl("start", &["--no-block"], &u),
+                            |pid| quiver_api::service::cgroup_of(pid).is_some_and(|c| c.rsplit('/').next() == Some(u.as_str())),
+                            unit::GIVE_WITHIN,
+                        )
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|r| r);
+                    match r {
+                        Ok(pid) => {
+                            tracing::info!("{unit_name} (pid {pid}) took the sockets; exiting");
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            tracing::warn!("moving into {unit_name}: {e:#}; carrying on here");
+                            daemon.log_activity("system", format!("quiverd couldn't move into {unit_name} ({e:#}); still running here"), None);
+                            daemon.lifecycle.reopen(&plan, &format!("{e:#}"));
+                        }
+                    }
+                    continue;
+                }
+                tracing::info!("restarting onto {} ({})", plan.to.as_deref().unwrap_or("a new build"), plan.exe.display());
                 let err = lifecycle::exec(&plan, &fds, daemon.lifecycle.restarts);
                 // Only back here if the exec failed: carry on with this build.
                 tracing::error!("restarting onto {}: {err}", plan.exe.display());

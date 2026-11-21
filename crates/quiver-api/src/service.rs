@@ -240,6 +240,14 @@ impl Systemd {
         run(c, &format!("systemctl --user {verb} {unit}"))
     }
 
+    /// `loginctl --no-ask-password enable-linger <user>`: allowed for one's own user on
+    /// most systems (polkit's `set-self-linger`); fails, never prompts, where it isn't.
+    pub fn enable_linger(&self, user: &str) -> Result<()> {
+        let mut c = self.cmd("loginctl").context("loginctl not found")?;
+        c.args(["--no-ask-password", "enable-linger", "--", user]);
+        run(c, &format!("loginctl enable-linger {user}"))
+    }
+
     /// Whether `systemd-run` can reach the user manager's bus.
     pub fn can_scope(&self) -> bool {
         self.tool("systemd-run").is_some() && (real_runtime_dir().join("bus").exists() || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some())

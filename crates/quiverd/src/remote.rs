@@ -481,6 +481,7 @@ fn status(daemon: &Daemon) -> Result<RemoteStatus> {
         pairing,
         peers: daemon.remote.peer_list(),
         local_only: remote::local_only_list(),
+        boot: None,
     })
 }
 
@@ -507,7 +508,12 @@ fn save_settings(f: impl FnOnce(&mut remote::RemoteSettings)) -> Result<()> {
 pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> Result<Value> {
     let r = &daemon.remote;
     Ok(match req {
-        Request::RemoteStatus => json!(status(daemon)?),
+        Request::RemoteStatus => {
+            let mut s = status(daemon)?;
+            let in_unit = daemon.lifecycle.in_unit;
+            s.boot = tokio::task::spawn_blocking(move || crate::unit::boot_status(&quiver_api::service::Systemd::from_env(), in_unit)).await.ok().flatten();
+            json!(s)
+        }
         Request::RemoteEnable { listen } => {
             let current = Config::load()?.remote;
             let addr = listen.clone().unwrap_or_else(|| current.listen());
