@@ -460,6 +460,7 @@ async fn run(so: &Path, w: u32, h: u32, fps: u32, hdr: bool, capture: Capture, s
         max_frames: None,
         force_sandbox_gid: None,
         exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_quiver-stream-host"))),
+        constant_bitrate_audio: false,
     };
     let (_btx, brx) = tokio::sync::watch::channel(bitrate);
     let mut host = Host::start(opts, brx).await.expect("start");
