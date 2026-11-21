@@ -1,0 +1,6 @@
+# The slice of the Quiver daemon (quiverd.service) and of the scopes it starts games and
+# stream hosts in (quiver-game-*.scope, quiver-stream-*.scope). A sibling of app.slice, so
+# terminals' scopes and what systemd-oomd watches there are separate (design/SERVICE.md).
+[Unit]
+Description=Quiver: its daemon, games and stream hosts
+Documentation=https://github.com/AndrewGaspar/quiver/blob/master/design/SERVICE.md

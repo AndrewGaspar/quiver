@@ -113,6 +113,10 @@ pub struct RemoteStatus {
     /// What a remote client can't ask for ([`local_only`]), in words.
     #[serde(default)]
     pub local_only: Vec<String>,
+    /// Whether quiverd starts at boot here (`Request::RemoteBoot`); `None` from daemons
+    /// before it, or without systemd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<crate::service::BootStatus>,
 }
 
 /// An open pairing window, without its code.

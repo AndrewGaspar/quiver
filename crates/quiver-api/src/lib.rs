@@ -31,6 +31,7 @@ pub mod perf;
 pub mod remote;
 pub mod savestores;
 pub mod secret;
+pub mod service;
 pub mod setup;
 pub mod sight;
 pub mod steamlib;
@@ -1109,6 +1110,11 @@ pub enum Request {
     MoonlightClients,
     /// Forget a Moonlight client (fingerprint or a prefix of it, or its name); its stream ends.
     MoonlightUnpair { fingerprint: String },
+    // ---- quiverd as a systemd user service (appended; design/SERVICE.md, see [`service`])
+    /// Start quiverd at boot (`enabled`: enable `quiverd.service` and turn lingering on
+    /// where the person may), or not (disable the unit; lingering is left as it is).
+    /// Returns `service::BootStatus`, with the command to run when lingering needs root.
+    RemoteBoot { enabled: bool },
 }
 
 fn yes() -> bool {

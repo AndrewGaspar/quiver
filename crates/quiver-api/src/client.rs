@@ -418,7 +418,10 @@ impl Shared {
                 Err(_) if start.elapsed() < grace => tokio::time::sleep(Duration::from_millis(100)).await,
                 Err(e) if !self.autostart => bail!("quiverd is not running ({e})"),
                 Err(_) => {
-                    spawn_daemon()?;
+                    let how = {
+                        let path = path.to_owned();
+                        tokio::task::spawn_blocking(move || start_daemon(&path)).await.context("starting quiverd")??
+                    };
                     let mut last = None;
                     let mut stream = None;
                     for _ in 0..100 {
@@ -431,8 +434,11 @@ impl Shared {
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    break stream
-                        .ok_or_else(|| anyhow!("quiverd did not start ({last:?}); see {}", daemon_log().display()))?;
+                    let see = match how {
+                        crate::service::Autostart::Unit | crate::service::Autostart::Transient => "journalctl --user -u quiverd".to_owned(),
+                        _ => daemon_log().display().to_string(),
+                    };
+                    break stream.ok_or_else(|| anyhow!("quiverd did not start ({last:?}); see {see}"))?;
                 }
             }
         };
@@ -542,28 +548,16 @@ pub fn daemon_log() -> PathBuf {
         .join("quiver/quiverd.log")
 }
 
-/// Start `quiverd` in the background: next to this executable, else from PATH.
-fn spawn_daemon() -> Result<()> {
+/// Start the `quiverd` for `socket` (next to this executable, else from PATH): as the
+/// systemd unit, a transient service or a scope of its own, never in the caller's cgroup
+/// ([`crate::service::start_daemon`]).
+fn start_daemon(socket: &std::path::Path) -> Result<crate::service::Autostart> {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("quiverd")))
         .filter(|p| p.is_file())
         .unwrap_or_else(|| PathBuf::from("quiverd"));
-    let log = daemon_log();
-    if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.stdin(std::process::Stdio::null()).stdout(out.try_clone()?).stderr(out);
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0); // survive the client's terminal closing
-    }
-    match cmd.spawn() {
-        Ok(_) => Ok(()),
-        Err(e) => bail!("could not start {}: {e}", exe.display()),
-    }
+    crate::service::start_daemon(&crate::service::Systemd::from_env(), socket, &exe, &daemon_log())
 }
 
 #[cfg(test)]

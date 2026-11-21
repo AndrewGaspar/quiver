@@ -16,7 +16,7 @@
 #   DATADIR     applications/quiver.desktop, icons/hicolor/,  (/usr/share)
 #               vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.<arch>.json
 #   SIGHT_LAYER_I686=1  also the 32-bit Sight layer and input preload (built for i686-unknown-linux-gnu)
-#   UNITDIR     quiverd.service (systemd user unit)          (/usr/lib/systemd/user)
+#   UNITDIR     quiverd.service (systemd user unit), quiver.slice  (/usr/lib/systemd/user)
 #   LICENSEDIR  LICENSE and third-party licenses             (/usr/share/licenses/quiver)
 #   EXEC_START  the unit's ExecStart                         ($BINDIR/quiverd)
 #   UDEVDIR     72-quiver-lab-pad.rules (system packages only: hides lab pads from the host)
@@ -97,10 +97,13 @@ for f in manifest.json Widget.qml Body.qml Ring.qml BrandRing.qml Service.qml Mo
     install -Dm644 "$omarchy_plugin/$f" "$root$LIBDIR/omarchy/quiver.downloads/$f"
 done
 
+# The daemon's systemd user unit and its slice (design/SERVICE.md). Installed, never enabled
+# here: `quiver remote enable --at-boot` enables it (clients start it on demand otherwise).
 install -d "$root$UNITDIR"
 sed -e "s|^ExecStart=.*|ExecStart=$EXEC_START|" \
     "$src/contrib/quiverd.service" >"$root$UNITDIR/quiverd.service"
 chmod 644 "$root$UNITDIR/quiverd.service"
+install -Dm644 "$src/contrib/quiver.slice" "$root$UNITDIR/quiver.slice"
 
 # quiver lab's virtual game controllers (design/LAB.md §16): the udev rule that keeps every lab
 # pad away from the host, and the group its nodes get. Root's to install, so only a system
