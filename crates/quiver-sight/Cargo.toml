@@ -37,6 +37,7 @@ gpui_platform.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # Wayland outputs are identified by a v5 UUID of their name (gpui_linux's WaylandDisplay).
@@ -49,7 +50,6 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [dev-dependencies]
 image.workspace = true
-tempfile.workspace = true
 # The layer's graph code, so `hud_variants` draws the live graph into its PNGs as the layer
 # would (pure CPU code: History and the vertex builder).
 quiver-sight-layer = { path = "../quiver-sight-layer" }

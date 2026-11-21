@@ -202,6 +202,8 @@ pub struct PanelView {
     pub pinned: BTreeMap<String, Vec<quiver_api::sight::QuickPin>>,
     /// What came of the last screenshot (the Session section shows it under the button).
     pub shot: Option<(String, Tone)>,
+    pub replay: crate::replay::State,
+    pub replay_note: Option<(String, Tone)>,
     /// The Achievements list's own scroll.
     pub ach_scroll: ScrollHandle,
     /// The Performance section's own state (`sections::performance`).
@@ -313,6 +315,8 @@ impl PanelView {
             marks: Rc::default(),
             pinned: BTreeMap::new(),
             shot: None,
+            replay: crate::replay::State::Hidden,
+            replay_note: None,
             ach_scroll: ScrollHandle::new(),
             perf: PerfSection::default(),
             perf_preview: None,
@@ -342,6 +346,9 @@ impl PanelView {
 
     /// The current section's rows, in focus order.
     pub fn rows(&self) -> Vec<Row> {
+        if self.nav.section == PanelSection::Session {
+            return super::sections::session::rows_with_replay(&self.data, self.replay);
+        }
         super::sections::rows(&self.nav, &self.data, &self.log, Utc::now())
     }
 
@@ -717,6 +724,12 @@ impl PanelView {
                 }
                 None => self.flash = Some(("The session isn't loaded yet.".into(), Tone::Warn)),
             },
+            Button::Replay | Button::StopReplay => {
+                let action = if b == Button::StopReplay { Some(crate::replay::Action::Stop) } else { self.replay.primary().map(|(_, action)| action) };
+                if let (Some(ui), Some(action)) = (&self.wiring.ui, action) {
+                    let _ = ui.unbounded_send(Msg::Replay { session: self.session.clone(), action });
+                }
+            }
             Button::Screenshot => {
                 self.send(LinkReq::Screenshot { session: self.session.clone() });
                 self.shot = Some(("Taking a screenshot…".into(), Tone::Muted));
@@ -1514,6 +1527,8 @@ impl PanelView {
                 let (label, help, col, ic) = match b {
                     Button::Quit => ("Quit game", "Asks the game to close, like its window's close button", th.tx1, Icon::LogOut),
                     Button::ForceQuit => ("Force quit", "Stops the game's processes at once; unsaved progress is lost", th.bad, Icon::CircleX),
+                    Button::Replay => (self.replay.primary().map_or("Replay", |(label, _)| label), "Rolling gameplay clips", th.tx1, Icon::History),
+                    Button::StopReplay => ("Stop buffer", "End replay capture", th.tx1, Icon::History),
                     Button::Screenshot => ("Screenshot", "The game's next frame, saved under Pictures › Quiver", th.tx1, Icon::Image),
                 };
                 div()
@@ -1659,7 +1674,7 @@ impl PanelView {
         let (title, body, yes) = match c.what {
             Button::Quit => (format!("Quit {game}?"), "Asks the game to close, as its window's close button does. The game may ask you first; anything unsaved may be lost.", "Quit"),
             Button::ForceQuit => (format!("Force quit {game}?"), "Stops the game's processes at once. Anything unsaved is lost.", "Force quit"),
-            Button::Screenshot => return None,
+            Button::Screenshot | Button::Replay | Button::StopReplay => return None,
         };
         let btn = |id: &'static str, label: &'static str, on: bool, danger: bool, yes: bool| {
             div()

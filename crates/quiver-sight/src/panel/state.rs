@@ -187,12 +187,14 @@ pub enum Button {
     ForceQuit,
     /// The game's next frame as a PNG (no confirmation).
     Screenshot,
+    Replay,
+    StopReplay,
 }
 
 impl Button {
     /// Asks "are you sure?" first.
     pub fn confirms(self) -> bool {
-        !matches!(self, Button::Screenshot)
+        matches!(self, Button::Quit | Button::ForceQuit)
     }
 }
 

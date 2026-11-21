@@ -1981,10 +1981,16 @@ the HUD preset (cycles the presets, shows the HUD if hidden); the frame-rate cap
 through No cap, 30, 60, 90, 120, 144, refresh − 3); pins; screenshot ("Game only": the same
 path as the Session section's button and the unlock screenshot, `SightRequest::Screenshot`,
 the Sight layer's capture of the game's frame into `~/Pictures/Quiver/<game>/`; where the layer
-can't, `grim` of the game's monitor into the same folder; `link::LinkReq::Shot`); save replay (only while a `gpu-screen-recorder -r` replay
-buffer runs: SIGUSR1); quit (A held 1 s; released on it, the menu latches: Hyprland closes the
+can't, `grim` of the game's monitor into the same folder; `link::LinkReq::Shot`); replay controls (also on Session); quit (A held 1 s; released on it, the menu latches: Hyprland closes the
 game's window, else quiverd stops it). Applying says what it did in a short toast. The menu writes
 the `sight-panel` state file while up, so hyprpad's `quiver-sight` mode holds the pad.
+
+**Instant replay.** Under Session, Start replay buffer keeps the last 60 seconds. In the
+Quick Menu, Up/Down on Start replay buffer selects 30, 60 or 120 seconds. The recorder
+captures the game's display and playback audio. Once armed, Save replay writes the
+available footage under `~/Videos/Quiver/<game>/` and keeps buffering. Stop buffer or
+ending the game stops capture. A recorder started outside Sight exposes Save replay and
+uses its own output directory and duration.
 
 **Pins** ("pin to quick menu": Y tapped on a Mods or Tweaks row, `PanelView::pin` →
 `quick::pin_row`): per game and profile in Sight's settings (`pins."ubisoft:3539/dlss"` and

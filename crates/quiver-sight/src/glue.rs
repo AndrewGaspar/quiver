@@ -14,6 +14,7 @@ use quiver_perf::panel::{EV_KEY, PanelEvent};
 
 use crate::link::{Loaded, LinkReq, Msg};
 use crate::panel::ingame::{self, InGame};
+use crate::replay::{self, Recorder};
 use crate::quick::{self, Act, Effect, Key, QuickView, TileKind};
 use crate::toasts::{self, ToastData, ToastKind};
 use crate::{Sight, overlay};
@@ -345,7 +346,7 @@ impl Sight {
         let data = self.quick_data.get(&s).cloned().unwrap_or_default();
         let game = data.session.ready().map(|v| (v.game, v.profile().map(str::to_owned)));
         let pins = game.map(|(g, p)| self.settings.pins_for(&g, p.as_deref())).unwrap_or_default();
-        let replay = quick::replay_buffer().map(|(pid, _)| pid);
+        let replay = self.replay_state(&s);
         self.quick.set_tiles(quick::tiles(&data, &pins, &self.toasts.answerable(), replay));
         self.quick_redraw(cx);
     }
@@ -484,15 +485,103 @@ impl Sight {
                 self.send_link(LinkReq::NoticeAct { id, button });
             }
             Act::Screenshot => self.screenshot(session, Duration::from_millis(150), true),
-            Act::Replay { pid } => {
-                // gpu-screen-recorder saves its replay buffer on SIGUSR1.
-                let ok = unsafe { libc::kill(pid as i32, libc::SIGUSR1) } == 0;
-                self.toast(if ok { said("Replay saved".into()) } else { ToastData { kind: ToastKind::Error, title: "The replay buffer has stopped".into(), urgent: true, ..Default::default() } }, cx);
-            }
+            Act::Replay(action) => self.apply_replay(session, action, cx),
             Act::Quit => {}
         }
         if matches!(t.kind, TileKind::Notice { .. }) {
             self.sync_overlay(cx);
+        }
+    }
+
+    pub(crate) fn replay_state(&self, session: &str) -> replay::State {
+        if !self.replay_enabled { return replay::State::Hidden; }
+        if let Some(r) = self.recorders.get(session) {
+            return if r.stopping() { replay::State::Stopping } else if r.ready { replay::State::Active(r.seconds) } else { replay::State::Starting };
+        }
+        match quick::replay_buffer(|pid| self.recorders.values().any(|r| r.pid() == Some(pid))) {
+            Some((pid, seconds)) => replay::State::External { pid, seconds },
+            None => replay::State::Off,
+        }
+    }
+
+    fn replay_changed(&mut self, session: &str, cx: &mut App) {
+        if self.panel.session() == Some(session) {
+            self.panel.set_replay(self.replay_state(session), cx);
+        }
+        if self.quick.shown() && self.quick.session.as_deref() == Some(session) { self.quick_tiles(cx); }
+    }
+
+    pub(crate) fn apply_replay(&mut self, session: &str, action: replay::Action, cx: &mut App) {
+        if !self.replay_enabled { return; }
+        let result = match action {
+            replay::Action::Start(seconds) => {
+                if !matches!(self.replay_state(session), replay::State::Off) {
+                    self.replay_changed(session, cx);
+                    return;
+                }
+                let Some(game) = self.quick_data.get(session).and_then(|d| d.session.ready()).map(|v| v.name.clone()) else {
+                    self.replay_feedback(session, Err("Game session details are unavailable".into()), cx);
+                    return;
+                };
+                let monitor = self.panel.game_monitor(session);
+                Recorder::start(&game, monitor.as_deref(), seconds).map(|r| {
+                    self.recorders.insert(session.to_owned(), r);
+                    "Starting replay buffer…".to_owned()
+                })
+            }
+            replay::Action::Stop => {
+                let Some(r) = self.recorders.get_mut(session) else { return };
+                r.stop();
+                Ok("Stopping replay buffer…".into())
+            }
+            replay::Action::Save => {
+                if let Some(r) = self.recorders.get(session).filter(|r| r.ready && !r.stopping()) {
+                    let socket = r.socket();
+                    let session = session.to_owned();
+                    let tx = self.tx.clone();
+                    cx.background_executor().spawn(async move {
+                        let result = replay::save(&socket);
+                        if let Some(tx) = tx { let _ = tx.unbounded_send(Msg::ReplayFeedback { session, result: result.map(|p| format!("Saved {p}")).map_err(|e| format!("{e:#}")) }); }
+                    }).detach();
+                    return;
+                }
+                Err(anyhow::anyhow!("the replay buffer is not ready"))
+            }
+            replay::Action::SaveExternal(pid) => {
+                replay::save_external(pid).map(|()| "Replay save requested".into())
+            }
+        };
+        self.replay_feedback(session, result.map_err(|e| format!("{e:#}")), cx);
+        self.replay_changed(session, cx);
+    }
+
+    pub(crate) fn replay_feedback(&mut self, session: &str, result: Result<String, String>, cx: &mut App) {
+        let (kind, title, body, urgent) = match result {
+            Ok(text) => (ToastKind::Options, text, None, false),
+            Err(reason) => (ToastKind::Error, "Replay unavailable".into(), Some(reason), true),
+        };
+        if self.panel.session() == Some(session) {
+            self.panel.replay_feedback(body.as_deref().unwrap_or(&title).to_owned(), urgent, cx);
+        }
+        self.toast(ToastData { kind, title, body, urgent, caption: "Instant replay".into(), session: Some(session.into()), ..Default::default() }, cx);
+    }
+
+    pub(crate) fn poll_replays(&mut self, cx: &mut App) {
+        let mut updates = Vec::new();
+        self.recorders.retain(|session, r| {
+            let was_ready = r.ready;
+            match r.poll() {
+                Err(e) => { updates.push((session.clone(), Err(e))); false }
+                Ok(false) => { updates.push((session.clone(), Ok("Replay buffer stopped".into()))); false }
+                Ok(true) => {
+                    if r.ready && !was_ready { updates.push((session.clone(), Ok(format!("Buffering the last {} seconds", r.seconds)))); }
+                    true
+                }
+            }
+        });
+        for (session, result) in updates {
+            self.replay_feedback(&session, result.map_err(|e| format!("{e:#}")), cx);
+            self.replay_changed(&session, cx);
         }
     }
 

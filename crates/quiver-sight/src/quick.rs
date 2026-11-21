@@ -14,8 +14,7 @@
 //! **Tiles** ([`tiles`]), left to right: the buttons of a notice that's up (an agent's "Keep v3
 //! for now"), frame generation (a mod's live `fg.enabled`), the HUD preset, the frame-rate cap
 //! (the `fps.cap` Tweak), pinned items (any option or Tweak pinned with "pin to quick menu",
-//! per game and profile: `SightSettings::pins_for`), screenshot, save replay (only while a
-//! gpu-screen-recorder replay buffer runs), quit game. Quit needs A (Enter) held for
+//! per game and profile: `SightSettings::pins_for`), screenshot, start or save a replay buffer, quit game. Quit needs A (Enter) held for
 //! [`QUIT_HOLD`]: releasing the chord on it latches the menu instead of quitting.
 //!
 //! **Drawing.** In the game, like the panel (`panel::ingame`): an off-screen GPUI window at the
@@ -40,6 +39,7 @@ use serde_json::Value;
 use crate::panel::ingame::{DepthParts, InGameView};
 use crate::panel::state::{PRESETS, PanelData, adjustable, shown_in_game, step_value};
 use crate::toasts::ToastData;
+use crate::replay::{self, State as ReplayState};
 
 /// A press held this long is a hold (the quick menu); released sooner, a tap (the panel).
 pub const HOLD: Duration = Duration::from_millis(280);
@@ -66,6 +66,9 @@ pub enum TileKind {
     Screenshot,
     /// gpu-screen-recorder's replay buffer: its pid.
     Replay { pid: u32 },
+    StartReplay { seconds: u32 },
+    SaveReplay,
+    StopReplay,
     Quit,
 }
 
@@ -152,7 +155,7 @@ fn pin_tile(d: &PanelData, p: &QuickPin) -> Option<Tile> {
 }
 
 /// The tiles for a session, left to right (module docs).
-pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: Option<u32>) -> Vec<Tile> {
+pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: ReplayState) -> Vec<Tile> {
     let mut out = Vec::new();
     for n in notices {
         let Some(id) = &n.notice else { continue };
@@ -180,11 +183,22 @@ pub fn tiles(d: &PanelData, pins: &[QuickPin], notices: &[ToastData], replay: Op
         }
     }
     out.push(tile(TileKind::Screenshot, "Screenshot", "Game only", None, Icon::Image));
-    if let Some(pid) = replay {
-        out.push(tile(TileKind::Replay { pid }, "Save replay", "The replay buffer", None, Icon::History));
+    match replay {
+        ReplayState::Off => out.push(start_replay_tile(replay::DEFAULT_SECONDS)),
+        ReplayState::External { pid, seconds } => out.push(tile(TileKind::Replay { pid }, "Save replay", format!("Last {seconds} s"), None, Icon::History)),
+        ReplayState::Starting => out.push(tile(TileKind::StopReplay, "Cancel replay buffer", "Starting…", None, Icon::History)),
+        ReplayState::Active(seconds) => {
+            out.push(tile(TileKind::SaveReplay, "Save replay", format!("Last {seconds} s"), Some(true), Icon::History));
+            out.push(tile(TileKind::StopReplay, "Stop buffer", "End capture", None, Icon::History));
+        }
+        ReplayState::Hidden | ReplayState::Stopping => {}
     }
     out.push(tile(TileKind::Quit, "Quit game", "Hold A", None, Icon::LogOut));
     out
+}
+
+fn start_replay_tile(seconds: u32) -> Tile {
+    tile(TileKind::StartReplay { seconds }, "Start replay buffer", format!("▲ ▼  {seconds} s"), None, Icon::History)
 }
 
 /// What a tile does: the value to set (options and Tweaks), or the action.
@@ -200,7 +214,7 @@ pub enum Act {
     HudShow,
     Notice { id: String, button: String },
     Screenshot,
-    Replay { pid: u32 },
+    Replay(replay::Action),
     Quit,
 }
 
@@ -236,7 +250,10 @@ pub fn act(t: &Tile, d: &PanelData) -> Option<Act> {
             }
         },
         TileKind::Screenshot => Act::Screenshot,
-        TileKind::Replay { pid } => Act::Replay { pid: *pid },
+        TileKind::Replay { pid } => Act::Replay(replay::Action::SaveExternal(*pid)),
+        TileKind::StartReplay { seconds } => Act::Replay(replay::Action::Start(*seconds)),
+        TileKind::SaveReplay => Act::Replay(replay::Action::Save),
+        TileKind::StopReplay => Act::Replay(replay::Action::Stop),
         TileKind::Quit => Act::Quit,
     })
 }
@@ -311,6 +328,8 @@ pub enum Effect {
 /// The keys the menu reads (the game's arrows, Enter, Escape; hyprpad types the pad's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
+    Up,
+    Down,
     Left,
     Right,
     Enter,
@@ -321,6 +340,8 @@ impl Key {
     /// From a Linux evdev key code (the input preload's events).
     pub fn from_evdev(code: u32) -> Option<Key> {
         Some(match code {
+            103 => Key::Up,
+            108 => Key::Down,
             105 | 104 => Key::Left, // Left, Page Up (hyprpad types LB as Page Up)
             106 | 109 => Key::Right,
             28 | 96 | 57 => Key::Enter,
@@ -344,6 +365,7 @@ pub struct Quick {
     pub last_word: Option<Instant>,
     /// The kind focused when it last closed (focus comes back to it).
     remember: Option<TileKind>,
+    replay_seconds: Option<u32>,
 }
 
 impl Quick {
@@ -385,7 +407,11 @@ impl Quick {
     }
 
     /// New tiles (data came in): focus stays on the same kind of tile.
-    pub fn set_tiles(&mut self, tiles: Vec<Tile>) {
+    pub fn set_tiles(&mut self, mut tiles: Vec<Tile>) {
+        if let Some(seconds) = self.replay_seconds
+            && let Some(tile) = tiles.iter_mut().find(|t| matches!(t.kind, TileKind::StartReplay { .. })) {
+            *tile = start_replay_tile(seconds);
+        }
         let cur = self.tiles.get(self.focus).map(|t| t.kind.clone());
         self.tiles = tiles;
         match cur.and_then(|k| self.tiles.iter().position(|t| same_kind(&t.kind, &k))) {
@@ -447,6 +473,15 @@ impl Quick {
             return Effect::None;
         }
         match (k, down) {
+            (Key::Up | Key::Down, true) => {
+                let Some(Tile { kind: TileKind::StartReplay { seconds }, .. }) = self.focused() else { return Effect::None };
+                let choices = replay::LENGTHS;
+                let current = choices.iter().position(|s| s == seconds).unwrap_or(1);
+                let next = (current + if k == Key::Up { 1 } else { choices.len() - 1 }) % choices.len();
+                self.replay_seconds = Some(choices[next]);
+                self.tiles[self.focus] = start_replay_tile(choices[next]);
+                Effect::Redraw
+            }
             (Key::Left, true) if self.focus > 0 => {
                 self.focus -= 1;
                 self.enter_since = None;
@@ -499,6 +534,7 @@ impl Quick {
 
 fn same_kind(a: &TileKind, b: &TileKind) -> bool {
     match (a, b) {
+        (TileKind::SaveReplay, TileKind::StartReplay { .. }) | (TileKind::StartReplay { .. }, TileKind::SaveReplay) => true,
         (TileKind::Pin(x), TileKind::Pin(y)) => x.same_item(y),
         (TileKind::Notice { id: a, button: x }, TileKind::Notice { id: b, button: y }) => a == b && x == y,
         _ => std::mem::discriminant(a) == std::mem::discriminant(b),
@@ -509,11 +545,12 @@ fn same_kind(a: &TileKind, b: &TileKind) -> bool {
 
 /// A running `gpu-screen-recorder` with a replay buffer (`-r SECONDS`): its pid and seconds.
 /// It saves the buffer on SIGUSR1.
-pub fn replay_buffer() -> Option<(u32, u32)> {
+pub fn replay_buffer(exclude: impl Fn(u32) -> bool) -> Option<(u32, u32)> {
     let dir = std::fs::read_dir("/proc").ok()?;
     let uid = unsafe { libc::getuid() };
     for e in dir.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        if exclude(pid) { continue; }
         let Ok(md) = std::fs::metadata(e.path()) else { continue };
         if std::os::unix::fs::MetadataExt::uid(&md) != uid {
             continue;
@@ -598,11 +635,13 @@ fn hint(th: &Theme, parts: Vec<gpui::AnyElement>) -> gpui::Div {
 }
 
 impl Render for QuickView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cx.global::<Theme>().clone();
         self.parts.borrow_mut().clear();
         let shade = th.ink0;
-        let tiles = self.tiles.iter().enumerate().map(|(i, t)| {
+        let visible = (((f32::from(window.viewport_size().width) - 32.) / 162.).floor() as usize).max(1);
+        let start = self.focus.saturating_sub(visible / 2).min(self.tiles.len().saturating_sub(visible));
+        let tiles = self.tiles.iter().enumerate().skip(start).take(visible).map(|(i, t)| {
             let focused = i == self.focus;
             let value_color = match t.on {
                 Some(true) => th.ok,
@@ -718,34 +757,35 @@ mod tests {
 
     #[test]
     fn tiles_like_the_mock() {
-        let t = tiles(&data(), &[pin()], &[], None);
+        let t = tiles(&data(), &[pin()], &[], ReplayState::Off);
         let names: Vec<(&str, &str)> = t.iter().map(|t| (t.label.as_str(), t.value.as_str())).collect();
-        assert_eq!(names, [("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Crowd density", "2"), ("Screenshot", "Game only"), ("Quit game", "Hold A")]);
+        assert_eq!(names, [("Frame Generation", "On · F9"), ("HUD", "Compact"), ("Frame rate cap", "120 fps"), ("Crowd density", "2"), ("Screenshot", "Game only"), ("Start replay buffer", "▲ ▼  60 s"), ("Quit game", "Hold A")]);
         // A replay buffer and a notice's buttons; no frame generation without the option.
         let mut d = data();
         if let Load::Ready(v) = &mut d.options {
             v[0].options.remove("fg.enabled");
         }
         let n = ToastData { notice: Some("n-3".into()), title: "DLSS v4 is ready".into(), buttons: vec![NoticeButton { id: "keep_v3".into(), label: "Keep v3 for now".into(), primary: true }], ..Default::default() };
-        let t = tiles(&d, &[], &[n], Some(77));
+        let t = tiles(&d, &[], &[n], ReplayState::External { pid: 77, seconds: 60 });
         assert_eq!(t[0].kind, TileKind::Notice { id: "n-3".into(), button: "keep_v3".into() });
         assert!(!t.iter().any(|t| matches!(t.kind, TileKind::FrameGen { .. })));
         assert!(t.iter().any(|t| t.kind == TileKind::Replay { pid: 77 }));
         // A pin that's gone from the profile has no tile.
         let gone = QuickPin { id: "x.y".into(), ..pin() };
-        assert_eq!(tiles(&data(), &[gone], &[], None).len(), 5);
+        assert_eq!(tiles(&data(), &[gone], &[], ReplayState::Off).len(), 6);
     }
 
     #[test]
     fn what_tiles_do() {
         let d = data();
-        let t = tiles(&d, &[pin()], &[], None);
+        let t = tiles(&d, &[pin()], &[], ReplayState::Off);
         assert_eq!(act(&t[0], &d), Some(Act::SetOption("m1/aco-dlss".into(), "fg.enabled".into(), json!(false))));
         assert_eq!(act(&t[1], &d), Some(Act::HudPreset("standard".into())));
         assert_eq!(act(&t[2], &d), Some(Act::SetTweak("fps.cap".into(), json!(144))));
         assert_eq!(act(&t[3], &d), Some(Act::SetOption("m1/aco-dlss".into(), "world.npc_density".into(), json!(2.5))));
         assert_eq!(act(&t[4], &d), Some(Act::Screenshot));
-        assert_eq!(act(&t[5], &d), Some(Act::Quit));
+        assert_eq!(act(&t[5], &d), Some(Act::Replay(replay::Action::Start(60))));
+        assert_eq!(act(&t[6], &d), Some(Act::Quit));
     }
 
     #[test]
@@ -774,7 +814,7 @@ mod tests {
         // Not an option: refused.
         assert!(pin_row(&d, &Row::Note("x".into()), &Default::default()).is_err());
         // Pinned, its tile shows in the quick menu.
-        let tiles = tiles(&d, &[t.pin], &[], None);
+        let tiles = tiles(&d, &[t.pin], &[], ReplayState::Off);
         assert!(tiles.iter().any(|x| matches!(&x.kind, TileKind::Pin(p) if p.id == "fps.cap")));
     }
 
@@ -789,8 +829,23 @@ mod tests {
 
     fn quick() -> Quick {
         let mut q = Quick::default();
-        q.set_tiles(tiles(&data(), &[pin()], &[], None));
+        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Off));
         q
+    }
+
+    #[test]
+    fn choose_buffer_length_then_reopen_on_save() {
+        let mut q = quick();
+        let now = Instant::now();
+        q.latch("s", now);
+        q.focus = q.tiles.iter().position(|t| matches!(t.kind, TileKind::StartReplay { .. })).unwrap();
+        assert_eq!(q.key(Key::Down, true, now), Effect::Redraw);
+        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Off));
+        assert_eq!(act(q.focused().unwrap(), &data()), Some(Act::Replay(replay::Action::Start(30))));
+        q.key(Key::Enter, true, now);
+        q.set_tiles(tiles(&data(), &[pin()], &[], ReplayState::Active(30)));
+        q.latch("s", now);
+        assert_eq!(act(q.focused().unwrap(), &data()), Some(Act::Replay(replay::Action::Save)));
     }
 
     #[test]

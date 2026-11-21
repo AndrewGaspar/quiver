@@ -441,6 +441,14 @@ impl PanelCtl {
         self.with_view(cx, |v, _| v.pinned = pins);
     }
 
+    pub fn set_replay(&self, state: crate::replay::State, cx: &mut App) {
+        self.with_view(cx, |v, _| v.replay = state);
+    }
+
+    pub fn replay_feedback(&self, message: String, error: bool, cx: &mut App) {
+        self.with_view(cx, |v, _| v.replay_note = Some((message, if error { quiver_ui::options::Tone::Bad } else { quiver_ui::options::Tone::Ok })));
+    }
+
     pub fn pin_failed(&self, scope: &str, reason: String, cx: &mut App) {
         self.with_view(cx, |v, _| {
             if let Some(s) = v.data.session.ready() {
@@ -622,6 +630,14 @@ impl PanelCtl {
         let active = h.active_window();
         let clients = h.clients();
         hypr::game_window(&clients, active.as_ref(), session, &[], std::path::Path::new("/proc")).cloned()
+    }
+
+    pub fn game_monitor(&mut self, session: &str) -> Option<String> {
+        let window = self.hypr_game_window(session);
+        let monitors = self.hypr()?.monitors();
+        window.and_then(|w| monitors.iter().find(|m| m.id == w.monitor))
+            .or_else(|| if monitors.len() == 1 { monitors.first() } else { None })
+            .map(|m| m.name.clone())
     }
 
     /// `show`: whether the game is in front when the command comes (else the panel opens

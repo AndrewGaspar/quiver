@@ -73,7 +73,7 @@ fn main() {
         let notices = vec![sample_toasts().remove(3)];
         for (name, latched_quit, with_notice) in [("quick", false, false), ("quick-notice", false, true), ("quick-quit", true, false)] {
             let mut q = Quick::default();
-            q.set_tiles(tiles(&data, &pins, if with_notice { &notices } else { &[] }, if with_notice { Some(4242) } else { None }));
+            q.set_tiles(tiles(&data, &pins, if with_notice { &notices } else { &[] }, if with_notice { quiver_sight::replay::State::External { pid: 4242, seconds: 60 } } else { quiver_sight::replay::State::Off }));
             let t = Instant::now();
             if latched_quit {
                 q.latch("s-1", t);

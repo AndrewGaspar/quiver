@@ -56,6 +56,8 @@ pub enum Msg {
     PinFailed { scope: String, reason: String },
     /// Read the panel chord again (the quick menu, every `quick::POLL` while it matters).
     QuickPoll,
+    Replay { session: String, action: crate::replay::Action },
+    ReplayFeedback { session: String, result: Result<String, String> },
     /// quiverd's answer to the Performance section (`panel::sections::performance`).
     Perf { session: String, reply: crate::panel::sections::performance::Reply },
     /// The panel's layout changed (docked or centred, design/SIGHT.md §9): the backdrop

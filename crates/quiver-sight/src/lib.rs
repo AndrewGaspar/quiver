@@ -48,6 +48,7 @@ pub mod overlay;
 pub mod panel;
 pub mod place;
 pub mod quick;
+pub mod replay;
 pub mod screenshot;
 pub mod toasts;
 pub mod toplevels;
@@ -94,10 +95,12 @@ pub struct Sight {
     /// To quiverd (`None`: the demo).
     link: Option<tokio::sync::mpsc::UnboundedSender<link::LinkReq>>,
     settings: SightSettings,
+    replay_enabled: bool,
     /// The toasts, the chip and the hint drawn in the game.
     overlay: overlay::Overlay,
     /// Sessions whose game didn't show the overlay lately (toasts on the desktop meanwhile).
     overlay_failed: HashMap<String, Instant>,
+    recorders: HashMap<String, replay::Recorder>,
     quick: quick::Quick,
     quick_shown: Option<glue::QuickShown>,
     /// The panel command a press came with: a tap opens the panel with it.
@@ -116,7 +119,7 @@ pub struct Sight {
 const HINT_EVERY: Duration = Duration::from_secs(1);
 
 impl Sight {
-    fn new(layer_shell: bool, panel: panel::PanelCtl, tx: Option<mpsc::UnboundedSender<Msg>>, link: Option<tokio::sync::mpsc::UnboundedSender<link::LinkReq>>, settings: SightSettings) -> Self {
+    fn new(layer_shell: bool, panel: panel::PanelCtl, tx: Option<mpsc::UnboundedSender<Msg>>, link: Option<tokio::sync::mpsc::UnboundedSender<link::LinkReq>>, settings: SightSettings, replay_enabled: bool) -> Self {
         Self {
             huds: HashMap::new(),
             toasts: toasts::ToastLane::new(layer_shell),
@@ -129,8 +132,10 @@ impl Sight {
             recheck: None,
             link,
             settings,
+            replay_enabled,
             overlay: Default::default(),
             overlay_failed: HashMap::new(),
+            recorders: HashMap::new(),
             quick: Default::default(),
             quick_shown: None,
             quick_cmd: None,
@@ -171,6 +176,9 @@ impl Sight {
         let was_open = self.panel.is_open();
         let session = c.session.clone().or_else(|| self.panel.session().map(str::to_owned));
         self.panel.command(c, hidden, cx);
+        if let Some(s) = self.panel.session().map(str::to_owned) {
+            self.panel.set_replay(self.replay_state(&s), cx);
+        }
         self.apply_front(cx);
         if was_open && !self.panel.is_open() {
             self.chip(session.as_deref(), false, cx);
@@ -260,6 +268,7 @@ impl Sight {
                 self.panel.set_stereo(&s, None, cx);
                 self.front.ended(&s);
                 self.hinted.remove(&s);
+                self.recorders.remove(&s);
                 self.quick_session_ended(&s, cx);
                 if let Some(mut h) = self.huds.remove(&s) {
                     let (rss, hwm) = game::rss_mib();
@@ -280,6 +289,8 @@ impl Sight {
                 self.panel_pins(cx);
                 self.panel.pin_failed(&scope, reason, cx);
             }
+            Msg::Replay { session, action } => self.apply_replay(&session, action, cx),
+            Msg::ReplayFeedback { session, result } => self.replay_feedback(&session, result, cx),
             Msg::QuickPoll => self.quick_polled(cx),
             Msg::Quit(why) => {
                 tracing::info!("quitting: {why}");
@@ -287,6 +298,7 @@ impl Sight {
                     h.game.close(cx);
                     h.desktop.close(cx);
                 }
+                self.recorders.clear();
                 self.toasts.close(cx);
                 self.overlay.close(cx);
                 self.panel.close(cx);
@@ -402,6 +414,7 @@ impl Sight {
         self.quick_renew();
         // The panel's clock and play time.
         if self.ticks.is_multiple_of(4) {
+            self.poll_replays(cx);
             self.panel.tick(cx);
         }
         // Learning which toplevel is the game's needs time to pass with nothing happening.
@@ -546,7 +559,7 @@ pub fn run() -> anyhow::Result<()> {
     app.with_quit_mode(gpui::QuitMode::Explicit).with_assets(quiver_ui::assets::Assets).run(move |cx: &mut App| {
         let dir = theme::omarchy_state_dir();
         quiver_ui::init(cx, theme::load(&dir));
-        let sight = Rc::new(RefCell::new(Sight::new(layer_shell, panel, Some(ui_tx), sight_link, settings)));
+        let sight = Rc::new(RefCell::new(Sight::new(layer_shell, panel, Some(ui_tx), sight_link, settings, args.demo.is_none() && args.lab.is_none())));
         // Theme switches: reload, and re-render what's shown (by replaying the models).
         let (ttx, mut trx) = mpsc::unbounded::<()>();
         theme::watch(dir.clone(), move || {

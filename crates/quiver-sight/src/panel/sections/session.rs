@@ -246,6 +246,10 @@ pub fn fg_toggle(options: &[SurfaceState]) -> Option<(String, String, String, Op
 
 /// The Quick toggles and buttons, in focus order.
 pub fn rows(d: &PanelData) -> Vec<Row> {
+    rows_with_replay(d, crate::replay::State::Hidden)
+}
+
+pub fn rows_with_replay(d: &PanelData, replay: crate::replay::State) -> Vec<Row> {
     let mut out = Vec::new();
     match &d.session {
         Load::Loading => out.push(Row::Note("Loading the session…".into())),
@@ -267,6 +271,8 @@ pub fn rows(d: &PanelData) -> Vec<Row> {
     }
     out.push(Row::Pref(Pref::Dnd));
     out.push(Row::Button(Button::Screenshot));
+    if replay.primary().is_some() { out.push(Row::Button(Button::Replay)); }
+    if matches!(replay, crate::replay::State::Active(_)) { out.push(Row::Button(Button::StopReplay)); }
     out.push(Row::Button(Button::Quit));
     out.push(Row::Button(Button::ForceQuit));
     out
@@ -363,6 +369,17 @@ pub fn body(v: &PanelView, th: &Theme, rows: &[Row], focused: Option<usize>, doc
         actions = actions.child(div().pt(px(10.)).text_size(px(12.)).text_color(tone_color(th, tone)).child(t));
     } else if let Some(why) = x.info.as_ref().and_then(|i| i.capture_off.clone()) {
         actions = actions.child(div().pt(px(10.)).text_size(px(12.)).text_color(th.tx3).child(format!("Screenshots: {why}")));
+    }
+    let detail = match v.replay {
+        crate::replay::State::Off => Some("Buffers 60 s of display video and playback audio. Choose another length in the Quick Menu.".to_owned()),
+        crate::replay::State::Active(s) | crate::replay::State::External { seconds: s, .. } => Some(format!("Save up to the last {s} seconds.")),
+        _ => None,
+    };
+    if let Some(text) = detail {
+        actions = actions.child(div().pt(px(8.)).text_size(px(12.)).text_color(th.tx3).child(text));
+    }
+    if let Some((text, tone)) = v.replay_note.clone() {
+        actions = actions.child(div().pt(px(8.)).text_size(px(12.)).text_color(tone_color(th, tone)).child(text));
     }
     right = right.child(actions);
     if docked {
@@ -595,6 +612,8 @@ fn switch(th: &Theme, on: bool) -> gpui::Div {
 
 fn button(v: &PanelView, th: &Theme, i: usize, b: Button, focused: bool, cx: &mut Context<PanelView>) -> AnyElement {
     let (label, ic, col, border) = match b {
+        Button::Replay => (v.replay.primary().map_or("Replay", |(label, _)| label), Icon::History, th.tx1, th.line2),
+        Button::StopReplay => ("Stop buffer", Icon::History, th.tx1, th.line2),
         Button::Screenshot => ("Screenshot", Icon::Image, th.tx1, th.line2),
         Button::Quit => ("Quit game", Icon::LogOut, th.tx1, th.line2),
         Button::ForceQuit => ("Force quit…", Icon::CircleX, th.bad, th.bad.opacity(0.4)),
