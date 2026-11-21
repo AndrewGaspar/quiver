@@ -1,0 +1,21 @@
+name = "bufferbloat-cable"
+summary = "The server on a DOCSIS cable line: the stream rides its 20 Mbit/s upstream behind a 600 ms FIFO; 300 Mbit/s the other way."
+sources = [
+  "Gettys and Nichols, 'Bufferbloat: Dark Buffers in the Internet' (ACM Queue, 2011): cable modems with upstream buffers of a second or more.",
+  "The FCC's Measuring Broadband America reports cable idle round trips of roughly 15–25 ms, and latency under load that rises by hundreds of ms on many lines.",
+  "DOCSIS 3.1 specifies PIE AQM upstream (RFC 8034), but many modems and plans still behave as deep FIFOs.",
+  "The brief's 20 Mbit/s up and 300 down: a self-hosted server's upload is what carries the stream (to_client).",
+]
+
+[both]
+delay_ms = 9
+jitter_ms = 1
+distribution = "normal"
+
+[to_client]
+rate_mbit = 20
+queue_ms = 600
+
+[to_server]
+rate_mbit = 300
+queue_ms = 100

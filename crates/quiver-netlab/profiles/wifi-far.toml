@@ -1,0 +1,20 @@
+name = "wifi-far"
+summary = "Wi-Fi one wall away from the access point (5 GHz around −70 dBm): lower rate, more retries, short loss bursts."
+sources = [
+  "An interior wall costs roughly 3–10 dB at 5 GHz (plasterboard to brick; ITU-R P.1238 indoor propagation); at −65 to −70 dBm an 802.11ac/ax link falls to MCS 3–5.",
+  "At those rates TCP throughput is 100–300 Mbit/s down and about half that up.",
+  "More MAC retransmissions widen the delay tail (several ms) and leave short loss bursts when retries run out (about 0.3%).",
+]
+
+[both]
+delay_ms = 2.5
+jitter_ms = 3.0
+distribution = "paretonormal"
+loss = { pct = 0.3, burst = 2 }
+queue_ms = 50
+
+[to_client]
+rate_mbit = 200
+
+[to_server]
+rate_mbit = 100

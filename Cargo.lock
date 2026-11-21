@@ -4902,6 +4902,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "quiver-netlab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fastrand",
+ "libc",
+ "quiver-stream-proto",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
 name = "quiver-pad"
 version = "0.1.0"
 dependencies = [

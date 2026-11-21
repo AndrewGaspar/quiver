@@ -1,0 +1,11 @@
+name = "microwave"
+summary = "A microwave oven next to a 2.4 GHz link: 2 s of 30% bursty loss both ways, then clean again. FEC and reference invalidation should ride it out without a keyframe storm."
+base = "wifi6-good"
+duration_s = 25
+
+[[event]]
+at_s = 10
+kind = "set"
+label = "microwave: 30% loss"
+for_s = 2
+both = { loss = { pct = 30, burst = 4 } }

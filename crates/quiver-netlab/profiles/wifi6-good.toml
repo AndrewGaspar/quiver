@@ -1,0 +1,20 @@
+name = "wifi6-good"
+summary = "Wi-Fi 6 (802.11ax, 5 GHz, 80 MHz, 2×2) in the same room as the access point."
+sources = [
+  "802.11ax 2×2 at 80 MHz has a 1201 Mbit/s PHY rate; TCP throughput at short range is commonly 600–900 Mbit/s down, less up (a client's lower transmit power).",
+  "Contention, block-ack aggregation and power save give a 2–4 ms round trip with occasional 10–20 ms spikes; MAC retries leave about 0.1% residual loss.",
+  "Access point and driver queues are tens of ms deep; Linux mac80211's airtime queues with fq_codel (Høiland-Jørgensen et al., USENIX ATC 2017) keep them short, many APs don't.",
+]
+
+[both]
+delay_ms = 1.5
+jitter_ms = 1.0
+distribution = "paretonormal"
+loss = { pct = 0.1 }
+queue_ms = 30
+
+[to_client]
+rate_mbit = 700
+
+[to_server]
+rate_mbit = 450

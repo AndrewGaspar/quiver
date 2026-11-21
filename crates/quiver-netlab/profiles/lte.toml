@@ -1,0 +1,22 @@
+name = "lte"
+summary = "LTE at a fair signal: 60–80 ms round trip, 10–50 Mbit/s down that moves every second, a deep FIFO."
+sources = [
+  "Ookla and Opensignal put LTE medians at roughly 20–50 Mbit/s down and 5–15 Mbit/s up; the rate here wanders 8–50 down and 2–15 up.",
+  "LTE round trips are typically 40–80 ms (scheduling grants, HARQ retransmissions, the core); 64 ms here.",
+  "Per-device base-station buffers of hundreds of ms make cellular the classic bufferbloat case (Jiang et al., IMC 2012).",
+]
+
+[both]
+delay_ms = 32
+jitter_ms = 8
+distribution = "normal"
+loss = { pct = 0.3, burst = 3 }
+queue_ms = 300
+
+[to_client]
+rate_mbit = 30
+wander = { min_mbit = 8, max_mbit = 50, every_ms = 500, step_pct = 20 }
+
+[to_server]
+rate_mbit = 8
+wander = { min_mbit = 2, max_mbit = 15, every_ms = 500, step_pct = 20 }

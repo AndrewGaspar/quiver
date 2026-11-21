@@ -1,0 +1,15 @@
+name = "cross-country"
+summary = "Coast to coast in the US over good broadband: 35 ms each way (70 ms round trip), little loss."
+sources = [
+  "WonderNetwork's city-to-city ping statistics show New York – Los Angeles at about 65–70 ms round trip; light in fibre covers ~200 km per ms, so ~4,000 km is at least 20 ms each way before routing.",
+  "Backbone paths are well provisioned: a ms or two of jitter and loss around 0.05%.",
+  "The bottleneck is the server's home upload; 100 Mbit/s is a common fibre or good cable tier.",
+]
+
+[both]
+delay_ms = 35
+jitter_ms = 1.5
+distribution = "normal"
+loss = { pct = 0.05 }
+rate_mbit = 100
+queue_ms = 60

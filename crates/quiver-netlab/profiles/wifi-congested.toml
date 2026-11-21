@@ -1,0 +1,20 @@
+name = "wifi-congested"
+summary = "Wi-Fi in a dense apartment block: many overlapping networks on the channel, jitter spikes and 1–2% bursty loss, about 80 Mbit/s."
+sources = [
+  "802.11's CSMA/CA defers to every overlapping network on the channel; at high channel utilisation, medium access delay reaches tens of ms (the long tail here, paretonormal).",
+  "Collisions and hidden terminals that exhaust MAC retries lose packets in bursts: 1.5% mean in bursts of 3 here, as the brief asks (1–2% bursty).",
+  "About 80 Mbit/s of airtime left for this client (the brief); upload is about half.",
+]
+
+[both]
+delay_ms = 3.0
+jitter_ms = 8.0
+distribution = "paretonormal"
+loss = { pct = 1.5, burst = 3 }
+queue_ms = 80
+
+[to_client]
+rate_mbit = 80
+
+[to_server]
+rate_mbit = 40

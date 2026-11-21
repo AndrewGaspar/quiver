@@ -1,0 +1,20 @@
+name = "step-down"
+summary = "The rate to the client drops from 200 to 20 Mbit/s at 10 s and comes back at 25 s: does the bitrate follow within a second, without a queue building?"
+base = "wifi6-good"
+duration_s = 40
+
+[to_client]
+rate_mbit = 200
+queue_ms = 100
+
+[[event]]
+at_s = 10
+kind = "set"
+label = "200 → 20 Mbit/s"
+to_client = { rate_mbit = 20 }
+
+[[event]]
+at_s = 25
+kind = "set"
+label = "back to 200 Mbit/s"
+to_client = { rate_mbit = 200 }

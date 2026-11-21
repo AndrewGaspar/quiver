@@ -1,0 +1,12 @@
+name = "competing-tcp"
+summary = "Someone at the server's end starts a big upload: a TCP bulk flow shares the 20 Mbit/s upstream and fills its 600 ms FIFO for 15 s."
+base = "bufferbloat-cable"
+duration_s = 35
+
+[[event]]
+at_s = 10
+kind = "flood"
+label = "TCP bulk upload"
+proto = "tcp"
+dir = "to_client"
+for_s = 15

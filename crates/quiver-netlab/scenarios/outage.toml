@@ -1,0 +1,9 @@
+name = "outage"
+summary = "Half a second of nothing either way (an AP channel switch, a cable blip): how long until frames flow again, and does it come back without a keyframe storm?"
+base = "wifi6-good"
+duration_s = 20
+
+[[event]]
+at_s = 10
+kind = "outage"
+ms = 500

@@ -1,0 +1,14 @@
+name = "tailscale-relay"
+summary = "Tailscale through a DERP relay (no direct UDP path): the detour to the relay and back, over TCP, so loss shows up as delay spikes."
+sources = [
+  "Tailscale's docs ('DERP servers'): when NAT traversal fails, traffic is relayed over HTTPS through the nearest DERP region; relays are shared and slower than a direct path.",
+  "The detour adds the round trip to the relay region, about 20–40 ms within a continent on top of the direct path: 36 ms round trip here.",
+  "DERP rides TCP, so a packet lost underneath arrives late (after a retransmission) rather than not at all: no loss here, a heavy delay tail instead (paretonormal).",
+]
+
+[both]
+delay_ms = 18
+jitter_ms = 6
+distribution = "paretonormal"
+rate_mbit = 40
+queue_ms = 100
