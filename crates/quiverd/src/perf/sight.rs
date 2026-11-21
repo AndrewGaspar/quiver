@@ -110,6 +110,8 @@ impl Spawner {
         let log = std::fs::create_dir_all(data_dir).and_then(|_| std::fs::File::create(data_dir.join("sight.log")));
         let mut cmd = Command::new(&bin);
         cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        // The session's display when quiverd started before it (at boot).
+        cmd.envs(quiver_core::scope::session_env());
         match log {
             Ok(f) => cmd.stderr(f),
             Err(_) => cmd.stderr(Stdio::null()),

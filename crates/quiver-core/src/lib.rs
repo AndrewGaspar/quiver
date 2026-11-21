@@ -35,6 +35,7 @@ pub mod saves;
 pub mod secret;
 pub mod savestores;
 pub mod savesync;
+pub mod scope;
 pub mod settings;
 pub mod sightenv;
 pub mod spaces;

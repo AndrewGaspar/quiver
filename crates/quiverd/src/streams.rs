@@ -183,6 +183,7 @@ fn host_argv(id: &str, scope: bool) -> Vec<String> {
     if scope {
         a.extend(["/usr/bin/systemd-run", "--user", "--scope", "--collect", "--quiet"].map(String::from));
         a.push(format!("--unit=quiver-stream-{id}"));
+        a.push(format!("--slice={}", quiver_api::service::SLICE));
         // systemd-run reaches the user manager through the real runtime folder; the host
         // keeps this quiverd's (a scratch daemon's has its own).
         if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
