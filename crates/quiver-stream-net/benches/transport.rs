@@ -25,7 +25,7 @@ fn main() {
     let secs = std::env::var("QUIVER_BENCH_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
     rt.block_on(throughput(150_000, secs));
     rt.block_on(throughput(600_000, secs.min(5)));
-    for fraction in [0.1, 0.3, 0.5, 1.0] {
+    for fraction in [0.1, 0.25, 0.5, 1.0] {
         rt.block_on(frame_latency(fraction));
     }
 }
