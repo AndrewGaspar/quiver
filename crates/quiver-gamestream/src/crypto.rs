@@ -16,7 +16,7 @@ pub type Key = [u8; 16];
 
 /// AES-128-ECB over whole blocks (pairing). `data.len()` must be a multiple of 16.
 pub fn ecb_encrypt(key: &Key, data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() % 16 != 0 {
+    if !data.len().is_multiple_of(16) {
         bail!("ECB input of {} bytes isn't whole blocks", data.len());
     }
     let cipher = Aes128::new(GenericArray::from_slice(key));
@@ -29,7 +29,7 @@ pub fn ecb_encrypt(key: &Key, data: &[u8]) -> Result<Vec<u8>> {
 
 /// The inverse of [`ecb_encrypt`].
 pub fn ecb_decrypt(key: &Key, data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() % 16 != 0 {
+    if !data.len().is_multiple_of(16) {
         bail!("ECB input of {} bytes isn't whole blocks", data.len());
     }
     let cipher = Aes128::new(GenericArray::from_slice(key));

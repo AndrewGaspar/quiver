@@ -166,10 +166,9 @@ impl ParityMatrix {
         let mut rhs: Vec<Vec<u8>> = Vec::with_capacity(n);
         for (r, &j) in use_rows.iter().enumerate() {
             let mut v = shards[self.data + j].clone().expect("present");
-            for i in 0..self.data {
-                match &shards[i] {
-                    Some(d) => mul_add(&mut v, d, self.get(j, i)),
-                    None => {}
+            for (i, d) in shards[..self.data].iter().enumerate() {
+                if let Some(d) = d {
+                    mul_add(&mut v, d, self.get(j, i));
                 }
             }
             for (c, &m) in missing.iter().enumerate() {

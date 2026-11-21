@@ -96,6 +96,9 @@ pub struct AudioPacketizer {
     block: Vec<Vec<u8>>,
     block_base_seq: u16,
     block_base_ts: u32,
+    /// Blocks sent with FEC, and blocks whose packets differed in size and went without.
+    pub fec_blocks: u64,
+    pub uneven_blocks: u64,
 }
 
 impl AudioPacketizer {
@@ -109,6 +112,8 @@ impl AudioPacketizer {
             block: Vec::with_capacity(DATA_SHARDS),
             block_base_seq: 0,
             block_base_ts: 0,
+            fec_blocks: 0,
+            uneven_blocks: 0,
         }
     }
 
@@ -131,7 +136,7 @@ impl AudioPacketizer {
         pkt.extend_from_slice(&payload);
         out.push(pkt);
 
-        if seq as usize % DATA_SHARDS == 0 {
+        if (seq as usize).is_multiple_of(DATA_SHARDS) {
             self.block.clear();
             self.block_base_seq = seq;
             self.block_base_ts = ts;
@@ -142,7 +147,10 @@ impl AudioPacketizer {
         }
         if seq as usize % DATA_SHARDS == DATA_SHARDS - 1 && self.block.len() == DATA_SHARDS {
             let len = self.block[0].len();
-            if self.block.iter().all(|p| p.len() == len) {
+            if self.block.iter().any(|p| p.len() != len) {
+                self.uneven_blocks += 1;
+            } else {
+                self.fec_blocks += 1;
                 let mut parity = vec![vec![0u8; len]; 2];
                 {
                     let data: Vec<&[u8]> = self.block.iter().map(Vec::as_slice).collect();

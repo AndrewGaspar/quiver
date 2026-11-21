@@ -190,7 +190,13 @@ fn launch(shared: &Arc<Shared>, req: &HttpRequest, client: PairedClient, peer: I
     };
     if let Some(l) = &current {
         if l.is_streaming() {
-            return Reply::error(400, "A stream is already running on this server.");
+            // The same client launching again has left its last stream (crashed, or lost the
+            // network before its control stream timed out): end that one. Another client
+            // can't take over a running stream.
+            if l.client.fingerprint != client.fingerprint {
+                return Reply::error(400, "A stream is already running on this server.");
+            }
+            l.end("the client started again");
         }
         if !resume && l.app.key != app.key {
             // Moonlight offers Resume or Quit for the running app; launching another quits it.
@@ -233,6 +239,7 @@ fn launch(shared: &Arc<Shared>, req: &HttpRequest, client: PairedClient, peer: I
 
 fn cancel(shared: &Shared) -> Reply {
     if let Some(l) = shared.launch.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        tracing::info!(app = %l.app.title, "Moonlight quit the app");
         l.end("the client quit the app");
         shared.host.quit(&l.app.key);
     }

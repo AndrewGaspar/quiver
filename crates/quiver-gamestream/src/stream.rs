@@ -137,10 +137,28 @@ impl Launch {
             let audio = UdpSocket::from_std(bind(p.audio)?)?;
             let control = bind(p.control)?;
             set_send_buffer(&video, 4 << 20);
+            dont_fragment(&video, self.local_ip);
+            dont_fragment(&audio, self.local_ip);
             s.sockets = Some(Sockets { video: Arc::new(video), audio: Arc::new(audio), control });
         }
         let p = shared.config.ports;
         Ok((p.video, p.audio, p.control))
+    }
+}
+
+/// Media datagrams never fragment: a send larger than the path MTU fails instead (and the
+/// kernel learns a smaller path MTU from ICMP). Packets are sized to fit
+/// ([`fit_packet_size`]).
+fn dont_fragment(sock: &UdpSocket, local: IpAddr) {
+    use std::os::fd::AsRawFd;
+    let (level, name, value) = if local.is_ipv4() {
+        (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, libc::IP_PMTUDISC_DO)
+    } else {
+        (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER, libc::IPV6_PMTUDISC_DO)
+    };
+    // SAFETY: a valid socket fd and a pointer to an int that outlives the call.
+    unsafe {
+        libc::setsockopt(sock.as_raw_fd(), level, name, (&value as *const i32).cast(), std::mem::size_of::<i32>() as u32);
     }
 }
 
@@ -196,6 +214,17 @@ pub(crate) async fn serve_rtsp(shared: &Arc<Shared>, mut tcp: TcpStream, peer: S
 
     tracing::debug!(method = %req.method, target = %req.target, "RTSP");
     let cseq = req.cseq();
+    if req.method == "SETUP" {
+        // A stream that was just ended may still hold the ports for a moment.
+        for _ in 0..30 {
+            match launch.ensure_sockets(shared) {
+                Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                _ => break,
+            }
+        }
+    }
     let (status, reason, headers, body) = match handle(shared, &launch, &req) {
         Ok(r) => r,
         Err(e) => {
@@ -434,6 +463,8 @@ impl Session {
         let loss = u32::from(c.test_video_loss_percent);
         let mut rng: u32 = 0x9E37_79B9 ^ l.connect_data;
         let mut dropped = 0u64;
+        let (mut sent_packets, mut send_errors, mut largest) = (0u64, 0u64, 0usize);
+        let (mut idr_requests, mut rfi_requests) = (0u32, 0u32);
         let connect_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         tracing::info!(
             codec = ?self.video.codec, w = self.video.width, h = self.video.height, fps = self.video.fps, kbps = self.video.bitrate_kbps,
@@ -460,7 +491,7 @@ impl Session {
                             Err(e) => { tracing::debug!(channel, "control message dropped: {e:#}"); continue; }
                         };
                         match ClientMessage::parse(ptype, &payload) {
-                            ClientMessage::RequestIdr => { let _ = self.control_in_tx.try_send(Control::Keyframe); }
+                            ClientMessage::RequestIdr => { idr_requests += 1; let _ = self.control_in_tx.try_send(Control::Keyframe); }
                             ClientMessage::InvalidateRefFrames { first, last } => {
                                 let seq_of = |f: u32| sent_frames.iter().find(|(i, _)| *i == f).map(|(_, s)| *s);
                                 let since = seq_of(first).or_else(|| sent_frames.front().map(|(_, s)| *s));
@@ -468,6 +499,7 @@ impl Session {
                                 match (since, through) {
                                     (Some(since_seq), Some(through_seq)) if self.video.reference_frame_invalidation => {
                                         invalidated_through = Some(through_seq);
+                                        rfi_requests += 1;
                                         let _ = self.control_in_tx.try_send(Control::LostFrames { since_seq, through_seq });
                                     }
                                     _ => { let _ = self.control_in_tx.try_send(Control::Keyframe); }
@@ -504,7 +536,7 @@ impl Session {
                                     Some(size) => {
                                         tracing::warn!(
                                             asked = self.announce.packet_size, size,
-                                            "the client's video packets don't fit the path MTU: sending smaller ones without FEC (set Moonlight's packet size to {} or less)", size
+                                            "the client's video packets don't fit the path MTU: sending smaller ones without FEC (set Moonlight's packet size to {} or less)", size + if video_key.is_some() { 32 } else { 0 }
                                         );
                                         VideoPacketizer::new(size, 0, 0, video_key)
                                     }
@@ -540,7 +572,13 @@ impl Session {
                                 rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
                                 if rng % 100 < loss { dropped += 1; continue; }
                             }
-                            if let Err(e) = self.sockets.video.send_to(&p, to).await { tracing::debug!("video send: {e}"); break; }
+                            if let Err(e) = self.sockets.video.send_to(&p, to).await {
+                                send_errors += 1;
+                                if send_errors <= 5 { tracing::warn!(len = p.len(), "video send: {e}"); }
+                                break;
+                            }
+                            sent_packets += 1;
+                            largest = largest.max(p.len());
                         },
                         Err(e) => tracing::warn!("frame {} not sent: {e:#}", f.seq),
                     }
@@ -567,9 +605,8 @@ impl Session {
             }
         };
 
-        if dropped > 0 {
-            tracing::info!(dropped, "video packets dropped for the loss test");
-        }
+        tracing::info!(sent_packets, largest, send_errors, dropped_for_test = dropped, idr_requests, rfi_requests, "video totals");
+        tracing::info!(fec_blocks = ap.fec_blocks, uneven_blocks = ap.uneven_blocks, "audio totals");
         if connected {
             send(&mut cipher, to_client::TERMINATION, &control::termination(control::TERMINATION_GRACEFUL));
             enet.disconnect();

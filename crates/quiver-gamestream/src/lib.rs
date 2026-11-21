@@ -21,6 +21,16 @@
 //! | UDP 47999 | control: ENet, AES-GCM; input, IDR and RFI requests, rumble, HDR, termination | [`control`], [`input`] |
 //! | UDP 48000 | audio: Opus RTP with FEC, optionally AES-CBC | [`audio`] |
 //!
+//! **Over Tailscale.** [`ServerConfig::bind`] can be just the tailnet's addresses (the 100.x
+//! one and the `fd7a:115c:a1e0::` one, or [`interface_addresses`]`("tailscale0")`), and the
+//! stream's UDP ports bind to whichever address the client used. Nothing depends on mDNS:
+//! Moonlight adds the server by IP or MagicDNS name. Tailscale's MTU is 1280, so media
+//! datagrams are sent with don't-fragment and sized to the route's MTU: Moonlight sends 1024-byte
+//! video packets to a 100.x address (it counts CGNAT space as remote), which fit, but treats
+//! an `fd7a:` address as local and asks for 1392, which doesn't; then the server cuts
+//! packets to fit and sends them without FEC (Moonlight's FEC recovery assumes its own
+//! size). Setting Moonlight's packet size to 1024 keeps FEC on such a path.
+//!
 //! **Pairing** is GameStream's PIN flow ([`pairing`]): Moonlight shows a PIN, the server's
 //! owner enters it on the server side, fed in through [`GameStreamServer::submit_pin`] (from
 //! the Quiver app on another machine, or `quiver remote moonlight-pin 1234`).

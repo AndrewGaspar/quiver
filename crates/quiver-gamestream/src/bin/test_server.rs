@@ -288,7 +288,7 @@ fn host_pattern(_: &std::path::Path, _: &mut ServerConfig) -> Result<Arc<dyn Str
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt().with_ansi(false).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).with_writer(std::io::stderr).init();
     let args = Args::parse();
     let codec = match args.codec.as_str() {
         "h264" => VideoCodec::H264,

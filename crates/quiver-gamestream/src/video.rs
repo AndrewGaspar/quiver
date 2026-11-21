@@ -70,7 +70,7 @@ impl VideoPacketizer {
     pub fn new(packet_size: usize, fec_percent: u8, min_parity: usize, cipher: Option<Key>) -> Self {
         Self {
             packet_size: packet_size.max(64),
-            fec_percent: usize::from(fec_percent.min(255)),
+            fec_percent: usize::from(fec_percent),
             min_parity,
             packets: 0,
             frame_index: 0,
