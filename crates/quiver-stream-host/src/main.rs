@@ -96,6 +96,9 @@ struct Args {
     /// Run the test window (an X11 program for the command target) instead of a host.
     #[arg(long, hide = true)]
     test_window: bool,
+    /// Run the display target's placeholder (a moment of black, then nothing until stopped).
+    #[arg(long, hide = true)]
+    placeholder: bool,
     /// The program to run in the virtual display (--target command).
     #[arg(last = true)]
     command: Vec<String>,
@@ -139,9 +142,16 @@ fn main() -> Result<()> {
     if raw.get(1).map(String::as_str) == Some("serve") {
         let s = ServeCli::parse_from(raw.iter().skip(1));
         let args = quiver_stream_host::serve::ServeArgs { socket_fd: s.socket_fd, listen: s.listen, preset: s.preset };
-        return tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(quiver_stream_host::serve::serve(args));
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let r = rt.block_on(quiver_stream_host::serve::serve(args));
+        // The stdin reader blocks in a read quiverd's open pipe never ends: don't wait for it.
+        rt.shutdown_timeout(Duration::from_millis(500));
+        return r;
     }
     let a = Args::parse();
+    if a.placeholder {
+        return quiver_stream_host::testwin::placeholder();
+    }
     if a.test_window {
         return quiver_stream_host::testwin::run(a.fps.round() as u32);
     }

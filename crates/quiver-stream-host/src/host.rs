@@ -96,6 +96,8 @@ pub struct Host {
     input_thread: Option<std::thread::JoinHandle<()>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     parts: Option<Parts>,
+    /// Keeps the thread that started gamescope alive (see [`Host::start`]).
+    _keeper: Option<std_mpsc::Sender<()>>,
 }
 
 /// What lives as long as the stream.
@@ -107,7 +109,23 @@ struct Parts {
 
 impl Host {
     pub async fn start(opts: HostOptions, bitrate: watch::Receiver<u32>) -> Result<Host> {
-        tokio::task::spawn_blocking(move || Host::start_blocking(opts, bitrate)).await.context("the host's start task")?
+        // gamescope dies with the *thread* that started it (PR_SET_PDEATHSIG), so that thread
+        // lives as long as the Host: a blocking-pool thread would exit when idle and take the
+        // display down with it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (keep_tx, keep_rx) = std_mpsc::channel::<()>();
+        let rt = tokio::runtime::Handle::current();
+        std::thread::Builder::new().name("host-start".into()).spawn(move || {
+            let _rt = rt.enter();
+            let r = Host::start_blocking(opts, bitrate).map(|mut h| {
+                h._keeper = Some(keep_tx);
+                h
+            });
+            let _ = tx.send(r);
+            // Until the Host (and with it the sender) is gone.
+            let _ = keep_rx.recv();
+        })?;
+        rx.await.context("the host's start thread")?
     }
 
     fn start_blocking(opts: HostOptions, bitrate: watch::Receiver<u32>) -> Result<Host> {
@@ -140,7 +158,7 @@ impl Host {
                 capture
             }
             Target::Display => {
-                let placeholder = vec!["sleep".into(), "infinity".into()];
+                let placeholder = vec![sandbox_exe(&opts)?.display().to_string(), "--placeholder".into()];
                 let (display, audio, mode) = start_display(&opts, &cfg, placeholder, Vec::new(), false, atx.clone())?;
                 pad_mode = mode.clone();
                 let mut env = audio.child_env();
@@ -242,6 +260,7 @@ impl Host {
             input_thread: Some(input_thread),
             tasks,
             parts: Some(parts),
+            _keeper: None,
         })
     }
 

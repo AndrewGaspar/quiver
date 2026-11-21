@@ -321,6 +321,11 @@ impl Serve {
     async fn session(&mut self, keys: SessionKeys, cmds: &mut mpsc::UnboundedReceiver<ServeIn>) -> Result<SessionEnd> {
         let sock = self.socket.try_clone().context("share the media socket")?;
         let sess = HostSession::bind_socket(sock, keys, host_opts(&self.spec)).context("start the session")?;
+        // The transport answers the client's hello on its own thread meanwhile, so the client
+        // connects while the target (gamescope, the game's display) comes up.
+        if self.host.is_none() {
+            self.start_host().await?;
+        }
         let mut link = sess.link_state();
         let mut target = sess.target_bitrate();
         self.target_kbps = *target.borrow();
@@ -398,7 +403,9 @@ impl Serve {
                         let _ = sess.set_max_bitrate(max);
                         let want = initial_config(&caps, &prefs);
                         let cur = &self.config;
-                        if (want.width, want.height, want.refresh_mhz) != (cur.width, cur.height, cur.refresh_mhz) {
+                        // A rate within 2 % (59.94 against 60) isn't a change.
+                        let rate_differs = want.refresh_mhz.abs_diff(cur.refresh_mhz) * 50 > cur.refresh_mhz;
+                        if (want.width, want.height) != (cur.width, cur.height) || rate_differs {
                             let display = DisplayCaps { width: want.width, height: want.height, refresh_mhz: want.refresh_mhz, ..caps.display.clone() };
                             let _ = host.control_in.try_send(Control::Resize { display });
                         }
@@ -418,6 +425,10 @@ impl Serve {
                         let _ = sess.set_max_bitrate(max);
                         let _ = host.control_in.try_send(Control::Prefs(p));
                     }
+                    // The window settling at the size the stream already has isn't a resize.
+                    Control::Resize { display }
+                        if (display.width & !1, display.height & !1) == (self.config.width, self.config.height)
+                            && display.refresh_mhz.abs_diff(self.config.refresh_mhz) * 50 <= self.config.refresh_mhz => {}
                     c @ (Control::Resize { .. } | Control::LostFrames { .. } | Control::Keyframe) => {
                         let _ = host.control_in.try_send(c);
                     }
@@ -587,16 +598,10 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     };
     events.send(&ServeOut::Listening { port });
     let result = async {
-        s.start_host().await?;
         let mut keys = Some(keys);
         loop {
             let end = match keys.take() {
-                Some(k) => {
-                    if s.host.is_none() {
-                        s.start_host().await?;
-                    }
-                    s.session(k, &mut cmds).await?
-                }
+                Some(k) => s.session(k, &mut cmds).await?,
                 None => s.kept(&mut cmds).await?,
             };
             match end {

@@ -160,6 +160,9 @@ impl Display {
         cmd.args(gamescope_args(&spec, vk.as_deref()));
         cmd.arg("--").arg("sh").arg("-c").arg(PROLOGUE).arg("quiver-stream").args(&spec.command);
         cmd.env("QUIVER_STREAM_DIR", &spec.dir);
+        // Headless: nothing of the desktop's. (gamescope would connect to the person's
+        // compositor when it finds WAYLAND_DISPLAY, and fails without one in its runtime dir.)
+        cmd.env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
