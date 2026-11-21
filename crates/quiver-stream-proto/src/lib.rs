@@ -143,6 +143,9 @@ pub enum StreamTarget {
     LabInstance { instance: String, input: bool },
     /// The host's own desktop (a host that isn't headless).
     Desktop,
+    /// The host's synthetic test pattern, with the frame stamp ([`stamp`]) drawn into every
+    /// frame and a tone each second: for diagnostics and latency checks, no program runs.
+    TestPattern,
 }
 
 /// Reliable messages on the stream's control channel, in both directions.
@@ -180,9 +183,14 @@ pub enum Control {
     Rumble { slot: u8, low: u16, high: u16, duration_ms: u16 },
     /// Host → client: something worth a toast on the client.
     Notice { text: String },
-    /// Either way: the stream is ending.
+    /// Either way: the stream is ending. From the client, `reason` [`BYE_QUIT_GAME`] also
+    /// ends the game; any other reason leaves it running, so the stream can be resumed.
     Bye { reason: String },
 }
+
+/// The [`Control::Bye`] reason with which the client asks the host to end the game too
+/// (the stream menu's "Quit game"). Other reasons only disconnect.
+pub const BYE_QUIT_GAME: &str = "quit-game";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CursorImage {
@@ -239,6 +247,13 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"t\":\"rumble\""));
         assert_eq!(serde_json::from_str::<Control>(&s).unwrap(), m);
+    }
+
+    #[test]
+    fn test_pattern_target_is_additive() {
+        let s = serde_json::to_string(&StreamTarget::TestPattern).unwrap();
+        assert_eq!(s, "\"TestPattern\"");
+        assert_eq!(serde_json::from_str::<StreamTarget>("\"Desktop\"").unwrap(), StreamTarget::Desktop);
     }
 
     #[test]

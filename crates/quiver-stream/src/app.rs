@@ -206,7 +206,7 @@ impl App {
                 self.quit = Some("disconnected".into());
             }
             Action::QuitGame => {
-                self.control(Control::Bye { reason: "quit-game".into() });
+                self.control(Control::Bye { reason: quiver_stream_proto::BYE_QUIT_GAME.into() });
                 self.quit = Some("quit the game".into());
             }
         }
