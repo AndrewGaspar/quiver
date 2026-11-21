@@ -86,7 +86,10 @@ impl Quiver {
     pub fn stream_tag(&self, g: &GameRow) -> Option<String> {
         let (k, s) = self.stream_session(g)?;
         Some(match s.state {
+            // Moonlight's: resumed from Moonlight, not from here.
+            StreamState::Kept if !s.client.is_quiver() => "Kept for Moonlight".into(),
             StreamState::Kept => format!("Resume on {}", self.mx.remotes[k].name()),
+            StreamState::Starting | StreamState::Streaming if !s.client.is_quiver() => "Streaming to Moonlight".into(),
             StreamState::Starting | StreamState::Streaming => "Streaming".into(),
         })
     }

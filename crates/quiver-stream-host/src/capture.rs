@@ -162,13 +162,14 @@ impl Source for PwCapture {
         loop {
             let r = match self.held.take() {
                 Some(r) => r,
-                None => loop {
+                None => {
                     if stop.load(Ordering::Relaxed) {
                         return Ok(Next::Stopped);
                     }
                     match self.rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(r) => break r,
-                        Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                        Ok(r) => r,
+                        // A still picture: let the video thread look at its requests.
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => return Ok(Next::Idle),
                         Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                             if let Some(e) = self.failed.lock().unwrap().clone() {
                                 bail!("capture: {e}");
@@ -176,7 +177,7 @@ impl Source for PwCapture {
                             return Ok(Next::Stopped);
                         }
                     }
-                },
+                }
             };
             // Skip to the newest frame.
             let mut r = r;

@@ -433,7 +433,31 @@ for it resumes with new keys on the same port, the game untouched (the test patt
 meanwhile and starts again). Another machine asking while one streams is refused. Quit game
 (`Bye{reason: "quit-game"}`) ends the stream and quiverd stops the game; the game exiting
 ends the stream. Streams show in `quiver status`, `Request::Streams` and `StreamsChanged`
-("streaming to Laptop", "kept for Laptop until 14:05"); `quiver stream --list|--stop`.
+("streaming to Laptop", "kept for 8 min (until 14:05), resume from Quiver on Laptop");
+`quiver stream --list|--stop`. The keep window is `remote.keep_secs` (600).
+
+**Moonlight sessions** keep the game the same way (`quiver_gamestream::keep`). Moonlight
+going (the app swiped away or backgrounded, the network gone, the control stream timing out)
+is a disconnect, never a quit: the game, its headless gamescope, sink and pads run on for
+`remote.keep_secs`, and `/serverinfo` reports it as `currentgame` with a `_SERVER_BUSY`
+state, so Moonlight shows it running with Resume and Quit. `/resume`, or `/launch` of the
+same app, attaches the new RTSP/ENet/RTP session to the running host with the new launch's
+keys: frames queued meanwhile are dropped, the host is asked for a keyframe at once, a
+different codec or colour goes to the encoder, and a different size or rate is logged and
+kept (a game's display can't resize; Moonlight scales). Launching another app while one runs
+gets GameStream's (and Sunshine's) 400 "An app is already running on this host", so Moonlight
+asks the person to quit it first. Quit app (`/cancel`), `quiver stream --stop`, the game
+exiting, or the window ending stops the game. The kept game shows in `Request::Streams` as
+"kept for 8 min (until 14:05), resume from Moonlight (roth)". **One stream per game across
+both front ends:** Moonlight's host is in quiverd and Quiver's transport's is a `serve`
+process, so a session can't move between them; each refuses the other's game, saying where
+to resume it.
+
+**A still picture.** gamescope paints only on damage, so a paused game sends no frames. The
+capture sources now report a quiet 100 ms (`Next::Idle`), and a keyframe asked for meanwhile
+(a session connecting or resuming, a loss) is made by encoding the last frame again (a new
+encoder session for another codec takes the last frame along). A resumed stream of a still
+game gets its picture at once, natively and from Moonlight.
 
 **Restarts.** The host isn't quiverd's: an exec onto a new build leaves it running, and the
 new build re-adopts it from `$XDG_RUNTIME_DIR/quiver/streams/<id>/` (its record and the
@@ -460,8 +484,8 @@ person's call). Moonlight launches go through the same display and launch
 **Not built:** `LabInstance` (the instance's gamescope is inside its container, with no
 PipeWire for the screencast and its X display in the container's network namespace: it needs
 a capture and an injector inside the container, under the lab limits) and `Desktop`; resizing
-a running game's display; a Moonlight resume keeps no game (its display ends with the
-stream).
+a running game's display; a stream moving between Moonlight and Quiver's own client;
+a Moonlight game surviving a quiverd restart (its host is in quiverd, unlike `serve`).
 
 **Measured on this laptop** (RTX 5070 Laptop; host and client on one GPU, the client in a
 nested headless gamescope at 2560×1440@120, HEVC, the test pattern's stamp read back from
@@ -488,7 +512,5 @@ client's wait for an overtaken frame follows the jitter, and the FEC margin is 2
   `wifi-congested` and `microwave`, and once on loopback with a game on the same GPU); the
   stream now ends with that error instead of freezing. NVDEC never did. Not root-caused: it
   may be the one-GPU test setup (the host's game and the client share it).
-- A still game sends no frames (gamescope paints only on damage), so a resumed stream of a
-  paused game shows "Connecting…" until the picture changes.
 - The pattern's noise can't go below ~12 Mbit/s at the encoder's highest QP, so the
   `pathological` profile (15 Mbit/s, 5 % bursty loss) measures the workload, not the link.

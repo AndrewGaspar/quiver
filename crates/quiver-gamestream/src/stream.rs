@@ -460,6 +460,7 @@ impl Session {
         let mut first_capture: Option<u64> = None;
         let mut sent_keyframe = false;
         let mut connected = false;
+        let mut connected_at: Option<std::time::Instant> = None;
         let loss = u32::from(c.test_video_loss_percent);
         let mut rng: u32 = 0x9E37_79B9 ^ l.connect_data;
         let mut dropped = 0u64;
@@ -481,6 +482,7 @@ impl Session {
                     Some(EnetEvent::Connected(addr)) => {
                         tracing::info!(%addr, "control stream connected");
                         connected = true;
+                        connected_at = Some(std::time::Instant::now());
                         if self.video.hdr {
                             send(&mut cipher, to_client::HDR_MODE, &control::hdr_mode(true, None));
                         }
@@ -552,6 +554,10 @@ impl Session {
                     let (Some(to), Some(vp)) = (video_peer, vp.as_mut()) else { continue };
                     if !sent_keyframe && !f.keyframe { continue; }
                     let ftype = if f.keyframe {
+                        if !sent_keyframe {
+                            let ms = connected_at.map(|t| t.elapsed().as_millis());
+                            tracing::info!(after_connect_ms = ms.unwrap_or(0) as u64, seq = f.seq, "first video frame sent");
+                        }
                         sent_keyframe = true;
                         invalidated_through = None;
                         FrameType::Idr

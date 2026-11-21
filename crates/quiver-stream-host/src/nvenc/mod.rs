@@ -307,6 +307,9 @@ pub struct Encoder {
     refs: RefTracker,
     force_key: bool,
     frames: u64,
+    /// The surface holding the last frame encoded (or adopted from the previous session),
+    /// for [`Encoder::encode_last`].
+    last: Option<usize>,
 }
 
 // SAFETY: the session is used from one thread at a time (the encoder thread owns it).
@@ -339,6 +342,7 @@ impl Encoder {
             refs: RefTracker::new(DPB as usize),
             force_key: true,
             frames: 0,
+            last: None,
             cfg,
         };
         e.caps = e.query_caps(codec_guid(e.cfg.codec))?;
@@ -484,6 +488,39 @@ impl Encoder {
         self.force_key = true;
     }
 
+    /// A keyframe was asked for and not made yet.
+    pub fn keyframe_pending(&self) -> bool {
+        self.force_key
+    }
+
+    /// Encode the last frame again, as frame `seq` (a keyframe when one is pending): for a
+    /// picture that hasn't changed, which a capture source sends nothing for. None before
+    /// any frame. The CUDA context must be current.
+    pub fn encode_last(&mut self, seq: u64, captured: Micros) -> Result<Option<(EncodedFrame, EncodeTiming)>> {
+        let Some(i) = self.last else { return Ok(None) };
+        self.next = i;
+        self.encode(seq, captured).map(Some)
+    }
+
+    /// Take `old`'s last frame (same size and layout), so this new session can repeat it
+    /// before its source sends another. False when there is none or it doesn't fit. The
+    /// CUDA context must be current.
+    pub fn adopt_last(&mut self, old: &Encoder) -> Result<bool> {
+        let Some(i) = old.last else { return Ok(false) };
+        let src = &old.surfaces[i];
+        // The slot the source writes into last, so the next frame doesn't overwrite it.
+        let j = (self.next + self.surfaces.len() - 1) % self.surfaces.len();
+        let dst = &self.surfaces[j];
+        if (src.width, src.height, src.format) != (dst.width, dst.height, dst.format) {
+            return Ok(false);
+        }
+        // SAFETY: both surfaces hold this format at this size.
+        unsafe { self.cuda.copy_dtod(src.row(0), src.pitch(), dst.row(0), dst.pitch(), src.width as usize * src.format.bytes_per_pixel(), src.format.rows(src.height))? };
+        self.surfaces[j].tag = 0;
+        self.last = Some(j);
+        Ok(true)
+    }
+
     /// The client lost frames `since..=through`. Invalidate them as references, or, when
     /// nothing older is left in the DPB to fall back on, make the next frame a keyframe.
     /// Returns false when it will be a keyframe.
@@ -619,6 +656,7 @@ impl Encoder {
         let refs_from_seq = self.refs.encoded(seq, keyframe);
         self.force_key = false;
         self.frames += 1;
+        self.last = Some(self.next);
         self.next = (self.next + 1) % self.surfaces.len();
         let frame = EncodedFrame { seq, captured, encoded, keyframe, refs_from_seq, width: self.cfg.width, height: self.cfg.height, data };
         Ok((frame, EncodeTiming { encode_us: t0.elapsed().as_micros() as u32 }))

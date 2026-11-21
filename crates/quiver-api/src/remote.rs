@@ -69,6 +69,10 @@ pub struct RemoteSettings {
     /// [`STREAM_PORT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_port: Option<u16>,
+    /// How long a streamed game is kept, running, after its client leaves (Quiver's or
+    /// Moonlight's), for a resume; `None`: [`KEEP_SECS`] (10 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_secs: Option<u64>,
     /// The Moonlight (GameStream) server, which has its own switch.
     #[serde(default, skip_serializing_if = "crate::moonlight::MoonlightSettings::is_default")]
     pub moonlight: crate::moonlight::MoonlightSettings,
@@ -77,7 +81,15 @@ pub struct RemoteSettings {
 /// The first media port (design/REMOTE.md §3).
 pub const STREAM_PORT: u16 = 47998;
 
+/// How long a stream's game is kept after its client leaves, unless `remote.keep_secs`.
+pub const KEEP_SECS: u64 = quiver_stream_proto::serve::KEEP_SECS;
+
 impl RemoteSettings {
+    /// `keep_secs`, or the default.
+    pub fn keep_secs(&self) -> u64 {
+        self.keep_secs.unwrap_or(KEEP_SECS)
+    }
+
     pub fn is_default(&self) -> bool {
         *self == RemoteSettings::default()
     }
@@ -204,18 +216,54 @@ pub struct StreamSession {
     pub port: u16,
     /// The host process.
     pub pid: u32,
+    /// Which front end it streams through: Quiver's own transport, or Moonlight's.
+    #[serde(default, skip_serializing_if = "StreamClient::is_quiver")]
+    pub client: StreamClient,
+}
+
+/// The front end a stream goes through. A kept stream resumes from the same one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamClient {
+    #[default]
+    Quiver,
+    Moonlight,
+}
+
+impl StreamClient {
+    pub fn is_quiver(&self) -> bool {
+        *self == StreamClient::Quiver
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            StreamClient::Quiver => "Quiver",
+            StreamClient::Moonlight => "Moonlight",
+        }
+    }
 }
 
 impl StreamSession {
-    /// "streaming to Laptop", "kept for Laptop until 14:05", "starting for Laptop".
+    /// "streaming to Laptop", "kept for 8 min (until 14:05), resume from Quiver on Laptop",
+    /// "starting for roth (Moonlight)".
     pub fn describe(&self) -> String {
+        let via = if self.client.is_quiver() { String::new() } else { format!(" ({})", self.client.label()) };
         match self.state {
-            StreamState::Starting => format!("starting for {}", self.peer),
-            StreamState::Streaming => format!("streaming to {}", self.peer),
-            StreamState::Kept => match self.kept_until {
-                Some(t) => format!("kept for {} until {}", self.peer, t.with_timezone(&chrono::Local).format("%H:%M")),
-                None => format!("kept for {}", self.peer),
-            },
+            StreamState::Starting => format!("starting for {}{via}", self.peer),
+            StreamState::Streaming => format!("streaming to {}{via}", self.peer),
+            StreamState::Kept => {
+                let from = match self.client {
+                    StreamClient::Quiver => format!("resume from Quiver on {}", self.peer),
+                    StreamClient::Moonlight => format!("resume from Moonlight ({})", self.peer),
+                };
+                match self.kept_until {
+                    Some(t) => {
+                        let mins = ((t - Utc::now()).num_seconds().max(0) as u64).div_ceil(60);
+                        format!("kept for {mins} min (until {}), {from}", t.with_timezone(&chrono::Local).format("%H:%M"))
+                    }
+                    None => format!("kept, {from}"),
+                }
+            }
         }
     }
 }

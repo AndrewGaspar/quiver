@@ -5,7 +5,8 @@
 //!   interface names such as `tailscale0`; empty: every address), `codecs` and `port`.
 //!   `MoonlightEnable`/`MoonlightDisable` change and remember it. On a self-restart the server
 //!   simply starts again in the new process from config (its listeners close with the old
-//!   one; a stream in progress ends, and Moonlight can resume the app).
+//!   one). A self-restart waits while a Moonlight stream runs or is kept; one forced anyway
+//!   (`quiver daemon stop`) ends it with its game.
 //! - **The library** Moonlight lists ([`Library`]) is the installed games, refreshed every
 //!   [`REFRESH_EVERY`], with their portrait art from the art cache (fetched into it on first
 //!   ask).
@@ -15,7 +16,10 @@
 //!   shows comes back as `MoonlightPin` (not local-only, so a paired Quiver client can enter
 //!   it for a headless server).
 //! - **What a launch streams** goes through one seam, [`stream_host_for`]: the game, launched
-//!   into the stream host's display as `StartStream` does (`streams::MoonlightGames`).
+//!   into the stream host's display as `StartStream` does (`streams::MoonlightGames`), and
+//!   kept across sessions: a disconnect leaves it running for `remote.keep_secs` (10 min),
+//!   Resume attaches to it, Quit app ends it. While a Moonlight stream runs or is kept,
+//!   quiverd doesn't restart onto a new build (`Daemon::busy`): its host is in this process.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -80,7 +84,9 @@ impl Moonlight {
 /// the host's headless display with the launch Play does ([`crate::streams::MoonlightGames`]).
 pub(crate) fn stream_host_for(daemon: &Arc<Daemon>) -> Arc<dyn StreamHost> {
     let run = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    Arc::new(crate::streams::MoonlightGames::new(daemon, run.join("quiver").join("moonlight-streams")))
+    let games = Arc::new(crate::streams::MoonlightGames::new(daemon, run.join("quiver").join("moonlight-streams")));
+    *daemon.streams.moonlight_games.lock().unwrap() = Arc::downgrade(&games);
+    games
 }
 
 /// Moonlight lists a "Test pattern" app first. Off now that games stream, unless

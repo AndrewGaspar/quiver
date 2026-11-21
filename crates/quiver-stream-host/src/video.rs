@@ -11,6 +11,13 @@
 //! If the frame channel is full (the transport has fallen behind), the frame is dropped
 //! rather than queued, and the encoder is told it was lost, so the frames after it never
 //! refer to it: the stream stays decodable and the client sees an ordinary gap.
+//!
+//! **A still picture.** A capture source sends nothing while the picture doesn't change
+//! (gamescope paints only on damage; a paused game). It says so ([`Next::Idle`]) every
+//! ~100 ms instead of waiting, and a keyframe asked for meanwhile (a client connecting or
+//! resuming, a loss) is made from the last frame, encoded again: the picture comes at once.
+//! A new encoder session (another codec or colour) takes the last frame along when its size
+//! and layout match.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +52,8 @@ pub enum Next {
     Frame { captured: Micros },
     /// The source's picture changed size or format: make a new session, then ask again.
     Changed { width: u32, height: u32, format: InputFormat },
+    /// No new frame for a while (the picture is still): nothing is in the surface.
+    Idle,
     /// Nothing more will come.
     Stopped,
 }
@@ -226,12 +235,40 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
         if rebuild {
             let (w, h, f) = source.format();
             base.bitrate_kbps = enc.config().bitrate_kbps;
-            drop(enc);
+            let old = enc;
             enc = Encoder::new(cuda.clone(), session(&base, w, h, f, source.color())).context("restart the encoder")?;
+            // The last picture comes along, for a still one's keyframe.
+            if let Err(e) = enc.adopt_last(&old) {
+                tracing::debug!("video: the last frame didn't carry over: {e:#}");
+            }
+            drop(old);
             configure(&enc, &mut announce);
         }
         match source.next(&cuda, enc.surface(), seq, &io.stop)? {
             Next::Stopped => break,
+            Next::Idle => {
+                apply(&mut enc, &mut pending)?;
+                if !enc.keyframe_pending() || !pending.is_empty() {
+                    continue;
+                }
+                // A keyframe of the still picture.
+                let captured = now_micros();
+                let Some((frame, t)) = enc.encode_last(seq, captured)? else { continue };
+                report.frames += 1;
+                report.keyframes += frame.keyframe as u64;
+                report.bytes += frame.data.len() as u64;
+                report.encode.push(t.encode_us);
+                tracing::debug!(seq, keyframe = frame.keyframe, "video: the still picture again");
+                match io.frames.try_send(frame) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        report.dropped += 1;
+                        enc.lost(seq, seq)?;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+                seq += 1;
+            }
             Next::Changed { width, height, format } => {
                 base.bitrate_kbps = enc.config().bitrate_kbps;
                 drop(enc);
