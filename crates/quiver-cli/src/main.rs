@@ -1301,6 +1301,12 @@ mod tests {
     /// `--machine` is global; a remote command's own machine argument stays its own.
     #[test]
     fn remote_and_machine_parse() {
+        // A debug build's clap parse of this many commands outgrows a test thread's 2 MB
+        // stack (the binary parses on its 8 MB main thread).
+        std::thread::Builder::new().stack_size(16 << 20).spawn(remote_and_machine_parse_on_a_big_stack).unwrap().join().unwrap();
+    }
+
+    fn remote_and_machine_parse_on_a_big_stack() {
         use remote::RemoteAction;
         let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied()));
         let c = parse(&["remote", "revoke", "laptop"]).unwrap();
