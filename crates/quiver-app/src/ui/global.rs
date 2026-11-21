@@ -238,6 +238,8 @@ pub struct GlobalUi {
     pub hyprpad: Option<(bool, Instant)>,
     /// Settings › Accounts › Epic Games.
     pub epic: super::settings::epic::EpicUi,
+    /// Accounts across machines (Settings › Accounts, the game page's launch account).
+    pub presence: super::settings::presence::PresenceUi,
 }
 
 impl GlobalUi {
@@ -361,8 +363,17 @@ impl Quiver {
                     self.ui.now_playing_open = false;
                 }
             }
-            Event::GameStarted { .. } | Event::GameStopped { .. } => self.load_sessions(cx),
-            Event::StoreAccountsChanged { .. } => self.load_epic_accounts(cx),
+            Event::GameStarted { .. } | Event::GameStopped { .. } => {
+                self.load_sessions(cx);
+                if self.ui.presence.presence.is_some() {
+                    self.load_presence(cx);
+                }
+            }
+            Event::StoreAccountsChanged { .. } => {
+                self.load_epic_accounts(cx);
+                self.load_presence(cx);
+            }
+            Event::AccountsPresenceChanged => self.load_presence(cx),
             Event::Disconnected => {
                 self.ui.down_since = Some(Instant::now());
                 self.ui.confirm = None;

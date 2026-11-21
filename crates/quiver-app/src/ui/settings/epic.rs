@@ -82,7 +82,13 @@ impl Quiver {
             }
             v.push(EpicAction::SignOut(i));
         }
-        v.into_iter().map(SettingsAction::Epic).collect()
+        let mut out: Vec<SettingsAction> = v.into_iter().map(SettingsAction::Epic).collect();
+        // Each account's Add to buttons come after the accounts' own.
+        for a in self.epic_accounts() {
+            out.extend(self.presence_actions(&a.account_id));
+        }
+        out.extend(self.epic_sources().into_iter().map(|s| SettingsAction::Presence(super::presence::PresenceAction::AddEpicFrom { account_id: s.account_id, from: s.from })));
+        out
     }
 
     pub(super) fn epic_action(&mut self, a: EpicAction, cx: &mut Context<Self>) {
@@ -220,11 +226,17 @@ impl Quiver {
                 SettingsAction::Epic(EpicAction::SignIn),
                 if accounts.is_empty() { Kind::Primary } else { Kind::Secondary },
                 Some(Icon::Plus),
-                if accounts.is_empty() { "Sign in to Epic" } else { "Add Epic account" },
+                match (self.accounts_elsewhere(), accounts.is_empty()) {
+                    (Some(m), true) => format!("Sign in on {m}"),
+                    (Some(m), false) => format!("Add Epic account on {m}"),
+                    (None, true) => "Sign in to Epic".to_owned(),
+                    (None, false) => "Add Epic account".to_owned(),
+                },
                 cx,
             )
         });
         let mut out = vec![head_row(th, "Epic Games", "Epic games show in the library with an Epic badge. Installing and playing them comes next.", sign_in)];
+        let sources = self.epic_sources_row(th, actions, cx);
         if let Some(Err(e)) = &self.ui.epic.accounts {
             out.push(card(th).p(px(16.)).text_color(th.bad).child(format!("Could not read Epic accounts: {e}")).into_any_element());
         }
@@ -261,6 +273,7 @@ impl Quiver {
         } else if accounts.is_empty() && matches!(self.ui.epic.accounts, Some(Ok(_))) {
             out.push(card(th).p(px(18.)).text_color(th.tx2).child("No Epic account is signed in. Sign in on Epic's own page, in Quiver's sign-in window; Quiver never sees your password.").into_any_element());
         }
+        out.extend(sources);
         let games = |id: &str| self.games.iter().filter(|g| g.entry.owned_by.iter().any(|o| o == id) || g.entry.records.iter().any(|r| r.owned_by.iter().any(|o| o == id))).count();
         let rows: Vec<(EpicAccount, usize)> = accounts.iter().map(|a| (a.clone(), games(&a.account_id))).collect();
         for (i, (a, n)) in rows.into_iter().enumerate() {
@@ -288,6 +301,7 @@ impl Quiver {
                 "Signed in".to_owned()
             };
             let linked = a.ubisoft.as_ref().map(|u| format!("Linked Ubisoft account: {}", u.name.clone().unwrap_or_else(|| short_id(&u.id))));
+            let presence = self.epic_presence_row(th, actions, &a.account_id, cx);
             out.push(
                 card(th)
                     .flex_row()
@@ -326,7 +340,8 @@ impl Quiver {
                                     .child(format!("{n} game{}", if n == 1 { "" } else { "s" })),
                             )
                             .when_some(linked, |d, l| d.child(div().text_size(px(12.)).text_color(th.tx3).child(l)))
-                            .child(div().mt(px(4.)).text_size(px(12.)).text_color(if ended { th.warn } else { th.tx2 }).child(status)),
+                            .child(div().mt(px(4.)).text_size(px(12.)).text_color(if ended { th.warn } else { th.tx2 }).child(status))
+                            .children(presence),
                     )
                     .child(buttons)
                     .into_any_element(),

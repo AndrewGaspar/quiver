@@ -67,6 +67,8 @@ pub struct LaunchMaterial {
     /// The ownership token and the file name it goes to (`<ns><item>.ovt`), when the game
     /// wants one; the caller writes it 0600 at the path it put in `-epicovt=`.
     pub ownership_token: Option<(String, Secret<Vec<u8>>)>,
+    /// The Epic account the launch is licensed to (who is playing, for presence).
+    pub account: String,
 }
 
 /// An app name as a game ref.
@@ -640,7 +642,7 @@ impl Epic {
             &locale,
             &i.namespace,
         );
-        Ok(LaunchMaterial { shown: redact(&args), args, ownership_token: ovt })
+        Ok(LaunchMaterial { shown: redact(&args), args, ownership_token: ovt, account })
     }
 }
 

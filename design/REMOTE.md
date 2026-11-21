@@ -85,7 +85,8 @@ profiles, the virtual display sized to the client, HDR, and SBS 3D.
   An address can also be added by hand (a Tailscale name). Unpaired machines show as
   "Pair…".
 - **Authorisation.** A paired peer is the person, so their requests carry
-  `source: remote:<peer name>` and are allowed as the app's would be. A few requests are
+  `source: remote:<peer name>` and are allowed as the app's would be. A client that labels
+  itself as something else (an agent) keeps that label: `remote:<peer name>/agent` (§6.1). A few requests are
   local-only, such as anything that names a local path to read or open a file picker on. The
   daemon lists them, and refuses them over the tunnel with code `local_only`. Revoking a peer
   (`quiver remote revoke`, or from the UI) drops its connections at once.
@@ -146,10 +147,9 @@ true and stable). A stream adds no machine. What has to work:
      session over. The two chains rotate independently, so nothing fights.
    - **Ubisoft:** one live demux connection per account (PROPOSAL.md). Each machine holds its
      own remember-me session (UbiServices allows several devices) and connects demux only while
-     its game runs. Getting the second session without the password and 2FA again needs a
-     spike: is there a sanctioned session-to-session handoff, or must the person sign in once
-     per machine? Until that is known, the client offers **Sign in on Tower** (point 1), which
-     is one sign-in per machine, done from wherever the person is. If both machines would go
+     its game runs. The spike (§6.2) found no sanctioned session-to-session hand-over, so the
+     client offers **Sign in on Tower** (point 1): one sign-in per machine, done from
+     wherever the person is. If both machines would go
      live at once, the second refuses with "playing on <machine>". That matches Ubisoft's own
      rule.
    - **Steam:** Valve's client signs in on each machine itself (person-only). On a headless
@@ -163,6 +163,195 @@ Save data follows the stores' cloud saves, plus Quiver's save stores (STORES.md 
 between machines therefore uploads on exit and downloads on launch, as between two PCs today.
 The play-time and achievement reporters run where the game runs.
 
+### 6.1 As built (phase 3, 2026-11-21)
+
+Nothing in this phase signed in to a store or called one. The Epic hand-over is tested between
+two scratch quiverds against a stand-in for Epic on 127.0.0.1; Ubisoft was read about, not
+called.
+
+**Protocol** (additive; `quiver_api::accounts`):
+
+| Request | What | Who |
+|---|---|---|
+| `Accounts(Local)` | This machine's accounts in every store (Ubisoft, Epic), each with the game it is playing. No secrets | anyone; what machines ask each other |
+| `Accounts(Presence { wait_ms })` | Every account across this machine, its paired servers (asked now, 3 s each) and its paired clients (what they announced in the last 75 s), merged per account: the machines it is signed in on and the one playing | anyone |
+| `Accounts(Handover { store, account, from, to })` | Give machine `to` its own session from machine `from` (`None` is this machine; names as `quiver remote peers` lists them). Epic only | the person |
+| `Accounts(Export { store, account })` | A one-time hand-over code from this machine's session (`HandoverCode`) | the person, over the tunnel only |
+| `Accounts(Import { store, code })` | Redeem one; adds the account here | the person |
+| `Accounts(Announce(MachineAccounts))` | A paired client telling a server what it is signed in to and playing | paired machines only, kept under the name they are paired as |
+| `Event::AccountsPresenceChanged` | Reload `Presence` | |
+
+`Handover` is always sent to the app's or CLI's own quiverd. That machine is paired with every
+machine the person sees, so it can do either direction: it mints the code locally or asks
+`from` for one (`Export`), then redeems it locally or sends it to `to` (`Import`). A server
+can't reach a client, so a hand-over from Tower to a laptop is run by the laptop ("add from").
+Every machine runs an announcer: at start, whenever its accounts or games change, and every
+30 s while a game runs, it sends `Announce` to its servers. A server therefore knows a client
+is playing even though it can't ask the client.
+
+**Sources and gates.** Over the tunnel a request's source is `remote:<peer>` when its client
+said `cli`, `gui` or `sight`, and `remote:<peer>/<what it said>` otherwise, such as
+`remote:laptop/agent` (`remote::remote_source_as`; until now every remote request was
+`remote:<peer>`). `remote::is_person` accepts the person here or remote. Signing in and out
+(Ubisoft's `Login`, `Login2fa` and `Logout`, Epic's `LoginComplete` and `Logout`), `Handover`
+and `Import` require it. `Export` additionally requires the tunnel, since only another
+machine has a use for the code. Ubisoft's sign-in had no source gate before; it has the same
+one as Epic's now.
+
+**What crosses the tunnel, and redaction.**
+
+- *Ubisoft sign-in on another machine:* the email, password and 2FA code are typed on the
+  client and sent in `Login` and `Login2fa` inside the pinned mutual TLS. `Request::Login.password`
+  and `Login2fa.code` are now `Secret<String>` (moved from `quiver-core` to
+  `quiver_api::secret`, and re-exported there), so a printed request shows `<redacted>`.
+  Serde still sends the value. The server stores only its own remember-me ticket, in its own
+  keyring.
+- *Epic sign-in on another machine:* the authorization code from Epic's page, produced in
+  the client's sign-in window or browser, goes in `LoginComplete` as before. `EpicRequest`'s
+  `Debug` already hides it.
+- *Epic hand-over:* the exchange code. It is minted on the giving machine, travels once (in
+  `Export`'s reply or in `Import`), is a `Secret` in every type (`HandoverCode`, `Import`'s
+  `Debug` is written out by hand), and is never logged or put in activity. Epic makes it
+  single-use and minutes long. No refresh or access token ever leaves its machine.
+- Presence carries account ids, names, states and game names, nothing secret.
+
+**Epic hand-over** (`epic-core`): `Epic::handover_code(account)` asks Epic for an exchange code
+with this machine's access token (`GET /account/api/oauth/exchange`), leaving the session as
+it was. `Epic::login_exchange(code)` posts `grant_type=exchange_code` and stores the new
+session as a sign-in does: in the keyring before the account is listed. Its refresh token
+starts a chain of its own, so the two machines rotate independently and signing out on one
+leaves the other signed in. Epic launches also record their account in the local session
+(`LaunchMaterial.account`), so presence knows who is playing an Epic game.
+
+**"Playing on <machine>".** Before a Ubisoft launch (`Request::Play` of an installed Ubisoft
+game), quiverd asks its paired servers (2 s each) and reads its clients' announcements. If
+the launch account is playing elsewhere, it refuses: "<account> is playing <game> on Tower.
+Ubisoft allows one live session per account, so starting here would end that one: stop it on
+Tower first". A machine that can't be reached doesn't hold up a launch. Lab instances count
+as playing, since they hold the account's live session too.
+
+**Test isolation.** `QUIVER_SCRATCH_SECRETS=<dir>` makes every keyring entry of that quiverd
+a 0600 file in a 0700 directory, through the `keyring` crate's credential-builder hook. It
+covers both Ubisoft's `session:` entries and Epic's `epic:` entries, so a scratch daemon never
+reaches the desktop's Secret Service. `QUIVER_EPIC_BASE=http://127.0.0.1:<port>` sends every
+Epic call to a stand-in; any value that isn't a loopback `http://` address is refused. Before
+this, scratch daemons were kept off the keyring only because `env_clear` left them no session
+bus.
+
+**Tests.**
+- `crates/quiverd/tests/accounts.rs` runs two scratch quiverds, paired, plus an Epic
+  stand-in that models refresh chains and single-use exchange codes. It checks:
+  - The laptop signs in.
+  - An agent is refused, here and through the tunnel (`remote:laptop/agent`). A local
+    `Export` and a Ubisoft hand-over are refused too, and nothing is minted for any refused
+    request.
+  - **Add to tower**: the tower's scratch keyring holds a refresh token from a new chain.
+    The laptop's is byte-for-byte the same. The code was minted with the laptop's session
+    and redeemed once.
+  - Neither log contains a token or code.
+  - Presence on both machines, the tower's coming from the laptop's announcement.
+  - The laptop signs out and takes a session back **from tower** (`Export` over the
+    tunnel). The tower's session is untouched, and its activity log records `remote:laptop`.
+  - An announced Ubisoft game shows as "playing on laptop" in the tower's presence.
+- `epic-core`: `handover_gives_the_other_machine_its_own_session` (Fake transport) and the
+  loopback-only base.
+- `quiver-api`: presence merging, `live_elsewhere`, the wire forms and that no secret is
+  ever printed, and the remote source rules.
+- `quiver-core`: the scratch store's file modes.
+
+**CLI.**
+- `quiver account machines [--json]`: every account, its machines, and what is playing.
+- `quiver epic add-to <machine> [--account A]` and `quiver epic add-from <machine>`.
+- `quiver --machine tower login` and `quiver --machine tower epic login` sign Tower in from
+  here. Epic's sign-in window opens on this machine, and the code goes to Tower.
+
+**App.** Settings › Accounts:
+- With a paired machine chosen in the switcher, the page is that machine's: "Tower's
+  accounts…", **Sign in on Tower** / **Add account on Tower** (Ubisoft's form and Epic's
+  window run here, and the session stays on Tower).
+- Each Ubisoft and Epic account card has a presence line: "Also signed in on This PC",
+  "Only on this machine", or "Playing Assassin's Creed Origins on Tower · its games won't
+  start here until that ends", in amber.
+- Epic cards get **Add to <machine>** for each machine that is up and doesn't have the
+  account. A machine without Epic gets **Add <account> from <machine>**.
+- The game page's account stat reads "demo · playing on Tower", and the overview gets a
+  *Live session: In use on Tower now* row.
+
+### 6.2 Ubisoft: a second machine's session (spike, desk research only)
+
+The question: can machine B get its own UbiServices session from machine A's, without the
+password and 2FA again? The research read public write-ups and open-source projects'
+documentation and issues. No code was copied. Quiver made no request to any Ubisoft domain.
+
+| Question | Finding |
+|---|---|
+| A sanctioned hand-over, device-code or QR login | **None found.** No OAuth device grant, "sign in with a code", or phone-approves-PC flow is documented for UbiServices. The QR codes in Ubisoft's help are for setting up an authenticator app. GeForce NOW's TV QR code opens Ubisoft's ordinary login page on the phone. The Connect mobile companion app reportedly shut down in April 2025 (unconfirmed). Community API notes describe a "ticket exchange": re-posting `/v3/profiles/sessions` with `ubi_v1 t=<ticket>` and another `Ubi-AppId` returns a ticket scoped to that app (wnc-replay/ubi-docs, `guide/ticket-exchange.md`). Nothing says it gives another *device* an independent session or a remember-me ticket. A `delegation-ubiservices` host appears in reverse-engineering notes without details. Using either would be our own invention, not a sanctioned flow |
+| `rememberDevice` | Real, and **per device**. Completing 2FA with `trustedDevice: {id, friendlyName}` returns a `rememberDeviceTicket`. Later logins send `Ubi-RememberDeviceTicket` and skip the 2FA prompt (UplayDB/UbiServices, MIT, `V3/Login.cs`). Each trusted device is a named entry in the account's Trusted Devices list, which has a cap, and "untrust all" signs every one out. Copying A's device ticket to B would present B as A |
+| One remember-me ticket on two machines | **No.** Ubisoft retires the previous remember-me ticket at each renewal (unifideck's measurements and issue #435; the GOG Galaxy plugin keeps whatever each `rm_v1` renewal returns; Ubisoft-Connect-RE saw 401s after a failed renewal). Two holders would sign each other out, as Epic refresh tokens would |
+| What other launchers do | Nothing across devices. The GOG Galaxy plugin (MIT) signs in through Ubisoft's web login in an embedded browser, one install at a time. Its retry loops once sent repeated 2FA emails and got accounts suspended (issue #33). ubisoft-demux-node, Lutris, GameNative, DroidDeck and unifideck sign in once per install. Playnite reads the Connect client's files |
+
+**Recommendation: one sign-in per machine, done from wherever the person is** (point 1, now
+built). The client's form collects the email, password and 2FA code and sends them over the
+pinned tunnel. Machine B makes its own `POST /v3/profiles/sessions` and keeps its own
+remember-me ticket. The credentials are used once and never stored. Not allowed (STORES.md
+§7, items 4, 7 and 8):
+- copying A's remember-me or device ticket to B;
+- deriving B's session from A's ticket through ticket exchange or `delegation-ubiservices`;
+- using the mobile app's AppId;
+- making up or rotating device ids to get past the trusted-device cap.
+
+Two follow-ups for the Ubisoft sign-in code (not built here):
+- Send an honest `trustedDevice` (a stable id per machine, named "Quiver on <host>") when
+  completing 2FA, so each machine is one named trusted device and stops asking for codes.
+  That is what Connect does.
+- Never let two processes share one remember-me ticket. unifideck's #435 is per-game prefixes
+  signing each other out, which is relevant to Quiver's bridge if it ever renews tickets
+  outside quiverd.
+
+A Steam-ticket login (accounts linked to Steam) is a legitimate per-machine alternative,
+outside this phase.
+
+### 6.3 Steam on a headless server (design; not built)
+
+Valve's client signs in on each machine itself, and Quiver never sees a Steam password
+(STORES.md §7, item 9). On a headless server the person still has to see Steam's own sign-in
+window, so Quiver streams it.
+
+1. **Steam in its own headless gamescope.** When a Steam game is wanted on Tower and Tower's
+   Steam isn't running, quiverd starts `steam -silent` inside a headless gamescope of its own
+   (the same `gamescope --backend headless` the stream host uses, LAB.md §1), sized for the
+   client, under the person's uid and Steam root. That gamescope is long-lived: Steam stays
+   up across games, as it does on a desktop.
+2. **Signing in is a stream of that display.** Settings › Accounts › Steam on Tower shows
+   Steam's state (STORE-STEAM's local mode: the client's most recent user, `ClientManaged`).
+   When it says Steam needs a sign-in, **Sign in to Steam on Tower** asks for
+   `StartStream { target: SteamClient }`, a new `StreamTarget` that names the Steam display
+   instead of a game. The client opens the stream window on Steam's login dialog. The person
+   uses Steam's QR code (scanned with their phone) or types the password and Steam Guard
+   code into Steam itself, through the forwarded keyboard. Quiver relays pixels and keys
+   only and sees no credential. Closing the window ends the stream, and Steam keeps running.
+3. **Playing.** A Steam game launched on Tower runs under that Steam, through steam-run's
+   hook as today (STORE-STEAM.md §9). The stream host captures the game's gamescope.
+   Whether the game nests in Steam's gamescope or gets its own is the integration's
+   choice; its own keeps the stream at the game's size and rate. Steam's own "playing
+   elsewhere" refusal (one playing session per account) is shown as Steam words it, and
+   Quiver doesn't add a check of its own.
+4. **Presence.** `Local` reports Steam's most recent user as a `ClientManaged` account (from
+   `loginusers.vdf`'s non-secret fields, as `Stores` does today), and presence shows which
+   machines have Steam signed in. Playing comes from steam-run sessions.
+
+**Needed from the integration work** (StartStream, the stream host and the client):
+- a `StreamTarget::SteamClient` (or a generic "named display") in `quiver-stream-proto`;
+- the host able to attach to an existing gamescope's PipeWire stream instead of spawning one,
+  and to keep it alive after the client leaves;
+- keyboard text input and pointer clicks in the stream reaching Steam's login UI (uinput or
+  XTest in the headless gamescope);
+- quiverd owning that gamescope's lifetime (start on demand, stop on `quiver steam stop` or
+  idle, never while a game runs); and the lab's GPU and CPU limits leaving it alone, since
+  it's the person's Steam, not a lab instance.
+
+"Restart Steam" stays Ask for agents (STORES.md §7, item 10), on a server too.
+
 ## 7. Phases
 
 | Phase | What | Who |
@@ -170,7 +359,7 @@ The play-time and achievement reporters run where the game runs.
 | 0 | This doc and `quiver-stream-proto` | main session |
 | 1 (parallel) | **net**: `quiver-stream-net` with the simulator and benchmarks. **host**: `quiver-stream-host` standalone (`--target game|lab|test-pattern`, writing frames to a file or a channel). **client**: `quiver-stream` standalone (plays an Annex-B/OBU file or a channel, with input capture shown in the overlay). **remote**: `quiver-remote`, `quiver remote enable/pair/…`, the remote API tunnel, the app's machine switcher and merged library. | four agents |
 | 2 | **Integration**: `StartStream` in quiverd spawns the host with a ticket, and the app's Stream button runs `quiver-stream`. End-to-end over loopback on this laptop, streaming a lab instance and then a real game. Latency measured with the stage stamps, plus a photodiode-free check (a frame counter drawn by a test pattern, read back from the client's swapchain). | one agent |
-| 3 | **Accounts**: remote sign-in, Epic exchange-code hand-over, the Ubisoft spike, the account presence UI. **Steam on headless**. | agents, with the person for every sign-in |
+| 3 | **Accounts**: remote sign-in, Epic exchange-code hand-over, the Ubisoft spike, the account presence UI (built: §6.1, §6.2). **Steam on headless** (designed: §6.3). | agents, with the person for every sign-in |
 | 1b | **Moonlight compatibility**: `quiver-gamestream`, a GameStream-protocol front end over the same host (pairing, app list, RTSP, the control stream, RTP video and audio with Moonlight's FEC). It lets TVs and phones connect early. The person decided this on 2026-11-21; Quiver's own client stays the priority. Off by default, with its own switch. Clean-room: Sunshine and moonlight-common-c are GPL-3.0. | one agent |
 | 4 | VAAPI and Vulkan Video encode, microphone, touch, Wake-on-LAN, a TV-friendly client mode, and a remote desktop target. | later |
 

@@ -3,6 +3,7 @@
 //! Front ends (`quiver`, the GUI, scripts and agents) talk to it over a Unix socket, and
 //! paired machines over TLS when remote is on (`remote`); see `quiver-api` for the protocol.
 
+mod accounts;
 mod achievements;
 mod downloads;
 mod exports;
@@ -377,18 +378,23 @@ impl Daemon {
                     accounts,
                 })
             }
+            // The person's, here or from a paired machine (the password and code then came
+            // inside the pinned TLS; they are `Secret`s and never logged).
             Request::Login { email, password } => {
+                accounts::person_only(source, "sign in to Ubisoft")?;
                 let auth = self.auth.clone();
-                let outcome = run_local(move || async move { auth.login(&email, &password).await }).await?;
+                let outcome = run_local(move || async move { auth.login(&email, password.expose()).await }).await?;
                 json!(self.finish_login(source, outcome).await?)
             }
             Request::Login2fa { code } => {
+                accounts::person_only(source, "sign in to Ubisoft")?;
                 let challenge = self.pending_2fa.lock().unwrap().clone().context("no sign-in waiting for a 2FA code")?;
                 let auth = self.auth.clone();
-                let session = run_local(move || async move { auth.complete_2fa(&challenge, &code).await }).await?;
+                let session = run_local(move || async move { auth.complete_2fa(&challenge, code.expose()).await }).await?;
                 json!(self.finish_login(source, LoginOutcome::Done(session)).await?)
             }
             Request::Logout { account } => {
+                accounts::person_only(source, "sign out of Ubisoft")?;
                 let id = match account {
                     Some(q) => store::resolve(&q)?.user_id,
                     None => store::default_account()?.context("not signed in")?,
@@ -423,6 +429,7 @@ impl Daemon {
             Request::Library { refresh, all_stores: false } => json!(self.library(refresh).await?),
             Request::Library { refresh, all_stores: true } => json!(self.library_all(refresh).await?),
             Request::Epic(r) => epic::handle(self, source, r).await?,
+            Request::Accounts(r) => accounts::handle(self, source, r).await?,
             Request::Install { game, after, .. } if !game.is_ubisoft() => json!(epic::install(self, source, game.0, after).await?),
             Request::Install { game, language, after } => json!(downloads::install(self, source, downloads::ubisoft(game.0)?, language, after).await?),
             Request::Play { game, profile } => json!(self.play(source, game.0, profile).await?),
@@ -924,7 +931,8 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Daemon(quiver_api::daemon::DaemonRequest::Status)
         | Request::Sight(quiver_api::sight::SightRequest::Status)
         | Request::RemoteStatus
-        | Request::RemotePeers => None,
+        | Request::RemotePeers
+        | Request::Accounts(quiver_api::accounts::AccountsRequest::Local | quiver_api::accounts::AccountsRequest::Presence { .. } | quiver_api::accounts::AccountsRequest::Announce(_)) => None,
         r => Some(
             serde_json::to_value(r)
                 .ok()
@@ -935,9 +943,10 @@ fn gated(req: &Request) -> Option<String> {
 }
 
 /// Serve one client connection: the Unix socket's, or (with `remote`) a paired machine's
-/// over TLS. A remote client's requests are its peer's (`source: remote:<name>`, whatever
-/// it sent), the local-only ones are refused, and the connection closes when the peer is
-/// revoked or the listener turned off.
+/// over TLS. A remote client's requests are its peer's (`source: remote:<name>`, or
+/// `remote:<name>/<what it sent>` when that isn't the person: `remote_source_as`), the
+/// local-only ones are refused, and the connection closes when the peer is revoked or the
+/// listener turned off.
 async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daemon>, stream: S, remote: Option<remote::RemotePeer>) {
     let conn_id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (r, mut w) = tokio::io::split(stream);
@@ -1036,7 +1045,7 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
             });
         }
         if let Some(peer) = &remote {
-            env.source = peer.source();
+            env.source = quiver_api::remote::remote_source_as(&peer.name, &env.source);
             if let Some(why) = quiver_api::remote::local_only(&env.request) {
                 let error = format!("not over the remote connection: {why}");
                 let _ = tx.send(Reply::Err { id: env.id, error, code: Some(quiver_api::remote::LOCAL_ONLY.into()) });
@@ -1097,6 +1106,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "quiverd=info,quiver_core=info,epic_core=info".into()),
         )
         .init();
+    // A scratch daemon's secrets go to files (tests), never the person's keyring.
+    quiver_core::secret::use_scratch_store_from_env();
     // After a restart onto a new build: the previous build's listening sockets.
     let inherited = lifecycle::take_inherited();
     let lifecycle = lifecycle::Lifecycle::from_env();
@@ -1255,6 +1266,7 @@ async fn main() -> Result<()> {
     epicgame::start(&daemon);
     sightinfo::start(&daemon);
     remote::start(&daemon, inherited.remote);
+    accounts::announcer(&daemon);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);
