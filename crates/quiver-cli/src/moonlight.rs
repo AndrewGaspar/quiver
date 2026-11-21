@@ -29,6 +29,12 @@ pub enum MoonlightAction {
         /// Codecs to offer (repeatable): h264, hevc, hevc10, av1, av1-10. Default: all.
         #[arg(long)]
         codec: Vec<String>,
+        /// Don't advertise it on the LAN (mDNS); Moonlight then needs its address typed.
+        #[arg(long)]
+        no_mdns: bool,
+        /// Advertise it on the LAN again (the default).
+        #[arg(long, conflicts_with = "no_mdns")]
+        mdns: bool,
     },
     /// Turn it off; a stream ends.
     Disable,
@@ -65,6 +71,12 @@ fn print_status(s: &MoonlightStatus) {
     if !s.codecs.is_empty() {
         println!("codecs: {}", s.codecs.join(", "));
     }
+    match (s.mdns, s.advertised_on.is_empty()) {
+        (true, false) => println!("LAN: Moonlight finds it by itself (mDNS on {})", s.advertised_on.join(", ")),
+        (true, true) if s.enabled => println!("LAN: not advertised (no LAN interface bound); add it in Moonlight by address"),
+        (false, _) => println!("LAN: not advertised (--no-mdns); add it in Moonlight by address"),
+        _ => {}
+    }
     let tcp: Vec<String> = s.ports.iter().filter(|p| p.protocol == "tcp").map(|p| p.port.to_string()).collect();
     let udp: Vec<String> = s.ports.iter().filter(|p| p.protocol == "udp").map(|p| p.port.to_string()).collect();
     println!("ports: TCP {}; UDP {}", tcp.join(", "), udp.join(", "));
@@ -91,10 +103,11 @@ pub async fn run(client: &Client, action: MoonlightAction) -> Result<()> {
             }
             print_status(&s);
         }
-        MoonlightAction::Enable { bind, everywhere, codec } => {
+        MoonlightAction::Enable { bind, everywhere, codec, no_mdns, mdns } => {
             let bind = if everywhere { Some(Vec::new()) } else { Some(bind).filter(|b| !b.is_empty()) };
             let codecs = Some(codec).filter(|c| !c.is_empty());
-            let s: MoonlightStatus = client.call(Request::MoonlightEnable { bind, codecs }).await?;
+            let mdns = if no_mdns { Some(false) } else if mdns { Some(true) } else { None };
+            let s: MoonlightStatus = client.call(Request::MoonlightEnable { bind, codecs, mdns }).await?;
             print_status(&s);
             println!();
             println!("In Moonlight, add this machine by its address (or Tailscale name), then enter the PIN it shows with `quiver remote moonlight pin`.");

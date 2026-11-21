@@ -31,6 +31,10 @@ pub struct MoonlightSettings {
     /// The HTTP port (default [`DEFAULT_PORT`]); the others move with it ([`ports`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Advertise the server on the LAN over mDNS (`_nvstream._tcp`, as GeForce Experience and
+    /// Sunshine do), so Moonlight lists it without an address typed. `None`: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdns: Option<bool>,
 }
 
 impl MoonlightSettings {
@@ -40,6 +44,10 @@ impl MoonlightSettings {
 
     pub fn port(&self) -> u16 {
         self.port.unwrap_or(DEFAULT_PORT)
+    }
+
+    pub fn mdns(&self) -> bool {
+        self.mdns.unwrap_or(true)
     }
 }
 
@@ -110,6 +118,13 @@ pub struct MoonlightStatus {
     pub ports: Vec<MoonlightPort>,
     #[serde(default)]
     pub codecs: Vec<String>,
+    /// Advertising on the LAN is on (`remote.moonlight.mdns`).
+    #[serde(default)]
+    pub mdns: bool,
+    /// The interfaces it is advertised on now (never `tailscale0`: mDNS doesn't cross a
+    /// tailnet, where Moonlight takes the address or MagicDNS name).
+    #[serde(default)]
+    pub advertised_on: Vec<String>,
     /// The name Moonlight shows for this machine.
     #[serde(default)]
     pub name: String,
@@ -156,7 +171,7 @@ mod tests {
     #[test]
     fn not_local_only() {
         // A paired Quiver client enters the PIN for a headless server.
-        for r in [crate::Request::MoonlightPin { pin: "1234".into() }, crate::Request::MoonlightEnable { bind: None, codecs: None }, crate::Request::MoonlightStatus] {
+        for r in [crate::Request::MoonlightPin { pin: "1234".into() }, crate::Request::MoonlightEnable { bind: None, codecs: None, mdns: None }, crate::Request::MoonlightStatus] {
             assert_eq!(crate::remote::local_only(&r), None);
         }
     }

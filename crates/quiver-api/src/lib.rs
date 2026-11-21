@@ -1079,6 +1079,9 @@ pub enum Request {
         bind: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codecs: Option<Vec<String>>,
+        /// Advertise it on the LAN over mDNS (default on).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mdns: Option<bool>,
     },
     /// Turn it off (and remember it); a stream ends.
     MoonlightDisable,

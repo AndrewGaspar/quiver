@@ -510,6 +510,15 @@ pub(crate) fn set_v6_only(fd: &impl std::os::fd::AsRawFd) -> Result<()> {
 /// The addresses on a network interface (for example `tailscale0`), to listen only there.
 /// Link-local IPv6 addresses are left out (a tailnet doesn't use them).
 pub fn interface_addresses(name: &str) -> Result<Vec<IpAddr>> {
+    let out: Vec<IpAddr> = interfaces()?.into_iter().filter(|(n, _)| n == name).map(|(_, ip)| ip).collect();
+    if out.is_empty() {
+        bail!("interface {name} has no usable address");
+    }
+    Ok(out)
+}
+
+/// Every interface's addresses, as (interface name, address); link-local IPv6 left out.
+pub fn interfaces() -> Result<Vec<(String, IpAddr)>> {
     let mut out = Vec::new();
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills a list that is only read here and freed below.
@@ -521,28 +530,26 @@ pub fn interface_addresses(name: &str) -> Result<Vec<IpAddr>> {
         while !p.is_null() {
             let ifa = &*p;
             p = ifa.ifa_next;
-            if ifa.ifa_addr.is_null() || std::ffi::CStr::from_ptr(ifa.ifa_name).to_bytes() != name.as_bytes() {
+            if ifa.ifa_addr.is_null() {
                 continue;
             }
+            let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
             match i32::from((*ifa.ifa_addr).sa_family) {
                 libc::AF_INET => {
                     let a = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                    out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr))));
+                    out.push((name, IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)))));
                 }
                 libc::AF_INET6 => {
                     let a = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
                     let ip = std::net::Ipv6Addr::from(a.sin6_addr.s6_addr);
                     if (ip.segments()[0] & 0xffc0) != 0xfe80 {
-                        out.push(IpAddr::V6(ip));
+                        out.push((name, IpAddr::V6(ip)));
                     }
                 }
                 _ => {}
             }
         }
         libc::freeifaddrs(ifap);
-    }
-    if out.is_empty() {
-        bail!("interface {name} has no usable address");
     }
     Ok(out)
 }

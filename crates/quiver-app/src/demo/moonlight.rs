@@ -35,6 +35,8 @@ fn seed() -> MoonlightStatus {
         error: None,
         ports: ports(quiver_api::moonlight::DEFAULT_PORT),
         codecs: ["h264", "hevc", "hevc10", "av1", "av1-10"].map(String::from).to_vec(),
+        mdns: true,
+        advertised_on: Vec::new(),
         name: "laptop".into(),
         pending: (on && flag != "idle").then(|| MoonlightPairing { device_name: "Living-room TV".into(), address: "100.88.4.20".into() }),
         clients: vec![
@@ -69,12 +71,14 @@ pub(super) fn handle(demo: &Demo, req: Request) -> Result<std::result::Result<Va
             }
             s.enabled = true;
             s.listening = if s.bind.is_empty() { vec!["0.0.0.0".into(), "::".into()] } else { TAILNET.iter().map(|a| a.to_string()).collect() };
+            s.advertised_on = if s.bind.is_empty() { vec!["enp5s0".into()] } else { Vec::new() };
             demo.emit(Event::MoonlightChanged);
             json!(s)
         }
         Request::MoonlightDisable => {
             s.enabled = false;
             s.listening.clear();
+            s.advertised_on.clear();
             s.pending = None;
             demo.emit(Event::MoonlightChanged);
             Value::Null

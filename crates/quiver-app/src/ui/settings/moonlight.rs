@@ -137,7 +137,7 @@ impl Quiver {
     }
 
     fn ml_enable(&mut self, bind: Option<Vec<String>>, cx: &mut Context<Self>) {
-        let req = Request::MoonlightEnable { bind, codecs: None };
+        let req = Request::MoonlightEnable { bind, codecs: None, mdns: None };
         self.ml_call::<MoonlightStatus, _>(req, cx, |this, r, cx| match r {
             Ok(_) => {
                 this.mx.settings.moonlight.custom = None;
@@ -269,6 +269,11 @@ impl Quiver {
         let focused = self.action_focused(actions, &SettingsAction::Moonlight(MoonlightAction::Toggle));
         let ix = actions.iter().position(|a| *a == SettingsAction::Moonlight(MoonlightAction::Toggle)).unwrap_or(usize::MAX);
         let state = match (s.enabled, s.listening.is_empty(), &s.error) {
+            (true, false, _) if !s.advertised_on.is_empty() => format!(
+                "Listening on {} as \"{}\". Moonlight on this network lists it by itself; elsewhere, add it by its address or Tailscale name. Paired clients only.",
+                s.listening.join(", "),
+                s.name
+            ),
             (true, false, _) => format!("Listening on {} as \"{}\". Paired clients only; add this machine in Moonlight by its address or Tailscale name.", s.listening.join(", "), s.name),
             (true, true, Some(e)) => format!("Not listening: {e}"),
             (true, true, None) => "Starting…".to_owned(),

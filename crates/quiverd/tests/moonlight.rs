@@ -167,11 +167,11 @@ async fn moonlight_on_pair_unpair_off_and_restart() {
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
 
     // A bind that isn't an address or interface is refused, and nothing is remembered.
-    let e = q.call::<MoonlightStatus>(Request::MoonlightEnable { bind: Some(vec!["no-such-if0".into()]), codecs: None }).await.unwrap_err();
+    let e = q.call::<MoonlightStatus>(Request::MoonlightEnable { bind: Some(vec!["no-such-if0".into()]), codecs: None, mdns: Some(false) }).await.unwrap_err();
     assert!(format!("{e:#}").contains("network interface"), "{e:#}");
     // On loopback only (as `tailscale0` would be), H.264 and HEVC.
     let s: MoonlightStatus = q
-        .call(Request::MoonlightEnable { bind: Some(vec!["127.0.0.1".into()]), codecs: Some(vec!["hevc".into()]) })
+        .call(Request::MoonlightEnable { bind: Some(vec!["127.0.0.1".into()]), codecs: Some(vec!["hevc".into()]), mdns: Some(false) })
         .await
         .unwrap();
     assert_eq!((s.enabled, s.listening.as_slice(), s.codecs.as_slice()), (true, &["127.0.0.1".to_owned()][..], &["h264".to_owned(), "hevc".to_owned()][..]));
@@ -246,7 +246,7 @@ async fn moonlight_on_pair_unpair_off_and_restart() {
     // Off: nothing listens. On again, then a restart: it comes back on by itself.
     let () = q.call(Request::MoonlightDisable).await.unwrap();
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
-    let _: MoonlightStatus = q.call(Request::MoonlightEnable { bind: None, codecs: None }).await.unwrap();
+    let _: MoonlightStatus = q.call(Request::MoonlightEnable { bind: None, codecs: None, mdns: None }).await.unwrap();
     drop(q);
     drop(events);
     drop(daemon);
@@ -264,6 +264,62 @@ async fn moonlight_on_pair_unpair_off_and_restart() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(get(port, "/serverinfo").contains("<hostname>tower</hostname>"));
+    let () = q.call(Request::MoonlightDisable).await.unwrap();
+    drop(daemon);
+}
+
+/// Moonlight finds the server on the LAN by itself (`_nvstream._tcp` over mDNS), and not once
+/// it's turned off. Runs in its own user and network namespace (re-running this test there):
+/// only loopback, with multicast on, so nothing is announced on a real network.
+#[tokio::test(flavor = "multi_thread")]
+async fn moonlight_mdns_in_a_network_namespace() {
+    const IN_NS: &str = "QUIVER_TEST_MOONLIGHT_NS";
+    if std::env::var(IN_NS).is_err() {
+        if Command::new("unshare").arg("--version").output().is_err() {
+            return eprintln!("skipped: no unshare");
+        }
+        let out = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--net"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "moonlight_mdns_in_a_network_namespace", "--nocapture", "--test-threads=1"])
+            .env(IN_NS, "1")
+            .output()
+            .unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if text.contains("Operation not permitted") && !out.status.success() {
+            return eprintln!("skipped: no unprivileged namespaces: {text}");
+        }
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+        return;
+    }
+    // Inside: loopback up, with multicast.
+    for args in [["link", "set", "lo", "up"], ["link", "set", "lo", "multicast"]] {
+        let mut a: Vec<&str> = args.to_vec();
+        if a[3] == "multicast" {
+            a.push("on");
+        }
+        assert!(Command::new("ip").args(&a).status().unwrap().success());
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let port = free_layout();
+    let m = Machine::new(tmp.path(), port);
+    let daemon = m.daemon();
+    let q = m.client().await;
+    let s: MoonlightStatus = q.call(Request::MoonlightEnable { bind: Some(vec!["127.0.0.1".into()]), codecs: None, mdns: None }).await.unwrap();
+    assert!(s.mdns && s.advertised_on == ["lo"], "{s:?}");
+    let browse = || tokio::task::spawn_blocking(|| quiver_remote::discovery::browse_service("_nvstream._tcp.local.", Duration::from_secs(3)).unwrap());
+    let found = browse().await.unwrap();
+    let ours = found.iter().find(|f| f.port == port).unwrap_or_else(|| panic!("not found: {found:?}"));
+    assert!(ours.fullname.starts_with("tower._nvstream"), "{ours:?}");
+    assert!(ours.addrs.contains(&"127.0.0.1".parse().unwrap()), "{ours:?}");
+
+    // Advertising off: gone (the browse is fresh, so nothing cached answers).
+    let s: MoonlightStatus = q.call(Request::MoonlightEnable { bind: None, codecs: None, mdns: Some(false) }).await.unwrap();
+    assert!(!s.mdns && s.advertised_on.is_empty(), "{s:?}");
+    let cfg: String = std::fs::read_to_string(m.dir("data/quiver/config.json")).unwrap().split_whitespace().collect();
+    assert!(cfg.contains("\"mdns\":false"), "remembered: {cfg}");
+    let found = browse().await.unwrap();
+    assert!(!found.iter().any(|f| f.port == port), "still advertised: {found:?}");
     let () = q.call(Request::MoonlightDisable).await.unwrap();
     drop(daemon);
 }

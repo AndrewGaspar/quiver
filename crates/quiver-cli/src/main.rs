@@ -1250,7 +1250,7 @@ mod tests {
         use moonlight::MoonlightAction as M;
         assert!(matches!(
             parse(&["remote", "moonlight", "enable", "--bind", "tailscale0", "--codec", "hevc"]).unwrap().cmd,
-            Cmd::Remote { action: RemoteAction::Moonlight { action: M::Enable { ref bind, ref codec, everywhere: false } } } if bind == &["tailscale0"] && codec == &["hevc"]
+            Cmd::Remote { action: RemoteAction::Moonlight { action: M::Enable { ref bind, ref codec, everywhere: false, no_mdns: false, mdns: false } } } if bind == &["tailscale0"] && codec == &["hevc"]
         ));
         assert!(matches!(parse(&["remote", "moonlight", "pin", "1234"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Pin { ref pin } } } if pin == "1234"));
         assert!(matches!(parse(&["remote", "moonlight", "unpair", "roth"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Unpair { .. } } }));

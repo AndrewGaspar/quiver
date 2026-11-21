@@ -38,6 +38,9 @@ struct Running {
     server: Arc<GameStreamServer>,
     listening: Vec<IpAddr>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// `_nvstream._tcp` on the LAN-ish bound interfaces, withdrawn when dropped.
+    advert: Option<quiver_remote::discovery::Advert>,
+    advertised_on: Vec<String>,
 }
 
 impl Drop for Running {
@@ -258,9 +261,63 @@ async fn run(daemon: &Arc<Daemon>, s: &MoonlightSettings) -> Result<()> {
         }
     });
     tracing::info!("moonlight: listening on {:?} (HTTP port {})", config.bind, config.ports.http);
-    *slot = Some(Running { server, listening: config.bind, tasks: vec![forward, refresh] });
+    let (advert, advertised_on) = if s.mdns() { advertise(&server, &config.bind, config.ports.http) } else { (None, Vec::new()) };
+    *slot = Some(Running { server, listening: config.bind, tasks: vec![forward, refresh], advert, advertised_on });
     *m.error.lock().unwrap() = None;
     Ok(())
+}
+
+/// The mDNS service type Moonlight browses for.
+pub(crate) const NVSTREAM: &str = "_nvstream._tcp.local.";
+
+/// A tailnet address (Tailscale's CGNAT range or its IPv6 prefix): mDNS doesn't cross those.
+fn is_tailnet(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (64..128).contains(&o[1])
+        }
+        IpAddr::V6(v6) => quiver_api::moonlight::is_tailnet_v6(&v6.to_string()),
+    }
+}
+
+/// The interfaces to advertise on: those holding a bound address (any non-loopback one for
+/// a wildcard bind), never a tailnet's.
+pub(crate) fn mdns_interfaces(bound: &[IpAddr], all: &[(String, IpAddr)]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (name, ip) in all {
+        if name.starts_with("tailscale") || is_tailnet(ip) {
+            continue;
+        }
+        let wanted = bound.contains(ip) || bound.iter().any(|b| b.is_unspecified() && b.is_ipv4() == ip.is_ipv4() && !ip.is_loopback());
+        if wanted && !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// Advertise the server as `_nvstream._tcp` on its LAN-ish interfaces (a failure is logged:
+/// Moonlight can still add it by address).
+fn advertise(server: &GameStreamServer, bound: &[IpAddr], port: u16) -> (Option<quiver_remote::discovery::Advert>, Vec<String>) {
+    let all = quiver_gamestream::interfaces().unwrap_or_default();
+    let names = mdns_interfaces(bound, &all);
+    if names.is_empty() {
+        tracing::info!("moonlight: not advertising on mDNS (no LAN interface among {bound:?})");
+        return (None, names);
+    }
+    let id: String = server.identity().unique_id().chars().filter(char::is_ascii_alphanumeric).take(12).collect::<String>().to_lowercase();
+    let host = format!("quiver-moonlight-{id}.local.");
+    match quiver_remote::discovery::Advert::service(NVSTREAM, &server_name(), &host, port, Default::default(), &names) {
+        Ok(a) => {
+            tracing::info!("moonlight: advertised on mDNS on {names:?}");
+            (Some(a), names)
+        }
+        Err(e) => {
+            tracing::warn!("moonlight: not advertising on mDNS: {e:#}");
+            (None, Vec::new())
+        }
+    }
 }
 
 fn forward_event(d: &Daemon, e: ServerEvent) {
@@ -311,6 +368,7 @@ async fn status(daemon: &Daemon) -> Result<MoonlightStatus> {
     let s = settings();
     let running = m.running.lock().await;
     let codecs = codecs_from(&s.codecs).map(|c| codec_names(&c)).unwrap_or_default();
+    let advertised_on = running.as_ref().filter(|r| r.advert.is_some()).map(|r| r.advertised_on.clone()).unwrap_or_default();
     let (listening, pending, stream) = match running.as_ref() {
         Some(r) => (
             r.listening.iter().map(ToString::to_string).collect(),
@@ -326,6 +384,8 @@ async fn status(daemon: &Daemon) -> Result<MoonlightStatus> {
         error: m.error.lock().unwrap().clone(),
         ports: api::ports(s.port()),
         codecs,
+        mdns: s.mdns(),
+        advertised_on,
         name: server_name(),
         pending,
         clients: m.clients.list()?.iter().map(client_info).collect(),
@@ -352,7 +412,7 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
     let m = &daemon.moonlight;
     Ok(match req {
         Request::MoonlightStatus => json!(status(daemon).await?),
-        Request::MoonlightEnable { bind, codecs } => {
+        Request::MoonlightEnable { bind, codecs, mdns } => {
             if let Some(b) = &bind {
                 resolve_bind(b)?;
             }
@@ -366,6 +426,9 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             }
             if let Some(c) = codecs {
                 s.codecs = c;
+            }
+            if let Some(on) = mdns {
+                s.mdns = (!on).then_some(false);
             }
             if let Err(e) = run(daemon, &s).await {
                 *m.error.lock().unwrap() = Some(format!("{e:#}"));
@@ -420,6 +483,22 @@ mod tests {
         assert_eq!(codec_names(&c), ["h264", "hevc", "av1"]);
         assert_eq!(codec_names(&codecs_from(&[]).unwrap()), ["h264", "hevc", "hevc10", "av1", "av1-10"]);
         assert!(codecs_from(&["vp9".into()]).is_err());
+    }
+
+    #[test]
+    fn mdns_only_on_lan_interfaces() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let all: Vec<(String, IpAddr)> = vec![
+            ("lo".into(), ip("127.0.0.1")),
+            ("wlp191s0".into(), ip("192.168.1.20")),
+            ("wlp191s0".into(), ip("fd00::20")),
+            ("tailscale0".into(), ip("100.101.12.7")),
+            ("tailscale0".into(), ip("fd7a:115c:a1e0::7")),
+        ];
+        assert_eq!(mdns_interfaces(&[ip("0.0.0.0"), ip("::")], &all), ["wlp191s0"]);
+        assert!(mdns_interfaces(&[ip("100.101.12.7"), ip("fd7a:115c:a1e0::7")], &all).is_empty(), "Tailscale only: nothing");
+        assert_eq!(mdns_interfaces(&[ip("127.0.0.1")], &all), ["lo"], "loopback only when bound to it");
+        assert_eq!(mdns_interfaces(&[ip("192.168.1.20"), ip("100.101.12.7")], &all), ["wlp191s0"]);
     }
 
     #[test]
