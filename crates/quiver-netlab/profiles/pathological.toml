@@ -2,14 +2,14 @@ name = "pathological"
 summary = "Everything wrong at once: 5% bursty loss, 100 ms of delay spread, duplicates, reordering and corruption, on a thin link."
 sources = [
   "Not a measured link: the brief's stress case (5% bursty loss, 100 ms jitter).",
-  "Delay is uniform in 10–110 ms each way; with in-order scheduling a late packet holds up those behind it, as a failing radio link does.",
+  "60 ms each way with a paretonormal spread of σ 25 ms (spikes to about +100 ms); in-order scheduling makes a late packet hold up those behind it, as a failing radio link does.",
   "Duplication, reordering (1%) and corruption (0.1%, which UDP's checksum turns into loss) exercise the transport's sequence handling.",
 ]
 
 [both]
 delay_ms = 60
-jitter_ms = 50
-distribution = "uniform"
+jitter_ms = 25
+distribution = "paretonormal"
 loss = { pct = 5, burst = 5 }
 duplicate_pct = 1
 reorder_pct = 1

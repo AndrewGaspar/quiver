@@ -17,7 +17,7 @@
 pub mod link;
 // pub mod matrix;
 pub mod ns;
-// pub mod probe;
+pub mod probe;
 pub mod profile;
 // pub mod report;
 // pub mod run;
