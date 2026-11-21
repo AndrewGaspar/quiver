@@ -24,6 +24,7 @@ pub mod exports;
 pub mod game;
 pub mod mods;
 pub mod info;
+pub mod moonlight;
 pub mod lab;
 pub mod options;
 pub mod perf;
@@ -1074,6 +1075,31 @@ pub enum Request {
     /// Which machines each account is signed in on and which one is playing, an Epic
     /// session handed to another machine, and what paired machines tell each other.
     Accounts(accounts::AccountsRequest),
+    // ---- Moonlight compatibility (appended; design/REMOTE.md phase 1b, see [`moonlight`])
+    /// The GameStream server's state, pending pairing and paired clients
+    /// (`moonlight::MoonlightStatus`).
+    MoonlightStatus,
+    /// Turn it on (and remember it), optionally changing what it listens on (addresses or
+    /// interface names such as `tailscale0`; empty: every address) and the codecs offered.
+    /// Returns `moonlight::MoonlightStatus`.
+    MoonlightEnable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codecs: Option<Vec<String>>,
+        /// Advertise it on the LAN over mDNS (default on).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mdns: Option<bool>,
+    },
+    /// Turn it off (and remember it); a stream ends.
+    MoonlightDisable,
+    /// The PIN the waiting Moonlight client shows. Answers once it is paired
+    /// (`moonlight::MoonlightClient`), or with why not.
+    MoonlightPin { pin: String },
+    /// Paired Moonlight clients (`Vec<moonlight::MoonlightClient>`).
+    MoonlightClients,
+    /// Forget a Moonlight client (fingerprint or a prefix of it, or its name); its stream ends.
+    MoonlightUnpair { fingerprint: String },
 }
 
 fn yes() -> bool {
@@ -1307,6 +1333,14 @@ pub enum Event {
     /// Paired machines or the listener changed (paired, revoked, renamed, enabled,
     /// disabled): reload `Request::RemoteStatus`.
     RemoteChanged,
+    /// A Moonlight client asked to pair and waits for the PIN it shows
+    /// (`Request::MoonlightPin`).
+    MoonlightPairingRequested { device_name: String, address: String },
+    /// A Moonlight client was paired.
+    MoonlightPaired { name: String, fingerprint: String },
+    /// The Moonlight server changed (on, off, a pairing, a client unpaired, a stream started
+    /// or ended): reload `Request::MoonlightStatus`.
+    MoonlightChanged,
     /// The pairing window closed: `outcome` is `paired` (with the new peer's `id` and
     /// `name`), `expired`, `failed` (three wrong codes) or `cancelled`.
     PairingEnded {

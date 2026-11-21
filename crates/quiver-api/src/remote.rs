@@ -64,6 +64,9 @@ pub struct RemoteSettings {
     /// What it binds (`host:port`); `None`: [`quiver_remote::DEFAULT_LISTEN`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    /// The Moonlight (GameStream) server, which has its own switch.
+    #[serde(default, skip_serializing_if = "crate::moonlight::MoonlightSettings::is_default")]
+    pub moonlight: crate::moonlight::MoonlightSettings,
 }
 
 impl RemoteSettings {

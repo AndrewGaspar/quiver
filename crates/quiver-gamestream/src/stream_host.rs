@@ -83,6 +83,7 @@ impl StreamHost for StreamHostAdapter {
             max_frames: None,
             force_sandbox_gid: None,
             exe: self.exe.clone(),
+            constant_bitrate_audio: req.audio.constant_bitrate,
         };
         let task = tokio::spawn(async move {
             let HostEnds { video, audio, mut input, mut control_in, control_out, trigger_rumble: _, bitrate_kbps } = ends;

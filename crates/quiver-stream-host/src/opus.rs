@@ -27,6 +27,7 @@ unsafe extern "C" {
 const APPLICATION_RESTRICTED_LOWDELAY: c_int = 2051;
 const SET_BITRATE: c_int = 4002;
 const SET_COMPLEXITY: c_int = 4010;
+const SET_VBR: c_int = 4006;
 
 pub const RATE: u32 = 48_000;
 
@@ -86,6 +87,13 @@ impl Encoder {
         Ok(Encoder { st, channels, streams: streams as u8, coupled: coupled as u8, mapping, frame, out: vec![0; 4000] })
     }
 
+    /// Constant bitrate: every packet the same size. Moonlight's audio FEC needs that (it
+    /// protects blocks of four equal-sized packets); Quiver's own transport doesn't.
+    pub fn set_constant_bitrate(&mut self, on: bool) {
+        // SAFETY: a live encoder and a ctl that takes one int.
+        unsafe { opus_multistream_encoder_ctl(self.st, SET_VBR, c_int::from(!on)) };
+    }
+
     /// Encode one frame of interleaved samples (`frame * channels` of them).
     pub fn encode(&mut self, pcm: &[f32]) -> Result<Vec<u8>> {
         assert_eq!(pcm.len(), self.frame * self.channels as usize);
@@ -130,5 +138,23 @@ mod tests {
         // TOC byte: CELT-only (restricted low delay), 5 ms → config 29 (FB, 5 ms) → 0xe8 or 0xec (stereo).
         let p = e.encode(&pcm).unwrap();
         assert_eq!(p[0] >> 3, 29, "toc {:#x}", p[0]);
+    }
+
+    #[test]
+    fn constant_bitrate_packets_are_equal() {
+        // A varying signal (quiet, loud, silence) makes VBR packets differ; CBR's don't.
+        let frame = |k: usize| -> Vec<f32> { (0..240 * 6).map(|i| if k % 3 == 2 { 0.0 } else { ((i * (k + 1)) as f32 * 0.03).sin() * (k % 3) as f32 * 0.4 }).collect() };
+        for (cbr, frame_ms_x10) in [(true, 50u32), (true, 100), (false, 50)] {
+            let mut e = Encoder::new(6, frame_ms_x10, 256_000).unwrap();
+            e.set_constant_bitrate(cbr);
+            let sizes: Vec<usize> = (0..12).map(|k| {
+                let mut pcm = frame(k);
+                pcm.resize(e.frame * 6, 0.0);
+                e.encode(&pcm).unwrap().len()
+            }).collect();
+            let all_equal = sizes.iter().all(|s| *s == sizes[0]);
+            assert_eq!(all_equal, cbr, "cbr {cbr}, {frame_ms_x10}: {sizes:?}");
+            assert_eq!(e.frame, 48 * frame_ms_x10 as usize / 10);
+        }
     }
 }

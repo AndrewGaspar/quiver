@@ -15,6 +15,7 @@ mod lab;
 mod lifecycle;
 mod localsessions;
 mod options;
+mod moonlight;
 mod remote;
 mod tweaks;
 mod savestores;
@@ -127,6 +128,8 @@ struct Daemon {
     sight: notices::SightState,
     /// Remote play's control plane: the listener, pairing, peers (`remote`).
     remote: remote::Remote,
+    /// Moonlight compatibility: the GameStream server, off by default (`moonlight`).
+    moonlight: moonlight::Moonlight,
 }
 
 /// A client connection's reply channel, and a signal once a `Reply::Closing` went out on it.
@@ -676,6 +679,12 @@ impl Daemon {
             | Request::RemoteWake { .. }
             | Request::RemoteDiscover { .. }
             | Request::StartStream { .. }) => remote::handle(self, source, r).await?,
+            r @ (Request::MoonlightStatus
+            | Request::MoonlightEnable { .. }
+            | Request::MoonlightDisable
+            | Request::MoonlightPin { .. }
+            | Request::MoonlightClients
+            | Request::MoonlightUnpair { .. }) => moonlight::handle(self, source, r).await?,
         })
     }
 
@@ -1257,6 +1266,7 @@ async fn main() -> Result<()> {
         pending_2fa_at: Mutex::new(None),
         sight: notices::SightState::default(),
         remote: remote::Remote::new(),
+        moonlight: moonlight::Moonlight::new(),
     });
     mod_sink.attach(&daemon);
     options::test_session(&daemon);
@@ -1267,6 +1277,7 @@ async fn main() -> Result<()> {
     sightinfo::start(&daemon);
     remote::start(&daemon, inherited.remote);
     accounts::announcer(&daemon);
+    moonlight::start(&daemon);
     daemon.start_perf_steam_sweep();
     let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
     lifecycle::start_watch(&daemon, restart_tx);

@@ -66,6 +66,7 @@ async fn a_wine_program_gets_keys_clicks_wheel_and_raw_motion() {
         max_frames: None,
         force_sandbox_gid: None,
         exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_quiver-stream-host"))),
+        constant_bitrate_audio: false,
     };
     let (_btx, brx) = tokio::sync::watch::channel(10_000);
     let mut host = Host::start(opts, brx).await.expect("start");
