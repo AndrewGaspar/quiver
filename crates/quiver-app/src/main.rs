@@ -34,6 +34,7 @@ mod nav;
 mod selfupdate;
 mod source;
 mod stereo_ui;
+mod streaming;
 mod ui;
 
 // The design system lives in `quiver-ui`; these keep the `crate::theme::…` paths the screens use.

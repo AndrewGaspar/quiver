@@ -619,6 +619,9 @@ impl Quiver {
         let mut tl = div().absolute().left(px(8.)).top(px(8.)).flex().gap(px(4.));
         if g.running() {
             tl = tl.child(tag(th, TagKind::Accent, Some(Icon::Gamepad), "Playing"));
+        } else if let Some(t) = self.stream_tag(&g) {
+            let kind = if t == "Streaming" { TagKind::Accent } else { TagKind::Plain };
+            tl = tl.child(tag(th, kind, Some(Icon::Cast), t));
         } else if g.failed().is_some() {
             tl = tl.child(tag(th, TagKind::Warn, Some(Icon::TriangleAlert), "Failed"));
         } else if g.paused() {

@@ -1513,6 +1513,7 @@ impl Render for Quiver {
                 .when_some(self.render_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.render_global_overlay(&th, cx), |d, o| d.child(o))
                 .when_some(self.render_dl_overlay(&th, window, cx), |d, o| d.child(o))
+                .when_some(self.render_stream_splash(&th), |d, s| d.child(s))
                 .when_some(self.toast.clone(), |d, t| d.child(crate::ui::overlay::toast(&th, t, self.toast_bad))),
         };
         // The top bar shows the daemon link; other screens get a notice instead.
