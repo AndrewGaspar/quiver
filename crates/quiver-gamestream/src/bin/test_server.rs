@@ -26,8 +26,12 @@ struct Args {
     /// Where the server's identity and paired clients live.
     #[arg(long)]
     state: PathBuf,
+    /// Addresses to listen on (repeatable).
     #[arg(long, default_value = "127.0.0.1")]
-    bind: std::net::IpAddr,
+    bind: Vec<std::net::IpAddr>,
+    /// Listen on every address of this interface instead (e.g. tailscale0).
+    #[arg(long)]
+    interface: Option<String>,
     #[arg(long, default_value_t = 47989)]
     http_port: u16,
     #[arg(long, default_value = "Quiver Test")]
@@ -293,7 +297,11 @@ async fn main() -> Result<()> {
     eprintln!("loaded {} frames ({} keyframes), {} audio packets", frames.len(), frames.iter().filter(|f| f.0).count(), audio.len());
 
     let mut config = ServerConfig::new(&args.name, &args.state);
-    config.bind = args.bind;
+    config.bind = match &args.interface {
+        Some(i) => quiver_gamestream::interface_addresses(i)?,
+        None => args.bind.clone(),
+    };
+    let listen_on = format!("{:?}", config.bind);
     config.ports = Ports::from_http(args.http_port);
     config.codecs = quiver_gamestream::Codecs {
         h264: codec == VideoCodec::H264,
@@ -310,7 +318,7 @@ async fn main() -> Result<()> {
     let host = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None) });
     let clients = Arc::new(FileClientStore::new(args.state.join("moonlight-clients.json")));
     let server = Arc::new(GameStreamServer::start(config, Arc::new(Library), clients, host).await?);
-    eprintln!("READY {} on {}:{} (fingerprint {})", args.name, args.bind, args.http_port, &server.identity().fingerprint()[..16]);
+    eprintln!("READY {} on {listen_on} port {} (fingerprint {})", args.name, args.http_port, &server.identity().fingerprint()[..16]);
 
     let mut events = server.events();
     let pin = args.pin.clone();

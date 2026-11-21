@@ -29,6 +29,8 @@ pub(crate) struct LaunchParams {
     pub app_number: u32,
     pub client: PairedClient,
     pub client_ip: IpAddr,
+    /// The server address the client reached: the stream's UDP ports bind there.
+    pub local_ip: IpAddr,
     pub key: Key,
     pub key_id: u32,
     pub mode: (u32, u32, u32),
@@ -43,6 +45,7 @@ pub(crate) struct Launch {
     pub app_number: u32,
     pub client: PairedClient,
     pub client_ip: IpAddr,
+    local_ip: IpAddr,
     key: Key,
     key_id: u32,
     pad_mask: u32,
@@ -88,6 +91,7 @@ impl Launch {
             app_number: p.app_number,
             client: p.client,
             client_ip: p.client_ip,
+            local_ip: p.local_ip,
             key: p.key,
             key_id: p.key_id,
             pad_mask: p.pad_mask,
@@ -123,7 +127,8 @@ impl Launch {
         let mut s = self.state();
         if s.sockets.is_none() {
             let bind = |port| -> Result<std::net::UdpSocket> {
-                let sock = std::net::UdpSocket::bind(SocketAddr::new(shared.config.bind, port)).with_context(|| format!("bind UDP {port}"))?;
+                let at = SocketAddr::new(self.local_ip, port);
+                let sock = std::net::UdpSocket::bind(at).with_context(|| format!("bind UDP {at}"))?;
                 sock.set_nonblocking(true)?;
                 Ok(sock)
             };
@@ -414,7 +419,8 @@ impl Session {
         let mut cipher = ControlCipher::new(l.key);
         let video_key = (self.announce.encryption & ENC_VIDEO != 0).then_some(l.key);
         let audio_key = (self.announce.encryption & ENC_AUDIO != 0).then_some((l.key, l.key_id));
-        let mut vp = VideoPacketizer::new(self.announce.packet_size, c.fec_percent, self.announce.min_fec_packets, video_key);
+        // Made when the client's video address is known, to size packets for its path.
+        let mut vp: Option<VideoPacketizer> = None;
         let mut ap = AudioPacketizer::new(u32::from(self.audio.packet_ms), audio_key);
         let mut decoder = InputDecoder::new();
         let mut video_peer: Option<SocketAddr> = None;
@@ -492,13 +498,26 @@ impl Session {
                         Media::Video => {
                             if video_peer.is_none() { let _ = self.control_in_tx.try_send(Control::Keyframe); }
                             video_peer = Some(addr);
+                            if vp.is_none() {
+                                let fit = fit_packet_size(self.announce.packet_size, video_key.is_some(), path_mtu(l.local_ip, addr));
+                                vp = Some(match fit {
+                                    Some(size) => {
+                                        tracing::warn!(
+                                            asked = self.announce.packet_size, size,
+                                            "the client's video packets don't fit the path MTU: sending smaller ones without FEC (set Moonlight's packet size to {} or less)", size
+                                        );
+                                        VideoPacketizer::new(size, 0, 0, video_key)
+                                    }
+                                    None => VideoPacketizer::new(self.announce.packet_size, c.fec_percent, self.announce.min_fec_packets, video_key),
+                                });
+                            }
                         }
                         Media::Audio => audio_peer = Some(addr),
                     }
                 }
                 frame = self.video_rx.recv() => {
                     let Some(f) = frame else { break "the host ended the stream".into() };
-                    let Some(to) = video_peer else { continue };
+                    let (Some(to), Some(vp)) = (video_peer, vp.as_mut()) else { continue };
                     if !sent_keyframe && !f.keyframe { continue; }
                     let ftype = if f.keyframe {
                         sent_keyframe = true;
@@ -576,5 +595,66 @@ impl Session {
         }
         tracing::info!(reason, "Moonlight stream ended");
         self.shared.emit(ServerEvent::StreamEnded { app: self.launch.app.title.clone(), reason: reason.to_owned() });
+    }
+}
+
+/// The MTU of the route from `local` to `peer`, from a connected UDP socket (Linux's
+/// `IP_MTU`/`IPV6_MTU`). None when it can't be found.
+pub(crate) fn path_mtu(local: IpAddr, peer: SocketAddr) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let sock = std::net::UdpSocket::bind(SocketAddr::new(local, 0)).ok()?;
+    sock.connect(peer).ok()?;
+    let (level, name) = if peer.is_ipv4() { (libc::IPPROTO_IP, libc::IP_MTU) } else { (libc::IPPROTO_IPV6, libc::IPV6_MTU) };
+    let mut mtu: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a valid socket fd, and an int and its length that outlive the call.
+    let r = unsafe { libc::getsockopt(sock.as_raw_fd(), level, name, (&mut mtu as *mut libc::c_int).cast(), &mut len) };
+    (r == 0 && mtu > 0).then_some(mtu as u32)
+}
+
+/// A video datagram is the client's packet size plus the 16-byte RTP header, plus 32 bytes
+/// when encrypted (the client already took those 32 off its packet size). If that doesn't
+/// fit the path MTU less the IP and UDP headers, the largest packet size that does (a
+/// multiple of 16). None when the client's size fits, or the MTU is unknown.
+///
+/// Moonlight decodes smaller packets fine, but its FEC recovery assumes its own size, so a
+/// stream sent smaller goes without FEC; fragmenting instead would lose whole frames to the
+/// loss of one fragment, and a tunnel like Tailscale (MTU 1280) may not carry fragments well.
+pub(crate) fn fit_packet_size(packet_size: usize, encrypted: bool, mtu: Option<u32>) -> Option<usize> {
+    let mtu = mtu? as usize;
+    // IPv6's header is the larger; assume it so one rule covers both.
+    let room = mtu.checked_sub(40 + 8)?;
+    let overhead = 16 + if encrypted { 32 } else { 0 };
+    if packet_size + overhead <= room {
+        return None;
+    }
+    let size = (room - overhead) / 16 * 16;
+    Some(size.max(256))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_size_fits_the_path() {
+        // Moonlight on a LAN: 1392, or 1360 with video encryption; Tailscale's MTU is 1280.
+        assert_eq!(fit_packet_size(1392, false, Some(1500)), None);
+        assert_eq!(fit_packet_size(1392, false, Some(1280)), Some(1216));
+        assert_eq!(fit_packet_size(1360, true, Some(1280)), Some(1184));
+        // What Moonlight sends for a remote IPv4 address (1024) or IPv6 one (1184) fits.
+        assert_eq!(fit_packet_size(1024, false, Some(1280)), None);
+        assert_eq!(fit_packet_size(1184 - 32, true, Some(1280)), None);
+        assert_eq!(fit_packet_size(1392, false, None), None);
+        for (p, enc) in [(1392, false), (1360, true)] {
+            let size = fit_packet_size(p, enc, Some(1280)).unwrap();
+            assert!(size + 16 + if enc { 32 } else { 0 } + 48 <= 1280);
+        }
+    }
+
+    #[test]
+    fn loopback_path_mtu() {
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert!(path_mtu("127.0.0.1".parse().unwrap(), peer).is_some_and(|m| m >= 1280));
     }
 }

@@ -324,7 +324,8 @@ m=video 47998  \r\n";
             "a=x-ss-general.featureFlags:1\n",
             "a=x-ss-general.encryptionSupported:7\n",
             "a=x-ss-general.encryptionRequested:1\n",
-            "a=fmtp:97 surround-params=642014235\na=fmtp:97 surround-params=660012345\n",
+            "a=fmtp:97 surround-params=642014235\na=fmtp:97 surround-params=642014523\n",
+            "a=fmtp:97 surround-params=85301645237\na=fmtp:97 surround-params=85301674523\n",
         ] {
             assert!(s.contains(needle), "{needle} in\n{s}");
         }

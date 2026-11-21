@@ -36,27 +36,32 @@ pub struct OpusLayout {
 
 impl OpusLayout {
     /// The layout for `channels` (2, 6 or 8; anything else gets stereo).
+    ///
+    /// These are exactly what libopus's surround encoder (mapping family 1) makes when fed
+    /// Vorbis channel order, which is how `quiver-stream-host` encodes: coupled streams for
+    /// FL/FR, then the side and back pairs, then centre and LFE alone. The mapping here is
+    /// that encoder's, re-indexed by Moonlight's channel order, so Moonlight's decoder puts
+    /// each speaker back where it belongs. "High quality" keeps the layout and doubles the
+    /// bitrate (the host has one encoder layout per channel count).
     pub fn for_channels(channels: u8, high_quality: bool) -> Self {
-        match (channels, high_quality) {
-            (6, false) => Self { channels: 6, streams: 4, coupled_streams: 2, mapping: vec![0, 1, 4, 5, 2, 3], bitrate_bps: 256_000, high_quality },
-            (8, false) => Self {
-                channels: 8,
-                streams: 5,
-                coupled_streams: 3,
-                mapping: vec![0, 1, 6, 7, 2, 3, 4, 5],
-                bitrate_bps: 450_000,
-                high_quality,
-            },
-            (6, true) => Self { channels: 6, streams: 6, coupled_streams: 0, mapping: (0..6).collect(), bitrate_bps: 768_000, high_quality },
-            (8, true) => Self { channels: 8, streams: 8, coupled_streams: 0, mapping: (0..8).collect(), bitrate_bps: 1_024_000, high_quality },
-            (_, hq) => Self {
-                channels: 2,
-                streams: 1,
-                coupled_streams: 1,
-                mapping: vec![0, 1],
-                bitrate_bps: if hq { 256_000 } else { 128_000 },
-                high_quality: hq,
-            },
+        let (channels, streams, coupled_streams, mapping, bps): (u8, u8, u8, Vec<u8>, u32) = match channels {
+            // Vorbis 5.1: FL FC FR RL RR LFE, encoder mapping 0 4 1 2 3 5.
+            6 => (6, 4, 2, vec![0, 1, 4, 5, 2, 3], 256_000),
+            // Vorbis 7.1: FL FC FR SL SR RL RR LFE, encoder mapping 0 6 1 2 3 4 5 7.
+            8 => (8, 5, 3, vec![0, 1, 6, 7, 4, 5, 2, 3], 450_000),
+            _ => (2, 1, 1, vec![0, 1], 128_000),
+        };
+        let bitrate_bps = if high_quality { bps * 2 } else { bps };
+        Self { channels, streams, coupled_streams, mapping, bitrate_bps, high_quality }
+    }
+
+    /// Moonlight's channel order (FL FR FC LFE BL BR SL SR) as indexes into Vorbis order
+    /// (FL FC FR [SL SR] BL BR LFE), the order the host's encoder takes its input in.
+    pub fn vorbis_index(channels: u8) -> &'static [usize] {
+        match channels {
+            6 => &[0, 2, 1, 5, 3, 4],
+            8 => &[0, 2, 1, 7, 5, 6, 3, 4],
+            _ => &[0, 1],
         }
     }
 
@@ -183,21 +188,31 @@ mod tests {
         let n51 = OpusLayout::for_channels(6, false);
         assert_eq!(n51.sdp_params(), "642014235");
         // What Moonlight does with a normal-quality entry: m[3] = p[last], m[4..] = p[3..].
-        let p: Vec<u8> = n51.sdp_params()[3..].bytes().map(|b| b - b'0').collect();
-        let mut m = p.clone();
-        m[3] = p[5];
-        m[4..6].copy_from_slice(&p[3..5]);
-        assert_eq!(m, n51.mapping);
-        let n71 = OpusLayout::for_channels(8, false);
-        let p: Vec<u8> = n71.sdp_params()[3..].bytes().map(|b| b - b'0').collect();
-        let mut m = p.clone();
-        m[3] = p[7];
-        m[4..8].copy_from_slice(&p[3..7]);
-        assert_eq!(m, n71.mapping);
-        // High quality isn't rotated.
-        assert_eq!(OpusLayout::for_channels(6, true).sdp_params(), "660012345");
-        for l in [n51, n71, OpusLayout::for_channels(8, true)] {
+        for l in [n51.clone(), OpusLayout::for_channels(8, false)] {
+            let n = l.mapping.len();
+            let p: Vec<u8> = l.sdp_params()[3..].bytes().map(|b| b - b'0').collect();
+            let mut m = p.clone();
+            m[3] = p[n - 1];
+            m[4..n].copy_from_slice(&p[3..n - 1]);
+            assert_eq!(m, l.mapping);
+        }
+        // High quality: same layout, not rotated, twice the rate.
+        let hq = OpusLayout::for_channels(6, true);
+        assert_eq!(hq.sdp_params(), "642014523");
+        assert_eq!(hq.bitrate_bps, 2 * n51.bitrate_bps);
+        for ch in [6u8, 8] {
+            let l = OpusLayout::for_channels(ch, false);
             assert_eq!(usize::from(l.streams + l.coupled_streams), usize::from(l.channels), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn mappings_follow_libopus_family_1() {
+        // libopus's vorbis_mappings for 5.1 and 7.1 (src/opus_multistream_encoder.c), indexed
+        // by Vorbis channel, re-indexed by Moonlight's.
+        for (ch, family1) in [(6u8, vec![0u8, 4, 1, 2, 3, 5]), (8, vec![0, 6, 1, 2, 3, 4, 5, 7])] {
+            let ours: Vec<u8> = OpusLayout::vorbis_index(ch).iter().map(|&v| family1[v]).collect();
+            assert_eq!(ours, OpusLayout::for_channels(ch, false).mapping, "{ch} channels");
         }
     }
 

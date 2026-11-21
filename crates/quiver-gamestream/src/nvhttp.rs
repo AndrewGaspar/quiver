@@ -208,6 +208,7 @@ fn launch(shared: &Arc<Shared>, req: &HttpRequest, client: PairedClient, peer: I
         app_number: number,
         client,
         client_ip: peer,
+        local_ip: local,
         key,
         key_id: key_id as u32,
         mode: (mode.first().copied().unwrap_or(0), mode.get(1).copied().unwrap_or(0), mode.get(2).copied().unwrap_or(0)),

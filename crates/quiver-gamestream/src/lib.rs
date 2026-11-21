@@ -169,9 +169,11 @@ pub enum AvEncryption {
 pub struct ServerConfig {
     /// The name Moonlight shows for this server.
     pub name: String,
-    /// The address to listen on. The design binds all addresses (a Tailscale or WireGuard
-    /// address is the way in from outside); tests use loopback.
-    pub bind: IpAddr,
+    /// The addresses to listen on. The default is every address (IPv4 and IPv6). To be
+    /// reachable only over a tailnet, give its addresses: the 100.x address and the
+    /// `fd7a:115c:a1e0::` one, or everything on `tailscale0` ([`interface_addresses`]).
+    /// A stream's UDP ports bind to the address the client reached the server on.
+    pub bind: Vec<IpAddr>,
     pub ports: Ports,
     /// Where the server's identity (key, certificate, id) lives.
     pub state_dir: PathBuf,
@@ -196,7 +198,7 @@ impl ServerConfig {
     pub fn new(name: impl Into<String>, state_dir: impl Into<PathBuf>) -> Self {
         Self {
             name: name.into(),
-            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            bind: vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED), IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)],
             ports: Ports::default(),
             state_dir: state_dir.into(),
             codecs: Codecs::default(),
@@ -291,10 +293,17 @@ impl GameStreamServer {
         host: Arc<dyn StreamHost>,
     ) -> Result<Self> {
         let tls = tokio_rustls::TlsAcceptor::from(tls::server_config(&identity)?);
-        let bind = |port: u16| SocketAddr::new(config.bind, port);
-        let http = TcpListener::bind(bind(config.ports.http)).await.with_context(|| format!("listen on HTTP {}", config.ports.http))?;
-        let https = TcpListener::bind(bind(config.ports.https)).await.with_context(|| format!("listen on HTTPS {}", config.ports.https))?;
-        let rtsp = TcpListener::bind(bind(config.ports.rtsp)).await.with_context(|| format!("listen on RTSP {}", config.ports.rtsp))?;
+        if config.bind.is_empty() {
+            bail!("no address to listen on");
+        }
+        let mut http = Vec::new();
+        let mut https = Vec::new();
+        let mut rtsp = Vec::new();
+        for &ip in &config.bind {
+            http.push(listen(ip, config.ports.http).with_context(|| format!("listen on HTTP {ip} {}", config.ports.http))?);
+            https.push(listen(ip, config.ports.https).with_context(|| format!("listen on HTTPS {ip} {}", config.ports.https))?);
+            rtsp.push(listen(ip, config.ports.rtsp).with_context(|| format!("listen on RTSP {ip} {}", config.ports.rtsp))?);
+        }
         let (events, _) = broadcast::channel(64);
         let shared = Arc::new(Shared {
             config,
@@ -310,13 +319,14 @@ impl GameStreamServer {
         let (stop, _) = watch::channel(false);
         let mut tasks = Vec::new();
 
-        let s = shared.clone();
-        tasks.push(tokio::spawn(async move {
+        for http in http {
+            let s = shared.clone();
+            tasks.push(tokio::spawn(async move {
             loop {
                 let Ok((tcp, peer)) = http.accept().await else { continue };
                 let s = s.clone();
                 tokio::spawn(async move {
-                    let local = tcp.local_addr().map(|a| a.ip()).unwrap_or(s.config.bind);
+                    let Ok(local) = tcp.local_addr().map(|a| a.ip()) else { return };
                     let _ = tcp.set_nodelay(true);
                     let mut tcp = tcp;
                     if let Err(e) = nvhttp::serve(&s, &mut tcp, peer, local, None).await {
@@ -324,16 +334,19 @@ impl GameStreamServer {
                     }
                 });
             }
-        }));
+            }));
+        }
 
-        let s = shared.clone();
-        tasks.push(tokio::spawn(async move {
+        for https in https {
+            let s = shared.clone();
+            let tls = tls.clone();
+            tasks.push(tokio::spawn(async move {
             loop {
                 let Ok((tcp, peer)) = https.accept().await else { continue };
                 let s = s.clone();
                 let tls = tls.clone();
                 tokio::spawn(async move {
-                    let local = tcp.local_addr().map(|a| a.ip()).unwrap_or(s.config.bind);
+                    let Ok(local) = tcp.local_addr().map(|a| a.ip()) else { return };
                     let _ = tcp.set_nodelay(true);
                     let mut io = match tokio::time::timeout(Duration::from_secs(10), tls.accept(tcp)).await {
                         Ok(Ok(io)) => io,
@@ -346,10 +359,12 @@ impl GameStreamServer {
                     }
                 });
             }
-        }));
+            }));
+        }
 
-        let s = shared.clone();
-        tasks.push(tokio::spawn(async move {
+        for rtsp in rtsp {
+            let s = shared.clone();
+            tasks.push(tokio::spawn(async move {
             loop {
                 let Ok((tcp, peer)) = rtsp.accept().await else { continue };
                 let s = s.clone();
@@ -359,7 +374,8 @@ impl GameStreamServer {
                     }
                 });
             }
-        }));
+            }));
+        }
 
         Ok(Self { shared, tasks, stop })
     }
@@ -432,6 +448,74 @@ impl Drop for GameStreamServer {
     }
 }
 
+/// A TCP listener on `ip:port`. An IPv6 socket is IPv6-only, so `0.0.0.0` and `::` can both
+/// be bound.
+fn listen(ip: IpAddr, port: u16) -> Result<TcpListener> {
+    let sock = match ip {
+        IpAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+        IpAddr::V6(_) => {
+            let s = tokio::net::TcpSocket::new_v6()?;
+            set_v6_only(&s)?;
+            s
+        }
+    };
+    sock.set_reuseaddr(true)?;
+    sock.bind(SocketAddr::new(ip, port))?;
+    Ok(sock.listen(64)?)
+}
+
+pub(crate) fn set_v6_only(fd: &impl std::os::fd::AsRawFd) -> Result<()> {
+    let one: libc::c_int = 1;
+    // SAFETY: a valid socket fd and a pointer to an int that outlives the call.
+    let r = unsafe {
+        libc::setsockopt(fd.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, (&one as *const libc::c_int).cast(), std::mem::size_of::<libc::c_int>() as u32)
+    };
+    if r != 0 {
+        bail!("IPV6_V6ONLY: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The addresses on a network interface (for example `tailscale0`), to listen only there.
+/// Link-local IPv6 addresses are left out (a tailnet doesn't use them).
+pub fn interface_addresses(name: &str) -> Result<Vec<IpAddr>> {
+    let mut out = Vec::new();
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills a list that is only read here and freed below.
+    unsafe {
+        if libc::getifaddrs(&mut ifap) != 0 {
+            bail!("getifaddrs: {}", std::io::Error::last_os_error());
+        }
+        let mut p = ifap;
+        while !p.is_null() {
+            let ifa = &*p;
+            p = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || std::ffi::CStr::from_ptr(ifa.ifa_name).to_bytes() != name.as_bytes() {
+                continue;
+            }
+            match i32::from((*ifa.ifa_addr).sa_family) {
+                libc::AF_INET => {
+                    let a = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr))));
+                }
+                libc::AF_INET6 => {
+                    let a = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                    let ip = std::net::Ipv6Addr::from(a.sin6_addr.s6_addr);
+                    if (ip.segments()[0] & 0xffc0) != 0xfe80 {
+                        out.push(IpAddr::V6(ip));
+                    }
+                }
+                _ => {}
+            }
+        }
+        libc::freeifaddrs(ifap);
+    }
+    if out.is_empty() {
+        bail!("interface {name} has no usable address");
+    }
+    Ok(out)
+}
+
 /// Whether an address is on this side of the internet: loopback, private, link-local, or
 /// CGNAT (Tailscale's 100.64/10).
 pub fn is_lan(ip: IpAddr) -> bool {
@@ -458,6 +542,22 @@ mod tests {
         assert_eq!(Codecs::default().mode_flags(), 0x1 | 0x100 | 0x200 | 0x1_0000 | 0x2_0000);
         let all = Codecs { yuv444: true, ..Codecs::default() };
         assert_eq!(all.mode_flags() & 0x7C_0000, 0x7C_0000);
+    }
+
+    #[test]
+    fn loopback_interface_addresses() {
+        let a = interface_addresses("lo").unwrap();
+        assert!(a.contains(&"127.0.0.1".parse().unwrap()), "{a:?}");
+        assert!(interface_addresses("no-such-if0").is_err());
+    }
+
+    #[tokio::test]
+    async fn listens_on_v4_and_v6_together() {
+        let a = listen("0.0.0.0".parse().unwrap(), 0).unwrap();
+        let port = a.local_addr().unwrap().port();
+        // The same port on :: works only because the IPv6 socket is IPv6-only.
+        let b = listen("::".parse().unwrap(), port);
+        assert!(b.is_ok(), "{b:?}");
     }
 
     #[test]
