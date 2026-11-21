@@ -147,6 +147,8 @@ pub struct Scenario {
 /// What the runner does at a point in the timeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+// A timeline has tens to hundreds of steps; boxing the shapes would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Op {
     /// Shape both directions like this from now on.
     Shape { to_client: LinkShape, to_server: LinkShape },

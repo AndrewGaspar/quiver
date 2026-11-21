@@ -322,6 +322,9 @@ impl Lab {
         ] {
             self.sysctl(ns, "net/ipv4/conf/all/promote_secondaries", "1")?;
             self.sysctl(ns, "net/ipv4/conf/default/promote_secondaries", "1")?;
+            // Unprivileged ICMP sockets for the person's gid (root in the lab's user
+            // namespace), so `ping` works inside without CAP_NET_RAW.
+            self.sysctl(ns, "net/ipv4/ping_group_range", "0 0")?;
             self.ip_batch(
                 ns,
                 &format!(

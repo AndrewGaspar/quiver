@@ -107,3 +107,25 @@ fn a_roam_changes_the_clients_source_address() {
     assert_eq!(before.port(), after.port(), "same socket");
     assert_eq!(after.ip(), IpAddr::from(new.v4));
 }
+
+#[test]
+fn aqm_keeps_the_queue_short_where_a_fifo_bloats() {
+    use quiver_netlab::probe::udp_rate;
+    use quiver_netlab::shape::Aqm;
+    let Some(lab) = test_lab() else { return };
+    let mut shaper = Shaper::new(&lab);
+    let mut loaded = Vec::new();
+    for aqm in [Aqm::Fifo, Aqm::FqCodel, Aqm::Cake] {
+        let s = LinkShape { delay_ms: 5.0, rate_mbit: 20.0, queue_ms: 300.0, aqm, ..Default::default() };
+        shaper.apply(Dir::ToClient, &s).unwrap();
+        shaper.apply(Dir::ToServer, &LinkShape { delay_ms: 5.0, ..Default::default() }).unwrap();
+        // 40 Mbit/s into 20: a FIFO of 300 ms fills in 0.3 s.
+        let r = udp_rate(&lab, Dir::ToClient, 40.0, 2.5, 7300, Some(0.5)).unwrap();
+        assert!((r.delivered_mbit - 20.0).abs() < 2.0, "{aqm:?}: {r:?}");
+        loaded.push(r.loaded_rtt_ms.unwrap().p50);
+    }
+    let [fifo, fq_codel, cake] = loaded[..] else { unreachable!() };
+    assert!(fifo > 250.0, "fifo {fifo}");
+    assert!(fq_codel < 60.0, "fq_codel {fq_codel}");
+    assert!(cake < 60.0, "cake {cake}");
+}

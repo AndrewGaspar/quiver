@@ -412,8 +412,11 @@ fn shell(name: &str, side: Side, command: Vec<String>) -> Result<()> {
     let info = lab.info(&p.name, Some(sock_path.display().to_string()));
     std::fs::write(&info_path, serde_json::to_string_pretty(&info)?)?;
     let done = AtomicBool::new(false);
+    // Shaped before the shell starts, so its first packet already sees the profile.
+    let mut shaper = Shaper::new(&lab);
+    shaper.apply_profile(&p)?;
     let result = std::thread::scope(|s| -> Result<i32> {
-        let control = s.spawn(|| control_loop(&lab, &p, &listener, &done, &info_path));
+        let control = s.spawn(|| control_loop(&lab, shaper, &p, &listener, &done, &info_path));
         let mut cmd = match command.split_first() {
             Some((c, rest)) => {
                 let mut cmd = Command::new(c);
@@ -447,9 +450,14 @@ fn shell(name: &str, side: Side, command: Vec<String>) -> Result<()> {
     std::process::exit(result?);
 }
 
-fn control_loop(lab: &Lab, start: &Profile, listener: &UnixListener, done: &AtomicBool, info_path: &std::path::Path) -> Result<()> {
-    let mut shaper = Shaper::new(lab);
-    shaper.apply_profile(start)?;
+fn control_loop(
+    lab: &Lab,
+    mut shaper: Shaper,
+    start: &Profile,
+    listener: &UnixListener,
+    done: &AtomicBool,
+    info_path: &std::path::Path,
+) -> Result<()> {
     let mut wander = WanderState::new(start, 1);
     while !done.load(Ordering::Relaxed) {
         wander.tick(&mut shaper)?;
