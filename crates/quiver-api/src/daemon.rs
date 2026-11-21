@@ -81,6 +81,17 @@ pub struct DaemonStatus {
     pub idle_for_secs: Option<u64>,
     #[serde(default)]
     pub holds: Vec<Hold>,
+    /// The unit its cgroup names: `quiverd.service`, or a terminal's scope for one started
+    /// outside the unit (`service`, design/SERVICE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// It runs as `quiverd.service`.
+    #[serde(default)]
+    pub in_unit: bool,
+    /// Moving into the unit: "moving into quiverd.service once nothing needs it", or why
+    /// that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocation: Option<String>,
 }
 
 /// A new build found on disk.

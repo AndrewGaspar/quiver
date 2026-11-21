@@ -760,6 +760,10 @@ impl Proton<'_> {
         for (k, v) in steam_input_env() {
             cmd.env(k, v);
         }
+        // The session's display, when quiverd started before it (at boot): crate::scope.
+        for (k, v) in crate::scope::session_env() {
+            cmd.env(k, v);
+        }
         for (k, v) in &self.cfg.env {
             cmd.env(k, v);
         }
@@ -1013,7 +1017,7 @@ pub async fn play(
     if let Some(n) = stream_note(plan, ns.as_ref()) {
         events(LaunchEvent::Detail(vec![n]));
     }
-    let mut bridge = proton.wrapped(&stream_wrap, &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    let mut bridge = proton.wrapped(&crate::scope::wrap("bridge", &plan.game.unwrap_or_else(|| game.game_ref()).to_string(), stream_wrap.clone()), &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
     stream_env(&mut bridge, plan);
     if let Some(ns) = &ns {
         // First into the namespace: its wineserver must start in there.
@@ -1049,6 +1053,7 @@ pub async fn play(
     args.extend(extra.iter().map(String::as_str));
     args.extend(settings.args.iter().map(String::as_str));
     let wrappers: Vec<String> = stream_wrappers(plan).into_iter().chain(settings.wrappers.iter().cloned()).collect();
+    let wrappers = crate::scope::wrap("game", &plan.game.unwrap_or_else(|| game.game_ref()).to_string(), wrappers);
     let mut cmd = proton.wrapped(&wrappers, &args);
     stream_env(&mut cmd, plan);
     for (k, v) in &settings.env {
@@ -1172,7 +1177,7 @@ async fn start_mods_bridge(cfg: &Config, proton: &Proton<'_>, game: &Game, plan:
     crate::private::write_private(&ctx_path, &serde_json::to_vec(&ctx)?)?;
     let log = run_dir.join("bridge.log");
     let _ = std::fs::remove_file(&log);
-    let mut cmd = proton.wrapped(&stream_wrappers(plan), &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
+    let mut cmd = proton.wrapped(&crate::scope::wrap("bridge", &game_ref.to_string(), stream_wrappers(plan)), &[r"C:\quiver\quiver-bridge.exe", &win_path(&ctx_path)]);
     stream_env(&mut cmd, plan);
     if let Some(ns) = ns {
         ns.enter(cmd.as_std_mut(), None)?;
@@ -1337,6 +1342,7 @@ pub async fn play_store_game(cfg: &Config, game: &Game, plan: &crate::mods::Plan
     args.extend(store.args.iter().map(String::as_str));
     args.extend(settings.args.iter().map(String::as_str));
     let wrappers: Vec<String> = stream_wrappers(plan).into_iter().chain(settings.wrappers.iter().cloned()).collect();
+    let wrappers = crate::scope::wrap("game", &plan.game.unwrap_or_else(|| game.game_ref()).to_string(), wrappers);
     let mut cmd = proton.wrapped(&wrappers, &args);
     stream_env(&mut cmd, plan);
     for (k, v) in store.env.iter().map(|(k, v)| (k, v)).chain(&settings.env) {

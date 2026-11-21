@@ -67,6 +67,8 @@ pub fn open(steam: &Steam, url: &str) -> Result<Vec<String>> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        // The session's display when quiverd started before it (at boot).
+        .envs(crate::scope::session_env())
         .process_group(0)
         .spawn()
         .with_context(|| format!("start {}", argv[0]))?;

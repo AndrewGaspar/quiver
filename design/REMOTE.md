@@ -74,7 +74,9 @@ profiles, the virtual display sized to the client, HDR, and SBS 3D.
   is TCP 47990 for the control plane, with media on a UDP port per stream from 47998 up. It binds
   on all addresses, because a Tailscale or WireGuard address is the expected way in from outside;
   the docs say not to port-forward. `quiver remote status` shows the state, and
-  `quiver remote disable` turns it off.
+  `quiver remote disable` turns it off. On a headless server, `quiver remote enable --at-boot` also
+  starts quiverd at boot, before anyone signs in (the `quiverd.service` user unit with
+  lingering: design/SERVICE.md).
 - **Pairing works when the server has no screen.** On the server, `quiver remote pair` prints a
   6-digit code and the machine's name, and waits 2 minutes. The person types the code into Quiver on
   the client (Settings → Machines → Add). The two sides run SPAKE2 over the code on a TLS

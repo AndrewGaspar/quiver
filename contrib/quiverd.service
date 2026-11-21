@@ -1,17 +1,38 @@
-# systemd user unit for the Quiver daemon (optional: clients start quiverd on demand).
-# tools/install-user.sh and the Arch package install it; enable it with
-#   systemctl --user enable --now quiverd
-# Games inherit this service's environment, so the session's display variables must be
-# imported into the user manager (most compositors do; otherwise run
+# systemd user unit for the Quiver daemon (design/SERVICE.md). tools/install-user.sh and the
+# Arch package install it. Clients start it on demand (`systemctl --user start quiverd`);
+# `quiver remote enable --at-boot` enables it, and with lingering on (loginctl enable-linger)
+# it starts at boot without anyone signing in, as a headless remote-play server needs.
+#
+# quiverd started before a desktop session (at boot) takes the session's display variables
+# from the user manager for each launch, so games still find the screen once someone signs
+# in (most compositors import them; otherwise run
 # `systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP`).
 [Unit]
 Description=Quiver launcher daemon (quiverd)
-After=graphical-session.target
-PartOf=graphical-session.target
+Documentation=https://github.com/AndrewGaspar/quiver/blob/master/design/SERVICE.md
+# A daemon that keeps failing to start stops being restarted after 5 tries in a minute.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+# READY=1 once it listens. A restart onto a new build execs in place (same pid), so the
+# default NotifyAccess=main still holds, and nothing systemd sees changes.
+Type=notify
 ExecStart=%h/.local/bin/quiverd
+# Its own slice: never in a terminal's scope (systemd-oomd kills whole app scopes), and
+# its games and stream hosts get scopes of their own beside it.
+Slice=quiver.slice
 Restart=on-failure
+RestartSec=2
+TimeoutStartSec=60
+# 75: another quiverd already serves the socket (one started outside the unit moves itself
+# in once nothing needs it). Not a failure, and nothing to restart.
+SuccessExitStatus=75
+RestartPreventExitStatus=75
+# Stopping or restarting the unit stops quiverd alone. Games run in their own scopes and
+# must outlive the daemon; anything else it started (a HUD renderer, a game when systemd
+# couldn't give it a scope) is left running too, as it always was.
+KillMode=process
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target

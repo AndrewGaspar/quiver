@@ -16,7 +16,8 @@
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg
-#   ~/.config/systemd/user/quiverd.service   (installed, not enabled)
+#   ~/.config/systemd/user/{quiverd.service,quiver.slice}  (installed, not enabled; the user
+#                                             manager is reloaded when they change)
 #   ~/.local/share/doc/quiver/                (licenses)
 #
 # Every installed file and its hash goes in ~/.local/state/quiver/installed.json. Running it
@@ -320,9 +321,12 @@ link_skill
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$datadir/applications" >/dev/null 2>&1 || true
 fi
-if command -v systemctl >/dev/null 2>&1 && grep -qxF "$unitdir/quiverd.service" "$changed_out" \
-    && systemctl --user is-enabled quiverd.service >/dev/null 2>&1; then
-    systemctl --user daemon-reload || true
+# The user manager reads changed unit files only on a reload, and quiverd (and clients
+# starting it) go by what it has loaded: reload whenever ours changed, enabled or not.
+# Nothing is started, stopped or enabled here.
+if command -v systemctl >/dev/null 2>&1 \
+    && grep -qxE "$unitdir/(quiverd\.service|quiver\.slice)" "$changed_out"; then
+    systemctl --user daemon-reload && echo "  reloaded the systemd user manager (quiverd.service changed)" || true
 fi
 
 # The Omarchy bar widget: installed as files only (quiver omarchy install-plugin puts it in the
@@ -378,6 +382,12 @@ print("; ".join(w))
     else
         echo "quiverd restarts onto this build by itself once nothing needs it; waiting on: $plan"
         echo "  (quiver daemon status shows progress; quiver daemon hold --reason … keeps it from restarting)"
+    fi
+    # Where it runs: a quiverd from before the unit (a terminal's scope) restarts onto this
+    # build there, then moves into quiverd.service by itself once idle (design/SERVICE.md).
+    cg=$(sed -n 's|^0::.*/||p' "/proc/$daemon/cgroup" 2>/dev/null || true)
+    if [[ -n $cg && $cg != quiverd.service ]]; then
+        echo "  it runs outside quiverd.service (in $cg); once this build runs and nothing needs it, it moves into the unit"
     fi
     exit 0
 fi

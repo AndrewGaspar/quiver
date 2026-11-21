@@ -11,7 +11,7 @@ merge only recompiles what changed.
 | Binaries | `~/.local/bin` | `/usr/bin` |
 | Bridge | `~/.local/lib/quiver/quiver-bridge.exe` (and `ubi-bridge.exe`, its old name) | `/usr/lib/quiver/quiver-bridge.exe` (`ubi-bridge.exe` links to it) |
 | Desktop entry, icon | `~/.local/share/applications`, `~/.local/share/icons/hicolor` | `/usr/share/…` |
-| systemd user unit (not enabled) | `~/.config/systemd/user/quiverd.service` | `/usr/lib/systemd/user/quiverd.service` |
+| systemd user unit and slice (not enabled) | `~/.config/systemd/user/quiverd.service`, `quiver.slice` | `/usr/lib/systemd/user/quiverd.service`, `quiver.slice` |
 | Licenses | `~/.local/share/doc/quiver` | `/usr/share/licenses/quiver` |
 | Tracking | `~/.local/state/quiver/installed.json` | pacman |
 | Build cache | `~/.cache/quiver-build` | `~/.cache/quiver-pkg` |
@@ -104,5 +104,8 @@ There is nothing to restart by hand:
 A `quiverd` from before self-restarting (no `quiver daemon status`) needs one manual
 `quiver daemon stop` when no game is running; from then on it follows upgrades.
 
-The systemd user unit is installed but not enabled; `quiverd` is started on demand by any
-client. To run it as a service instead: `systemctl --user enable --now quiverd`.
+The systemd user unit is installed but not enabled. Clients start it on demand
+(`systemctl --user start quiverd`), so quiverd runs in `quiver.slice`, never in the scope of
+the terminal or app that first needed it. To start it at boot (a headless remote-play
+server): `quiver remote enable --at-boot`, which enables the unit and turns lingering on
+(design/SERVICE.md).

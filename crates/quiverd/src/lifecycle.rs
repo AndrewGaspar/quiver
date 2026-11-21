@@ -15,6 +15,10 @@
 //!   Every connection gets `Reply::Closing`; then quiverd execs the new binary with the same
 //!   pid, handing it the listening sockets (`QUIVER_LISTEN_FDS`), so connections made in
 //!   between wait in the backlog and the broker keeps its port.
+//! - **Moving into the unit:** a daemon outside `quiverd.service` (started from a terminal
+//!   before the unit existed) moves itself in the same way once idle, waiting on streams
+//!   too: instead of an exec it hands its sockets to the unit's process and exits
+//!   (`unit.rs`, design/SERVICE.md).
 //! - **Holds** keep it from restarting: tied to the connection that asked (gone when that
 //!   client exits or crashes), or with a time limit (at most a day), so a holder that
 //!   crashed never blocks updates for long.
@@ -102,6 +106,10 @@ pub(crate) struct Busy {
     /// Perf sessions of launches without a game session yet (`quiver steam-run`), by name.
     pub perf_sessions: Vec<String>,
     pub awaiting_2fa: bool,
+    /// Streams this machine serves (kept ones too), by title. An exec leaves their hosts
+    /// running and re-adopts them, so they only keep the daemon from moving into the unit,
+    /// which hands over to another process.
+    pub streams: Vec<String>,
 }
 
 struct HoldEntry {
@@ -128,6 +136,21 @@ struct State {
     /// A build exec failed for: not tried again until another one is staged.
     failed: Option<FileId>,
     idle_since: Option<Instant>,
+    /// Move into this unit once idle (`unit.rs`).
+    relocate: Option<Relocation>,
+}
+
+struct Relocation {
+    unit: String,
+    /// Moving failed (why): not tried again by this process.
+    failed: Option<String>,
+}
+
+impl State {
+    /// The unit to move into, while that is still to be tried.
+    fn relocating(&self) -> Option<&str> {
+        self.relocate.as_ref().filter(|r| r.failed.is_none()).map(|r| r.unit.as_str())
+    }
 }
 
 pub(crate) struct Lifecycle {
@@ -141,6 +164,10 @@ pub(crate) struct Lifecycle {
     pub started: DateTime<Utc>,
     pub restarts: u32,
     pub restarted_from: Option<String>,
+    /// The unit this process's cgroup names (`quiverd.service`, `kitty-1-0.scope`).
+    pub unit: Option<String>,
+    /// It runs as its unit (`unit::in_unit`).
+    pub in_unit: bool,
     /// Refusing new work: the restart is under way. Changed only under `state`'s lock;
     /// read without it.
     closed: AtomicBool,
@@ -180,7 +207,11 @@ pub(crate) struct Plan {
     pub exe: PathBuf,
     /// The new build's version, if the manifest says.
     pub to: Option<String>,
-    file: FileId,
+    /// The staged build (none when only moving into the unit).
+    file: Option<FileId>,
+    /// Move into this unit (hand the sockets over) instead of exec'ing: the unit runs the
+    /// installed build anyway.
+    pub relocate: Option<String>,
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -191,6 +222,9 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// with `inflight` (the restart itself waits them out; the idle timer ignores them).
 fn reasons(st: &State, busy: &Busy, inflight: bool, now: DateTime<Utc>) -> Vec<String> {
     let mut out = busy.sessions.clone();
+    if st.relocating().is_some() {
+        out.extend(busy.streams.iter().map(|t| format!("stream: {t}")));
+    }
     out.extend(busy.starting.iter().map(|n| format!("starting {n}")));
     out.extend(busy.jobs.iter().cloned());
     if busy.perf_subscriptions > 0 {
@@ -251,6 +285,8 @@ impl Lifecycle {
             started: Utc::now(),
             restarts: 0,
             restarted_from: None,
+            unit: None,
+            in_unit: false,
             closed: AtomicBool::new(false),
             state: Mutex::default(),
         })
@@ -258,14 +294,16 @@ impl Lifecycle {
 
     /// This process's: its binary, settings from the environment, and the restart it
     /// came from (whose variables it takes out of the environment, see [`take_inherited`]).
-    pub(crate) fn from_env() -> Arc<Self> {
+    pub(crate) fn from_env(in_unit: bool, moved_from: Option<&str>) -> Arc<Self> {
         let exe = started_from();
         // The running image, even once its file was replaced.
         let running = FileId::of(Path::new("/proc/self/exe"));
         let mut lc = Self::new(Settings::from_env(), exe, running, manifest_path());
         let l = Arc::get_mut(&mut lc).expect("fresh");
         l.restarts = std::env::var(RESTART_COUNT).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        l.restarted_from = std::env::var(RESTARTED_FROM).ok().filter(|v| !v.is_empty());
+        l.restarted_from = std::env::var(RESTARTED_FROM).ok().filter(|v| !v.is_empty()).or_else(|| moved_from.map(str::to_owned));
+        l.unit = quiver_api::service::current_unit();
+        l.in_unit = in_unit;
         // SAFETY: called from `main` before anything else runs that reads the environment
         // (the runtime's threads are idle); games must not inherit these.
         unsafe {
@@ -360,6 +398,18 @@ impl Lifecycle {
         ids.into_iter().filter_map(|id| st.holds.remove(&id)).map(|h| h.hold).collect()
     }
 
+    /// Move into `unit` once idle (unless that already failed).
+    pub(crate) fn want_relocation(&self, unit: String) {
+        let mut st = self.lock();
+        if self.in_unit || st.relocate.as_ref().is_some_and(|r| r.failed.is_some()) {
+            return;
+        }
+        if st.relocate.is_none() {
+            tracing::info!("quiverd runs outside {unit}; moving into it once nothing needs it");
+        }
+        st.relocate = Some(Relocation { unit, failed: None });
+    }
+
     /// Notice a new build in place of ours.
     fn check_staged(&self, st: &mut State, now: Instant) {
         let (Some(exe), Some(running)) = (&self.exe, self.running) else { return };
@@ -391,9 +441,10 @@ impl Lifecycle {
         } else {
             st.idle_since = None;
         }
+        let staged = st.staged.as_ref().is_some_and(|s| Some(s.file) != st.failed && now.duration_since(s.at) >= self.settings.settle);
         let ready = self.settings.auto
             && !self.closed()
-            && st.staged.as_ref().is_some_and(|s| Some(s.file) != st.failed && now.duration_since(s.at) >= self.settings.settle)
+            && (staged || st.relocating().is_some())
             && st.idle_since.is_some_and(|t| now.duration_since(t) >= self.settings.idle);
         (ready, expired)
     }
@@ -410,8 +461,16 @@ impl Lifecycle {
         if self.closed() {
             return Err(vec!["already restarting".into()]);
         }
-        let (Some(exe), Some(staged)) = (&self.exe, &st.staged) else { return Err(vec!["no new build staged".into()]) };
-        let plan = Plan { exe: exe.clone(), to: staged.update.version.clone(), file: staged.file };
+        let plan = match (&self.exe, &st.staged, st.relocating()) {
+            (exe, staged, Some(unit)) => Plan {
+                exe: exe.clone().unwrap_or_default(),
+                to: staged.as_ref().and_then(|s| s.update.version.clone()),
+                file: staged.as_ref().map(|s| s.file),
+                relocate: Some(unit.to_owned()),
+            },
+            (Some(exe), Some(staged), None) => Plan { exe: exe.clone(), to: staged.update.version.clone(), file: Some(staged.file), relocate: None },
+            _ => return Err(vec!["no new build staged".into()]),
+        };
         let why = reasons(&st, &busy(), true, Utc::now());
         if !why.is_empty() {
             return Err(why);
@@ -423,9 +482,15 @@ impl Lifecycle {
     /// The exec failed: take requests again, and don't retry this build.
     pub(crate) fn reopen(&self, plan: &Plan, error: &str) {
         let mut st = self.lock();
-        st.failed = Some(plan.file);
-        if let Some(s) = st.staged.as_mut().filter(|s| s.file == plan.file) {
-            s.update.note = Some(format!("restarting onto it failed: {error}"));
+        if plan.relocate.is_some() {
+            if let Some(r) = st.relocate.as_mut() {
+                r.failed = Some(error.to_owned());
+            }
+        } else {
+            st.failed = plan.file;
+            if let Some(s) = st.staged.as_mut().filter(|s| Some(s.file) == plan.file) {
+                s.update.note = Some(format!("restarting onto it failed: {error}"));
+            }
         }
         self.closed.store(false, Ordering::SeqCst);
     }
@@ -452,6 +517,12 @@ impl Lifecycle {
             idle_for_secs: if waiting_on.is_empty() { st.idle_since.map(|t| now.duration_since(t).as_secs()) } else { None },
             waiting_on,
             holds: st.holds.values().map(|h| h.hold.clone()).collect(),
+            unit: self.unit.clone(),
+            in_unit: self.in_unit,
+            relocation: st.relocate.as_ref().map(|r| match &r.failed {
+                None => format!("moving into {} once nothing needs it", r.unit),
+                Some(e) => format!("moving into {} failed: {e}", r.unit),
+            }),
         }
     }
 }
@@ -475,7 +546,12 @@ pub(crate) fn exec(plan: &Plan, fds: &[(&str, RawFd)], restarts: u32) -> std::io
         set_cloexec(*fd, false);
     }
     let spec: Vec<String> = fds.iter().map(|(name, fd)| format!("{name}:{fd}")).collect();
-    let err = std::process::Command::new(&plan.exe)
+    let mut cmd = std::process::Command::new(&plan.exe);
+    // The unit's notify socket, taken out of the environment at start (`unit.rs`).
+    if let Some(n) = crate::unit::notify_socket() {
+        cmd.env("NOTIFY_SOCKET", n);
+    }
+    let err = cmd
         .env(LISTEN_FDS, spec.join(","))
         .env(RESTARTED_FROM, build())
         .env(RESTART_COUNT, (restarts + 1).to_string())
@@ -507,30 +583,49 @@ fn listening(fd: RawFd, domain: libc::c_int) -> bool {
     get(libc::SO_ACCEPTCONN) == Some(1) && get(libc::SO_DOMAIN) == Some(domain)
 }
 
+impl Inherited {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.unix.is_none() && self.broker.is_none() && self.remote.is_none()
+    }
+}
+
 /// Take the sockets the previous build handed over (`QUIVER_LISTEN_FDS`), out of the
 /// environment too. Call first thing in `main`.
 pub(crate) fn take_inherited() -> Inherited {
-    use std::os::fd::FromRawFd;
     let spec = std::env::var(LISTEN_FDS).ok();
     // SAFETY: first thing in `main`; nothing else reads the environment yet.
     unsafe { std::env::remove_var(LISTEN_FDS) };
-    let mut out = Inherited::default();
+    let mut fds = Vec::new();
     for part in spec.as_deref().unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
         let Some((name, fd)) = part.split_once(':').and_then(|(n, f)| Some((n, f.parse::<RawFd>().ok()?))) else {
             tracing::warn!("{LISTEN_FDS}: ignoring '{part}'");
             continue;
         };
+        fds.push((name.to_owned(), fd));
+    }
+    inherited_from(fds)
+}
+
+/// Named listening sockets (from an exec or a handover into the unit) as [`Inherited`];
+/// a descriptor named wrongly is closed, one that isn't a listening socket left alone.
+pub(crate) fn inherited_from(fds: Vec<(String, RawFd)>) -> Inherited {
+    use std::os::fd::FromRawFd;
+    let mut out = Inherited::default();
+    for (name, fd) in fds {
+        let name = name.as_str();
         let domain = match name {
             "unix" => libc::AF_UNIX,
             "broker" | "remote" => libc::AF_INET,
             _ => {
-                tracing::warn!("{LISTEN_FDS}: unknown socket '{name}'");
+                tracing::warn!("inherited sockets: unknown socket '{name}'");
+                // SAFETY: handed to us to own; nothing else holds it.
+                unsafe { libc::close(fd) };
                 continue;
             }
         };
         let ok = listening(fd, domain) || (domain == libc::AF_INET && listening(fd, libc::AF_INET6));
         if !ok {
-            tracing::warn!("{LISTEN_FDS}: fd {fd} ({name}) is not a listening socket");
+            tracing::warn!("inherited sockets: fd {fd} ({name}) is not a listening socket");
             continue;
         }
         // Games and other children must not inherit it.
@@ -615,6 +710,7 @@ impl crate::Daemon {
             .collect();
         busy.awaiting_2fa = self.pending_2fa.lock().unwrap().is_some()
             && self.pending_2fa_at.lock().unwrap().is_some_and(|t| t.elapsed() < TWO_FA_BUSY);
+        busy.streams = self.streams.list().into_iter().map(|s| s.title).collect();
         busy
     }
 
@@ -654,20 +750,29 @@ impl crate::Daemon {
     pub(crate) async fn announce_restart(&self, plan: &Plan) {
         let to = plan.to.clone();
         let from = build();
-        self.log_activity(
-            "system",
-            format!(
-                "quiverd restarting onto {} (was {from}): a new build is installed and nothing needs the daemon",
-                to.as_deref().unwrap_or("a new build")
+        let (what, reason) = match &plan.relocate {
+            Some(unit) => (
+                format!(
+                    "quiverd moving into {unit} (it ran in {}): nothing needs the daemon",
+                    self.lifecycle.unit.as_deref().unwrap_or("another cgroup")
+                ),
+                format!("moving into {unit}"),
             ),
-            None,
-        );
+            None => (
+                format!(
+                    "quiverd restarting onto {} (was {from}): a new build is installed and nothing needs the daemon",
+                    to.as_deref().unwrap_or("a new build")
+                ),
+                "restarting onto a new build".to_owned(),
+            ),
+        };
+        self.log_activity("system", what, None);
         self.emit(quiver_api::Event::DaemonRestarting { from, to });
         // Events reach connections through their forwarding tasks; let them go first.
         tokio::time::sleep(Duration::from_millis(100)).await;
         let conns: Vec<_> = self.conns.lock().unwrap().values().cloned().collect();
         for (tx, _) in &conns {
-            let _ = tx.send(quiver_api::Reply::Closing { reason: "restarting onto a new build".into() });
+            let _ = tx.send(quiver_api::Reply::Closing { reason: reason.clone() });
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         for (_, written) in &conns {
@@ -764,6 +869,7 @@ mod tests {
             huds: 2,
             perf_sessions: vec!["Rayman".into()],
             awaiting_2fa: true,
+            streams: vec!["Test pattern".into()],
         };
         st.broker_conns = 1;
         let r = reasons(&st, &busy, false, Utc::now());
@@ -883,6 +989,51 @@ mod tests {
         lc.hold("c", "cli", Some(60), None).unwrap();
         lc.hold("d", "cli", Some(60), None).unwrap();
         assert_eq!(lc.release(None, true).unwrap().len(), 2);
+    }
+
+    /// Moving into the unit: wanted without a staged build, waits for idle *and* for
+    /// streams (an exec doesn't), commits like a restart, and isn't retried once it failed.
+    #[test]
+    fn moving_into_the_unit() {
+        let bin = Bin::new(0);
+        let lc = &bin.lc;
+        let streaming = Busy { streams: vec!["Test pattern".into()], ..Default::default() };
+        // A stream doesn't hold up an exec onto a new build.
+        bin.replace();
+        assert!(lc.tick(&streaming).0);
+        let plan = lc.try_close(|| streaming.clone()).unwrap();
+        assert!(plan.relocate.is_none());
+        lc.reopen(&plan, "test");
+
+        let bin = Bin::new(0);
+        let lc = &bin.lc;
+        assert!(!lc.tick(&Busy::default()).0, "nothing staged, nothing wanted");
+        lc.want_relocation("quiverd.service".into());
+        assert_eq!(lc.status(&Busy::default()).relocation.as_deref(), Some("moving into quiverd.service once nothing needs it"));
+        // A game or a stream holds it up.
+        assert!(!lc.tick(&Busy { sessions: vec!["AC Origins (bridge)".into()], ..Default::default() }).0);
+        assert!(!lc.tick(&streaming).0);
+        assert_eq!(lc.status(&streaming).waiting_on, ["stream: Test pattern"]);
+        assert_eq!(lc.try_close(|| streaming.clone()).err().unwrap(), ["stream: Test pattern"]);
+        assert!(lc.tick(&Busy::default()).0);
+        let pass = lc.enter(Some("play")).unwrap();
+        assert!(lc.try_close(Busy::default).is_err(), "requests in flight are waited out");
+        drop(pass);
+        let plan = lc.try_close(Busy::default).unwrap();
+        assert_eq!(plan.relocate.as_deref(), Some("quiverd.service"));
+        assert!(lc.closed() && lc.enter(Some("play")).is_err());
+
+        // It failed: requests run again, and it isn't tried again (nor re-wanted).
+        lc.reopen(&plan, "the unit didn't come");
+        assert!(!lc.closed() && lc.enter(Some("play")).is_ok());
+        assert!(!lc.tick(&Busy::default()).0);
+        lc.want_relocation("quiverd.service".into());
+        assert!(!lc.tick(&Busy::default()).0);
+        assert!(lc.status(&Busy::default()).relocation.unwrap().contains("failed: the unit didn't come"));
+        // A new build is still restarted onto (by exec).
+        bin.replace();
+        assert!(lc.tick(&Busy::default()).0);
+        assert!(lc.try_close(Busy::default).unwrap().relocate.is_none());
     }
 
     #[test]
