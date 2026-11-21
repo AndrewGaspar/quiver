@@ -89,6 +89,11 @@ sed -e "s|^Exec=.*|Exec=$BINDIR/quiver-app|" -e "s|^Icon=.*|Icon=quiver|" \
     "$src/contrib/quiver.desktop" >"$root$DATADIR/applications/quiver.desktop"
 chmod 644 "$root$DATADIR/applications/quiver.desktop"
 install -Dm644 "$src/contrib/quiver.svg" "$root$DATADIR/icons/hicolor/scalable/apps/quiver.svg"
+# PNG renders of it (tools/render-icons.sh), for consumers that only read raster icons.
+for png in "$src"/contrib/icons/hicolor/*/apps/quiver.png; do
+    size=$(basename "$(dirname "$(dirname "$png")")")
+    install -Dm644 "$png" "$root$DATADIR/icons/hicolor/$size/apps/quiver.png"
+done
 
 # The agent skill (Claude Code / Codex / ~/.agents): matches this build's CLI. A package can
 # link $LIBDIR/skills/quiver into a skills directory; tools/install-user.sh does it per user.

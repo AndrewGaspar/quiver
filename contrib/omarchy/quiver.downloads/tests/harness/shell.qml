@@ -2,11 +2,12 @@
 // links the shell's Ui/Commons and this plugin next to this file). It drives
 // the real Service, Widget and Body with canned queues (what `quiver queue
 // --json` prints), checks what the bar would show for each state, and saves
-// screenshots of the bar (horizontal and vertical) and the panel. The poll
-// scenarios run the Service's own polling against stand-ins: fake-quiver
-// (serves tests/fixtures/live-queue.json), fake-quiver-down (quiverd isn't
-// running) and fake-quiver-old (a CLI without --no-start). Nothing here starts
-// quiverd or the app, or sends notifications.
+// screenshots of the bar (horizontal and vertical) and the panel. What is
+// playing comes in as `quiver playing --json` lines. The poll and follow
+// scenarios run the Service's own processes against stand-ins: fake-quiver
+// (serves tests/fixtures/live-queue.json and playing.json), fake-quiver-down
+// (quiverd isn't running) and fake-quiver-old (a CLI without --no-start or
+// `playing`). Nothing here starts quiverd or the app, or sends notifications.
 
 import QtQuick
 import Quickshell
@@ -63,6 +64,31 @@ ShellRoot {
   readonly property var odyssey: h.entry({ position: 2, done_bytes: 140694473, total_bytes: 102383586228 })
   readonly property var valhalla: h.entry({ product_id: 13504, name: "Assassin's Creed® Valhalla", position: 3 })
   readonly property var markup: h.entry({ product_id: 4242, name: "<img src=x onerror=alert(1)> <b>Not bold</b> &amp;", position: 4 })
+  // A line of `quiver playing --json`: Origins running for 72 min with the Pharos profile,
+  // streaming to roth through Moonlight, and three recent games.
+  function playingLine(game, extra) {
+    var g = {
+      ref: "3539", name: "Assassin's Creed Origins", short: "AC Origins",
+      started: new Date(Date.now() - 72 * 60000).toISOString(), profile: "Pharos", via: ["launcher"],
+      session: "s-pzfkk4bl2v", stream: { peer: "roth", client: "moonlight", state: "streaming" },
+      icon: h.iconDir + "/odyssey.png"
+    }
+    for (var k in game) g[k] = game[k]
+    var v = {
+      connected: true,
+      playing: [g],
+      recent: [
+        { ref: "420", name: "Far Cry 4", short: "Far Cry 4", last_played: new Date(Date.now() - 14 * 60000).toISOString(), icon: h.iconDir + "/farcry.png" },
+        { ref: "epic:dc9d2e595d0e4650b35d659f90d41059", name: "Alan Wake 2", short: "Alan Wake 2", last_played: new Date(Date.now() - 3 * 3600000).toISOString() },
+        { ref: "5059", name: "Assassin's Creed Odyssey", short: "AC Odyssey", last_played: new Date(Date.now() - 26 * 3600000).toISOString(), icon: h.iconDir + "/odyssey.png" }
+      ]
+    }
+    for (var e in extra) v[e] = extra[e]
+    return JSON.stringify(v)
+  }
+  readonly property string iconDir: Quickshell.env("HARNESS_ICONS")
+  readonly property string longTitle: "Tom Clancy's Rainbow Six Extraction Deluxe Edition"
+
   readonly property var downloading: h.aw2({ state: "downloading", position: 1, done_bytes: 31699451644, total_bytes: 105865248129, speed: 3, retries: 2, throughput: h.tp(60, 25922326) })
 
   readonly property var scenarios: [
@@ -180,25 +206,139 @@ ShellRoot {
       }
     },
     {
-      name: "idle",
+      name: "idle-hidden",
+      settings: { showWhenIdle: false },
       apply: function () { service.handleQueue(h.line([])) },
       expect: function () {
         h.check(hw.phase === "idle", "phase " + hw.phase)
-        h.check(!hw.visible, "hidden when idle")
+        h.check(!hw.visible, "hidden when idle with showWhenIdle off")
       }
     },
     {
-      name: "idle-shown",
-      settings: { showWhenIdle: true },
+      name: "idle",
       apply: function () { service.handleQueue(h.line([])) },
-      expect: function () { h.check(hw.visible, "showWhenIdle keeps it") }
+      expect: function () {
+        h.check(hw.visible, "the mark stays by default")
+        h.check(hw.labelText === "", "no label: '" + hw.labelText + "'")
+        h.check(!hw.queueBusy, "plain mark")
+        h.check(hw.tooltip === "Quiver: nothing playing or downloading", "tooltip: " + hw.tooltip)
+      }
     },
     {
       name: "down",
       apply: function () { service.handleFailure("down", "Error: quiverd is not running (No such file or directory (os error 2))") },
       expect: function () {
         h.check(hw.phase === "down", "phase " + hw.phase)
-        h.check(!hw.visible, "hidden while quiverd is down")
+        h.check(hw.visible, "the mark stays while quiverd is down")
+      }
+    },
+    {
+      name: "down-hidden",
+      settings: { showWhenIdle: false },
+      apply: function () { service.handleFailure("down", "Error: quiverd is not running (No such file or directory (os error 2))") },
+      expect: function () { h.check(!hw.visible, "hidden while quiverd is down with showWhenIdle off") }
+    },
+    // ---- now playing, recent games
+    {
+      name: "playing",
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({}))
+      },
+      expect: function () {
+        h.check(hw.visible, "visible")
+        h.check(hw.labelText === "AC Origins", "label '" + hw.labelText + "'")
+        h.check(!hw.titleOverflows, "a short title fits")
+        h.check(vw.labelText === "", "vertical bar has no label")
+        h.check(hw.tooltip.indexOf("Now playing: Assassin's Creed Origins · 1 h 12 min") === 0, "tooltip: " + hw.tooltip)
+        h.check(hw.tooltip.indexOf("Streaming to roth (Moonlight)") !== -1, "tooltip has the stream: " + hw.tooltip)
+        h.check(body.playingRows.length === 1, "one playing card")
+        h.check(body.playingDetail(body.playingRows[0]) === "1 h 12 min · Profile Pharos", "detail: " + body.playingDetail(body.playingRows[0]))
+        h.check(body.recentRows.length === 3, "three recent games, got " + body.recentRows.length)
+        h.check(body.targetCount === 3 + 3 + 2, "cursor targets: " + body.targetCount)
+        h.check(body.heroMeta === "Playing AC Origins", "hero: " + body.heroMeta)
+      }
+    },
+    {
+      name: "playing-downloading",
+      apply: function () {
+        service.handleQueue(h.line([h.downloading, h.odyssey]))
+        service.handlePlaying(h.playingLine({ stream: null, profile: null }))
+      },
+      expect: function () {
+        h.check(hw.phase === "active", "phase " + hw.phase)
+        h.check(hw.labelText === "AC Origins", "the title wins: '" + hw.labelText + "'")
+        h.check(hw.tooltip.indexOf("Alan Wake 2") !== -1, "tooltip has the download: " + hw.tooltip)
+        h.check(body.rowsStart === 3 && body.recentStart === 5, "targets: " + body.rowsStart + "/" + body.recentStart)
+      }
+    },
+    {
+      name: "playing-label-percent",
+      settings: { label: "percent" },
+      apply: function () {
+        service.handleQueue(h.line([h.downloading]))
+        service.handlePlaying(h.playingLine({}))
+      },
+      expect: function () { h.check(hw.labelText === "29%", "label '" + hw.labelText + "'") }
+    },
+    {
+      name: "playing-long-title",
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({ ref: "6000", name: h.longTitle, short: h.longTitle, stream: { peer: "roth", client: "quiver", state: "kept" }, icon: "" }))
+      },
+      expect: function () {
+        h.check(hw.labelText === h.longTitle, "the whole title: '" + hw.labelText + "'")
+        h.check(hw.titleOverflows, "cut to the slot")
+        h.check(!hw.titleScrolling, "still until hovered")
+        h.check(hw.tooltip.indexOf("Kept for a resume from roth (Quiver)") !== -1, "kept stream: " + hw.tooltip)
+      }
+    },
+    {
+      name: "playing-marquee",
+      marquee: true,
+      wait: 2400,
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({ ref: "6000", name: h.longTitle, short: h.longTitle, icon: "" }))
+      },
+      expect: function () { h.check(hw.titleScrolling, "scrolls on hover") }
+    },
+    {
+      name: "playing-markup",
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({ name: "<b>Bold</b> <img src=x>", short: "<b>B</b>", profile: "<i>p</i>" }))
+      },
+      expect: function () {
+        h.check(hw.labelText === "<b>B</b>", "label kept literal")
+        h.check(body.playingRows[0].name === "<b>Bold</b> <img src=x>", "name kept literal")
+      }
+    },
+    {
+      name: "recent-only",
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({}, { playing: [] }))
+      },
+      expect: function () {
+        h.check(hw.labelText === "", "no label")
+        h.check(body.recentRows.length === 3, "recent games listed")
+        h.check(body.playingRows.length === 0, "nothing playing")
+        h.check(body.heroMeta === "Nothing to download", "hero: " + body.heroMeta)
+      }
+    },
+    {
+      name: "follow-disconnected",
+      apply: function () {
+        service.handleQueue(h.line([]))
+        service.handlePlaying(h.playingLine({}))
+        service.handlePlaying(JSON.stringify({ connected: false, playing: [], recent: [] }))
+      },
+      expect: function () {
+        h.check(!service.followConnected, "disconnected")
+        h.check(service.playing.length === 0, "nothing playing while quiverd is away")
+        h.check(service.recent.length === 3, "recent games kept")
       }
     },
     {
@@ -222,6 +362,7 @@ ShellRoot {
     },
     {
       name: "poll-down",
+      settings: { showWhenIdle: false },
       apply: function () { h.pollWith(h.fakeDown) },
       wait: 1500,
       expect: function () {
@@ -239,6 +380,30 @@ ShellRoot {
       expect: function () {
         h.check(hw.phase === "unavailable", "phase " + hw.phase)
         h.check(service.downReason.indexOf("--no-start") !== -1, "reason: " + service.downReason)
+      }
+    },
+    // The follow (`quiver playing --follow`), against the stand-ins.
+    {
+      name: "follow-live",
+      apply: function () { h.followWith(h.fake) },
+      wait: 1200,
+      expect: function () {
+        h.check(service.followConnected, "connected")
+        h.check(service.playing.length === 1 && service.playing[0].short === "Alan Wake 2", "playing from the follow")
+        h.check(service.recent.length === 2, "recent from the follow")
+        h.check(hw.labelText === "Alan Wake 2", "label '" + hw.labelText + "'")
+        h.check(follow() && follow().running, "the follow keeps running")
+      }
+    },
+    {
+      name: "follow-old-cli",
+      apply: function () { h.followWith(h.fakeOld) },
+      wait: 1200,
+      expect: function () {
+        h.check(!service.followConnected, "not connected")
+        h.check(service.followDowns === 1, "one failed follow: " + service.followDowns)
+        h.check(service.playing.length === 0, "nothing playing")
+        h.check(follow() && !follow().running, "not stuck running")
       }
     },
     {
@@ -261,6 +426,20 @@ ShellRoot {
     }
     return null
   }
+  // The Service's follow Process, found by its command.
+  function follow() {
+    for (var i = 0; i < service.data.length; i++) {
+      var c = service.data[i]
+      if (c && c.command !== undefined && c.command.indexOf("playing") !== -1) return c
+    }
+    return null
+  }
+  function followWith(path) {
+    service.quiverPath = path
+    service.followDowns = 0
+    service.following = true
+    service.startFollow()
+  }
   function pollWith(path) {
     service.quiverPath = path
     service.downs = 0
@@ -279,6 +458,16 @@ ShellRoot {
     if (sc.settings) for (var k in sc.settings) s[k] = sc.settings[k]
     hw.settings = s
     vw.settings = s
+    hw.previewMarquee = !!sc.marquee
+    // The panel is on screen here: action errors show in it, not as notifications.
+    service.panelOpen = true
+    // The follow runs only in its own scenarios.
+    service.following = false
+    var f = h.follow()
+    if (f && f.running) f.running = false
+    service.playing = []
+    service.recent = []
+    service.followConnected = false
     service.lastError = ""
     service.unavailable = false
     service.downs = 0
@@ -321,7 +510,15 @@ ShellRoot {
     service.quiverPath = h.fake
     service.handleQueue(h.line([h.downloading, h.odyssey, h.valhalla, h.entry({ product_id: 0, game: "epic:$(touch /tmp/pwned)", name: "Evil", position: 5 })]))
     service.pauseAll()
-    service.openApp()
+    // Play a recent game (and one that isn't recent: nothing runs), stop the running one,
+    // and Sight over it; each ref goes through as its own argument.
+    service.handlePlaying(h.playingLine({}))
+    service.play("420")
+    service.play("99")
+    service.stop("3539")
+    service.stop("420")
+    service.sight("3539")
+    service.openApp("downloads")
     bulkDone.start()
   }
   Timer {
@@ -346,6 +543,7 @@ ShellRoot {
     quiverPath: h.fake
     notify: false
     polling: false
+    following: false
   }
 
   QtObject {
@@ -382,7 +580,7 @@ ShellRoot {
 
   FloatingWindow {
     implicitWidth: 520
-    implicitHeight: 1000
+    implicitHeight: 1500
     color: Commons.Color.background
 
     Column {
@@ -420,7 +618,7 @@ ShellRoot {
         }
       }
 
-      // The panel's card as KeyboardPanel draws it.
+      // The panel's card as KeyboardPanel draws it (its height capped as the shell does).
       Rectangle {
         id: card
         readonly property int pad: Style.spacing.popupPadding

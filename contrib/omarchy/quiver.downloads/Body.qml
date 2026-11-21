@@ -1,10 +1,13 @@
-// The downloads panel: what is downloading now, what is next, and the actions.
-// Built when the panel first opens (KeyboardPanel's lazy content); `widget` is
-// the bar widget (strings, formatting, cursor state) and `service` the queue.
+// The Quiver panel: what is being played (with Sight, Open in Quiver and Stop),
+// the download queue, the recently played games to launch, and a way into
+// Quiver. Built when the panel first opens (KeyboardPanel's lazy content);
+// `widget` is the bar widget (strings, formatting, cursor state) and `service`
+// the data.
 //
-// Keys: j/k or arrows move, Enter pauses/resumes/retries the row (or presses
-// the button under the cursor), x removes the row (press twice), p pauses or
-// resumes everything, o opens Quiver, Esc closes.
+// Keys: j/k or arrows move, Enter presses what the cursor is on (a playing
+// game's buttons, a download's pause/resume/retry, a recent game's Play), x
+// removes a download (press twice), 1-6 play that recent game, s opens Sight
+// over the game, p pauses or resumes every download, o opens Quiver, Esc closes.
 
 import QtQuick
 import QtQuick.Layouts
@@ -21,6 +24,8 @@ PanelKeyCatcher {
 
   // How many waiting items are listed before "and N more".
   readonly property int maxWaiting: 6
+  // How many recent games are listed.
+  readonly property int maxRecent: 6
 
   readonly property var strings: widget ? widget.strings : null
   function t(key) { return body.strings ? body.strings.t(key) : key }
@@ -29,15 +34,23 @@ PanelKeyCatcher {
   readonly property var summary: widget ? widget.summary : Model.summarize([], {})
   readonly property string phase: widget ? widget.phase : "down"
   readonly property bool connected: !!service && service.connected
+  readonly property var playingRows: widget ? widget.playing : []
+  readonly property var recentRows: widget ? widget.recent.slice(0, maxRecent) : []
   readonly property var activeRows: summary.active
   readonly property var waitingRows: summary.waiting.slice(0, maxWaiting)
   readonly property int hiddenWaiting: Math.max(0, summary.waiting.length - maxWaiting)
     + (service && service.truncated ? 1 : 0)
   readonly property var rows: activeRows.concat(waitingRows)
-  // Cursor targets: every row, then the two buttons.
-  readonly property int targetCount: rows.length + 2
-  readonly property int toggleIndex: rows.length
-  readonly property int openIndex: rows.length + 1
+
+  // Cursor targets, in reading order: each playing game's three buttons (Sight,
+  // Open in Quiver, Stop), the download rows, the recent games, then the two
+  // buttons at the bottom.
+  readonly property int playingCount: playingRows.length * 3
+  readonly property int rowsStart: playingCount
+  readonly property int recentStart: rowsStart + rows.length
+  readonly property int toggleIndex: recentStart + recentRows.length
+  readonly property int openIndex: toggleIndex + 1
+  readonly property int targetCount: openIndex + 1
 
   readonly property color fg: widget && widget.bar ? widget.bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(fg, 1.4)
@@ -81,15 +94,47 @@ PanelKeyCatcher {
       widget.arm(item.key)
     }
   }
+  // Stop asks twice: the first press arms it.
+  function stopGame(game) {
+    if (!service || !widget || !game) return
+    var key = "stop:" + game.ref
+    if (widget.armedKey === key) {
+      widget.armedKey = ""
+      service.stop(game.ref)
+    } else {
+      widget.arm(key)
+    }
+  }
+  function sight(game) {
+    if (!service || !game) return
+    service.sight(game.ref)
+    if (widget) widget.close()
+  }
+  function openGame() {
+    if (service) service.openApp("library")
+    if (widget) widget.close()
+  }
+  function play(game) {
+    if (!service || !game) return
+    service.play(game.ref)
+    if (widget) widget.close()
+  }
   function activate() {
     if (!widget) return
     var i = widget.cursorIndex
-    if (i < rows.length) primary(rows[i])
+    if (i < playingCount) {
+      var g = playingRows[Math.floor(i / 3)]
+      var b = i % 3
+      if (b === 0) sight(g)
+      else if (b === 1) openGame()
+      else stopGame(g)
+    } else if (i < recentStart) primary(rows[i - rowsStart])
+    else if (i < toggleIndex) play(recentRows[i - recentStart])
     else if (i === toggleIndex) service && service.toggleAll()
     else if (i === openIndex) openApp()
   }
   function openApp() {
-    if (service) service.openApp()
+    if (service) service.openApp(rows.length > 0 ? "downloads" : "library")
     if (widget) widget.close()
   }
 
@@ -98,16 +143,23 @@ PanelKeyCatcher {
   onCloseRequested: if (widget) widget.close()
   onTabRequested: function (direction) { if (widget) widget.switchPanel(direction) }
   onDeleteRequested: {
-    if (widget && widget.cursorActive && widget.cursorIndex < rows.length) removeRow(rows[widget.cursorIndex])
+    if (!widget || !widget.cursorActive) return
+    var i = widget.cursorIndex
+    if (i >= rowsStart && i < recentStart) removeRow(rows[i - rowsStart])
   }
   onTextKey: function (t) {
     var k = String(t).toLowerCase()
     if (k === "p") service && service.toggleAll()
     else if (k === "o") openApp()
     else if (k === "r") service && service.refresh()
+    else if (k === "s" && playingRows.length > 0) sight(playingRows[0])
+    else if (k >= "1" && k <= "9" && k.length === 1) {
+      var n = Number(k) - 1
+      if (n < recentRows.length) play(recentRows[n])
+    }
   }
 
-  // A line of detail for a row: sizes, speed, time left, retries.
+  // A line of detail for a download row: sizes, speed, time left, retries.
   function detailFor(item) {
     var parts = []
     var stalled = !!service && !!service.stalled[item.key]
@@ -128,6 +180,16 @@ PanelKeyCatcher {
     return parts.join(" · ")
   }
 
+  // A playing game's line: how long, and its profile.
+  function playingDetail(game) {
+    if (!widget || !game) return ""
+    var parts = []
+    var run = widget.runningText(game.started)
+    if (run !== "") parts.push(run)
+    if (game.profile !== "") parts.push(t("profile").arg(game.profile))
+    return parts.join(" · ")
+  }
+
   readonly property string heroMeta: {
     var s = summary
     if (phase === "active") {
@@ -136,9 +198,14 @@ PanelKeyCatcher {
       if (eta !== "") bits.push(eta)
       return bits.join(" · ")
     }
-    if (phase === "idle") return t("phase.idle")
+    if (phase === "idle") {
+      if (playingRows.length > 0) return t("meta.playing").arg(playingRows[0].short)
+      return t("phase.idle")
+    }
     return widget ? widget.phaseText : ""
   }
+
+  readonly property bool queueBusy: !!widget && widget.queueBusy
 
   Column {
     id: column
@@ -148,7 +215,8 @@ PanelKeyCatcher {
     PanelHero {
       id: hero
       width: parent.width
-      title: body.t("title")
+      // A brand name: not translated.
+      title: "Quiver"
       meta: body.heroMeta
       detail: body.summary.active.length > 0 ? body.widget.percentText(body.summary.fraction)
         : (body.summary.count > 0 ? body.widget.num(body.summary.count, 0) : "")
@@ -156,22 +224,34 @@ PanelKeyCatcher {
       fontFamily: body.fontFamily
 
       // PanelHero has its own `root`; the icon reads what it needs off the hero.
+      readonly property bool ringShown: body.queueBusy
       readonly property real ringFraction: body.summary.active.length > 0 ? body.summary.fraction : 0
       readonly property color ringColor: body.phase === "stalled" || body.phase === "failed" ? body.urgent : body.fg
       readonly property string ringMark: body.widget ? body.widget.markFor(body.phase) : "none"
       readonly property bool ringBroken: body.phase === "stalled"
-      iconOpacity: body.phase === "paused" || body.phase === "queued" || body.phase === "idle"
+      iconOpacity: body.phase === "paused" || body.phase === "queued"
         || body.phase === "down" || body.phase === "unavailable" ? 0.5 : 1
 
       iconComponent: Component {
-        Ring {
+        Item {
           width: Style.font.display * 1.4
           height: width
-          fraction: hero.ringFraction
-          color: hero.ringColor
-          mark: hero.ringMark
-          broken: hero.ringBroken
-          trackStrength: body.phase === "failed" ? 1 : 0.28
+          // The download ring while there is a queue; Quiver's mark otherwise.
+          Ring {
+            visible: hero.ringShown
+            anchors.fill: parent
+            fraction: hero.ringFraction
+            color: hero.ringColor
+            mark: hero.ringMark
+            broken: hero.ringBroken
+            trackStrength: body.phase === "failed" ? 1 : 0.28
+          }
+          BrandRing {
+            visible: !hero.ringShown
+            anchors.fill: parent
+            plain: true
+            color: body.fg
+          }
         }
       }
     }
@@ -199,6 +279,39 @@ PanelKeyCatcher {
       elide: Text.ElideRight
     }
 
+    // --- now playing ---------------------------------------------------------------
+
+    PanelSeparator {
+      visible: body.playingRows.length > 0
+      foreground: body.fg
+    }
+
+    Column {
+      id: playingList
+      visible: body.playingRows.length > 0
+      width: parent.width
+      spacing: Style.space(10)
+
+      PanelSectionHeader {
+        text: body.t("section.playing")
+        foreground: body.fg
+        fontFamily: body.fontFamily
+      }
+
+      Repeater {
+        model: body.playingRows
+        PlayingCard {
+          required property var modelData
+          required property int index
+          width: playingList.width
+          game: modelData
+          firstTarget: index * 3
+        }
+      }
+    }
+
+    // --- downloads -------------------------------------------------------------------
+
     PanelSeparator {
       visible: body.rows.length > 0
       foreground: body.fg
@@ -223,7 +336,7 @@ PanelKeyCatcher {
           required property int index
           width: activeList.width
           item: modelData
-          rowIndex: index
+          rowIndex: body.rowsStart + index
         }
       }
     }
@@ -247,7 +360,7 @@ PanelKeyCatcher {
           required property int index
           width: waitingList.width
           item: modelData
-          rowIndex: body.activeRows.length + index
+          rowIndex: body.rowsStart + body.activeRows.length + index
         }
       }
 
@@ -262,13 +375,37 @@ PanelKeyCatcher {
       }
     }
 
-    Text {
-      textFormat: Text.PlainText
-      visible: body.connected && body.rows.length === 0
-      text: body.t("queue.empty")
-      color: body.dim
-      font.family: body.fontFamily
-      font.pixelSize: Style.font.bodySmall
+    // --- recent games ------------------------------------------------------------------
+
+    PanelSeparator {
+      visible: body.recentRows.length > 0
+      foreground: body.fg
+    }
+
+    Column {
+      id: recentList
+      visible: body.recentRows.length > 0
+      width: parent.width
+      spacing: Style.space(2)
+
+      PanelSectionHeader {
+        text: body.t("section.recent")
+        foreground: body.fg
+        fontFamily: body.fontFamily
+        bottomPadding: Style.space(4)
+      }
+
+      Repeater {
+        model: body.recentRows
+        RecentRow {
+          required property var modelData
+          required property int index
+          width: recentList.width
+          game: modelData
+          number: index + 1
+          rowIndex: body.recentStart + index
+        }
+      }
     }
 
     PanelSeparator {
@@ -303,6 +440,195 @@ PanelKeyCatcher {
         fontFamily: body.fontFamily
         onHovered: function (on) { if (on) body.point(body.openIndex) }
         onClicked: body.openApp()
+      }
+    }
+  }
+
+  // A game's picture (its icon, else its box art), or its initial on a quiet tile.
+  component GameArt: Rectangle {
+    id: art
+    property string path: ""
+    property string label: ""
+    radius: Math.max(2, width / 6)
+    color: Qt.rgba(body.fg.r, body.fg.g, body.fg.b, 0.08)
+    clip: true
+
+    Image {
+      id: picture
+      anchors.fill: parent
+      source: art.path !== "" ? Util.fileUrl(art.path) : ""
+      sourceSize.width: Math.ceil(art.width * Screen.devicePixelRatio)
+      sourceSize.height: Math.ceil(art.height * Screen.devicePixelRatio)
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      smooth: true
+      visible: status === Image.Ready
+    }
+    Text {
+      visible: picture.status !== Image.Ready
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: art.label.length > 0 ? art.label.charAt(0).toUpperCase() : "?"
+      color: body.dim
+      font.family: body.fontFamily
+      font.pixelSize: Math.round(art.height * 0.5)
+      font.bold: true
+    }
+  }
+
+  // A running game: its picture, name, how long and with which profile, the
+  // stream it goes out on, and Sight / Open in Quiver / Stop.
+  component PlayingCard: Column {
+    id: card
+    property var game: null
+    property int firstTarget: 0
+    readonly property bool stopArmed: !!game && !!body.widget && body.widget.armedKey === "stop:" + game.ref
+    spacing: Style.space(10)
+
+    RowLayout {
+      width: parent.width
+      spacing: Style.space(12)
+
+      GameArt {
+        Layout.preferredWidth: Style.space(44)
+        Layout.preferredHeight: Style.space(44)
+        Layout.alignment: Qt.AlignVCenter
+        path: card.game ? card.game.icon : ""
+        label: card.game ? card.game.short : ""
+      }
+
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(2)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: card.game ? card.game.name : ""
+          color: body.fg
+          font.family: body.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+          elide: Text.ElideRight
+          maximumLineCount: 1
+        }
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          visible: text !== ""
+          text: body.playingDetail(card.game)
+          color: body.dim
+          font.family: body.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+          maximumLineCount: 1
+        }
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          visible: text !== ""
+          text: card.game && card.game.stream && body.widget ? body.widget.streamText(card.game.stream) : ""
+          color: body.dim
+          font.family: body.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+          maximumLineCount: 1
+        }
+      }
+    }
+
+    RowLayout {
+      width: parent.width
+      spacing: Style.space(8)
+
+      Button {
+        Layout.fillWidth: true
+        text: body.t("action.sight")
+        tooltipText: body.t("action.sightTip")
+        iconText: "󰕮"
+        hasCursor: body.cursorAt(card.firstTarget)
+        foreground: body.fg
+        fontFamily: body.fontFamily
+        onHovered: function (on) { if (on) body.point(card.firstTarget) }
+        onClicked: body.sight(card.game)
+      }
+      Button {
+        Layout.fillWidth: true
+        text: body.t("action.openGame")
+        iconText: "󰏌"
+        hasCursor: body.cursorAt(card.firstTarget + 1)
+        foreground: body.fg
+        fontFamily: body.fontFamily
+        onHovered: function (on) { if (on) body.point(card.firstTarget + 1) }
+        onClicked: body.openGame()
+      }
+      Button {
+        Layout.fillWidth: true
+        text: card.stopArmed ? body.t("action.confirmStop") : body.t("action.stop")
+        iconText: card.stopArmed ? "󰄬" : "󰓛"
+        hasCursor: body.cursorAt(card.firstTarget + 2)
+        foreground: card.stopArmed ? body.urgent : body.fg
+        fontFamily: body.fontFamily
+        enabled: !!body.service && !body.service.busy
+        onHovered: function (on) { if (on) body.point(card.firstTarget + 2) }
+        onClicked: body.stopGame(card.game)
+      }
+    }
+  }
+
+  // A recently played game: Enter or a click plays it (its default profile).
+  component RecentRow: CursorSurface {
+    id: recentRow
+    property var game: null
+    property int number: 0
+    property int rowIndex: 0
+
+    hasCursor: body.cursorAt(rowIndex)
+    foreground: body.fg
+    implicitHeight: Style.space(36)
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: body.point(recentRow.rowIndex)
+      onClicked: body.play(recentRow.game)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(10)
+
+      GameArt {
+        Layout.preferredWidth: Style.space(24)
+        Layout.preferredHeight: Style.space(24)
+        Layout.alignment: Qt.AlignVCenter
+        path: recentRow.game ? recentRow.game.icon : ""
+        label: recentRow.game ? recentRow.game.short : ""
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        text: recentRow.game ? recentRow.game.name : ""
+        color: body.fg
+        font.family: body.fontFamily
+        font.pixelSize: Style.font.body
+        elide: Text.ElideRight
+        maximumLineCount: 1
+      }
+
+      // Played how long ago; on the cursor, what Enter does instead.
+      Text {
+        textFormat: Text.PlainText
+        text: recentRow.hasCursor ? body.t("action.playKey") : (recentRow.game && body.widget ? body.widget.agoText(recentRow.game.lastPlayed) : "")
+        color: body.dim
+        font.family: body.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
   }

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "quiver.downloads",
-  "name": "Quiver downloads",
-  "version": "1.0.0",
+  "name": "Quiver",
+  "version": "1.1.0",
   "author": "Quiver",
   "license": "MIT",
-  "description": "Quiver's download queue in the bar: a progress ring with the percentage or speed while a game downloads, distinct marks for paused, failed and stalled downloads, and a panel with what is downloading and what is next, pause and resume, and a way into Quiver's Downloads page. Polls `quiver queue --json --no-start` (every 2 s while downloading, every 15 s otherwise); never starts quiverd.",
+  "description": "Quiver in the bar: its mark, the running game's title, and the download queue as a progress ring (with the percentage or speed), with distinct marks for paused, failed and stalled downloads. The panel has what is playing (Sight, Open in Quiver, Stop), the recently played games to launch, the queue with pause and resume, and a way into Quiver. Follows `quiver playing --follow --json --no-start` (quiverd's events, no polling) and polls `quiver queue --json --no-start` (every 2 s while downloading, every 15 s otherwise); never starts quiverd.",
   "kinds": [
     "service",
     "bar-widget"
@@ -15,20 +15,23 @@
     "barWidget": "Widget.qml"
   },
   "barWidget": {
-    "displayName": "Quiver downloads",
-    "description": "Download progress for Quiver's queue; hidden while nothing is queued. Click for the queue, middle-click to open Quiver's Downloads page.",
+    "displayName": "Quiver",
+    "description": "Quiver's mark, the running game's title and download progress. Click for now playing, recent games and the queue; middle-click opens Quiver.",
     "category": "Status",
     "aliases": [
       "quiver",
       "downloads",
       "games",
-      "queue"
+      "queue",
+      "now playing",
+      "recent"
     ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "label": "percent",
-      "showWhenIdle": false,
+      "label": "playing",
+      "showWhenIdle": true,
+      "titleWidth": 18,
       "notify": true,
       "quiverPath": ""
     },
@@ -36,20 +39,31 @@
       {
         "key": "label",
         "type": "enum",
-        "label": "Beside the ring while downloading",
+        "label": "Beside the mark",
+        "description": "playing: the running game's title, and the percentage while only downloading. percent, speed, both: the download's progress only. none: the mark alone.",
         "options": [
+          "playing",
           "percent",
           "speed",
           "both",
           "none"
         ],
-        "defaultValue": "percent"
+        "defaultValue": "playing"
+      },
+      {
+        "key": "titleWidth",
+        "type": "integer",
+        "label": "Widest title in the bar (characters); longer ones end in … and scroll while hovered",
+        "min": 6,
+        "max": 40,
+        "step": 1,
+        "defaultValue": 18
       },
       {
         "key": "showWhenIdle",
         "type": "boolean",
-        "label": "Keep the ring in the bar when nothing is queued",
-        "defaultValue": false
+        "label": "Keep Quiver's mark in the bar when nothing plays or downloads",
+        "defaultValue": true
       },
       {
         "key": "notify",

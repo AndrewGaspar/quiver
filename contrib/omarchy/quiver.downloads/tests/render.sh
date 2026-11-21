@@ -45,6 +45,12 @@ for cmd in notify-send omarchy-launch-or-focus uwsm-app; do
     printf '#!/bin/sh\necho "%s $*" >>"%s"\n' "$cmd" "$tmp/stray.log" >"$tmp/bin/$cmd"
     chmod +x "$tmp/bin/$cmd"
 done
+# Game art for the panel's rows (plain tiles; a missing one shows the initial).
+mkdir "$tmp/icons"
+if command -v magick >/dev/null; then
+    magick -size 64x64 gradient:'#3a6ea5-#14324f' "$tmp/icons/odyssey.png"
+    magick -size 64x64 gradient:'#c0582b-#4a1d0c' "$tmp/icons/farcry.png"
+fi
 if [[ -n $out ]]; then
     mkdir -p "$out"
     out=$(cd "$out" && pwd)
@@ -52,7 +58,7 @@ fi
 
 status=0
 env -u WAYLAND_DISPLAY -u DISPLAY -u QT_QPA_PLATFORMTHEME -u HYPRLAND_INSTANCE_SIGNATURE \
-    QT_QPA_PLATFORM=${HARNESS_QPA:-offscreen} DISPLAY=${HARNESS_DISPLAY:-} HARNESS_OUT="$out" HARNESS_FAKE_QUIVER="$here/harness/fake-quiver" \
+    QT_QPA_PLATFORM=${HARNESS_QPA:-offscreen} DISPLAY=${HARNESS_DISPLAY:-} HARNESS_OUT="$out" HARNESS_ICONS="$tmp/icons" HARNESS_FAKE_QUIVER="$here/harness/fake-quiver" \
     PATH="$tmp/bin:$PATH" FAKE_QUIVER_LOG="$log" timeout 90 quickshell -p "$tmp" --no-color >"$tmp/qs.log" 2>&1 || status=$?
 
 fail() {
@@ -69,12 +75,17 @@ grep -q "RESULT pass" "$tmp/qs.log" || fail "widget states"
 echo "ok - $(sed -n 's/.*CHECKS \([0-9]*\).*/\1/p' "$tmp/qs.log") widget state checks"
 
 # The actions the panel ran, as argv: resume for the failing item; pause-all
-# pauses the waiting items before the active one; the malformed ref never runs.
+# pauses the waiting items before the active one; the malformed ref never runs;
+# a recent game plays detached (one that isn't recent doesn't), the running one
+# stops (one that isn't running doesn't), and Sight opens over its session.
 tab=$'\t'
 expected="resume${tab}99999
 pause${tab}5059
 pause${tab}13504
-pause${tab}epic:dc9d2e595d0e4650b35d659f90d41059"
+pause${tab}epic:dc9d2e595d0e4650b35d659f90d41059
+play${tab}420${tab}--detach
+stop${tab}3539
+sight${tab}toggle${tab}--session${tab}s-pzfkk4bl2v"
 if [[ $(cat "$log") != "$expected" ]]; then
     echo "expected:" >&2
     echo "$expected" >&2
@@ -82,7 +93,7 @@ if [[ $(cat "$log") != "$expected" ]]; then
     cat "$log" >&2
     fail "quiver actions"
 fi
-echo "ok - quiver actions run with checked refs, in order"
+echo "ok - quiver actions (queue, play, stop, Sight) run with checked refs, in order"
 # "Open Quiver" (run once by the harness): Hyprland focuses an open window, and
 # quiver-app turns it to Downloads (or starts there), each argument on its own.
 # Nothing else: no notification, no other launch.

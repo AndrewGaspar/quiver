@@ -397,8 +397,141 @@ function pollFailure(exitCode, stderr) {
   return "error"
 }
 
+// ---- now playing, recent games ------------------------------------------------------
+//
+// `quiver playing --follow --json --no-start` prints one snapshot per line (and another
+// whenever it changes):
+//   { "connected": true,
+//     "playing": [{ "ref": "3539", "name": "…", "short": "AC Origins", "started": "<RFC 3339>",
+//                   "profile"?: "Pharos", "via": ["launcher"], "session"?: "s-…",
+//                   "stream"?: { "peer": "roth", "client": "moonlight", "state": "streaming",
+//                                "kept_until"?: "<RFC 3339>" },
+//                   "icon"?: "/…/x.png" }],
+//     "recent": [{ "ref": "…", "name": "…", "short": "…", "last_played": "<RFC 3339>", "icon"?: "…" }] }
+// Untrusted like the queue: names cleaned and bounded, refs and session ids checked
+// before they reach argv, icon paths only absolute image paths.
+
+var MAX_PLAYING = 4
+var MAX_RECENT = 20
+var MAX_SHORT = 60
+var MAX_PROFILE = 60
+var MAX_PEER = 40
+var MAX_PATH = 512
+var PRODUCT = /^[1-9][0-9]{0,8}$/
+var SESSION = /^s-[a-z0-9]{1,32}$/
+var HOLDER = /^[a-z]{1,16}$/
+var ICON = /^\/[^\u0000-\u001f]*\.(png|jpe?g|ico|webp)$/i
+var STREAM_CLIENTS = { quiver: true, moonlight: true }
+var STREAM_STATES = { starting: true, streaming: true, kept: true }
+
+// A ref `quiver play|stop` may take: a product id, or `store:id`. "" otherwise.
+function playRef(value) {
+  if (typeof value !== "string") return ""
+  return PRODUCT.test(value) || REF.test(value) ? value : ""
+}
+
+function sessionId(value) {
+  return typeof value === "string" && SESSION.test(value) ? value : ""
+}
+
+// Milliseconds since the epoch, or 0.
+function time(value) {
+  if (typeof value !== "string" || value.length > 64) return 0
+  var t = Date.parse(value)
+  return isFinite(t) && t > 0 ? t : 0
+}
+
+function iconPath(value) {
+  if (typeof value !== "string" || value.length > MAX_PATH || value.indexOf("/../") !== -1) return ""
+  return ICON.test(value) ? value : ""
+}
+
+function parseGame(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  var ref = playRef(raw.ref)
+  if (ref === "") return null
+  var name = cleanText(raw.name, MAX_NAME)
+  var shortName = cleanText(raw.short, MAX_SHORT)
+  return {
+    ref: ref,
+    name: name !== "" ? name : ref,
+    short: shortName !== "" ? shortName : (name !== "" ? name : ref),
+    icon: iconPath(raw.icon)
+  }
+}
+
+function parseStream(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  var peer = cleanText(raw.peer, MAX_PEER)
+  if (peer === "") return null
+  return {
+    peer: peer,
+    client: typeof raw.client === "string" && STREAM_CLIENTS[raw.client] ? raw.client : "quiver",
+    state: typeof raw.state === "string" && STREAM_STATES[raw.state] ? raw.state : "streaming",
+    keptUntil: time(raw.kept_until)
+  }
+}
+
+// One line of `quiver playing --json` → { connected, playing, recent }, or null.
+function parsePlaying(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > MAX_TEXT) return null
+  var v
+  try {
+    v = JSON.parse(text)
+  } catch (e) {
+    return null
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null
+  var out = { connected: v.connected !== false, playing: [], recent: [] }
+  var seen = {}
+  var list = Array.isArray(v.playing) ? v.playing : []
+  for (var i = 0; i < list.length && out.playing.length < MAX_PLAYING; i++) {
+    var g = parseGame(list[i])
+    if (!g || seen[g.ref]) continue
+    seen[g.ref] = true
+    var raw = list[i]
+    var via = []
+    if (Array.isArray(raw.via)) for (var j = 0; j < raw.via.length && via.length < 4; j++) {
+      if (typeof raw.via[j] === "string" && HOLDER.test(raw.via[j])) via.push(raw.via[j])
+    }
+    g.started = time(raw.started)
+    g.profile = cleanText(raw.profile, MAX_PROFILE)
+    g.session = sessionId(raw.session)
+    g.via = via
+    g.stream = parseStream(raw.stream)
+    out.playing.push(g)
+  }
+  var recent = Array.isArray(v.recent) ? v.recent : []
+  for (var k = 0; k < recent.length && out.recent.length < MAX_RECENT; k++) {
+    var r = parseGame(recent[k])
+    if (!r || seen[r.ref]) continue
+    seen[r.ref] = true
+    r.lastPlayed = time(recent[k].last_played)
+    out.recent.push(r)
+  }
+  return out
+}
+
+// How long ago, in the pieces the strings need: { kind: "now" | "m" | "h" | "d", n }.
+function agoParts(thenMs, nowMs) {
+  var s = Math.max(0, Math.floor((Number(nowMs) - Number(thenMs)) / 1000))
+  if (!(thenMs > 0) || s < 60) return { kind: "now", n: 0 }
+  if (s < 3600) return { kind: "m", n: Math.floor(s / 60) }
+  if (s < 86400) return { kind: "h", n: Math.floor(s / 3600) }
+  return { kind: "d", n: Math.floor(s / 86400) }
+}
+
+// How often to restart the follow after it ended: like the queue's backoff, and once a
+// minute for a quiver without `playing` (it may be updated meanwhile).
+function followRetry(kind, downs) {
+  if (kind === "unavailable") return 60000
+  return [5000, 15000, 30000, 60000][Math.min(Math.max(downs, 1), 4) - 1]
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    parsePlaying: parsePlaying, playRef: playRef, sessionId: sessionId, iconPath: iconPath,
+    agoParts: agoParts, followRetry: followRetry, MAX_PLAYING: MAX_PLAYING, MAX_RECENT: MAX_RECENT,
     MAX_TEXT: MAX_TEXT, MAX_ITEMS: MAX_ITEMS, MAX_SAMPLES: MAX_SAMPLES, MAX_NAME: MAX_NAME, MAX_ERROR: MAX_ERROR,
     SLOW: SLOW, STALL_SECS: STALL_SECS,
     cleanText: cleanText, escapeMarkup: escapeMarkup, gameRef: gameRef, parseSamples: parseSamples,
