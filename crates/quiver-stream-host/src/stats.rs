@@ -1,4 +1,4 @@
-//! Per-second statistics for [`HostStats`](quiver_stream_proto::HostStats) and the CLI, and
+//! Per-second statistics for [`HostStats`] and the CLI, and
 //! the percentiles a benchmark prints.
 
 use std::time::{Duration, Instant};

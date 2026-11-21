@@ -121,7 +121,7 @@ impl DisplayLocks {
             let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&p);
             if let Ok(mut f) = f {
                 use std::io::Write;
-                let _ = write!(f, "{pid:>10}\n");
+                let _ = writeln!(f, "{pid:>10}");
                 made.push(p);
             }
         }

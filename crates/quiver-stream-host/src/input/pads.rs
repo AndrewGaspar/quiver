@@ -95,7 +95,7 @@ impl PadHost {
         if let PadMode::Hidden { gid } = mode {
             let canary = Pad::canary(uinput, &format!("{}{session} canary", sandbox::NAME_PREFIX), &format!("{}{session}/canary", sandbox::PHYS_PREFIX))?;
             let n = canary.nodes()?;
-            sandbox::wait_hidden(&[n.event.clone()], gid, Duration::from_secs(3)).context("the stream pad rule didn't hide the canary device")?;
+            sandbox::wait_hidden(std::slice::from_ref(&n.event), gid, Duration::from_secs(3)).context("the stream pad rule didn't hide the canary device")?;
         }
         let (tx, rx) = std_mpsc::channel();
         let session = session.to_owned();

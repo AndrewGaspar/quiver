@@ -227,7 +227,7 @@ impl Pattern {
         let dw = (dh / 2) & !1;
         let y0 = stamp_h + 8;
         draw_digits(cv, 8, y0, dw, dh, &format!("{seq:08}"), white);
-        draw_digits(cv, 8, y0 + dh + dh / 4, dw / 2 & !1, dh / 2 & !1, &format!("{:010}", captured / 1000), white);
+        draw_digits(cv, 8, y0 + dh + dh / 4, (dw / 2) & !1, (dh / 2) & !1, &format!("{:010}", captured / 1000), white);
         // The moving block.
         let by = (y0 + dh + dh / 4 + dh / 2 + 8) & !1;
         let bh = band.saturating_sub(by + 4) & !1;
@@ -376,7 +376,7 @@ mod tests {
     fn the_band_fits_small_and_odd_aspect_frames() {
         for (w, h) in [(320, 180), (3840, 1080), (1920, 1200)] {
             let mut p = Pattern::new(w, h, ColorInfo::sdr(), false);
-            assert!(p.band <= h && p.band % 2 == 0);
+            assert!(p.band <= h && p.band.is_multiple_of(2));
             p.draw_band(7, 8);
             assert_eq!(read_back(&p), Some(Stamp { seq: 7, captured: 8 }), "{w}x{h}");
         }

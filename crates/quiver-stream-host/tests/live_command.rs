@@ -36,7 +36,9 @@ fn have(cmd: &str, arg: &str) -> bool {
 
 fn available() -> bool {
     for (c, a) in [("gamescope", "--help"), ("pw-cli", "--version"), ("ffmpeg", "-version"), ("paplay", "--version")] {
-        if !have(c, a) && !(c == "gamescope" && Command::new(c).arg(a).output().is_ok()) {
+        // gamescope --help exits non-zero; running at all is enough for it.
+        let ok = if c == "gamescope" { Command::new(c).arg(a).output().is_ok() } else { have(c, a) };
+        if !ok {
             eprintln!("skip: no {c}");
             return false;
         }

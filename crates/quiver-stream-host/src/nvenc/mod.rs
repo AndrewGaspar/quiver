@@ -396,7 +396,7 @@ impl Encoder {
         if c.color.chroma == Chroma::Yuv444 && c.codec == VideoCodec::Av1 {
             bail!("NVENC doesn't encode 4:4:4 AV1");
         }
-        if c.width % 2 != 0 || c.height % 2 != 0 {
+        if !c.width.is_multiple_of(2) || !c.height.is_multiple_of(2) {
             bail!("the size must be even ({}x{})", c.width, c.height);
         }
         Ok(())

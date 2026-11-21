@@ -1,19 +1,22 @@
 //! Capture from gamescope's PipeWire screencast node into the encoder.
 //!
-//! gamescope offers its output as BGRx or NV12, each as a LINEAR dma-buf or in shared memory.
-//! This takes **NV12 in shared memory** (gamescope converts with BT.709 limited range on its
-//! GPU, and NV12 is 1.5 bytes a pixel rather than 4), or BGRx when the stream is 4:4:4 (NVENC
-//! then converts). The CUDA driver can't import a dma-buf directly (only memory exported by
-//! Vulkan or GL), so the dma-buf path would need a Vulkan import and copy in between; see
-//! `design/REMOTE.md`'s host notes for the measured trade-off.
+//! gamescope (3.16) offers its output as BGRx or NV12, each as a LINEAR dma-buf or in shared
+//! memory. This takes **BGRx in shared memory** (NVENC converts to YUV). Its NV12 in shared
+//! memory comes out all zeros, and the CUDA driver can't import a dma-buf directly (only
+//! memory Vulkan or GL exported), so the dma-buf path would need a Vulkan import and a copy
+//! into exportable memory first. Measured at 2560×1440 (14.7 MB a frame): the copy from the
+//! page-locked mapping into CUDA takes about 1.0 ms (p50), and the whole capture → encode start
+//! 1.1 ms; gamescope's own path (the program draws → the frame is dequeued here) is about 1.6
+//! refreshes, 13 ms at 120 Hz. That, not the copy, is the cost worth removing (see the crate
+//! docs on capturing in the Sight layer instead).
 //!
 //! The PipeWire loop runs on its own thread, with the CUDA context pushed. Each frame is copied
 //! from the mapped buffer into one of three CUDA staging buffers and announced to the video
 //! thread, which copies the newest into the encoder's input (a device-to-device copy) and
 //! encodes it. Frames the encoder hasn't got to are skipped, never queued.
 //!
-//! The capture time is the buffer's header timestamp when gamescope sets one (its
-//! `CLOCK_MONOTONIC` at the frame), else the moment it was dequeued.
+//! The capture time is the buffer's header timestamp when the producer sets one (its
+//! `CLOCK_MONOTONIC` at the frame), else the moment it was dequeued. gamescope 3.16 sets none.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;

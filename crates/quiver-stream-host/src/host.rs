@@ -156,6 +156,9 @@ impl Host {
         let mut cfg_v = cfg.clone();
         if matches!(opts.target, Target::Command { .. }) {
             // gamescope's screencast is 8-bit SDR.
+            if cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8 {
+                let _ = ctx.try_send(Control::Notice { text: "HDR and 10-bit aren't available from gamescope's screencast yet: streaming 8-bit SDR".into() });
+            }
             cfg_v.color.bit_depth = 8;
             cfg_v.color.hdr = None;
         }
