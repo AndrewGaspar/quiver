@@ -76,7 +76,7 @@ impl Default for HostOpts {
             max_kbps: 150_000,
             start_kbps: 20_000,
             probe: true,
-            pacing_fraction: 0.3,
+            pacing_fraction: 0.25,
             max_pacing_kbps: 2_000_000,
             fec_frame_loss: 1e-4,
             fec_frame_loss_nack: 2e-3,

@@ -117,7 +117,7 @@ fn two_percent_random_loss_loses_no_frames() {
         );
         assert!(seen.frames.len() > 1150, "{name}: only {} frames", seen.frames.len());
         // FEC alone is planned for one frame in 10^4 lost; NACKs pick up the rest.
-        let allowed = if client_nacks(&name) { 0 } else { 1 };
+        let allowed = if client_nacks(name) { 0 } else { 1 };
         assert!(seen.lost() <= allowed, "{name}: frames lost at 2% loss: {:?}", seen.gaps);
         assert!(stats.shards_recovered > 100, "FEC did the work");
     }

@@ -388,7 +388,7 @@ impl SimPair {
             let next = [
                 Some(next_tick),
                 Some(until),
-                self.host.poll_timeout(self.host_now()).map(|t| self.from_host(t)),
+                self.host.poll_timeout(self.host_now()).map(|t| self.host_to_client_time(t)),
                 self.client.poll_timeout(self.now),
                 self.down.next_delivery(),
                 self.up.next_delivery(),
@@ -406,7 +406,7 @@ impl SimPair {
         (self.now as i64 + self.host_skew) as Micros
     }
 
-    fn from_host(&self, t: Micros) -> Micros {
+    fn host_to_client_time(&self, t: Micros) -> Micros {
         (t as i64 - self.host_skew).max(0) as Micros
     }
 
@@ -550,11 +550,11 @@ fn relay_loop(front: UdpSocket, mut back: UdpSocket, server: SocketAddr, stop: &
     while !stop.load(Ordering::Relaxed) {
         let now = now_micros();
         let mut s = shared.lock().expect("relay lock");
-        if std::mem::take(&mut s.rebind) {
-            if let Ok(b) = UdpSocket::bind("127.0.0.1:0") {
-                let _ = b.set_nonblocking(true);
-                back = b;
-            }
+        if std::mem::take(&mut s.rebind)
+            && let Ok(b) = UdpSocket::bind("127.0.0.1:0")
+        {
+            let _ = b.set_nonblocking(true);
+            back = b;
         }
         while let Ok((n, from)) = front.recv_from(&mut buf) {
             client = Some(from);

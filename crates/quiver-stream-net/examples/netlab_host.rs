@@ -53,7 +53,7 @@ struct Args {
     #[arg(long, default_value_t = 20_000)]
     start_kbps: u32,
     /// The share of a frame interval each frame is paced over.
-    #[arg(long, default_value_t = 0.3)]
+    #[arg(long, default_value_t = 0.25)]
     pacing: f32,
     /// A keyframe every this many frames (0: only when the client asks).
     #[arg(long, default_value_t = 0)]

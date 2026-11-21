@@ -76,6 +76,7 @@ pub struct ClientNetStats {
     pub shards: u64,
     pub shards_recovered: u64,
     pub shards_late: u64,
+    pub shards_surplus: u64,
     pub shards_duplicate: u64,
     pub nacks: u64,
     pub nack_saves: u64,
@@ -133,6 +134,7 @@ pub struct ClientCore {
     last_transit: Option<i64>,
     network_samples: Vec<u32>,
     bytes_received: u64,
+    audio_received: u64,
     mark: Mark,
 }
 
@@ -166,6 +168,7 @@ impl ClientCore {
             last_transit: None,
             network_samples: Vec::new(),
             bytes_received: 0,
+            audio_received: 0,
             mark: Mark::default(),
             opts,
         }
@@ -268,6 +271,7 @@ impl ClientCore {
             Kind::Video => self.video.on_shard(body, now)?,
             Kind::Audio => {
                 for p in self.audio_rx.on_chunk(body)? {
+                    self.audio_received += 1;
                     self.events.push_back(ClientEvent::Audio(p));
                 }
             }
@@ -489,10 +493,11 @@ impl ClientCore {
             shards: v.shards,
             shards_recovered: v.recovered,
             shards_late: v.late,
+            shards_surplus: v.surplus,
             shards_duplicate: v.duplicates,
             nacks: v.nacks,
             nack_saves: v.nack_saves,
-            audio_received: 0,
+            audio_received: self.audio_received,
             audio_recovered: self.audio_rx.recovered,
             input_sent: self.input_tx.sent_events,
             input_resends: self.input_tx.resends,

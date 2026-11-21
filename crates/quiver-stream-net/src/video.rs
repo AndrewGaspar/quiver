@@ -478,7 +478,7 @@ fn valid(l: Layout, index: usize) -> bool {
     l.k >= 1
         && index < l.k + l.r
         && l.shard >= 2
-        && l.shard % 2 == 0
+        && l.shard.is_multiple_of(2)
         && l.blob_len <= l.k * l.shard
         && l.blob_len > (l.k - 1) * l.shard
         && l.blob_len >= codec::FRAME_META_LEN

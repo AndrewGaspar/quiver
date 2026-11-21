@@ -83,7 +83,7 @@ pub fn parity_needed(k: usize, p: f64, target: f64, cap: usize) -> usize {
     (0..=cap).find(|&r| binomial_tail(k + r, p, r) <= target).unwrap_or(cap)
 }
 
-/// P[X > r] for X ~ Binomial(n, p). Exact for n up to a few thousand; past that the normal
+/// `P[X > r]` for `X ~ Binomial(n, p)`. Exact for n up to a few thousand; past that the normal
 /// approximation, which is plenty for planning.
 pub fn binomial_tail(n: usize, p: f64, r: usize) -> f64 {
     if r >= n {

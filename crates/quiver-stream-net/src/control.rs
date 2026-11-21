@@ -172,7 +172,7 @@ pub fn put_segment(w: &mut Writer<'_>, seq: u32, fin: bool, data: &[u8]) {
     w.u32(seq).u8(fin as u8).bytes(data);
 }
 
-pub fn get_segment<'a>(body: &'a [u8]) -> Result<(u32, bool, &'a [u8]), Malformed> {
+pub fn get_segment(body: &[u8]) -> Result<(u32, bool, &[u8]), Malformed> {
     let mut r = Reader::new(body);
     Ok((r.u32()?, r.u8()? & 1 != 0, r.rest()))
 }
