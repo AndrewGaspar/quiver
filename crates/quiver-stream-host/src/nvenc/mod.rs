@@ -568,7 +568,6 @@ impl Encoder {
         let hdr = if key { self.cfg.color.hdr.clone() } else { None };
         let (mut mdi, mut cll) = match (&hdr, self.cfg.codec) {
             (Some(h), VideoCodec::Hevc) => mastering_hevc(h),
-            (Some(h), VideoCodec::Av1) => mastering_av1(h),
             _ => Default::default(),
         };
         let mut sei_payloads: Vec<Vec<u8>> = Vec::new();
@@ -579,10 +578,9 @@ impl Encoder {
                     pic.codecPicParams.hevcPicParams.pMaxCll = &mut cll;
                     pic.codecPicParams.hevcPicParams.pMasteringDisplay = &mut mdi;
                 }
-                VideoCodec::Av1 => {
-                    pic.codecPicParams.av1PicParams.pMaxCll = &mut cll;
-                    pic.codecPicParams.av1PicParams.pMasteringDisplay = &mut mdi;
-                }
+                // NVENC 13.1 writes no metadata OBU for these (checked with ffprobe/dav1d), so
+                // they are added to the bitstream below.
+                VideoCodec::Av1 => {}
                 VideoCodec::H264 => {
                     sei_payloads = h264_hdr_sei(h);
                     for (ty, p) in [137u32, 144].into_iter().zip(sei_payloads.iter_mut()) {
@@ -606,7 +604,10 @@ impl Encoder {
             unsafe { self.api.fns.nvEncUnmapInputResource.unwrap()(self.enc, map.mappedResource) };
             return Err(self.fail("nvEncLockBitstream", r));
         }
-        let data = unsafe { std::slice::from_raw_parts(lock.bitstreamBufferPtr as *const u8, lock.bitstreamSizeInBytes as usize) }.to_vec();
+        let mut data = unsafe { std::slice::from_raw_parts(lock.bitstreamBufferPtr as *const u8, lock.bitstreamSizeInBytes as usize) }.to_vec();
+        if let (Some(h), VideoCodec::Av1) = (&hdr, self.cfg.codec) {
+            data = av1_insert_hdr_metadata(&data, h);
+        }
         let pic_type = lock.pictureType;
         unsafe {
             self.api.fns.nvEncUnlockBitstream.unwrap()(self.enc, self.bitstream);
@@ -769,10 +770,6 @@ fn apply_config(cfg: &mut NV_ENC_CONFIG, c: &EncoderConfig, caps: &Caps) {
                 a.intraRefreshPeriod = ir_period;
                 a.intraRefreshCnt = ir_cnt;
             }
-            if c.color.hdr.is_some() {
-                a.set_outputMaxCll(1);
-                a.set_outputMasteringDisplay(1);
-            }
             a.colorPrimaries = prim;
             a.transferCharacteristics = transfer;
             a.matrixCoefficients = matrix;
@@ -791,22 +788,89 @@ fn mastering_hevc(h: &HdrMetadata) -> (MASTERING_DISPLAY_INFO, CONTENT_LIGHT_LEV
     )
 }
 
-/// AV1's metadata OBU units (AV1 spec 6.7.4): primaries in 0.16 fixed point, maximum
-/// luminance in 24.8, minimum in 18.14.
-fn mastering_av1(h: &HdrMetadata) -> (MASTERING_DISPLAY_INFO, CONTENT_LIGHT_LEVEL) {
+fn leb128(mut v: usize, out: &mut Vec<u8>) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// One metadata OBU (AV1 5.8): header (type 5, with a size field), size, metadata_type,
+/// the payload, trailing bits.
+fn av1_metadata_obu(kind: usize, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    leb128(kind, &mut body);
+    body.extend_from_slice(payload);
+    body.push(0x80);
+    let mut obu = vec![(5 << 3) | 0x02];
+    leb128(body.len(), &mut obu);
+    obu.extend_from_slice(&body);
+    obu
+}
+
+/// The HDR metadata OBUs (AV1 6.7.3, 6.7.4): content light level (type 1) and mastering
+/// display colour volume (type 2), whose primaries are R, G, B in 0.16 fixed point and whose
+/// luminance is 24.8 (max) and 18.14 (min) fixed point.
+pub fn av1_hdr_obus(h: &HdrMetadata) -> Vec<u8> {
     let xy = |v: u16| ((v as u64 * 65536 + 25_000) / 50_000).min(65535) as u16;
-    let p = |i: usize| CHROMA_POINTS { x: xy(h.primaries[i][0]), y: xy(h.primaries[i][1]) };
-    (
-        MASTERING_DISPLAY_INFO {
-            r: p(0),
-            g: p(1),
-            b: p(2),
-            whitePoint: CHROMA_POINTS { x: xy(h.white_point[0]), y: xy(h.white_point[1]) },
-            maxLuma: ((h.max_luminance as u64 * 256 + 5_000) / 10_000) as u32,
-            minLuma: ((h.min_luminance as u64 * 16_384 + 5_000) / 10_000) as u32,
-        },
-        CONTENT_LIGHT_LEVEL { maxContentLightLevel: h.max_cll, maxPicAverageLightLevel: h.max_fall },
-    )
+    let mut cll = Vec::new();
+    cll.extend_from_slice(&h.max_cll.to_be_bytes());
+    cll.extend_from_slice(&h.max_fall.to_be_bytes());
+    let mut mdcv = Vec::new();
+    for p in &h.primaries {
+        mdcv.extend_from_slice(&xy(p[0]).to_be_bytes());
+        mdcv.extend_from_slice(&xy(p[1]).to_be_bytes());
+    }
+    mdcv.extend_from_slice(&xy(h.white_point[0]).to_be_bytes());
+    mdcv.extend_from_slice(&xy(h.white_point[1]).to_be_bytes());
+    mdcv.extend_from_slice(&(((h.max_luminance as u64 * 256 + 5_000) / 10_000) as u32).to_be_bytes());
+    mdcv.extend_from_slice(&(((h.min_luminance as u64 * 16_384 + 5_000) / 10_000) as u32).to_be_bytes());
+    let mut out = av1_metadata_obu(1, &cll);
+    out.extend(av1_metadata_obu(2, &mdcv));
+    out
+}
+
+/// Put the HDR metadata OBUs into a temporal unit, after its sequence header (or its
+/// temporal delimiter), before any frame.
+pub fn av1_insert_hdr_metadata(tu: &[u8], h: &HdrMetadata) -> Vec<u8> {
+    let mut i = 0;
+    let mut at = 0;
+    while i < tu.len() {
+        let header = tu[i];
+        let kind = (header >> 3) & 0xf;
+        let mut j = i + 1 + ((header >> 2) & 1) as usize;
+        let size = if header & 0x02 != 0 {
+            let (mut v, mut shift) = (0usize, 0);
+            while j < tu.len() {
+                let b = tu[j];
+                j += 1;
+                v |= ((b & 0x7f) as usize) << shift;
+                shift += 7;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            v
+        } else {
+            tu.len() - j
+        };
+        if kind == 1 || kind == 2 {
+            at = j + size;
+        } else {
+            break;
+        }
+        i = j + size;
+    }
+    let mut out = Vec::with_capacity(tu.len() + 64);
+    out.extend_from_slice(&tu[..at]);
+    out.extend(av1_hdr_obus(h));
+    out.extend_from_slice(&tu[at..]);
+    out
 }
 
 /// H.264 has no NVENC switch for HDR metadata, so the SEI payloads are written here:
@@ -855,16 +919,23 @@ mod tests {
     }
 
     #[test]
-    fn av1_units() {
-        let (m, c) = mastering_av1(&hdr());
-        // 0.708 → 0.708 * 65536 = 46399.
-        assert_eq!(m.r.x, 46399);
-        // 1000 nits in 24.8 is 256000; 0.005 nits in 18.14 is 82.
-        assert_eq!(m.maxLuma, 256_000);
-        assert_eq!(m.minLuma, 82);
-        assert_eq!((c.maxContentLightLevel, c.maxPicAverageLightLevel), (4000, 600));
-        let (h, _) = mastering_hevc(&hdr());
+    fn av1_metadata_obus() {
+        let o = av1_hdr_obus(&hdr());
+        // CLL: header 0x2a, size 6, type 1, 4000, 600, trailing.
+        assert_eq!(&o[..9], &[0x2a, 6, 1, 0x0f, 0xa0, 0x02, 0x58, 0x80, 0x2a]);
+        // MDCV: size 26, type 2, R x 0.708 → 46399 = 0xb53f, …, max 1000 nits = 256000.
+        assert_eq!(&o[9..13], &[26, 2, 0xb5, 0x3f]);
+        assert_eq!(&o[9 + 2 + 16..9 + 2 + 20], &256_000u32.to_be_bytes());
+        assert_eq!(&o[9 + 2 + 20..9 + 2 + 24], &82u32.to_be_bytes());
+        // Inserted after the temporal delimiter and sequence header, before the frame.
+        let tu = [0x12, 0x00, 0x0a, 0x02, 0xaa, 0xbb, 0x32, 0x01, 0xcc];
+        let out = av1_insert_hdr_metadata(&tu, &hdr());
+        assert_eq!(&out[..6], &tu[..6]);
+        assert_eq!(&out[6..6 + o.len()], &o[..]);
+        assert_eq!(&out[6 + o.len()..], &tu[6..]);
+        let (h, c) = mastering_hevc(&hdr());
         assert_eq!((h.g.x, h.r.x, h.maxLuma), (8500, 35400, 10_000_000));
+        assert_eq!((c.maxContentLightLevel, c.maxPicAverageLightLevel), (4000, 600));
     }
 
     #[test]

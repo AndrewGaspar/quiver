@@ -176,17 +176,29 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
     let mut window = Window::default();
     let mut seq = 0u64;
     let mut bitrate = io.bitrate.clone();
-    loop {
-        if io.stop.load(Ordering::Relaxed) || io.max_frames.is_some_and(|m| report.frames >= m) {
-            break;
-        }
-        let mut rebuild = false;
+    // Changes of size, codec or colour wait for the next frame boundary; the rest apply to
+    // the very next frame, including commands that arrive while the source waits for it.
+    let mut pending: Vec<VideoCmd> = Vec::new();
+    let apply = |enc: &mut Encoder, pending: &mut Vec<VideoCmd>| -> Result<()> {
         while let Ok(cmd) = io.cmds.try_recv() {
             match cmd {
                 VideoCmd::Lost { since, through } => {
                     enc.lost(since, through)?;
                 }
                 VideoCmd::Keyframe => enc.request_keyframe(),
+                other => pending.push(other),
+            }
+        }
+        Ok(())
+    };
+    loop {
+        if io.stop.load(Ordering::Relaxed) || io.max_frames.is_some_and(|m| report.frames >= m) {
+            break;
+        }
+        apply(&mut enc, &mut pending)?;
+        let mut rebuild = false;
+        for cmd in pending.drain(..) {
+            match cmd {
                 VideoCmd::Resize { width, height, refresh_mhz } => {
                     source.resize(width, height, refresh_mhz);
                     base.fps_num = refresh_mhz;
@@ -198,19 +210,13 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
                     base.codec = c;
                     rebuild = true;
                 }
-                VideoCmd::Codec(_) => {}
                 VideoCmd::Color(c) if c != base.color => {
                     source.recolor(&c);
                     base.color = c;
                     rebuild = true;
                 }
-                VideoCmd::Color(_) => {}
+                _ => {}
             }
-        }
-        if bitrate.has_changed().unwrap_or(false) {
-            let kbps = *bitrate.borrow_and_update();
-            base.bitrate_kbps = kbps;
-            enc.set_bitrate(kbps)?;
         }
         if rebuild {
             let (w, h, f) = source.format();
@@ -228,6 +234,12 @@ pub fn run(cuda: Arc<Cuda>, mut source: Box<dyn Source>, mut base: EncoderConfig
                 configure(&enc, &mut announce);
             }
             Next::Frame { captured } => {
+                apply(&mut enc, &mut pending)?;
+                if bitrate.has_changed().unwrap_or(false) {
+                    let kbps = *bitrate.borrow_and_update();
+                    base.bitrate_kbps = kbps;
+                    enc.set_bitrate(kbps)?;
+                }
                 let capture_us = now_micros().saturating_sub(captured) as u32;
                 let (frame, t) = enc.encode(seq, captured)?;
                 report.frames += 1;
