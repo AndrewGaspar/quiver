@@ -20,9 +20,11 @@ pub struct Stamped {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum InputEvent {
     /// A key, as a Linux evdev key code (`KEY_*` in linux/input-event-codes.h). This is the
-    /// key's position, not its symbol: the host's keymap applies. A compositor remap on the
-    /// client, such as Caps Lock swapped with Escape, is applied before the client sees the
-    /// key, so it carries over.
+    /// key's position, not its symbol: the host's keymap applies. The exception is keys that
+    /// type no text (Escape, Caps Lock, the modifiers, Enter, Tab, Backspace): the client
+    /// sends those by what the client's keymap makes them, because an XKB option such as
+    /// `caps:swapescape` remaps symbols, not key codes, and the person's swap has to carry
+    /// over. A key's release always carries the code its press did.
     Key { code: u16, down: bool },
     /// Text the client's input method composed, for chat boxes. Hosts that can't type it
     /// ignore it.
