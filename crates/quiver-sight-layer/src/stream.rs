@@ -118,6 +118,44 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 static HELD: AtomicU64 = AtomicU64::new(0);
 static BUSY: AtomicU64 = AtomicU64::new(0);
 
+/// Microseconds in 5 µs buckets up to a millisecond, for the log.
+pub struct Hist([AtomicU32; 201]);
+
+impl Hist {
+    const fn new() -> Hist {
+        Hist([const { AtomicU32::new(0) }; 201])
+    }
+
+    pub fn add(&self, ns: u64) {
+        self.0[((ns / 5_000) as usize).min(200)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// "p50 / p99 / max µs (n)", each the top of its bucket.
+    pub fn summary(&self) -> String {
+        let counts: Vec<u32> = self.0.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+        let n: u64 = counts.iter().map(|&c| c as u64).sum();
+        if n == 0 {
+            return "no samples".into();
+        }
+        let at = |q: f64| {
+            let want = ((n as f64 * q).ceil() as u64).max(1);
+            let mut seen = 0;
+            counts.iter().position(|&c| {
+                seen += c as u64;
+                seen >= want
+            })
+        };
+        let us = |i: Option<usize>| i.map_or("?".into(), |i| if i == 200 { ">1000".to_owned() } else { ((i + 1) * 5).to_string() });
+        let max = counts.iter().rposition(|&c| c > 0);
+        format!("p50 {} / p99 {} / max {} µs (n {n})", us(at(0.5)), us(at(0.99)), us(max))
+    }
+}
+
+/// The capture step of a present on the CPU (stream_capture in present.rs), and its compute
+/// dispatch on the GPU.
+pub static CPU: Hist = Hist::new();
+pub static GPU: Hist = Hist::new();
+
 fn pack(w: Want) -> u32 {
     w.chroma444 as u32 | (w.ten_bit as u32) << 1 | (w.hdr as u32) << 2 | (w.full_range as u32) << 3
 }
@@ -296,11 +334,13 @@ fn connection(path: CString) {
             End::Stolen => log!("stream capture: other code in this process closed our socket (fd {fd}, now {})", what_is(fd)),
         }
         log!(
-            "stream capture: disconnected ({} presents captured, {} dropped so far: {} with every slot held, {} with the GPU behind)",
+            "stream capture: disconnected ({} presents captured, {} dropped so far: {} with every slot held, {} with the GPU behind); per present: CPU {}, GPU {}",
             CAPTURED.load(Ordering::Relaxed),
             DROPPED.load(Ordering::Relaxed),
             HELD.load(Ordering::Relaxed),
-            BUSY.load(Ordering::Relaxed)
+            BUSY.load(Ordering::Relaxed),
+            CPU.summary(),
+            GPU.summary()
         );
         logged = false;
         std::thread::sleep(Duration::from_secs(1));
@@ -549,6 +589,9 @@ pub struct Capture {
     next: usize,
     /// A ring announcement the socket couldn't take: not again before this.
     retry_at: Option<Instant>,
+    /// Two timestamps per slot around its dispatch ([`GPU`]), and which slots wrote them.
+    queries: vk::QueryPool,
+    timed: [bool; SLOTS],
     seq: u64,
     /// The swapchain's captures failed for good.
     pub failed: bool,
@@ -582,6 +625,8 @@ impl Capture {
             retired: Vec::new(),
             next: 0,
             retry_at: None,
+            queries: vk::QueryPool::null(),
+            timed: [false; SLOTS],
             seq: 0,
             failed: false,
         };
@@ -638,6 +683,7 @@ impl Capture {
             let made = dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(self.layout)], None);
             dev.destroy_shader_module(module, None);
             self.pipeline = made.map_err(|(_, e)| e)?[0];
+            self.queries = dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * SLOTS as u32), None)?;
         }
         Ok(())
     }
@@ -886,8 +932,21 @@ impl Capture {
                 return Ok(None);
             };
             let cmd = self.cmds[slot];
+            // The slot's last dispatch is done (its value was reached): its GPU time.
+            let period = d.timestamps(family);
+            if std::mem::take(&mut self.timed[slot])
+                && let Some(period) = period
+            {
+                let mut t = [0u64; 2];
+                if dev.get_query_pool_results(self.queries, 2 * slot as u32, &mut t, vk::QueryResultFlags::TYPE_64).is_ok() {
+                    GPU.add((t[1].saturating_sub(t[0]) as f64 * period as f64) as u64);
+                }
+            }
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            if period.is_some() {
+                dev.cmd_reset_query_pool(cmd, self.queries, 2 * slot as u32, 2);
+            }
             let offset = slot as u64 * ring.slot_bytes;
             let range = ring.pitch as u64 * ring.format.rows(ring.height) as u64;
             let read = vk::ImageMemoryBarrier::default()
@@ -909,6 +968,9 @@ impl Capture {
                 .offset(offset)
                 .size(range);
             dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[acquire], &[read]);
+            if period.is_some() {
+                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, self.queries, 2 * slot as u32);
+            }
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[ring.sets[image]], &[]);
             let push = Push {
@@ -924,6 +986,9 @@ impl Capture {
             dev.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, bytes);
             let (bx, by) = block(ring.mode);
             dev.cmd_dispatch(cmd, ring.width.div_ceil(bx).div_ceil(8), ring.height.div_ceil(by).div_ceil(8), 1);
+            if period.is_some() {
+                dev.cmd_write_timestamp(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, self.queries, 2 * slot as u32 + 1);
+            }
             let back = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(vk::AccessFlags::empty())
@@ -958,6 +1023,7 @@ impl Capture {
             dev.queue_submit(queue, &[submit], vk::Fence::null())?;
             self.value = value;
             self.cmd_value[slot] = value;
+            self.timed[slot] = period.is_some();
             self.seq += 1;
             self.next = (slot + 1) % SLOTS;
             let ring = self.ring.as_mut().unwrap();
@@ -989,6 +1055,7 @@ impl Capture {
             // SAFETY: our semaphore.
             let _ = unsafe { (s.wait_semaphores)(d.handle, &vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&values), 1_000_000_000) };
         }
+        log!("stream capture: swapchain gone; per present: CPU {}, GPU {}", CPU.summary(), GPU.summary());
         // SAFETY: done waiting.
         unsafe { self.destroy_now(d) };
     }
@@ -1003,6 +1070,7 @@ impl Capture {
             if let Some((_, pool)) = self.pool.take() {
                 dev.destroy_command_pool(pool, None);
             }
+            dev.destroy_query_pool(self.queries, None);
             dev.destroy_pipeline(self.pipeline, None);
             dev.destroy_pipeline_layout(self.layout, None);
             dev.destroy_descriptor_set_layout(self.set_layout, None);

@@ -67,8 +67,9 @@ pub unsafe extern "system" fn queue_present_khr(queue: vk::Queue, info: *const v
     let mut plan = Plan::new();
     guard("present", || unsafe { prepare(&dev, queue, pi, entry, &mut plan) });
     if streaming {
-        let presented = quiver_stream_proto::now_micros();
+        let (presented, t0) = (quiver_stream_proto::now_micros(), mono_raw_ns());
         guard("stream capture", || unsafe { stream_capture(&dev, queue, pi, presented, &mut plan) });
+        crate::stream::CPU.add((mono_raw_ns() - t0).max(0) as u64);
     }
 
     let mut patched;
