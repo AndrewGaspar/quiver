@@ -19,6 +19,7 @@ quiver-perf = { path = "crates/quiver-perf" }
 epic-core = { path = "crates/epic-core" }
 quiver-stream-proto = { path = "crates/quiver-stream-proto" }
 quiver-remote = { path = "crates/quiver-remote" }
+quiver-stream-net = { path = "crates/quiver-stream-net" }
 anyhow = "1"
 thiserror = "2"
 prost = "0.14"

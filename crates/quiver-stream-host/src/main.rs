@@ -3,7 +3,11 @@
 //! ```text
 //! quiver-stream-host --target test-pattern --size 2560x1440 --fps 120 --codec hevc --out f.h265
 //! quiver-stream-host --target command --size 1920x1080 --fps 60 --out g.h265 --audio-out g.opus -- vkcube
+//! quiver-stream-host serve [--socket-fd N | --listen ADDR] [--preset P] < spec.json
 //! ```
+//!
+//! `serve` is how quiverd runs a stream (`quiver_stream_host::serve`): the spec, keys
+//! included, is the first line on stdin.
 //!
 //! Stats go to stderr once a second, and a summary at the end. `--out` is a raw elementary
 //! stream (Annex-B H.264/HEVC, or AV1 OBUs) that ffplay opens; `--audio-out` is Ogg Opus.
@@ -97,6 +101,21 @@ struct Args {
     command: Vec<String>,
 }
 
+/// `quiver-stream-host serve`: the spec (keys included) is the first line on stdin.
+#[derive(Parser, Debug)]
+#[command(name = "quiver-stream-host serve", about = "Serve one stream behind the transport, as quiverd runs it; the spec is the first line on stdin")]
+struct ServeCli {
+    /// The media socket, already bound, inherited on this fd.
+    #[arg(long)]
+    socket_fd: Option<i32>,
+    /// Bind the media socket here instead (else the spec's `listen`, else 0.0.0.0:47998).
+    #[arg(long)]
+    listen: Option<std::net::SocketAddr>,
+    /// NVENC preset, 1 (fastest) to 7.
+    #[arg(long, default_value_t = 1)]
+    preset: u8,
+}
+
 fn parse_size(s: &str) -> Result<(u32, u32)> {
     let Some((w, h)) = s.split_once('x') else { bail!("--size wants WIDTHxHEIGHT, not {s}") };
     Ok((w.parse()?, h.parse()?))
@@ -117,6 +136,11 @@ fn main() -> Result<()> {
         return Err(quiver_stream_host::sandbox::sandbox_exec(gid, &program));
     }
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
+    if raw.get(1).map(String::as_str) == Some("serve") {
+        let s = ServeCli::parse_from(raw.iter().skip(1));
+        let args = quiver_stream_host::serve::ServeArgs { socket_fd: s.socket_fd, listen: s.listen, preset: s.preset };
+        return tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(quiver_stream_host::serve::serve(args));
+    }
     let a = Args::parse();
     if a.test_window {
         return quiver_stream_host::testwin::run(a.fps.round() as u32);

@@ -46,7 +46,13 @@ pub enum Target {
     TestPattern { motion: bool },
     /// A program, run in a headless gamescope.
     Command { argv: Vec<String>, env: Vec<(String, String)> },
+    /// A headless gamescope for programs someone else starts (quiverd's game launch, which
+    /// keeps its own process tree): it runs a placeholder until stopped, and
+    /// [`Host::launch`] says how to start a program into it.
+    Display,
 }
+
+pub use quiver_stream_proto::serve::LaunchEnv;
 
 #[derive(Debug, Clone)]
 pub struct HostOptions {
@@ -83,6 +89,8 @@ pub struct Host {
     pub pad_mode: PadMode,
     /// The program's X display, for a command target.
     pub x_display: Option<String>,
+    /// For a [`Target::Display`] stream: how to start the program into it.
+    pub launch: Option<LaunchEnv>,
     stop: Arc<AtomicBool>,
     video: Option<std::thread::JoinHandle<Result<RunReport>>>,
     input_thread: Option<std::thread::JoinHandle<()>>,
@@ -116,45 +124,46 @@ impl Host {
         let mut parts = Parts { display: None, _audio: None, _tone: None };
         let mut pad_mode = PadMode::Off("the test pattern has no program to give pads to".into());
         let mut x = None;
+        let mut launch = None;
         let source: Box<dyn Source> = match &opts.target {
             Target::TestPattern { motion } => {
                 parts._tone = Some(crate::tone::start(cfg.audio_channels, atx.clone(), stop.clone(), cfg.refresh_mhz)?);
                 Box::new(PatternSource::new(cfg.width, cfg.height, cfg.refresh_mhz, cfg.color.clone(), *motion))
             }
             Target::Command { argv, env } => {
-                let audio = Audio::start(AudioSpec { id: opts.session.clone(), channels: cfg.audio_channels, frame_ms_x10: cfg.audio_frame_ms as u32 * 10, bitrate: if cfg.audio_channels > 2 { 256_000 } else { 128_000 } }, atx.clone())?;
-                let mut env = env.clone();
-                env.extend(audio.child_env());
+                let (display, audio, mode) = start_display(&opts, &cfg, argv.clone(), env.clone(), true, atx.clone())?;
+                pad_mode = mode;
+                x = Some((display.x_display.clone(), display.pid()));
+                let capture = open_capture(&cuda, &display)?;
+                parts.display = Some(display);
+                parts._audio = Some(audio);
+                capture
+            }
+            Target::Display => {
+                let placeholder = vec!["sleep".into(), "infinity".into()];
+                let (display, audio, mode) = start_display(&opts, &cfg, placeholder, Vec::new(), false, atx.clone())?;
+                pad_mode = mode.clone();
+                let mut env = audio.child_env();
+                env.push(("DISPLAY".into(), display.x_display.clone()));
+                env.push(("GAMESCOPE_WAYLAND_DISPLAY".into(), display.wayland_display.clone()));
                 if cfg.color.hdr.is_some() {
                     env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));
                     env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
                 }
-                let seated = seat::seated_sessions(std::path::Path::new("/run/systemd/sessions"));
-                pad_mode = seat::decide(opts.headless_server, &seated, crate::sandbox::check_rule().map_err(|e| format!("{e:#}")));
-                let wrapper = match (pad_mode.clone(), opts.force_sandbox_gid) {
-                    (PadMode::Hidden { gid }, _) | (_, Some(gid)) => {
-                        let exe = match &opts.exe {
-                            Some(e) => e.clone(),
-                            None => std::env::current_exe().context("find quiver-stream-host for the pad namespace")?,
-                        };
-                        crate::sandbox::wrap(&exe, gid, &[])
-                    }
+                let wrapper = match mode {
+                    PadMode::Hidden { gid } => crate::sandbox::wrap(&sandbox_exe(&opts)?, gid, &[]),
                     _ => Vec::new(),
                 };
-                let display = Display::start(
-                    DisplaySpec { width: cfg.width, height: cfg.height, refresh_mhz: cfg.refresh_mhz, hdr: cfg.color.hdr.is_some(), command: argv.clone(), env, dir: opts.dir.clone(), wrapper },
-                    Duration::from_secs(30),
-                )?;
+                launch = Some(LaunchEnv { env, unset: vec!["WAYLAND_DISPLAY".into()], wrapper });
                 x = Some((display.x_display.clone(), display.pid()));
-                let want = Want::Bgrx;
-                let capture = PwCapture::start(cuda.clone(), display.node_id, want, Duration::from_secs(15))?;
+                let capture = open_capture(&cuda, &display)?;
                 parts.display = Some(display);
                 parts._audio = Some(audio);
-                Box::new(capture)
+                capture
             }
         };
         let mut cfg_v = cfg.clone();
-        if matches!(opts.target, Target::Command { .. }) {
+        if !matches!(opts.target, Target::TestPattern { .. }) {
             // gamescope's screencast is 8-bit SDR.
             if cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8 {
                 let _ = ctx.try_send(Control::Notice { text: "HDR and 10-bit aren't available from gamescope's screencast yet: streaming 8-bit SDR".into() });
@@ -227,6 +236,7 @@ impl Host {
             control_in: cin_tx,
             pad_mode,
             x_display: x.map(|(d, _)| d),
+            launch,
             stop,
             video: Some(video),
             input_thread: Some(input_thread),
@@ -262,6 +272,45 @@ impl Host {
     pub fn alive(&mut self) -> bool {
         self.parts.as_mut().and_then(|p| p.display.as_mut()).is_none_or(|d| d.alive())
     }
+}
+
+/// The `quiver-stream-host` binary that runs the inside of the pad namespace.
+fn sandbox_exe(opts: &HostOptions) -> Result<PathBuf> {
+    match &opts.exe {
+        Some(e) => Ok(e.clone()),
+        None => std::env::current_exe().context("find quiver-stream-host for the pad namespace"),
+    }
+}
+
+/// The stream's sink, the pad policy, and the virtual display running `argv`. With `wrap`,
+/// gamescope itself runs in the pad namespace when pads are hidden (a command target, whose
+/// program is gamescope's child); without, the namespace is left to whoever starts the
+/// program ([`LaunchEnv::wrapper`]).
+fn start_display(opts: &HostOptions, cfg: &StreamConfig, argv: Vec<String>, mut env: Vec<(String, String)>, wrap: bool, atx: mpsc::Sender<AudioPacket>) -> Result<(Display, Audio, PadMode)> {
+    let audio = Audio::start(AudioSpec { id: opts.session.clone(), channels: cfg.audio_channels, frame_ms_x10: cfg.audio_frame_ms as u32 * 10, bitrate: if cfg.audio_channels > 2 { 256_000 } else { 128_000 } }, atx)?;
+    env.extend(audio.child_env());
+    if cfg.color.hdr.is_some() {
+        env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));
+        env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
+    }
+    let seated = seat::seated_sessions(std::path::Path::new("/run/systemd/sessions"));
+    let pad_mode = seat::decide(opts.headless_server, &seated, crate::sandbox::check_rule().map_err(|e| format!("{e:#}")));
+    let wrapper = match (wrap, pad_mode.clone(), opts.force_sandbox_gid) {
+        (true, PadMode::Hidden { gid }, _) | (true, _, Some(gid)) => crate::sandbox::wrap(&sandbox_exe(opts)?, gid, &[]),
+        _ => Vec::new(),
+    };
+    let display = Display::start(
+        DisplaySpec { width: cfg.width, height: cfg.height, refresh_mhz: cfg.refresh_mhz, hdr: cfg.color.hdr.is_some(), command: argv, env, dir: opts.dir.clone(), wrapper },
+        Duration::from_secs(30),
+    )?;
+    Ok((display, audio, pad_mode))
+}
+
+/// Capture of the virtual display: the one place the host picks how frames reach the
+/// encoder (today gamescope's PipeWire screencast).
+fn open_capture(cuda: &Arc<Cuda>, display: &Display) -> Result<Box<dyn Source>> {
+    let capture = PwCapture::start(cuda.clone(), display.node_id, Want::Bgrx, Duration::from_secs(15))?;
+    Ok(Box::new(capture))
 }
 
 impl Drop for Host {

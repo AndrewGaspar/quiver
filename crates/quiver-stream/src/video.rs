@@ -468,6 +468,7 @@ fn present_loop(
     waiter: Sender<WaitMsg>,
 ) -> Result<()> {
     let mut last: Option<Shown> = None;
+    let mut last_shown_at: Option<Micros> = None;
     let flush = |waiter: &Sender<WaitMsg>| {
         if gpu.present_wait.is_some() {
             let (t, r) = crossbeam_channel::bounded(1);
@@ -540,6 +541,8 @@ fn present_loop(
         };
         shared.frames_shown.fetch_add(1, Ordering::Relaxed);
         shared.stats.window.lock().unwrap().frames_shown += 1;
+        let interval = shared.config.lock().unwrap().as_ref().map_or(0, |c| 1_000_000_000 / c.refresh_mhz.max(1) as u64);
+        shared.stats.shown(&mut last_shown_at, now_micros(), interval);
         if let Some(m) = &shared.measure {
             m.lock().unwrap().shown += 1;
         }

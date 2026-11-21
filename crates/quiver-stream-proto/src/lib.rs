@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod input;
 pub mod media;
+pub mod serve;
 pub mod stamp;
 
 pub use input::{InputEvent, MouseButton, PadButtons, PadKind, PadState};

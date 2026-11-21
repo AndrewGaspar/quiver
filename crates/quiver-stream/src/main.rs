@@ -13,6 +13,7 @@ use quiver_stream::bench;
 use quiver_stream::decode::VideoDecoder;
 use quiver_stream::gpu::Gpu;
 use quiver_stream::link;
+use quiver_stream::{caps, net};
 use quiver_stream::source::FileSource;
 use quiver_stream_proto::{Pacing, StreamPrefs, StreamTarget};
 
@@ -107,6 +108,46 @@ enum Cmd {
         #[arg(long)]
         intro: bool,
     },
+    /// Stream from a host: the ticket (`StartStream`'s reply, `{"ticket": {"addr",
+    /// "session_id", "key"}, "host_name"}`) is the first line on stdin, never an argument.
+    Connect {
+        /// A window rather than full screen.
+        #[arg(long)]
+        windowed: bool,
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
+        #[arg(long, value_parser = parse_pacing, default_value = "lowest")]
+        pacing: Pacing,
+        #[arg(long, value_parser = parse_mode)]
+        present_mode: Option<vk::PresentModeKHR>,
+        #[arg(long, value_parser = parse_backend)]
+        decoder: Option<Backend>,
+        /// Show the stats chip from the start.
+        #[arg(long)]
+        stats: bool,
+        #[arg(long)]
+        no_pads: bool,
+        #[arg(long)]
+        no_audio: bool,
+        /// Read the stamp from each frame and report latencies after N frames (JSON).
+        #[arg(long)]
+        measure: Option<u64>,
+        /// Quit after this many seconds.
+        #[arg(long)]
+        seconds: Option<f64>,
+        #[arg(long)]
+        intro: bool,
+        /// Never NACK missing shards (FEC only).
+        #[arg(long)]
+        no_nack: bool,
+    },
+    /// What this machine can decode and show: the `ClientCaps` a Hello or `StartStream`
+    /// carries (decoders, the display, pads), as JSON.
+    Caps {
+        /// JSON (the only form; for symmetry with other tools).
+        #[arg(long)]
+        json: bool,
+    },
     /// What this machine can decode and show (the Hello's caps), as JSON.
     Probe,
     /// Decode a file without a window, timing each frame.
@@ -176,11 +217,59 @@ fn main() -> Result<()> {
                 intro,
                 measure,
                 duration: seconds.map(Duration::from_secs_f64),
+                periods: None,
             };
             if let Some(report) = app::run(client, opts)? {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
+        Cmd::Connect { windowed, size, pacing, present_mode, decoder, stats, no_pads, no_audio, measure, seconds, intro, no_nack } => {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let spec = net::ConnectSpec::parse(&line)?;
+            let mut opts = quiver_stream_net::ClientOpts::default();
+            if no_nack {
+                opts.nack_max_wait_us = None;
+            }
+            let (link, net) = net::connect(&spec.ticket, opts)?;
+            // Under the netlab: each second's numbers as its stats lines.
+            let mut file = quiver_stream_net::netlab::StatsFile::from_env();
+            let periods = file.enabled().then(|| {
+                let (tx, rx) = crossbeam_channel::unbounded::<quiver_stream::stats::Period>();
+                std::thread::spawn(move || {
+                    while let Ok(p) = rx.recv() {
+                        file.client(&p.client, &p.netlab_extra());
+                    }
+                });
+                tx
+            });
+            let mut prefs = spec.prefs.clone().unwrap_or_default();
+            prefs.pacing = pacing;
+            let opts = Options {
+                windowed,
+                size,
+                prefs,
+                present_mode,
+                decoder,
+                stats,
+                pads: !no_pads,
+                audio: !no_audio,
+                sbs: false,
+                target: spec.target.clone().unwrap_or(StreamTarget::Desktop),
+                intro,
+                measure,
+                duration: seconds.map(Duration::from_secs_f64),
+                periods,
+            };
+            let result = app::run(link, opts);
+            net.close();
+            match result {
+                Ok(Some(report)) => println!("{}", serde_json::to_string_pretty(&report)?),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Cmd::Caps { json: _ } => println!("{}", serde_json::to_string_pretty(&caps::probe()?)?),
         Cmd::Probe => {
             let (entry, instance, exts) = Gpu::instance(&[])?;
             let gpu = Arc::new(Gpu::new(entry, instance, exts, None)?);

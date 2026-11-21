@@ -58,6 +58,8 @@ pub struct Options {
     pub measure: Option<u64>,
     /// Quit after this long (for tests).
     pub duration: Option<Duration>,
+    /// Each second's numbers also go here (`connect` writes them as netlab stats lines).
+    pub periods: Option<crossbeam_channel::Sender<crate::stats::Period>>,
 }
 
 fn sdl_error() -> String {
@@ -852,7 +854,11 @@ fn with_window(window: *mut sdl::SDL_Window, link: StreamLink, opts: Options) ->
             let secs = last_stats.elapsed().as_secs_f32();
             last_stats = now;
             let rtt = shared.clock.lock().unwrap().rtt_us();
-            let (client, fps, kbps, loss) = shared.stats.take(secs, rtt);
+            let period = shared.stats.period(secs, rtt);
+            if let Some(tx) = &opts.periods {
+                let _ = tx.send(period.clone());
+            }
+            let crate::stats::Period { client, fps, kbps, loss_percent: loss, .. } = period;
             if let Some(p) = &playback {
                 let jb = p.buffer.lock().unwrap();
                 let audio_ms = (jb.depth_us() + p.device_us()) as f32 / 1000.0;

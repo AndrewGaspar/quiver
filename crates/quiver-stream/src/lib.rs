@@ -2,7 +2,9 @@
 //! quiver-app launches.
 //!
 //! The boundary with the transport is [`link::StreamLink`] (video, audio and control in;
-//! input and control out); [`source::FileSource`] stands in for a host during development.
+//! input and control out); [`net`] fills one from `quiver-stream-net` (`quiver-stream
+//! connect`, the ticket on stdin), and [`source::FileSource`] stands in for a host during
+//! development. [`caps`] says what this machine can do (`quiver-stream caps --json`).
 //! The pieces:
 //!
 //! - **Decode** ([`decode`], [`av`], csrc/qs_av.c): libav, Vulkan Video first, on the
@@ -46,6 +48,7 @@ pub mod app;
 pub mod audio;
 pub mod av;
 pub mod bench;
+pub mod caps;
 pub mod color;
 pub mod decode;
 pub mod gap;
@@ -54,6 +57,7 @@ pub mod input;
 pub mod jitter;
 pub mod keymap;
 pub mod link;
+pub mod net;
 pub mod opus;
 pub mod source;
 pub mod stats;
