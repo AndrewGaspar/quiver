@@ -182,6 +182,40 @@ headless gamescope (never X displays :0–:9), the test-pattern target, and the 
 root). Agents stream lab instances, never the person's running game. They don't stop or slow
 the person's games, and the lab limits apply to streams of lab instances too.
 
+### 8.1 Network conditions (`quiver-netlab`)
+
+The net simulator covers unit tests. For real processes over a real link, `quiver-netlab`
+shapes the link with the kernel's own qdiscs (netem, tbf, fq_codel, cake). That needs no root
+after all: the netlab makes a user namespace the person owns and puts three network namespaces
+in it (server, router, client). The shaping sits on the router's interfaces, and the host's
+network is never touched. Workloads run as the person's own uid in a nested user namespace.
+Only the network namespace changes, so the GPU, PipeWire and the Wayland socket work as usual.
+The crate's README covers the details.
+
+- `quiver-netlab list` shows twelve profiles with their sources. They run from `lan-wired`
+  through `wifi6-good`, `wifi-far`, `wifi-congested`, `5g`, `lte`, `cafe`,
+  `tailscale-relay`, `cross-country` and `transatlantic` to `bufferbloat-cable` and
+  `pathological`. Seven scenarios change a profile over time: `step-down`, `microwave`,
+  `outage`, `roam` (the client's address changes), `latency-creep`, `competing-tcp` and
+  `competing-udp`.
+- `quiver-netlab verify --profile all` measures each profile (one-way delays, RTT, loss, rate
+  and loaded RTT) against a model of netem. The crate's tests do this for every profile.
+- `quiver-netlab run --scenario step-down --server '<host cmd>' --client '<client cmd>'` runs
+  the two sides. They get `QUIVER_NETLAB_SERVER_ADDR` and `QUIVER_NETLAB_CLIENT_ADDR`, and a
+  stats file (`QUIVER_NETLAB_STATS`, also on fd 3) for timestamped `ClientStats` and
+  `HostStats` JSON lines. The run writes `report.json` and a self-contained `report.html`:
+  bitrate against capacity, latency, queueing, loss and frame gaps, with the events marked.
+- `quiver-netlab matrix --profiles all --scenarios all --server … --client …` writes one
+  summary table: median and p99 latency, gaps per minute, bitrate against capacity, and
+  recovery after a step-down. Until the host and client exist, `--fake` runs a stand-in UDP
+  stream (fixed or AIMD bitrate) on both sides.
+- `quiver-netlab shell --profile lte` gives a shaped shell for poking around.
+  `quiver-netlab set` changes the shaping from another terminal while the shell runs.
+
+Integration (phase 2) should make `quiver-stream-host` and `quiver-stream` write the stats
+lines when `QUIVER_NETLAB_STATS` is set, and run the matrix before each transport change
+lands.
+
 ## 9. Not decided (the person's call)
 
 - Whether the first server is this laptop (for development) or a real box. The GPU vendor
