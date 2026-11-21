@@ -1365,6 +1365,11 @@ mod tests {
 
     #[test]
     fn queue_now_and_after_parse() {
+        // On a big stack too: see remote_and_machine_parse.
+        std::thread::Builder::new().stack_size(16 << 20).spawn(queue_now_and_after_parse_on_a_big_stack).unwrap().join().unwrap();
+    }
+
+    fn queue_now_and_after_parse_on_a_big_stack() {
         use downloads::{OnOff, QueueAction};
         let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).map(|c| c.cmd);
         assert!(matches!(parse(&["queue", "now", "origins"]), Ok(Cmd::Queue { action: Some(QueueAction::Now { game }), .. }) if game == "origins"));

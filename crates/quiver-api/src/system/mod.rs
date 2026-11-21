@@ -345,6 +345,7 @@ fn pad_piece(f: &Facts, id: &str, title: &str, unlocks: &str, reason: &str, rule
     (piece(state, s, items, fix), gid)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn firewall_piece(f: &Facts, server: Server, kind: Kind, scopes: &[Scope], opts: &Options, rules: &Option<(Vec<firewall::UfwRule>, Vec<firewall::UfwRule>)>, zones: &Option<firewall::FirewalldZones>, plan: &mut Plan) -> Piece {
     let (id, title, unlocks, reason) = match server {
         Server::Moonlight => (

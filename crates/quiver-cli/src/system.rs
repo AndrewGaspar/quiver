@@ -217,7 +217,7 @@ pub fn moonlight_notice() -> Option<String> {
     match p.state {
         State::Missing => Some(format!("{} may block Moonlight: its ports aren't allowed from {}. Run: quiver system setup --firewall lan,tailnet", r.firewall.name(), p.items.iter().filter(|i| i.state == State::Missing).map(|i| i.what.as_str()).collect::<Vec<_>>().join(", "))),
         State::Unknown if p.fix.is_some() => Some(format!("{} is on and Quiver can't tell without root whether it allows Moonlight's ports. Run: quiver system setup --firewall lan,tailnet", r.firewall.name())),
-        State::Unknown => Some(format!("{}", p.summary)),
+        State::Unknown => Some(p.summary.clone()),
         _ => None,
     }
 }

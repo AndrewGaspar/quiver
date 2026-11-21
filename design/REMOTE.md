@@ -492,3 +492,42 @@ client's wait for an overtaken frame follows the jitter, and the FEC margin is 2
   paused game shows "Connecting…" until the picture changes.
 - The pattern's noise can't go below ~12 Mbit/s at the encoder's highest QP, so the
   `pathological` profile (15 Mbit/s, 5 % bursty loss) measures the workload, not the link.
+
+## 11. A headless server, start to finish (2026-11-21)
+
+A machine with a GPU and no one at it (a tower in a closet), streaming to your laptop, TV and
+phone. Every step but one runs as you; the one root step is a script you read first
+(design/INSTALL.md).
+
+1. **Install Quiver** as yourself: `tools/install-user.sh` from a checkout (or the Arch
+   package, `tools/package.sh`, which also installs the udev rules, groups and firewall
+   profiles). Sign in to your stores once (`quiver login`, `quiver epic login`), over SSH if you
+   like.
+2. **The root step:**
+
+   ```sh
+   quiver system setup --firewall lan,tailnet --at-boot
+   ```
+
+   It checks the machine without root, then prints one script with exactly what's missing:
+   the groups and udev rules for stream (and lab) controllers, the `/dev/uinput` rule a
+   machine with nobody seated needs, Quiver's firewall profiles, firewall rules from your LAN
+   subnet(s) and `tailscale0` only (never from anywhere; only for Moonlight and remote play
+   once they're on, so run it again after turning one on), and lingering where polkit doesn't
+   let you turn it on yourself (it doesn't over SSH on most systems). It saves the script to
+   `~/.local/state/quiver/system-setup-<date>.sh`, asks `Run it with sudo? [y/N]`, and
+   `--at-boot` then runs `quiver remote boot on`, so quiverd starts at boot before anyone signs
+   in. `quiver system setup --check` shows where each piece stands; `--print` only prints the
+   script; `--undo` removes what it installed.
+3. **Turn remote play on:** `quiver remote enable` (TCP 47990, and a UDP media port per
+   stream from 47998). For Moonlight clients too: `quiver remote moonlight enable`, then
+   `quiver system setup --firewall lan,tailnet` again if it says the firewall doesn't allow
+   Moonlight yet (`quiver remote moonlight enable` prints that line when it applies).
+4. **Pair your machines:** `quiver remote pair` on the server prints a 6-digit code; type it on
+   the client (Settings → Machines → Add, or `quiver remote add <server> <code>`). Moonlight
+   clients pair with the PIN they show: `quiver remote moonlight pin 1234`.
+
+`quiver doctor` shows the build, quiverd, and the same system setup list at any time. Pads
+in streams work with nobody seated because the stream host opens `/dev/uinput` through a
+short-lived helper that alone gets the `quiver-uinput` group (INSTALL.md §7); without the
+rule, a stream's notice says to run `quiver system setup`.
