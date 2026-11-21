@@ -573,6 +573,17 @@ pub(crate) fn set_and_wait(inst: &Inst, m: &Manifest, assigns: &[configset::Assi
     Ok(done)
 }
 
+/// Which wrap-up hint a lab command gets (design/LAB.md §19): none for the instance's own
+/// processes (the supervisor, the pad host), and none for what frees an instance.
+pub(crate) fn hint_kind(action: &LabAction) -> crate::hint::Kind {
+    use crate::hint::Kind;
+    match action {
+        LabAction::Supervise { .. } | LabAction::PadHost { .. } | LabAction::PadRule => Kind::None,
+        LabAction::Kill { .. } | LabAction::Down { .. } | LabAction::Rm { .. } => Kind::Freeing,
+        _ => Kind::Lab,
+    }
+}
+
 pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
     if bg && !matches!(action, LabAction::Job { .. } | LabAction::Supervise { .. } | LabAction::PadHost { .. }) {
         let lab = the_lab()?;
@@ -744,12 +755,16 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             let runs = run_owners(&inst, 6);
             let enforced = limits::status_of(&inst);
             let vclock = limits::run_has_virtual_clock(&inst, st.run.as_ref().map(|r| r.id));
+            // A staged quiverd update this instance's run holds up (design/LAB.md §19).
+            let waiting = crate::hint::restart_waiting(source).await;
+            let holding = waiting.as_ref().and_then(|w| w.lab.iter().find(|b| b.instance == inst.name).map(|b| (w, b)));
             if json {
                 let clock = st.run.as_ref().and_then(|r| lab::vclock::Report::read(&inst.run_dir(r.id)));
                 let control = clock::snapshot(&inst);
                 let throttled = enforced.as_ref().and_then(|s| lab::limits::throttle_note(s, vclock));
                 let runs: Vec<serde_json::Value> = runs.iter().map(|(id, o)| serde_json::json!({ "run": id, "owner": owner_json(o.as_ref()) })).collect();
-                return print_json(&serde_json::json!({ "state": st, "owner": owner_json(owner.as_ref()), "runs": runs, "host": hs, "display": m.display, "clock": clock, "clock_control": control, "limits": enforced, "throttled": throttled }));
+                return print_json(&serde_json::json!({ "state": st, "owner": owner_json(owner.as_ref()), "runs": runs, "host": hs, "display": m.display, "clock": clock, "clock_control": control, "limits": enforced, "throttled": throttled,
+                    "restart_waiting": waiting, "holds_restart": holding.is_some() }));
             }
             println!("{} ({}, {}): container {}", inst.name, m.game, m.display, if st.container_up { "up" } else { "down" });
             match &owner {
@@ -788,6 +803,14 @@ pub async fn run(source: &str, action: LabAction, bg: bool) -> Result<()> {
             }
             for v in &st.violations {
                 println!("  VIOLATION: {v}");
+            }
+            if let Some((w, b)) = holding {
+                let who = b.owner_name().map(|o| format!("; run by {o}")).unwrap_or_default();
+                println!(
+                    "  holds up a quiverd update (waiting {}{who}): at a good stopping point, `{}` frees it (the container can stay up); launch again after the restart",
+                    quiver_api::daemon::human_secs(w.waiting_secs),
+                    b.free_with
+                );
             }
             println!("  host: {}", hs.summary());
             match &enforced {

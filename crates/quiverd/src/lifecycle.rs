@@ -115,6 +115,10 @@ pub(crate) struct Busy {
     /// running and re-adopts them, so they only keep the daemon from moving into the unit,
     /// which hands over to another process.
     pub hosted_streams: Vec<String>,
+    /// Lab instances whose runs hold a bridge connection or a play session, with their
+    /// owners: whom to ask (design/LAB.md §19). They're among `sessions` or the bridge
+    /// connections already; this says which instance each is.
+    pub lab: Vec<quiver_api::daemon::LabBlocker>,
 }
 
 struct HoldEntry {
@@ -143,6 +147,11 @@ struct State {
     idle_since: Option<Instant>,
     /// Move into this unit once idle (`unit.rs`).
     relocate: Option<Relocation>,
+    /// Lab instances whose owners a `quiver` command asked to wrap up for the staged update
+    /// (`DaemonRequest::Hinted`), and when. Cleared with the update.
+    asked: BTreeMap<String, DateTime<Utc>>,
+    /// When the first of the builds staged since this one started was noticed.
+    waiting_since: Option<DateTime<Utc>>,
 }
 
 struct Relocation {
@@ -244,8 +253,10 @@ fn reasons(st: &State, busy: &Busy, inflight: bool, now: DateTime<Utc>) -> Vec<S
         out.push("a sign-in waiting for its 2FA code".into());
     }
     // A bridge's session explains its connection; without one, say there are connections.
+    // A lab bridge's is its instance's (and whose it is).
     if st.broker_conns > 0 && busy.sessions.is_empty() {
-        out.push(plural(st.broker_conns, "bridge connection", "bridge connections"));
+        let conns = plural(st.broker_conns, "bridge connection", "bridge connections");
+        out.push(if busy.lab.is_empty() { conns } else { format!("{conns} ({})", lab_in_words(&busy.lab)) });
     }
     out.extend(st.holds.values().map(|h| h.hold.describe(now)));
     if inflight && !st.inflight.is_empty() {
@@ -346,7 +357,14 @@ impl Lifecycle {
     }
 
     /// Take a hold: for `for_secs` (at most [`MAX_HOLD_SECS`]), else while `conn` lasts.
+    #[cfg(test)]
     pub(crate) fn hold(&self, reason: &str, source: &str, for_secs: Option<u64>, conn: Option<u64>) -> Result<Hold> {
+        self.hold_as(reason, source, for_secs, conn, None)
+    }
+
+    /// [`Self::hold`] for `owner` (a lab owner, as the client detected it): while it lasts,
+    /// that session's commands don't ask it to wrap up its lab instances.
+    pub(crate) fn hold_as(&self, reason: &str, source: &str, for_secs: Option<u64>, conn: Option<u64>, owner: Option<serde_json::Value>) -> Result<Hold> {
         let reason = reason.trim();
         if reason.is_empty() {
             bail!("say why (--reason): it shows in `quiver daemon status`");
@@ -367,6 +385,7 @@ impl Lifecycle {
             source: source.to_owned(),
             since: now,
             expires: for_secs.map(|s| now + chrono::Duration::seconds(s as i64)),
+            owner,
         };
         let deadline = for_secs.map(|s| Instant::now() + Duration::from_secs(s));
         st.holds.insert(hold.id, HoldEntry { hold: hold.clone(), conn, deadline });
@@ -389,6 +408,24 @@ impl Lifecycle {
             }
         };
         Ok(ids.into_iter().filter_map(|id| st.holds.remove(&id)).map(|h| h.hold).collect())
+    }
+
+    /// `owner` was asked to wrap up `instances` (for the staged update, if there is one).
+    /// Returns the instances asked for the first time (nothing is recorded while no update
+    /// is staged).
+    pub(crate) fn hinted(&self, instances: &[String]) -> Vec<String> {
+        let mut st = self.lock();
+        if st.staged.is_none() {
+            return Vec::new();
+        }
+        let now = Utc::now();
+        let mut first = Vec::new();
+        for i in instances.iter().take(64) {
+            if st.asked.insert(i.clone(), now).is_none() {
+                first.push(i.clone());
+            }
+        }
+        first
     }
 
     /// A connection closed: its holds go.
@@ -421,9 +458,15 @@ impl Lifecycle {
         let (Some(exe), Some(running)) = (&self.exe, self.running) else { return };
         let on_disk = FileId::of(exe).filter(|f| *f != running);
         match on_disk {
-            None => st.staged = None,
+            None => {
+                st.staged = None;
+                st.waiting_since = None;
+                st.asked.clear();
+            }
             Some(f) if st.staged.as_ref().is_some_and(|s| s.file == f) => {}
             Some(f) => {
+                // A newer build on top of a waiting one: it has all been waiting since the first.
+                st.waiting_since.get_or_insert_with(Utc::now);
                 let (version, commit) = manifest_build(&self.manifest, exe);
                 let note = (st.failed == Some(f)).then(|| "restarting onto it failed; see quiverd.log".to_owned());
                 tracing::info!(exe = %exe.display(), version = version.as_deref().unwrap_or("?"), "a new build is installed; restarting onto it once idle");
@@ -521,6 +564,7 @@ impl Lifecycle {
             update: st.staged.as_ref().map(|s| s.update.clone()),
             restarting: self.closed(),
             idle_for_secs: if waiting_on.is_empty() { st.idle_since.map(|t| now.duration_since(t).as_secs()) } else { None },
+            restart_waiting: self.restart_waiting(&st, busy, &waiting_on),
             waiting_on,
             holds: st.holds.values().map(|h| h.hold.clone()).collect(),
             unit: self.unit.clone(),
@@ -531,6 +575,36 @@ impl Lifecycle {
             }),
         }
     }
+
+    /// A staged update that would restart once idle, and what is in its way (none: no
+    /// update, nothing in its way, auto-restart off, restarting already, or the exec onto
+    /// this build failed).
+    fn restart_waiting(&self, st: &State, busy: &Busy, waiting_on: &[String]) -> Option<quiver_api::daemon::RestartWaiting> {
+        let staged = st.staged.as_ref()?;
+        if waiting_on.is_empty() || !self.settings.auto || self.closed() || st.failed == Some(staged.file) {
+            return None;
+        }
+        let since = st.waiting_since.unwrap_or(staged.update.since);
+        let lab = busy.lab.iter().map(|b| quiver_api::daemon::LabBlocker { asked: st.asked.get(&b.instance).copied(), ..b.clone() }).collect();
+        Some(quiver_api::daemon::RestartWaiting {
+            since,
+            waiting_secs: (Utc::now() - since).num_seconds().max(0) as u64,
+            version: staged.update.version.clone(),
+            waiting_on: waiting_on.to_vec(),
+            lab,
+        })
+    }
+}
+
+/// Lab blockers in words: `lab origins, codex:pharos-xreal; lab t2`.
+fn lab_in_words(lab: &[quiver_api::daemon::LabBlocker]) -> String {
+    lab.iter()
+        .map(|b| match b.owner_name() {
+            Some(o) => format!("lab {}, {o}", b.instance),
+            None => format!("lab {}", b.instance),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn set_cloexec(fd: RawFd, on: bool) {
@@ -681,8 +755,14 @@ impl crate::Daemon {
         let local = self.local.list();
         // A lab instance's session names the instance and who's using it, so whoever is
         // waiting for the restart knows whom to ask (design/LAB.md "Owners").
-        let lab = quiver_core::lab::Lab::new(quiver_core::lab::root(&self.cfg.prefixes));
-        let holders = |s: &quiver_api::ActiveSession| holders_in_words(&s.holders, || quiver_core::lab::owner::describe_running(&lab, &quiver_api::GameRef::ubisoft(s.product_id)));
+        let lab_blockers = self.lab_blockers(&sessions);
+        let holders = |s: &quiver_api::ActiveSession| {
+            holders_in_words(&s.holders, || {
+                let game = Some(quiver_api::GameRef::ubisoft(s.product_id));
+                let of: Vec<_> = lab_blockers.iter().filter(|(g, _)| *g == game).map(|(_, b)| b.clone()).collect();
+                (!of.is_empty()).then(|| lab_in_words(&of))
+            })
+        };
         let mut busy = Busy {
             sessions: sessions
                 .iter()
@@ -718,7 +798,55 @@ impl crate::Daemon {
         busy.awaiting_2fa = self.pending_2fa.lock().unwrap().is_some()
             && self.pending_2fa_at.lock().unwrap().is_some_and(|t| t.elapsed() < TWO_FA_BUSY);
         busy.hosted_streams = self.streams.list().into_iter().map(|s| s.title).collect();
+        busy.lab = lab_blockers.into_iter().map(|(_, b)| b).collect();
         busy
+    }
+
+    /// The lab instances whose runs keep the daemon busy, each with its game: the runs whose
+    /// bridges are connected to the broker (they name their lab session), and for a lab
+    /// play session no connected run explains (an older bridge), the instances running
+    /// that game by their state files.
+    fn lab_blockers(&self, sessions: &[quiver_api::ActiveSession]) -> Vec<(Option<quiver_api::GameRef>, quiver_api::daemon::LabBlocker)> {
+        use quiver_api::daemon::LabBlocker;
+        use quiver_core::lab::owner;
+        let connected = self.broker_svc.lab_sessions();
+        let lab_held: Vec<&quiver_api::ActiveSession> = sessions.iter().filter(|s| s.holders.iter().any(|h| h == quiver_api::lab::LAB_HOLDER)).collect();
+        if connected.is_empty() && lab_held.is_empty() {
+            return Vec::new();
+        }
+        let lab = quiver_core::lab::Lab::new(quiver_core::lab::root(&self.cfg.prefixes));
+        let proc = std::path::Path::new("/proc");
+        let mut out: Vec<(Option<quiver_api::GameRef>, LabBlocker)> = owner::blocking(&lab, &connected)
+            .into_iter()
+            .map(|b| {
+                let blocker = LabBlocker {
+                    free_with: LabBlocker::free_command(&b.instance),
+                    owner: b.owner.as_ref().map(|o| o.report(proc)),
+                    game: b.title,
+                    run: b.run,
+                    session: b.session,
+                    instance: b.instance,
+                    asked: None,
+                };
+                (b.game, blocker)
+            })
+            .collect();
+        for s in lab_held {
+            let game = quiver_api::GameRef::ubisoft(s.product_id);
+            if out.iter().any(|(g, _)| g.as_ref() == Some(&game)) {
+                continue;
+            }
+            for (instance, o) in owner::running(&lab, &game) {
+                let blocker = LabBlocker {
+                    free_with: LabBlocker::free_command(&instance),
+                    owner: o.as_ref().map(|o| o.report(proc)),
+                    instance,
+                    ..Default::default()
+                };
+                out.push((Some(game), blocker));
+            }
+        }
+        out
     }
 
     /// `Request::Daemon`. `conn`: the asking connection (holds without a time limit).
@@ -726,8 +854,17 @@ impl crate::Daemon {
         use quiver_api::daemon::DaemonRequest as D;
         Ok(match req {
             D::Status => serde_json::json!(self.lifecycle.status(&self.busy())),
-            D::Hold { reason, for_secs } => {
-                let hold = self.lifecycle.hold(&reason, source, for_secs, conn)?;
+            D::Hinted { instances, owner } => {
+                // In the activity log the first time only (the hint repeats every few minutes).
+                let first = self.lifecycle.hinted(&instances);
+                if !first.is_empty() {
+                    let owner: String = owner.chars().filter(|c| !c.is_control()).take(128).collect();
+                    self.log_activity(source, format!("asked {owner} to wrap up lab {} so quiverd can restart onto the new build", first.join(", ")), None);
+                }
+                serde_json::Value::Null
+            }
+            D::Hold { reason, for_secs, owner } => {
+                let hold = self.lifecycle.hold_as(&reason, source, for_secs, conn, owner)?;
                 let how = match for_secs {
                     Some(s) => format!("for {}", quiver_api::daemon::human_secs(s)),
                     None => "while its client runs".into(),
@@ -878,6 +1015,7 @@ mod tests {
             awaiting_2fa: true,
             streams: vec!["Moonlight stream of X (kept for 8 min (until 14:05), resume from Moonlight (roth))".into()],
             hosted_streams: vec!["Test pattern".into()],
+            lab: vec![],
         };
         st.broker_conns = 1;
         let r = reasons(&st, &busy, false, Utc::now());
@@ -1060,6 +1198,54 @@ mod tests {
         assert_eq!(bin.lc.try_close(Busy::default).err().unwrap(), ["1 bridge connection"]);
         drop(conn);
         assert!(bin.lc.try_close(Busy::default).is_ok());
+    }
+
+    /// A staged update held up by a lab run: `restart_waiting` names the instance, its owner
+    /// and what frees it, records when its owner was asked, and keeps its start across a
+    /// newer build staged on top.
+    #[test]
+    fn restart_waiting_on_lab_instances() {
+        use quiver_api::daemon::LabBlocker;
+        let bin = Bin::new(0);
+        let owner = serde_json::json!({"agent": "codex", "session_id": "01a1ff7d-5b9f-7dc2-a632-14a8fb0160c9", "name": "codex:01a1ff7d/agent:codex-ports", "alive": null});
+        let lab = vec![LabBlocker {
+            instance: "pharos-content-loader".into(),
+            run: Some(7),
+            session: Some("lab-pharos-content-loader-r7".into()),
+            owner: Some(owner),
+            free_with: LabBlocker::free_command("pharos-content-loader"),
+            ..Default::default()
+        }];
+        let busy = Busy { lab: lab.clone(), ..Default::default() };
+        let conn = bin.lc.broker_conn();
+        // No update: nothing is waiting, and asking records nothing.
+        assert!(bin.lc.status(&busy).restart_waiting.is_none());
+        assert!(bin.lc.hinted(&["pharos-content-loader".into()]).is_empty());
+        bin.replace();
+        let s = bin.lc.status(&busy);
+        assert_eq!(s.waiting_on, ["1 bridge connection (lab pharos-content-loader, codex:01a1ff7d/agent:codex-ports)"]);
+        let w = s.restart_waiting.expect("waiting");
+        assert_eq!((w.lab.len(), w.lab[0].free_with.as_str(), w.lab[0].asked), (1, "quiver lab kill pharos-content-loader", None));
+        assert_eq!(w.version.as_deref(), Some("0.2.0.r9.gabc"));
+        assert_eq!(w.waiting_on, s.waiting_on);
+        // Asked once (the first time is what the activity log notes), then again.
+        assert_eq!(bin.lc.hinted(&["pharos-content-loader".into()]), ["pharos-content-loader"]);
+        assert!(bin.lc.hinted(&["pharos-content-loader".into()]).is_empty());
+        let w = bin.lc.status(&busy).restart_waiting.unwrap();
+        assert!(w.lab[0].asked.is_some());
+        // Another build on top: still waiting since the first, still asked.
+        std::thread::sleep(Duration::from_millis(20));
+        bin.replace();
+        let w2 = bin.lc.status(&busy).restart_waiting.unwrap();
+        assert_eq!(w2.since, w.since);
+        assert!(w2.lab[0].asked.is_some());
+        // The run stopped (its bridge went): nothing in the way, nothing waiting.
+        drop(conn);
+        assert!(bin.lc.status(&Busy::default()).restart_waiting.is_none());
+        // Auto-restart off: the person restarts it, so nobody is asked.
+        let off = Lifecycle::new(Settings { auto: false, ..settings(0) }, bin.lc.exe.clone(), bin.lc.running, bin.dir.path().join("installed.json"));
+        let _c = off.broker_conn();
+        assert!(off.status(&busy).restart_waiting.is_none());
     }
 
     /// The race: launches arriving while the daemon decides to restart. Every launch that

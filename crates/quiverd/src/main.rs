@@ -955,7 +955,7 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Subscribe
         | Request::Sessions
         | Request::Activity { .. }
-        | Request::Daemon(quiver_api::daemon::DaemonRequest::Status)
+        | Request::Daemon(quiver_api::daemon::DaemonRequest::Status | quiver_api::daemon::DaemonRequest::Hinted { .. })
         | Request::Sight(quiver_api::sight::SightRequest::Status)
         | Request::RemoteStatus
         | Request::RemotePeers

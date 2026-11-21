@@ -29,6 +29,10 @@ pub enum DaemonRequest {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         for_secs: Option<u64>,
+        /// Who asked, as `quiver lab whoami --json` prints it (a lab owner): while the hold
+        /// lasts, that session isn't asked to wrap up its lab instances ([`RestartWaiting`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<serde_json::Value>,
     },
     /// Release a hold by id; with `all`, every hold. Neither: the only hold there is
     /// (an error if there are several). Returns the released `Vec<Hold>`.
@@ -37,6 +41,14 @@ pub enum DaemonRequest {
         id: Option<u64>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
+    },
+    /// A `quiver` command showed `owner` the hint to wrap up these lab instances (they hold
+    /// up a staged update): recorded for the person's view (`LabBlocker::asked`). Returns
+    /// nothing. Sent only to daemons that report [`RestartWaiting`].
+    Hinted {
+        instances: Vec<String>,
+        /// The owner's name (`codex:pharos-xreal`).
+        owner: String,
     },
 }
 
@@ -92,6 +104,64 @@ pub struct DaemonStatus {
     /// that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relocation: Option<String>,
+    /// A staged update waiting on something (none: no update, or nothing in its way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_waiting: Option<RestartWaiting>,
+}
+
+/// A staged update that something keeps quiverd from restarting onto, and the lab
+/// instances among what it waits on (design/LAB.md §19). `quiver` commands run by those
+/// instances' owners print a hint on stderr asking them to wrap up.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RestartWaiting {
+    /// When the update was noticed: it has waited since.
+    pub since: DateTime<Utc>,
+    pub waiting_secs: u64,
+    /// The staged build's version, if the install manifest says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Everything it waits on, in words (as `DaemonStatus::waiting_on`).
+    #[serde(default)]
+    pub waiting_on: Vec<String>,
+    /// The lab instances among it: runs whose bridge holds a connection to the broker.
+    #[serde(default)]
+    pub lab: Vec<LabBlocker>,
+}
+
+/// A lab instance whose run keeps quiverd from restarting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LabBlocker {
+    pub instance: String,
+    /// The game's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+    /// The run (`r<N>`) and its session id (`lab-<instance>-r<N>`), when the bridge named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Who's using it: the run's owner, else the instance's, as `quiver lab list --json`
+    /// gives it (a lab owner with `name` and `alive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<serde_json::Value>,
+    /// What frees it: stopping the run ([`LabBlocker::free_command`]). The container may
+    /// stay up; pausing the clock doesn't free it (the bridge stays connected).
+    pub free_with: String,
+    /// When a `quiver` command last asked its owner to wrap up (`DaemonRequest::Hinted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<DateTime<Utc>>,
+}
+
+impl LabBlocker {
+    /// The owner's short name (`codex:pharos-xreal`), if one was recorded.
+    pub fn owner_name(&self) -> Option<&str> {
+        self.owner.as_ref()?.get("name")?.as_str()
+    }
+
+    /// `kill` stops the run's game and its bridge; the container stays up.
+    pub fn free_command(instance: &str) -> String {
+        format!("quiver lab kill {instance}")
+    }
 }
 
 /// A new build found on disk.
@@ -120,6 +190,9 @@ pub struct Hold {
     /// When a timed hold runs out; none: it lasts as long as its connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires: Option<DateTime<Utc>>,
+    /// Who asked (a lab owner, `DaemonRequest::Hold::owner`), if the client said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<serde_json::Value>,
 }
 
 impl Hold {
@@ -129,7 +202,16 @@ impl Hold {
             Some(t) => format!("{} left", human_secs((t - now).num_seconds().max(0) as u64)),
             None => "while its client runs".into(),
         };
-        format!("hold #{}: {} ({}, {left})", self.id, self.reason, self.source)
+        let by = match self.owner.as_ref().and_then(|o| o.get("name")?.as_str()) {
+            Some(n) if n != self.source => format!("{}, {n}", self.source),
+            _ => self.source.clone(),
+        };
+        format!("hold #{}: {} ({by}, {left})", self.id, self.reason)
+    }
+
+    /// Still in force at `now` (one without a time limit is, while it's listed).
+    pub fn active(&self, now: DateTime<Utc>) -> bool {
+        self.expires.is_none_or(|t| t > now)
     }
 }
 

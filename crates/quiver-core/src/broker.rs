@@ -31,6 +31,27 @@ pub struct Broker {
     mods: std::sync::OnceLock<Arc<crate::modsdk::ModRegistry>>,
     /// Achievement lists and earns from games (none: refused).
     achievements: std::sync::OnceLock<Arc<crate::achievements::Engine>>,
+    /// Open connections of lab bridges, by their lab session id (`lab-origins-r3`): which
+    /// instances' runs keep quiverd from restarting, and whose they are.
+    lab_conns: Arc<std::sync::Mutex<std::collections::BTreeMap<String, usize>>>,
+}
+
+/// A lab bridge's connection, counted in [`Broker::lab_sessions`] until dropped.
+struct LabConn {
+    conns: Arc<std::sync::Mutex<std::collections::BTreeMap<String, usize>>>,
+    session: String,
+}
+
+impl Drop for LabConn {
+    fn drop(&mut self) {
+        let mut m = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.session) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.session);
+            }
+        }
+    }
 }
 
 /// The broker's answer to a lab instance's request that must not reach the person's
@@ -59,7 +80,25 @@ pub fn lab_answer(req: &BrokerRequest) -> Option<BrokerResponse> {
 impl Broker {
     /// `sessions`: where bridges' play sessions are tracked (none: answered but not tracked).
     pub fn new(accounts: Arc<Accounts>, sessions: Option<Arc<PlaySessions>>) -> Arc<Self> {
-        Arc::new(Self { accounts, conns: Mutex::new(HashMap::new()), sessions, mods: std::sync::OnceLock::new(), achievements: std::sync::OnceLock::new() })
+        Arc::new(Self {
+            accounts,
+            conns: Mutex::new(HashMap::new()),
+            sessions,
+            mods: std::sync::OnceLock::new(),
+            achievements: std::sync::OnceLock::new(),
+            lab_conns: Arc::default(),
+        })
+    }
+
+    /// The lab sessions (`lab-origins-r3`) whose bridges are connected now.
+    pub fn lab_sessions(&self) -> Vec<String> {
+        self.lab_conns.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
+    }
+
+    /// Count this connection under lab session `s` (once per connection).
+    fn lab_conn(&self, s: &str) -> LabConn {
+        *self.lab_conns.lock().unwrap_or_else(|e| e.into_inner()).entry(s.to_owned()).or_default() += 1;
+        LabConn { conns: self.lab_conns.clone(), session: s.to_owned() }
     }
 
     /// Accept mod SDK channels (`BrokerRequest::ModChannel`) into `registry`. Set once.
@@ -99,6 +138,8 @@ impl Broker {
         let mut lines = BufReader::new(r).lines();
         // A play-session lease, held until the bridge closes this connection.
         let mut _lease = None;
+        // A lab bridge's connection, by its session (whose run it is): until it closes.
+        let mut _lab = None;
         while let Some(line) = lines.next_line().await? {
             let parsed = serde_json::from_str::<BrokerRequest>(&line);
             // A lab instance's requests that would reach the person's records (design/LAB.md).
@@ -134,6 +175,11 @@ impl Broker {
                     // A lab instance's bridge (design/LAB.md): tracked, never reported.
                     let holder = crate::playsession::bridge_holder(session.as_deref());
                     tracing::info!(uplay_id, holder, "bridge reports game running");
+                    if let Some(s) = session.as_deref().filter(|s| quiver_api::lab::is_lab_session(s))
+                        && _lab.is_none()
+                    {
+                        _lab = Some(self.lab_conn(s));
+                    }
                     _lease = self.sessions.as_ref().map(|s| s.begin(account_id.as_deref(), uplay_id, holder));
                     BrokerResponse::Ok
                 }

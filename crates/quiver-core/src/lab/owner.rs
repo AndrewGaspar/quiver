@@ -429,6 +429,117 @@ fn terminal(chain: &[ProcInfo], env: &Env) -> Owner {
     }
 }
 
+/// Whether two owners are the same session ([`same_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Same {
+    Yes,
+    No,
+    /// Not enough recorded to tell (an `unknown` host, a Codex command without its thread).
+    Unsure,
+}
+
+impl Owner {
+    /// [`Owner::name`] without the `--source` label: the session itself (`claude:pharos`).
+    pub fn base_name(&self) -> String {
+        Owner { source: None, ..self.clone() }.name()
+    }
+
+    /// A stable key for this session (rate limits): its id, else its name, else its process.
+    pub fn key(&self) -> String {
+        if let Some(id) = &self.session_id {
+            return format!("{}:{id}", self.agent);
+        }
+        if let Some(s) = &self.session {
+            return format!("{}:{s}", self.agent);
+        }
+        if let Some(l) = &self.label {
+            return format!("label:{l}");
+        }
+        match (self.pid, self.pid_start) {
+            (Some(p), Some(t)) => format!("{}:pid{p}@{t}", self.agent),
+            (Some(p), None) => format!("{}:pid{p}", self.agent),
+            _ => self.agent.clone(),
+        }
+    }
+}
+
+/// Whether `a` and `b` are the same session (a caller and an instance's owner). The
+/// `--source` label doesn't count: subagents inside one session share it.
+/// - an explicit label one gave (`--owner`, `QUIVER_LAB_OWNER`) that the other has, or is
+///   named by: the same;
+/// - different hosts (`claude`, `codex`, `muse`, a terminal): not;
+/// - the same host: the same session id (Claude's session, Codex's thread, muse's session),
+///   else the same host process (pid and start time), else the same session name;
+/// - nothing to compare (`unknown`, or a Codex command that didn't say its thread): unsure.
+pub fn same_session(a: &Owner, b: &Owner) -> Same {
+    let named = |x: &Owner, y: &Owner| x.label.as_ref().is_some_and(|l| *l == y.base_name() || y.label.as_ref() == Some(l));
+    if named(a, b) || named(b, a) {
+        return Same::Yes;
+    }
+    if a.agent == "unknown" || b.agent == "unknown" {
+        return Same::Unsure;
+    }
+    if a.agent != b.agent {
+        return Same::No;
+    }
+    if let (Some(x), Some(y)) = (&a.session_id, &b.session_id) {
+        return if x == y { Same::Yes } else { Same::No };
+    }
+    if let (Some(x), Some(y)) = (a.pid, b.pid) {
+        let started_same = a.pid_start.zip(b.pid_start).is_none_or(|(s, t)| s == t);
+        return if x == y && started_same { Same::Yes } else { Same::No };
+    }
+    if let (Some(x), Some(y)) = (&a.session, &b.session) {
+        return if x == y { Same::Yes } else { Same::No };
+    }
+    Same::Unsure
+}
+
+/// A lab instance whose run's bridge is connected to quiverd's broker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Blocking {
+    pub instance: String,
+    pub run: Option<u32>,
+    /// The lab session (`lab-origins-r3`).
+    pub session: Option<String>,
+    /// The game's title and ref, from the instance's manifest.
+    pub title: Option<String>,
+    pub game: Option<quiver_api::GameRef>,
+    /// The run's owner, else the instance's.
+    pub owner: Option<Owner>,
+}
+
+/// The instances behind connected lab sessions (`lab-<instance>-r<run>`, from the broker),
+/// each with its run's owner (the run's `owner.json`, else `state.json`'s run), else the
+/// instance's. A session no instance matches is kept, named as the session says.
+pub fn blocking(lab: &super::Lab, sessions: &[String]) -> Vec<Blocking> {
+    let names = lab.list();
+    let mut out: Vec<Blocking> = Vec::new();
+    for s in sessions {
+        let found = names.iter().find_map(|n| quiver_api::lab::session_run(s, n).map(|r| (n.clone(), r)));
+        let (instance, run) = match found {
+            Some(f) => f,
+            None => {
+                let rest = s.strip_prefix(quiver_api::lab::SESSION_PREFIX).unwrap_or(s);
+                match rest.rsplit_once("-r").and_then(|(i, r)| Some((i.to_owned(), r.parse::<u32>().ok()?))) {
+                    Some(f) => f,
+                    None => (rest.to_owned(), 0),
+                }
+            }
+        };
+        let inst = lab.instance(&instance);
+        let state_run = || -> Option<Owner> {
+            let st: super::ready::State = serde_json::from_slice(&std::fs::read(inst.state_path()).ok()?).ok()?;
+            st.run.filter(|r| r.id == run)?.owner
+        };
+        let owner = inst.run_owner(run).or_else(state_run).or_else(|| inst.owner());
+        let m = inst.load().ok();
+        let (title, game) = (m.as_ref().map(|m| m.title.clone()), m.map(|m| m.game));
+        out.push(Blocking { instance, run: (run > 0).then_some(run), session: Some(s.clone()), title, game, owner });
+    }
+    out
+}
+
 /// The instances running `game` now (container up, a run that hasn't exited), each with
 /// who's using it: the run's owner, else the instance's. For quiverd's "waiting on" line.
 pub fn running(lab: &super::Lab, game: &quiver_api::GameRef) -> Vec<(String, Option<Owner>)> {
@@ -662,5 +773,32 @@ mod tests {
         assert_eq!(describe_running(&lab, &m.game).as_deref(), Some("lab origins"));
         Owner { session: Some("quiver".into()), ..Owner::bare("claude") }.write(&o.owner_path()).unwrap();
         assert_eq!(describe_running(&lab, &m.game).as_deref(), Some("lab origins, claude:quiver"));
+    }
+
+    #[test]
+    fn connected_sessions_name_their_instance_and_run_owner() {
+        let t = tempfile::tempdir().unwrap();
+        let lab = super::super::Lab::new(t.path().into());
+        let m = super::super::manifest::tests::sample();
+        // `awr-r5` ends like a run: the instance list decides, not the last "-r".
+        for name in ["origins", "awr-r5"] {
+            let inst = lab.instance(name);
+            std::fs::create_dir_all(&inst.dir).unwrap();
+            m.save(&inst.manifest_path()).unwrap();
+            Owner { session: Some("up-er".into()), ..Owner::bare("claude") }.write(&inst.owner_path()).unwrap();
+        }
+        // Run 7's own owner file wins over the instance's.
+        let o = lab.instance("origins");
+        std::fs::create_dir_all(o.run_dir(7)).unwrap();
+        Owner { session_id: Some("01a1ff7d-5b9f-7dc2-a632-14a8fb0160c9".into()), source: Some("agent:codex-ports".into()), ..Owner::bare("codex") }
+            .write(&o.run_dir(7).join(FILE))
+            .unwrap();
+        let b = blocking(&lab, &["lab-origins-r7".into(), "lab-awr-r5-r2".into(), "lab-gone-r3".into()]);
+        assert_eq!(b.len(), 3);
+        assert_eq!((b[0].instance.as_str(), b[0].run, b[0].owner.as_ref().unwrap().name()), ("origins", Some(7), "codex:01a1ff7d/agent:codex-ports".into()));
+        assert_eq!((b[0].title.as_deref(), b[0].game.as_ref()), (Some(m.title.as_str()), Some(&m.game)));
+        assert_eq!((b[1].instance.as_str(), b[1].run, b[1].owner.as_ref().unwrap().name()), ("awr-r5", Some(2), "claude:up-er".into()));
+        // A session no instance has (removed since): named as it says, nobody's.
+        assert_eq!((b[2].instance.as_str(), b[2].run, b[2].owner.is_none(), b[2].title.is_none()), ("gone", Some(3), true, true));
     }
 }
