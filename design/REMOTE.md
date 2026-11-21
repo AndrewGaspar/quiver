@@ -413,3 +413,74 @@ lands.
 ## 9. Not decided (the person's call)
 
 - Reachability: are the LAN and Tailscale enough, or is NAT traversal or a relay wanted?
+
+## 10. Phase 2 as built (2026-11-21)
+
+**The pieces, end to end.** `StartStream` (quiverd `streams.rs`) binds a media port (from
+47998 up, or `remote.stream_port`), makes fresh keys for every request, and starts
+`quiver-stream-host serve` in its own scope (`systemd-run --user --scope`), the port as fd 3
+and the spec, keys included, as the first line on its stdin (`quiver_stream_proto::serve`).
+The reply's ticket names the address the client's control connection came in on. The client
+(`quiver-stream connect`) reads the ticket on its stdin and runs `ClientSession` under the
+stream window (`net.rs`, as `link.rs` describes). `quiver-stream caps --json` gives the caps
+the app and `quiver stream` send.
+
+**Sessions.** One stream per target. A client that leaves (Disconnect, closing the window,
+silence) leaves the session kept for 10 minutes: the game runs on, and the next `StartStream`
+for it resumes with new keys on the same port, the game untouched (the test pattern stops
+meanwhile and starts again). Another machine asking while one streams is refused. Quit game
+(`Bye{reason: "quit-game"}`) ends the stream and quiverd stops the game; the game exiting
+ends the stream. Streams show in `quiver status`, `Request::Streams` and `StreamsChanged`
+("streaming to Laptop", "kept for Laptop until 14:05"); `quiver stream --list|--stop`.
+
+**Restarts.** The host isn't quiverd's: an exec onto a new build leaves it running, and the
+new build re-adopts it from `$XDG_RUNTIME_DIR/quiver/streams/<id>/` (its record and the
+host's `control.sock`). Measured: a kept test-pattern stream re-adopted after a restart and
+resumed from the client with new keys, same host pid.
+
+**Games.** `StreamTarget::Game` runs the host's headless gamescope with a placeholder
+(`Target::Display`), then `Play` exactly as today (launch plan, profile, bridge, Sight,
+tweaks) with the host's `LaunchEnv` in the plan: its `DISPLAY`, its sink, the Sight layer's
+capture socket, and the pad namespace's wrapper around the bridge and the game (not with
+mounts: the pad group can't be mapped inside the launch's own namespace, so a modded stream
+has no pads). Tested with a Wine test program registered in a scratch daemon
+(`QUIVER_TEST_GAMES`), launched through `play_store_game` as an Epic game is: keys and clicks
+reached it, and Quit game from the stream menu stopped it. Not tested with a store game (the
+person's call). Moonlight launches go through the same display and launch
+(`streams::MoonlightGames`, in-process).
+
+**Not built:** `LabInstance` (the instance's gamescope is inside its container, with no
+PipeWire for the screencast and its X display in the container's network namespace: it needs
+a capture and an injector inside the container, under the lab limits) and `Desktop`; resizing
+a running game's display; a Moonlight resume keeps no game (its display ends with the
+stream).
+
+**Measured on this laptop** (RTX 5070 Laptop; host and client on one GPU, the client in a
+nested headless gamescope at 2560×1440@120, HEVC, the test pattern's stamp read back from
+every decoded frame, present time from `VK_KHR_present_wait`):
+
+| | capture → present p50 / p99 | decode p50 | stamps right |
+|---|---|---|---|
+| loopback, Vulkan Video decode | 4.8 / 7.7 ms | 1.0 ms | 2356 / 2356 |
+| loopback, Vulkan Video, a game running on the same GPU | 5.3 / 7.0 ms | 1.2 ms | 1128 / 1128 |
+| loopback, NVDEC, a game running | 7.7 / 9.9 ms | 3.5 ms | 2338 / 2338 |
+| two scratch quiverds, `quiver stream --target test-pattern` (debug builds) | 14.8 / 26.3 ms | 1.1 ms | 876 / 876 |
+
+**Under the netlab** (`quiver-netlab matrix`, all profiles and scenarios, 15 s a profile;
+the real host and client, NVDEC; the pattern's bottom 6 % noise so the encoder spends what
+it's given, `QUIVER_STREAM_PATTERN_NOISE`): the commit "Remote play tuning from the netlab"
+has the table before and after. After tuning, p50 / p99 ms: lan-wired 7.7 / 33, wifi6-good
+11.6 / 15, wifi-far 19.2 / 24, 5g 39 / 138, lte 47 / 169, tailscale-relay 42 / 76,
+cross-country 47 / 135, transatlantic 51 / 91, bufferbloat-cable 20 / 155. The tuning:
+overuse needs real queueing (8 ms, or 4× the delay noise, above the 2 s minimum), the
+client's wait for an overtaken frame follows the jitter, and the FEC margin is 2.5.
+
+**Open problems found:**
+- libav's Vulkan Video decode path sometimes ends in `VK_ERROR_DEVICE_LOST` (netlab
+  `wifi-congested` and `microwave`, and once on loopback with a game on the same GPU); the
+  stream now ends with that error instead of freezing. NVDEC never did. Not root-caused: it
+  may be the one-GPU test setup (the host's game and the client share it).
+- A still game sends no frames (gamescope paints only on damage), so a resumed stream of a
+  paused game shows "Connecting…" until the picture changes.
+- The pattern's noise can't go below ~12 Mbit/s at the encoder's highest QP, so the
+  `pathological` profile (15 Mbit/s, 5 % bursty loss) measures the workload, not the link.
