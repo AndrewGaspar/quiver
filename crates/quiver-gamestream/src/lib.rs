@@ -434,6 +434,25 @@ impl GameStreamServer {
         }
     }
 
+    /// The launched app and its client, while one is launched: (app title, client name,
+    /// client fingerprint, streaming now).
+    pub fn current(&self) -> Option<(String, String, String, bool)> {
+        self.shared.current_launch().map(|l| (l.app.title.clone(), l.client.name.clone(), l.client.fingerprint.clone(), l.is_streaming()))
+    }
+
+    /// Ends the launch of the client with this certificate, if it has one (after unpairing
+    /// it). Its later requests fail the pin check.
+    pub fn disconnect(&self, fingerprint: &str) -> bool {
+        let mut slot = self.shared.launch.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|l| l.client.fingerprint == fingerprint) {
+            if let Some(l) = slot.take() {
+                l.end("the client was unpaired");
+            }
+            return true;
+        }
+        false
+    }
+
     /// Ends the stream (if any) and stops listening.
     pub async fn shutdown(mut self) {
         self.stop_all();
