@@ -1,0 +1,14 @@
+name = "lan-wired"
+summary = "Gigabit Ethernet through one switch: sub-millisecond, no loss."
+sources = [
+  "Gigabit Ethernet is 1000 Mbit/s; a 1500-byte frame takes 12 µs to serialise and a store-and-forward switch adds a few µs per hop.",
+  "Ping between two hosts on one switch is typically 0.1–0.5 ms round trip, most of it the hosts' own stacks and interrupt moderation.",
+  "Unmanaged gigabit switches share roughly 1–2 MB of packet buffer between ports: a couple of ms at line rate at most.",
+]
+
+[both]
+delay_ms = 0.1
+jitter_ms = 0.03
+distribution = "normal"
+rate_mbit = 1000
+queue_ms = 2

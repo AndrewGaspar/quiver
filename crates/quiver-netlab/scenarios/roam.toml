@@ -1,0 +1,16 @@
+name = "roam"
+summary = "The client's address changes mid-stream: a Wi-Fi roam with a 150 ms gap at 10 s, then a clean re-address at 20 s. The transport must follow the client to its new address."
+base = "wifi6-good"
+duration_s = 30
+
+[[event]]
+at_s = 10
+kind = "roam"
+label = "roam (150 ms gap)"
+gap_ms = 150
+
+[[event]]
+at_s = 20
+kind = "roam"
+label = "re-address"
+gap_ms = 0

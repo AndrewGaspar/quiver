@@ -1,0 +1,13 @@
+name = "competing-udp"
+summary = "An unresponsive UDP flow (another stream, a video call) takes 150 of the link's 200 Mbit/s for 10 s: the stream must fit in what is left."
+base = "wifi-far"
+duration_s = 30
+
+[[event]]
+at_s = 10
+kind = "flood"
+label = "UDP flood, 150 Mbit/s"
+proto = "udp"
+rate_mbit = 150
+dir = "to_client"
+for_s = 10

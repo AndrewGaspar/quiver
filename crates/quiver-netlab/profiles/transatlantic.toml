@@ -1,0 +1,15 @@
+name = "transatlantic"
+summary = "US East Coast to Western Europe: 80 ms round trip (40 ms each way)."
+sources = [
+  "WonderNetwork's ping statistics show New York – London at about 70–80 ms round trip and New York – Frankfurt around 80–90 ms.",
+  "Submarine cables plus terrestrial backhaul: a few ms of jitter, loss around 0.1% at peering points.",
+  "The bottleneck is a home upload of 100 Mbit/s at the server's end.",
+]
+
+[both]
+delay_ms = 40
+jitter_ms = 2
+distribution = "normal"
+loss = { pct = 0.1 }
+rate_mbit = 100
+queue_ms = 60

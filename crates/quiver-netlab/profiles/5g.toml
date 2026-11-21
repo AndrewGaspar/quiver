@@ -1,0 +1,22 @@
+name = "5g"
+summary = "Mid-band 5G (n77/n78) at a good signal: a high rate that moves with the radio, about 40 ms round trip, deep base-station queues."
+sources = [
+  "Ookla Speedtest reports US 5G median downloads in the low hundreds of Mbit/s and uploads of 15–30 Mbit/s (2024–2025); the rate here wanders 60–300 down and 10–50 up.",
+  "5G non-standalone sits behind the LTE core: idle round trips to a nearby server are typically 25–45 ms (the brief: 40–80 ms for cellular).",
+  "Base stations queue each device's traffic deeply (hundreds of ms): Jiang et al., 'Tackling Bufferbloat in 3G/4G Networks', IMC 2012.",
+]
+
+[both]
+delay_ms = 20
+jitter_ms = 4
+distribution = "normal"
+loss = { pct = 0.1, burst = 2 }
+queue_ms = 150
+
+[to_client]
+rate_mbit = 150
+wander = { min_mbit = 60, max_mbit = 300, every_ms = 500, step_pct = 15 }
+
+[to_server]
+rate_mbit = 30
+wander = { min_mbit = 10, max_mbit = 50, every_ms = 500, step_pct = 15 }

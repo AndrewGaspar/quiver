@@ -1,0 +1,14 @@
+name = "latency-creep"
+summary = "Latency rises slowly, from 35 to 120 ms each way over 30 s (a route change, a congested peering link): the delay-based controller must not mistake it for congestion forever."
+base = "cross-country"
+duration_s = 40
+
+[[event]]
+at_s = 5
+kind = "ramp"
+label = "delay 35 → 120 ms each way"
+field = "delay_ms"
+to = 120
+over_s = 30
+step_ms = 500
+dir = "both"

@@ -1,0 +1,20 @@
+name = "cafe"
+summary = "Shared café Wi-Fi on a modest broadband line: everyone's traffic in one bufferbloated FIFO, about 25 Mbit/s down for this client."
+sources = [
+  "Small-business routers rarely run SQM; the Waveform and DSLReports bufferbloat tests commonly grade such lines C to F, i.e. 100–500 ms added under load.",
+  "A café's 50–100 Mbit/s line shared by a dozen people leaves this client roughly a quarter of it; uploads are a fraction of that.",
+  "Busy public Wi-Fi adds contention jitter and some bursty loss (see wifi-congested), milder here: 0.5% in bursts of 3.",
+]
+
+[both]
+delay_ms = 12
+jitter_ms = 6
+distribution = "paretonormal"
+loss = { pct = 0.5, burst = 3 }
+queue_ms = 400
+
+[to_client]
+rate_mbit = 25
+
+[to_server]
+rate_mbit = 6
