@@ -915,6 +915,12 @@ fn with_window(window: *mut sdl::SDL_Window, link: StreamLink, opts: Options) ->
         }
     }
     app.set_captured(false);
+    if let Some(why) = shared.fatal.lock().unwrap().take() {
+        shared.stop();
+        let _ = present.join();
+        let _ = decode.join();
+        bail!("{why}");
+    }
     let report = video::measure_report(&shared);
     shared.stop();
     let _ = present.join();
