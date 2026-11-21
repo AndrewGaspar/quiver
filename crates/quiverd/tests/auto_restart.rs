@@ -161,7 +161,7 @@ async fn restarts_onto_a_new_build_once_idle() {
 
     // Busy: a hold for as long as its client's connection, and a bridge on the broker.
     let holder = Client::connect_running_at(e.sock(), "agent").await.unwrap();
-    let hold: Hold = holder.call(Request::Daemon(DaemonRequest::Hold { reason: "measuring".into(), for_secs: None })).await.unwrap();
+    let hold: Hold = holder.call(Request::Daemon(DaemonRequest::Hold { reason: "measuring".into(), for_secs: None, owner: None })).await.unwrap();
     assert!(hold.expires.is_none());
     let bridge = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
 
@@ -232,7 +232,7 @@ async fn restarts_onto_a_new_build_once_idle() {
     std::net::TcpStream::connect(("127.0.0.1", port)).expect("the broker listens on the same port");
 
     // A timed hold blocks the next build too, until released.
-    let h: Hold = cli.call(Request::Daemon(DaemonRequest::Hold { reason: "bench".into(), for_secs: Some(600) })).await.unwrap();
+    let h: Hold = cli.call(Request::Daemon(DaemonRequest::Hold { reason: "bench".into(), for_secs: Some(600), owner: None })).await.unwrap();
     e.install_build("3.0.0-newer");
     wait_for(&e, &cli, "the next staged update", |s| s.update.is_some()).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;

@@ -1662,3 +1662,125 @@ app-server; pid reuse; the environment allowlist; `owner.json` and the running-i
 `lab::ready` (`a_stale_state_follows_podman`), the CLI's `status_after_down_is_down` and
 `owners_in_the_table_and_runs`, the supervisor request's round trip, and quiverd's
 `lab_holders_name_the_instance_and_its_owner`.
+
+## 19. Asking lab agents to wrap up for a quiverd update (2026-11-21)
+
+quiverd restarts onto a newly installed build once nothing needs it (design/SERVICE.md), and a
+lab run can hold that up for hours while the agent that started it works on. Agents (Claude Code
+sessions, Codex threads, muse) can't be sent a message, but they run `quiver` constantly, so the
+request rides on their own commands.
+
+**If quiver tells you an update is waiting on your instance, finish your current step, save
+what you need, and stop the run (`quiver lab kill <i>`), then launch it again after the
+restart; use a time-limited hold only if you truly need longer.** Nothing is ever forced: no
+kill, no auto-down.
+
+**What holds the restart.** Only a run's **bridge**: a Ubisoft game's `quiver-bridge` in the
+instance keeps a TCP connection to quiverd's broker (its play session, held as `lab`) for as
+long as the game runs. The container does not (pasta forwards the broker port per connection,
+it opens none of its own), the supervisor does not (it asks quiverd for the licence once per
+launch and lets go), a lab `quiver-sight` never talks to quiverd (§12), and Epic and DRM-free
+games have no bridge at all. So:
+
+| State | Holds the restart? |
+|---|---|
+| a Ubisoft run going (any phase before `exited`) | yes |
+| paused or stepping on the virtual clock (`lab clock … pause`) | yes: the game, and its bridge, are still there |
+| the run killed (`quiver lab kill`), container up | no |
+| the instance down | no |
+| an Epic or DRM-free run | no |
+
+So the hint asks for `quiver lab kill <i>`, not `down`: the container can stay up and the next
+`launch` after the restart is quick. Verified against a scratch daemon (below): with a lab
+bridge connected the update waits; when the connection closes quiverd restarts.
+
+**Which instances.** The broker now notes each lab bridge's session (`lab-<instance>-r<run>`,
+from its `play_session` request) while its connection lasts (`Broker::lab_sessions`), and
+quiverd maps them to instances and their runs' owners (`owner::blocking`: the run's
+`owner.json`, else `state.json`'s run, else the instance's). Before, "waiting on" matched lab
+play sessions to instances by game and `state.json`, which named instances whose state file was
+stale: on 2026-11-21 it listed `xreal-origins` (down, its run exited) next to the
+`pharos-aim-verify` run that really held quiverd. A lab play session no connected bridge
+explains (an older bridge that doesn't name its session) still falls back to that match.
+
+**What quiverd reports.** `quiver daemon status --json` (and `quiver lab status N --json`) has
+`restart_waiting` while a staged update would restart but something is in its way (none when
+auto-restart is off, a restart is under way, or the exec onto this build failed):
+
+```json
+"restart_waiting": {
+  "since": "2026-11-21T19:15:35Z", "waiting_secs": 754, "version": "0.1.0.r622.g5b94e68",
+  "waiting_on": ["Assassin's Creed® Origins (lab pharos-content-loader, codex:01a1ff7d/agent:codex-ports)"],
+  "lab": [{ "instance": "pharos-content-loader", "game": "Assassin's Creed® Origins", "run": 7,
+            "session": "lab-pharos-content-loader-r7", "owner": { "agent": "codex", "session_id": "01a1ff7d-…",
+            "source": "agent:codex-ports", "name": "codex:01a1ff7d/agent:codex-ports", "alive": null, … },
+            "free_with": "quiver lab kill pharos-content-loader", "asked": "2026-11-21T19:27:02Z" }]
+}
+```
+
+`since` is when the first of the builds staged since quiverd started was noticed (a newer build
+on top doesn't restart the clock). `quiver lab status N --json` adds `holds_restart`, and its
+text says "holds up a quiverd update (waiting 12m; run by …): … `quiver lab kill N` frees it".
+
+**The hint.** Every `quiver` command (one hook in `main`, `quiver_core::lab::hint`) whose caller
+owns a blocking run prints one line on **stderr**; stdout, and so `--json`, is untouched:
+
+> quiver: a quiverd update is waiting on your lab instance "pharos-content-loader" (12m). At a
+> good stopping point, save what you need and stop the run with `quiver lab kill
+> pharos-content-loader` (the container can stay up; pausing the clock doesn't free it), then
+> launch it again once quiverd has restarted (`quiver daemon status`). Need longer? `quiver
+> daemon hold --for 30m --reason "…"` (it holds the restart and stops these reminders while it
+> lasts).
+
+After 30 minutes it reads "has been waiting 47m on your lab instance … Please wrap up soon:"; after
+60, "has been waiting 1h 12m …, and the person is waiting for it. Unless you're mid-step, please
+wrap up now:". Lab commands (only) also get a neutral line about blockers that aren't the
+caller's but can't be told apart, or whose owner has exited:
+
+> quiver: a quiverd update is waiting (8m) on lab instances: xreal-origins
+> (codex:pharos-xreal/agent:xreal-recorder). If one is yours, stop its run at a good point
+> (`quiver lab kill NAME`) and launch it again after the restart; if not, leave it to its owner
+> or the person.
+
+> quiver: a quiverd update is waiting (20m) on lab instance "awr-rt", whose owner
+> (claude:36696674/agent:torchbearer-rt) has exited; it may be abandoned. Don't stop an instance
+> you didn't start without asking: mention it to the person.
+
+- **"Yours"** (`owner::same_session`, the `--source` label aside): an explicit label (`--owner`,
+  `QUIVER_LAB_OWNER`) one side gave that the other has or is named by; else different hosts are
+  different sessions; else the same session id (Claude's `CLAUDE_CODE_SESSION_ID`, Codex's
+  thread, muse's session), else the same host process (pid and start time), else the same
+  session name. A Codex command without its thread, or an `unknown` host: unsure, which gets
+  the neutral line. A run whose owner is another live (or uncheckable) session gets nothing:
+  its own commands get the hint.
+- **How often:** once per command, at most once per 5 minutes per session (`Owner::key`;
+  `$XDG_RUNTIME_DIR/quiver/hints.json`, which also caches quiverd's answer for 20 s so a burst
+  of commands asks once; `lab kill`, `down` and `rm` drop the cache). `QUIVER_NO_HINTS=1` turns
+  it off. Never on `quiver daemon …` (it shows all this itself), `--machine`, `steam-run`, the
+  supervisor and pad host, or `queue --no-start` (status bars).
+- **A hold** taken with `quiver daemon hold` records the caller's owner (`Hold::owner`); while
+  it lasts that session isn't reminded. It still holds the restart, so it's for "I need 30 more
+  minutes", not a way around stopping. Holds already took `--for` (capped at 24 h).
+- **The person's view.** After printing a hint for the caller's own instances, quiver tells
+  quiverd (`DaemonRequest::Hinted`; the first time per instance also goes in the activity log:
+  "asked codex:01a1ff7d to wrap up lab … so quiverd can restart onto the new build"), and
+  `quiver daemon status` says, under "waiting on":
+
+  ```
+    lab agents have been asked to wrap up: pharos-content-loader r7, codex:01a1ff7d/agent:codex-ports, asked 3m ago
+    (stopping a run frees it: quiver lab kill NAME; the container may stay up)
+  ```
+
+  or "lab agents will be asked to wrap up on their next quiver command: …" before any was. The
+  app and the Omarchy widget have no "update waiting" display (the app shows only the restart
+  itself, `Event::DaemonRestarting`), so this is the person's view for now.
+
+Tests: `lab::hint` (same Codex thread with another `--source`, another thread, the same and
+another Claude session, a label naming the thread, an owner gone or unknown, the neutral line,
+the wording at 12, 47 and 72 minutes, holds; the rate limiter and its file; owner keys),
+`lab::owner::connected_sessions_name_their_instance_and_run_owner`, quiverd's
+`restart_waiting_on_lab_instances`, and the CLI's `lab_hint` end to end against a scratch
+quiverd and lab folder: a fake bridge under `lab-hinttest-r7`, a build installed over the
+daemon, `quiver lab list --json` as the owner (one stderr line, stdout byte for byte the same),
+as another thread and with `QUIVER_NO_HINTS=1` (nothing), the rate limit, `asked` and the
+activity entry, a hold quieting it, and the bridge closing letting quiverd restart.

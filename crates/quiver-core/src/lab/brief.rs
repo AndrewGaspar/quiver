@@ -299,6 +299,7 @@ fn eos_note(sdk: bool, i: &str) -> String {
 /// The rules every brief carries.
 pub const RULES: &[&str] = &[
     "Instances are shared with other sessions (Claude, Codex, the person). Before taking down, killing or relaunching an instance you didn't start, check its owner in `quiver lab list` (or `quiver lab status <i>`) and ask that session or the person; a `(gone)` owner is a hint it's abandoned, not permission. `quiver lab up` records you as the owner (`--owner NAME` or `QUIVER_LAB_OWNER` to name yourself).",
+    "If quiver tells you (on stderr) that a quiverd update is waiting on your instance, finish your current step, save what you need, and stop the run (`quiver lab kill <i>`; the container can stay up, pausing the clock doesn't free it), then launch it again after the restart (`quiver daemon status`). Use a time-limited hold (`quiver daemon hold --for 30m --reason \"…\"`) only if you truly need longer.",
     "Never sign in to any store, and never run a store's client (Ubisoft Connect, the Epic launcher, Steam) in an instance. The lab gets the licence from quiverd per launch; Connect is disabled in every instance and a Connect process kills the run.",
     "Never read credential or token files (Connect's `ConnectSecureStorage.dat`, keyrings, `~/.config/*/credentials`).",
     "Never touch the user's real prefix or install (`quiver lab` never mounts them). Copy saves in as fixtures (`quiver lab fixture`), never link them.",
@@ -360,7 +361,7 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1", "check its owner in `quiver lab list`"] {
+        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1", "check its owner in `quiver lab list`", "a quiverd update is waiting on your instance", "stop the run (`quiver lab kill <i>`"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));

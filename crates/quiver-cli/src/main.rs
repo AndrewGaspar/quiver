@@ -11,6 +11,7 @@ mod downloads;
 mod epic;
 mod epicgame;
 mod exports;
+mod hint;
 mod mods;
 mod omarchy;
 mod perf;
@@ -762,6 +763,21 @@ fn quiet_on_closed_stdout() {
     }));
 }
 
+/// Which wrap-up hint (design/LAB.md §19) a command gets: none for another machine's
+/// commands, `quiver daemon` (it shows the wait itself), Steam's launch wrapper and status
+/// bars, whose stderr nobody reads.
+fn hint_kind(cli: &Cli) -> hint::Kind {
+    use hint::Kind;
+    if cli.machine.is_some() {
+        return Kind::None;
+    }
+    match &cli.cmd {
+        Cmd::Daemon { .. } | Cmd::Omarchy { .. } | Cmd::SteamRun(_) | Cmd::Queue { no_start: true, .. } => Kind::None,
+        Cmd::Lab { action, .. } => lab::hint_kind(action),
+        _ => Kind::Other,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     quiet_on_closed_stdout();
@@ -784,6 +800,8 @@ async fn main() -> Result<()> {
             bail!("`quiver {cmd}` works on this machine only; run it on {m} itself (over SSH)");
         }
     }
+    // A staged quiverd update waiting on a lab instance of the caller's: a line on stderr.
+    hint::maybe(&cli.source, hint_kind(&cli)).await;
     if let Cmd::Dev { cmd } = cli.cmd {
         return dev::run_dev(cmd).await;
     }

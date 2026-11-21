@@ -27,6 +27,7 @@ pub mod eos;
 pub mod eosproxy;
 pub mod facts;
 pub mod guard;
+pub mod hint;
 pub mod host;
 pub mod image;
 pub mod limits;

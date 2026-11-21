@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use quiver_api::daemon::{DaemonRequest, DaemonStatus, Hold, human_secs, parse_duration};
+use quiver_api::daemon::{DaemonRequest, DaemonStatus, Hold, RestartWaiting, human_secs, parse_duration};
 use quiver_api::{Client, Event, Request};
 
 #[derive(Subcommand)]
@@ -76,7 +76,9 @@ pub(crate) async fn run(source: &str, action: DaemonAction) -> Result<()> {
         }
         DaemonAction::Hold { reason, duration, json } => {
             let client = Client::connect(source).await?;
-            let req = || DaemonRequest::Hold { reason: reason.clone(), for_secs: duration };
+            // Who holds it: while the hold lasts, this session isn't asked to wrap up its lab instances.
+            let owner = quiver_core::lab::owner::Owner::current(source, None).report(std::path::Path::new("/proc"));
+            let req = || DaemonRequest::Hold { reason: reason.clone(), for_secs: duration, owner: Some(owner.clone()) };
             if duration.is_some() {
                 let h: Hold = call(&client, req()).await?;
                 if json {
@@ -123,6 +125,28 @@ pub(crate) async fn run(source: &str, action: DaemonAction) -> Result<()> {
     Ok(())
 }
 
+/// The lab instances a staged update waits on, and whether their agents were asked to wrap
+/// up (their `quiver` commands print the hint, design/LAB.md §19).
+fn print_lab_wait(w: &RestartWaiting, now: chrono::DateTime<chrono::Utc>) {
+    let mut asked = Vec::new();
+    let mut not_yet = Vec::new();
+    for b in &w.lab {
+        let who = b.owner_name().map(|o| format!(", {o}")).unwrap_or_default();
+        let run = b.run.map(|r| format!(" r{r}")).unwrap_or_default();
+        match b.asked {
+            Some(t) => asked.push(format!("{}{run}{who}, asked {} ago", b.instance, human_secs((now - t).num_seconds().max(0) as u64))),
+            None => not_yet.push(format!("{}{run}{who}", b.instance)),
+        }
+    }
+    if !asked.is_empty() {
+        println!("  lab agents have been asked to wrap up: {}", asked.join("; "));
+    }
+    if !not_yet.is_empty() {
+        println!("  lab agents will be asked to wrap up on their next quiver command: {}", not_yet.join("; "));
+    }
+    println!("  (stopping a run frees it: quiver lab kill NAME; the container may stay up)");
+}
+
 fn print_status(s: &DaemonStatus) {
     let now = chrono::Utc::now();
     let commit = s.commit.as_deref().map(|c| format!(", commit {}", &c[..c.len().min(10)])).unwrap_or_default();
@@ -159,6 +183,9 @@ fn print_status(s: &DaemonStatus) {
                 println!("  idle for {}; restarts onto it after {} idle", human_secs(idle), human_secs(s.idle_secs));
             } else {
                 println!("  waiting on: {}", s.waiting_on.join(", "));
+                if let Some(w) = s.restart_waiting.as_ref().filter(|w| !w.lab.is_empty()) {
+                    print_lab_wait(w, now);
+                }
             }
         }
         (None, true) => println!("no update staged ({busy}); restarts onto a new build once {} idle", human_secs(s.idle_secs)),
