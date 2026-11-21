@@ -108,6 +108,14 @@ fn example_hdr() -> HdrMetadata {
 }
 
 fn main() -> Result<()> {
+    // The pad namespace's inside part (quiver_stream_host::sandbox) runs before anything else:
+    // `--sandbox-exec GID -- PROGRAM…`.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some("--sandbox-exec") {
+        let gid: u32 = raw.get(2).and_then(|g| g.parse().ok()).ok_or_else(|| anyhow::anyhow!("--sandbox-exec GID -- PROGRAM"))?;
+        let program: Vec<String> = raw.iter().skip(3).skip_while(|a| *a == "--").cloned().collect();
+        return Err(quiver_stream_host::sandbox::sandbox_exec(gid, &program));
+    }
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
     let a = Args::parse();
     if a.test_window {
@@ -144,7 +152,7 @@ async fn run(a: Args) -> Result<()> {
     let session = format!("cli-{}", std::process::id());
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("quiver-stream").join(&session);
     let max_frames = a.frames.or(a.seconds.map(|s| (s * a.fps).round() as u64));
-    let opts = HostOptions { target, config: config.clone(), session, dir: dir.clone(), preset: a.preset, recovery, headless_server: a.headless_server, max_frames };
+    let opts = HostOptions { target, config: config.clone(), session, dir: dir.clone(), preset: a.preset, recovery, headless_server: a.headless_server, max_frames, force_sandbox_gid: None, exe: None };
     let (_bitrate_tx, bitrate_rx) = tokio::sync::watch::channel(a.bitrate);
     let mut host = Host::start(opts, bitrate_rx).await?;
     eprintln!("pads: {:?}{}", host.pad_mode, host.x_display.as_deref().map(|d| format!(", display {d}")).unwrap_or_default());

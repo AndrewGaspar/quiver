@@ -72,6 +72,41 @@ fn quiet_wav(path: &Path) {
     std::fs::write(path, d).unwrap();
 }
 
+/// Whether this user can make the pad namespace (newuidmap, newgidmap, a subgid range with the
+/// pad gid in it).
+fn sandbox_ok() -> bool {
+    let w = quiver_stream_host::sandbox::wrap(Path::new(env!("CARGO_BIN_EXE_quiver-stream-host")), quiver_stream_host::sandbox::GID, &["id".into(), "-G".into()]);
+    let o = Command::new(&w[0]).args(&w[1..]).output();
+    o.is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("105001"))
+}
+
+/// The namespace for real, when this user can make one: the program has the pad group and
+/// nothing else, no capabilities, and a private X socket folder. Not GPU work, so not ignored;
+/// skips where unshare or a subgid range is missing.
+#[test]
+fn the_pad_namespace() {
+    let exe = Path::new(env!("CARGO_BIN_EXE_quiver-stream-host"));
+    let w = quiver_stream_host::sandbox::wrap(exe, quiver_stream_host::sandbox::GID, &["sh".into(), "-c".into(), "id -G; grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status; stat -c '%u %a' /tmp/.X11-unix".into()]);
+    let Ok(o) = Command::new(&w[0]).args(&w[1..]).output() else {
+        eprintln!("skip: no unshare");
+        return;
+    };
+    if !o.status.success() {
+        eprintln!("skip: can't make the namespace here: {}", String::from_utf8_lossy(&o.stderr));
+        return;
+    }
+    let out = String::from_utf8_lossy(&o.stdout);
+    eprintln!("{out}");
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let mut lines = out.lines();
+    assert_eq!(lines.next().unwrap(), format!("{gid} {}", quiver_stream_host::sandbox::GID));
+    for _ in 0..5 {
+        let l = lines.next().unwrap();
+        assert!(l.ends_with("0000000000000000"), "{l}");
+    }
+    assert_eq!(lines.next().unwrap(), format!("{uid} 1777"));
+}
+
 fn sinks() -> String {
     String::from_utf8_lossy(&Command::new("pactl").args(["list", "short", "sinks"]).output().unwrap().stdout).into_owned()
 }
@@ -89,10 +124,15 @@ async fn command_target_end_to_end() {
     let wav = dir.join("quiet.wav");
     quiet_wav(&wav);
     let exe = env!("CARGO_BIN_EXE_quiver-stream-host");
-    let script = format!("paplay '{}' & exec '{exe}' --test-window --fps 60", wav.display());
+    // QUIVER_STREAM_TEST_MODE=WxH@HZ runs it at another size and rate (default 1280x720@60).
+    let mode = std::env::var("QUIVER_STREAM_TEST_MODE").unwrap_or("1280x720@60".into());
+    let (size, hz) = mode.split_once('@').unwrap();
+    let hz: u32 = hz.parse().unwrap();
+    let (w, h) = size.split_once('x').map(|(a, b)| (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap())).unwrap();
+    let script = format!("paplay '{}' & exec '{exe}' --test-window --fps {hz}", wav.display());
     let session = format!("test-{}", std::process::id());
-    let (w, h) = (1280, 720);
-    let config = StreamConfig { codec: VideoCodec::Hevc, width: w, height: h, refresh_mhz: 60_000, color: ColorInfo::sdr(), bitrate_kbps: 20_000, audio: AudioCodec::Opus, audio_channels: 2, audio_frame_ms: 5 };
+
+    let config = StreamConfig { codec: VideoCodec::Hevc, width: w, height: h, refresh_mhz: hz * 1000, color: ColorInfo::sdr(), bitrate_kbps: 20_000, audio: AudioCodec::Opus, audio_channels: 2, audio_frame_ms: 5 };
     let opts = HostOptions {
         target: Target::Command { argv: vec!["sh".into(), "-c".into(), script], env: vec![("QUIVER_TESTWIN_LOG".into(), log.display().to_string())] },
         config,
@@ -102,11 +142,16 @@ async fn command_target_end_to_end() {
         recovery: Recovery::RefInvalidation,
         headless_server: false,
         max_frames: None,
+        // The program runs in the pad namespace (with the stream pad group's gid, which needs
+        // only /etc/subgid, not the group itself), so this also proves gamescope, Xwayland,
+        // capture, audio and XTEST all work from inside it.
+        force_sandbox_gid: sandbox_ok().then_some(quiver_stream_host::sandbox::GID),
+        exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_quiver-stream-host"))),
     };
     let (_btx, brx) = tokio::sync::watch::channel(20_000);
     let mut host = Host::start(opts, brx).await.expect("start");
     let display = host.x_display.clone().unwrap();
-    eprintln!("display {display}, pads {:?}", host.pad_mode);
+    eprintln!("display {display}, pads {:?}, in the pad namespace: {}", host.pad_mode, sandbox_ok());
     assert!(!quiver_stream_host::display::reserved_display(&display), "{display}");
     let sink = format!("quiver-stream-{session}");
     assert!(sinks().contains(&sink), "the stream's sink exists while it runs");
@@ -148,7 +193,7 @@ async fn command_target_end_to_end() {
     }
     let report = host.stop().await.unwrap();
     eprintln!("{} frames, capture→encode start {}, encode {}", report.frames, report.capture.summary(), report.encode.summary());
-    assert!(frames.len() > 150, "{} frames", frames.len());
+    assert!(frames.len() as u32 > hz * 5 / 2, "{} frames", frames.len());
 
     // 1. Stamps: the program's draw time against the capture time.
     let path = dir.join("cmd.hevc");
@@ -172,7 +217,8 @@ async fn command_target_end_to_end() {
     // 2. Input.
     let got = std::fs::read_to_string(&log).unwrap();
     eprintln!("input log:\n{got}");
-    for line in ["key 38 down", "key 38 up", "button 1 down", "button 1 up", "button 4 down", "button 4 up", "key 39 down", "key 39 up", "motion 646 356"] {
+    let moved = format!("motion {} {}", 32768 * (w - 1) / 65535 + 7, 32768 * (h - 1) / 65535 - 3);
+    for line in ["key 38 down", "key 38 up", "button 1 down", "button 1 up", "button 4 down", "button 4 up", "key 39 down", "key 39 up", moved.as_str()] {
         assert!(got.lines().any(|l| l == line), "the program didn't get '{line}'");
     }
     assert!(got.lines().any(|l| l == "raw 7 -3"), "no XI2 raw motion of (7, -3)");

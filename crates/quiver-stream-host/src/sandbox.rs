@@ -3,12 +3,15 @@
 //!
 //! The namespace maps the person's own uid and gid to themselves and the pad group's gid to
 //! itself (newuidmap/newgidmap, which allow exactly the person's own ids and their
-//! `/etc/subgid` range), sets the supplementary groups to just those two, and drops every
-//! capability before running the program:
+//! `/etc/subgid` range). Inside it, this binary (`--sandbox-exec`) mounts a private tmpfs on
+//! `/tmp/.X11-unix` (the real one is root's, which the namespace sees as unmapped, and
+//! Xwayland refuses a socket folder not owned by root or the user; the host still reaches the
+//! display through its abstract socket), sets the supplementary groups to just the person's
+//! gid and the pad group, drops every capability, and runs the program:
 //!
 //! ```text
-//! unshare --user --map-users=U:U:1 --map-groups=G:G:1 --map-groups=P:P:1 --setgroups=allow --keep-caps \
-//!   setpriv --groups=G,P --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- PROGRAM…
+//! unshare --user --mount --map-users=U:U:1 --map-groups=G:G:1 --map-groups=P:P:1 --setgroups=allow --keep-caps \
+//!   quiver-stream-host --sandbox-exec P -- PROGRAM…
 //! ```
 //!
 //! The program is the same user with the same files, GPU and PipeWire; it has the pad group and
@@ -88,26 +91,85 @@ pub fn check_rule() -> Result<u32> {
     Ok(gid)
 }
 
-/// The command that runs `program` with the pad group, as the module docs describe.
-pub fn wrap(pad_gid: u32, program: &[String]) -> Vec<String> {
+/// The command that runs `program` with the pad group, as the module docs describe. `exe` is
+/// this crate's binary (`quiver-stream-host`), which does the inside part.
+pub fn wrap(exe: &std::path::Path, pad_gid: u32, program: &[String]) -> Vec<String> {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let mut c: Vec<String> = vec![
         "unshare".into(),
         "--user".into(),
+        "--mount".into(),
         format!("--map-users={uid}:{uid}:1"),
         format!("--map-groups={gid}:{gid}:1"),
         format!("--map-groups={pad_gid}:{pad_gid}:1"),
         "--setgroups=allow".into(),
         "--keep-caps".into(),
-        "setpriv".into(),
-        format!("--groups={gid},{pad_gid}"),
-        "--inh-caps=-all".into(),
-        "--ambient-caps=-all".into(),
-        "--bounding-set=-all".into(),
+        exe.display().to_string(),
+        "--sandbox-exec".into(),
+        pad_gid.to_string(),
         "--".into(),
     ];
     c.extend(program.iter().cloned());
     c
+}
+
+/// The inside part (`quiver-stream-host --sandbox-exec GID -- PROGRAM…`), run by `unshare`
+/// with the namespace's capabilities: the private X socket folder, the groups, no
+/// capabilities, then exec. Returns only on failure.
+pub fn sandbox_exec(pad_gid: u32, program: &[String]) -> anyhow::Error {
+    let run = || -> Result<std::convert::Infallible> {
+        if program.is_empty() {
+            bail!("--sandbox-exec needs a program");
+        }
+        let dir = std::path::Path::new("/tmp/.X11-unix");
+        if !dir.exists() {
+            std::fs::create_dir_all(dir).context("create /tmp/.X11-unix")?;
+        }
+        let r = unsafe { libc::mount(c"quiver-stream-x11".as_ptr(), c"/tmp/.X11-unix".as_ptr(), c"tmpfs".as_ptr(), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, c"mode=1777,size=64k".as_ptr() as *const libc::c_void) };
+        if r != 0 {
+            bail!("mount a private /tmp/.X11-unix: {}", std::io::Error::last_os_error());
+        }
+        let groups = [unsafe { libc::getgid() }, pad_gid];
+        if unsafe { libc::setgroups(groups.len(), groups.as_ptr()) } != 0 {
+            bail!("setgroups: {}", std::io::Error::last_os_error());
+        }
+        drop_capabilities()?;
+        let err = std::os::unix::process::CommandExt::exec(std::process::Command::new(&program[0]).args(&program[1..]));
+        Err(anyhow::Error::from(err).context(format!("run {}", program[0])))
+    };
+    match run() {
+        Ok(never) => match never {},
+        Err(e) => e,
+    }
+}
+
+/// Clear the ambient set, empty the bounding set, and drop every permitted, effective and
+/// inheritable capability.
+fn drop_capabilities() -> Result<()> {
+    unsafe {
+        libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+        for cap in 0..64 {
+            libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0);
+        }
+    }
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Data {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let mut h = Header { version: 0x2008_0522, pid: 0 };
+    let d = [Data { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    if unsafe { libc::syscall(libc::SYS_capset, &mut h as *mut Header, d.as_ptr()) } != 0 {
+        bail!("capset: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// One node's state after udev, for the hidden check.
@@ -215,10 +277,9 @@ mod tests {
 
     #[test]
     fn the_namespace_has_only_the_pad_group_and_no_capabilities() {
-        let w = wrap(105001, &["gamescope".into(), "--".into(), "game".into()]).join(" ");
-        assert!(w.starts_with("unshare --user --map-users="));
-        assert!(w.contains("--map-groups=105001:105001:1 --setgroups=allow --keep-caps setpriv --groups="));
-        assert!(w.contains(",105001 --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- gamescope -- game"));
+        let w = wrap(std::path::Path::new("/x/quiver-stream-host"), 105001, &["gamescope".into(), "--".into(), "game".into()]).join(" ");
+        assert!(w.starts_with("unshare --user --mount --map-users="));
+        assert!(w.ends_with("--map-groups=105001:105001:1 --setgroups=allow --keep-caps /x/quiver-stream-host --sandbox-exec 105001 -- gamescope -- game"), "{w}");
     }
 
     #[test]

@@ -65,6 +65,12 @@ pub struct HostOptions {
     pub headless_server: bool,
     /// Stop after this many frames (tests and benchmarks).
     pub max_frames: Option<u64>,
+    /// Run the program in the pad namespace with this group even when no hidden pads are made
+    /// (tests of the namespace itself).
+    pub force_sandbox_gid: Option<u32>,
+    /// The `quiver-stream-host` binary, which runs the inside of the pad namespace
+    /// ([`crate::sandbox`]). None is this process's own executable.
+    pub exe: Option<PathBuf>,
 }
 
 pub struct Host {
@@ -125,8 +131,14 @@ impl Host {
                 }
                 let seated = seat::seated_sessions(std::path::Path::new("/run/systemd/sessions"));
                 pad_mode = seat::decide(opts.headless_server, &seated, crate::sandbox::check_rule().map_err(|e| format!("{e:#}")));
-                let wrapper = match pad_mode {
-                    PadMode::Hidden { gid } => crate::sandbox::wrap(gid, &[]),
+                let wrapper = match (pad_mode.clone(), opts.force_sandbox_gid) {
+                    (PadMode::Hidden { gid }, _) | (_, Some(gid)) => {
+                        let exe = match &opts.exe {
+                            Some(e) => e.clone(),
+                            None => std::env::current_exe().context("find quiver-stream-host for the pad namespace")?,
+                        };
+                        crate::sandbox::wrap(&exe, gid, &[])
+                    }
                     _ => Vec::new(),
                 };
                 let display = Display::start(
