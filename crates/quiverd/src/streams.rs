@@ -88,11 +88,31 @@ impl Streams {
         v
     }
 
+    /// What keeps quiverd from restarting (`Daemon::busy`): a Moonlight stream in any state
+    /// (streaming, starting, or kept for a resume) and whatever it shows, game or test
+    /// pattern: its host runs in this process, so a restart would end it. Quiver's own
+    /// streams don't count: their hosts are separate processes, re-adopted after a restart.
+    pub fn busy(&self) -> Vec<String> {
+        let running = self.moonlight_games.lock().unwrap().upgrade().and_then(|g| quiver_gamestream::StreamHost::running(&*g));
+        busy_lines(self.moonlight.lock().unwrap().as_ref(), running)
+    }
+
     fn save(e: &Entry) {
         let path = root().join(&e.rec.session.id).join("stream.json");
         if let Ok(text) = serde_json::to_vec_pretty(&e.rec) {
             let _ = quiver_core::private::write_private(&path, &text);
         }
+    }
+}
+
+/// [`Streams::busy`]'s lines: the Moonlight host's running app (by key), described by its
+/// session when it has one (a game does; the test pattern doesn't).
+fn busy_lines(session: Option<&StreamSession>, running: Option<String>) -> Vec<String> {
+    match (session, running) {
+        (Some(s), _) => vec![format!("Moonlight stream of {} ({})", s.title, s.describe())],
+        (None, Some(k)) if k == crate::moonlight::TEST_PATTERN_KEY => vec!["Moonlight stream of the test pattern".into()],
+        (None, Some(k)) => vec![format!("Moonlight stream of {k}")],
+        (None, None) => Vec::new(),
     }
 }
 
@@ -816,6 +836,29 @@ async fn launch_for_moonlight(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moonlight_streams_keep_quiverd_busy_whatever_they_show() {
+        assert!(busy_lines(None, None).is_empty());
+        // The test pattern: no game, no session record, still busy.
+        assert_eq!(busy_lines(None, Some(crate::moonlight::TEST_PATTERN_KEY.into())), ["Moonlight stream of the test pattern"]);
+        // A game kept for a resume.
+        let s = StreamSession {
+            id: "moonlight-1".into(),
+            target: StreamTarget::Game { game: "epic:x".into(), profile: None },
+            title: "X".into(),
+            game: Some("epic:x".into()),
+            peer: "roth".into(),
+            state: StreamState::Kept,
+            started_at: Utc::now(),
+            kept_until: Some(Utc::now() + chrono::Duration::minutes(8)),
+            port: 0,
+            pid: 1,
+            client: StreamClient::Moonlight,
+        };
+        let l = busy_lines(Some(&s), Some("epic:x".into()));
+        assert!(l[0].starts_with("Moonlight stream of X (kept for 8 min") && l[0].contains("resume from Moonlight (roth)"), "{l:?}");
+    }
 
     #[test]
     fn keys_are_the_transport_form() {

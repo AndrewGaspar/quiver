@@ -496,7 +496,7 @@ mod tests {
         }
         let info = get(&shared, "/serverinfo", &[]).await;
         assert_eq!((tag(&info, "currentgame"), tag(&info, "state")), (a.to_string(), "QUIVER_SERVER_BUSY".into()));
-        games.hosts.lock().unwrap()[0].frames.send(frame(1, true)).await.unwrap();
+        { let tx = games.hosts.lock().unwrap()[0].frames.clone(); tx.send(frame(1, true)).await.unwrap(); }
         assert_eq!(c1.video.recv().await.unwrap().seq, 1);
 
         // The app swiped away: the session's goodbye, then its channels close. Not a quit.
@@ -520,7 +520,7 @@ mod tests {
         games.start(request("game-a", 1280), e2).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(games.slot.kept().unwrap().state(), KeptState::Streaming);
-        games.hosts.lock().unwrap()[0].frames.send(frame(9, true)).await.unwrap();
+        { let tx = games.hosts.lock().unwrap()[0].frames.clone(); tx.send(frame(9, true)).await.unwrap(); }
         assert_eq!(c2.video.recv().await.unwrap().seq, 9);
         // A /launch of the running app attaches the same way (Moonlight sends that too).
         let r = get(&shared, "/launch", &launch_args(a)).await;
@@ -528,7 +528,7 @@ mod tests {
         let (e3, mut c3) = ends();
         games.start(request("game-a", 1280), e3).unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
-        games.hosts.lock().unwrap()[0].frames.send(frame(10, true)).await.unwrap();
+        { let tx = games.hosts.lock().unwrap()[0].frames.clone(); tx.send(frame(10, true)).await.unwrap(); }
         assert_eq!(c3.video.recv().await.unwrap().seq, 10);
         assert_eq!(games.launches.load(Ordering::SeqCst), 1, "never relaunched");
 

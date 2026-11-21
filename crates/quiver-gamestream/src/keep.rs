@@ -522,7 +522,10 @@ pub(crate) mod tests {
         _control_out: mpsc::Sender<Control>,
     }
 
-    pub fn host() -> (HostChannels, FakeHost, Arc<Mutex<Option<(String, bool)>>>) {
+    /// How the host was stopped: (reason, quit).
+    pub type Stopped = Arc<Mutex<Option<(String, bool)>>>;
+
+    pub fn host() -> (HostChannels, FakeHost, Stopped) {
         let (frames, frames_rx) = mpsc::channel(8);
         let (audio, audio_rx) = mpsc::channel(8);
         let (control_out, control_out_rx) = mpsc::channel(8);
@@ -537,7 +540,7 @@ pub(crate) mod tests {
         )
     }
 
-    pub fn hooks(stopped: Arc<Mutex<Option<(String, bool)>>>) -> Hooks {
+    pub fn hooks(stopped: Stopped) -> Hooks {
         Hooks {
             tick: Box::new(|| None),
             stop: Box::new(move |reason, quit| {

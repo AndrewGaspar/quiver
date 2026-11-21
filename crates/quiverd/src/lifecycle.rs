@@ -5,8 +5,9 @@
 //!   new file into place). The install manifest names its version.
 //! - **Busy:** a game session (any holder), a game quiverd is starting, an install,
 //!   update, repair, verify or import running, a perf subscription or attached HUD, a perf
-//!   session of a launch that is starting, a sign-in waiting for its 2FA code, a bridge
-//!   connection to the broker, a hold, or a request in flight. Event subscriptions (app
+//!   session of a launch that is starting, a sign-in waiting for its 2FA code, a Moonlight
+//!   stream (streaming, starting or kept for a resume, whatever it shows: its host runs in
+//!   quiverd), a bridge connection to the broker, a hold, or a request in flight. Event subscriptions (app
 //!   windows) and finished one-shot calls are not.
 //! - **Restart:** once an update has been staged for [`Settings::settle`] and nothing has
 //!   been busy for [`Settings::idle`] (requests in flight aside, which are waited out), the
@@ -102,6 +103,9 @@ pub(crate) struct Busy {
     /// Perf sessions of launches without a game session yet (`quiver steam-run`), by name.
     pub perf_sessions: Vec<String>,
     pub awaiting_2fa: bool,
+    /// Streams whose host runs in quiverd (Moonlight's), as "Moonlight stream of X (kept…)".
+    /// Quiver's own streams aren't here: their hosts outlive a restart and are re-adopted.
+    pub streams: Vec<String>,
 }
 
 struct HoldEntry {
@@ -200,6 +204,7 @@ fn reasons(st: &State, busy: &Busy, inflight: bool, now: DateTime<Utc>) -> Vec<S
         out.push(plural(busy.huds, "HUD attached", "HUDs attached"));
     }
     out.extend(busy.perf_sessions.iter().map(|n| format!("perf session for {n}")));
+    out.extend(busy.streams.iter().cloned());
     if busy.awaiting_2fa {
         out.push("a sign-in waiting for its 2FA code".into());
     }
@@ -613,6 +618,7 @@ impl crate::Daemon {
             .filter(|p| !sessions.iter().chain(&local).any(|s| s.game_ref() == p.game_ref()) && !running.contains(&p.product_id))
             .map(|p| if p.product_id == 0 { p.game_ref().to_string() } else { name(p.product_id) })
             .collect();
+        busy.streams = self.streams.busy();
         busy.awaiting_2fa = self.pending_2fa.lock().unwrap().is_some()
             && self.pending_2fa_at.lock().unwrap().is_some_and(|t| t.elapsed() < TWO_FA_BUSY);
         busy
@@ -764,6 +770,7 @@ mod tests {
             huds: 2,
             perf_sessions: vec!["Rayman".into()],
             awaiting_2fa: true,
+            streams: vec!["Moonlight stream of X (kept for 8 min (until 14:05), resume from Moonlight (roth))".into()],
         };
         st.broker_conns = 1;
         let r = reasons(&st, &busy, false, Utc::now());
@@ -776,6 +783,7 @@ mod tests {
                 "1 perf subscription",
                 "2 HUDs attached",
                 "perf session for Rayman",
+                "Moonlight stream of X (kept for 8 min (until 14:05), resume from Moonlight (roth))",
                 "a sign-in waiting for its 2FA code",
             ]
         );
@@ -797,6 +805,12 @@ mod tests {
         bin.replace();
         let busy = Busy { sessions: vec!["AC Origins (bridge)".into()], ..Default::default() };
         assert!(!lc.tick(&busy).0, "a session blocks");
+        // A Moonlight stream with no game behind it (the test pattern), or one kept for a
+        // resume: its host is in quiverd, so it blocks too.
+        let moon = Busy { streams: vec!["Moonlight stream of the test pattern".into()], ..Default::default() };
+        assert!(!lc.tick(&moon).0, "a Moonlight stream blocks");
+        assert!(lc.try_close(|| moon.clone()).is_err());
+        assert_eq!(lc.status(&moon).waiting_on, ["Moonlight stream of the test pattern"]);
         let s = lc.status(&busy);
         assert_eq!(s.update.as_ref().and_then(|u| u.version.as_deref()), Some("0.2.0.r9.gabc"));
         assert_eq!(s.waiting_on, ["AC Origins (bridge)"]);

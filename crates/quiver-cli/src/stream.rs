@@ -85,7 +85,8 @@ pub async fn run(client: &Client, a: StreamArgs) -> Result<()> {
             println!("no streams on {machine}");
         }
         for s in v {
-            println!("{}  {}  {} (port {}, pid {})", s.id, s.title, s.describe(), s.port, s.pid);
+            let at = if s.client.is_quiver() { format!("port {}, ", s.port) } else { "in quiverd, ".to_owned() };
+            println!("{}  {}  {} ({at}pid {})", s.id, s.title, s.describe(), s.pid);
         }
         return Ok(());
     }

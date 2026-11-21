@@ -374,3 +374,153 @@ fn moonlight_e2e_against_quiverd() {
     assert!(log.lines().filter(|l| l.contains("audio totals")).all(|l| l.contains("uneven_blocks=0")), "{log}");
     assert!(log.lines().filter(|l| l.contains("video totals")).all(|l| l.contains("send_errors=0")), "{log}");
 }
+
+/// "Proton" for the resume test's game: `proton run Z:\…\x.exe ARGS` runs x.exe (a shell
+/// script) natively, with WINEPREFIX set as Proton sets it.
+const FAKE_PROTON: &str = r#"#!/usr/bin/env python3
+import os, sys
+compat = os.environ["STEAM_COMPAT_DATA_PATH"]
+os.environ["WINEPREFIX"] = os.path.join(compat, "pfx")
+args = sys.argv[2:]
+if not args or args[0].lower() in ("wineboot", "reg"):
+    sys.exit(0)
+exe = args[0]
+if exe.startswith("Z:"):
+    exe = exe[2:].replace("\\", "/")
+os.execvp("sh", ["sh", exe] + args[1:])
+"#;
+
+/// "wineserver": `-k` ends the prefix's processes, `-w` waits for them, as the real one.
+const FAKE_WINESERVER: &str = r#"#!/usr/bin/env python3
+import os, signal, sys, time
+pfx = os.path.realpath(os.environ["WINEPREFIX"])
+def mine():
+    out = []
+    for p in os.listdir("/proc"):
+        if not p.isdigit() or int(p) == os.getpid():
+            continue
+        try:
+            env = open(f"/proc/{p}/environ", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if any(e.startswith(b"STEAM_COMPAT_DATA_PATH=") and os.path.realpath(e.split(b"=", 1)[1].decode()) == pfx for e in env):
+            out.append(int(p))
+    return out
+if "-k" in sys.argv:
+    for p in mine():
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
+for _ in range(100):
+    if not mine():
+        break
+    time.sleep(0.1)
+"#;
+
+/// The game: say it started (its pid), then show nothing new: the display's picture stays
+/// still, so frames come only from the host repeating its last one.
+const STILL_GAME: &str = "echo \"start $$\" >> \"$1\"\nsleep 900 &\nwait\n";
+
+/// The bug the person hit: streaming a game from Moonlight, the app swiped away (the client
+/// process gone), Resume relaunched the game. Here, against a scratch quiverd and the real
+/// Moonlight client in quiver-gamestream's isolated namespace (`moonlight-e2e.sh`,
+/// `GS_RESUME=1`), with a test game (`QUIVER_TEST_GAMES`) whose picture never changes:
+/// stream it, kill the Moonlight process, see the stream kept (`quiver stream --list`),
+/// stream again, and check the game's process is the same one (it started once) and the
+/// resumed stream's first frame came within a second of its control stream connecting,
+/// still picture and all. Then Quit app ends it.
+///
+/// Gated: `QUIVER_E2E_MOONLIGHT=1`; needs gamescope, moonlight, the `quiver` CLI and
+/// `quiver-stream-host` built next to quiverd. The GPU, briefly (the host's NVENC, the
+/// client's decode).
+#[test]
+fn moonlight_resume_keeps_the_game_running() {
+    if std::env::var("QUIVER_E2E_MOONLIGHT").as_deref() != Ok("1") {
+        return eprintln!("skipped: set QUIVER_E2E_MOONLIGHT=1");
+    }
+    let quiverd = PathBuf::from(env!("CARGO_BIN_EXE_quiverd"));
+    let (cli, host) = (quiverd.with_file_name("quiver"), quiverd.with_file_name("quiver-stream-host"));
+    let have = |t: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(t).is_file()));
+    if !cli.is_file() || !host.is_file() || !["gamescope", "moonlight", "unshare", "xprop", "prlimit", "ip", "python3"].iter().all(|t| have(t)) {
+        return eprintln!("skipped: needs gamescope, moonlight, {} and {}", cli.display(), host.display());
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("moonlight-resume");
+    let _ = std::fs::remove_dir_all(&dir);
+    let exec = |p: &Path, s: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        write(p, s);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let proton = dir.join("proton");
+    exec(&proton.join("proton"), FAKE_PROTON);
+    exec(&proton.join("files/bin/wineserver"), FAKE_WINESERVER);
+    exec(&dir.join("game/install/still.exe"), STILL_GAME);
+    std::fs::create_dir_all(dir.join("game/prefix")).unwrap();
+    let game_log = dir.join("game/started.log");
+    let games = json!([{
+        "product_id": 0, "name": "Still Probe", "install_dir": dir.join("game/install"), "prefix": dir.join("game/prefix"),
+        "exe": "still.exe", "args": game_log, "game": "epic:quiverstillprobe",
+    }]);
+    write(&dir.join("games.json"), &games.to_string());
+    let daemon_env = format!(
+        "QUIVER_TEST_GAMES={} QUIVER_STREAM_HOST_BIN={} QUIVER_STREAM_SCOPE=0 PIPEWIRE_RUNTIME_DIR={}",
+        dir.join("games.json").display(),
+        host.display(),
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }))
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../quiver-gamestream/tests/moonlight-e2e.sh");
+    let out = Command::new("bash")
+        .arg(&script)
+        .env("GS_QUIVERD", &quiverd)
+        .env("GS_CLI", &cli)
+        .env("GS_SERVER", "unused")
+        .env("GS_STATE", &dir)
+        .env("GS_PROTON", &proton)
+        .env("GS_APP", "Still Probe")
+        .env("GS_RESUME", "1")
+        .env("GS_DAEMON_ENV", daemon_env)
+        .env("RUST_LOG", "info,quiver_stream_host=info")
+        .output()
+        .unwrap();
+    let steps = String::from_utf8_lossy(&out.stdout);
+    let raw = std::fs::read_to_string(dir.join("server.log")).unwrap_or_default();
+    let mut log = String::with_capacity(raw.len());
+    let mut it = raw.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            let _ = it.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            log.push(c);
+        }
+    }
+    let kept = std::fs::read_to_string(dir.join("streams-kept.txt")).unwrap_or_default();
+    let after = std::fs::read_to_string(dir.join("streams-after.txt")).unwrap_or_default();
+    let started = std::fs::read_to_string(&game_log).unwrap_or_default();
+    eprintln!("{steps}\n--- kept: {kept}--- after: {after}--- the game: {started}--- server log: {}", dir.join("server.log").display());
+    for step in ["STEP server ready", "STEP paired", "STEP listed", "STEP first stream video", "STEP killed client", "STEP kept", "STEP resumed video", "STEP quit", "STEP done"] {
+        assert!(steps.contains(step), "missing {step:?}\n{steps}\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+    // Kept, as status shows it, and the game started once: the resume found the same process.
+    assert!(kept.contains("Still Probe") && kept.contains("kept for") && kept.contains("resume from Moonlight"), "{kept}");
+    assert_eq!(started.lines().filter(|l| l.starts_with("start ")).count(), 1, "the game started again: {started}");
+    // A restart onto a new build waits for it (the host is in quiverd).
+    let status = std::fs::read_to_string(dir.join("daemon-kept.txt")).unwrap_or_default();
+    assert!(status.contains("Moonlight stream of Still Probe"), "{status}");
+    assert_eq!(log.matches("play Still Probe (test game)").count(), 1, "{log}");
+    assert!(log.contains("is kept for 10 min for a resume from Moonlight"), "{log}");
+    assert!(log.contains("resumed Still Probe on"), "{log}");
+    // Both streams' first frame within a second of their control stream, though the picture
+    // never changed (the second is the resume, onto the running host).
+    let firsts: Vec<u64> = log
+        .lines()
+        .filter(|l| l.contains("first video frame sent"))
+        .filter_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix("after_connect_ms=")).and_then(|v| v.parse().ok()))
+        .collect();
+    eprintln!("first frame after the control stream connected, ms: {firsts:?}");
+    assert_eq!(firsts.len(), 2, "{log}");
+    assert!(firsts[1] < 1000, "the resumed stream's first frame took {} ms", firsts[1]);
+    // Quit app ended it.
+    assert!(log.contains("Still Probe quit: the client quit the app"), "{log}");
+    assert!(after.contains("no streams"), "{after}");
+}

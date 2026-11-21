@@ -184,6 +184,43 @@ listed() { grep -q "$LISTED" "$GS_STATE/list.log"; }
 wait_for 30 listed && echo "STEP listed"
 stop_moonlight
 
+# GS_RESUME=1 (with GS_QUIVERD and a GS_APP game): the resume round instead of the two
+# streams. Stream the game, kill the Moonlight process outright (as iOS does to a backgrounded
+# app), see quiverd keep the game, stream again (Moonlight resumes the running app), quit.
+if [ -n "${GS_RESUME:-}" ]; then
+    first_video() { grep -q "Received first video packet" "$1"; }
+    start_moonlight "$GS_STATE/resume-1.log" stream 127.0.0.1 "$APP" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed
+    wait_for 90 first_video "$GS_STATE/resume-1.log" && echo "STEP first stream video"
+    sleep 2
+    shot resume-1
+    kill -KILL "$(pgrep -x moonlight)" 2>/dev/null
+    kill -KILL "$GPID" 2>/dev/null
+    wait "$GPID" 2>/dev/null
+    rm -f /tmp/.X11-unix/X* /tmp/.X1[0-9]-lock
+    echo "STEP killed client"
+    kept() { daemon_env "$GS_CLI" stream --list > "$GS_STATE/streams-kept.txt" 2>&1; grep -q "resume from Moonlight" "$GS_STATE/streams-kept.txt"; }
+    for _ in $(seq 300); do kept && break; sleep 0.1; done
+    kept && echo "STEP kept"
+    # What quiverd's restart waits on: the kept stream.
+    daemon_env "$GS_CLI" daemon status > "$GS_STATE/daemon-kept.txt" 2>&1
+    start_moonlight "$GS_STATE/resume-2.log" stream 127.0.0.1 "$APP" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed
+    wait_for 60 first_video "$GS_STATE/resume-2.log" && echo "STEP resumed video"
+    sleep 2
+    shot resume-2
+    stop_moonlight
+    sleep 1
+    start_moonlight "$GS_STATE/quit.log" quit 127.0.0.1
+    quitted() { grep -q "Moonlight quit the app" "$SLOG"; }
+    wait_for 30 quitted && echo "STEP quit"
+    stop_moonlight
+    sleep 3
+    daemon_env "$GS_CLI" stream --list > "$GS_STATE/streams-after.txt" 2>&1
+    kill -TERM $SPID
+    wait $SPID
+    echo "STEP done"
+    exit 0
+fi
+
 # Moonlight learns the server's IPv6 address; the first stream then goes over IPv6 and the
 # resumed one after it over 127.0.0.1.
 start_moonlight "$GS_STATE/list-v6.log" list "[::1]"
