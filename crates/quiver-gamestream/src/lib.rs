@@ -61,6 +61,8 @@ pub mod rtsp;
 pub mod sdp;
 mod stream;
 pub mod store;
+#[cfg(feature = "stream-host")]
+pub mod stream_host;
 mod tls;
 pub mod video;
 

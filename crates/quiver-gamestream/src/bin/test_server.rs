@@ -50,6 +50,10 @@ struct Args {
     /// Submit this PIN to the first pairing request.
     #[arg(long)]
     pin: Option<String>,
+    /// Stream quiver-stream-host's test pattern (NVENC) instead of replaying a file. Needs
+    /// the `stream-host` feature.
+    #[arg(long)]
+    host_pattern: bool,
     /// Drop this percentage of video packets, to test FEC.
     #[arg(long, default_value_t = 0)]
     loss: u8,
@@ -267,6 +271,21 @@ fn read_ogg_opus(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(packets.into_iter().skip(2).collect())
 }
 
+#[cfg(feature = "stream-host")]
+fn host_pattern(state: &std::path::Path, config: &mut ServerConfig) -> Result<Arc<dyn StreamHost>> {
+    use quiver_stream_host::host::Target;
+    // NVENC does all three, and reference invalidation.
+    config.codecs = quiver_gamestream::Codecs::default();
+    config.reference_frame_invalidation = true;
+    let adapter = quiver_gamestream::stream_host::StreamHostAdapter::new(state.join("streams"), |_app: &App| Ok(Target::TestPattern { motion: true }));
+    Ok(Arc::new(adapter))
+}
+
+#[cfg(not(feature = "stream-host"))]
+fn host_pattern(_: &std::path::Path, _: &mut ServerConfig) -> Result<Arc<dyn StreamHost>> {
+    bail!("--host-pattern needs the stream-host feature")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).with_writer(std::io::stderr).init();
@@ -315,8 +334,13 @@ async fn main() -> Result<()> {
     config.reference_frame_invalidation = false;
     config.test_video_loss_percent = args.loss;
     let stats = Arc::new(Stats::default());
-    let host = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None) });
+    let replay = Arc::new(Replay { frames: Arc::new(frames), audio: Arc::new(audio), fps: args.fps, stats: stats.clone(), current: Mutex::new(None) });
     let clients = Arc::new(FileClientStore::new(args.state.join("moonlight-clients.json")));
+    let host: Arc<dyn StreamHost> = if args.host_pattern {
+        host_pattern(&args.state, &mut config)?
+    } else {
+        replay
+    };
     let server = Arc::new(GameStreamServer::start(config, Arc::new(Library), clients, host).await?);
     eprintln!("READY {} on {listen_on} port {} (fingerprint {})", args.name, args.http_port, &server.identity().fingerprint()[..16]);
 

@@ -10,8 +10,13 @@ publish.workspace = true
 name = "quiver-gamestream-test"
 path = "src/bin/test_server.rs"
 
+[features]
+# StreamHostAdapter: serve Moonlight from quiver-stream-host (NVENC, gamescope, PipeWire).
+stream-host = ["dep:quiver-stream-host"]
+
 [dependencies]
 quiver-stream-proto.workspace = true
+quiver-stream-host = { path = "../quiver-stream-host", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
