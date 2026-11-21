@@ -245,6 +245,7 @@ impl Quiver {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ml_button(&self, th: &Theme, actions: &[SettingsAction], a: MoonlightAction, kind: Kind, i: Option<Icon>, label: impl Into<gpui::SharedString>, cx: &mut Context<Self>) -> AnyElement {
         self.action_button(th, actions, SettingsAction::Moonlight(a), kind, i, label, cx)
     }

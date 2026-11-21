@@ -102,7 +102,7 @@ fn write(p: &Path, s: &str) {
 fn free_layout() -> u16 {
     for _ in 0..200 {
         let p = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        if p < 1100 || p > 65_000 {
+        if !(1100..=65_000).contains(&p) {
             continue;
         }
         let tcp = [p - 5, p, p + 21].iter().all(|&q| std::net::TcpListener::bind(("127.0.0.1", q)).is_ok());

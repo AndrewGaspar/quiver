@@ -120,7 +120,7 @@ impl Library {
                 (App { key: e.game.key(), title: e.name.clone(), hdr: false }, art)
             })
             .collect();
-        apps.sort_by(|a, b| a.0.title.to_lowercase().cmp(&b.0.title.to_lowercase()));
+        apps.sort_by_key(|a| a.0.title.to_lowercase());
         if LIST_TEST_PATTERN {
             apps.insert(0, (App { key: TEST_PATTERN_KEY.into(), title: "Test pattern".into(), hdr: false }, Vec::new()));
         }
