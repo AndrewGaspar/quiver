@@ -149,6 +149,7 @@ async fn command_target_end_to_end() {
         // capture, audio and XTEST all work from inside it.
         force_sandbox_gid: sandbox_ok().then_some(quiver_stream_host::sandbox::GID),
         exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_quiver-stream-host"))),
+        constant_bitrate_audio: false,
     };
     let (_btx, brx) = tokio::sync::watch::channel(20_000);
     let mut host = Host::start(opts, brx).await.expect("start");
