@@ -323,3 +323,54 @@ async fn moonlight_mdns_in_a_network_namespace() {
     let () = q.call(Request::MoonlightDisable).await.unwrap();
     drop(daemon);
 }
+
+/// The real Moonlight client against a scratch quiverd: turned on and the PIN entered with the
+/// CLI, then pair, list, stream quiverd's "Test pattern" (the stream host's NVENC pattern)
+/// twice and quit, in quiver-gamestream's isolated namespace (`moonlight-e2e.sh`).
+///
+/// Gated like quiver-gamestream's: `QUIVER_E2E_MOONLIGHT=1`, and skipped without gamescope,
+/// moonlight or the `quiver` CLI built next to quiverd (`cargo build -p quiver-cli`).
+#[test]
+fn moonlight_e2e_against_quiverd() {
+    if std::env::var("QUIVER_E2E_MOONLIGHT").as_deref() != Ok("1") {
+        return eprintln!("skipped: set QUIVER_E2E_MOONLIGHT=1");
+    }
+    let quiverd = PathBuf::from(env!("CARGO_BIN_EXE_quiverd"));
+    let cli = quiverd.with_file_name("quiver");
+    let have = |t: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(t).is_file()));
+    if !cli.is_file() || !["gamescope", "moonlight", "unshare", "xprop", "prlimit", "ip"].iter().all(|t| have(t)) {
+        return eprintln!("skipped: needs gamescope, moonlight and {}", cli.display());
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("moonlight-e2e-quiverd");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../quiver-gamestream/tests/moonlight-e2e.sh");
+    let out = Command::new("bash")
+        .arg(&script)
+        .env("GS_QUIVERD", &quiverd)
+        .env("GS_CLI", &cli)
+        .env("GS_SERVER", "unused")
+        .env("GS_STATE", &dir)
+        .output()
+        .unwrap();
+    let steps = String::from_utf8_lossy(&out.stdout);
+    let raw = std::fs::read_to_string(dir.join("server.log")).unwrap_or_default();
+    // Without the log's colours.
+    let mut log = String::with_capacity(raw.len());
+    let mut it = raw.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            let _ = it.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            log.push(c);
+        }
+    }
+    for step in ["STEP server ready", "STEP paired", "STEP listed", "STEP streamed stream-1392", "STEP streamed stream-auto", "STEP quit", "STEP done"] {
+        assert!(steps.contains(step), "missing {step:?}\n{steps}\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+    assert_eq!(log.matches("control stream connected").count(), 2, "{log}");
+    assert!(log.contains("advertised on mDNS"), "{log}");
+    // Constant-bitrate audio: every 4-packet block had FEC.
+    assert!(log.lines().filter(|l| l.contains("audio totals")).all(|l| l.contains("uneven_blocks=0")), "{log}");
+    assert!(log.lines().filter(|l| l.contains("video totals")).all(|l| l.contains("send_errors=0")), "{log}");
+}

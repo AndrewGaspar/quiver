@@ -5,6 +5,10 @@
 #   GS_SERVER=path/to/quiver-gamestream-test GS_STATE=dir [GS_SERVER_ARGS=...] [GS_STREAM_ARGS=...] [GS_MTU=1280] \
 #       moonlight-e2e.sh
 #
+# With GS_QUIVERD=path/to/quiverd and GS_CLI=path/to/quiver instead, the server is a scratch
+# quiverd (its own HOME and XDG dirs under GS_STATE/daemon): the CLI turns Moonlight on and
+# enters the PIN, and the app streamed is quiverd's "Test pattern".
+#
 # Steps: pair (PIN 4321), list, reach the server over IPv6, stream at --packet-size 1392 (what
 # Moonlight uses for a host it thinks is local: too big for a 1280 MTU, so the server must
 # cut it), stream at Moonlight's own choice for 127.0.0.1 (it counts loopback as remote:
@@ -45,12 +49,37 @@ export SDL_AUDIODRIVER=dummy QT_QPA_PLATFORM=xcb SDL_VIDEODRIVER=x11 SDL_JOYSTIC
 echo "STEP namespace lo mtu $(ip -o link show lo | sed -n 's/.* mtu \([0-9]*\).*/\1/p')"
 
 SLOG=$GS_STATE/server.log
-# shellcheck disable=SC2086
-QUIVER_SHM_ROOT=$GS_STATE/shm RUST_LOG=${RUST_LOG:-info} "$GS_SERVER" --state "$GS_STATE/server" --bind 127.0.0.1 --bind ::1 \
-    --pin 4321 --exit-after 400 ${GS_SERVER_ARGS:-} > "$SLOG" 2>&1 &
-SPID=$!
-for _ in $(seq 300); do grep -q '^READY' "$SLOG" && break; kill -0 $SPID 2>/dev/null || break; sleep 0.1; done
-grep -q '^READY' "$SLOG" || { echo "STEP server failed"; tail -20 "$SLOG"; exit 92; }
+APP="Quiver Test Pattern"
+LISTED="Second Title"
+if [ -n "${GS_QUIVERD:-}" ]; then
+    D=$GS_STATE/daemon
+    # The runtime dir (its socket) on the private /tmp: socket paths are short.
+    DRUN=/tmp/qd
+    mkdir -p "$D/data/quiver/remote" "$DRUN"
+    chmod 700 "$DRUN"
+    echo '{"accounts":[]}' > "$D/data/quiver/accounts.json"
+    printf '{"library":"%s/lib","prefixes":"%s/pfx","proton":"%s/proton","sdk_source":"%s/sdk","save_backups":"%s/backups","report_playtime":false,"steam_offers":false}' "$D" "$D" "$D" "$D" "$D" > "$D/data/quiver/config.json"
+    echo '{"name":"tower"}' > "$D/data/quiver/remote/machine.json"
+    daemon_env() {
+        env -i PATH=/usr/bin:/bin HOME="$D/home" XDG_DATA_HOME="$D/data" XDG_CONFIG_HOME="$D/config" XDG_STATE_HOME="$D/state" \
+            XDG_CACHE_HOME="$D/cache" XDG_RUNTIME_DIR="$DRUN" QUIVER_SHM_ROOT="$GS_STATE/shm" QUIVER_BROKER=127.0.0.1:0 \
+            QUIVER_AUTO_RESTART=0 QUIVER_REMOTE_MDNS=0 RUST_LOG=${RUST_LOG:-info} "$@"
+    }
+    daemon_env "$GS_QUIVERD" > "$SLOG" 2>&1 &
+    SPID=$!
+    for _ in $(seq 300); do [ -S "$DRUN/quiver/quiverd.sock" ] && break; sleep 0.1; done
+    daemon_env "$GS_CLI" remote moonlight enable --bind 127.0.0.1 --bind ::1 > "$GS_STATE/enable.log" 2>&1 || { echo "STEP enable failed"; cat "$GS_STATE/enable.log"; exit 92; }
+    grep -q 'listening on' "$GS_STATE/enable.log" || { echo "STEP server failed"; cat "$GS_STATE/enable.log"; tail -20 "$SLOG"; exit 92; }
+    APP="Test pattern"
+    LISTED="Test pattern"
+else
+    # shellcheck disable=SC2086
+    QUIVER_SHM_ROOT=$GS_STATE/shm RUST_LOG=${RUST_LOG:-info} "$GS_SERVER" --state "$GS_STATE/server" --bind 127.0.0.1 --bind ::1 \
+        --pin 4321 --exit-after 400 ${GS_SERVER_ARGS:-} > "$SLOG" 2>&1 &
+    SPID=$!
+    for _ in $(seq 300); do grep -q '^READY' "$SLOG" && break; kill -0 $SPID 2>/dev/null || break; sleep 0.1; done
+    grep -q '^READY' "$SLOG" || { echo "STEP server failed"; tail -20 "$SLOG"; exit 92; }
+fi
 echo "STEP server ready"
 
 # gamescope can crash while tearing down after its child exits. A core limit of exactly 1
@@ -110,7 +139,7 @@ shot() { # NAME
 stream() { # NAME HOST ARGS...
     local name=$1 host=$2
     shift 2
-    start_moonlight "$GS_STATE/$name.log" stream "$host" "Quiver Test Pattern" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed ${GS_STREAM_ARGS:-} "$@"
+    start_moonlight "$GS_STATE/$name.log" stream "$host" "$APP" --resolution 1280x720 --fps 60 --bitrate 8000 --display-mode windowed ${GS_STREAM_ARGS:-} "$@"
     local t=0
     while [ $t -lt "$GS_STREAM_SECS" ]; do
         sleep 2.5
@@ -127,16 +156,29 @@ stream() { # NAME HOST ARGS...
 # reports "Incorrect PIN" (fixed in later moonlight-qt). A retry draws a new salt.
 paired() { grep -q '^PAIRED' "$SLOG"; }
 settled() { paired || [ "$(grep -c '^PAIR FAILED' "$SLOG")" -ge "$attempt" ]; }
+# With quiverd, the PIN goes in through the CLI once the request shows in its status.
+pending() { daemon_env "$GS_CLI" remote moonlight status --json 2>/dev/null | grep -q '"pending"'; }
 for attempt in 1 2 3; do
     start_moonlight "$GS_STATE/pair-$attempt.log" pair 127.0.0.1 --pin 4321
-    wait_for 60 settled
+    if [ -n "${GS_QUIVERD:-}" ]; then
+        wait_for 30 pending
+        if daemon_env "$GS_CLI" remote moonlight pin 4321 > "$GS_STATE/pin-$attempt.log" 2>&1; then
+            echo "PAIRED $(cat "$GS_STATE/pin-$attempt.log")" >> "$SLOG"
+        else
+            echo "PAIR FAILED $(cat "$GS_STATE/pin-$attempt.log")" >> "$SLOG"
+        fi
+    else
+        wait_for 60 settled
+    fi
+    # Moonlight finishes on its side (the HTTPS check, saving the host) after the server pins it.
+    paired && wait_for 5 false
     stop_moonlight
     paired && break
 done
 paired && echo "STEP paired"
 
 start_moonlight "$GS_STATE/list.log" list 127.0.0.1
-listed() { grep -q 'Second Title' "$GS_STATE/list.log"; }
+listed() { grep -q "$LISTED" "$GS_STATE/list.log"; }
 wait_for 30 listed && echo "STEP listed"
 stop_moonlight
 

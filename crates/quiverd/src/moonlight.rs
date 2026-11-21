@@ -87,6 +87,12 @@ pub(crate) fn stream_host_for(_daemon: &Arc<Daemon>) -> Arc<dyn StreamHost> {
     }))
 }
 
+/// Moonlight lists a "Test pattern" app first while [`stream_host_for`] streams the test
+/// pattern for every app: something to try a client with before game launches land. The
+/// integration with the game launcher drops it.
+pub(crate) const LIST_TEST_PATTERN: bool = true;
+pub(crate) const TEST_PATTERN_KEY: &str = "quiver:test-pattern";
+
 // --- the library Moonlight lists ------------------------------------------------------------
 
 /// The installed games, as Moonlight apps, with where their portrait art can come from.
@@ -101,7 +107,10 @@ impl Library {
     async fn refresh(&self, daemon: &Arc<Daemon>) {
         let entries = match daemon.library(false).await {
             Ok(e) => e,
-            Err(e) => return tracing::warn!("moonlight: reading the library: {e:#}"),
+            Err(e) => {
+                tracing::info!("moonlight: no games to list: {e:#}");
+                Vec::new()
+            }
         };
         let mut apps: Vec<(App, Vec<quiver_api::art::ArtRef>)> = entries
             .iter()
@@ -112,6 +121,9 @@ impl Library {
             })
             .collect();
         apps.sort_by(|a, b| a.0.title.to_lowercase().cmp(&b.0.title.to_lowercase()));
+        if LIST_TEST_PATTERN {
+            apps.insert(0, (App { key: TEST_PATTERN_KEY.into(), title: "Test pattern".into(), hdr: false }, Vec::new()));
+        }
         *self.apps.lock().unwrap() = apps;
     }
 
