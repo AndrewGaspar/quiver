@@ -212,6 +212,16 @@ fn bridge(port: u16, session: &str) -> std::net::TcpStream {
     s
 }
 
+/// `quiver lab whoami`'s text with its trailing ", since <time>)" dropped: two calls a second
+/// apart differ only there.
+fn without_since(out: &[u8]) -> String {
+    let text = String::from_utf8_lossy(out);
+    match text.rfind(", since ") {
+        Some(i) => text[..i].to_string(),
+        None => text.into_owned(),
+    }
+}
+
 fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
@@ -262,7 +272,8 @@ fn wrap_up_hint_for_the_owner_of_a_run_holding_up_an_update() {
     assert!(err.contains("stop the run with `quiver lab kill hinttest`") && err.contains("quiver daemon hold --for 30m"), "{err}");
     // Not again within five minutes, whatever the command.
     let o = e.quiver(Some(&me), &[], &["lab", "whoami"]);
-    assert_eq!((o.stdout.as_slice(), stderr(&o).as_str()), (whoami.stdout.as_slice(), ""));
+    // `whoami` ends with "since <now>", so compare it without the time.
+    assert_eq!((without_since(&o.stdout), stderr(&o).as_str()), (without_since(&whoami.stdout), ""));
     e.forget_cache();
     assert_eq!(stderr(&e.quiver(Some(&me), &[], &["lab", "list", "--json"])), "");
 
