@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 pub mod detail;
 pub mod downloads;
 pub mod perf;
+pub mod moonlight;
 pub mod remote;
 pub mod stores;
 
@@ -212,6 +213,7 @@ impl Demo {
             return perf::handle(self, &st, p);
         }
         let req = match remote::handle(self, &st, req)? { Ok(v) => return Ok(v), Err(req) => req };
+        let req = match moonlight::handle(self, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = stores::handle(self, &mut st, &req)? {
             return Ok(v);
         }
