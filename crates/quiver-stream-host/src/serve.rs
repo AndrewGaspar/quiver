@@ -379,7 +379,24 @@ impl Serve {
                     }
                 }
                 Got::HostControl(Some(c)) => {
-                    self.host_control(&c);
+                    if let (Control::HostStats(s), true) = (&c, self.stats.enabled()) {
+                        // Under the netlab: the transport's own view alongside.
+                        if let Ok(n) = sess.stats().await {
+                            let mut extra: BTreeMap<String, f64> = [("target_kbps".to_string(), self.target_kbps as f64)].into();
+                            extra.insert("budget_kbps".into(), n.budget_kbps as f64);
+                            extra.insert("acked_kbps".into(), n.acked_kbps.unwrap_or(0) as f64);
+                            extra.insert("loss".into(), n.loss as f64);
+                            extra.insert("loss_baseline".into(), n.loss_baseline as f64);
+                            extra.insert("fec_ratio".into(), n.fec_ratio as f64);
+                            extra.insert("pacer_delay_us".into(), n.pacer_delay_us as f64);
+                            extra.insert("overuses".into(), n.overuses as f64);
+                            extra.insert("resends".into(), n.resends as f64);
+                            extra.insert("rtt_us".into(), n.rtt_us.unwrap_or(0) as f64);
+                            self.stats.host(s, &extra);
+                        }
+                    } else {
+                        self.host_control(&c);
+                    }
                     if hello {
                         let _ = sess.send_control(c);
                     }

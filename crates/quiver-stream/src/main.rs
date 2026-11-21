@@ -140,6 +140,9 @@ enum Cmd {
         /// Never NACK missing shards (FEC only).
         #[arg(long)]
         no_nack: bool,
+        /// After a later frame starts arriving, how long to wait for an incomplete one (µs).
+        #[arg(long)]
+        reorder_slack_us: Option<u64>,
     },
     /// What this machine can decode and show: the `ClientCaps` a Hello or `StartStream`
     /// carries (decoders, the display, pads), as JSON.
@@ -223,11 +226,14 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
-        Cmd::Connect { windowed, size, pacing, present_mode, decoder, stats, no_pads, no_audio, measure, seconds, intro, no_nack } => {
+        Cmd::Connect { windowed, size, pacing, present_mode, decoder, stats, no_pads, no_audio, measure, seconds, intro, no_nack, reorder_slack_us } => {
             let mut line = String::new();
             std::io::stdin().read_line(&mut line)?;
             let spec = net::ConnectSpec::parse(&line)?;
             let mut opts = quiver_stream_net::ClientOpts::default();
+            if let Some(s) = reorder_slack_us {
+                opts.video.reorder_slack_us = s;
+            }
             if no_nack {
                 opts.nack_max_wait_us = None;
             }

@@ -10,7 +10,13 @@
 //!   last 20 points (the *trendline*); its slope, scaled, is compared with an adaptive
 //!   threshold. A rising slope is overuse: a queue is building. An AIMD controller then
 //!   cuts the rate to 0.85 × the rate that actually arrived, and otherwise raises it: by 8 %
-//!   a second when far from the last known capacity, by 4 % a second near it.
+//!   a second when far from the last known capacity, by 4 % a second near it. A rising
+//!   trend counts only once the delay it built is real queueing: the smoothed delay stands
+//!   more than [`Trendline::QUEUE_FLOOR_MS`] (or four times the path's delay noise) above
+//!   its minimum of the last two seconds. Jitter that delays a run of packets and then lets
+//!   them through (a Wi-Fi retry, netem's in-order jitter) makes short steep slopes that GCC's
+//!   detector alone reads as overuse; under the netlab's `tailscale-relay` (no loss, ±6 ms)
+//!   that cut the rate to a quarter of the link, three times a second.
 //! - **Loss-based.** Loss above the path's own baseline (random Wi-Fi loss, which FEC
 //!   handles, is not congestion) of more than 10 % cuts the rate by half the loss; under 2 %
 //!   excess, the cap lifts.
@@ -172,6 +178,11 @@ struct Trendline {
     time_over: f64,
     over_count: u32,
     usage: Usage,
+    /// The smoothed delay over the last [`Trendline::FLOOR_WINDOW_US`], for the queue it
+    /// stands above its minimum.
+    recent: VecDeque<(Micros, f64)>,
+    /// The mean size of one group's delay change, ms: the path's delay noise.
+    noise: f64,
 }
 
 impl Default for Trendline {
@@ -188,6 +199,8 @@ impl Default for Trendline {
             time_over: -1.0,
             over_count: 0,
             usage: Usage::Normal,
+            recent: VecDeque::new(),
+            noise: 0.0,
         }
     }
 }
@@ -197,6 +210,16 @@ impl Trendline {
     const SMOOTHING: f64 = 0.9;
     const GAIN: f64 = 4.0;
     const OVERUSE_MS: f64 = 10.0;
+    /// The least queueing delay, ms, that a rising trend must have built to count as
+    /// overuse.
+    pub const QUEUE_FLOOR_MS: f64 = 8.0;
+    const FLOOR_WINDOW_US: Micros = 2_000_000;
+
+    /// How far the smoothed delay stands above its recent minimum, ms.
+    fn queue_ms(&self) -> f64 {
+        let min = self.recent.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+        if min.is_finite() { self.smoothed - min } else { 0.0 }
+    }
 
     /// One group delta, in µs. Returns the detector's state after it.
     fn update(&mut self, send_delta: f64, arrival_delta: f64, arrival: Micros) -> Usage {
@@ -205,6 +228,11 @@ impl Trendline {
         let first = *self.first_arrival.get_or_insert(arrival);
         self.accumulated += delta_ms;
         self.smoothed = Self::SMOOTHING * self.smoothed + (1.0 - Self::SMOOTHING) * self.accumulated;
+        self.noise += (delta_ms.abs() - self.noise) / 32.0;
+        self.recent.push_back((arrival, self.smoothed));
+        while self.recent.front().is_some_and(|r| r.0 + Self::FLOOR_WINDOW_US < arrival) {
+            self.recent.pop_front();
+        }
         self.window.push_back(((arrival - first) as f64 / 1000.0, self.smoothed));
         if self.window.len() > Self::WINDOW {
             self.window.pop_front();
@@ -227,7 +255,8 @@ impl Trendline {
                 self.time_over += send_delta_ms;
             }
             self.over_count += 1;
-            if self.time_over > Self::OVERUSE_MS && self.over_count > 1 && trend >= self.prev_trend {
+            let queued = self.queue_ms() > Self::QUEUE_FLOOR_MS.max(4.0 * self.noise);
+            if self.time_over > Self::OVERUSE_MS && self.over_count > 1 && trend >= self.prev_trend && queued {
                 self.time_over = 0.0;
                 self.over_count = 0;
                 self.usage = Usage::Over;
