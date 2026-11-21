@@ -95,6 +95,22 @@ pub(super) fn handle(demo: &Demo, st: &State, req: Request) -> Result<std::resul
             .collect();
         return Ok(Ok(Value::Array(q)));
     }
+    // Tower keeps a session of Origins, left a few minutes ago: its card says Resume on Tower.
+    if matches!(req, Request::Streams) {
+        let kept = demo.machine.is_some().then(|| quiver_api::remote::StreamSession {
+            id: "s5a17c0de".into(),
+            target: quiver_api::remote::StreamTarget::Game { game: "ubisoft:3539".into(), profile: None },
+            title: "Assassin's Creed Origins".into(),
+            game: Some("ubisoft:3539".into()),
+            peer: "laptop".into(),
+            state: quiver_api::remote::StreamState::Kept,
+            started_at: Utc::now() - Span::minutes(48),
+            kept_until: Some(Utc::now() + Span::minutes(7)),
+            port: 47998,
+            pid: 4242,
+        });
+        return Ok(Ok(json!(kept.into_iter().collect::<Vec<_>>())));
+    }
     let key = demo as *const Demo as usize;
     let mut all = REMOTE.lock().unwrap();
     let r = all.entry(key).or_insert_with(|| seed(demo.machine.as_deref()));
@@ -169,7 +185,7 @@ pub(super) fn handle(demo: &Demo, st: &State, req: Request) -> Result<std::resul
             }
             Value::Null
         }
-        Request::StartStream { .. } => bail!("streaming isn't implemented yet"),
+        Request::StartStream { .. } => bail!("the demo's machines have no stream host"),
         other => return Ok(Err(other)),
     };
     Ok(Ok(out))

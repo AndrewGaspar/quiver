@@ -23,7 +23,7 @@
 use futures::StreamExt;
 use gpui::Context;
 use quiver_api::downloads::{QueueEntry, QueueState};
-use quiver_api::remote::{PeerInfo, PeerState, RemoteStatus, Role, StartStreamReply};
+use quiver_api::remote::{PeerInfo, PeerState, RemoteStatus, Role, StreamSession, StreamState};
 use quiver_api::{Event, LibraryEntry, Request, Status};
 
 use crate::app::{Cmd, Command, Quiver};
@@ -62,13 +62,15 @@ pub struct Remote {
     pub status: Option<Status>,
     pub library: Vec<LibraryEntry>,
     pub queue: Vec<QueueEntry>,
+    /// Its streams, running or kept for a resume (`Request::Streams`).
+    pub streams: Vec<StreamSession>,
     /// A connection attempt is under way or done (don't start another).
     started: bool,
 }
 
 impl Remote {
     fn new(peer: PeerInfo) -> Remote {
-        Remote { peer, source: None, link: Link::Connecting, status: None, library: Vec::new(), queue: Vec::new(), started: false }
+        Remote { peer, source: None, link: Link::Connecting, status: None, library: Vec::new(), queue: Vec::new(), streams: Vec::new(), started: false }
     }
 
     pub fn id(&self) -> &str {
@@ -127,6 +129,8 @@ pub struct MachinesUi {
     pending_open: Option<Gid>,
     /// Settings → Machines (`ui/settings/machines.rs`).
     pub settings: crate::ui::settings::machines::MachinesSettings,
+    /// A stream starting from here: the launch splash (`streaming.rs`).
+    pub launch: Option<crate::streaming::StreamLaunch>,
 }
 
 impl MachinesUi {
@@ -175,9 +179,9 @@ pub enum MachineCmd {
     InstallOn(Gid, Option<usize>),
 }
 
-/// A stand-in for the client's capabilities until the stream client (`quiver-stream`)
-/// reports its own: the window's size, 60 Hz, stereo audio, no hardware decoder listed.
-fn caps(viewport: (f32, f32)) -> quiver_api::remote::ClientCaps {
+/// A stand-in for the client's capabilities when the stream client (`quiver-stream caps`)
+/// can't say: the window's size, 60 Hz, stereo audio, no hardware decoder listed.
+pub fn window_caps(viewport: (f32, f32)) -> quiver_api::remote::ClientCaps {
     quiver_api::remote::ClientCaps {
         decoders: Vec::new(),
         display: quiver_stream_proto::DisplayCaps {
@@ -315,6 +319,19 @@ impl Quiver {
             }
         });
         self.machine_queue(id, cx);
+        self.machine_streams(id, cx);
+    }
+
+    /// Read a paired server's streams (the cards' Streaming and Resume on …).
+    pub(crate) fn machine_streams(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(source) = self.mx.remote(id).and_then(|r| r.source.clone()) else { return };
+        let i = id.to_owned();
+        self.call_on::<Vec<StreamSession>, _>(source, Request::Streams, cx, move |this, r, cx| {
+            if let (Ok(s), Some(m)) = (r, this.mx.remote_mut(&i)) {
+                m.streams = s;
+                cx.notify();
+            }
+        });
     }
 
     /// Read a paired machine's queue again (after a change made from here).
@@ -393,6 +410,7 @@ impl Quiver {
             }
             Event::LibraryChanged | Event::GameStarted { .. } | Event::GameStopped { .. } => self.machine_load(id, cx),
             Event::Job(_) => self.machine_queue(id, cx),
+            Event::StreamsChanged => self.machine_streams(id, cx),
             _ => {}
         }
         if self.mx.view == View::Machine(id.to_owned()) {
@@ -605,6 +623,14 @@ impl Quiver {
         if g.running() {
             return None;
         }
+        // A stream of it there: resume it (or take it over, from this machine).
+        if let Some((k, s)) = self.stream_session(g) {
+            let name = self.mx.remotes[k].name();
+            return Some(match s.state {
+                StreamState::Kept => (format!("Resume on {name}"), Icon::Cast),
+                StreamState::Starting | StreamState::Streaming => (format!("Streaming from {name}"), Icon::Cast),
+            });
+        }
         // Still downloading here, ready there: stream it meanwhile.
         if let Some(k) = self.play_target(g) {
             return Some((format!("Stream from {}", self.mx.remotes[k].name()), Icon::Cast));
@@ -628,6 +654,10 @@ impl Quiver {
         if g.running() || g.installing().is_some() || g.queued() {
             return false;
         }
+        if let Some((k, _)) = self.stream_session(&g) {
+            self.stream_from(id, k, cx);
+            return true;
+        }
         if let Some(k) = self.play_target(&g) {
             self.stream_from(id, k, cx);
             return true;
@@ -640,25 +670,7 @@ impl Quiver {
         false
     }
 
-    /// Ask paired server `k` to stream a game here (`StartStream`). The stream client comes
-    /// with the integration; until then its answer (or error) shows as a toast.
-    pub fn stream_from(&mut self, id: Gid, k: usize, cx: &mut Context<Self>) {
-        let Some(r) = self.mx.remotes.get(k) else { return };
-        let (machine, name) = (r.peer.id.clone(), r.peer.name.clone());
-        let Some(source) = r.source.clone() else {
-            return self.show_toast(format!("{name} isn't connected"), cx);
-        };
-        self.remember_play_on(id, &machine);
-        let target = quiver_api::remote::StreamTarget::Game { game: id.0.to_string(), profile: None };
-        let req = Request::StartStream { target, prefs: Default::default(), caps: caps(self.viewport) };
-        let game = self.game_name(id);
-        self.call_on::<StartStreamReply, _>(source, req, cx, move |this, r, cx| match r {
-            Ok(s) => this.show_toast(format!("{} is ready to stream {game} ({})", s.host_name, s.ticket.addr), cx),
-            Err(e) => this.toast_for(format!("Stream from {name}: {}", err_text(&e)).into(), true, 7000, cx),
-        });
-    }
-
-    fn remember_play_on(&mut self, id: Gid, choice: &str) {
+    pub(crate) fn remember_play_on(&mut self, id: Gid, choice: &str) {
         let key = id.to_string();
         if self.stereo.prefs.play_on.get(&key).map(String::as_str) == Some(choice) {
             return;

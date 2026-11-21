@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 quiver-stream-proto.workspace = true
+quiver-stream-net.workspace = true
+tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 libc.workspace = true

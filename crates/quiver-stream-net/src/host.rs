@@ -38,6 +38,9 @@ pub struct HostOpts {
     /// Probe the path at the start (and after a migration) to reach the rate quickly.
     pub probe: bool,
     /// The share of the frame interval a frame's datagrams are spread over (0.05..=1.0).
+    /// Measured under the netlab at 1440p120 (~100 Mbit/s): 0.12 saved 0.5 ms of median
+    /// latency over 0.25 on lan-wired and wifi6-good and made the tail burstier; 0.6 didn't
+    /// lift the rate on a jittery 40 Mbit/s path. 0.25 stays.
     pub pacing_fraction: f32,
     /// Never pace faster than this, kbit/s, whatever the frame size.
     pub max_pacing_kbps: u32,
@@ -51,7 +54,10 @@ pub struct HostOpts {
     pub fec_max_ratio: f64,
     /// At least this many recovery shards a frame, even on a clean path.
     pub fec_min_parity: usize,
-    /// Plan FEC for the measured loss times this, plus 0.2 %.
+    /// Plan FEC for the measured loss times this, plus 0.2 %. Loss comes in bursts (Wi-Fi,
+    /// cellular), so a frame sees more than the average: under the netlab, 2.5 rather than
+    /// 1.25 lost a third fewer frames on wifi-congested and cafe, and skipped a quarter as many
+    /// waiting for recovery, for 4-5 % more FEC on those paths and none on clean ones.
     pub fec_loss_margin: f64,
     /// Answer the client's NACKs from the last 200 ms of frames.
     pub answer_nacks: bool,
@@ -83,7 +89,7 @@ impl Default for HostOpts {
             nack_rtt_us: 5_000,
             fec_max_ratio: 0.5,
             fec_min_parity: 1,
-            fec_loss_margin: 1.25,
+            fec_loss_margin: 2.5,
             answer_nacks: true,
             audio_redundancy: 2,
             mtu_probe: true,

@@ -165,6 +165,7 @@ fn handle_with(demo: &Demo, st: &mut State, g: &mut Global, req: &Request) -> Re
             proton_default: Some("GE-Proton10-26".into()),
             broker: "127.0.0.1:47810".into(),
             accounts: g.accounts.clone(),
+            streams: Vec::new(),
         }),
         // Ubisoft games the signed-in accounts own, and other stores' games whatever
         // Ubisoft's state (as quiverd: a store that fails doesn't hide the others).

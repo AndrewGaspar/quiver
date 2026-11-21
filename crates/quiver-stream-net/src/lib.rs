@@ -64,6 +64,7 @@
 //!   (trendline), loss above the path's baseline, and probing at the start ([`bwe`]).
 //! - **Clock sync** from pings: the RTT, and the host-minus-client clock offset from the
 //!   least-queued recent sample ([`clock`]).
+//! - **Under the netlab**: [`netlab`] writes the stats lines `quiver-netlab run` reads.
 //! - **Testing**: [`sim`] has a userspace link model (loss, bursts, delay, jitter,
 //!   reordering, duplication, a bottleneck with a queue), a virtual-time harness for the
 //!   cores, a real-time loopback relay, and a synthetic encoder.
@@ -84,6 +85,7 @@ pub mod feedback;
 pub mod host;
 pub mod input;
 pub mod io;
+pub mod netlab;
 pub mod pacer;
 pub mod path;
 pub mod session;

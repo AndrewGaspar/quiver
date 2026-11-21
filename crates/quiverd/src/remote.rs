@@ -67,6 +67,8 @@ pub(crate) fn code_of(e: &anyhow::Error) -> Option<String> {
 #[derive(Clone)]
 pub(crate) struct RemotePeer {
     pub name: String,
+    /// This machine's address the connection came in on (a stream's ticket names it).
+    pub local: Option<std::net::IpAddr>,
     /// Flips to true when the connection must close (revoked, listener off).
     pub kick: watch::Receiver<bool>,
 }
@@ -150,6 +152,14 @@ impl Remote {
         let i = Arc::new(Identity::load_or_create(&self.dir)?);
         *slot = Some(i.clone());
         Ok(i)
+    }
+
+    /// This machine's name (its identity's; the hostname until it has one).
+    pub fn machine_name(&self) -> String {
+        match self.identity() {
+            Ok(i) => i.name().to_owned(),
+            Err(_) => std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "this machine".into()),
+        }
     }
 
     /// The listening socket's fd, for handing to the next build.
@@ -346,7 +356,7 @@ async fn serve_incoming_inner(daemon: Arc<Daemon>, acceptor: quiver_remote::tls:
         daemon.emit(Event::PeerOnline { id: peer.id.clone(), name: peer.name.clone() });
     }
     tracing::info!("remote: {} ({}) connected", peer.name, peer.id);
-    let ctx = RemotePeer { name: peer.name.clone(), kick: kick_rx };
+    let ctx = RemotePeer { name: peer.name.clone(), local, kick: kick_rx };
     crate::serve_conn(daemon.clone(), stream, Some(ctx)).await;
     let last = {
         let mut conns = daemon.remote.conns.lock().unwrap();
@@ -640,9 +650,6 @@ pub(crate) async fn handle(daemon: &Arc<Daemon>, source: &str, req: Request) -> 
             let mine = r.identity().map(|i| i.id()).unwrap_or_default();
             let found = tokio::task::spawn_blocking(move || quiver_remote::discovery::browse(wait)).await??;
             json!(found.into_iter().filter(|d| d.id != mine).collect::<Vec<_>>())
-        }
-        Request::StartStream { .. } => {
-            return Err(Coded { code: remote::NOT_IMPLEMENTED, error: "streaming isn't implemented yet".into() }.into());
         }
         other => bail!("not a remote request: {other:?}"),
     })

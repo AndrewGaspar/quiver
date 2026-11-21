@@ -108,3 +108,29 @@ pub fn run(fps: u32) -> Result<()> {
         }
     }
 }
+
+/// The placeholder a [`crate::Target::Display`] runs until the program someone else starts
+/// shows up (`quiver-stream-host --placeholder`): it paints a black full-screen window for a
+/// moment, so the display's screencast starts and capture connects, then removes it and waits
+/// (keeping gamescope up) until the stream ends. The program's own window is then the only
+/// one, and gamescope shows it.
+pub fn placeholder() -> Result<()> {
+    let (conn, screen) = x11rb::connect(None).context("connect to $DISPLAY")?;
+    let s = conn.setup().roots[screen].clone();
+    let win = conn.generate_id()?;
+    conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, s.root, 0, 0, s.width_in_pixels, s.height_in_pixels, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new().background_pixel(s.black_pixel))?;
+    conn.change_property8(xproto::PropMode::REPLACE, win, xproto::AtomEnum::WM_NAME, xproto::AtomEnum::STRING, b"quiver-stream placeholder")?;
+    conn.map_window(win)?;
+    let gc = conn.generate_id()?;
+    conn.create_gc(gc, win, &CreateGCAux::new().foreground(s.black_pixel))?;
+    for _ in 0..60 {
+        conn.poly_fill_rectangle(win, gc, &[Rectangle { x: 0, y: 0, width: s.width_in_pixels, height: s.height_in_pixels }])?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    conn.destroy_window(win)?;
+    conn.flush()?;
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}

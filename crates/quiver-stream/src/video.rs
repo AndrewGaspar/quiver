@@ -112,6 +112,9 @@ pub struct Shared {
     pub measure: Option<Mutex<MeasureLog>>,
     pub out: Sender<Outgoing>,
     pub frames_shown: AtomicU64,
+    /// Why the video pipeline can't go on (the Vulkan device was lost): the stream ends with
+    /// this as its error.
+    pub fatal: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -133,6 +136,7 @@ impl Shared {
             measure: measure.then(|| Mutex::new(MeasureLog::default())),
             out,
             frames_shown: AtomicU64::new(0),
+            fatal: Mutex::new(None),
         })
     }
 
@@ -332,6 +336,14 @@ fn decode_loop(
         for mut pic in pics {
             let c = match conv.convert(&mut pic, hdr, current.color.full_range) {
                 Ok(c) => c,
+                Err(e) if format!("{e:#}").contains("device has been lost") => {
+                    // Every backend shares the device, so no fallback can help: end the stream
+                    // with the reason rather than leave a window that never shows a frame.
+                    warn!("the GPU device was lost decoding with {:?}", vd.backend());
+                    *shared.fatal.lock().unwrap() = Some(format!("the GPU device was lost (decoding with {:?})", vd.backend()));
+                    shared.stop();
+                    return;
+                }
                 Err(e) => {
                     warn!("showing a {:?} picture: {e:#}", vd.backend());
                     drop(pic);
@@ -468,6 +480,7 @@ fn present_loop(
     waiter: Sender<WaitMsg>,
 ) -> Result<()> {
     let mut last: Option<Shown> = None;
+    let mut last_shown_at: Option<Micros> = None;
     let flush = |waiter: &Sender<WaitMsg>| {
         if gpu.present_wait.is_some() {
             let (t, r) = crossbeam_channel::bounded(1);
@@ -540,6 +553,8 @@ fn present_loop(
         };
         shared.frames_shown.fetch_add(1, Ordering::Relaxed);
         shared.stats.window.lock().unwrap().frames_shown += 1;
+        let interval = shared.config.lock().unwrap().as_ref().map_or(0, |c| 1_000_000_000 / c.refresh_mhz.max(1) as u64);
+        shared.stats.shown(&mut last_shown_at, now_micros(), interval);
         if let Some(m) = &shared.measure {
             m.lock().unwrap().shown += 1;
         }

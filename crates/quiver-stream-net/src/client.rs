@@ -50,6 +50,12 @@ impl Default for ClientOpts {
     }
 }
 
+/// How long to wait for a frame a later one overtook: three times the frames' transit jitter,
+/// at least `base` and at most 12 ms (beyond that the frames behind it wait too long).
+pub fn reorder_slack(base: Micros, jitter_us: f64) -> Micros {
+    ((3.0 * jitter_us) as Micros).clamp(base, base.max(12_000))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     Connected,
@@ -313,6 +319,11 @@ impl ClientCore {
             let transit = done as i64 - encoded as i64;
             if let Some(last) = self.last_transit.replace(transit) {
                 self.jitter += ((transit - last).abs() as f64 - self.jitter) / 16.0;
+                // The wait for a frame overtaken by the next follows the path's jitter: on a
+                // jittery path a frame's last shards trail the next frame's first ones without
+                // being lost (measured under the netlab's tailscale-relay: a fixed 1.5 ms gave
+                // up on 1-5 whole frames a second with no packet lost).
+                self.video.opts.reorder_slack_us = reorder_slack(self.opts.video.reorder_slack_us, self.jitter);
             }
             if let Some(off) = self.clock.offset() {
                 let network = done as i64 - (encoded as i64 - off);
@@ -551,4 +562,14 @@ fn median(v: &mut [u32]) -> u32 {
     }
     let mid = v.len() / 2;
     *v.select_nth_unstable(mid).1
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reorder_slack_follows_jitter() {
+        assert_eq!(super::reorder_slack(1_500, 100.0), 1_500);
+        assert_eq!(super::reorder_slack(1_500, 2_000.0), 6_000);
+        assert_eq!(super::reorder_slack(1_500, 50_000.0), 12_000);
+    }
 }

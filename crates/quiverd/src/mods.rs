@@ -140,6 +140,8 @@ pub(crate) fn launch_plan(game: &launcher::Game, profile: Option<&str>, source: 
     }
     let mut plan = store.plan(profile.as_deref())?;
     plan.api.warnings.extend(warning.clone());
+    // Streamed: into the stream host's display (`streams::start`).
+    plan.stream = crate::streams::take_launch(game.game_ref());
     Ok((plan, warning))
 }
 

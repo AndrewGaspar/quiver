@@ -17,6 +17,8 @@ mod localsessions;
 mod options;
 mod moonlight;
 mod remote;
+mod streams;
+mod testgames;
 mod tweaks;
 mod savestores;
 mod setup;
@@ -128,6 +130,8 @@ struct Daemon {
     sight: notices::SightState,
     /// Remote play's control plane: the listener, pairing, peers (`remote`).
     remote: remote::Remote,
+    /// The streams this machine serves (`streams`).
+    streams: streams::Streams,
     /// Moonlight compatibility: the GameStream server, off by default (`moonlight`).
     moonlight: moonlight::Moonlight,
 }
@@ -379,6 +383,7 @@ impl Daemon {
                     proton_default: self.cfg.proton.file_name().map(|n| n.to_string_lossy().into_owned()),
                     broker: self.broker.clone(),
                     accounts,
+                    streams: self.streams.list(),
                 })
             }
             // The person's, here or from a paired machine (the password and code then came
@@ -487,6 +492,11 @@ impl Daemon {
                     JobKind::Import => bail!("imports can't be cancelled"),
                 }
                 self.log_activity(source, format!("cancelled job {job_id} ({}){}", job.name, if discard { ", discarding files" } else { "" }), job.game.as_ubisoft());
+                Value::Null
+            }
+            Request::Stop { game } if testgames::find(game.0).is_some() => {
+                let g = testgames::find(game.0).context("test game")?;
+                launcher::stop(&self.cfg, &g).await?;
                 Value::Null
             }
             Request::Stop { game } if epic::is_installed(self, game.0) => {
@@ -677,8 +687,13 @@ impl Daemon {
             | Request::RemoteRevoke { .. }
             | Request::RemoteRename { .. }
             | Request::RemoteWake { .. }
-            | Request::RemoteDiscover { .. }
-            | Request::StartStream { .. }) => remote::handle(self, source, r).await?,
+            | Request::RemoteDiscover { .. }) => remote::handle(self, source, r).await?,
+            Request::StartStream { target, prefs, caps } => json!(streams::start(self, source, None, target, prefs, caps).await?),
+            Request::Streams => json!(self.streams.list()),
+            Request::StopStream { id } => {
+                streams::stop_request(self, source, &id).await?;
+                Value::Null
+            }
             r @ (Request::MoonlightStatus
             | Request::MoonlightEnable { .. }
             | Request::MoonlightDisable
@@ -941,6 +956,7 @@ fn gated(req: &Request) -> Option<String> {
         | Request::Sight(quiver_api::sight::SightRequest::Status)
         | Request::RemoteStatus
         | Request::RemotePeers
+        | Request::Streams
         | Request::Accounts(quiver_api::accounts::AccountsRequest::Local | quiver_api::accounts::AccountsRequest::Presence { .. } | quiver_api::accounts::AccountsRequest::Announce(_)) => None,
         r => Some(
             serde_json::to_value(r)
@@ -1072,6 +1088,7 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
         };
         let daemon = daemon.clone();
         let tx = tx.clone();
+        let remote_peer = remote.clone();
         tokio::spawn(async move {
             let _pass = pass;
             let result = match env.request {
@@ -1079,6 +1096,10 @@ async fn serve_conn<S: AsyncRead + AsyncWrite + Send + 'static>(daemon: Arc<Daem
                 Request::Perf(req) => daemon.handle_perf(&env.source, Some(perf::ConnCtx { id: conn_id, tx: tx.clone() }), req).await,
                 // So do holds without a time limit.
                 Request::Daemon(req) => daemon.handle_daemon(&env.source, Some(conn_id), req),
+                // A stream's ticket names the address this connection came in on.
+                Request::StartStream { target, prefs, caps } => {
+                    streams::start(&daemon, &env.source, remote_peer, target, prefs, caps).await.map(|r| serde_json::json!(r))
+                }
                 req => daemon.handle(&env.source, req).await,
             };
             let reply = match result {
@@ -1266,6 +1287,7 @@ async fn main() -> Result<()> {
         pending_2fa_at: Mutex::new(None),
         sight: notices::SightState::default(),
         remote: remote::Remote::new(),
+        streams: streams::Streams::default(),
         moonlight: moonlight::Moonlight::new(),
     });
     mod_sink.attach(&daemon);
@@ -1276,6 +1298,7 @@ async fn main() -> Result<()> {
     epicgame::start(&daemon);
     sightinfo::start(&daemon);
     remote::start(&daemon, inherited.remote);
+    streams::readopt(&daemon);
     accounts::announcer(&daemon);
     moonlight::start(&daemon);
     daemon.start_perf_steam_sweep();

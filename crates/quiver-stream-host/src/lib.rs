@@ -9,6 +9,7 @@
 //! | Piece | Module |
 //! |---|---|
 //! | the async API | [`host`] |
+//! | behind the transport, for quiverd (`serve`) | [`serve`] |
 //! | the test pattern (and its tone) | [`pattern`], [`tone`] |
 //! | NVENC, CUDA | [`nvenc`], [`cuda`], [`recovery`] |
 //! | the encode thread | [`video`] |
@@ -98,6 +99,7 @@ pub mod pattern;
 pub mod recovery;
 pub mod sandbox;
 pub mod seat;
+pub mod serve;
 pub mod stats;
 pub mod testwin;
 pub mod tone;

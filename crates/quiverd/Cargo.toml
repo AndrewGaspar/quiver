@@ -14,6 +14,7 @@ path = "src/main.rs"
 quiver-core.workspace = true
 quiver-api.workspace = true
 quiver-remote.workspace = true
+quiver-stream-proto.workspace = true
 # Moonlight compatibility (`moonlight.rs`): the GameStream server, streaming from the host.
 quiver-gamestream = { path = "../quiver-gamestream", features = ["stream-host"] }
 quiver-stream-host = { path = "../quiver-stream-host" }

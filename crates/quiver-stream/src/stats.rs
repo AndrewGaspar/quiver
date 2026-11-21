@@ -93,6 +93,9 @@ pub struct Window {
     /// Picture ready to on screen (present wait), or to the present call.
     pub present: Samples,
     pub capture_to_present: Samples,
+    /// Presentation gaps: new frames shown more than 2.5 frame intervals apart.
+    pub frame_gaps: u32,
+    pub max_gap_us: u64,
     pub packets_received: u32,
     pub packets_lost: u32,
     pub packets_recovered: u32,
@@ -121,7 +124,60 @@ pub struct Stats {
     pub window: Mutex<Window>,
 }
 
+/// One period's numbers: the host's [`ClientStats`], the chip's, and the extra ones a netlab
+/// run reports.
+#[derive(Debug, Clone, Default)]
+pub struct Period {
+    pub client: ClientStats,
+    pub fps: f32,
+    pub kbps: u32,
+    pub loss_percent: f32,
+    pub latency_p99_us: u64,
+    pub frame_gaps: u32,
+    pub max_gap_us: u64,
+}
+
+impl Period {
+    /// The `extra` numbers of a netlab stats line (`frame_gaps`, `max_gap_ms`, `recv_kbps`,
+    /// `latency_p99_us`).
+    pub fn netlab_extra(&self) -> std::collections::BTreeMap<String, f64> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("frame_gaps".into(), self.frame_gaps as f64);
+        m.insert("max_gap_ms".into(), self.max_gap_us as f64 / 1000.0);
+        m.insert("recv_kbps".into(), self.kbps as f64);
+        if self.latency_p99_us > 0 {
+            m.insert("latency_p99_us".into(), self.latency_p99_us as f64);
+        }
+        m
+    }
+}
+
 impl Stats {
+    /// Note that a new frame was shown at `at` (our clock), `interval_us` after the stream's
+    /// frame interval says the next one is due: a gap when frames are more than 2.5
+    /// intervals apart. `last` is the previous one's time, kept by the caller.
+    pub fn shown(&self, last: &mut Option<Micros>, at: Micros, interval_us: u64) {
+        if let Some(prev) = last.replace(at) {
+            let d = at.saturating_sub(prev);
+            if interval_us > 0 && d * 2 > interval_us * 5 {
+                let mut w = self.window.lock().unwrap();
+                w.frame_gaps += 1;
+                w.max_gap_us = w.max_gap_us.max(d);
+            }
+        }
+    }
+
+    /// Close the period of `secs` seconds.
+    pub fn period(&self, secs: f32, rtt_us: Option<u32>) -> Period {
+        let p99 = self.window.lock().unwrap().capture_to_present.percentile(99);
+        let (gaps, max_gap) = {
+            let w = self.window.lock().unwrap();
+            (w.frame_gaps, w.max_gap_us)
+        };
+        let (client, fps, kbps, loss_percent) = self.take(secs, rtt_us);
+        Period { client, fps, kbps, loss_percent, latency_p99_us: p99, frame_gaps: gaps, max_gap_us: max_gap }
+    }
+
     /// Close the period of `secs` seconds: the ClientStats for the host and the chip's numbers.
     pub fn take(&self, secs: f32, rtt_us: Option<u32>) -> (ClientStats, f32, u32, f32) {
         let w = std::mem::take(&mut *self.window.lock().unwrap());
@@ -164,6 +220,19 @@ mod tests {
         assert_eq!(s.median(), 51);
         assert_eq!(s.percentile(99), 100);
         assert_eq!(s.percentile(100), 100);
+    }
+
+    #[test]
+    fn gaps_are_frames_more_than_two_and_a_half_intervals_apart() {
+        let s = Stats::default();
+        let mut last = None;
+        for at in [0, 8_333, 16_666, 37_000, 45_000, 100_000] {
+            s.shown(&mut last, at, 8_333);
+        }
+        let p = s.period(1.0, None);
+        assert_eq!((p.frame_gaps, p.max_gap_us), (1, 55_000), "20.3 ms is under 2.5 intervals; 55 ms isn't");
+        assert_eq!(p.netlab_extra()["max_gap_ms"], 55.0);
+        assert_eq!(s.period(1.0, None).frame_gaps, 0, "a new period starts empty");
     }
 
     #[test]
