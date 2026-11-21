@@ -545,6 +545,12 @@ pub(crate) fn take_inherited() -> Inherited {
     out
 }
 
+/// A session's holders for "waiting on": a lab holder as the instance and its owner
+/// (`lab origins, codex:pharos-xreal`, from `lab_word`), else as it is.
+fn holders_in_words(holders: &[String], lab_word: impl Fn() -> Option<String>) -> String {
+    holders.iter().map(|h| if h == quiver_api::lab::LAB_HOLDER { lab_word().unwrap_or_else(|| h.clone()) } else { h.clone() }).collect::<Vec<_>>().join(", ")
+}
+
 // ---------------------------------------------------------------------------------------
 // The daemon's side
 
@@ -572,10 +578,14 @@ impl crate::Daemon {
         };
         // Steam games played through `quiver steam-run` count as running games too.
         let local = self.local.list();
+        // A lab instance's session names the instance and who's using it, so whoever is
+        // waiting for the restart knows whom to ask (design/LAB.md "Owners").
+        let lab = quiver_core::lab::Lab::new(quiver_core::lab::root(&self.cfg.prefixes));
+        let holders = |s: &quiver_api::ActiveSession| holders_in_words(&s.holders, || quiver_core::lab::owner::describe_running(&lab, &quiver_api::GameRef::ubisoft(s.product_id)));
         let mut busy = Busy {
             sessions: sessions
                 .iter()
-                .map(|s| format!("{} ({})", name(s.product_id), s.holders.join(", ")))
+                .map(|s| format!("{} ({})", name(s.product_id), holders(s)))
                 .chain(local.iter().map(|s| format!("{} ({})", s.game_ref(), s.holders.join(", "))))
                 .collect(),
             starting: running.iter().filter(|p| !sessions.iter().any(|s| s.product_id == **p)).map(|p| name(*p)).collect(),
@@ -725,6 +735,20 @@ mod tests {
             let manifest = serde_json::json!({"version": "0.2.0.r9.gabc", "commit": "abc", "files": [{"path": exe}]});
             std::fs::write(self.dir.path().join("installed.json"), manifest.to_string()).unwrap();
         }
+    }
+
+    #[test]
+    fn lab_holders_name_the_instance_and_its_owner() {
+        let h = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let word = || Some("lab origins, codex:pharos-xreal".to_owned());
+        assert_eq!(
+            format!("Assassin's Creed® Origins ({})", holders_in_words(&h(&["lab"]), word)),
+            "Assassin's Creed® Origins (lab origins, codex:pharos-xreal)"
+        );
+        assert_eq!(holders_in_words(&h(&["bridge", "lab"]), word), "bridge, lab origins, codex:pharos-xreal");
+        // No instance found running it: just the holder.
+        assert_eq!(holders_in_words(&h(&["lab"]), || None), "lab");
+        assert_eq!(holders_in_words(&h(&["launcher"]), || panic!("only asked for lab holders")), "launcher");
     }
 
     #[test]
