@@ -15,6 +15,7 @@ mod mods;
 mod omarchy;
 mod perf;
 mod profiles;
+mod moonlight;
 mod remote;
 mod options;
 mod info;
@@ -1246,6 +1247,14 @@ mod tests {
         assert_eq!(c.machine.as_deref(), Some("tower"));
         assert!(matches!(parse(&["remote", "enable", "--listen", "0.0.0.0:47990"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Enable { listen: Some(_) } }));
         assert!(matches!(parse(&["remote", "rename", "Tower"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Rename { second: None, .. } }));
+        use moonlight::MoonlightAction as M;
+        assert!(matches!(
+            parse(&["remote", "moonlight", "enable", "--bind", "tailscale0", "--codec", "hevc"]).unwrap().cmd,
+            Cmd::Remote { action: RemoteAction::Moonlight { action: M::Enable { ref bind, ref codec, everywhere: false } } } if bind == &["tailscale0"] && codec == &["hevc"]
+        ));
+        assert!(matches!(parse(&["remote", "moonlight", "pin", "1234"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Pin { ref pin } } } if pin == "1234"));
+        assert!(matches!(parse(&["remote", "moonlight", "unpair", "roth"]).unwrap().cmd, Cmd::Remote { action: RemoteAction::Moonlight { action: M::Unpair { .. } } }));
+        assert!(parse(&["remote", "moonlight", "enable", "--bind", "x", "--everywhere"]).is_err());
         assert!(parse(&["remote", "add", "tower"]).is_err(), "needs the code");
     }
 
