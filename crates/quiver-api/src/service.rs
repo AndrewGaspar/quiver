@@ -633,6 +633,57 @@ mod tests {
         }
     }
 
+    const SHIPPED_UNIT: &str = include_str!("../../../contrib/quiverd.service");
+    const SHIPPED_SLICE: &str = include_str!("../../../contrib/quiver.slice");
+
+    /// The unit as `packaging/layout.sh` renders it (its ExecStart replaced).
+    fn rendered(exec_start: &str) -> String {
+        SHIPPED_UNIT.lines().map(|l| if l.starts_with("ExecStart=") { format!("ExecStart={exec_start}") } else { l.to_owned() }).collect::<Vec<_>>().join("\n") + "\n"
+    }
+
+    #[test]
+    fn unit_file() {
+        let u = rendered("%h/.local/bin/quiverd");
+        let has = |l: &str| u.lines().any(|x| x == l);
+        for want in [
+            "[Service]",
+            "Type=notify",
+            "ExecStart=%h/.local/bin/quiverd",
+            "Slice=quiver.slice",
+            "Restart=on-failure",
+            "KillMode=process",
+            "WantedBy=default.target",
+        ] {
+            assert!(has(want), "{want} in\n{u}");
+        }
+        assert!(has(&format!("SuccessExitStatus={EXIT_ALREADY_RUNNING}")) && has(&format!("RestartPreventExitStatus={EXIT_ALREADY_RUNNING}")));
+        assert!(!u.contains("PartOf=graphical-session"), "a headless server has no graphical session");
+        assert!(!u.lines().any(|l| l.starts_with("NotifyAccess=") || l.starts_with("WatchdogSec=")), "exec keeps the main pid: the defaults hold");
+        assert_eq!(format!("Slice={SLICE}"), "Slice=quiver.slice");
+        assert!(SHIPPED_SLICE.contains("[Unit]"));
+        // The unit file's own name is the one clients start.
+        assert_eq!(UNIT, "quiverd.service");
+    }
+
+    /// `systemd-analyze --user verify` on the rendered unit and the slice (offline: it loads
+    /// files, starts nothing), where systemd-analyze exists.
+    #[test]
+    fn unit_file_verifies() {
+        let Some(analyze) = Systemd::from_env().tool("systemd-analyze") else {
+            eprintln!("no systemd-analyze; skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("quiverd.service");
+        std::fs::write(&unit, rendered("/usr/bin/true")).unwrap();
+        let slice = dir.path().join("quiver.slice");
+        std::fs::write(&slice, SHIPPED_SLICE).unwrap();
+        let out = Command::new(analyze).args(["--user", "verify"]).arg(&unit).arg(&slice).env("SYSTEMD_UNIT_PATH", format!("{}:", dir.path().display())).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        let ours: Vec<&str> = err.lines().filter(|l| l.contains("quiverd.service") || l.contains("quiver.slice")).collect();
+        assert!(out.status.success() && ours.is_empty(), "{err}");
+    }
+
     #[test]
     fn boot_words() {
         let b = |installed, enabled, linger| BootStatus { installed, enabled, linger, ..Default::default() };
