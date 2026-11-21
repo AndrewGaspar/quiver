@@ -171,7 +171,8 @@ The play-time and achievement reporters run where the game runs.
 | 1 (parallel) | **net**: `quiver-stream-net` with the simulator and benchmarks. **host**: `quiver-stream-host` standalone (`--target game|lab|test-pattern`, writing frames to a file or a channel). **client**: `quiver-stream` standalone (plays an Annex-B/OBU file or a channel, with input capture shown in the overlay). **remote**: `quiver-remote`, `quiver remote enable/pair/…`, the remote API tunnel, the app's machine switcher and merged library. | four agents |
 | 2 | **Integration**: `StartStream` in quiverd spawns the host with a ticket, and the app's Stream button runs `quiver-stream`. End-to-end over loopback on this laptop, streaming a lab instance and then a real game. Latency measured with the stage stamps, plus a photodiode-free check (a frame counter drawn by a test pattern, read back from the client's swapchain). | one agent |
 | 3 | **Accounts**: remote sign-in, Epic exchange-code hand-over, the Ubisoft spike, the account presence UI. **Steam on headless**. | agents, with the person for every sign-in |
-| 4 | VAAPI and Vulkan Video encode, microphone, touch, Wake-on-LAN, a TV-friendly client mode, Moonlight-protocol compatibility (so phones and TVs with Moonlight can connect), and a remote desktop target. | later |
+| 1b | **Moonlight compatibility**: `quiver-gamestream`, a GameStream-protocol front end over the same host (pairing, app list, RTSP, the control stream, RTP video and audio with Moonlight's FEC). It lets TVs and phones connect early. The person decided this on 2026-11-21; Quiver's own client stays the priority. Off by default, with its own switch. Clean-room: Sunshine and moonlight-common-c are GPL-3.0. | one agent |
+| 4 | VAAPI and Vulkan Video encode, microphone, touch, Wake-on-LAN, a TV-friendly client mode, and a remote desktop target. | later |
 
 ## 8. Testing on one machine
 
@@ -188,6 +189,4 @@ the person's games, and the lab limits apply to streams of lab instances too.
 
 ## 9. Not decided (the person's call)
 
-- Whether Moonlight compatibility (phase 4) is worth doing early, so a TV or phone can connect
-  before a Quiver client exists for them.
 - Reachability: are the LAN and Tailscale enough, or is NAT traversal or a relay wanted?
