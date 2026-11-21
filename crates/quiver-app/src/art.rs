@@ -31,6 +31,10 @@ pub enum ArtSource {
     Url(String),
     /// An image file on this machine: one the user chose, or Steam's library cache.
     Local(PathBuf),
+    /// An image file on a paired machine (its id): Steam's library cache there. Keyed by
+    /// the machine, so a path never resolves to this machine's file of the same name; not
+    /// fetched over the tunnel yet, so the next candidate (a CDN's) shows.
+    Machine(String, PathBuf),
 }
 
 /// Hosts [`ArtSource::Url`] may download from.
@@ -242,6 +246,7 @@ impl Fetcher {
     /// The original file on disk, downloading it first if it isn't cached.
     async fn original(&self, src: &ArtSource) -> Result<PathBuf> {
         match src {
+            ArtSource::Machine(m, p) => bail!("{} is on machine {m}", p.display()),
             ArtSource::Local(p) => {
                 if !p.is_file() {
                     bail!("{} does not exist", p.display());
@@ -283,6 +288,7 @@ impl Fetcher {
                     format!("url-{}", flat.rsplit_once('.').map(|(s, _)| s).unwrap_or(&flat))
                 }
             },
+            ArtSource::Machine(..) => unreachable!("never loaded"),
             ArtSource::Local(p) => {
                 // Key local files on path + mtime, so replacing the file refreshes it.
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -510,6 +516,15 @@ pub fn candidates(entry: &quiver_api::LibraryEntry, custom: Option<&CustomArt>, 
         out.push(Candidate { src, origin: Some(origin) });
     }
     out
+}
+
+/// Make a paired machine's candidates its own: local files are that machine's.
+pub fn on_machine(cands: &mut [Candidate], machine: &str) {
+    for c in cands {
+        if let ArtSource::Local(p) = &c.src {
+            c.src = ArtSource::Machine(machine.to_owned(), p.clone());
+        }
+    }
 }
 
 /// The first candidate's image that hasn't failed (`Loading` while the best untried one

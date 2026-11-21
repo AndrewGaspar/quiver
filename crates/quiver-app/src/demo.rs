@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 pub mod detail;
 pub mod downloads;
 pub mod perf;
+pub mod remote;
 pub mod stores;
 
 use quiver_api::{
@@ -96,6 +97,8 @@ pub struct Demo {
     events: mpsc::UnboundedSender<Event>,
     /// Perf sessions, HUD settings and live updates (`demo/perf.rs`).
     pub perf: perf::DemoPerf,
+    /// A paired demo machine's name (`demo/remote.rs`); `None`: this PC.
+    pub machine: Option<String>,
 }
 
 fn home() -> PathBuf {
@@ -157,9 +160,18 @@ impl Demo {
         Self::start_with(State { global: Some(global::init(true)), ..build_state() })
     }
 
+    /// A paired demo machine (Tower: its own library and download; `demo/remote.rs`).
+    pub fn start_remote(name: &str) -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_on(remote::tower_state(), Some(name.to_owned()))
+    }
+
     fn start_with(state: State) -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
+        Self::start_on(state, None)
+    }
+
+    fn start_on(state: State, machine: Option<String>) -> (Arc<Demo>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let demo = Arc::new(Demo { state: Mutex::new(state), events: tx, perf: perf::DemoPerf::new() });
+        let demo = Arc::new(Demo { state: Mutex::new(state), events: tx, perf: perf::DemoPerf::new(), machine });
         let weak = Arc::downgrade(&demo);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -199,6 +211,7 @@ impl Demo {
         if let Request::Perf(p) = req {
             return perf::handle(self, &st, p);
         }
+        let req = match remote::handle(self, &st, req)? { Ok(v) => return Ok(v), Err(req) => req };
         if let Some(v) = stores::handle(self, &mut st, &req)? {
             return Ok(v);
         }

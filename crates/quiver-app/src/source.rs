@@ -82,6 +82,29 @@ impl Source {
         Ok((Source::Daemon(client), status, events))
     }
 
+    /// A paired machine's quiverd as a source of its own, connected and subscribed
+    /// (design/REMOTE.md §4): `Client::machine` over TLS, with this machine's identity and
+    /// peers. In demo mode, the demo machine: Tower answers, the others can't be reached.
+    pub async fn machine(&self, peer: &quiver_api::remote::PeerInfo) -> Result<(Source, Status, mpsc::UnboundedReceiver<Event>)> {
+        match self {
+            Source::Demo(_) => {
+                if peer.id != crate::demo::remote::TOWER {
+                    anyhow::bail!("{} can't be reached", peer.name);
+                }
+                let (demo, events) = Demo::start_remote(&peer.name);
+                let source = Source::Demo(demo);
+                let status = source.call(Request::Status).await?;
+                Ok((source, status, events))
+            }
+            Source::Daemon(_) => {
+                let client = Client::machine_named(&peer.id, "gui").await?;
+                let status: Status = client.call(Request::Status).await?;
+                let events = client.subscribe().await?;
+                Ok((Source::Daemon(client), status, events))
+            }
+        }
+    }
+
     /// Perf events (`PerfEvent`: subscription updates, perf sessions, HUD changes) from now
     /// on. Subscriptions don't survive a daemon restart: make them again on `Reconnected`.
     pub async fn perf_events(&self) -> Result<mpsc::UnboundedReceiver<quiver_api::perf::PerfEvent>> {

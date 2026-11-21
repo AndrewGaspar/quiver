@@ -151,6 +151,8 @@ pub enum Cmd {
     Global(crate::ui::global::GlobalCmd),
     /// The verify dialog, the welcome flow (`ui/downloads.rs`).
     Downloads(crate::ui::downloads::DlCmd),
+    /// The machine switcher, streaming and installing on another machine (`machines.rs`).
+    Machine(crate::machines::MachineCmd),
 }
 
 pub struct Quiver {
@@ -202,6 +204,8 @@ pub struct Quiver {
     pub tw: crate::ui::game::tweaks::TweaksUi,
     /// The stereo UI (`stereo_ui.rs`): Settings → Display, and the window's packing.
     pub stereo: crate::stereo_ui::StereoUi,
+    /// Paired machines, their clients, and which machines the app shows (`machines.rs`).
+    pub mx: crate::machines::MachinesUi,
 }
 
 impl Quiver {
@@ -246,6 +250,7 @@ impl Quiver {
             perf: Default::default(),
             tw: Default::default(),
             stereo: Default::default(),
+            mx: Default::default(),
         };
         this.connect(cx);
         this.start_theme_watch(cx);
@@ -257,6 +262,7 @@ impl Quiver {
             this.start_demo_script(window, cx);
             this.start_options_demo(window, cx);
             this.start_tweaks_demo(window, cx);
+            this.start_machines_demo(window, cx);
         }
         this
     }
@@ -303,7 +309,7 @@ impl Quiver {
                 .flatten();
             let Some(mut events) = events else { return };
             while let Some(e) = events.next().await {
-                if this.update(cx, |this, cx| this.on_event(e, cx)).is_err() {
+                if this.update(cx, |this, cx| this.on_local_event(e, cx)).is_err() {
                     break;
                 }
             }
@@ -319,12 +325,13 @@ impl Quiver {
 
     /// Connected: the library opens whether or not a Ubisoft account is signed in (other
     /// stores' games show either way; the library offers Ubisoft's sign-in).
-    fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
+    pub(crate) fn on_status(&mut self, status: Status, cx: &mut Context<Self>) {
         self.status = Some(status);
         self.conn = Conn::Ready;
         self.load_library(false, cx);
         self.global_status(cx);
         self.downloads_status(cx);
+        self.machines_start(cx);
     }
 
     /// Send a request; `done` runs on the UI thread with the result.
@@ -370,7 +377,8 @@ impl Quiver {
         .detach();
     }
 
-    fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
+    /// An event from the quiverd the app shows (see `Quiver::on_local_event`).
+    pub(crate) fn on_event(&mut self, e: Event, cx: &mut Context<Self>) {
         self.downloads_event(&e, cx);
         self.global_event(&e, cx);
         self.perf_on_event(&e, cx);
@@ -570,12 +578,15 @@ impl Quiver {
                     this.store_filter = None;
                 }
                 this.library_loaded = true;
+                // Paired machines' copies and titles (the merged library).
+                this.machines_merge(cx);
             }
             // Signed out of Ubisoft with no other store's games, quiverd answers with
             // Ubisoft's "not signed in": that's an empty library, not a failure.
             Err(_) if !this.ubisoft_signed_in() => {
                 this.games.clear();
                 this.library_loaded = true;
+                this.machines_merge(cx);
             }
             Err(e) => this.show_toast(format!("Could not load the library: {}", err_text(&e)), cx),
         });
@@ -605,6 +616,10 @@ impl Quiver {
 
     /// Everything the game page shows that the library doesn't carry.
     pub fn load_details(&mut self, id: Gid, cx: &mut Context<Self>) {
+        // A game only a paired machine has: its page is that machine's.
+        if self.machines_redirect(id, cx) {
+            return;
+        }
         self.load_playtime(id, cx);
         self.load_settings(id, cx);
         self.load_page(id, cx);
@@ -722,7 +737,11 @@ impl Quiver {
         variant: Variant,
         cx: &mut Context<Self>,
     ) -> (ArtState, Option<crate::art::Candidate>) {
-        let cands = crate::art::candidates(&g.entry, g.id().ubisoft().and_then(|p| self.custom_art.get(&p)), slot, self.art_pref(g));
+        let mut cands = crate::art::candidates(&g.entry, g.id().ubisoft().and_then(|p| self.custom_art.get(&p)), slot, self.art_pref(g));
+        // Another machine's game: its files are that machine's, never this one's.
+        if let Some(m) = &g.home {
+            crate::art::on_machine(&mut cands, m);
+        }
         let (state, c) = crate::art::pick(&cands, |src| self.art.update(cx, |a, cx| a.get(src, variant, cx)));
         (state, c.cloned())
     }
@@ -829,8 +848,10 @@ impl Quiver {
             palette_items: self.palette_commands().len(),
             menu_items: match self.nav.overlay {
                 Some(crate::nav::Overlay::Menu { game, .. }) => self.menu_commands(game).len(),
+                Some(crate::nav::Overlay::Machines { .. }) => self.machine_commands().len(),
                 _ => 0,
             },
+            machines: !self.mx.remotes.is_empty(),
         }
     }
 
@@ -864,6 +885,15 @@ impl Quiver {
     }
 
     pub fn menu_commands(&self, id: Gid) -> Vec<Command> {
+        // Where to play or install, when other machines have it (`machines.rs`).
+        let mut v = self.machine_menu_entries(id);
+        let mine = !v.is_empty();
+        // Their Play on / Stream from entries stand in for the plain Play.
+        v.extend(self.menu_commands_here(id).into_iter().filter(|c| !(mine && c.action == Cmd::Primary(id))));
+        v
+    }
+
+    fn menu_commands_here(&self, id: Gid) -> Vec<Command> {
         if let Some(v) = self.play_menu_commands(id) {
             return v;
         }
@@ -981,6 +1011,7 @@ impl Quiver {
             Cmd::Settings(s) => self.nav.open_settings(s),
             Cmd::Global(g) => self.run_global(g, cx),
             Cmd::Downloads(d) => self.run_dl(d, cx),
+            Cmd::Machine(m) => self.run_machine_cmd(m, cx),
         }
     }
 
@@ -994,6 +1025,10 @@ impl Quiver {
 
     /// Play, or whatever stands in for it: Stop while running, Install / Update otherwise.
     pub fn primary(&mut self, id: Gid, cx: &mut Context<Self>) {
+        // Streamed from another machine, or installed on one (`machines.rs`).
+        if self.machines_primary(id, cx) {
+            return;
+        }
         let Some(g) = self.game(id) else { return };
         let name = g.entry.name.clone();
         if g.running() && g.steam_only() {
@@ -1141,6 +1176,11 @@ impl Quiver {
             }
             Effect::Menu(id, i) => {
                 if let Some(c) = self.menu_commands(id).get(i).cloned() {
+                    self.run_command(&c, cx);
+                }
+            }
+            Effect::Machine(i) => {
+                if let Some(c) = self.machine_commands().get(i).cloned() {
                     self.run_command(&c, cx);
                 }
             }

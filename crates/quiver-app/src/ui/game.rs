@@ -471,6 +471,23 @@ impl Quiver {
             hero_el = hero_el.child(div().absolute().left(px(pad)).top(px(top)).depth_surface().child(t));
         }
         let art_chip_el = self.render_art_chip(th, g, cx);
+        // The machine whose game this is, when it isn't this one.
+        let machine_chip = self.shown_machine().map(|(_, name)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(32.))
+                .px(px(10.))
+                .rounded(px(8.))
+                .bg(on_art::glass())
+                .border_1()
+                .border_color(rgba(0xffffff, 0.09))
+                .text_size(px(12.5))
+                .text_color(on_art::tx1())
+                .child(icon(Icon::Server, 14., on_art::tx2()))
+                .child(name)
+        });
         hero_el.child(
             div()
                 .absolute()
@@ -479,6 +496,7 @@ impl Quiver {
                 .depth_surface()
                 .flex()
                 .gap(px(6.))
+                .children(machine_chip)
                 .child(
                     div()
                         .flex()
@@ -688,7 +706,13 @@ impl Quiver {
         let steam_profile = self.render_steam_profile_chip(th, g, slim, cx);
         let pad = self.mode == InputMode::Pad;
         let f = |i| self.focused(Target::Action(i));
-        let (label, i) = primary_label(g);
+        // Other machines decide it when they have the game: Stream from …, Play on This PC,
+        // Install on… (`machines.rs`).
+        let machine_label = self.machine_play_label(g);
+        let (label, i) = match &machine_label {
+            Some((l, i)) => (l.as_str(), *i),
+            None => primary_label(g),
+        };
         let (main, more) = play_button(th, !slim, label, i, pad, f(ACTION_PRIMARY), f(ACTION_OPTIONS));
         let play = div()
             .flex()
@@ -793,6 +817,11 @@ impl Quiver {
             Some((PillKind::Accent, Icon::Download, format!("Installing {:.0}%", (fr * 100.).floor())))
         } else if g.queued() {
             Some((PillKind::Muted, Icon::Download, "Queued".into()))
+        } else if let Some((_, name)) = self.shown_machine().filter(|_| g.installed()) {
+            // The app is on a paired machine: the page says whose game this is.
+            Some((PillKind::Ok, Icon::Server, format!("Installed on {name}")))
+        } else if let Some(c) = g.installed_elsewhere().next().filter(|_| !g.entry.on_disk()) {
+            Some((PillKind::Muted, Icon::Server, format!("Installed on {}", c.name)))
         } else if g.installed() && g.entry.update_available {
             Some((PillKind::Accent, Icon::ArrowDownToLine, "Update available".into()))
         } else if g.installed() && !slim {

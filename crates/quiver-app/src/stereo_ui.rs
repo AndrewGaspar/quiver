@@ -99,11 +99,15 @@ pub struct Prefs {
     pub stereo_ui: Setting,
     /// Its depth strength, percent (0..=200).
     pub stereo_depth: u32,
+    /// Where a game's Play goes, by game ref (`ubisoft:3539`): `here`, or a paired machine's
+    /// id to stream from (`ui/machines.rs`). Games not listed play here when they can.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub play_on: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { stereo_ui: Setting::Auto, stereo_depth: 100 }
+        Prefs { stereo_ui: Setting::Auto, stereo_depth: 100, play_on: Default::default() }
     }
 }
 
@@ -800,11 +804,11 @@ mod tests {
         // SAFETY: this test is the only one touching the variable.
         unsafe { std::env::set_var(ENV_CONFIG, &path) };
         let p = Prefs::load();
-        assert_eq!(p, Prefs { stereo_ui: Setting::Off, stereo_depth: 100 });
-        Prefs { stereo_ui: Setting::Auto, stereo_depth: 150 }.save().unwrap();
+        assert_eq!(p, Prefs { stereo_ui: Setting::Off, stereo_depth: 100, ..Default::default() });
+        Prefs { stereo_ui: Setting::Auto, stereo_depth: 150, ..Default::default() }.save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"someday\": true"), "{text}");
-        assert_eq!(Prefs::load(), Prefs { stereo_ui: Setting::Auto, stereo_depth: 150 });
+        assert_eq!(Prefs::load(), Prefs { stereo_ui: Setting::Auto, stereo_depth: 150, ..Default::default() });
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(Prefs::load(), Prefs::default());
         unsafe { std::env::remove_var(ENV_CONFIG) };
