@@ -5,6 +5,10 @@ post_install() {
     with tools/install-user.sh --uninstall.
 ==> A quiverd already running keeps its old build; restart it when no game is running:
     quiver daemon stop   (any quiver command starts the new one)
+==> The groups and udev rules for game controllers are installed. Firewall profiles are
+    installed but allow nothing: to let Moonlight clients and your other machines in from
+    your LAN and tailnet only, run  quiver system setup --firewall lan,tailnet
+    (quiver system setup --check lists what's set up).
 EOF
 }
 

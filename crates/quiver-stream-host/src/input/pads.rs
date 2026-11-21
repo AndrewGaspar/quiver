@@ -90,17 +90,18 @@ struct Slot {
 
 impl PadHost {
     /// Start the pad thread. For hidden pads, first prove the rule hides a canary device.
-    pub fn start(mode: PadMode, session: &str, control: mpsc::Sender<Control>) -> Result<PadHost> {
-        let uinput = Path::new("/dev/uinput");
+    /// `exe`: this crate's binary, for the uinput helper when nobody is seated
+    /// ([`sandbox::open_uinput`]).
+    pub fn start(mode: PadMode, session: &str, control: mpsc::Sender<Control>, exe: Option<PathBuf>) -> Result<PadHost> {
         if let PadMode::Hidden { gid } = mode {
-            let canary = Pad::canary(uinput, &format!("{}{session} canary", sandbox::NAME_PREFIX), &format!("{}{session}/canary", sandbox::PHYS_PREFIX))?;
+            let canary = Pad::canary_on(sandbox::open_uinput(exe.as_deref())?, &format!("{}{session} canary", sandbox::NAME_PREFIX), &format!("{}{session}/canary", sandbox::PHYS_PREFIX))?;
             let n = canary.nodes()?;
             sandbox::wait_hidden(std::slice::from_ref(&n.event), gid, Duration::from_secs(3)).context("the stream pad rule didn't hide the canary device")?;
         }
         let (tx, rx) = std_mpsc::channel();
         let session = session.to_owned();
         let m = mode.clone();
-        let thread = std::thread::Builder::new().name("pads".into()).spawn(move || pad_thread(m, session, rx, control))?;
+        let thread = std::thread::Builder::new().name("pads".into()).spawn(move || pad_thread(m, session, rx, control, exe))?;
         Ok(PadHost { tx, thread: Some(thread), mode })
     }
 
@@ -118,8 +119,8 @@ impl Drop for PadHost {
     }
 }
 
-fn make(mode: &PadMode, session: &str, k: u8) -> Result<Slot> {
-    let pad = Pad::create(Path::new("/dev/uinput"), &sandbox::pad_name(session, k), &sandbox::pad_phys(session, k))?;
+fn make(mode: &PadMode, session: &str, k: u8, exe: Option<&Path>) -> Result<Slot> {
+    let pad = Pad::create_on(sandbox::open_uinput(exe)?, &sandbox::pad_name(session, k), &sandbox::pad_phys(session, k))?;
     let n = pad.nodes()?;
     let nodes: Vec<PathBuf> = std::iter::once(n.event).chain(n.js).collect();
     if let PadMode::Hidden { gid } = mode
@@ -131,7 +132,7 @@ fn make(mode: &PadMode, session: &str, k: u8) -> Result<Slot> {
     Ok(Slot { pad, nodes, sent: (0, 0, 0), sent_at: Instant::now() })
 }
 
-fn pad_thread(mode: PadMode, session: String, rx: std_mpsc::Receiver<Cmd>, control: mpsc::Sender<Control>) {
+fn pad_thread(mode: PadMode, session: String, rx: std_mpsc::Receiver<Cmd>, control: mpsc::Sender<Control>, exe: Option<PathBuf>) {
     let mut slots: Vec<Option<Slot>> = (0..MAX_PADS).map(|_| None).collect();
     let notice = |text: String| {
         tracing::warn!("{text}");
@@ -146,7 +147,7 @@ fn pad_thread(mode: PadMode, session: String, rx: std_mpsc::Receiver<Cmd>, contr
                     if let PadMode::Off(why) = &mode {
                         notice(format!("pads aren't available: {why}"));
                     } else if slots[slot as usize].is_none() {
-                        match make(&mode, &session, slot) {
+                        match make(&mode, &session, slot, exe.as_deref()) {
                             Ok(s) => slots[slot as usize] = Some(s),
                             Err(e) => notice(format!("{e:#}")),
                         }

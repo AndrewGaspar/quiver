@@ -169,13 +169,32 @@ impl Pad {
         Pad::make(uinput, name, phys, false)
     }
 
-    fn make(uinput: &Path, name: &str, phys: &str, gamepad: bool) -> Result<Pad> {
-        let file = OpenOptions::new()
+    /// [`Pad::create`] on a `/dev/uinput` opened elsewhere (read-write, non-blocking): the
+    /// stream host opens it through a helper when nobody is seated (design/INSTALL.md §7).
+    pub fn create_on(file: File, name: &str, phys: &str) -> Result<Pad> {
+        Pad::make_on(file, name, phys, true)
+    }
+
+    /// [`Pad::canary`] on a `/dev/uinput` opened elsewhere.
+    pub fn canary_on(file: File, name: &str, phys: &str) -> Result<Pad> {
+        Pad::make_on(file, name, phys, false)
+    }
+
+    /// Open `/dev/uinput` (or `uinput`) as the pads need it.
+    pub fn open(uinput: &Path) -> Result<File> {
+        OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(uinput)
-            .with_context(|| format!("open {} (needs your ACL on it, as Steam's udev rule gives)", uinput.display()))?;
+            .with_context(|| format!("open {} (needs your ACL on it, as Steam's udev rule gives)", uinput.display()))
+    }
+
+    fn make(uinput: &Path, name: &str, phys: &str, gamepad: bool) -> Result<Pad> {
+        Pad::make_on(Pad::open(uinput)?, name, phys, gamepad)
+    }
+
+    fn make_on(file: File, name: &str, phys: &str, gamepad: bool) -> Result<Pad> {
         let fd = file.as_raw_fd();
         ioctl(fd, UI_SET_EVBIT, EV_SYN as usize)?;
         if gamepad {

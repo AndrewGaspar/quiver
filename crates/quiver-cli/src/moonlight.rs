@@ -94,7 +94,7 @@ fn print_status(s: &MoonlightStatus) {
     print_clients(&s.clients);
 }
 
-pub async fn run(client: &Client, action: MoonlightAction) -> Result<()> {
+pub async fn run(client: &Client, action: MoonlightAction, local: bool) -> Result<()> {
     match action {
         MoonlightAction::Status { json } => {
             let s: MoonlightStatus = client.call(Request::MoonlightStatus).await?;
@@ -109,6 +109,10 @@ pub async fn run(client: &Client, action: MoonlightAction) -> Result<()> {
             let mdns = if no_mdns { Some(false) } else if mdns { Some(true) } else { None };
             let s: MoonlightStatus = client.call(Request::MoonlightEnable { bind, codecs, mdns }).await?;
             print_status(&s);
+            // A firewall that doesn't allow its ports yet: one line with the command.
+            if local && let Ok(Some(n)) = tokio::task::spawn_blocking(crate::system::moonlight_notice).await {
+                println!("note: {n}");
+            }
             println!();
             println!("In Moonlight, add this machine by its address (or Tailscale name), then enter the PIN it shows with `quiver remote moonlight pin`.");
         }

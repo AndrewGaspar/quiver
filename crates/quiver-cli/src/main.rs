@@ -26,6 +26,7 @@ mod setup;
 mod sight;
 mod steamrun;
 mod stream;
+mod system;
 mod tweaks;
 
 use std::io::Write;
@@ -412,6 +413,19 @@ enum Cmd {
     /// (`quiver steam patch` does it for you; without `--product`, the id comes from the
     /// game's Steam install script or its prefix's registry).
     SteamRun(steamrun::SteamRunArgs),
+    /// The parts of Quiver that need root (design/INSTALL.md): `quiver system setup` checks
+    /// them (`--check`), or writes one script for what's missing that you read, then run with
+    /// sudo. `--firewall lan,tailnet`, `--at-boot`, `--undo`, `--print`.
+    System {
+        #[command(subcommand)]
+        action: system::SystemAction,
+    },
+    /// What's set up here: this build, quiverd, and the system setup check (`--json` for
+    /// agents, who report missing pieces to the person and never run setup).
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -793,6 +807,8 @@ async fn main() -> Result<()> {
             Cmd::Lab { .. } => Some("lab"),
             Cmd::Daemon { .. } => Some("daemon"),
             Cmd::Omarchy { .. } => Some("omarchy"),
+            Cmd::System { .. } => Some("system setup"),
+            Cmd::Doctor { .. } => Some("doctor"),
             Cmd::Steam { action: exports::SteamAction::Restart { .. } } => Some("steam restart"),
             _ => None,
         };
@@ -825,6 +841,13 @@ async fn main() -> Result<()> {
     if let Cmd::Omarchy { action } = cli.cmd {
         return omarchy::run(action);
     }
+    // The root step and the check: files, polkit and systemctl; the daemon only for --at-boot.
+    if let Cmd::System { action } = cli.cmd {
+        return system::run(&cli.source, action).await;
+    }
+    if let Cmd::Doctor { json } = cli.cmd {
+        return system::doctor(&cli.source, json).await;
+    }
     // A status bar polling the queue must not bring back a quiverd someone stopped.
     let client = if let Some(m) = &cli.machine {
         Client::machine_named(m, &cli.source).await?
@@ -839,11 +862,13 @@ async fn main() -> Result<()> {
         | Cmd::Steam { action: exports::SteamAction::Restart { .. } }
         | Cmd::Daemon { .. }
         | Cmd::Lab { .. }
+        | Cmd::System { .. }
+        | Cmd::Doctor { .. }
         | Cmd::Omarchy { .. } => {
             unreachable!()
         }
         Cmd::Export { action } => exports::export(&client, action).await?,
-        Cmd::Remote { action } => remote::run(&client, action).await?,
+        Cmd::Remote { action } => remote::run(&client, action, cli.machine.is_none()).await?,
         Cmd::Stream(a) => stream::run(&client, a).await?,
         Cmd::Steam { action } => exports::steam(&client, action).await?,
         Cmd::Epic { action } => epic::run(&client, action).await?,
@@ -1358,6 +1383,11 @@ mod tests {
 
     #[test]
     fn queue_now_and_after_parse() {
+        // On a big stack too: see remote_and_machine_parse.
+        std::thread::Builder::new().stack_size(16 << 20).spawn(queue_now_and_after_parse_on_a_big_stack).unwrap().join().unwrap();
+    }
+
+    fn queue_now_and_after_parse_on_a_big_stack() {
         use downloads::{OnOff, QueueAction};
         let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).map(|c| c.cmd);
         assert!(matches!(parse(&["queue", "now", "origins"]), Ok(Cmd::Queue { action: Some(QueueAction::Now { game }), .. }) if game == "origins"));

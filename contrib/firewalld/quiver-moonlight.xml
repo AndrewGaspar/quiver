@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- quiver-firewalld service v1 (design/INSTALL.md). Allow it from your LAN and tailnet only:
+     `quiver system setup --firewall lan,tailnet` adds rich rules with a source address. -->
+<service>
+  <short>Quiver Moonlight</short>
+  <description>Moonlight clients (TVs, phones, PCs) streaming from Quiver: HTTPS, HTTP, RTSP, video, control, audio and mDNS.</description>
+  <port protocol="tcp" port="47984"/>
+  <port protocol="tcp" port="47989"/>
+  <port protocol="tcp" port="48010"/>
+  <port protocol="udp" port="47998-48000"/>
+  <port protocol="udp" port="5353"/>
+</service>

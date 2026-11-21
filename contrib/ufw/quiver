@@ -1,0 +1,18 @@
+# quiver-ufw profiles v1 (design/INSTALL.md): ufw application profiles for Quiver's servers.
+#
+# Installed to /etc/ufw/applications.d/quiver. Nothing is allowed until you add a rule, and
+# then only from your LAN and your tailnet, never from anywhere:
+#     ufw allow from 192.168.50.0/24 to any app "Quiver Moonlight" comment quiver
+#     ufw allow in on tailscale0 to any app "Quiver Moonlight" comment quiver
+# `quiver system setup --firewall lan,tailnet` writes these for the features you have on.
+# The ports are Quiver's defaults; with other ports configured, setup allows those instead.
+
+[Quiver Moonlight]
+title=Quiver Moonlight server
+description=Moonlight clients (TVs, phones, PCs) streaming from Quiver: HTTPS 47984, HTTP 47989, RTSP 48010, video, control and audio 47998-48000, mDNS 5353
+ports=47984,47989,48010/tcp|47998:48000/udp|5353/udp
+
+[Quiver Remote]
+title=Quiver remote play
+description=Other Quiver machines: the control connection 47990 and each stream's media port, counting up from 47998
+ports=47990/tcp|47998:48061/udp

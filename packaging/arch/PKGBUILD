@@ -32,6 +32,8 @@ provides=('quiver')
 conflicts=('quiver')
 options=('!debug' '!lto')
 install=quiver.install
+# ufw's profiles are configuration: keep the person's edits across upgrades.
+backup=('etc/ufw/applications.d/quiver')
 _repo=${QUIVER_REPO:-https://github.com/AndrewGaspar/quiver.git}
 [[ $_repo == /* ]] && _repo=file://$_repo
 source=("quiver::git+$_repo${QUIVER_COMMIT:+#commit=$QUIVER_COMMIT}")
@@ -80,5 +82,6 @@ package() {
   BINDIR=/usr/bin LIBDIR=/usr/lib/quiver DATADIR=/usr/share UNITDIR=/usr/lib/systemd/user \
     LICENSEDIR=/usr/share/licenses/quiver EXEC_START=/usr/bin/quiverd \
     UDEVDIR=/usr/lib/udev/rules.d SYSUSERSDIR=/usr/lib/sysusers.d \
+    UFWDIR=/etc/ufw/applications.d FIREWALLDDIR=/usr/lib/firewalld/services \
     packaging/layout.sh "${QUIVER_CARGO_TARGET_DIR:-$srcdir/target}" "$pkgdir"
 }

@@ -138,6 +138,11 @@ fn main() -> Result<()> {
         let program: Vec<String> = raw.iter().skip(3).skip_while(|a| *a == "--").cloned().collect();
         return Err(quiver_stream_host::sandbox::sandbox_exec(gid, &program));
     }
+    // The uinput helper (sandbox::open_uinput): `--uinput-open GID`, in its own namespace.
+    if raw.get(1).map(String::as_str) == Some("--uinput-open") {
+        let gid: u32 = raw.get(2).and_then(|g| g.parse().ok()).ok_or_else(|| anyhow::anyhow!("--uinput-open GID"))?;
+        return quiver_stream_host::sandbox::uinput_open_child(gid);
+    }
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
     if raw.get(1).map(String::as_str) == Some("serve") {
         let s = ServeCli::parse_from(raw.iter().skip(1));

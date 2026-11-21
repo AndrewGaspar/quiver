@@ -1377,7 +1377,7 @@ hyprpad and the compositor would all see a phantom pad. That must never happen, 
 
 - **The udev rule** (`contrib/lab/72-quiver-lab-pad.rules`, `quiver lab pad-rule` prints the
   build's copy; installed by the system package to `/usr/lib/udev/rules.d`, with the group from
-  `contrib/lab/quiver-lab-pad.sysusers`). It matches every lab pad by name (`Quiver Lab Pad *`)
+  `contrib/sysusers/quiver.conf`). It matches every lab pad by name (`Quiver Lab Pad *`)
   and phys (`quiver-lab/*`), on the input device and on its `event` and `js` nodes, and:
   - removes the `uaccess` and `seat` tags. 70-uaccess tags every joystick, and 73-seat-late turns
     the tag into an ACL for the session user, so the rule sits at 72, between them (the window

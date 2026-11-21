@@ -16,7 +16,7 @@
 #     udev announces the device to listeners (Steam, SDL, libinput) only after that.
 #   - 70-uaccess.rules tags every joystick `uaccess`, and 73-seat-late.rules turns that tag into
 #     an ACL for the logged-in user. The tag is removed here, between the two (hence 72).
-#   - GROUP quiver-stream-pad is gid 105001 (contrib/stream/quiver-stream-pad.sysusers), inside
+#   - GROUP quiver-stream-pad is gid 105001 (contrib/sysusers/quiver.conf), inside
 #     your subordinate gid range (/etc/subgid), so newgidmap lets the stream's user namespace
 #     map it. Nobody is a member and no host process runs with it.
 #   - MODE 0660, OWNER root: nothing for "other", and no host uid owns it.
@@ -28,8 +28,10 @@
 # then and every 5 s after.
 #
 # INSTALL (the group first: udev ignores a GROUP it can't resolve)
+#     quiver system setup          # shows the one root step, then runs it with sudo
+#   or by hand:
 #     sudo groupadd --system --gid 105001 quiver-stream-pad
-#       (or: sudo install -Dm644 contrib/stream/quiver-stream-pad.sysusers /etc/sysusers.d/quiver-stream-pad.conf
+#       (or: sudo install -Dm644 contrib/sysusers/quiver.conf /etc/sysusers.d/quiver.conf
 #            && sudo systemd-sysusers)
 #     sudo install -Dm644 contrib/stream/72-quiver-stream-pad.rules /etc/udev/rules.d/72-quiver-stream-pad.rules
 #     sudo udevadm control --reload

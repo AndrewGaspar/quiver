@@ -1,0 +1,39 @@
+# quiver-uinput rule v1 (design/INSTALL.md §7)
+#
+# /dev/uinput for Quiver's stream host on a machine where nobody is seated: a headless server
+# streaming to your other machines, or any machine streaming while nobody is signed in at it.
+#
+# WHY
+#   The stream host makes the client's pads with uinput. On a desktop you get /dev/uinput from
+#   your seat: Steam's 60-steam-input.rules tags it `uaccess`, and logind gives the active seat
+#   session an ACL on it. With nobody seated (quiverd started at boot, you signed in over SSH)
+#   there is no seat session, no ACL, and /dev/uinput is root's alone, so streams get no pads.
+#
+# HOW
+#   The node gets group quiver-uinput (gid 105002, contrib/sysusers/quiver.conf). Nobody is a
+#   member, so nothing you run has it by default, games included. The gid is inside your
+#   subordinate gid range (/etc/subgid), so the stream host can give it to one short-lived
+#   helper in a user namespace of its own (newgidmap, the way a stream's program gets the
+#   stream pad group): the helper opens /dev/uinput, hands the descriptor back, and exits.
+#   Your seat's uaccess ACL is untouched, and MODE 0660 gives "other" nothing.
+#
+#   Not a group you join: membership would give every process of yours (every game, every
+#   script) the power to make keyboards and mice, all the time. Not quiver-stream-pad either: a
+#   stream's program has that group, and must never make input devices of its own.
+#
+# INSTALL (the group first: udev ignores a GROUP it can't resolve)
+#     quiver system setup            # shows the one root step, then runs it with sudo
+#   or by hand:
+#     sudo install -Dm644 contrib/sysusers/quiver.conf /etc/sysusers.d/quiver.conf && sudo systemd-sysusers
+#     sudo install -Dm644 contrib/udev/72-quiver-uinput.rules /etc/udev/rules.d/72-quiver-uinput.rules
+#     sudo udevadm control --reload && sudo udevadm trigger --action=change /sys/devices/virtual/misc/uinput
+#
+# VERIFY
+#     ls -l /dev/uinput              # crw-rw----  root quiver-uinput (a + when a seat has its ACL)
+#     quiver system setup --check
+#
+# REVERT
+#     quiver system setup --undo
+#   or: sudo rm /etc/udev/rules.d/72-quiver-uinput.rules && sudo udevadm control --reload
+
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="quiver-uinput", MODE="0660", OPTIONS+="static_node=uinput"

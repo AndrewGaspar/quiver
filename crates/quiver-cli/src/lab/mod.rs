@@ -1671,6 +1671,11 @@ async fn brief(lab: &Lab, client: &Client, game: &str, instance: Option<String>,
         fixtures: list_dir(lab.fixtures(&src.game.dir_name()), ""),
         profiles: list_dir(lab.profiles(&src.game.dir_name()), ".set"),
         docs: docs.map(|d| d.display().to_string()),
+        system_setup: {
+            let facts = tokio::task::spawn_blocking(quiver_api::system::Facts::gather).await?;
+            let r = quiver_api::system::check(&facts, &Default::default()).report;
+            r.attention().map(|p| format!("{} ({}): {}", p.title, p.state.word(), p.summary)).collect()
+        },
     };
     Ok(quiver_core::lab::brief::render(&b))
 }
