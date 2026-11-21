@@ -29,6 +29,30 @@ pub struct BriefInput {
     pub profiles: Vec<String>,
     /// Where Quiver's checkout is, for the docs (`design/LAB.md`), if known.
     pub docs: Option<String>,
+    /// Pieces of this machine's system setup that are missing (`quiver system setup --check`,
+    /// design/INSTALL.md), one line each.
+    #[serde(default)]
+    pub system_setup: Vec<String>,
+}
+
+/// The brief's system setup section: what's missing, and that it's the person's to install.
+pub fn system_setup_section(missing: &[String]) -> String {
+    let mut s = String::from(
+        "Some features need a one-time root step on the person's machine (udev rules and groups for game controllers, \
+         firewall rules, lingering). `quiver doctor --json` (`system_setup`) and `quiver system setup --check` list them. \
+         **Report missing pieces to the person and never run `quiver system setup`, `sudo` or the script yourself**, and \
+         don't work around them: the person runs `quiver system setup`, which shows the script before anything runs.\n\n",
+    );
+    if missing.is_empty() {
+        s.push_str("Nothing is missing on this machine right now.\n\n");
+    } else {
+        s.push_str("Missing now:\n");
+        for m in missing {
+            s.push_str(&format!("  - {m}\n"));
+        }
+        s.push('\n');
+    }
+    s
 }
 
 fn list(items: &[String], none: &str) -> String {
@@ -232,6 +256,9 @@ pub fn render(b: &BriefInput) -> String {
     s.push_str("## HDR in the instance\n\n");
     s.push_str(&hdr_section(i));
 
+    s.push_str("## System setup (the person's root step)\n\n");
+    s.push_str(&system_setup_section(&b.system_setup));
+
     s.push_str("## The lab channel (what your mod can tell the lab)\n\n");
     s.push_str(
         "The game's environment has `QUIVER_LAB=Z:\\lab` (the instance's lab folder), `QUIVER_LAB_RUN=r<N>` and \
@@ -360,10 +387,12 @@ mod tests {
             ..Default::default()
         };
         let s = render(&b);
-        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1", "check its owner in `quiver lab list`"] {
+        for want in ["## Lab limits and the virtual clock", "THROTTLED", "quiver lab edit origins clock=virtual:62.5", "quiver lab create ubisoft:3539 --name origins", "Direct3D 11", "ACO.ini", "Connect is disabled", "pkill -f", "/src/quiver/design/LAB.md", "quiver lab bench origins", "QUIVER_LAB", "quiver lab sight origins status", "edit origins sight=on", "refused and logged", "## HDR in the instance", "quiver lab shot origins --hdr", "edit origins display.hdr=on", "clock=virtual:62.5", "## Game controllers in the instance", "quiver lab pad origins press a", "edit origins pads=1", "check its owner in `quiver lab list`", "## System setup (the person's root step)", "never run `quiver system setup`", "Nothing is missing"] {
             assert!(s.contains(want), "missing {want:?} in\n{s}");
         }
         assert!(!s.contains("EOS filter:") && !s.contains("Epic Online Services:**"));
+        let missing = render(&BriefInput { system_setup: vec!["Lab controllers: 72-quiver-lab-pad.rules: not installed".into()], ..b.clone() });
+        assert!(missing.contains("Missing now:\n  - Lab controllers: 72-quiver-lab-pad.rules: not installed"));
         let refused = render(&BriefInput { licence: None, refused: Some("Steamworks needs the Steam client".into()), ..b.clone() });
         assert!(refused.contains("Lab launches are refused"));
         // An Epic game with the EOS SDK: the filter, its log and the allowlist.

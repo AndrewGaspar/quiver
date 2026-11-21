@@ -13,7 +13,7 @@
 #   - 70-uaccess.rules tags every joystick `uaccess`, and 73-seat-late.rules turns that tag into
 #     an ACL for the logged-in user. The tag is removed here, between the two (hence 72, the
 #     same window as /etc/udev/rules.d/72-hyprpad-puck.rules). 75 or 99 would be too late.
-#   - GROUP quiver-lab-pad is gid 105000 (contrib/lab/quiver-lab-pad.sysusers; udev wants a
+#   - GROUP quiver-lab-pad is gid 105000 (contrib/sysusers/quiver.conf; udev wants a
 #     group name it can resolve, not a bare number), a host gid inside your subordinate range
 #     (/etc/subgid: e.g. you:100000:65536). Nobody is a member and no host process runs with it. Under rootless podman with --userns=keep-id it is gid 5001
 #     in the container (container gid G > 1000 is host gid 100000 + G - 1), which the lab gives
@@ -27,8 +27,10 @@
 # destroys the pad at once.
 #
 # INSTALL (the group first: udev ignores a GROUP it can't resolve)
+#     quiver system setup          # shows the one root step, then runs it with sudo
+#   or by hand:
 #     sudo groupadd --system --gid 105000 quiver-lab-pad
-#       (or: sudo install -Dm644 contrib/lab/quiver-lab-pad.sysusers /etc/sysusers.d/quiver-lab-pad.conf
+#       (or: sudo install -Dm644 contrib/sysusers/quiver.conf /etc/sysusers.d/quiver.conf
 #            && sudo systemd-sysusers)
 #     sudo install -Dm644 contrib/lab/72-quiver-lab-pad.rules /etc/udev/rules.d/72-quiver-lab-pad.rules
 #       (or, without a checkout: quiver lab pad-rule | sudo install -Dm644 /dev/stdin /etc/udev/rules.d/72-quiver-lab-pad.rules)

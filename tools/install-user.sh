@@ -13,6 +13,9 @@
 #                                             entry there that isn't our link is left alone
 #   ~/.local/lib/quiver/omarchy/quiver.downloads/  (the Omarchy bar widget; never put in the bar
 #                                             from here: `quiver omarchy install-plugin` does that)
+#   ~/.local/lib/quiver/contrib/              (the pieces that need root: groups, udev rules,
+#                                             firewall profiles; nothing here installs them:
+#                                             `quiver system setup` shows the one sudo step)
 #   ~/.local/share/vulkan/implicit_layer.d/VK_LAYER_QUIVER_sight.{x86_64,i686}.json
 #                                             (loaded only into launches with QUIVER_SIGHT=1)
 #   ~/.local/share/applications/quiver.desktop, ~/.local/share/icons/hicolor/scalable/apps/quiver.svg

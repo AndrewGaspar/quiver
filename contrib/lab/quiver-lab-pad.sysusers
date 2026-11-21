@@ -1,4 +1,0 @@
-# quiver lab's virtual game controllers (contrib/lab/72-quiver-lab-pad.rules): the group their
-# nodes get. Nobody is a member: gid 105000 is in the subordinate gid range rootless podman maps
-# into lab containers (container gid 5001 under --userns=keep-id with subgid 100000:65536).
-g quiver-lab-pad 105000

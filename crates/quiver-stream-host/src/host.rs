@@ -221,7 +221,7 @@ impl Host {
         let (itx, irx) = std_mpsc::channel::<InputEvent>();
         let pads = match &pad_mode {
             PadMode::Off(_) => None,
-            m => match PadHost::start(m.clone(), &opts.session, ctx.clone()) {
+            m => match PadHost::start(m.clone(), &opts.session, ctx.clone(), sandbox_exe(&opts).ok()) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     pad_mode = PadMode::Off(format!("{e:#}"));

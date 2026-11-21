@@ -24,6 +24,7 @@ pub mod epic;
 pub mod machines;
 pub mod presence;
 pub mod moonlight;
+pub mod system;
 
 /// The repository, for About.
 const SOURCE_URL: &str = "https://github.com/AndrewGaspar/quiver";
@@ -54,6 +55,8 @@ pub enum SettingsAction {
     Presence(presence::PresenceAction),
     /// Machines › Moonlight clients (`settings/moonlight.rs`).
     Moonlight(moonlight::MoonlightAction),
+    /// About › System setup (`settings/system.rs`).
+    System(system::SystemAction),
 }
 
 /// Avatar gradients, by sign-in order.
@@ -158,6 +161,7 @@ impl Quiver {
                 v.push(SettingsAction::Copy(quiver_api::socket_path().display().to_string()));
             }
             SettingsSection::About => {
+                v.extend(self.system_actions());
                 v.push(SettingsAction::Url(SOURCE_URL.into()));
                 v.push(SettingsAction::Url("https://account.ubisoft.com".into()));
                 v.push(SettingsAction::Url("https://store.ubisoft.com".into()));
@@ -192,6 +196,7 @@ impl Quiver {
             SettingsAction::Machine(a) => self.machine_action(a, cx),
             SettingsAction::Presence(a) => self.presence_action(a, cx),
             SettingsAction::Moonlight(a) => self.moonlight_action(a, cx),
+            SettingsAction::System(a) => self.system_action(a, cx),
         }
     }
 
@@ -1788,6 +1793,7 @@ impl Quiver {
         let link = |this: &Self, url: &str, i: Icon, label: &str, cx: &mut Context<Self>| {
             this.action_button(th, actions, SettingsAction::Url(url.into()), Kind::Secondary, Some(i), label.to_owned(), cx)
         };
+        let system = self.settings_system(th, actions, cx);
         let credits = [
             ("Protobuf definitions", "from YoobieRE/ubisoft-demux-node, refreshed from the client's descriptors"),
             ("Text input", "adapted from GPUI's input example (Apache-2.0, Zed Industries)"),
@@ -1823,6 +1829,7 @@ impl Quiver {
                         )),
                 )
                 .into_any_element(),
+            system,
             group(
                 th,
                 "Links",

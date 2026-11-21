@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub const RULE: &str = include_str!("../../../contrib/lab/72-quiver-lab-pad.rules");
-pub const SYSUSERS: &str = include_str!("../../../contrib/lab/quiver-lab-pad.sysusers");
+pub const SYSUSERS: &str = include_str!("../../../contrib/sysusers/quiver.conf");
 pub const RULE_FILE: &str = "72-quiver-lab-pad.rules";
 pub const MARKER: &str = "quiver-lab-pad rule v1";
 pub const GROUP: &str = "quiver-lab-pad";
@@ -34,7 +34,8 @@ pub const RULE_DIRS: &[&str] = &["/etc/udev/rules.d", "/run/udev/rules.d", "/usr
 /// the rule this build carries.
 pub fn install_hint() -> String {
     format!(
-        "lab pads need the udev rule that hides them from the host (a system package installs it). As root:\n  \
+        "lab pads need the udev rule that hides them from the host (a system package installs it): run `quiver system setup` \
+         (it shows the one root step, then runs it with sudo), or by hand:\n  \
          sudo groupadd --system --gid {GID} {GROUP}\n  \
          quiver lab pad-rule | sudo install -Dm644 /dev/stdin /etc/udev/rules.d/{RULE_FILE}\n  \
          sudo udevadm control --reload\n\

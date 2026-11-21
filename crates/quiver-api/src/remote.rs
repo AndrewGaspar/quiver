@@ -76,6 +76,9 @@ pub struct RemoteSettings {
 
 /// The first media port (design/REMOTE.md §3).
 pub const STREAM_PORT: u16 = 47998;
+/// How many media ports up from the first a stream may take (one per stream at a time), so
+/// firewalls allow `STREAM_PORT ..= STREAM_PORT + STREAM_PORTS - 1` (design/INSTALL.md).
+pub const STREAM_PORTS: u16 = 64;
 
 impl RemoteSettings {
     pub fn is_default(&self) -> bool {

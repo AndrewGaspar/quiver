@@ -141,6 +141,8 @@ impl Quiver {
         self.ml_call::<MoonlightStatus, _>(req, cx, |this, r, cx| match r {
             Ok(_) => {
                 this.mx.settings.moonlight.custom = None;
+                // Its firewall notice reads the config quiverd just wrote.
+                this.ui.system.checked = None;
                 this.moonlight_reload(cx);
             }
             Err(e) => {
@@ -258,6 +260,8 @@ impl Quiver {
             }
             Some(Ok(s)) => s.clone(),
         };
+        // The firewall may block it (this machine's check, design/INSTALL.md §5).
+        let firewall = self.moonlight_firewall_notice(th, s.enabled, cx);
         let ui = &self.mx.settings.moonlight;
         let (custom, pin, pin_error, busy, asking) = (ui.custom.clone(), ui.pin.clone(), ui.pin_error.clone(), ui.busy, ui.confirm_unpair.clone());
         let bind = match (&custom, &ui.chosen_bind) {
@@ -473,6 +477,7 @@ impl Quiver {
                 .child(bind_row)
                 .children(custom_row)
                 .child(ports_row)
+                .children(firewall)
                 .children(pending)
                 .children(streaming)
                 .child(clients)

@@ -112,8 +112,8 @@ fn print_peers(peers: &[PeerInfo]) {
 fn print_boot(b: &BootStatus) {
     println!("starts at boot: {}", b.describe());
     if let Some(cmd) = &b.linger_command {
-        println!("  lingering needs root here; to start quiverd before anyone signs in, run:");
-        println!("    {cmd}");
+        println!("  lingering needs root here; to start quiverd before anyone signs in, run");
+        println!("    quiver system setup --at-boot   (shows the one sudo step first), or: {cmd}");
     } else if b.enabled && !b.linger {
         println!("  lingering is off: quiverd starts when you sign in, not at boot");
     }
@@ -126,7 +126,9 @@ fn spaced(code: &str) -> String {
     if code.len() == 6 { format!("{} {}", &code[..3], &code[3..]) } else { code.to_owned() }
 }
 
-pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
+/// `local`: the client is this machine's quiverd (no `--machine`), so local checks (the
+/// firewall, lingering) apply to it.
+pub async fn run(client: &Client, action: RemoteAction, local: bool) -> Result<()> {
     match action {
         RemoteAction::Status { json } => {
             let s: RemoteStatus = client.call(Request::RemoteStatus).await?;
@@ -206,7 +208,7 @@ pub async fn run(client: &Client, action: RemoteAction) -> Result<()> {
             let () = client.call(Request::RemoteWake { id: peer.clone() }).await?;
             println!("sent a wake-up to {peer}");
         }
-        RemoteAction::Moonlight { action } => crate::moonlight::run(client, action).await?,
+        RemoteAction::Moonlight { action } => crate::moonlight::run(client, action, local).await?,
         RemoteAction::Discover { wait, json } => {
             let found: Vec<Discovered> = client.call(Request::RemoteDiscover { wait_ms: Some(wait.saturating_mul(1000)) }).await?;
             if json {

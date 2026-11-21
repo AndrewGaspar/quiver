@@ -141,7 +141,7 @@ fn peer_name(peer: Option<&RemotePeer>) -> String {
 
 /// A free media port from `base` up, skipping the ones streams here hold.
 fn bind_port(base: u16, taken: &[u16]) -> Result<UdpSocket> {
-    for port in base..base.saturating_add(64) {
+    for port in base..base.saturating_add(remote::STREAM_PORTS) {
         if taken.contains(&port) {
             continue;
         }
@@ -149,7 +149,7 @@ fn bind_port(base: u16, taken: &[u16]) -> Result<UdpSocket> {
             return Ok(s);
         }
     }
-    bail!("no free UDP port for the stream in {base}–{}", base.saturating_add(63))
+    bail!("no free UDP port for the stream in {base}–{}", base.saturating_add(remote::STREAM_PORTS - 1))
 }
 
 /// `quiver-stream-host`: `QUIVER_STREAM_HOST_BIN`, beside quiverd, else on `PATH`.

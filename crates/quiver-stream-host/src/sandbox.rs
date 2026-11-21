@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail};
 use quiver_pad::rule;
 
 pub const RULE: &str = include_str!("../../../contrib/stream/72-quiver-stream-pad.rules");
-pub const SYSUSERS: &str = include_str!("../../../contrib/stream/quiver-stream-pad.sysusers");
+pub const SYSUSERS: &str = include_str!("../../../contrib/sysusers/quiver.conf");
 pub const RULE_FILE: &str = "72-quiver-stream-pad.rules";
 pub const MARKER: &str = "quiver-stream-pad rule v1";
 pub const GROUP: &str = "quiver-stream-pad";
@@ -36,7 +36,8 @@ pub const PHYS_PREFIX: &str = "quiver-stream/";
 /// How to install the rule (the person does it; Quiver never runs anything as root).
 pub fn install_hint() -> String {
     format!(
-        "stream pads need the udev rule that hides them from your desktop. As root:\n  \
+        "stream pads need the udev rule that hides them from your desktop: run `quiver system setup` (it shows the one root step, \
+         then runs it with sudo), or by hand:\n  \
          sudo groupadd --system --gid {GID} {GROUP}\n  \
          sudo install -Dm644 contrib/stream/{RULE_FILE} /etc/udev/rules.d/{RULE_FILE}\n  \
          sudo udevadm control --reload"
@@ -172,6 +173,173 @@ fn drop_capabilities() -> Result<()> {
     Ok(())
 }
 
+/// The group `contrib/udev/72-quiver-uinput.rules` gives `/dev/uinput` (design/INSTALL.md §7).
+pub const UINPUT_GROUP: &str = "quiver-uinput";
+pub const UINPUT: &str = "/dev/uinput";
+
+/// What to say when `/dev/uinput` can't be opened.
+pub fn uinput_hint() -> String {
+    "nobody is signed in at this machine, so no seat gives Quiver /dev/uinput: run `quiver system setup` \
+     (it installs the rule that lets the stream host open it)"
+        .into()
+}
+
+/// Open `/dev/uinput` for pads. Directly when the person may (their seat's uaccess ACL);
+/// otherwise, when the uinput rule is installed, through a helper (`exe --uinput-open GID`) in a
+/// user namespace that has the rule's group and nothing else, which hands the descriptor back
+/// and exits. Nothing of the person's holds the group for longer than that open.
+pub fn open_uinput(exe: Option<&std::path::Path>) -> Result<std::fs::File> {
+    let e = match quiver_pad::uinput::Pad::open(std::path::Path::new(UINPUT)) {
+        Ok(f) => return Ok(f),
+        Err(e) => e,
+    };
+    let denied = e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied));
+    if !denied {
+        return Err(e);
+    }
+    let groups = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let Some((gid, _)) = rule::group_entry(&groups, UINPUT_GROUP) else {
+        bail!("{e:#}: {}", uinput_hint());
+    };
+    let node_gid = std::fs::metadata(UINPUT).map(|m| std::os::unix::fs::MetadataExt::gid(&m)).ok();
+    if node_gid != Some(gid) {
+        bail!(
+            "{e:#}: {UINPUT} isn't group {UINPUT_GROUP} yet ({}); run `quiver system setup`",
+            node_gid.map(|g| format!("it is gid {g}")).unwrap_or_else(|| "can't stat it".into())
+        );
+    }
+    let exe = match exe {
+        Some(e) => e.to_owned(),
+        None => std::env::current_exe().context("find quiver-stream-host for the uinput helper")?,
+    };
+    open_via_helper(&exe, gid).with_context(|| format!("open {UINPUT} through the {UINPUT_GROUP} helper"))
+}
+
+/// `unshare … exe --uinput-open GID`: the namespace maps the person's own ids and the uinput
+/// group's gid, as [`wrap`] does for the pad group.
+pub fn uinput_argv(exe: &std::path::Path, uid: u32, my_gid: u32, gid: u32) -> Vec<String> {
+    vec![
+        "unshare".into(),
+        "--user".into(),
+        format!("--map-users={uid}:{uid}:1"),
+        format!("--map-groups={my_gid}:{my_gid}:1"),
+        format!("--map-groups={gid}:{gid}:1"),
+        "--setgroups=allow".into(),
+        "--keep-caps".into(),
+        exe.display().to_string(),
+        "--uinput-open".into(),
+        gid.to_string(),
+    ]
+}
+
+fn open_via_helper(exe: &std::path::Path, gid: u32) -> Result<std::fs::File> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    let mut sv = [0i32; 2];
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, sv.as_mut_ptr()) } != 0 {
+        bail!("socketpair: {}", std::io::Error::last_os_error());
+    }
+    // SAFETY: socketpair just made both.
+    let (ours, theirs) = unsafe { (OwnedFd::from_raw_fd(sv[0]), OwnedFd::from_raw_fd(sv[1])) };
+    let tv = libc::timeval { tv_sec: 10, tv_usec: 0 };
+    // SAFETY: a valid socket and a timeval of the size given.
+    unsafe { libc::setsockopt(sv[0], libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const libc::c_void, std::mem::size_of::<libc::timeval>() as u32) };
+    let argv = uinput_argv(exe, unsafe { libc::getuid() }, unsafe { libc::getgid() }, gid);
+    let child_fd = sv[1];
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            if child_fd == 3 {
+                let fl = libc::fcntl(3, libc::F_GETFD);
+                libc::fcntl(3, libc::F_SETFD, fl & !libc::FD_CLOEXEC);
+            } else if libc::dup2(child_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().with_context(|| format!("run {}", argv.join(" ")))?;
+    drop(theirs);
+    let got = recv_fd(&ours);
+    let out = child.wait_with_output()?;
+    match got {
+        Ok(Some(fd)) => Ok(std::fs::File::from(fd)),
+        _ => bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("the helper sent nothing")),
+    }
+}
+
+/// The helper's side (`quiver-stream-host --uinput-open GID`, run by `unshare` with the
+/// namespace's capabilities): take the group, open `/dev/uinput`, drop every capability, send
+/// the descriptor on fd 3, exit.
+pub fn uinput_open_child(gid: u32) -> Result<()> {
+    use std::os::fd::{AsFd, BorrowedFd};
+    let groups = [unsafe { libc::getgid() }, gid];
+    if unsafe { libc::setgroups(groups.len(), groups.as_ptr()) } != 0 {
+        bail!("setgroups: {}", std::io::Error::last_os_error());
+    }
+    let file = quiver_pad::uinput::Pad::open(std::path::Path::new(UINPUT));
+    drop_capabilities()?;
+    let file = file?;
+    // SAFETY: the parent put the socket at fd 3 for us, and it stays open until we exit.
+    let sock = unsafe { BorrowedFd::borrow_raw(3) };
+    send_fd(sock, file.as_fd())
+}
+
+/// Send one descriptor with SCM_RIGHTS.
+pub fn send_fd(sock: std::os::fd::BorrowedFd<'_>, fd: std::os::fd::BorrowedFd<'_>) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut byte = [b'u'];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut cbuf = [0u64; 4];
+    // SAFETY: a zeroed msghdr is valid; the fields set below point at live buffers.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf.as_mut_ptr().cast();
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) } as usize;
+    // SAFETY: the control buffer holds one fd's message (CMSG_SPACE(4) = 24 ≤ 32 bytes).
+    unsafe {
+        let c = libc::CMSG_FIRSTHDR(&msg);
+        (*c).cmsg_level = libc::SOL_SOCKET;
+        (*c).cmsg_type = libc::SCM_RIGHTS;
+        (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as u32) as usize;
+        std::ptr::write_unaligned(libc::CMSG_DATA(c) as *mut i32, fd.as_raw_fd());
+    }
+    if unsafe { libc::sendmsg(sock.as_raw_fd(), &msg, 0) } != 1 {
+        bail!("sendmsg: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Receive one descriptor ([`send_fd`]); `None` when the other end closed without one.
+pub fn recv_fd(sock: &impl std::os::fd::AsRawFd) -> Result<Option<std::os::fd::OwnedFd>> {
+    use std::os::fd::FromRawFd;
+    let mut byte = [0u8];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut cbuf = [0u64; 4];
+    // SAFETY: as in send_fd.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&cbuf);
+    let n = unsafe { libc::recvmsg(sock.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
+    if n < 0 {
+        bail!("recvmsg: {}", std::io::Error::last_os_error());
+    }
+    // SAFETY: recvmsg filled the control buffer it was given.
+    unsafe {
+        let c = libc::CMSG_FIRSTHDR(&msg);
+        if n == 1 && !c.is_null() && (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+            let fd = std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const i32);
+            return Ok(Some(std::os::fd::OwnedFd::from_raw_fd(fd)));
+        }
+    }
+    Ok(None)
+}
+
 /// One node's state after udev, for the hidden check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeState {
@@ -280,6 +448,33 @@ mod tests {
         let w = wrap(std::path::Path::new("/x/quiver-stream-host"), 105001, &["gamescope".into(), "--".into(), "game".into()]).join(" ");
         assert!(w.starts_with("unshare --user --mount --map-users="));
         assert!(w.ends_with("--map-groups=105001:105001:1 --setgroups=allow --keep-caps /x/quiver-stream-host --sandbox-exec 105001 -- gamescope -- game"), "{w}");
+    }
+
+    #[test]
+    fn the_uinput_helper_gets_only_the_uinput_group() {
+        let a = uinput_argv(std::path::Path::new("/x/quiver-stream-host"), 1000, 1000, 105002).join(" ");
+        assert_eq!(a, "unshare --user --map-users=1000:1000:1 --map-groups=1000:1000:1 --map-groups=105002:105002:1 --setgroups=allow --keep-caps /x/quiver-stream-host --uinput-open 105002");
+        assert!(SYSUSERS.contains(&format!("g {UINPUT_GROUP} 105002")));
+        assert!(uinput_hint().contains("quiver system setup") && install_hint().contains("quiver system setup"));
+    }
+
+    #[test]
+    fn a_descriptor_crosses_the_socket() {
+        use std::io::{Read, Seek, Write};
+        use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+        let mut sv = [0i32; 2];
+        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, sv.as_mut_ptr()) }, 0);
+        let (a, b) = unsafe { (OwnedFd::from_raw_fd(sv[0]), OwnedFd::from_raw_fd(sv[1])) };
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(b"pad").unwrap();
+        send_fd(a.as_fd(), f.as_fd()).unwrap();
+        let mut got = std::fs::File::from(recv_fd(&b).unwrap().unwrap());
+        got.rewind().unwrap();
+        let mut s = String::new();
+        got.read_to_string(&mut s).unwrap();
+        assert_eq!(s, "pad");
+        drop(a);
+        assert!(recv_fd(&b).unwrap().is_none(), "closed without one");
     }
 
     #[test]

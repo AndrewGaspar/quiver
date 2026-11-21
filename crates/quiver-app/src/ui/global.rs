@@ -240,6 +240,8 @@ pub struct GlobalUi {
     pub epic: super::settings::epic::EpicUi,
     /// Accounts across machines (Settings › Accounts, the game page's launch account).
     pub presence: super::settings::presence::PresenceUi,
+    /// Settings › About › System setup, and the Moonlight card's firewall notice.
+    pub system: super::settings::system::SystemUi,
 }
 
 impl GlobalUi {

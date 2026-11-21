@@ -34,6 +34,7 @@ pub mod secret;
 pub mod service;
 pub mod setup;
 pub mod sight;
+pub mod system;
 pub mod steamlib;
 pub mod tweaks;
 pub mod stores;

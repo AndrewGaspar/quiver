@@ -19,8 +19,14 @@
 #   UNITDIR     quiverd.service (systemd user unit), quiver.slice  (/usr/lib/systemd/user)
 #   LICENSEDIR  LICENSE and third-party licenses             (/usr/share/licenses/quiver)
 #   EXEC_START  the unit's ExecStart                         ($BINDIR/quiverd)
-#   UDEVDIR     72-quiver-lab-pad.rules (system packages only: hides lab pads from the host)
-#   SYSUSERSDIR quiver-lab-pad.conf (the group those pads' nodes get)  (unset: neither)
+#               contrib/ (the root-owned pieces, design/INSTALL.md: copied byte for byte by
+#               `quiver system setup` for a per-user install)
+#   System packages only (each unset: not installed):
+#   UDEVDIR     72-quiver-{lab-pad,stream-pad,uinput}.rules        (/usr/lib/udev/rules.d)
+#   SYSUSERSDIR quiver.conf (the groups those rules give nodes)    (/usr/lib/sysusers.d)
+#   UFWDIR      quiver (ufw application profiles; no rule allows them) (/etc/ufw/applications.d)
+#   FIREWALLDDIR quiver-moonlight.xml, quiver-remote.xml (services, not enabled)
+#                                                                  (/usr/lib/firewalld/services)
 #
 # quiverd finds the bridge at <its dir>/../lib/quiver/quiver-bridge.exe, so LIBDIR must be
 # $BINDIR/../lib/quiver (crates/quiver-core/src/launcher.rs, bridge_candidates).
@@ -105,15 +111,31 @@ sed -e "s|^ExecStart=.*|ExecStart=$EXEC_START|" \
 chmod 644 "$root$UNITDIR/quiverd.service"
 install -Dm644 "$src/contrib/quiver.slice" "$root$UNITDIR/quiver.slice"
 
-# quiver lab's virtual game controllers (design/LAB.md §16): the udev rule that keeps every lab
-# pad away from the host, and the group its nodes get. Root's to install, so only a system
-# package does (UDEVDIR, SYSUSERSDIR); a per-user install prints the commands
-# (`quiver lab doctor`). pacman's hooks run systemd-sysusers and reload udev.
+# The pieces that need root (design/INSTALL.md): the groups, the udev rules for lab and stream
+# pads and for /dev/uinput with nobody seated, and the firewall profiles. Every install carries
+# a copy under $LIBDIR/contrib, which `quiver system setup` copies byte for byte (after checking
+# each against the hash the build ships) for a per-user install. A system package also installs
+# them where they work (UDEVDIR, SYSUSERSDIR, UFWDIR, FIREWALLDDIR); pacman's hooks run
+# systemd-sysusers and reload udev. Firewall profiles only name ports: nothing is allowed until
+# the person adds a rule (`quiver system setup --firewall lan,tailnet`).
+for f in sysusers/quiver.conf lab/72-quiver-lab-pad.rules stream/72-quiver-stream-pad.rules udev/72-quiver-uinput.rules \
+    ufw/quiver firewalld/quiver-moonlight.xml firewalld/quiver-remote.xml; do
+    install -Dm644 "$src/contrib/$f" "$root$LIBDIR/contrib/$f"
+done
 if [[ -n ${SYSUSERSDIR:-} ]]; then
-    install -Dm644 "$src/contrib/lab/quiver-lab-pad.sysusers" "$root$SYSUSERSDIR/quiver-lab-pad.conf"
+    install -Dm644 "$src/contrib/sysusers/quiver.conf" "$root$SYSUSERSDIR/quiver.conf"
 fi
 if [[ -n ${UDEVDIR:-} ]]; then
     install -Dm644 "$src/contrib/lab/72-quiver-lab-pad.rules" "$root$UDEVDIR/72-quiver-lab-pad.rules"
+    install -Dm644 "$src/contrib/stream/72-quiver-stream-pad.rules" "$root$UDEVDIR/72-quiver-stream-pad.rules"
+    install -Dm644 "$src/contrib/udev/72-quiver-uinput.rules" "$root$UDEVDIR/72-quiver-uinput.rules"
+fi
+if [[ -n ${UFWDIR:-} ]]; then
+    install -Dm644 "$src/contrib/ufw/quiver" "$root$UFWDIR/quiver"
+fi
+if [[ -n ${FIREWALLDDIR:-} ]]; then
+    install -Dm644 "$src/contrib/firewalld/quiver-moonlight.xml" "$root$FIREWALLDDIR/quiver-moonlight.xml"
+    install -Dm644 "$src/contrib/firewalld/quiver-remote.xml" "$root$FIREWALLDDIR/quiver-remote.xml"
 fi
 
 lic=$root$LICENSEDIR
