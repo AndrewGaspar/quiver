@@ -1,0 +1,29 @@
+[package]
+name = "quiver-stream-host"
+description = "The server side of a Quiver stream: headless gamescope as the virtual display, capture, NVENC encode, audio to Opus, input injection and rumble back (design/REMOTE.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quiver-stream-host"
+path = "src/main.rs"
+
+[dependencies]
+quiver-stream-proto.workspace = true
+quiver-pad = { path = "../quiver-pad" }
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libloading = "0.8"
+pipewire = "0.10"
+x11rb = { version = "0.13", features = ["xtest", "xfixes", "xinput", "allow-unsafe-code"] }
+
+[dev-dependencies]
+tempfile.workspace = true

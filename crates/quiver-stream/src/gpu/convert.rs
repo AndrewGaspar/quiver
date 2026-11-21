@@ -180,7 +180,7 @@ impl Converter {
 
     /// Read the test pattern from a converted picture (`readback` must be on). Waits for the
     /// conversion.
-    pub fn read_pattern(&mut self, c: &Converted) -> Result<Option<quiver_stream_proto::pattern::Stamp>> {
+    pub fn read_pattern(&mut self, c: &Converted) -> Result<Option<quiver_stream_proto::stamp::Stamp>> {
         if !self.wait_done(c, 1_000_000_000)? {
             bail!("a conversion didn't finish in 1 s");
         }
@@ -191,7 +191,7 @@ impl Converter {
         let rw = r.width as usize;
         let px = buf.bytes();
         // A2B10G10R10: red in the low 10 bits; the pattern is grey, so red is its luma.
-        Ok(quiver_stream_proto::pattern::read_with(w, h, |x, y| {
+        Ok(quiver_stream_proto::stamp::read(w, h, |x, y| {
             let o = (y as usize * rw + x as usize) * 4;
             match px.get(o..o + 4) {
                 Some(b) => ((u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x3ff) >> 2) as u8,
@@ -235,7 +235,7 @@ impl Converter {
             )?);
         }
         if self.readback {
-            let (rw, rh) = quiver_stream_proto::pattern::region(extent.width, extent.height);
+            let (rw, rh) = quiver_stream_proto::stamp::layout(extent.width, extent.height).map_or((1, 1), |l| l.size());
             let r = vk::Extent2D { width: rw.min(extent.width), height: rh.min(extent.height) };
             if slot.readback.as_ref().is_none_or(|(_, e)| *e != r) {
                 if let Some((b, _)) = slot.readback.take() {

@@ -8,7 +8,19 @@
 //!
 //! Ordering: video and audio arrive in `seq` order. Anything that will never arrive is
 //! announced with a `Lost` notice in its place, so a receiver can act on a gap at once; a
-//! receiver also treats a jump in `seq` with no notice as a loss.
+//! receiver also treats a jump in `seq` with no notice as a loss. (Audio may arrive out of
+//! order too: the jitter buffer orders it.)
+//!
+//! With `quiver_stream_net::ClientSession`, the adapter is a few tasks around a
+//! [`loopback`] pair:
+//! - `recv_video()`: `VideoEvent::Frame(f)` → [`VideoIn::Frame`], `VideoEvent::Gap { since_seq,
+//!   through_seq }` → [`VideoIn::Lost`] (the decode thread sends the `LostFrames`);
+//! - `recv_audio()` → [`AudioIn::Packet`]; `recv_control()` → [`ControlIn::Control`];
+//! - `take_stats()` once a second, with `clock_offset()` → [`ControlIn::Transport`] (the
+//!   transport's fields of `ClientStats`, and the clock offset, which then replaces the
+//!   client's own Ping/Pong estimate); the session ending → [`ControlIn::Closed`];
+//! - [`Outgoing::Input`] → `send_input_at(event, at)` (the transport numbers input itself),
+//!   [`Outgoing::Control`] → `send_control`.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use quiver_stream_proto::input::Stamped;

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use quiver_stream_proto::pattern;
+use quiver_stream_proto::stamp;
 
 use crate::av::{AVCOL_TRC_SMPTE2084, Backend, Demuxer};
 use crate::decode::VideoDecoder;
@@ -81,7 +81,7 @@ pub fn decode(file: &Path, fps: f64, backend: Option<Backend>, max_frames: usize
                 bail!("a frame took over a second");
             }
             let t2 = Instant::now();
-            if check_pattern && conv.read_pattern(&c)?.is_some_and(|s| s.seq == n as u32) {
+            if check_pattern && conv.read_pattern(&c)?.is_some_and(|s| s.seq == n as u64) {
                 pattern_ok += 1;
             }
             if n >= WARMUP {
@@ -134,9 +134,15 @@ pub fn pattern_frames(width: u32, height: u32, frames: u32) -> Result<()> {
                 uv[row * w + col * 2 + 1] = (128 + ((row + n as usize) % 64) as i32 - 32) as u8;
             }
         }
-        pattern::draw_luma8(y, w, width, height, false, pattern::Stamp { seq: n, captured: 0 });
-        // Neutral chroma under the pattern, so it stays grey.
-        let (rw, rh) = pattern::region(width, height);
+        // The frame stamp (proto::stamp, as the host's test pattern draws it), limited range.
+        stamp::paint(width, height, stamp::Stamp { seq: n as u64, captured: 0 }, |x0, y0, cw, ch, white| {
+            for yy in y0..y0 + ch {
+                let row = &mut y[yy as usize * w..];
+                row[x0 as usize..(x0 + cw) as usize].fill(if white { 235 } else { 16 });
+            }
+        });
+        // Neutral chroma under the stamp, so it stays grey.
+        let (rw, rh) = stamp::layout(width, height).map_or((0, 0), |l| l.size());
         for row in 0..(rh as usize / 2).min(h / 2) {
             for col in 0..(rw as usize / 2).min(w / 2) {
                 uv[row * w + col * 2] = 128;

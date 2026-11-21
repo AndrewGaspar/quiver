@@ -1,0 +1,59 @@
+# quiver-stream-pad rule v1 (crates/quiver-stream-host, design/REMOTE.md)
+#
+# Remote play's virtual game controllers: the uinput pads a stream's host makes for the
+# client's pads ("Quiver Stream Pad <session>[ P<k>]", phys "quiver-stream/<session>/<k>").
+# On a machine where a person is seated, stream input must never reach their desktop. This rule
+# keeps every stream pad away from the host: no session ACL, no seat, ignored by libinput, and
+# a group no host process has, so Hyprland, Steam, hyprpad and your own games can never open
+# them. Only the stream's own program can: the host runs it in a user namespace that has this
+# group and nothing else (unshare + setpriv, through newgidmap), with no capabilities.
+#
+# It works like the lab pad rule (contrib/lab/72-quiver-lab-pad.rules) with its own names and
+# group, so a stream's program can't open a lab instance's pads, nor a lab container a stream's.
+#
+# HOW IT HIDES THEM
+#   - The node a uinput device gets in devtmpfs is root 0600 until udev has run its rules, and
+#     udev announces the device to listeners (Steam, SDL, libinput) only after that.
+#   - 70-uaccess.rules tags every joystick `uaccess`, and 73-seat-late.rules turns that tag into
+#     an ACL for the logged-in user. The tag is removed here, between the two (hence 72).
+#   - GROUP quiver-stream-pad is gid 105001 (contrib/stream/quiver-stream-pad.sysusers), inside
+#     your subordinate gid range (/etc/subgid), so newgidmap lets the stream's user namespace
+#     map it. Nobody is a member and no host process runs with it.
+#   - MODE 0660, OWNER root: nothing for "other", and no host uid owns it.
+#   - LIBINPUT_IGNORE_DEVICE: the compositor (through logind) never opens it either.
+#
+# The host refuses to make a pad unless this file is installed, makes a canary device first and
+# requires this rule to have run on it, and checks each node after udev is done with it
+# (root-owned, this group, no ACL, not openable by you); it destroys the pads if a check fails,
+# then and every 5 s after.
+#
+# INSTALL (the group first: udev ignores a GROUP it can't resolve)
+#     sudo groupadd --system --gid 105001 quiver-stream-pad
+#       (or: sudo install -Dm644 contrib/stream/quiver-stream-pad.sysusers /etc/sysusers.d/quiver-stream-pad.conf
+#            && sudo systemd-sysusers)
+#     sudo install -Dm644 contrib/stream/72-quiver-stream-pad.rules /etc/udev/rules.d/72-quiver-stream-pad.rules
+#     sudo udevadm control --reload
+#
+# VERIFY
+#     udevadm verify /etc/udev/rules.d/72-quiver-stream-pad.rules
+#
+# REVERT
+#     sudo rm /etc/udev/rules.d/72-quiver-stream-pad.rules && sudo udevadm control --reload
+#     sudo groupdel quiver-stream-pad
+
+ACTION=="remove", GOTO="quiver_stream_pad_end"
+SUBSYSTEM!="input", GOTO="quiver_stream_pad_end"
+
+# The input device itself (inputN, no node): no seat, libinput ignores it.
+KERNEL=="input*", ATTR{phys}=="quiver-stream/*", ATTR{name}=="Quiver Stream Pad *", \
+    TAG-="seat", TAG-="uaccess", ENV{ID_SEAT}="", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{QUIVER_STREAM_PAD}="1"
+
+# Its event and joystick nodes.
+KERNEL!="event*|js*", GOTO="quiver_stream_pad_end"
+ATTRS{phys}!="quiver-stream/*", GOTO="quiver_stream_pad_end"
+ATTRS{name}!="Quiver Stream Pad *", GOTO="quiver_stream_pad_end"
+TAG-="uaccess", TAG-="seat", ENV{ID_SEAT}="", \
+    ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT}="", \
+    OWNER:="root", GROUP:="quiver-stream-pad", MODE:="0660", ENV{QUIVER_STREAM_PAD}="1"
+
+LABEL="quiver_stream_pad_end"

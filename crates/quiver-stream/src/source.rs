@@ -78,22 +78,30 @@ impl FileSource {
         drop(probe);
         let config_size = (config.width, config.height);
         info!("file source: {} {:?} {}×{} at {fps} fps", self.path.display(), config.codec, config.width, config.height);
-        let _ = host.control.send(ControlIn::Control(Control::Welcome {
-            version: PROTOCOL_VERSION,
-            host_name: "file".into(),
-            session: format!("file-{}", std::process::id()),
-        }));
-        let _ = host.control.send(ControlIn::Control(Control::Configure(config)));
-        if self.tone {
-            let audio = host.audio.clone();
-            std::thread::Builder::new().name("source-audio".into()).spawn(move || {
-                if let Err(e) = tone(audio) {
-                    warn!("test tone: {e:#}");
-                }
-            })?;
-        }
-        let size = (config_size.0, config_size.1);
+        let size = config_size;
         Ok(std::thread::Builder::new().name("source-video".into()).spawn(move || {
+            // Like a host: nothing until the client's Hello.
+            loop {
+                match host.from_client.recv() {
+                    Ok(Outgoing::Control(Control::Hello { .. })) => break,
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
+            }
+            let _ = host.control.send(ControlIn::Control(Control::Welcome {
+                version: PROTOCOL_VERSION,
+                host_name: "file".into(),
+                session: format!("file-{}", std::process::id()),
+            }));
+            let _ = host.control.send(ControlIn::Control(Control::Configure(config)));
+            if self.tone {
+                let audio = host.audio.clone();
+                let _ = std::thread::Builder::new().name("source-audio".into()).spawn(move || {
+                    if let Err(e) = tone(audio) {
+                        warn!("test tone: {e:#}");
+                    }
+                });
+            }
             if let Err(e) = self.run(host, fps, size) {
                 warn!("file source: {e:#}");
             }

@@ -1,0 +1,3 @@
+# The group remote play's virtual pads belong to (contrib/stream/72-quiver-stream-pad.rules).
+# Nobody is a member: only a stream's sandboxed program gets it, in its own user namespace.
+g quiver-stream-pad 105001

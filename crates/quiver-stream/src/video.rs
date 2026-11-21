@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use ash::vk;
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use quiver_stream_proto::pattern::Stamp;
+use quiver_stream_proto::stamp::Stamp;
 use quiver_stream_proto::{Control, Micros, Pacing, StreamConfig, now_micros};
 use tracing::{info, warn};
 
@@ -36,6 +36,10 @@ use crate::link::{Outgoing, VideoIn};
 use crate::stats::{ClockSync, Samples, Stats};
 use crate::ui::atlas::Atlas;
 use crate::ui::overlay::{self, OverlayState};
+
+/// Frames waiting to be decoded beyond which the decode thread drops them and restarts from
+/// a keyframe, so latency can't grow without bound.
+const BACKLOG_MAX: usize = 6;
 
 /// A picture waiting to be shown.
 #[derive(Debug, Clone, Copy)]
@@ -217,9 +221,33 @@ fn decode_loop(
     let mut vd = VideoDecoder::new(gpu.clone(), backend);
     let mut gap = GapTracker::new();
     let mut config: Option<StreamConfig> = None;
+    let mut last_drain: Option<Instant> = None;
     loop {
         if shared.quit.load(Ordering::SeqCst) {
             return;
+        }
+        // Falling behind (a slow decoder): never let a queue build up. Drop what's waiting,
+        // tell the host it's lost, and start again from a keyframe.
+        if rx.len() > BACKLOG_MAX && last_drain.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(1)) {
+            last_drain = Some(Instant::now());
+            let mut dropped: Option<(u64, u64)> = None;
+            while let Ok(m) = rx.try_recv() {
+                let (a, b) = match m {
+                    VideoIn::Frame(f) => (f.seq, f.seq),
+                    VideoIn::Lost { first, last } => (first, last),
+                };
+                dropped = Some(dropped.map_or((a, b), |(x, _)| (x, b)));
+            }
+            if let Some((first, last)) = dropped {
+                warn!("decoding fell behind: dropped frames {first}..={last}");
+                shared.stats.window.lock().unwrap().frames_dropped += (last - first + 1) as u32;
+                for c in gap.on_lost(first, last, Instant::now()) {
+                    shared.send(c);
+                }
+                shared.send(Control::Keyframe);
+                shared.overlay.lock().unwrap().toast("This device can't decode the stream fast enough");
+            }
+            continue;
         }
         let msg = match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(m) => m,
@@ -331,7 +359,7 @@ fn decode_loop(
                     seq,
                     FrameRecord {
                         seq,
-                        pattern: Some(stamp.is_some_and(|s| s.seq == seq as u32)),
+                        pattern: Some(stamp.is_some_and(|s| s.seq == seq)),
                         decode_us: ready.saturating_sub(arrived),
                         arrived,
                         ..Default::default()
