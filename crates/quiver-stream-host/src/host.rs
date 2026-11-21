@@ -119,6 +119,7 @@ impl Host {
         let mut parts = Parts { display: None, _audio: None, _tone: None };
         let mut pad_mode = PadMode::Off("the test pattern has no program to give pads to".into());
         let mut x = None;
+        let mut layer_capture = false;
         let source: Box<dyn Source> = match &opts.target {
             Target::TestPattern { motion } => {
                 parts._tone = Some(crate::tone::start(cfg.audio_channels, cfg.audio_frame_ms, opts.constant_bitrate_audio, atx.clone(), stop.clone(), cfg.refresh_mhz)?);
@@ -128,6 +129,10 @@ impl Host {
                 let audio = Audio::start(AudioSpec { id: opts.session.clone(), channels: cfg.audio_channels, frame_ms_x10: cfg.audio_frame_ms as u32 * 10, bitrate: if cfg.audio_channels > 2 { 256_000 } else { 128_000 }, constant_bitrate: opts.constant_bitrate_audio }, atx.clone())?;
                 let mut env = env.clone();
                 env.extend(audio.child_env());
+                // The Sight layer's capture, falling back to PipeWire (layer_capture.rs).
+                let layer = if crate::layer_capture::wanted(&env) { Some(crate::layer_capture::LayerServer::bind(&opts.dir)?) } else { None };
+                env.extend(layer.as_ref().map(|l| l.env()));
+                layer_capture = layer.is_some();
                 if cfg.color.hdr.is_some() {
                     env.push(("ENABLE_GAMESCOPE_WSI".into(), "1".into()));
                     env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
@@ -149,17 +154,19 @@ impl Host {
                     Duration::from_secs(30),
                 )?;
                 x = Some((display.x_display.clone(), display.pid()));
-                let want = Want::Bgrx;
-                let capture = PwCapture::start(cuda.clone(), display.node_id, want, Duration::from_secs(15))?;
+                let capture: Box<dyn Source> = match layer {
+                    Some(l) => Box::new(crate::layer_capture::LayerCapture::start(cuda.clone(), l, display.node_id, &cfg.color, Duration::from_secs(15))?),
+                    None => Box::new(PwCapture::start(cuda.clone(), display.node_id, Want::Bgrx, Duration::from_secs(15))?),
+                };
                 parts.display = Some(display);
                 parts._audio = Some(audio);
-                Box::new(capture)
+                capture
             }
         };
         let mut cfg_v = cfg.clone();
         if matches!(opts.target, Target::Command { .. }) {
-            // gamescope's screencast is 8-bit SDR.
-            if cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8 {
+            // gamescope's screencast is 8-bit SDR; the layer's capture sets its own colour.
+            if !layer_capture && (cfg_v.color.hdr.is_some() || cfg_v.color.bit_depth > 8) {
                 let _ = ctx.try_send(Control::Notice { text: "HDR and 10-bit aren't available from gamescope's screencast yet: streaming 8-bit SDR".into() });
             }
             cfg_v.color.bit_depth = 8;

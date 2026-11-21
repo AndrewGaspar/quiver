@@ -58,9 +58,10 @@ pub unsafe extern "system" fn create_instance(
         unsafe {
             let instance = *out;
             let fns = ash::Instance::load_with(|n| load_fn(gipa, instance, n), instance);
-            let mut data = InstanceData { handle: instance, next_gipa: gipa, fns, app_name: [0; 64], engine_name: [0; 32], engine_version: 0 };
+            let mut data = InstanceData { handle: instance, next_gipa: gipa, fns, app_name: [0; 64], engine_name: [0; 32], engine_version: 0, api_version: vk::API_VERSION_1_0 };
             let app = (*ci).p_application_info;
             if !app.is_null() {
+                data.api_version = (*app).api_version.max(vk::API_VERSION_1_0);
                 if let Some(s) = ffi::c_str((*app).p_application_name) {
                     LayerStatus::set_str(&mut data.app_name, &s.to_string_lossy());
                 }
@@ -133,7 +134,37 @@ pub unsafe extern "system" fn create_device(
     // SAFETY: the app's arguments, or the same with low-priority queues. The loader's link
     // advances once per call down the chain, so a retry puts it back first.
     let link_next = unsafe { (*link_info).u.layer_info };
+    // The stream capture's extensions (stream.rs), only while a stream names its socket: on
+    // top of whatever else, and if that device can't be made, made without them.
+    let mut streamed = false;
+    if crate::stream::configured() {
+        crate::stream::start();
+        let base = match &lowered {
+            Some(Ok(l)) => l.info(),
+            _ => ci,
+        };
+        // SAFETY: the app's create info (or the lowered copy of it), for `physical`.
+        let patch = instance.as_ref().and_then(|i| guard("stream capture", || unsafe { crate::stream::DevicePatch::new(i, physical, base) }).flatten());
+        if let Some(p) = patch {
+            // SAFETY: the create info with extensions and a feature struct added.
+            let r = unsafe { create(physical, p.info().cast(), alloc, out) };
+            if r == vk::Result::SUCCESS {
+                streamed = true;
+            } else {
+                log!("vkCreateDevice with the stream capture's extensions failed ({r:?}); again without them");
+                unsafe { (*link_info).u.layer_info = link_next };
+            }
+        }
+    }
     let r = match &lowered {
+        _ if streamed => {
+            match &lowered {
+                Some(Ok(l)) => crate::labgpu::note(if l.app_chose { crate::labgpu::Priority::AppChose } else { crate::labgpu::Priority::Low }),
+                Some(Err(p)) => crate::labgpu::note(*p),
+                None => {}
+            }
+            vk::Result::SUCCESS
+        }
         Some(Ok(l)) => {
             let r = unsafe { create(physical, l.info(), alloc, out) };
             if r == vk::Result::SUCCESS {
@@ -164,6 +195,8 @@ pub unsafe extern "system" fn create_device(
     let swapchain_fn = ash::khr::swapchain::DeviceFn::load(load);
     // SAFETY: the next layer's pointers (null when the device lacks the extension).
     let ll2 = unsafe { crate::latency::Fns::load(load) };
+    // SAFETY: the next layer's pointers, of a device made with capture's extensions.
+    let stream = if streamed { unsafe { crate::stream::DeviceSupport::load(load) } } else { None };
     let mut families = Vec::new();
     let mut memory = vk::PhysicalDeviceMemoryProperties::default();
     let mut props = vk::PhysicalDeviceProperties::default();
@@ -191,7 +224,7 @@ pub unsafe extern "system" fn create_device(
         }
     });
     let name = props.device_name_as_c_str().ok().map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
-    log!("device {name} (low_latency2 {low_latency2}, present_wait {present_wait})");
+    log!("device {name} (low_latency2 {low_latency2}, present_wait {present_wait}{})", if stream.is_some() { ", stream capture" } else { "" });
     state::add_device(Arc::new(DeviceData::new(
         device,
         physical,
@@ -206,6 +239,7 @@ pub unsafe extern "system" fn create_device(
         low_latency2,
         present_wait,
         ll2,
+        stream,
     )));
     r
 }
@@ -277,13 +311,21 @@ pub unsafe extern "system" fn create_swapchain_khr(
     // Decide before creating, so COLOR_ATTACHMENT usage can be added for the compositor (and
     // SAMPLED for the backdrop blur, which reads the image).
     let plan = guard("vkCreateSwapchainKHR", || {
-        telemetry::init()?;
-        Some(plan_swapchain(&d, &orig))
+        let stream = crate::stream::configured() && crate::stream::wants_swapchain(&d, &orig, format_features(&d, orig.image_format), surface_usage(&d, orig.surface));
+        if telemetry::init().is_none() {
+            // No session dir: no HUD, but a stream may still capture.
+            return stream.then_some(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL), capture: false, stream });
+        }
+        Some(Plan { stream, ..plan_swapchain(&d, &orig) })
     })
     .flatten();
-    let mut plan = plan.unwrap_or(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL), capture: false });
-    // Captures (hdr.rs) need TRANSFER_SRC; added with whatever else is added, dropped with it.
-    let extra = if plan.capture { vk::ImageUsageFlags::TRANSFER_SRC } else { vk::ImageUsageFlags::empty() };
+    let mut plan = plan.unwrap_or(Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_INTERNAL), capture: false, stream: false });
+    // Captures (hdr.rs) need TRANSFER_SRC, the stream capture (stream.rs) SAMPLED; added with
+    // whatever else is added, dropped with it.
+    let mut extra = if plan.capture { vk::ImageUsageFlags::TRANSFER_SRC } else { vk::ImageUsageFlags::empty() };
+    if plan.stream {
+        extra |= vk::ImageUsageFlags::SAMPLED;
+    }
     let with = |usage: vk::ImageUsageFlags| {
         let mut p = orig;
         p.image_usage |= usage | extra;
@@ -294,6 +336,8 @@ pub unsafe extern "system" fn create_swapchain_khr(
         with(blur_usage)
     } else if plan.hud.is_ok() || plan.capture {
         with(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+    } else if plan.stream {
+        with(vk::ImageUsageFlags::empty())
     } else {
         orig
     };
@@ -317,6 +361,7 @@ pub unsafe extern "system" fn create_swapchain_khr(
         plan.hud = Err(DRAW_ERR_USAGE);
         plan.blur = Err(BACKDROP_ERR_USAGE);
         plan.capture = false;
+        plan.stream = false;
     }
     if r != vk::Result::SUCCESS {
         return r;
@@ -338,11 +383,13 @@ struct Plan {
     /// `TRANSFER_SRC` usage for captures (`QUIVER_SIGHT_CAPTURE=1`, a known format, the
     /// surface allows it).
     capture: bool,
+    /// `SAMPLED` usage and a [`crate::stream::Capture`]: a stream names its socket.
+    stream: bool,
 }
 
 fn plan_swapchain(d: &DeviceData, ci: &vk::SwapchainCreateInfoKHR<'_>) -> Plan {
     if !draw_enabled() {
-        return Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_OFF), capture: false };
+        return Plan { hud: Err(DRAW_ERR_INTERNAL), blur: Err(BACKDROP_ERR_OFF), capture: false, stream: false };
     }
     let features = format_features(d, ci.image_format);
     let blend = vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
@@ -366,7 +413,7 @@ fn plan_swapchain(d: &DeviceData, ci: &vk::SwapchainCreateInfoKHR<'_>) -> Plan {
         && crate::hdr::bytes_per_pixel(ci.image_format).is_some()
         && formats::drawable(ci).is_ok()
         && surface_usage(d, ci.surface).is_some_and(|u| u.contains(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT));
-    Plan { hud, blur, capture }
+    Plan { hud, blur, capture, stream: false }
 }
 
 fn format_features(d: &DeviceData, format: vk::Format) -> vk::FormatFeatureFlags {
@@ -390,7 +437,7 @@ fn surface_usage(d: &DeviceData, surface: vk::SurfaceKHR) -> Option<vk::ImageUsa
 }
 
 unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainCreateInfoKHR<'_>, plan: Plan) {
-    if telemetry::get().is_none() {
+    if telemetry::get().is_none() && !plan.stream {
         return;
     }
     // SAFETY: a live swapchain.
@@ -445,6 +492,18 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         if comp.is_some() && draw_error == 0 { "compositing".to_owned() } else { format!("no HUD (draw_error {draw_error})") },
         if comp.is_some() && blur_error == 0 { "backdrop blur ready".to_owned() } else { format!("no backdrop blur (error {blur_error})") }
     );
+    let stream = if plan.stream && !images.is_empty() {
+        // SAFETY: the swapchain's own images, made with SAMPLED usage.
+        match unsafe { crate::stream::Capture::new(d, handle, &images, ci.image_format, ci.image_color_space, ci.image_extent) } {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log!("stream capture setup failed: {e:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let sc = Swapchain {
         id,
         extent: ci.image_extent,
@@ -458,6 +517,7 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
         draw_error,
         blur_error,
         latency: latency.clone(),
+        stream,
     };
     d.add_latency(handle, latency);
     state::write(&d.swapchains).push((handle, Arc::new(Mutex::new(sc))));
@@ -466,6 +526,10 @@ unsafe fn register(d: &DeviceData, handle: vk::SwapchainKHR, ci: &vk::SwapchainC
 
 /// Destroys a swapchain's compositors; false if one had to leak its objects.
 fn destroy_compositors(d: &DeviceData, s: &mut Swapchain) -> bool {
+    if let Some(c) = s.stream.take() {
+        // SAFETY: the swapchain is going away; waits (a second at most) for our submits.
+        unsafe { c.destroy(d) };
+    }
     let mut all: Vec<Compositor> = s.disabled.drain(..).collect();
     all.extend(s.comp.take());
     let mut done = true;

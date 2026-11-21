@@ -25,6 +25,8 @@ pub struct InstanceData {
     pub app_name: [u8; 64],
     pub engine_name: [u8; 32],
     pub engine_version: u32,
+    /// The app's `VkApplicationInfo::apiVersion` (1.0 without one).
+    pub api_version: u32,
 }
 
 pub struct DeviceData {
@@ -43,6 +45,9 @@ pub struct DeviceData {
     pub present_wait: bool,
     /// The next layer's `VK_NV_low_latency2` commands (latency.rs).
     pub ll2: latency::Fns,
+    /// Made with the stream capture's extensions (stream.rs): only while a stream names its
+    /// socket.
+    pub stream: Option<crate::stream::DeviceSupport>,
     /// Each registered swapchain's Reflex state, apart from the swapchain lock (the app's
     /// latency calls must not wait for a present's HUD work).
     latency: RwLock<Vec<(vk::SwapchainKHR, Arc<Latency>)>>,
@@ -74,6 +79,7 @@ impl DeviceData {
         low_latency2: bool,
         present_wait: bool,
         ll2: latency::Fns,
+        stream: Option<crate::stream::DeviceSupport>,
     ) -> DeviceData {
         DeviceData {
             handle,
@@ -89,6 +95,7 @@ impl DeviceData {
             low_latency2,
             present_wait,
             ll2,
+            stream,
             latency: RwLock::new(Vec::new()),
             queues: RwLock::new(Vec::new()),
             swapchains: RwLock::new(Vec::new()),
@@ -211,6 +218,8 @@ pub struct Swapchain {
     pub blur_error: u32,
     /// Reflex state (also in the device's latency list).
     pub latency: Arc<Latency>,
+    /// The stream capture (stream.rs), on swapchains made while a stream names its socket.
+    pub stream: Option<crate::stream::Capture>,
 }
 
 /// Locks, ignoring poisoning (a panic is already handled by [`crate::guard`]).

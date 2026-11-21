@@ -5185,6 +5185,7 @@ dependencies = [
  "image",
  "libc",
  "quiver-perf",
+ "quiver-stream-proto",
  "serde_json",
  "tempfile",
  "x11rb",
@@ -5217,11 +5218,13 @@ name = "quiver-stream-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "clap",
  "libc",
  "libloading",
  "pipewire",
  "quiver-pad",
+ "quiver-sight-layer",
  "quiver-stream-proto",
  "serde",
  "serde_json",
